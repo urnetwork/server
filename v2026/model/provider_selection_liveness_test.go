@@ -1,10 +1,10 @@
 // FindProviders2 and the provider liveness lease (provider_liveness_lease.go):
 // a candidate without a current lease leaves every draw of the request, in
-// every rank mode, though its connection row still reads live; a named one is
-// refused in every mode. Every read that cannot judge fails open: a connect
-// fleet with a live handler that does not stamp the writer set, a stale shard,
-// a failed read. Every provider here is connected on a live handler, so the
-// request's own live read admits each of them.
+// every rank mode, though its connection row still reads live; a named one
+// keeps its place in every mode. Every read that cannot judge fails open: a
+// connect fleet with a live handler that does not stamp the writer set, a
+// stale shard, a failed read. Every provider here is connected on a live
+// handler, so the request's own live read admits each of them.
 package model
 
 import (
@@ -285,30 +285,56 @@ func TestFindProviders2CurrentLeaseKeepsTheLaterPageRevocation(t *testing.T) {
 	})
 }
 
-// A named provider without a lease is refused in every mode, by a request that
-// names only it and by a discovery request that names it; a named provider
-// with a lease is answered as before.
-func TestFindProviders2LeaselessNamedProviderIsRefusedInEveryMode(t *testing.T) {
+// A named provider keeps its place whatever its lease, in every mode, by a
+// request that names only it and by a discovery request that names it: a
+// redial that names its exit gets one try, and a wrong offline verdict there
+// changes the user's IP. In the same fleet, enforcing, a leaseless provider
+// the discovery request did not name is left out; and a mixed fleet and an
+// unreadable shard answer the named provider all the same.
+func TestFindProviders2LeaselessNamedProviderIsAnsweredInEveryMode(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		livenessTestSetup(t)
 		ctx := t.Context()
 		fixture := newLivenessTestFixture(ctx, t, "Leaseless Named")
 		leaseless := fixture.natives[1]
-		fixture.lease(ctx, t, leaseless)
+		unnamedLeaseless := fixture.speedOnly[1]
+		fixture.lease(ctx, t, leaseless, unnamedLeaseless)
 		named := []*ProviderSpec{{ClientId: &leaseless}}
-		leasedNamed := []*ProviderSpec{{ClientId: &fixture.natives[0]}}
-		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed, RankModeOnline} {
-			if providers := egressTestFind(ctx, t, named, rankMode, 10, false, server.NewId()); len(providers) != 0 {
-				t.Fatalf("%s: a request naming only the leaseless provider answered it", rankMode)
-			}
-			if providers := egressTestFind(ctx, t, leasedNamed, rankMode, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{fixture.natives[0]}) {
-				t.Fatalf("%s: a request naming a leased provider changed", rankMode)
+		answersNamed := func(label string) {
+			t.Helper()
+			livenessTestForgetCoverage()
+			for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed, RankModeOnline} {
+				if providers := egressTestFind(ctx, t, named, rankMode, 10, false, server.NewId()); !slices.Equal(egressTestIds(providers), []server.Id{leaseless}) {
+					t.Fatalf("%s, %s: a request naming only the leaseless provider answered %d providers, want it", label, rankMode, len(providers))
+				}
 			}
 		}
+
+		answersNamed("enforcing")
 		offlineTestForEachReader(t, func(nativeReader bool) {
+			livenessTestForgetCoverage()
 			mixed := egressTestFind(ctx, t, append(slices.Clone(named), egressTestLocationSpec(fixture.city)...), RankModeSpeed, 10, false, server.NewId())
-			assertLivenessTestAnswer(t, fmt.Sprintf("reader=%t named and discovered Speed", nativeReader), mixed, livenessTestWithout(fixture.speedAnswer(), leaseless))
+			assertLivenessTestAnswer(t, fmt.Sprintf("reader=%t named and discovered Speed", nativeReader), mixed, livenessTestWithout(fixture.speedAnswer(), unnamedLeaseless))
+			if len(mixed) == 0 || mixed[0].ClientId != leaseless {
+				t.Fatalf("reader=%t: a Speed discovery request lost the provider it names", nativeReader)
+			}
 		})
+
+		unstamped := CreateNetworkClientHandler(ctx)
+		answersNamed("a mixed fleet")
+		if err := PublishProviderLivenessWriter(ctx, unstamped); err != nil {
+			t.Fatal(err)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			key := providerLivenessLeaseKey(providerLivenessLeaseShard(leaseless))
+			if err := r.Del(ctx, key).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Set(ctx, key, "test: not a sorted set", time.Hour).Err(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		answersNamed("an unreadable shard")
 	})
 }
 
@@ -325,8 +351,8 @@ func TestFindProviders2LeaseReadFailsOpen(t *testing.T) {
 		leaseless := []server.Id{fixture.speedOnly[1], fixture.onlineOnly}
 		find := func(label string) []*FindProvidersProvider {
 			t.Helper()
-			// a new handler is seen at the next read of the live handlers
-			defaultProviderLivenessHandlers.reset()
+			// a new handler or stamp is seen once the cached reads age out
+			livenessTestForgetCoverage()
 			return egressTestFind(ctx, t, egressTestLocationSpec(fixture.city), RankModeQuality, 10, false, server.NewId())
 		}
 		admits := func(label string) {

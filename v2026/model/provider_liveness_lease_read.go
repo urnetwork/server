@@ -3,12 +3,17 @@
 //
 // A read judges nothing unless every live connect handler, a heartbeat within
 // two heartbeat timeouts, has a current stamp in the writer set; a connect
-// process without the writer, mid-rollout, rolled back or built without it,
-// would otherwise leave every provider it serves without a lease. The live
-// handlers come from the database at most every providerLivenessHandlersMaxAge
-// per process. While coverage is short, or a read fails, every candidate is
-// unknown and admitted, as a candidate in a stale shard is. Nothing here ever
-// refuses a request.
+// process without the writer, mid-rollout, rolled back, built without it or
+// with its lease writes stopped, would otherwise leave every provider it
+// serves without a lease. The live handlers come from the database at most
+// every providerLivenessHandlersMaxAge per process, and the verdict on their
+// stamps is reused for ProviderLivenessCoverageCacheAge; while coverage is
+// short no shard is read at all. Every Redis read runs on the deadline-bound
+// pool within providerLivenessReadTimeout, retries nothing and fails open, so a
+// slow or wedged node costs a request at most that budget. A shard whose read
+// fails, whose newest lease is stale, or more than half of whose candidates
+// read offline (a lost or stale-restored key, not churn) is unknown and
+// admitted. Nothing here ever refuses a request.
 //
 // Safe for concurrent use.
 package model
@@ -35,24 +40,62 @@ const (
 	providerLivenessUnknown = "unknown"
 )
 
+// Why a read admitted candidates it could not judge, as the fail-open metric
+// labels them.
+const (
+	// the live handlers are unknown, or there are none
+	providerLivenessFailOpenHandlers = "handlers"
+	// a live handler has no current stamp
+	providerLivenessFailOpenCoverage = "coverage"
+	// the writer set could not be read within the budget
+	providerLivenessFailOpenWriters = "writers_error"
+	// a shard could not be read within the budget
+	providerLivenessFailOpenShard = "shard_error"
+	// a shard has no lease within the window
+	providerLivenessFailOpenStale = "stale"
+	// more than half of a shard's candidates read offline
+	providerLivenessFailOpenOfflineFraction = "offline_fraction"
+)
+
 var findProviders2LivenessCandidates = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_liveness_candidates_total",
-	Help: "FindProviders2 candidates judged by their provider liveness lease, by the request's rank mode and verdict: live; offline, no lease within the window, left out of every draw of the request; unknown, admitted because a live connect handler has no current writer stamp, the shard is stale or the read failed",
+	Help: "FindProviders2 candidates judged by their provider liveness lease, by the request's rank mode and verdict: live; offline, no lease within the window, left out of every draw of the request; unknown, admitted (urnetwork_findproviders2_liveness_failopens_total says why)",
 }, []string{"rank_mode", "verdict"})
 
 var findProviders2LivenessReadErrors = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_liveness_read_errors_total",
-	Help: "Provider liveness lease reads of FindProviders2 that failed, in whole or for some shard; their candidates were admitted as unknown",
+	Help: "Provider liveness lease reads of FindProviders2 that failed or ran past their budget, of the writer set or of some shard; their candidates were admitted as unknown",
 })
 
-var findProviders2LivenessWriterCoverage = prometheus.NewGauge(prometheus.GaugeOpts{
+var findProviders2LivenessFailOpens = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_findproviders2_liveness_failopens_total",
+	Help: "Provider liveness lease reads that admitted candidates they could not judge, by reason: handlers and coverage, writers_error and shard_error per read, stale and offline_fraction per shard",
+}, []string{"reason"})
+
+// No labels: the child exists from a process's first verdict on coverage, so a
+// process that has read nothing exports nothing.
+var findProviders2LivenessWriterCoverage = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "urnetwork_findproviders2_liveness_writer_coverage",
-	Help: "The share of live connect handlers with a current provider liveness writer stamp at this process's latest lease read; leases are enforced only at 1",
-})
+	Help: "The share of live connect handlers with a current provider liveness writer stamp at this process's latest verdict, 0 when the handlers or the stamps could not be read; leases are enforced only at 1",
+}, []string{})
 
 func init() {
-	prometheus.MustRegister(findProviders2LivenessCandidates, findProviders2LivenessReadErrors, findProviders2LivenessWriterCoverage)
+	prometheus.MustRegister(
+		findProviders2LivenessCandidates,
+		findProviders2LivenessReadErrors,
+		findProviders2LivenessFailOpens,
+		findProviders2LivenessWriterCoverage,
+	)
 }
+
+// The budget of one Redis read of the lease, the writer set or the shards. A
+// read past it fails open.
+const providerLivenessReadTimeout = 150 * time.Millisecond
+
+// A shard is judged by the fraction of its candidates that read offline only
+// from this many candidates in one read; below it, one offline candidate is
+// too much of the sample to say anything.
+const providerLivenessBreakerMinCandidates = 8
 
 // How long a process reuses its read of the live connect handlers.
 const providerLivenessHandlersMaxAge = 30 * time.Second
@@ -62,10 +105,11 @@ const providerLivenessHandlersMaxAge = 30 * time.Second
 const providerLivenessHandlersMaxStaleness = 2 * providerLivenessHandlersMaxAge
 
 // The live connect handlers, read from the database at most every
-// providerLivenessHandlersMaxAge, by one caller at a time while the others use
-// the previous read.
+// providerLivenessHandlersMaxAge of this process's monotonic clock, by one
+// caller at a time while the others use the previous read.
 type providerLivenessHandlers struct {
 	load func(ctx context.Context, minHeartbeatTime time.Time) ([]server.Id, error)
+	now  func() time.Time
 
 	stateLock  sync.Mutex
 	handlerIds []server.Id
@@ -76,11 +120,13 @@ type providerLivenessHandlers struct {
 
 var defaultProviderLivenessHandlers = &providerLivenessHandlers{
 	load: loadLiveNetworkClientHandlerIds,
+	now:  time.Now,
 }
 
-// The live handlers at now, and whether they are known. A failed read keeps the
+// The live handlers, and whether they are known. A failed read keeps the
 // previous one until it is providerLivenessHandlersMaxStaleness old.
-func (self *providerLivenessHandlers) get(ctx context.Context, now time.Time) ([]server.Id, bool) {
+func (self *providerLivenessHandlers) get(ctx context.Context) ([]server.Id, bool) {
+	now := self.now()
 	load := false
 	var handlerIds []server.Id
 	var readTime time.Time
@@ -106,7 +152,8 @@ func (self *providerLivenessHandlers) get(ctx context.Context, now time.Time) ([
 					self.handlerIds, self.readTime = loadedHandlerIds, now
 				}
 			}()
-			loadedHandlerIds, err = self.load(ctx, now.Add(-2*NetworkClientHandlerHeartbeatTimeout))
+			// the heartbeats are the connect hosts' wall clocks
+			loadedHandlerIds, err = self.load(ctx, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
 		}()
 		if err == nil {
 			return loadedHandlerIds, true
@@ -157,6 +204,136 @@ func loadLiveNetworkClientHandlerIds(ctx context.Context, minHeartbeatTime time.
 	return
 }
 
+// The verdict on writer coverage, reused for ProviderLivenessCoverageCacheAge
+// of this process's monotonic clock: whether every live handler has a current
+// stamp, and when not, why.
+type providerLivenessCoverage struct {
+	handlers *providerLivenessHandlers
+	now      func() time.Time
+
+	stateLock sync.Mutex
+	covered   bool
+	reason    string
+	// zero before the first verdict
+	checkTime time.Time
+}
+
+var defaultProviderLivenessCoverage = &providerLivenessCoverage{
+	handlers: defaultProviderLivenessHandlers,
+	now:      time.Now,
+}
+
+// Whether every live handler has a current stamp, and the fail-open reason
+// when not, from a verdict at most ProviderLivenessCoverageCacheAge old. The
+// error is the context's alone.
+func (self *providerLivenessCoverage) get(ctx context.Context) (covered bool, reason string, returnErr error) {
+	now := self.now()
+	cached := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !self.checkTime.IsZero() && now.Sub(self.checkTime) < ProviderLivenessCoverageCacheAge {
+			covered, reason, cached = self.covered, self.reason, true
+		}
+	}()
+	if cached {
+		return
+	}
+	covered, reason, returnErr = self.read(ctx)
+	if returnErr != nil {
+		return
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.covered, self.reason, self.checkTime = covered, reason, now
+	}()
+	return
+}
+
+// Forgets the verdict, so the next lease read judges coverage again.
+func (self *providerLivenessCoverage) reset() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.covered, self.reason, self.checkTime = false, "", time.Time{}
+}
+
+// Reads the live handlers and their stamps, and sets the coverage gauge.
+func (self *providerLivenessCoverage) read(ctx context.Context) (bool, string, error) {
+	coverage := findProviders2LivenessWriterCoverage.WithLabelValues()
+	handlerIds, handlersKnown := self.handlers.get(ctx)
+	if err := ctx.Err(); err != nil {
+		return false, "", err
+	}
+	if !handlersKnown || len(handlerIds) == 0 {
+		coverage.Set(0)
+		return false, providerLivenessFailOpenHandlers, nil
+	}
+	handlerMembers := make([]string, len(handlerIds))
+	for i, handlerId := range handlerIds {
+		handlerMembers[i] = handlerId.String()
+	}
+	var newestCmd *redis.ZSliceCmd
+	var stampCmd *redis.FloatSliceCmd
+	readErr := readProviderLiveness(ctx, func(readCtx context.Context, pipe redis.Pipeliner) {
+		newestCmd = pipe.ZRevRangeWithScores(readCtx, providerLivenessWritersKey, 0, 0)
+		stampCmd = pipe.ZMScore(readCtx, providerLivenessWritersKey, handlerMembers...)
+	})
+	if err := ctx.Err(); err != nil {
+		return false, "", err
+	}
+	if readErr != nil || providerLivenessZSliceFailed(newestCmd) || providerLivenessFloatSliceFailed(stampCmd) {
+		findProviders2LivenessReadErrors.Inc()
+		coverage.Set(0)
+		return false, providerLivenessFailOpenWriters, nil
+	}
+	current, ok := judgeProviderLivenessStamps(
+		server.NowUtc().UnixMilli(),
+		providerLivenessNewestMillis(newestCmd),
+		providerLivenessStampMillis(stampCmd),
+		providerLivenessWriterWindow,
+	)
+	coveredCount := 0
+	for _, isCurrent := range current {
+		if isCurrent {
+			coveredCount += 1
+		}
+	}
+	coverage.Set(float64(coveredCount) / float64(len(handlerIds)))
+	if !ok || coveredCount < len(handlerIds) {
+		return false, providerLivenessFailOpenCoverage, nil
+	}
+	return true, "", nil
+}
+
+// Runs one pipelined read within providerLivenessReadTimeout on the
+// deadline-bound pool, which applies the deadline to its socket I/O and
+// retries no command or redirect. The read is single-key commands only, which
+// that pool's routing serves shard by shard. A command's own failure is on
+// the command; the error is the read's.
+func readProviderLiveness(ctx context.Context, queue func(context.Context, redis.Pipeliner)) error {
+	readCtx, readCancel := context.WithTimeout(ctx, providerLivenessReadTimeout)
+	defer readCancel()
+	return server.RedisWithDeadline(readCtx, func(r server.RedisClient) error {
+		_, err := r.Pipelined(readCtx, func(pipe redis.Pipeliner) error {
+			queue(readCtx, pipe)
+			return nil
+		})
+		if err != nil && readCtx.Err() != nil {
+			return readCtx.Err()
+		}
+		return nil
+	})
+}
+
+func providerLivenessZSliceFailed(cmd *redis.ZSliceCmd) bool {
+	return cmd == nil || cmd.Err() != nil
+}
+
+func providerLivenessFloatSliceFailed(cmd *redis.FloatSliceCmd) bool {
+	return cmd == nil || cmd.Err() != nil
+}
+
 // Judges members of one sorted set at now from their stamps and the set's
 // newest stamp, all in unix milliseconds, zero for none. A set without a stamp
 // within the window of now is stale and judges no one (ok false). Otherwise a
@@ -176,6 +353,17 @@ func judgeProviderLivenessStamps(nowMillis int64, newestMillis int64, stampMilli
 		current[i] = 0 < stamp && reference-stamp <= windowMillis
 	}
 	return current, true
+}
+
+// Whether a shard's read is the loss of its key rather than churn: more than
+// half of its candidates offline, from providerLivenessBreakerMinCandidates
+// candidates. Churn leaves about a tenth of a page's candidates offline (the
+// pool is up to 65 minutes old, and 5-10% of what it lent was offline); a key
+// lost with a node restart, an empty failover or an eviction, or restored
+// stale, leaves nearly all of them offline until their connections refresh,
+// up to 30 s later. Admitting such a shard costs what a stale one does.
+func providerLivenessBreakerTrips(candidateCount int, offlineCount int) bool {
+	return providerLivenessBreakerMinCandidates <= candidateCount && candidateCount < 2*offlineCount
 }
 
 // The newest stamp of a ZREVRANGE 0 0 WITHSCORES, zero for an empty set.
@@ -198,10 +386,10 @@ func providerLivenessStampMillis(cmd *redis.FloatSliceCmd) []int64 {
 
 // The lease's verdicts on clientIds at now. offline holds the providers with
 // no lease, or one older than the window, in a shard that is current; unknown
-// holds the rest that are not live: every one while a live connect handler has
-// no current writer stamp, and those in a stale shard or one whose read failed.
-// Both are judged once per distinct id, in one pipelined read. The error is the
-// context's alone: every other failure fails open, and is counted.
+// holds the rest that are not live: every one while writer coverage is short
+// or the shard read fails, and those in a stale shard or one that trips the
+// offline-fraction breaker. Both are judged once per distinct id. The error is
+// the context's alone: every other failure fails open, and is counted.
 func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, now time.Time) (offline map[server.Id]bool, unknown map[server.Id]bool, returnErr error) {
 	offline = map[server.Id]bool{}
 	unknown = map[server.Id]bool{}
@@ -217,94 +405,59 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 	if len(shardClientIds) == 0 {
 		return
 	}
+	// a canceled request is the request's own error, cached verdicts or not
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	failOpen := func(clientIds []server.Id) {
 		for _, clientId := range clientIds {
 			unknown[clientId] = true
 		}
 	}
-	failAllOpen := func() {
+	failAllOpen := func(reason string) {
+		findProviders2LivenessFailOpens.WithLabelValues(reason).Inc()
 		for _, clientIds := range shardClientIds {
 			failOpen(clientIds)
 		}
 	}
 
-	handlerIds, handlersKnown := defaultProviderLivenessHandlers.get(ctx, now)
-	if err := ctx.Err(); err != nil {
+	covered, reason, err := defaultProviderLivenessCoverage.get(ctx)
+	if err != nil {
 		return nil, nil, err
 	}
-	if !handlersKnown || len(handlerIds) == 0 {
-		findProviders2LivenessWriterCoverage.Set(0)
-		failAllOpen()
+	if !covered {
+		failAllOpen(reason)
 		return
-	}
-	handlerMembers := make([]string, len(handlerIds))
-	for i, handlerId := range handlerIds {
-		handlerMembers[i] = handlerId.String()
 	}
 
 	shards := slices.Sorted(maps.Keys(shardClientIds))
-	var writerNewestCmd *redis.ZSliceCmd
-	var writerStampCmd *redis.FloatSliceCmd
 	shardNewestCmds := make([]*redis.ZSliceCmd, len(shards))
 	shardStampCmds := make([]*redis.FloatSliceCmd, len(shards))
-	readErr := providerLivenessLeaseRedis(ctx, func(r server.RedisClient) error {
-		// a failed command is judged with its own shard below
-		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			writerNewestCmd = pipe.ZRevRangeWithScores(ctx, providerLivenessWritersKey, 0, 0)
-			writerStampCmd = pipe.ZMScore(ctx, providerLivenessWritersKey, handlerMembers...)
-			for i, shard := range shards {
-				key := providerLivenessLeaseKey(shard)
-				members := make([]string, len(shardClientIds[shard]))
-				for j, clientId := range shardClientIds[shard] {
-					members[j] = clientId.String()
-				}
-				shardNewestCmds[i] = pipe.ZRevRangeWithScores(ctx, key, 0, 0)
-				shardStampCmds[i] = pipe.ZMScore(ctx, key, members...)
+	readErr := readProviderLiveness(ctx, func(readCtx context.Context, pipe redis.Pipeliner) {
+		for i, shard := range shards {
+			key := providerLivenessLeaseKey(shard)
+			members := make([]string, len(shardClientIds[shard]))
+			for j, clientId := range shardClientIds[shard] {
+				members[j] = clientId.String()
 			}
-			return nil
-		})
-		return nil
+			shardNewestCmds[i] = pipe.ZRevRangeWithScores(readCtx, key, 0, 0)
+			shardStampCmds[i] = pipe.ZMScore(readCtx, key, members...)
+		}
 	})
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	failed := func(cmds ...redis.Cmder) bool {
-		for _, cmd := range cmds {
-			if cmd == nil || cmd.Err() != nil {
-				return true
-			}
-		}
-		return false
-	}
-	if readErr != nil || failed(writerNewestCmd, writerStampCmd) {
+	if readErr != nil {
 		findProviders2LivenessReadErrors.Inc()
-		failAllOpen()
+		failAllOpen(providerLivenessFailOpenShard)
 		return
 	}
 
 	nowMillis := now.UnixMilli()
-	writersCurrent, writersOk := judgeProviderLivenessStamps(
-		nowMillis,
-		providerLivenessNewestMillis(writerNewestCmd),
-		providerLivenessStampMillis(writerStampCmd),
-		providerLivenessWriterWindow,
-	)
-	coveredCount := 0
-	for _, current := range writersCurrent {
-		if current {
-			coveredCount += 1
-		}
-	}
-	findProviders2LivenessWriterCoverage.Set(float64(coveredCount) / float64(len(handlerIds)))
-	if !writersOk || coveredCount < len(handlerIds) {
-		failAllOpen()
-		return
-	}
-
 	shardFailed := false
 	for i, shard := range shards {
 		clientIds := shardClientIds[shard]
-		if failed(shardNewestCmds[i], shardStampCmds[i]) {
+		if providerLivenessZSliceFailed(shardNewestCmds[i]) || providerLivenessFloatSliceFailed(shardStampCmds[i]) {
 			shardFailed = true
 			failOpen(clientIds)
 			continue
@@ -316,17 +469,28 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 			providerLivenessLeaseWindow,
 		)
 		if !ok || len(live) != len(clientIds) {
+			findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenStale).Inc()
 			failOpen(clientIds)
 			continue
 		}
+		offlineClientIds := []server.Id{}
 		for j, clientId := range clientIds {
 			if !live[j] {
-				offline[clientId] = true
+				offlineClientIds = append(offlineClientIds, clientId)
 			}
+		}
+		if providerLivenessBreakerTrips(len(clientIds), len(offlineClientIds)) {
+			findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenOfflineFraction).Inc()
+			failOpen(clientIds)
+			continue
+		}
+		for _, clientId := range offlineClientIds {
+			offline[clientId] = true
 		}
 	}
 	if shardFailed {
 		findProviders2LivenessReadErrors.Inc()
+		findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenShard).Inc()
 	}
 	return
 }

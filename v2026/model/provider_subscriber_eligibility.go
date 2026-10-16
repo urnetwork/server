@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server/v2026"
@@ -32,17 +31,18 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 }
 
 // The exclusions of a request that names its providers by client id and has no
-// discovery spec. Named providers keep the common exclusions in every mode,
-// and in every mode a named provider without a current liveness lease is
-// refused (provider_liveness_lease.go). A named Quality provider also needs a
-// live connection with no live ARIN risk, but not ARIN quality verification
-// (getProviderNamedSubscriberExclusions). Discovery, force_minimum included,
-// evaluates the full subscriber evidence for native Quality membership; Speed
-// and Online borrowing use the independent common exclusions, and leave out a
-// candidate the request's own read found without a live connection.
+// discovery spec. Named providers keep the common exclusions in every mode. A
+// named Quality provider also needs a live connection with no live ARIN risk,
+// but not ARIN quality verification (getProviderNamedSubscriberExclusions). A
+// named provider is never read for a liveness lease: a redial that names its
+// exit gets one try, and a wrong offline verdict there changes the user's IP.
+// Discovery, force_minimum included, evaluates the full subscriber evidence
+// for native Quality membership; Speed and Online borrowing use the
+// independent common exclusions, and leave out a candidate the request's own
+// read found without a live connection.
 func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mode RankMode) (map[server.Id]bool, error) {
 	excluded, err := getProviderHardExclusions(ctx, clientIds)
-	if err != nil {
+	if err != nil || mode != RankModeQuality || len(clientIds) == 0 {
 		return excluded, err
 	}
 	pending := make([]server.Id, 0, len(clientIds))
@@ -51,19 +51,6 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 			pending = append(pending, id)
 		}
 	}
-	leaseOffline, err := readFindProviders2Liveness(ctx, pending, server.NowUtc(), mode)
-	if err != nil {
-		return nil, err
-	}
-	for id := range leaseOffline {
-		excluded[id] = true
-	}
-	if mode != RankModeQuality || len(clientIds) == 0 {
-		return excluded, nil
-	}
-	pending = slices.DeleteFunc(pending, func(id server.Id) bool {
-		return leaseOffline[id]
-	})
 	offline, risky, err := getProviderNamedSubscriberExclusions(ctx, pending)
 	if err != nil {
 		return nil, err

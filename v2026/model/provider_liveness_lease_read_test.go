@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,8 +41,24 @@ func livenessTestVerdictCount(t testing.TB, rankMode RankMode, verdict string) f
 // Forgets the process's read of the live handlers, now and when the test ends:
 // the read is the process's, and each test env has its own database.
 func livenessTestFreshHandlers(t testing.TB) {
+	livenessTestForgetCoverage()
+	t.Cleanup(livenessTestForgetCoverage)
+}
+
+// Forgets the process's read of the live handlers and its coverage verdict,
+// as the next read past their ages would.
+func livenessTestForgetCoverage() {
 	defaultProviderLivenessHandlers.reset()
-	t.Cleanup(defaultProviderLivenessHandlers.reset)
+	defaultProviderLivenessCoverage.reset()
+}
+
+// The writer coverage gauge, and whether the process has exported it.
+func livenessTestCoverage(t testing.TB) (float64, bool) {
+	t.Helper()
+	if testutil.CollectAndCount(findProviders2LivenessWriterCoverage) == 0 {
+		return 0, false
+	}
+	return testutil.ToFloat64(findProviders2LivenessWriterCoverage.WithLabelValues()), true
 }
 
 // Stamps every live connect handler in the writer set with the node's clock.
@@ -171,6 +188,8 @@ func TestProviderLivenessHandlersReuseTheirRead(t *testing.T) {
 	loadCount := 0
 	var minHeartbeatTimes []time.Time
 	var during func()
+	start := time.UnixMilli(1_800_000_000_000)
+	clock := start
 	handlers := &providerLivenessHandlers{
 		load: func(ctx context.Context, minHeartbeatTime time.Time) ([]server.Id, error) {
 			loadCount += 1
@@ -180,18 +199,23 @@ func TestProviderLivenessHandlersReuseTheirRead(t *testing.T) {
 			}
 			return handlerIds, loadErr
 		},
+		now: func() time.Time {
+			return clock
+		},
 	}
-	start := time.UnixMilli(1_800_000_000_000)
 	check := func(label string, now time.Time, wantLoadCount int, wantKnown bool) {
 		t.Helper()
-		got, known := handlers.get(ctx, now)
+		clock = now
+		got, known := handlers.get(ctx)
 		if loadCount != wantLoadCount || known != wantKnown || (known && !slices.Equal(got, handlerIds)) {
 			t.Fatalf("%s: %d reads, known %t, want %d reads, known %t", label, loadCount, known, wantLoadCount, wantKnown)
 		}
 	}
+	wallBefore := server.NowUtc()
 	check("first", start, 1, true)
-	if !minHeartbeatTimes[0].Equal(start.Add(-2 * NetworkClientHandlerHeartbeatTimeout)) {
-		t.Fatalf("read handlers with a heartbeat since %s, want two heartbeat timeouts", start.Sub(minHeartbeatTimes[0]))
+	// the heartbeats are wall time, whatever the cache's clock
+	if since := wallBefore.Sub(minHeartbeatTimes[0]); since < 2*NetworkClientHandlerHeartbeatTimeout-time.Second || 2*NetworkClientHandlerHeartbeatTimeout+time.Minute < since {
+		t.Fatalf("read handlers with a heartbeat since %s ago, want two heartbeat timeouts", since)
 	}
 	check("reused", start.Add(providerLivenessHandlersMaxAge-time.Millisecond), 1, true)
 	check("expired", start.Add(providerLivenessHandlersMaxAge), 2, true)
@@ -205,7 +229,7 @@ func TestProviderLivenessHandlersReuseTheirRead(t *testing.T) {
 	check("recovered", readTime.Add(providerLivenessHandlersMaxStaleness+time.Second), 5, true)
 	// a caller that finds another reading uses the previous read
 	during = func() {
-		if _, known := handlers.get(ctx, readTime.Add(providerLivenessHandlersMaxStaleness+2*providerLivenessHandlersMaxAge)); !known || loadCount != 6 {
+		if _, known := handlers.get(ctx); !known || loadCount != 6 {
 			t.Fatalf("a caller during another's read read again (%d) or found nothing (%t)", loadCount, known)
 		}
 	}
@@ -337,6 +361,8 @@ func TestProviderLivenessExclusionsNeedEveryLiveHandlerStamped(t *testing.T) {
 		clientIds := []server.Id{leased, leaseless}
 		read := func(label string, want map[server.Id]string, wantCoverage float64) {
 			t.Helper()
+			// a verdict is reused for its cache age; judge afresh
+			defaultProviderLivenessCoverage.reset()
 			offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
 			if err != nil {
 				t.Fatal(err)
@@ -344,8 +370,8 @@ func TestProviderLivenessExclusionsNeedEveryLiveHandlerStamped(t *testing.T) {
 			if got := livenessTestVerdicts(clientIds, offline, unknown); !maps.Equal(got, want) {
 				t.Fatalf("%s: verdicts %v, want %v", label, got, want)
 			}
-			if coverage := livenessTestMetric(t, findProviders2LivenessWriterCoverage); coverage != wantCoverage {
-				t.Fatalf("%s: writer coverage %v, want %v", label, coverage, wantCoverage)
+			if coverage, ok := livenessTestCoverage(t); !ok || coverage != wantCoverage {
+				t.Fatalf("%s: writer coverage %v (%t), want %v", label, coverage, ok, wantCoverage)
 			}
 		}
 		failedOpen := map[server.Id]string{leased: providerLivenessUnknown, leaseless: providerLivenessUnknown}
@@ -356,7 +382,6 @@ func TestProviderLivenessExclusionsNeedEveryLiveHandlerStamped(t *testing.T) {
 		if err := PublishProviderLivenessWriter(ctx, unstamped); err != nil {
 			t.Fatal(err)
 		}
-		// the stamps are read with every lease read
 		read("every live handler stamped", enforced, 1)
 
 		// one stamp past its window, the other current
@@ -409,6 +434,7 @@ func TestProviderLivenessExclusionsFailOpenOnAStaleWriterStamp(t *testing.T) {
 		if err := PublishProviderLivenessWriter(ctx, stale); err != nil {
 			t.Fatal(err)
 		}
+		defaultProviderLivenessCoverage.reset()
 		offline, unknown, err = getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
 		if err != nil {
 			t.Fatal(err)
@@ -455,6 +481,9 @@ func TestProviderLivenessExclusionsFailOpenOnRedisErrors(t *testing.T) {
 			t.Fatalf("counted %v read errors, want 1", count)
 		}
 
+		if coverage, ok := livenessTestCoverage(t); !ok || coverage != 1 {
+			t.Fatalf("writer coverage %v (%t) before the writer set fails, want 1", coverage, ok)
+		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			if err := r.Del(ctx, providerLivenessWritersKey).Err(); err != nil {
 				t.Fatal(err)
@@ -463,6 +492,7 @@ func TestProviderLivenessExclusionsFailOpenOnRedisErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+		defaultProviderLivenessCoverage.reset()
 		offline, unknown, err = getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
 		if err != nil {
 			t.Fatalf("a failed writer set read failed the request: %v", err)
@@ -474,6 +504,11 @@ func TestProviderLivenessExclusionsFailOpenOnRedisErrors(t *testing.T) {
 		if count := livenessTestMetric(t, findProviders2LivenessReadErrors) - errorsBefore; count != 2 {
 			t.Fatalf("counted %v read errors, want 2", count)
 		}
+		// failing open on an unreadable writer set does not leave the last
+		// coverage on the gauge
+		if coverage, ok := livenessTestCoverage(t); !ok || coverage != 0 {
+			t.Fatalf("writer coverage %v (%t) after the writer set failed, want 0", coverage, ok)
+		}
 
 		// a canceled request is the request's own error
 		canceledCtx, cancel := context.WithCancel(ctx)
@@ -482,6 +517,259 @@ func TestProviderLivenessExclusionsFailOpenOnRedisErrors(t *testing.T) {
 			t.Fatalf("a canceled read returned %v, want the cancellation", err)
 		}
 	})
+}
+
+// Observes the deadline-bound pool's pipelines that touch the lease's keys:
+// counts the shard commands, and while blocking, holds a pipeline that
+// touches a key with the prefix until its context ends, as a socket read on a
+// wedged node does.
+type livenessTestPoolHook struct {
+	shardCommands atomic.Int64
+	blockPrefix   atomic.Pointer[string]
+}
+
+func (self *livenessTestPoolHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (self *livenessTestPoolHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return next
+}
+
+func (self *livenessTestPoolHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		blocked := false
+		for _, cmd := range cmds {
+			args := cmd.Args()
+			if len(args) < 2 {
+				continue
+			}
+			key, _ := args[1].(string)
+			if strings.HasPrefix(key, "{provider_live:") {
+				self.shardCommands.Add(1)
+			}
+			if prefix := self.blockPrefix.Load(); prefix != nil && strings.HasPrefix(key, *prefix) {
+				blocked = true
+			}
+		}
+		if blocked {
+			<-ctx.Done()
+			for _, cmd := range cmds {
+				cmd.SetErr(ctx.Err())
+			}
+			return ctx.Err()
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// Adds the hook to the deadline-bound pool, for the rest of the test env.
+func livenessTestHookPool(ctx context.Context, t testing.TB) *livenessTestPoolHook {
+	t.Helper()
+	hook := &livenessTestPoolHook{}
+	hookCtx, hookCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer hookCancel()
+	if err := server.RedisWithDeadline(hookCtx, func(r server.RedisClient) error {
+		r.AddHook(hook)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return hook
+}
+
+// Without full writer coverage a read judges nothing and reads no shard: a
+// fleet with a live handler that does not write costs one writer set read per
+// coverage verdict, not one command per shard per page.
+func TestProviderLivenessReadSkipsShardsWithoutCoverage(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		livenessTestFreshHandlers(t)
+		CreateNetworkClientHandler(ctx)
+		hook := livenessTestHookPool(ctx, t)
+		clientIds := []server.Id{}
+		for shard := range providerLivenessLeaseShardCount {
+			clientIds = append(clientIds, livenessTestIdInShard(shard, 0))
+		}
+		coverageBefore := livenessTestMetric(t, findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenCoverage))
+		for range 3 {
+			offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(offline) != 0 || len(unknown) != len(clientIds) {
+				t.Fatalf("an unstamped fleet judged %d offline and %d unknown of %d, want every one unknown", len(offline), len(unknown), len(clientIds))
+			}
+		}
+		if count := hook.shardCommands.Load(); count != 0 {
+			t.Fatalf("an unstamped fleet read the shards with %d commands, want none", count)
+		}
+		if count := livenessTestMetric(t, findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenCoverage)) - coverageBefore; count != 3 {
+			t.Fatalf("counted %v coverage fail-opens, want 3", count)
+		}
+	})
+}
+
+// A slow or wedged node costs a read its budget and no more: a shard read held
+// past it, and then a writer set read held past it, each fail open within a
+// fraction of a second, count a read error, and leave the request alive.
+func TestProviderLivenessReadFailsOpenWithinItsBudget(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		livenessTestFreshHandlers(t)
+		CreateNetworkClientHandler(ctx)
+		livenessTestStampLiveHandlers(ctx, t)
+		hook := livenessTestHookPool(ctx, t)
+		leased := livenessTestIdInShard(7, 0)
+		leaseless := livenessTestIdInShard(7, 1)
+		if err := RefreshProviderLivenessLease(ctx, leased); err != nil {
+			t.Fatal(err)
+		}
+		clientIds := []server.Id{leased, leaseless}
+		failedOpen := map[server.Id]string{leased: providerLivenessUnknown, leaseless: providerLivenessUnknown}
+		read := func(label string, want map[server.Id]string) {
+			t.Helper()
+			errorsBefore := livenessTestMetric(t, findProviders2LivenessReadErrors)
+			started := time.Now()
+			offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
+			elapsed := time.Since(started)
+			if err != nil {
+				t.Fatalf("%s: the request failed: %v", label, err)
+			}
+			if got := livenessTestVerdicts(clientIds, offline, unknown); !maps.Equal(got, want) {
+				t.Fatalf("%s: verdicts %v, want %v", label, got, want)
+			}
+			if maps.Equal(want, failedOpen) {
+				if time.Second < elapsed {
+					t.Fatalf("%s: failing open took %s, want about the %s budget", label, elapsed, providerLivenessReadTimeout)
+				}
+				if livenessTestMetric(t, findProviders2LivenessReadErrors)-errorsBefore != 1 {
+					t.Fatalf("%s: the read past its budget was not counted", label)
+				}
+			}
+		}
+
+		read("unhindered", map[server.Id]string{leased: providerLivenessLive, leaseless: providerLivenessOffline})
+		shardPrefix := "{provider_live:"
+		hook.blockPrefix.Store(&shardPrefix)
+		read("a wedged shard node", failedOpen)
+		hook.blockPrefix.Store(nil)
+
+		writersPrefix := providerLivenessWritersKey
+		hook.blockPrefix.Store(&writersPrefix)
+		defaultProviderLivenessCoverage.reset()
+		read("a wedged writer set node", failedOpen)
+		if coverage, ok := livenessTestCoverage(t); !ok || coverage != 0 {
+			t.Fatalf("writer coverage %v (%t) after the writer set read ran past its budget, want 0", coverage, ok)
+		}
+		hook.blockPrefix.Store(nil)
+	})
+}
+
+// Churn leaves a fraction of a shard's candidates offline; a lost key leaves
+// nearly all of them offline until their connections refresh. More than half,
+// from the minimum sample, trips the breaker; at most half, or a smaller
+// sample, is judged.
+func TestProviderLivenessBreakerTrips(t *testing.T) {
+	minimum := providerLivenessBreakerMinCandidates
+	for _, c := range []struct {
+		candidates int
+		offline    int
+		trips      bool
+	}{
+		{candidates: minimum - 1, offline: minimum - 1, trips: false},
+		{candidates: minimum, offline: minimum / 2, trips: false},
+		{candidates: minimum, offline: minimum/2 + 1, trips: true},
+		{candidates: 31, offline: 15, trips: false},
+		{candidates: 31, offline: 16, trips: true},
+		{candidates: 31, offline: 3, trips: false},
+	} {
+		if trips := providerLivenessBreakerTrips(c.candidates, c.offline); trips != c.trips {
+			t.Fatalf("%d of %d offline: trips %t, want %t", c.offline, c.candidates, trips, c.trips)
+		}
+	}
+}
+
+// A shard whose key was lost (a node restart, an empty failover, an eviction)
+// has a current newest lease again as soon as one connection refreshes, while
+// every other lease it held is gone until its connection refreshes. Its
+// candidates read offline together, and the breaker admits them as unknown; a
+// shard with one leaseless candidate of ten is judged.
+func TestProviderLivenessLostShardKeyTripsTheBreaker(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		livenessTestFreshHandlers(t)
+		CreateNetworkClientHandler(ctx)
+		livenessTestStampLiveHandlers(ctx, t)
+		clientIds := []server.Id{}
+		for i := range 10 {
+			clientId := livenessTestIdInShard(5, i)
+			clientIds = append(clientIds, clientId)
+			if err := RefreshProviderLivenessLease(ctx, clientId); err != nil {
+				t.Fatal(err)
+			}
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			if err := r.Del(ctx, providerLivenessLeaseKey(5)).Err(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		// the first connection to refresh after the loss
+		if err := RefreshProviderLivenessLease(ctx, livenessTestIdInShard(5, 10)); err != nil {
+			t.Fatal(err)
+		}
+		breakerBefore := livenessTestMetric(t, findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenOfflineFraction))
+		offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(offline) != 0 || len(unknown) != len(clientIds) {
+			t.Fatalf("a lost shard key judged %d offline and %d unknown of %d, want every one unknown", len(offline), len(unknown), len(clientIds))
+		}
+		if livenessTestMetric(t, findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenOfflineFraction))-breakerBefore != 1 {
+			t.Fatal("the breaker's fail-open was not counted")
+		}
+
+		// the connections refresh, all but one
+		for _, clientId := range clientIds[1:] {
+			if err := RefreshProviderLivenessLease(ctx, clientId); err != nil {
+				t.Fatal(err)
+			}
+		}
+		offline, unknown, err = getProviderLivenessExclusions(ctx, clientIds, livenessTestNodeTime(ctx, t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unknown) != 0 || len(offline) != 1 || !offline[clientIds[0]] {
+			t.Fatalf("one leaseless candidate of ten judged %d offline and %d unknown, want it alone offline", len(offline), len(unknown))
+		}
+	})
+}
+
+// A process exports no writer coverage until its first verdict, then the
+// verdict's share; handlers it cannot read are a share of 0.
+func TestProviderLivenessCoverageGaugeWaitsForTheFirstVerdict(t *testing.T) {
+	findProviders2LivenessWriterCoverage.Reset()
+	t.Cleanup(findProviders2LivenessWriterCoverage.Reset)
+	if _, ok := livenessTestCoverage(t); ok {
+		t.Fatal("a process with no verdict exported writer coverage")
+	}
+	coverage := &providerLivenessCoverage{
+		handlers: &providerLivenessHandlers{
+			load: func(context.Context, time.Time) ([]server.Id, error) {
+				return nil, errors.New("test: the database refused this read")
+			},
+			now: time.Now,
+		},
+		now: time.Now,
+	}
+	covered, reason, err := coverage.get(context.Background())
+	if err != nil || covered || reason != providerLivenessFailOpenHandlers {
+		t.Fatalf("unreadable handlers: covered %t, reason %q, err %v; want not covered for the handlers", covered, reason, err)
+	}
+	if value, ok := livenessTestCoverage(t); !ok || value != 0 {
+		t.Fatalf("writer coverage %v (%t) with unreadable handlers, want 0", value, ok)
+	}
 }
 
 // One read pipelined across every shard of a real Redis cluster: each shard is
@@ -554,8 +842,8 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 		popVaultRedis()
 		server.RedisReset()
 	})
-	defaultProviderLivenessHandlers.reset()
-	t.Cleanup(defaultProviderLivenessHandlers.reset)
+	livenessTestForgetCoverage()
+	t.Cleanup(livenessTestForgetCoverage)
 	handlerId := server.NewId()
 	previousLoad := defaultProviderLivenessHandlers.load
 	defaultProviderLivenessHandlers.load = func(context.Context, time.Time) ([]server.Id, error) {
