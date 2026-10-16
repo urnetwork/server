@@ -249,3 +249,45 @@ func TestLagStatsLeaveOutAutomated(t *testing.T) {
 		connect.AssertEqual(t, GetLagTrack(ctx, visitor).Source, LagSourceWeb)
 	})
 }
+
+// A load's span runs LagLoadSpanTail past its upload window (lag.dev/PLAN.md
+// L4, X9, amendment 18): on a slow uplink the path stays loaded while what
+// the browser queued drains, past the extender's 2 s close wait, so a ping
+// sent then is not idle. On lag.dev's local stack a 0.5 Mbps path's pings
+// sent 2.06–2.11 s after the extender's upload window still met the load, at
+// 6–9 times idle, and its path was empty about 2.3 s after it. A ping sent
+// once the span is over is idle again.
+func TestLagStatsIdleLeavesOutUploadDrain(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		trackId := testLagStatsTrack(ctx, server.NewId(), now.Add(-20*time.Minute), "us")
+		result := testLagStatsResult(trackId, 0, 4, "complete", now.Add(-10*time.Minute), testLagStatsFloat(20), testLagStatsFloat(1), testLagStatsFloat(0.5))
+		// M8: the minute runs from 25 s before the download's first byte; the
+		// upload window ends at 35.5 s
+		result.DownloadStartMs = 25000
+		result.DownloadMs = 5000
+		result.UploadStartMs = 30500
+		result.UploadMs = 5000
+		uploadEndMs := int32(result.UploadStartMs + result.UploadMs)
+		result.PingOffsetMs = []int32{
+			// idle, before the load
+			1000,
+			// the drain, 2.05–2.25 s after the upload window
+			uploadEndMs + 2050,
+			uploadEndMs + 2150,
+			uploadEndMs + 2250,
+			// idle again once the span is over
+			uploadEndMs + int32(LagLoadSpanTail.Milliseconds()) + 100,
+		}
+		result.PingMicros = []int32{20000, 150000, 150000, 150000, 20000}
+		connect.AssertEqual(t, AddLagResult(ctx, result), true)
+
+		medians := GetLagResultMediansSince(ctx, now.Add(-time.Hour), "complete")
+		connect.AssertEqual(t, len(medians), 1)
+		connect.AssertEqual(t, medians[0].Count, int64(1))
+		// with a 2 s tail the three drain pings would be the median
+		connect.AssertEqual(t, *medians[0].IdleLatencyP50Ms, float64(20))
+	})
+}
