@@ -464,15 +464,19 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 	}
 }
 
-// RedisWithDeadline is the non-retrying boundary for optional cleanup with an
-// explicit caller deadline. Its dedicated pool applies that deadline to socket
-// reads and writes for both standalone and cluster clients. The callback must
-// pass the same ctx to every command. RedisReset and pool telemetry own this
-// pool just like the ordinary pools; no per-operation client is leaked.
-// This pool is restricted to PING, GET and same-slot EVAL operations; it bypasses
-// cluster command-policy discovery and must not route multi-shard operations.
-// EVAL callers must keep every declared key in one explicit Redis hash tag.
-func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (returnErr error) {
+// RedisWithDeadline is the non-retrying boundary for work with an explicit
+// caller deadline: optional cleanup, admission, and the provider liveness
+// lease. Its dedicated pool applies that deadline to socket reads and writes for
+// both standalone and cluster clients. The callback must pass the same ctx to
+// every command. RedisReset and pool telemetry own this pool just like the
+// ordinary pools; no per-operation client is leaked.
+// The pool bypasses cluster command-policy discovery, so each command routes by
+// its own first key: PING, GET, same-slot EVAL and other single-key commands,
+// alone or pipelined across slots. It must not route a command whose keys span
+// slots. EVAL callers must keep every declared key in one explicit Redis hash
+// tag. Each call first pings an arbitrary node unless the caller passes
+// OptRedisNoPreflight.
+func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error, options ...any) (returnErr error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")
 	}
@@ -498,17 +502,33 @@ func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (r
 	}()
 	redisWithClient(ctx, safeDeadlineClient, func(client RedisClient) {
 		returnErr = callback(client)
-	}, OptNoRetry())
+	}, append([]any{OptNoRetry()}, options...)...)
 	return
+}
+
+// Whether a call on the non-retrying or deadline-bound pools pings first.
+type RedisPreflightOptions struct {
+	skip bool
+}
+
+// Skips the preflight PING of the non-retrying and deadline-bound pools, for
+// idempotent commands whose results are judged one by one: the PING reaches an
+// arbitrary node, never necessarily the one a command routes to, and costs a
+// round trip per call.
+func OptRedisNoPreflight() RedisPreflightOptions {
+	return RedisPreflightOptions{skip: true}
 }
 
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
 	retryOptions := OptRetryDefault()
+	preflight := true
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
 		case DbRetryOptions:
 			retryOptions = v
+		case RedisPreflightOptions:
+			preflight = !v.skip
 		}
 	}
 
@@ -529,7 +549,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 		// cannot guarantee the next command succeeds. Dedicated non-retrying
 		// and deadline pools retain their existing preflight policy.
 		var connErr error
-		if pool.disableCommandRetry || pool.contextTimeoutEnabled {
+		if preflight && (pool.disableCommandRetry || pool.contextTimeoutEnabled) {
 			connErr = client.Ping(ctx).Err()
 		}
 		if connErr != nil {

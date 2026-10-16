@@ -298,27 +298,67 @@ func TestProviderLivenessLeaseIsTheClients(t *testing.T) {
 
 // The contract between connect writers and API readers, in time. A healthy
 // connection survives one failed write without its process withholding the
-// stamp; a process whose refreshes stop, for one connection or all, has its
-// last stamp lapse at every reader, through the coverage cache, before any
-// lease it refreshed lapses; and stamps renew well within their window. The
-// refresh runs on its own interval: a refresh tied to sync rounds waited out
-// a failed read's retries (up to a minute) and the longest backoff (two
+// stamp. A process whose writes stop, for one shard or all, has its last stamp
+// lapse at every reader, through the coverage cache, before any lease it wrote
+// lapses: a write's success is the time it started, up to a write's bound
+// before its score, then the withhold age, the stamp's own write, the stamp
+// window and the readers' cache. Stamps renew well within their window. The
+// writes run on their own interval: a refresh tied to sync rounds waited out a
+// failed read's retries (up to a minute) and the longest backoff (two
 // minutes), 180 s, past the lease window.
 func TestProviderLivenessBudgetStaysUnderTheLeaseWindow(t *testing.T) {
-	worstRefreshGap := ProviderLivenessLeaseRefreshInterval + ProviderLivenessLeaseWriteTimeout
+	worstRefreshGap := ProviderLivenessLeaseRefreshInterval + ProviderLivenessLeaseRefreshJitter + ProviderLivenessLeaseWriteTimeout
 	if ProviderLivenessWriterWithholdAge <= 2*worstRefreshGap {
-		t.Fatalf("a connection that misses one refresh reaches the withhold age: %s <= 2 x %s", ProviderLivenessWriterWithholdAge, worstRefreshGap)
+		t.Fatalf("a connection that misses one write reaches the withhold age: %s <= 2 x %s", ProviderLivenessWriterWithholdAge, worstRefreshGap)
 	}
-	lastEnforced := ProviderLivenessWriterWithholdAge + ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWindow + ProviderLivenessCoverageCacheAge
+	lastEnforced := ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWithholdAge + ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWindow + ProviderLivenessCoverageCacheAge
 	if ProviderLivenessLeaseWindow <= lastEnforced {
-		t.Fatalf("readers may enforce until %s after a connection's last refresh, past the %s lease window", lastEnforced, ProviderLivenessLeaseWindow)
+		t.Fatalf("readers may enforce until %s after a lease's last score, past the %s lease window", lastEnforced, ProviderLivenessLeaseWindow)
 	}
 	if ProviderLivenessWriterWindow <= 2*(ProviderLivenessWriterInterval+ProviderLivenessLeaseWriteTimeout) {
 		t.Fatalf("one failed stamp lapses the writer: %s window, %s interval", ProviderLivenessWriterWindow, ProviderLivenessWriterInterval)
 	}
 	if ProviderLivenessLeaseWindow <= worstRefreshGap {
-		t.Fatalf("a healthy lease lapses between refreshes: %s window, %s gap", ProviderLivenessLeaseWindow, worstRefreshGap)
+		t.Fatalf("a healthy lease lapses between writes: %s window, %s gap", ProviderLivenessLeaseWindow, worstRefreshGap)
 	}
+}
+
+// One shard script scores, extends only what the shard holds, and removes, at
+// the node's clock, and refuses a client of another shard before writing.
+func TestProviderLivenessLeaseShardWrite(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		shard := 4
+		scored := livenessTestIdInShard(shard, 0)
+		held := livenessTestIdInShard(shard, 1)
+		unheld := livenessTestIdInShard(shard, 2)
+		removed := livenessTestIdInShard(shard, 3)
+		nodeMillis := livenessTestNodeTime(ctx, t).UnixMilli()
+		livenessTestScore(ctx, t, providerLivenessLeaseKey(shard), map[string]int64{
+			held.String():    nodeMillis - 60_000,
+			removed.String(): nodeMillis - 60_000,
+		})
+		flags, err := WriteProviderLivenessLeaseShard(ctx, shard, []server.Id{scored}, []server.Id{held, unheld}, []server.Id{removed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(flags) != 2 || !flags[0] || flags[1] {
+			t.Fatalf("extensions reported held %v, want the held member alone", flags)
+		}
+		members := livenessTestMembers(ctx, t, providerLivenessLeaseKey(shard))
+		if _, ok := members[unheld.String()]; ok {
+			t.Fatal("an extension created a member the shard did not hold")
+		}
+		if _, ok := members[removed.String()]; ok {
+			t.Fatal("the removed member remains")
+		}
+		if members[scored.String()] < nodeMillis || members[held.String()] < nodeMillis {
+			t.Fatalf("the scored and extended members are not at the node's clock: %v", members)
+		}
+		if _, err := WriteProviderLivenessLeaseShard(ctx, shard+1, []server.Id{scored}, nil, nil); err == nil {
+			t.Fatal("a client of another shard was written")
+		}
+	})
 }
 
 // A lease write takes its own deadline and runs no retry loop: on a canceled
