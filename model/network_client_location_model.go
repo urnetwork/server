@@ -6199,14 +6199,15 @@ func FindProviders2(
 			maps.Copy(hardExcludedClientIds, excluded)
 			// A candidate without a current liveness lease leaves every draw
 			// of the request like one the live read finds offline. The lease
-			// read fails open (provider_liveness_lease_read.go).
+			// read fails open (provider_liveness_lease_read.go), and judges
+			// at its own instant, which needs nothing of the request's.
 			leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
 			for _, clientId := range candidateClientIds {
 				if !hardExcludedClientIds[clientId] {
 					leaseClientIds = append(leaseClientIds, clientId)
 				}
 			}
-			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, filterTime, rankMode)
+			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
 			if err != nil {
 				return err
 			}
