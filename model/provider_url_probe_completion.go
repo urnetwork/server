@@ -122,7 +122,7 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 			completed_priority_ready=false,
 			next_attempt_at=CASE WHEN $7<>'' AND cycle.claim_ordinal=$2
 				AND ($6 OR cycle.next_attempt_at=$9)
-				AND ((SELECT `+providerUrlProbeMeasuredWorkDueSql("recent", "$3", "$8")+` FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
+				AND ((SELECT `+providerUrlProbeMeasuredWorkDueSql("recent", "cycle.latest_result_at", "$3", "$8")+` FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
 					OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
 				AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
 				THEN CASE WHEN $6 THEN $10::timestamp
