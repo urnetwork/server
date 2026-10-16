@@ -23,6 +23,12 @@ var (
 	ErrConsentRequired  = errors.New("consent_required")
 )
 
+// The reasons a user may not authorize, which tell the user what to do.
+var (
+	errUnauthorizedGuestNetwork = fmt.Errorf("%w: upgrade the guest network before authorizing", ErrUnauthorizedUser)
+	errUnauthorizedNoNetwork    = fmt.Errorf("%w: no network", ErrUnauthorizedUser)
+)
+
 // What the authorization endpoint received from the client.
 type AuthorizationRequest struct {
 	ClientId            string
@@ -106,10 +112,10 @@ func Authorize(
 
 	// a guest network cannot be billed, and every scope that matters bills
 	if user.GuestMode {
-		return "", fmt.Errorf("%w: upgrade the guest network before authorizing", ErrUnauthorizedUser)
+		return "", errUnauthorizedGuestNetwork
 	}
 	if user.NetworkId == (server.Id{}) {
-		return "", fmt.Errorf("%w: no network", ErrUnauthorizedUser)
+		return "", errUnauthorizedNoNetwork
 	}
 
 	scopes := FilterSupportedScopes(request.Scopes)

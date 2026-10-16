@@ -81,7 +81,14 @@ func writeGrantError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrInvalidRefreshToken), errors.Is(err, ErrInvalidGrant):
 		writeOauthError(w, http.StatusBadRequest, "invalid_grant", "The grant is invalid or expired.")
 	case errors.Is(err, ErrUnauthorizedUser):
-		writeOauthError(w, http.StatusForbidden, "access_denied", err.Error())
+		// a declared reason tells the user what to do; any other detail is logged
+		description := ErrUnauthorizedUser.Error()
+		for _, reason := range []error{errUnauthorizedGuestNetwork, errUnauthorizedNoNetwork} {
+			if errors.Is(err, reason) {
+				description = reason.Error()
+			}
+		}
+		writeOauthError(w, http.StatusForbidden, "access_denied", description)
 	default:
 		writeOauthError(w, http.StatusInternalServerError, "server_error", "Please try again.")
 	}
