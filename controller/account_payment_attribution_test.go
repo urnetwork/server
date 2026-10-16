@@ -286,7 +286,7 @@ func TestProviderPaymentAttributionStatusRefusesHistoricalDuplicate(t *testing.T
 // decision's fresh read/write boundary; a second record bind then still refuses.
 func TestProviderPaymentAttributionRetentionWaitsForLegacyOwner(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		legacyOwner, legacy, _ := legacyReconcileTestFixture(t)
+		_, legacy, _ := legacyReconcileTestFixture(t)
 		owner, payment := controllerPayoutFixture(t, time.Date(2020, 1, 6, 23, 59, 59, 0, time.UTC))
 		wallet := model.GetAccountWallet(owner.Ctx, *payment.WalletId)
 		ctx, cancel := context.WithTimeout(owner.Ctx, 30*time.Second)
