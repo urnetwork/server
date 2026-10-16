@@ -706,10 +706,11 @@ type providerEgressFacts struct {
 	blackholed              bool
 	tlsAuthenticationFailed bool
 	// the native URL-run minimums (egress_native_min_runs.go): the accepted
-	// URL runs behind the ratio are too few, or too close together, to
-	// decide Quality, and too few to decide Speed
-	qualityWarmup bool
-	speedWarmup   bool
+	// URL runs behind the ratio are enough, and far enough apart, to decide
+	// Quality, and enough to decide Speed. The zero value has met neither, so
+	// facts that leave them out admit a passing ratio to no native bucket.
+	qualityRunsMet bool
+	speedRunsMet   bool
 	// a fresh probe observed the exit in a country other than the published one
 	countryMismatch bool
 	// The rollup index is a ranking diagnostic; the verdict uses current history.
@@ -774,8 +775,8 @@ func (self providerCountFilter) egressFacts(
 		reliabilityFailed:       self.reliabilityFailed[clientId],
 		blackholed:              self.isBlackholed(clientId),
 		tlsAuthenticationFailed: self.tlsAuthenticationFailed[clientId],
-		qualityWarmup:           providerQualityUrlRunsShort(counts, urlIndex),
-		speedWarmup:             providerSpeedUrlRunsShort(counts, urlIndex),
+		qualityRunsMet:          providerQualityUrlRunsMet(counts, urlIndex),
+		speedRunsMet:            providerSpeedUrlRunsMet(counts, urlIndex),
 		// a provider nobody has located, or whose own country is unknown,
 		// cannot contradict itself
 		countryMismatch: settings.CountryGate &&
@@ -870,8 +871,8 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// modern provider gate reads only the providers the other rules
 		// admit, so one short for both buckets has no gate outcome and
 		// counts as unprobed; one the gate reads counts as not_modern first.
-		quality := !facts.arinNonQuality && !facts.qualityWarmup
-		speed := !facts.speedWarmup
+		quality := !facts.arinNonQuality && facts.qualityRunsMet
+		speed := facts.speedRunsMet
 		decision := providerEgressDecision{
 			quality:                 quality,
 			speed:                   speed,
@@ -892,7 +893,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			decision.quality = false
 			decision.speed = false
 			decision.reason = ProviderExcludedNotModern
-		case facts.qualityWarmup || facts.speedWarmup:
+		case !facts.qualityRunsMet || !facts.speedRunsMet:
 			// Probing goes on, and the run that meets a minimum brings the
 			// provider into that bucket on the next pass, while its ratio
 			// still passes.

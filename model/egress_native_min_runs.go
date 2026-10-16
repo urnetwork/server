@@ -45,19 +45,20 @@ const ProviderQualityMinMeasuredUrlSpan = 30 * time.Minute
 // sample, not a share.
 const ProviderSpeedMinMeasuredUrlRuns = 2
 
-// Whether the accepted URL runs in the evidence window are too few, or span
-// too short a time, for Quality, whatever their ratio. A provider without
-// current evidence has no runs to read, so it is short too.
-func providerQualityUrlRunsShort(counts ProviderEgressHealthCounts, urlIndex EgressIndex) bool {
-	return !urlIndex.Evidence ||
-		counts.Total < ProviderQualityMinMeasuredUrlRuns ||
-		counts.MeasuredAt.Sub(counts.FirstMeasuredAt) < ProviderQualityMinMeasuredUrlSpan
+// Whether the accepted URL runs in the evidence window are enough, and span
+// long enough, for Quality to read their ratio, whatever it is. A provider
+// without current evidence has no runs to read, so it has not met them.
+func providerQualityUrlRunsMet(counts ProviderEgressHealthCounts, urlIndex EgressIndex) bool {
+	return urlIndex.Evidence &&
+		ProviderQualityMinMeasuredUrlRuns <= counts.Total &&
+		ProviderQualityMinMeasuredUrlSpan <= counts.MeasuredAt.Sub(counts.FirstMeasuredAt)
 }
 
-// Whether the accepted URL runs in the evidence window are too few for Speed,
-// whatever their ratio. A provider without current evidence is short too.
-func providerSpeedUrlRunsShort(counts ProviderEgressHealthCounts, urlIndex EgressIndex) bool {
-	return !urlIndex.Evidence || counts.Total < ProviderSpeedMinMeasuredUrlRuns
+// Whether the accepted URL runs in the evidence window are enough for Speed
+// to read their ratio, whatever it is. A provider without current evidence
+// has not met them.
+func providerSpeedUrlRunsMet(counts ProviderEgressHealthCounts, urlIndex EgressIndex) bool {
+	return urlIndex.Evidence && ProviderSpeedMinMeasuredUrlRuns <= counts.Total
 }
 
 // The minimums as the dashboard's policy key reads them
