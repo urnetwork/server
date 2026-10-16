@@ -3618,7 +3618,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "min by (service) (max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"}))",
+          "expr": "min by (service) ((max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env=\"$env\",service=~\"api|proxy\"}) and on (service, host, instance) max by (service, host, instance) (process_start_time_seconds{env=\"$env\",service=~\"api|proxy\"})) or on (service, host, instance) (0 * max by (service, host, instance) (process_start_time_seconds{env=\"$env\",service=~\"api|proxy\"})))",
           "refId": "A",
           "legendFormat": "{{service}}: every process"
         },
@@ -3632,7 +3632,7 @@
           "legendFormat": "{{service}}: any process"
         }
       ],
-      "description": "Whether the api and the proxy order their FindProviders2 draws by evidence (egress_index.rank_measured_first in provider.yml), as each process read it. \"every process\" is on only once all of a service's processes apply it, so through a staggered restart it reads on when the last one has restarted onto the new config; \"any process\" is on as soon as one has. Turning it on or off is a config release and a restart of the api and the proxy; the taskworker needs nothing."
+      "description": "Whether the api and the proxy order their FindProviders2 draws by evidence (egress_index.rank_measured_first in provider.yml), as each process read it. \"every process\" compares the gauge with the independent process_start_time_seconds inventory by service, host and instance: a process without the gauge counts as off, including an old binary. It is on only once every inventoried process applies the setting, and has no value when no process inventory is visible. During a staggered restart, drained processes can keep it off until their series become stale; \"any process\" is on as soon as one publishes on. Turning it on or off is a config release and a restart of the api and the proxy; the taskworker needs nothing."
     },
     {
       "id": 71,

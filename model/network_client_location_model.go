@@ -540,7 +540,20 @@ func runClientScoreExportBatches(
 	)
 }
 
+// Refuse a command that expired while queued before touching a newer value.
+// Redis SET PXAT alone deletes that value when its deadline is already past.
+const clientScoreExportSetScript = `
+local expiresAt = tonumber(ARGV[2])
+local now = redis.call('TIME')
+if not expiresAt or expiresAt <= tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) then
+  return redis.error_reply('client score export expired')
+end
+return redis.call('SET', KEYS[1], ARGV[1], 'PXAT', expiresAt)
+`
+
+// Publishes each value and its deadline atomically, rejecting expired exports.
 func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl time.Duration, produce clientScoreExportProduce) error {
+	expiresAt := clientScoreExportExpiresAt(ctx)
 	return runClientScoreExportStream(
 		ctx,
 		clientScoreExportBatchSize,
@@ -548,13 +561,20 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 		clientScoreExportMaxAttempts,
 		produce,
 		func(batch []clientScoreRedisSet) error {
+			if !expiresAt.IsZero() && !server.NowUtc().Before(expiresAt) {
+				return fmt.Errorf("client score export expired")
+			}
 			span := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseCacheWrite)
 			defer span.finish()
 			pipe := r.Pipeline()
 			batchBytes := 0
 			for _, set := range batch {
 				batchBytes += len(set.key) + len(set.value)
-				pipe.Set(ctx, set.key, set.value, ttl)
+				if expiresAt.IsZero() {
+					pipe.Set(ctx, set.key, set.value, ttl)
+				} else {
+					pipe.Eval(ctx, clientScoreExportSetScript, []string{set.key}, set.value, expiresAt.UnixMilli())
+				}
 			}
 			updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseCacheWrite, len(batch), batchBytes)
 			_, err := pipe.Exec(ctx)
@@ -5206,6 +5226,9 @@ func clientScoreLocationGroupFacetSampleKey(forceMinimum bool, rankMode RankMode
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
+	if ttl < time.Millisecond {
+		return fmt.Errorf("client score export requires positive ttl")
+	}
 	nativeSourceStartedAt := server.NowUtc()
 	aliasesReady, err := clientScoreAliasReady(ctx)
 	if err != nil {
@@ -5624,7 +5647,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	if err != nil {
 		return fmt.Errorf("read client score target manifest: %w", err)
 	}
-	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, server.NowUtc(), ttl)
+	manifestTime := server.NowUtc()
+	// All payload generations from this export expire with its write-ahead
+	// record, even when a batch runs late or the final publication fails.
+	ctx = context.WithValue(ctx, clientScoreExportExpiryContextKey{}, manifestTime.Add(ttl))
+	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, manifestTime, ttl)
 	targets = append(targets, departedTargets...)
 	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
 		return fmt.Errorf("publish client score target manifest: %w", err)
@@ -5735,9 +5762,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	returnErr = finishClientScoreExport(ctx, returnErrs)
 
 	if returnErr == nil {
-		// Every departed target now holds encoded-empty documents that outlive
-		// its previous ones, so the next export compares against this export's
-		// row targets only, stamped after their last document.
+		// Merge completion without forgetting an older overlapping export's
+		// live targets. Their deadlines, not completion order, bound retention.
 		if err := writeClientScoreTargetManifest(ctx, targetMaps.targetManifest(server.NowUtc()), ttl); err != nil {
 			// the manifest published before the documents still names the
 			// departed targets, so the next export clears them again

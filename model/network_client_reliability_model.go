@@ -1864,7 +1864,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	}
 
 	// upsert the fresh scores, then remove rows not refreshed in this round
-	// (identified by a stale max_block_number). This replaces the previous
+	// (identified by either stale window bound). This replaces the previous
 	// delete-all-and-reinsert, which rewrote the entire table every round and
 	// kept it permanently bloated.
 	server.RaisePgResult(tx.Exec(
@@ -1926,8 +1926,9 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		ctx,
 		`
 		DELETE FROM network_connection_reliability_score
-		WHERE max_block_number != $1
+		WHERE min_block_number <> $1 OR max_block_number <> $2
 		`,
+		minBlockNumber,
 		maxBlockNumber,
 	))
 }

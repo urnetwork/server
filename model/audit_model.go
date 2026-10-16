@@ -630,16 +630,17 @@ func computeStatsDeviceWindowParallel(
 			continue
 		}
 		chains.Add(1)
-		go server.HandleError(func() {
+		go func() {
+			// Recovery publishes the failure before this chain joins.
 			defer chains.Done()
-			walk()
-		}, func(err error) {
-			stateLock.Lock()
-			defer stateLock.Unlock()
-			if chainErr == nil {
-				chainErr = err
-			}
-		})
+			server.HandleError(walk, func(err error) {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				if chainErr == nil {
+					chainErr = err
+				}
+			})
+		}()
 	}
 	chains.Wait()
 	if chainErr != nil {

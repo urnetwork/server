@@ -67,26 +67,28 @@ func (self *ContentionError) Error() string {
 	return self.message
 }
 
-// Every cause, through wrapping and joins, is a contention refusal.
+// Every concrete leaf, through wrapping and joins, is a contention refusal.
+// Incomplete or malformed cause graphs do not classify as contention.
 func IsContentionError(r any) bool {
 	err, ok := r.(error)
 	if !ok || err == nil {
 		return false
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
+	causes := InspectErrorCauseBatch(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
+	}
+	found := false
+	for _, cause := range causes.Nodes {
+		if !cause.Leaf {
+			continue
+		}
+		if contention, ok := cause.Err.(*ContentionError); !ok || contention == nil {
 			return false
 		}
-		for _, cause := range causes {
-			if !IsContentionError(cause) {
-				return false
-			}
-		}
-		return true
+		found = true
 	}
-	var contention *ContentionError
-	return errors.As(err, &contention)
+	return found
 }
 
 var contentionRecoveredCounter = prometheus.NewCounter(prometheus.CounterOpts{

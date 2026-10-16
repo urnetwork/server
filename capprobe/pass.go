@@ -16,8 +16,8 @@ import (
 	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
-// How long one evidence write may take, apart from the pass's end: a reading
-// that came in as the pass was ending is still worth storing.
+// How long one evidence flush may take, apart from the pass's end. A released
+// negative backlog shares this grace with the reading that released it.
 const recordTimeout = 10 * time.Second
 
 // What a pass keeps for its selection reads, ahead of its measurements.
@@ -270,7 +270,7 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 		return !bounded || self.settings.admissionReserve() <= deadline.Sub(self.now())
 	}
 	// records one recordable reading, and counts it
-	recordReading := func(result measurement) {
+	recordReading := func(recordCtx context.Context, result measurement) {
 		outcome := result.outcome()
 		confirmed := false
 		if modernOutcomeOf(result.evidence) != model.ProviderModernOutcomeModern {
@@ -280,7 +280,7 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 				confirmed = held.confirms(result.providerId)
 			}()
 		}
-		wasHeld, err := self.recordEvidence(ctx, result.providerId, result.evidence, confirmed)
+		wasHeld, err := self.recordEvidence(recordCtx, result.providerId, result.evidence, confirmed)
 		func() {
 			stateLock.Lock()
 			defer stateLock.Unlock()
@@ -358,11 +358,18 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 				if !result.recordable {
 					observeMeasurement(result, result.outcome())
 				}
-				if recordNow {
-					recordReading(result)
-				}
-				for _, waiting := range released {
-					recordReading(waiting)
+				if recordNow || 0 < len(released) {
+					recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+					defer cancel()
+					if recordNow {
+						recordReading(recordCtx, result)
+					}
+					for _, waiting := range released {
+						if recordFailed() {
+							break
+						}
+						recordReading(recordCtx, waiting)
+					}
 				}
 			}, func(err error) {
 				// the measurement's own teardown has run while unwinding
@@ -400,12 +407,13 @@ func (self *passRunner) measureAll(ctx context.Context, dueClientIds []server.Id
 	return counts, recordErr
 }
 
-// Writes one provider's evidence under a bound of its own, apart from the
-// pass's cancellation; held as passRunner.record says.
+// Writes one provider's evidence within the flush's shared grace. Expiry
+// leaves unwritten evidence due for the failed pass's retry.
 func (self *passRunner) recordEvidence(ctx context.Context, providerId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (held bool, err error) {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
-	defer cancel()
-	return self.record(recordCtx, providerId, evidence, downgradeConfirmed)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return self.record(ctx, providerId, evidence, downgradeConfirmed)
 }
 
 // The production write: model.RecordProviderModernEvidenceHoldingDowngrade,

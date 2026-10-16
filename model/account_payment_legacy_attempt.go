@@ -110,15 +110,7 @@ func GetProviderPaymentProcessorRecords(ctx context.Context) (records map[string
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-			SELECT payment_record FROM account_payment WHERE payment_record IS NOT NULL
-			UNION
-			SELECT event_details::jsonb->'attempt'->>'payment_record' FROM audit_account_payment
-			WHERE event_type = 'circle_attempt_outcome' AND event_details::jsonb->'attempt'->>'payment_record' IS NOT NULL
-			UNION
-			SELECT event_details::jsonb->>'record' FROM audit_account_payment
-			WHERE event_type = 'circle_late_acceptance' AND event_details::jsonb->>'record' IS NOT NULL
-			`,
+			`SELECT DISTINCT record FROM (`+providerPaymentProcessorOwnershipSql+`) owned WHERE record IS NOT NULL AND record<>''`,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -192,15 +184,17 @@ func BindLegacyProviderPaymentRecord(ctx context.Context, expected *AccountPayme
 	if record == "" || len(record) > 4096 || !(0 < amount) || providerPaymentReceiptLimit < len(observation) {
 		return ErrProviderPaymentAttemptChanged
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	wallet, err := legacyProviderPaymentWallet(ctx, expected)
+	if err != nil {
+		return err
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(expected.PaymentId, wallet.Blockchain, wallet.WalletAddress, record), func(tx server.PgTx) {
 		returnErr = nil
-		if !lockLegacyProviderPaymentAttemptInTx(ctx, tx, expected) {
+		if !lockLegacyProviderPaymentAttributionInTx(ctx, tx, expected, wallet) {
 			returnErr = ErrProviderPaymentAttemptChanged
 			return
 		}
-		var bound bool
-		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM account_payment WHERE payment_record = $1)`, record).Scan(&bound))
-		if bound {
+		if providerPaymentRecordClaimedInTx(ctx, tx, record, nil) {
 			returnErr = ErrProviderPaymentAttemptChanged
 			return
 		}
@@ -225,9 +219,13 @@ func ReleaseLegacyProviderPaymentKey(ctx context.Context, expected *AccountPayme
 	if providerPaymentReceiptLimit < len(observation) {
 		return ErrProviderPaymentAttemptChanged
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	wallet, err := legacyProviderPaymentWallet(ctx, expected)
+	if err != nil {
+		return err
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(expected.PaymentId, wallet.Blockchain, wallet.WalletAddress, ""), func(tx server.PgTx) {
 		returnErr = nil
-		if !lockLegacyProviderPaymentAttemptInTx(ctx, tx, expected) {
+		if !lockLegacyProviderPaymentAttributionInTx(ctx, tx, expected, wallet) {
 			returnErr = ErrProviderPaymentAttemptChanged
 			return
 		}

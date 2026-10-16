@@ -133,9 +133,9 @@ func TestStatsLagAutomatedValues(t *testing.T) {
 	connect.AssertEqual(t, len(statsLagAutomatedValues(map[string]int64{})), len(model.LagAutomatedReasons))
 }
 
-// A track is stored automated with its reason for a signing agent and for a
-// hosting network, and a visitor's is not; one agent's tracks are capped
-// wherever its browsers run, apart from another agent's (amendment 12).
+// A claimed agent and a hosting network are conservatively stored as
+// automated; a visitor is not. An unverified agent claim cannot impose a
+// shared quota on independent authenticated clients.
 func TestLagTrackAutomated(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -182,7 +182,7 @@ func TestLagTrackAutomated(t *testing.T) {
 		connect.AssertEqual(t, automated, true)
 		connect.AssertEqual(t, *reason, model.LagAutomatedReasonDatacenterAsn)
 
-		// a fresh agent per run, so a rerun within the hour starts its own count
+		// a synthetic claimed agent; its name is not an authenticated identity
 		agent := fmt.Sprintf(`"https://agent-%s.example"`, server.NewId())
 		first := issue("198.51.100.31:1234", agent)
 		automated, reason = row(first)
@@ -191,15 +191,14 @@ func TestLagTrackAutomated(t *testing.T) {
 		connect.AssertEqual(t, model.GetLagTrack(ctx, *first.TrackId).AutomatedReason, model.LagAutomatedReasonSignatureAgent)
 		connect.AssertEqual(t, model.GetLagTrack(ctx, *first.TrackId).Automated(), true)
 
-		// the agent's second track is allowed, and its third is capped, from
-		// another network as from the first
+		// repeated claims stay automated without spending a global quota,
+		// including a third independent client from another network
 		row(issue("198.51.100.32:1234", agent))
-		capped := issue("203.0.113.31:1234", agent)
-		connect.AssertEqual(t, capped.TrackId, (*server.Id)(nil))
-		connect.AssertEqual(t, capped.Error.Code, LagErrorCodeLimit)
-		connect.AssertEqual(t, 0 < capped.Error.RetryAfterMs, true)
+		automated, reason = row(issue("203.0.113.31:1234", agent))
+		connect.AssertEqual(t, automated, true)
+		connect.AssertEqual(t, *reason, model.LagAutomatedReasonSignatureAgent)
 
-		// another agent keeps its own count
+		// changing the claimed name does not change admission either
 		row(issue("198.51.100.33:1234", fmt.Sprintf(`"https://agent-%s.example"`, server.NewId())))
 	})
 }

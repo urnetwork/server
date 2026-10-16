@@ -47,7 +47,7 @@ func reserveProviderPaymentBasisInTx(ctx context.Context, tx server.PgTx, paymen
 	// A payment of a plan whose sweep assignment is pending is not payable yet.
 	result, err := tx.Query(ctx, `UPDATE account_payment p SET circle_idempotency_key=COALESCE(circle_idempotency_key,$2)
 			WHERE p.payment_id=$1 AND p.network_id=$3 AND p.wallet_id=$4 AND p.payout_nano_cents=$5
-			AND NOT p.completed AND NOT p.canceled AND p.payment_record IS NULL AND p.tx_hash IS NULL
+			AND NOT p.completed AND NOT p.canceled AND NOT p.attribution_review_required AND p.payment_record IS NULL AND p.tx_hash IS NULL
 			AND ($8 OR p.circle_idempotency_key IS NULL)
 			AND EXISTS (SELECT 1 FROM account_wallet w WHERE w.wallet_id=p.wallet_id AND w.network_id=p.network_id
 			AND w.wallet_address=$6 AND w.blockchain=$7 AND w.active)

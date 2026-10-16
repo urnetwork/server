@@ -1017,10 +1017,9 @@ func newConnectHandlerWithPacketConns(
 	cancelCtx, cancel := context.WithCancel(ctx)
 	packetEndpoints := connectHandlerPacketEndpoints(settings, packetConns)
 	activeZero := make(chan struct{})
-	activeCount := len(packetEndpoints)
-	if activeCount == 0 {
-		close(activeZero)
-	}
+	// The refusal worker owns hijacked sockets after their request returns.
+	// Reserve its lifecycle before launch, including an already-canceled parent.
+	activeCount := len(packetEndpoints) + 1
 	listenerStates := make(map[connectListenerKey]bool, len(packetEndpoints))
 	for _, endpoint := range packetEndpoints {
 		listenerStates[endpoint.key] = false
@@ -1099,7 +1098,10 @@ func newConnectHandlerWithPacketConns(
 	go server.HandleError(h.run, cancel)
 	// the hold releases every socket it holds when it stops, so a failure of
 	// its own leaves serving untouched
-	go server.HandleError(h.refusalHold.run)
+	go func() {
+		defer h.endHandle()
+		server.HandleError(h.refusalHold.run)
+	}()
 
 	return h, nil
 }

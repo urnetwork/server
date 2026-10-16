@@ -18,8 +18,9 @@
 //     the earning admission refuses, so it cannot be paid before its sweeps are
 //     its own.
 //  2. the replacement takes earning authority from the original's sweeps:
-//     either one anchor sweep (the first, in contract order, that satisfies the
-//     earning admission), or every sweep, in bounded transactions
+//     either one anchor sweep for a zero-revenue history (the first, in contract
+//     order, that satisfies the earning admission), or every sweep, in bounded
+//     transactions, when any sweep carries revenue
 //  3. the review hold is then released: with an anchor once the replacement
 //     owns it, journaling on both payments the sweeps the original keeps
 //     pending reattribution; with a full move once the original owns none. A
@@ -285,9 +286,13 @@ func ReplaceLegacyProviderPayment(ctx context.Context, correction *LegacyProvide
 	if err != nil || providerPaymentReceiptLimit < len(details) {
 		return server.Id{}, ErrLegacyProviderPaymentReplacementChanged
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	wallet, err := legacyProviderPaymentWallet(ctx, original)
+	if err != nil {
+		return server.Id{}, err
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(original.PaymentId, wallet.Blockchain, wallet.WalletAddress, ""), func(tx server.PgTx) {
 		returnErr = nil
-		if !lockLegacyProviderPaymentAttemptInTx(ctx, tx, original) {
+		if !lockLegacyProviderPaymentAttributionInTx(ctx, tx, original, wallet) {
 			returnErr = ErrLegacyProviderPaymentReplacementChanged
 			return
 		}
@@ -396,6 +401,8 @@ type LegacyProviderPaymentReplacement struct {
 	Canceled   bool
 	// the original still owns a sweep
 	OriginalOwnsSweeps bool
+	// Nonzero revenue requires its original sweep provenance, not an anchor.
+	OriginalOwnsRevenue bool
 	// the replacement owns a sweep (its anchor, or moved sweeps)
 	ReplacementOwnsSweeps bool
 }
@@ -417,7 +424,10 @@ func GetLegacyProviderPaymentReplacements(ctx context.Context) (replacements []*
 					SELECT 1 FROM transfer_escrow_sweep s
 					WHERE s.payment_id = (a.event_details::jsonb->>'original_payment_id')::uuid
 				),
-				EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id = r.payment_id)
+				EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id = r.payment_id),
+				EXISTS (SELECT 1 FROM transfer_escrow_sweep s
+					WHERE s.payment_id=(a.event_details::jsonb->>'original_payment_id')::uuid
+					AND s.payout_net_revenue_nano_cents<>0)
 			FROM audit_account_payment a
 			JOIN account_payment r ON r.payment_id = a.payment_id
 			WHERE a.event_type = $1
@@ -437,6 +447,7 @@ func GetLegacyProviderPaymentReplacements(ctx context.Context) (replacements []*
 					&replacement.Canceled,
 					&replacement.OriginalOwnsSweeps,
 					&replacement.ReplacementOwnsSweeps,
+					&replacement.OriginalOwnsRevenue,
 				))
 				replacements = append(replacements, replacement)
 			}
@@ -449,6 +460,11 @@ func GetLegacyProviderPaymentReplacements(ctx context.Context) (replacements []*
 // the canceled, keyed, unsubmitted legacy attempt and the replacement is its
 // unsubmitted, review-held successor in the same plan and network.
 func lockLegacyProviderPaymentReplacementInTx(ctx context.Context, tx server.PgTx, replacement *LegacyProviderPaymentReplacement) bool {
+	return lockLegacyProviderPaymentReplacementReviewInTx(ctx, tx, replacement, true)
+}
+
+// Repair requires the exact released state, never a moving or submitted pair.
+func lockLegacyProviderPaymentReplacementReviewInTx(ctx context.Context, tx server.PgTx, replacement *LegacyProviderPaymentReplacement, reviewHeld bool) bool {
 	result, err := tx.Query(
 		ctx,
 		`SELECT payment_id FROM account_payment WHERE payment_id = ANY($1) ORDER BY payment_id FOR UPDATE`,
@@ -476,7 +492,7 @@ func lockLegacyProviderPaymentReplacementInTx(ctx context.Context, tx server.PgT
 			WHERE o.payment_id = $1 AND
 				o.canceled AND NOT o.completed AND o.circle_idempotency_key IS NOT NULL AND
 				o.payment_record IS NULL AND o.tx_hash IS NULL AND
-				NOT r.completed AND NOT r.canceled AND r.attribution_review_required AND
+				NOT r.completed AND NOT r.canceled AND r.attribution_review_required=$4 AND
 				r.circle_idempotency_key IS NULL AND r.payment_record IS NULL AND r.tx_hash IS NULL AND
 				r.network_id = o.network_id AND r.payment_plan_id = o.payment_plan_id
 		)
@@ -484,8 +500,30 @@ func lockLegacyProviderPaymentReplacementInTx(ctx context.Context, tx server.PgT
 		replacement.OriginalPaymentId,
 		replacement.ReplacementPaymentId,
 		legacyProviderPaymentReplacementEventType,
+		reviewHeld,
 	).Scan(&paired))
 	return paired
+}
+
+// Old anchor releases can be repaired only before any submission. Restore the
+// hold under both row locks before moving retained revenue; no amount changes.
+func ReholdLegacyProviderPaymentReplacement(ctx context.Context, replacement *LegacyProviderPaymentReplacement) (held bool, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		held, returnErr = false, nil
+		if !lockLegacyProviderPaymentReplacementReviewInTx(ctx, tx, replacement, false) {
+			returnErr = ErrLegacyProviderPaymentReplacementChanged
+			return
+		}
+		var revenue bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow_sweep
+			WHERE payment_id=$1 AND payout_net_revenue_nano_cents<>0)`, replacement.OriginalPaymentId).Scan(&revenue))
+		if !revenue {
+			return
+		}
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET attribution_review_required=true WHERE payment_id=$1`, replacement.ReplacementPaymentId))
+		held = true
+	}, server.TxReadCommitted)
+	return
 }
 
 // MoveLegacyProviderPaymentReplacementSweeps moves at most batchSize of the
@@ -615,6 +653,10 @@ type legacyProviderPaymentReattributionDetails struct {
 // every sweep of the original. A replacement at or below the transfer fee
 // keeps its hold; the hold is journaled once.
 func ReleaseLegacyProviderPaymentReplacement(ctx context.Context, replacement *LegacyProviderPaymentReplacement, policy *LegacyProviderPaymentCorrectionPolicy, anchored bool) (released bool, returnErr error) {
+	earningPolicy, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil {
+		return false, err
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		returnErr = nil
 		released = false
@@ -641,6 +683,13 @@ func ReleaseLegacyProviderPaymentReplacement(ctx context.Context, replacement *L
 		).Scan(&remainingSweepCount, &remainingByteCount, &replacementSweepCount, &payout))
 		if replacementSweepCount == 0 || (!anchored && remainingSweepCount != 0) {
 			returnErr = ErrLegacyProviderPaymentReplacementChanged
+			return
+		}
+		// Ignore only the review bit being released; every actual earning and
+		// component-provenance condition is the ordinary sender's same census.
+		_, _, attributionErr := inspectProviderUsdcPaymentAttributionWithReview(ctx, tx, replacement.ReplacementPaymentId, earningPolicy, false, true)
+		if attributionErr != nil {
+			returnErr = attributionErr
 			return
 		}
 		if anchored {
@@ -733,11 +782,11 @@ func GetCanceledProviderPaymentsWithRecord(ctx context.Context) (payments []*Acc
 // only, so the submission basis is unchanged; the account balance is credited
 // exactly as an ordinary completion credits it.
 func CompleteCanceledProviderPayment(ctx context.Context, expected *AccountPayment, paymentReceipt string, txHash string) (returnErr error) {
-	if expected == nil || expected.PaymentRecord == nil || expected.TxHash != nil || txHash == "" ||
+	if expected == nil || expected.PaymentId == (server.Id{}) || expected.NetworkId == (server.Id{}) || expected.PaymentRecord == nil || expected.TxHash != nil || txHash == "" ||
 		len(txHash) > 1024 || providerPaymentReceiptLimit < len(paymentReceipt) {
 		return ErrProviderPaymentAttemptChanged
 	}
-	keys := []server.PgOwnershipKey{server.NewPgOwnershipKey("account_payment", expected.PaymentId)}
+	keys := providerPaymentAttributionKeys(expected.PaymentId, "", "", *expected.PaymentRecord)
 	keys = append(keys, accountBalanceOwnershipKeys([]server.Id{expected.NetworkId})...)
 	server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 		returnErr = nil
@@ -760,6 +809,10 @@ func CompleteCanceledProviderPayment(ctx context.Context, expected *AccountPayme
 		matched := false
 		server.WithPgResult(result, err, func() { matched = result.Next() })
 		if !matched {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if providerPaymentRecordClaimedInTx(ctx, tx, *expected.PaymentRecord, expected) {
 			returnErr = ErrProviderPaymentAttemptChanged
 			return
 		}

@@ -606,8 +606,10 @@ type providerOnlineSuccessBaselineReads struct {
 	baseline   *providerOnlineSuccessBaseline
 	resultTime time.Time
 	hasResult  bool
-	// a caller is reading past the window
-	reading bool
+	// A cold or expired read owns its generation. Publication or reset
+	// supersedes it, so its completion cannot replace the installed state.
+	reading    bool
+	generation uint64
 	// the last read failed, and its failure window has been logged
 	failing bool
 }
@@ -631,12 +633,15 @@ func init() {
 // The guard as last read within the window, or read now.
 func (self *providerOnlineSuccessBaselineReads) get(ctx context.Context) *providerOnlineSuccessBaseline {
 	now := self.now()
+	var generation uint64
 	baseline, current := func() (*providerOnlineSuccessBaseline, bool) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		if self.hasResult && (now.Sub(self.resultTime) < self.maxAge || self.reading) {
+		if self.reading || (self.hasResult && now.Sub(self.resultTime) < self.maxAge) {
 			return self.baseline, true
 		}
+		self.generation += 1
+		generation = self.generation
 		self.reading = true
 		return nil, false
 	}()
@@ -660,6 +665,10 @@ func (self *providerOnlineSuccessBaselineReads) get(ctx context.Context) *provid
 	failureStarted, failureEnded := func() (bool, bool) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		if generation != self.generation {
+			baseline = self.baseline
+			return false, false
+		}
 		self.reading = false
 		self.baseline = baseline
 		self.resultTime = now
@@ -689,6 +698,8 @@ func (self *providerOnlineSuccessBaselineReads) store(baseline *providerOnlineSu
 	failureEnded := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		self.generation += 1
+		self.reading = false
 		self.baseline = baseline
 		self.resultTime = self.now()
 		self.hasResult = true
@@ -705,6 +716,7 @@ func (self *providerOnlineSuccessBaselineReads) store(baseline *providerOnlineSu
 func (self *providerOnlineSuccessBaselineReads) reset() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	self.generation += 1
 	self.baseline = nil
 	self.resultTime = time.Time{}
 	self.hasResult = false

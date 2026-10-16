@@ -100,6 +100,72 @@ func livenessLeaseWriteTimeForTest(connection *providerLivenessLeaseConnection) 
 
 var livenessLeasePublicForTest = map[model.ProvideMode]bool{model.ProvideModePublic: true}
 
+// An unheld pending connection stops vouching until its first providing read.
+// Failed score writes must then withhold coverage, while a successful write
+// restores it; a still-pending consumer cannot withhold the stamp.
+func TestLivenessLeaseUnheldPendingProviderRestoresTheStampSafeguard(t *testing.T) {
+	for _, mode := range []model.ProvideMode{model.ProvideModePublic, model.ProvideModeNetwork} {
+		ctx := context.Background()
+		start := time.UnixMilli(1_800_000_000_000)
+		now := start
+		recorder := newLivenessLeaseWriterForTest(&now)
+		connection := recorder.writer.begin(server.NewId(), nil)
+		recorder.writer.write(ctx, true)
+		if writeTime := livenessLeaseWriteTimeForTest(connection); !writeTime.IsZero() {
+			t.Fatalf("%d: the unheld pending connection is still vouched for", mode)
+		}
+		stampCount := 0
+		stamp := func(context.Context, server.Id) error {
+			stampCount += 1
+			return nil
+		}
+		now = start.Add(2 * model.ProviderLivenessWriterWithholdAge)
+		if outcome := stampProviderLivenessWriter(ctx, server.Id{}, recorder.writer, now, stamp); outcome != livenessLeaseOutcomeStamped || stampCount != 1 {
+			t.Fatalf("%d: an unheld pending consumer withheld coverage: %s, %d stamps", mode, outcome, stampCount)
+		}
+		connection.afterRead(map[model.ProvideMode]bool{mode: true})
+		providingAt := now
+		recorder.err = errors.New("test: score writes refused")
+		for range 3 {
+			recorder.writer.write(ctx, true)
+			now = now.Add(model.ProviderLivenessWriterWithholdAge / 2)
+			connection.afterRead(map[model.ProvideMode]bool{mode: true})
+		}
+		if outcome := stampProviderLivenessWriter(ctx, server.Id{}, recorder.writer, now, stamp); outcome != livenessLeaseOutcomeStampWithheld || stampCount != 1 {
+			t.Fatalf("%d: failed first scores kept coverage healthy: %s, %d stamps", mode, outcome, stampCount)
+		}
+		if writeTime := livenessLeaseWriteTimeForTest(connection); !writeTime.Equal(providingAt) {
+			t.Fatalf("%d: providing read vouched from %s, want %s", mode, writeTime, providingAt)
+		}
+		recorder.err = nil
+		recorder.writer.write(ctx, true)
+		if outcome := stampProviderLivenessWriter(ctx, server.Id{}, recorder.writer, now, stamp); outcome != livenessLeaseOutcomeStamped || stampCount != 2 {
+			t.Fatalf("%d: a successful score did not restore coverage: %s, %d stamps", mode, outcome, stampCount)
+		}
+	}
+}
+
+// A pending connection with a retained lease keeps its original vouch age:
+// the first providing read must not grant extra time to a stale writer.
+func TestLivenessLeaseFirstProvidingReadKeepsAnExistingVouch(t *testing.T) {
+	ctx := context.Background()
+	start := time.UnixMilli(1_800_000_000_000)
+	now := start
+	recorder := newLivenessLeaseWriterForTest(&now)
+	connection := recorder.writer.begin(server.NewId(), nil)
+	recorder.held[connection.clientId] = true
+	recorder.writer.write(ctx, true)
+	now = start.Add(model.ProviderLivenessWriterWithholdAge + time.Millisecond)
+	connection.afterRead(livenessLeasePublicForTest)
+	outcome := stampProviderLivenessWriter(ctx, server.Id{}, recorder.writer, now, func(context.Context, server.Id) error {
+		t.Fatal("a stale held lease still stamped coverage")
+		return nil
+	})
+	if outcome != livenessLeaseOutcomeStampWithheld {
+		t.Fatalf("first providing read reset a retained vouch: %s", outcome)
+	}
+}
+
 // A connection registers when its rounds start, before any read: the process
 // vouches for it from then, and the writer extends its client's lease, which
 // keeps a reconnecting provider's lease whatever its first reads do. A held

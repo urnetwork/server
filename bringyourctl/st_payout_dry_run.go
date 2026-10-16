@@ -193,9 +193,10 @@ func writeStPayoutDryRunSummary(w io.Writer, result *controller.StPayoutDryRun) 
 }
 
 // What finalize would pay the epoch's root, from the vault as read now: the
-// stake a timely close captures (or the already captured funding), the carry,
-// and the previous epoch's funding while it waits to be marked missed. It is
-// a projection; later emission, carry and finalize order change it.
+// stake a timely close captures (or the already captured funding) and observed
+// carry. A prior funded entitlement can still commit or finalize its own root;
+// it is not carry until the vault records it. Later emission, carry and finalize
+// order change this projection.
 func stPayoutProjectedTotal(result *controller.StPayoutDryRun) (*big.Int, string) {
 	funding := result.Funding
 	if funding == nil || funding.CarryRao == nil || funding.AccruingRao == nil || funding.FundedRao == nil {
@@ -215,11 +216,7 @@ func stPayoutProjectedTotal(result *controller.StPayoutDryRun) (*big.Int, string
 		return nil, ""
 	}
 	projected.Add(projected, funding.CarryRao)
-	notes = append(notes, "carry")
-	if previous := result.PreviousFunding; result.PreviousFundingErr == nil && previous != nil && previous.Status == 1 && previous.FundedRao != nil {
-		projected.Add(projected, previous.FundedRao)
-		notes = append(notes, fmt.Sprintf("epoch %d funding once it is marked missed", result.Epoch-1))
-	}
+	notes = append(notes, "observed carry")
 	return projected, strings.Join(notes, " + ")
 }
 

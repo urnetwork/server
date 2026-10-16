@@ -24,18 +24,36 @@ import (
 type clientScoreTargetManifest struct {
 	locationIds      map[server.Id]int64
 	locationGroupIds map[server.Id]int64
+	// Explicit deadlines preserve earlier exports with a different ttl.
+	locationExpireMillis      map[server.Id]int64
+	locationGroupExpireMillis map[server.Id]int64
 }
 
 // The Redis document of a manifest, under clientScoreTargetManifestKey.
 type clientScoreTargetManifestDocument struct {
-	LocationIds      map[string]int64 `json:"location_ids"`
-	LocationGroupIds map[string]int64 `json:"location_group_ids"`
+	LocationIds               map[string]int64 `json:"location_ids"`
+	LocationGroupIds          map[string]int64 `json:"location_group_ids"`
+	LocationExpireMillis      map[string]int64 `json:"location_expire_ms,omitempty"`
+	LocationGroupExpireMillis map[string]int64 `json:"location_group_expire_ms,omitempty"`
 }
 
+// Every discoverable payload in one export shares its write-ahead deadline.
+// An absent value preserves the relative ttl of standalone writer callers.
+type clientScoreExportExpiryContextKey struct{}
+
+// Reads the immutable deadline chosen before this export's first payload.
+func clientScoreExportExpiresAt(ctx context.Context) time.Time {
+	expiresAt, _ := ctx.Value(clientScoreExportExpiryContextKey{}).(time.Time)
+	return expiresAt
+}
+
+// Creates empty, independently owned target and expiry maps.
 func newClientScoreTargetManifest() *clientScoreTargetManifest {
 	return &clientScoreTargetManifest{
-		locationIds:      map[server.Id]int64{},
-		locationGroupIds: map[server.Id]int64{},
+		locationIds:               map[server.Id]int64{},
+		locationGroupIds:          map[server.Id]int64{},
+		locationExpireMillis:      map[server.Id]int64{},
+		locationGroupExpireMillis: map[server.Id]int64{},
 	}
 }
 
@@ -43,26 +61,29 @@ func newClientScoreTargetManifest() *clientScoreTargetManifest {
 // publishes this after its last document.
 func (self *clientScoreTargetMaps) targetManifest(writtenAt time.Time) *clientScoreTargetManifest {
 	manifest := newClientScoreTargetManifest()
+	// Whole-second legacy timestamps must never claim expiry before the
+	// last fractional second's payload can expire.
+	writtenSecond := writtenAt.Unix()
+	if writtenAt.Nanosecond() != 0 {
+		writtenSecond += 1
+	}
 	for locationId := range self.locationClientScores {
-		manifest.locationIds[locationId] = writtenAt.Unix()
+		manifest.locationIds[locationId] = writtenSecond
 	}
 	for locationGroupId := range self.locationGroupClientScores {
-		manifest.locationGroupIds[locationGroupId] = writtenAt.Unix()
+		manifest.locationGroupIds[locationGroupId] = writtenSecond
 	}
 	return manifest
 }
 
 // The departed targets one export also writes: an empty target for each
-// target of the previous manifest that the maps no longer hold and that was
-// written from rows less than ttl before now, so its documents may still be
-// read. Older entries are dropped: their documents have expired, which bounds
-// the memory to the targets of one cache ttl.
+// target of the previous manifest that the maps no longer hold and whose
+// payload deadline has not passed. Legacy documents use their last-write time
+// plus ttl. Expired entries are dropped so retention stays finite.
 //
-// The returned manifest is what this export may leave readable: the maps'
-// targets at now, and each departed target at the time it was last written
-// from rows. The export publishes it before writing any document, so an
-// export that fails or dies part way still leaves every target it may have
-// written, and every target it has not yet cleared, for the next export.
+// The returned manifest is what this export may leave readable. Publication
+// atomically merges it with other exports and keeps each target through its
+// last payload deadline, even after an earlier export cleared that target.
 func (self *clientScoreTargetMaps) departedTargets(
 	previous *clientScoreTargetManifest,
 	now time.Time,
@@ -72,11 +93,14 @@ func (self *clientScoreTargetMaps) departedTargets(
 	if previous == nil {
 		return
 	}
-	readable := func(writtenAt int64) bool {
+	readable := func(writtenAt int64, expireMillis int64) bool {
+		if expireMillis != 0 {
+			return now.UnixMilli() < expireMillis
+		}
 		return now.Before(time.Unix(writtenAt, 0).Add(ttl))
 	}
 	for locationId, writtenAt := range previous.locationIds {
-		if _, ok := self.locationClientScores[locationId]; ok || !readable(writtenAt) {
+		if _, ok := self.locationClientScores[locationId]; ok || !readable(writtenAt, previous.locationExpireMillis[locationId]) {
 			continue
 		}
 		departed = append(departed, clientScoreTarget{
@@ -84,9 +108,10 @@ func (self *clientScoreTargetMaps) departedTargets(
 			clientScores: map[server.Id]*ClientScore{},
 		})
 		manifest.locationIds[locationId] = writtenAt
+		manifest.locationExpireMillis[locationId] = previous.locationExpireMillis[locationId]
 	}
 	for locationGroupId, writtenAt := range previous.locationGroupIds {
-		if _, ok := self.locationGroupClientScores[locationGroupId]; ok || !readable(writtenAt) {
+		if _, ok := self.locationGroupClientScores[locationGroupId]; ok || !readable(writtenAt, previous.locationGroupExpireMillis[locationGroupId]) {
 			continue
 		}
 		departed = append(departed, clientScoreTarget{
@@ -95,20 +120,29 @@ func (self *clientScoreTargetMaps) departedTargets(
 			clientScores:  map[server.Id]*ClientScore{},
 		})
 		manifest.locationGroupIds[locationGroupId] = writtenAt
+		manifest.locationGroupExpireMillis[locationGroupId] = previous.locationGroupExpireMillis[locationGroupId]
 	}
 	return
 }
 
 func encodeClientScoreTargetManifest(manifest *clientScoreTargetManifest) ([]byte, error) {
 	document := clientScoreTargetManifestDocument{
-		LocationIds:      make(map[string]int64, len(manifest.locationIds)),
-		LocationGroupIds: make(map[string]int64, len(manifest.locationGroupIds)),
+		LocationIds:               make(map[string]int64, len(manifest.locationIds)),
+		LocationGroupIds:          make(map[string]int64, len(manifest.locationGroupIds)),
+		LocationExpireMillis:      make(map[string]int64, len(manifest.locationExpireMillis)),
+		LocationGroupExpireMillis: make(map[string]int64, len(manifest.locationGroupExpireMillis)),
 	}
 	for locationId, writtenAt := range manifest.locationIds {
 		document.LocationIds[locationId.String()] = writtenAt
 	}
 	for locationGroupId, writtenAt := range manifest.locationGroupIds {
 		document.LocationGroupIds[locationGroupId.String()] = writtenAt
+	}
+	for locationId, expireMillis := range manifest.locationExpireMillis {
+		document.LocationExpireMillis[locationId.String()] = expireMillis
+	}
+	for locationGroupId, expireMillis := range manifest.locationGroupExpireMillis {
+		document.LocationGroupExpireMillis[locationGroupId.String()] = expireMillis
 	}
 	return json.Marshal(document)
 }
@@ -125,6 +159,8 @@ func decodeClientScoreTargetManifest(value []byte) (*clientScoreTargetManifest, 
 	}{
 		{document: document.LocationIds, manifest: manifest.locationIds},
 		{document: document.LocationGroupIds, manifest: manifest.locationGroupIds},
+		{document: document.LocationExpireMillis, manifest: manifest.locationExpireMillis},
+		{document: document.LocationGroupExpireMillis, manifest: manifest.locationGroupExpireMillis},
 	} {
 		for idStr, writtenAt := range ids.document {
 			id, err := server.ParseId(idStr)
@@ -160,14 +196,74 @@ func readClientScoreTargetManifest(ctx context.Context) (manifest *clientScoreTa
 	return
 }
 
-// The manifest expires with the documents it describes.
+// Merge overlapping exports atomically and retain each target through its
+// latest payload deadline. A completed export cannot forget a slower writer's
+// targets, and a shorter ttl cannot shorten an earlier generation's lifetime.
+// Pruning bounds the single document to targets with unexpired payloads.
+const clientScoreTargetManifestWriteScript = `
+local incoming = cjson.decode(ARGV[1])
+local clock = redis.call('TIME')
+local now = math.max(tonumber(ARGV[2]), tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000))
+local ttl = tonumber(ARGV[3])
+local exportExpiry = tonumber(ARGV[4])
+if ttl <= 0 or (exportExpiry > 0 and exportExpiry <= now) then
+  return redis.error_reply('client score export expired')
+end
+local previous = {}
+local value = redis.call('GET', KEYS[1])
+if value then
+  local ok, decoded = pcall(cjson.decode, value)
+  if ok and type(decoded) == 'table' then previous = decoded end
+end
+local result = {}
+local latestExpiry = 0
+for _, names in ipairs({{'location_ids', 'location_expire_ms'}, {'location_group_ids', 'location_group_expire_ms'}}) do
+  local targets, expirations = {}, {}
+  for _, source in ipairs({previous, incoming}) do
+    local sourceExpirations = source[names[2]] or {}
+    if type(sourceExpirations) ~= 'table' then sourceExpirations = {} end
+    local sourceTargets = source[names[1]] or {}
+    if type(sourceTargets) == 'table' then
+      for id, writtenAt in pairs(sourceTargets) do
+        local validId = type(id) == 'string' and #id == 36 and
+          string.sub(id, 9, 9) == '-' and string.sub(id, 14, 14) == '-' and
+          string.sub(id, 19, 19) == '-' and string.sub(id, 24, 24) == '-' and
+          #string.gsub(id, '-', '') == 32 and
+          string.match(string.gsub(id, '-', ''), '^%x+$')
+        if validId and type(writtenAt) == 'number' then
+          local expiresAt = tonumber(sourceExpirations[id]) or 0
+          if expiresAt <= 0 then
+            expiresAt = writtenAt * 1000 + ttl
+            if source == incoming and exportExpiry > 0 then expiresAt = exportExpiry end
+          end
+          if now < expiresAt and (not expirations[id] or expirations[id] < expiresAt) then
+            targets[id], expirations[id] = writtenAt, expiresAt
+            latestExpiry = math.max(latestExpiry, expiresAt)
+          end
+        end
+      end
+    end
+  end
+  result[names[1]], result[names[2]] = targets, expirations
+end
+if latestExpiry <= now then return redis.call('DEL', KEYS[1]) end
+redis.call('SET', KEYS[1], cjson.encode(result), 'PXAT', latestExpiry)
+return 1
+`
+
+// Publication and expiry are one Redis operation, including the write-ahead
+// record left by an export that fails before its final manifest write.
 func writeClientScoreTargetManifest(ctx context.Context, manifest *clientScoreTargetManifest, ttl time.Duration) (returnErr error) {
 	value, err := encodeClientScoreTargetManifest(manifest)
 	if err != nil {
 		return err
 	}
+	expireMillis := int64(0)
+	if expiresAt := clientScoreExportExpiresAt(ctx); !expiresAt.IsZero() {
+		expireMillis = expiresAt.UnixMilli()
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		returnErr = r.Set(ctx, clientScoreTargetManifestKey, value, ttl).Err()
+		returnErr = r.Eval(ctx, clientScoreTargetManifestWriteScript, []string{clientScoreTargetManifestKey}, value, server.NowUtc().UnixMilli(), ttl.Milliseconds(), expireMillis).Err()
 	})
 	return
 }

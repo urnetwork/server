@@ -577,6 +577,48 @@ func TestConnectionReconcileKeepsADeferredRowForTheNextPass(t *testing.T) {
 	}
 }
 
+// A full busy prefix cannot spend every pass's retirement budget. The first
+// pass attempts that prefix; the next must reach the free row beyond it, at
+// both a one-row budget and the production batch boundary.
+func TestConnectionReconcileRetiresPastAContinuouslyBusyBatch(t *testing.T) {
+	for _, batchCount := range []int{1, DefaultConnectionReconcileSettings().RetireBatchCount} {
+		store := newReconcileStoreForTest()
+		settings := DefaultConnectionReconcileSettings()
+		settings.RetireBatchCount = batchCount
+		reconcile := newReconcileForTest(store, settings)
+		connectionIds := registerFailedReleasesForTest(reconcile, store, batchCount+1)
+		for _, connectionId := range connectionIds[:batchCount] {
+			store.deferRetire(connectionId, true)
+		}
+		free := connectionIds[batchCount]
+		reconcile.reconcile()
+		if attempts := store.takeAttempts(); len(attempts) != 0 {
+			t.Fatalf("batch %d: first sighting attempted %v", batchCount, attempts)
+		}
+		reconcile.reconcile()
+		if attempts := store.takeAttempts(); !slices.Equal(attempts, connectionIds[:batchCount]) {
+			t.Fatalf("batch %d: first retirement pass attempted %v, want the busy prefix", batchCount, attempts)
+		}
+		reconcile.reconcile()
+		attempts := store.takeAttempts()
+		if len(attempts) > batchCount || !slices.Contains(attempts, free) || store.connected(free) {
+			t.Fatalf("batch %d: busy prefix starved free row %s; attempts %v", batchCount, free, attempts)
+		}
+		for _, connectionId := range connectionIds[:batchCount] {
+			if !store.connected(connectionId) {
+				t.Fatalf("batch %d: a busy row was retired", batchCount)
+			}
+			store.deferRetire(connectionId, false)
+		}
+		if backlog := reconcile.reconcile(); backlog {
+			t.Fatalf("batch %d: cleared fences left a backlog", batchCount)
+		}
+		if attempts := store.takeAttempts(); len(attempts) != batchCount || len(store.retired()) != len(connectionIds) {
+			t.Fatalf("batch %d: recovery attempted %d and retired %d rows", batchCount, len(attempts), len(store.retired()))
+		}
+	}
+}
+
 // The row of a failed final disconnect is retired with the time its
 // transport ended, which the release knows, not the later time of the pass.
 func TestConnectionReconcileRetiresWithTheReleaseTime(t *testing.T) {

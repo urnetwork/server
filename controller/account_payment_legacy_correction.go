@@ -12,11 +12,10 @@
 // A dry run reads Circle and the database and writes nothing. An applied run
 // replaces each absent, reduced attempt, gives the replacement its earning
 // authority, releases the replacement's review hold and schedules the ordinary
-// AdvancePayment for it. By default the replacement takes one anchor sweep and
-// the canceled original keeps the rest, journaled on both payments for a later
-// reattribution; a full move instead moves every sweep in bounded
-// transactions. Every step is resumable: a later run continues from the
-// journaled pairs.
+// AdvancePayment for it. A zero-revenue history may use one anchor sweep and
+// journal the canceled original's remainder for later reattribution. Any
+// nonzero sweep revenue instead requires full movement in bounded transactions.
+// Every step is resumable: a later run continues from the journaled pairs.
 package controller
 
 import (
@@ -41,7 +40,7 @@ type LegacyProviderPaymentCorrectionSettings struct {
 	GroupLimit int
 	// pause between Circle lookups, well under Circle's GET limit
 	LookupInterval time.Duration
-	// move one anchor sweep per replacement; otherwise every sweep
+	// allow one anchor for zero-revenue histories; otherwise move every sweep
 	AnchorSweeps bool
 	// full move: sweeps moved per transaction
 	SweepBatchSize int
@@ -245,7 +244,7 @@ func correctLegacyProviderPaymentGroups(
 			result.LookupErrorCount += len(group)
 			continue
 		}
-		transactions, err := lister.ListDestinationTransactions(ctx, blockchain, key.walletAddress)
+		transactions, err := listLegacyProviderPaymentTransactions(ctx, lister, blockchain, key.walletAddress, group, boundRecords)
 		if err != nil {
 			glog.Warningf("[payout]legacy correction lookup failed for a %s destination group of %d: %s\n", blockchain, len(group), err)
 			result.LookupErrorCount += len(group)
@@ -368,7 +367,17 @@ func advanceLegacyProviderPaymentReplacements(
 		if replacement.Completed || replacement.Canceled {
 			continue
 		}
-		if replacement.ReviewHeld && settings.AnchorSweeps {
+		if !replacement.ReviewHeld && replacement.OriginalOwnsRevenue {
+			held, err := model.ReholdLegacyProviderPaymentReplacement(ctx, replacement)
+			if err != nil || !held {
+				result.RefusedCount += 1
+				continue
+			}
+			replacement.ReviewHeld = true
+		}
+		// An anchor can leave zero-revenue history behind, never revenue that
+		// the replacement amount still promises. Reuse bounded full movement.
+		if replacement.ReviewHeld && settings.AnchorSweeps && !replacement.OriginalOwnsRevenue {
 			if !replacement.ReplacementOwnsSweeps {
 				anchored, err := model.MoveLegacyProviderPaymentReplacementAnchor(ctx, replacement, cutoff)
 				if err != nil {

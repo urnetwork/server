@@ -64,7 +64,8 @@ func init() {
 }
 
 // The process's serving epoch, read at most once per ttl. Concurrent readers
-// share a refresh: while one reads, the others serve the previous value.
+// share a refresh: while one reads, the others serve the previous value,
+// or 0 until the first read completes. Only that reader publishes its result.
 // Safe for concurrent use.
 type arindbServingEpochCache struct {
 	stateLock  sync.Mutex
@@ -92,6 +93,7 @@ func ArindbServingEpoch(ctx context.Context) int64 {
 	return readArindbServingEpoch(ctx)
 }
 
+// Admits one refresh even before the first result exists.
 func (self *arindbServingEpochCache) get(
 	ctx context.Context,
 	now func() time.Time,
@@ -102,7 +104,7 @@ func (self *arindbServingEpochCache) get(
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		servedEpoch = self.epoch
-		if self.known && (now().Sub(self.readAt) < arindbServingEpochCacheTtl || self.refreshing) {
+		if self.refreshing || (self.known && now().Sub(self.readAt) < arindbServingEpochCacheTtl) {
 			return
 		}
 		self.refreshing = true

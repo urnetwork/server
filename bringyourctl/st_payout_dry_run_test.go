@@ -84,7 +84,7 @@ func TestStPayoutDryRunSummaryWritesOnlyAggregates(t *testing.T) {
 		{"carry", "500", "rao"},
 		{"pool", "epoch", "1", "unset:"},
 		{"previous", "pool", "epoch", "0", "funded:", "funded", "500,"},
-		{"projected", "epoch", "total", "2200", "rao"},
+		{"projected", "epoch", "total", "1700", "rao"},
 	} {
 		found := false
 		for _, summaryLine := range strings.Split(summary, "\n") {

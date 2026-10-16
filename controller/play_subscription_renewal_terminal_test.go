@@ -720,6 +720,7 @@ func TestPlaySubscriptionRenewalTerminalEndFailureReturnsError(t *testing.T) {
 
 		previousEnd := endPlaySubscriptionEntitlement
 		endPlaySubscriptionEntitlement = func(
+			server.PgConn,
 			context.Context,
 			server.Id,
 			string,

@@ -528,6 +528,7 @@ func TestProviderLivenessExclusionsFailOpenOnRedisErrors(t *testing.T) {
 type livenessTestPoolHook struct {
 	shardCommands atomic.Int64
 	blockPrefix   atomic.Pointer[string]
+	failPrefix    atomic.Pointer[string]
 }
 
 func (self *livenessTestPoolHook) DialHook(next redis.DialHook) redis.DialHook {
@@ -561,7 +562,19 @@ func (self *livenessTestPoolHook) ProcessPipelineHook(next redis.ProcessPipeline
 			}
 			return ctx.Err()
 		}
-		return next(ctx, cmds)
+		err := next(ctx, cmds)
+		for _, cmd := range cmds {
+			args := cmd.Args()
+			if len(args) < 2 {
+				continue
+			}
+			key, _ := args[1].(string)
+			if prefix := self.failPrefix.Load(); prefix != nil && strings.HasPrefix(key, *prefix) {
+				err = errors.New("test: shard immediately refused the command")
+				cmd.SetErr(err)
+			}
+		}
+		return err
 	}
 }
 
@@ -824,6 +837,59 @@ func TestProviderLivenessReadBacksOffAfterAFailedRead(t *testing.T) {
 	})
 }
 
+// Immediate per-command failures retain healthy-shard answers for this read,
+// but suppress further shard reads until the exact fake-clock backoff boundary.
+func TestProviderLivenessReadBacksOffAfterImmediateShardErrors(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		livenessTestFreshHandlers(t)
+		CreateNetworkClientHandler(ctx)
+		livenessTestStampLiveHandlers(ctx, t)
+		hook := livenessTestHookPool(ctx, t)
+		failed := livenessTestIdInShard(6, 0)
+		leased := livenessTestIdInShard(7, 0)
+		leaseless := livenessTestIdInShard(7, 1)
+		for _, clientId := range []server.Id{failed, leased} {
+			if err := RefreshProviderLivenessLease(ctx, clientId); err != nil {
+				t.Fatal(err)
+			}
+		}
+		now := livenessTestNodeTime(ctx, t)
+		clock := now
+		previousHealthClock := defaultProviderLivenessReadHealth.now
+		defaultProviderLivenessReadHealth.now = func() time.Time { return clock }
+		t.Cleanup(func() { defaultProviderLivenessReadHealth.now = previousHealthClock })
+		clientIds := []server.Id{failed, leased, leaseless}
+		failedPrefix := providerLivenessLeaseKey(6)
+		hook.failPrefix.Store(&failedPrefix)
+		offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, now)
+		if err != nil || len(offline) != 1 || !offline[leaseless] || len(unknown) != 1 || !unknown[failed] {
+			t.Fatalf("immediate shard failure lost healthy verdicts: offline %v, unknown %v, error %v", offline, unknown, err)
+		}
+		if commands := hook.shardCommands.Load(); commands != 4 {
+			t.Fatalf("first read ran %d shard commands, want four", commands)
+		}
+		for _, elapsed := range []time.Duration{0, time.Second, providerLivenessReadBackoff - time.Nanosecond} {
+			clock = now.Add(elapsed)
+			offline, unknown, err := getProviderLivenessExclusions(ctx, clientIds, now)
+			if err != nil || len(offline) != 0 || len(unknown) != len(clientIds) || hook.shardCommands.Load() != 4 {
+				t.Fatalf("at %s, backoff read returned %v/%v (%v) after %d commands", elapsed, offline, unknown, err, hook.shardCommands.Load())
+			}
+		}
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, _, err := getProviderLivenessExclusions(canceledCtx, clientIds, now); !errors.Is(err, context.Canceled) {
+			t.Fatalf("backoff hid caller cancellation: %v", err)
+		}
+		hook.failPrefix.Store(nil)
+		clock = now.Add(providerLivenessReadBackoff)
+		offline, unknown, err = getProviderLivenessExclusions(ctx, clientIds, now)
+		if err != nil || len(offline) != 1 || !offline[leaseless] || len(unknown) != 0 || hook.shardCommands.Load() != 8 {
+			t.Fatalf("at backoff expiry, read returned %v/%v (%v) after %d commands", offline, unknown, err, hook.shardCommands.Load())
+		}
+	})
+}
+
 // A lapse spread across shards, too thin in each for the shard breaker, would
 // read most of a small location offline: a read in which more than 30% of
 // the judged candidates, and at least 3, read offline admits them all, and one
@@ -1027,7 +1093,18 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 			}
 		}
 	}
-	masterAddrs := []string{}
+	slots, err := clusterClient.ClusterSlots(ctx).Result()
+	if err != nil {
+		t.Fatalf("cluster slots: %v", err)
+	}
+	expectedMasterAddrs := map[string]bool{}
+	for _, slot := range slots {
+		if len(slot.Nodes) == 0 {
+			t.Fatal("cluster slot has no master")
+		}
+		expectedMasterAddrs[slot.Nodes[0].Addr] = true
+	}
+	census := &livenessTestMasterCensus{}
 	err = clusterClient.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
 		keyCount, err := node.DBSize(ctx).Result()
 		if err != nil {
@@ -1036,11 +1113,19 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 		if keyCount != 0 {
 			return fmt.Errorf("master %s stores %d keys", node.Options().Addr, keyCount)
 		}
-		masterAddrs = append(masterAddrs, node.Options().Addr)
+		census.add(node.Options().Addr)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("refusing a cluster that is not empty: %v", err)
+	}
+	masterAddrs := census.addresses()
+	masterAddrSet := map[string]bool{}
+	for _, addr := range masterAddrs {
+		masterAddrSet[addr] = true
+	}
+	if len(masterAddrs) != len(expectedMasterAddrs) || !maps.Equal(masterAddrSet, expectedMasterAddrs) {
+		t.Fatalf("master census %v, want exactly %v", masterAddrs, expectedMasterAddrs)
 	}
 	if len(masterAddrs) < 2 {
 		t.Fatalf("the cluster has %d masters, want more than one to spread the shards", len(masterAddrs))

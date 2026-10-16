@@ -6,6 +6,7 @@
 //   - the attempt submitted exactly the legacy amount (payout minus the fixed
 //     0.01 fee, formatted to six decimals) to the payment's pinned wallet, from
 //     the configured developer payout wallet, after the payment was planned
+//   - its token id resolves to the configured USDC asset on that exact chain
 //   - a listed transfer already bound to an attempt (a current record, or one
 //     retained by an outcome journal) belongs to that attempt's own key
 //   - an inbound mirror or an end-user custody transfer is never a provider
@@ -153,22 +154,14 @@ func decideLegacyProviderPaymentGroup(
 		return hold("no configured payout wallet")
 	}
 
-	windowStart := attempts[0].Payment.CreateTime
-	for _, attempt := range attempts {
-		windowStart = server.MinTime(windowStart, attempt.Payment.CreateTime)
-	}
-	windowStart = windowStart.Add(-legacyProviderPaymentWindowMargin)
-
+	relevant := legacyProviderPaymentRelevantTransfer(attempts, boundRecords)
 	live := []*CircleListedTransaction{}
 	for _, transaction := range transactions {
-		if transaction.CreateDate.Before(windowStart) {
+		if !relevant(transaction) {
 			continue
 		}
-		if strings.EqualFold(transaction.TransactionType, "INBOUND") || strings.EqualFold(transaction.CustodyType, "ENDUSER") {
-			continue
-		}
-		if boundRecords[transaction.Id] {
-			continue
+		if transaction.TokenId == "" || !transaction.usdcAssetVerified {
+			return hold("a transfer's asset is unknown or is not the configured chain USDC")
 		}
 		if circleTerminalFailure(transaction) {
 			decision.failedRecords = append(decision.failedRecords, transaction.Id)
@@ -331,7 +324,7 @@ func reconcileLegacyProviderPaymentAttempts(
 			result.LookupErrorCount += len(group)
 			continue
 		}
-		transactions, err := lister.ListDestinationTransactions(ctx, blockchain, key.walletAddress)
+		transactions, err := listLegacyProviderPaymentTransactions(ctx, lister, blockchain, key.walletAddress, group, boundRecords)
 		if err != nil {
 			glog.Warningf("[payout]legacy attempt lookup failed for a %s destination group of %d: %s\n", blockchain, len(group), err)
 			result.LookupErrorCount += len(group)

@@ -28,8 +28,8 @@ import (
 // it must open within ticket_ttl, and once open it pings for as long as the
 // browser keeps it, with at most one load under the ticket's caps. The
 // extender enforces its own session and load limits (M3); the limits here
-// are per client, per /24 (/48) of the caller and per signing agent, on
-// tracks. A track from an agent browser or a hosting network is flagged
+// are per authenticated client and per /24 (/48) of the caller, on tracks.
+// A claimed agent browser or a hosting network is conservatively flagged
 // automated and kept out of every aggregate (lag_automated.go).
 //
 // A dot whose session dropped reconnects within its track (L4): the same call
@@ -41,7 +41,7 @@ import (
 // and only while it is younger than track_reissue_window; that caps how many
 // valid tickets a client can mint for an extender of its choosing.
 
-// The tracks counted per client, per /24 (/48) and per signing agent.
+// The tracks counted per authenticated client and per /24 (/48).
 const lagTrackRateLimitName = "track"
 
 // The header the lagdev command line and MCP server name themselves with,
@@ -266,23 +266,9 @@ func lagTrack(
 		), nil
 	}
 	header := http.Header(clientSession.Header)
-	if signatureAgent := lagSignatureAgent(header); signatureAgent != "" {
-		// an agent's browsers share one count wherever they run, since each
-		// track they start draws on volunteers' extenders (amendment 12)
-		signatureLimit, err := model.CheckLagSignatureRateLimit(
-			ctx,
-			lagTrackRateLimitName,
-			signatureAgent,
-			settings.TrackSignatureLimit,
-			settings.TrackLimitWindow,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if !signatureLimit.Allowed {
-			return lagTrackLimited(signatureLimit, "Too many tracks from this agent. Try again later."), nil
-		}
-	}
+	// Signature-Agent is an unverified caller claim, not an authenticated
+	// identity. It may conservatively flag automation below, but must neither
+	// spend another agent's quota nor grant relief from the caller's limits.
 
 	signer, refusal := newLagTicketSigner()
 	if refusal != nil {

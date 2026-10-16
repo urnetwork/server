@@ -27,9 +27,9 @@
 // moment during ordinary churn waits for the regular interval. Passes
 // retire in bounded batches through the model. A retire takes the transport
 // disconnect's fences with try-locks, as handler expiry does, so a busy
-// endpoint defers its row to the next pass instead of queueing. A retire that
-// fails leaves its row for a later pass, tried after the rows that have not
-// failed, and the pass goes on; after three consecutive failures it leaves the
+// endpoint defers its row to a later pass instead of queueing. Busy and failed
+// retires are tried after rows with fewer retries, so neither can monopolize
+// a full batch. After three consecutive failures the pass leaves the
 // rest of its batch too. Rows of a process that ended remain handler expiry's.
 //
 // All methods are safe for concurrent use. A nil reconcile holds nothing and
@@ -171,8 +171,8 @@ type handlerConnectionReconcile struct {
 	// rows seen connected and unheld, by the generation their first sighting's
 	// read returned in
 	unheldConnectionGenerations map[server.Id]uint64
-	// unheld rows whose retire raised, by how many times
-	retireFailureCounts map[server.Id]int
+	// unheld rows whose retire raised or deferred, by how many times
+	retireRetryCounts map[server.Id]int
 	// rows whose final disconnect failed, by when their transport ended
 	releaseTimes map[server.Id]time.Time
 }
@@ -217,7 +217,7 @@ func newHandlerConnectionReconcileWithStore(
 		heldConnectionIds:           map[server.Id]bool{},
 		connectingGenerationCounts:  map[uint64]int{},
 		unheldConnectionGenerations: map[server.Id]uint64{},
-		retireFailureCounts:         map[server.Id]int{},
+		retireRetryCounts:           map[server.Id]int{},
 		releaseTimes:                map[server.Id]time.Time{},
 	}
 }
@@ -351,7 +351,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 	}()
 
 	var staleConnectionIds []server.Id
-	failureCounts := map[server.Id]int{}
+	retryCounts := map[server.Id]int{}
 	releaseTimes := map[server.Id]time.Time{}
 	unheldCount := 0
 	func() {
@@ -387,7 +387,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		for connectionId := range self.unheldConnectionGenerations {
 			if !unheldConnectionIds[connectionId] {
 				delete(self.unheldConnectionGenerations, connectionId)
-				delete(self.retireFailureCounts, connectionId)
+				delete(self.retireRetryCounts, connectionId)
 			}
 		}
 		// a row released before this read began, and not read connected, was
@@ -399,7 +399,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		}
 		unheldCount = len(self.unheldConnectionGenerations)
 		for _, connectionId := range staleConnectionIds {
-			failureCounts[connectionId] = self.retireFailureCounts[connectionId]
+			retryCounts[connectionId] = self.retireRetryCounts[connectionId]
 			if releaseTime, released := self.releaseTimes[connectionId]; released {
 				releaseTimes[connectionId] = releaseTime
 			}
@@ -407,11 +407,10 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 	}()
 	connectionReconcileUnheldGauge.Set(float64(unheldCount))
 
-	// rows whose retire failed go last, so a row that keeps failing never
-	// blocks the others; otherwise oldest first, so a backlog drains in the
-	// order it formed
+	// Repeated failures and busy fences yield to rows with fewer attempts.
+	// Otherwise oldest first, so untouched backlogs drain in their usual order.
 	slices.SortFunc(staleConnectionIds, func(a server.Id, b server.Id) int {
-		if c := cmp.Compare(failureCounts[a], failureCounts[b]); c != 0 {
+		if c := cmp.Compare(retryCounts[a], retryCounts[b]); c != 0 {
 			return c
 		}
 		return a.Cmp(b)
@@ -444,7 +443,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-				self.retireFailureCounts[connectionId] += 1
+				self.retireRetryCounts[connectionId] += 1
 			}()
 			if connectionReconcileMaxConsecutiveRetireFailures <= consecutiveFailureCount {
 				break
@@ -453,9 +452,14 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 		}
 		consecutiveFailureCount = 0
 		if deferred {
-			// a fence or the row is busy; the row stays for the next pass
+			// A busy prefix must yield its next batch to later free rows.
 			busyCount += 1
 			connectionReconcileUnretiredCounter.WithLabelValues("busy").Inc()
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				self.retireRetryCounts[connectionId] += 1
+			}()
 			continue
 		}
 		func() {
@@ -463,7 +467,7 @@ func (self *handlerConnectionReconcile) reconcile() (backlog bool) {
 			defer self.stateLock.Unlock()
 			// retired, or already disconnected by another owner
 			delete(self.unheldConnectionGenerations, connectionId)
-			delete(self.retireFailureCounts, connectionId)
+			delete(self.retireRetryCounts, connectionId)
 			delete(self.releaseTimes, connectionId)
 		}()
 		if retired {

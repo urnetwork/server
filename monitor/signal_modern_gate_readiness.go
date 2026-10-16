@@ -108,6 +108,8 @@ type modernGateReadinessObservation struct {
 	// bucket to its providers in the last sample before the start, read only
 	// during the watch after it
 	bucketsBefore map[string]float64
+	// a failed historical read does not invalidate the current fleet verdict
+	bucketsBeforeErr error
 }
 
 // Taskworker processes and what they publish.
@@ -218,15 +220,18 @@ func (modernGateReadinessProbe) observe(ctx context.Context, env *probeEnv) ([]f
 	}
 	if observation.start != nil && !now.Before(*observation.start) && now.Before(modernGateReadinessWatchEnd(*observation.start)) {
 		// the buckets in the last sample before the start
-		beforeParts, err := query(`label_replace(`+modernGateReadinessBucketExpression(env.cfg.env)+`,"monitor_modern_gate_part","bucket","","")`, observation.start.Add(-time.Second))
+		before, err := func() (modernGateReadinessObservation, error) {
+			beforeParts, err := query(`label_replace(`+modernGateReadinessBucketExpression(env.cfg.env)+`,"monitor_modern_gate_part","bucket","","")`, observation.start.Add(-time.Second))
+			if err != nil {
+				return modernGateReadinessObservation{}, err
+			}
+			return newModernGateReadinessObservation(beforeParts)
+		}()
 		if err != nil {
-			return nil, err
+			observation.bucketsBeforeErr = err
+		} else {
+			observation.bucketsBefore = before.buckets
 		}
-		before, err := newModernGateReadinessObservation(beforeParts)
-		if err != nil {
-			return nil, err
-		}
-		observation.bucketsBefore = before.buckets
 	}
 	return evaluateModernGateReadiness(observation, now)
 }
@@ -425,7 +430,7 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 		findings = append(findings, modernGateFleetDisagreesFinding(observation, &earliest, now, tier))
 	}
 	// what the verdict below cannot read
-	var unobserved error
+	unobserved := observation.bucketsBeforeErr
 	switch {
 	case now.Before(start.Add(-modernGateReadinessWarnLead)):
 		// only an earlier start opens the window this early

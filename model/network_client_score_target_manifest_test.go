@@ -442,8 +442,9 @@ func TestClientScoreTargetManifestDocumentRoundTrip(t *testing.T) {
 // Two real exports over the database and Redis: the only provider of a city
 // leaves the score source between them. The second export publishes the
 // city's documents encoded empty, so FindProviders2 reads the city as
-// cache_empty instead of lending the departed provider, and the manifest it
-// publishes once complete no longer names the city.
+// cache_empty instead of lending the departed provider. The city remains in
+// cleanup metadata through its old payload deadline in case an older export
+// is still publishing; its already-cleared payload stays empty.
 func TestUpdateClientScoresClearsALocationWhoseProvidersAllLeft(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -509,8 +510,8 @@ func TestUpdateClientScoresClearsALocationWhoseProvidersAllLeft(t *testing.T) {
 		if providerCount := forcedProviderCount(); providerCount != 0 {
 			t.Fatalf("second export: the city's forced pools still hold %d providers of the previous export", providerCount)
 		}
-		if manifestNamesCity() {
-			t.Fatal("second export: the complete export's manifest still names the cleared city")
+		if !manifestNamesCity() {
+			t.Fatal("second export: completion forgot a target an older export may still publish")
 		}
 
 		clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "departed-target-test", false, false))

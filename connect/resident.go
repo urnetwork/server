@@ -3719,6 +3719,8 @@ type Resident struct {
 	// stream-hop listener owned by Run.
 	afterStreamHopListenerStartForTest     func(*model.StreamHopListener)
 	afterStreamHopListenerCloseWaitForTest func()
+	// Observes the publishing worker's completion channel before the Run join.
+	beforeStreamAuthorizationJoinForTest func(<-chan struct{})
 
 	// streamHopListener *model.StreamHopListener
 }
@@ -4132,7 +4134,11 @@ func (self *Resident) Run() {
 	// Lease publication is separate from the registry listener: its bounded
 	// I/O cannot block Redis key-event dispatch or the stream lifecycle owner.
 	hopSnapshots := make(chan []model.StreamHop, 1)
-	go self.runStreamAuthorizations(hopSnapshots)
+	streamAuthorizationsDone := make(chan struct{})
+	go func() {
+		defer close(streamAuthorizationsDone)
+		self.runStreamAuthorizations(hopSnapshots)
+	}()
 	streamHopListener := model.NewStreamHopListener(self.ctx, self.clientId, func(event *model.StreamHopEvent) {
 		snapshot := append([]model.StreamHop(nil), event.StreamHops...)
 		select {
@@ -4154,6 +4160,13 @@ func (self *Resident) Run() {
 	}
 	defer func() {
 		streamHopListener.CloseAndWait()
+		// No listener can enqueue again. Cancellation releases bounded grant
+		// reads and sends; the external Run owner joins the publishing worker.
+		self.cancel()
+		if self.beforeStreamAuthorizationJoinForTest != nil {
+			self.beforeStreamAuthorizationJoinForTest(streamAuthorizationsDone)
+		}
+		<-streamAuthorizationsDone
 		if self.afterStreamHopListenerCloseWaitForTest != nil {
 			self.afterStreamHopListenerCloseWaitForTest()
 		}

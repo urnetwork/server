@@ -567,6 +567,7 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 		}
 	}
 	if shardFailed {
+		defaultProviderLivenessReadHealth.failed()
 		findProviders2LivenessReadErrors.Inc()
 		findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenShard).Inc()
 	}

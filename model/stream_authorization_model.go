@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -40,6 +41,40 @@ func storeStreamParticipants(ctx context.Context, streamId server.Id, key stream
 	encoded, _ := json.Marshal(ids)
 	return server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
 		return r.Set(ctx, streamAuthorityKey(streamId, "p"), encoded, 8*time.Hour).Err()
+	})
+}
+
+// A repair carries the membership's absolute Redis horizon across pool/slot
+// boundaries. Expired work cannot publish authority, and older repairs cannot
+// shorten a newer contract's already-published participant lifetime.
+func storeStreamParticipantsUntil(ctx context.Context, streamId server.Id, key streamKey, deadlineMillis int64) error {
+	ids := []server.Id{}
+	for id := range key.Edges() {
+		ids = append(ids, id)
+	}
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		published, err := r.Eval(ctx, `
+			local clock = redis.call('TIME')
+			local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+			local deadline = tonumber(ARGV[2])
+			if deadline <= now then return 0 end
+			local remaining = redis.call('PTTL', KEYS[1])
+			if remaining > 0 then deadline = math.max(deadline, now + remaining) end
+			redis.call('SET', KEYS[1], ARGV[1])
+			redis.call('PEXPIREAT', KEYS[1], deadline)
+			return 1
+		`, []string{streamAuthorityKey(streamId, "p")}, encoded, deadlineMillis).Int()
+		if err != nil {
+			return err
+		}
+		if published != 1 {
+			return errors.New("stream membership expired before participant publication")
+		}
+		return nil
 	})
 }
 

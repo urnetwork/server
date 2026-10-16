@@ -184,27 +184,43 @@ func (self *CoreStClient) clientKeyAuthorityAttemptBudget() time.Duration {
 // is sized for paced public endpoints, so no per-endpoint bound shorter than
 // the operation's own deadline is imposed here: refusals, transport errors and
 // failed verification move to the next endpoint, a stall still holds the batch.
+// Every attempt spends the same operation allowance, including failed reads.
 func readStClientKeyAuthoritiesFailover(ctx context.Context, urls []string, queries []stabi.ClientKeyAuthorityQuery, limits stabi.ClientKeyAuthorityRpcLimits) ([]stabi.ClientKeyAuthorityObservation, stabi.ClientKeyAuthorityRpcWork, error) {
 	if ctx == nil || len(urls) == 0 {
 		return nil, stabi.ClientKeyAuthorityRpcWork{}, errors.New("client-key batch has no actual chain transport")
 	}
 	failures := make([]error, 0, len(urls))
+	work := stabi.ClientKeyAuthorityRpcWork{}
 	for _, endpoint := range urls {
 		if err := ctx.Err(); err != nil {
-			return nil, stabi.ClientKeyAuthorityRpcWork{}, errors.Join(errors.Join(failures...), err)
+			return nil, work, errors.Join(errors.Join(failures...), err)
 		}
-		authorities, work, err := func() ([]stabi.ClientKeyAuthorityObservation, stabi.ClientKeyAuthorityRpcWork, error) {
+		if work.Requests >= limits.MaximumRequests || work.Methods >= limits.MaximumMethods || work.Bytes >= limits.MaximumBytes {
+			return nil, work, errors.Join(errors.Join(failures...), stabi.ErrClientKeyAuthorityRpcWork)
+		}
+		remaining := stabi.ClientKeyAuthorityRpcLimits{
+			MaximumRequests: limits.MaximumRequests - work.Requests,
+			MaximumMethods:  limits.MaximumMethods - work.Methods,
+			MaximumBytes:    limits.MaximumBytes - work.Bytes,
+		}
+		authorities, attemptWork, err := func() ([]stabi.ClientKeyAuthorityObservation, stabi.ClientKeyAuthorityRpcWork, error) {
 			client, err := ethclient.DialContext(ctx, endpoint)
 			if err != nil {
 				return nil, stabi.ClientKeyAuthorityRpcWork{}, err
 			}
 			defer client.Close()
-			return stabi.ReadClientKeyAuthoritiesContext(ctx, client, queries, limits)
+			return stabi.ReadClientKeyAuthoritiesContext(ctx, client, queries, remaining)
 		}()
+		work.Requests += attemptWork.Requests
+		work.Methods += attemptWork.Methods
+		work.Bytes += attemptWork.Bytes
 		if err == nil {
 			return authorities, work, nil
 		}
 		failures = append(failures, fmt.Errorf("%s: %w", endpoint, err))
+		if errors.Is(err, stabi.ErrClientKeyAuthorityRpcWork) {
+			break
+		}
 	}
-	return nil, stabi.ClientKeyAuthorityRpcWork{}, errors.Join(failures...)
+	return nil, work, errors.Join(failures...)
 }

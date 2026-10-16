@@ -10416,4 +10416,12 @@ var migrations = []any{
 	// earlier positive. Only network_client_location is locked, so this never
 	// waits on the rollup while it holds the location rows.
 	newSqlMigration(arinDatabaseCanaryLocationSchemaSql),
+
+	// 839: retain original registration authority for idempotent session replay.
+	// No historical binding is inferred or backfilled from mutable client rows.
+	newSqlMigration(clientRegistrationSessionSchemaSql),
+
+	// 840: immutable seed-window recovery metadata; signed receipt bytes stay
+	// unchanged. The existing original-transition trigger protects the column.
+	newSqlMigration(verifyOriginalWindowSchemaSql),
 }

@@ -212,7 +212,7 @@ func (self *providerLivenessLeaseConnection) afterRead(provideModes map[model.Pr
 		if providing {
 			self.releasePending = false
 			if self.state != livenessLeaseProviding {
-				if self.state == livenessLeaseNotProviding {
+				if self.writeTime.IsZero() {
 					// vouched for again from now
 					self.writeTime = writer.now()
 				}

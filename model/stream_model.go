@@ -243,7 +243,8 @@ func pairStreamsKey(clientIdA server.Id, clientIdB server.Id) string {
 }
 
 // returns a stream id to use for the contract
-// if stream count changes from 0, associate the stream id with each hop on the stream
+// Every add repairs the stream's publications, including an unchanged replay
+// after membership committed but a later dependency failed.
 // a stream it starts takes the id the contract's insert bound, when the
 // creation request carries a binding (see WithAddStreamBinding)
 func AddToStream(
@@ -290,7 +291,11 @@ func AddToStream(
 				redis.call('EXPIRE', stream_contracts_key, ttl)
 			end
 
-			return {stream_id, initial_size, changed}
+			local clock = redis.call('TIME')
+			local remaining = redis.call('PTTL', stream_id_key)
+			local deadline = 0
+			if remaining > 0 then deadline = clock[1] * 1000 + math.floor(clock[2] / 1000) + remaining end
+			return {stream_id, initial_size, changed, deadline}
 			`,
 			[]string{
 				streamIdKey(streamKey),
@@ -308,58 +313,62 @@ func AddToStream(
 		streamId = server.Id([]byte(values[0].(string)))
 		initialSize := values[1].(int64)
 		changed := 0 < values[2].(int64)
+		publicationDeadlineMillis := values[3].(int64)
+		if publicationDeadlineMillis <= 0 {
+			panic("stream membership has no publication lifetime")
+		}
 		if changed && initialSize == 0 {
 			originalBirthTime = server.NowUtc()
 		}
 
-		if changed {
-			pipe := r.TxPipeline()
-			pipe.Set(ctx, contractStreamKey(contractId), streamKey.Bytes(), ttl)
-			pipe.Set(ctx, contractStreamId(contractId), streamId.Bytes(), ttl)
-			_, err := pipe.Exec(ctx)
-			if err != nil {
-				panic(err)
-			}
-
-			// the pair marker key is in its own slot: plain pipeline
-			r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-				pairKey := pairStreamsKey(streamKey.SourceId(), streamKey.DestinationId())
-				pipe.SAdd(ctx, pairKey, streamKey.Bytes())
-				pipe.Expire(ctx, pairKey, ttl)
-				return nil
-			})
-
-			server.Raise(storeStreamParticipants(ctx, streamId, streamKey))
-			if initialSize == 0 {
-				for clientId, edges := range streamKey.Edges() {
-					// bump the per-client hops version (PEERS2.md
-					// dirty-counter + poll; no pubsub delivery)
-					streamHopsKey := clientStreamHopsKey(clientId)
-					streamHop := NewStreamHop(edges[0], edges[1], streamId)
-
-					pipe := r.TxPipeline()
-					pipe.Incr(ctx, clientEventIdKey(clientId))
-					pipe.SAdd(ctx, streamHopsKey, streamHop.Bytes())
-					pipe.Expire(ctx, streamHopsKey, ttl)
-					pipe.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
-					_, err := pipe.Exec(ctx)
-					if err != nil {
-						panic(err)
-					}
-				}
-			} else {
-				for clientId, _ := range streamKey.Edges() {
-					streamHopsKey := clientStreamHopsKey(clientId)
-					r.Expire(ctx, streamHopsKey, ttl)
-					r.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
-				}
-			}
+		pipe := r.TxPipeline()
+		pipe.Set(ctx, contractStreamKey(contractId), streamKey.Bytes(), ttl)
+		pipe.PExpireAt(ctx, contractStreamKey(contractId), time.UnixMilli(publicationDeadlineMillis))
+		pipe.Set(ctx, contractStreamId(contractId), streamId.Bytes(), ttl)
+		pipe.PExpireAt(ctx, contractStreamId(contractId), time.UnixMilli(publicationDeadlineMillis))
+		if _, err := pipe.Exec(ctx); err != nil {
+			panic(err)
 		}
+
+		// The pair marker is a best-effort candidate index in another slot.
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			pairKey := pairStreamsKey(streamKey.SourceId(), streamKey.DestinationId())
+			pipe.SAdd(ctx, pairKey, streamKey.Bytes())
+			pipe.Expire(ctx, pairKey, ttl)
+			return nil
+		})
+		publishStreamHops(ctx, r, streamId, streamKey, publicationDeadlineMillis)
 	})
 	if !originalBirthTime.IsZero() {
 		providerWorkRetainStreamBirth(ctx, streamId, originalCohort, originalBirthTime)
 	}
 	return
+}
+
+// Participant authority precedes every hop. Idempotent per-client publication
+// repairs partial writes without duplicate dirty events or shortening another
+// stream's shared hop-set lifetime. Absolute expiry does not grow while a
+// dependency is blocked, and an exhausted horizon cannot publish a missing hop.
+func publishStreamHops(ctx context.Context, r server.RedisClient, streamId server.Id, key streamKey, deadlineMillis int64) {
+	server.Raise(storeStreamParticipantsUntil(ctx, streamId, key, deadlineMillis))
+	for clientId, edges := range key.Edges() {
+		hop := NewStreamHop(edges[0], edges[1], streamId)
+		server.Raise(r.Eval(ctx, `
+			local clock = redis.call('TIME')
+			local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+			local deadline = tonumber(ARGV[2])
+			if deadline <= now then return 0 end
+			local changed = 0
+			if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+				redis.call('INCR', KEYS[2])
+				changed = redis.call('SADD', KEYS[1], ARGV[1])
+			end
+			local remaining = redis.call('PTTL', KEYS[1])
+			if remaining < 0 or now + remaining < deadline then redis.call('PEXPIREAT', KEYS[1], deadline) end
+			redis.call('EXPIRE', KEYS[2], ARGV[3])
+			return changed
+		`, []string{clientStreamHopsKey(clientId), clientEventIdKey(clientId)}, hop.Bytes(), deadlineMillis, int64(clientEventIdTtl/time.Second)).Err())
+	}
 }
 
 // AddCompanionContractToStream marks a companion contract with the active
@@ -562,7 +571,8 @@ func joinStream(
 			redis.call('EXPIRE', stream_id_key, ttl)
 			redis.call('EXPIRE', stream_contracts_key, ttl)
 
-			return stream_id
+			local clock = redis.call('TIME')
+			return {stream_id, clock[1] * 1000 + math.floor(clock[2] / 1000) + redis.call('PTTL', stream_id_key)}
 			`,
 			[]string{
 				streamIdKey(key),
@@ -571,18 +581,21 @@ func joinStream(
 			contractId.Bytes(),
 			ttlSeconds,
 		)
-		streamIdBytes, err := result.Text()
+		values, err := result.Slice()
 		if err == server.RedisNil {
 			return
 		}
 		if err != nil {
 			panic(err)
 		}
-		streamId = server.Id([]byte(streamIdBytes))
+		streamId = server.Id([]byte(values[0].(string)))
+		publicationDeadlineMillis := values[1].(int64)
 
 		pipe := r.TxPipeline()
 		pipe.Set(ctx, contractStreamKey(contractId), key.Bytes(), ttl)
+		pipe.PExpireAt(ctx, contractStreamKey(contractId), time.UnixMilli(publicationDeadlineMillis))
 		pipe.Set(ctx, contractStreamId(contractId), streamId.Bytes(), ttl)
+		pipe.PExpireAt(ctx, contractStreamId(contractId), time.UnixMilli(publicationDeadlineMillis))
 		_, err = pipe.Exec(ctx)
 		if err != nil {
 			panic(err)
@@ -596,13 +609,9 @@ func joinStream(
 			return nil
 		})
 
-		// joining an existing stream never changes hop membership;
-		// refresh the hop key ttls like a same-stream add
-		for clientId, _ := range key.Edges() {
-			streamHopsKey := clientStreamHopsKey(clientId)
-			r.Expire(ctx, streamHopsKey, ttl)
-			r.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
-		}
+		// A companion can be the first retry after the original publication
+		// failed. Membership alone does not prove that its hops were published.
+		publishStreamHops(ctx, r, streamId, key, publicationDeadlineMillis)
 
 		ok = true
 	})

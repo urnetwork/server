@@ -261,9 +261,8 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	if err != nil || resource == nil {
 		return settings, modernGateFailure
 	}
-	// Each top-level key with its value and how many times the file gives it.
-	// A parse into nodes checks no types and no duplicate keys, so only a file
-	// that is not yaml, or whose top level is not a mapping, fails here.
+	// Resolve top-level merges before decoding each setting. Keep duplicate
+	// explicit keys local to their setting, including inherited duplicates.
 	keyValues, keyCounts, err := func() (map[string]*yaml.Node, map[string]int, error) {
 		value, err := resource.BytesE()
 		if err != nil {
@@ -283,15 +282,67 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 		if mapping.Kind == yaml.ScalarNode && mapping.Tag == "!!null" {
 			return keyValues, keyCounts, nil
 		}
-		if mapping.Kind != yaml.MappingNode {
-			return nil, nil, fmt.Errorf("the top level is not a mapping")
+		type resolvedMapping struct {
+			values map[string]*yaml.Node
+			counts map[string]int
 		}
-		for i := 0; i+1 < len(mapping.Content); i += 2 {
-			key := mapping.Content[i].Value
-			keyValues[key] = mapping.Content[i+1]
-			keyCounts[key] += 1
+		resolvedMappings := map[*yaml.Node]resolvedMapping{}
+		resolvingNodes := map[*yaml.Node]bool{}
+		var resolveMapping func(*yaml.Node) (resolvedMapping, error)
+		resolveMapping = func(node *yaml.Node) (resolvedMapping, error) {
+			if resolved, ok := resolvedMappings[node]; ok {
+				return resolved, nil
+			}
+			if node == nil || resolvingNodes[node] {
+				return resolvedMapping{}, fmt.Errorf("the provider mapping contains a cyclic merge")
+			}
+			resolvingNodes[node] = true
+			defer delete(resolvingNodes, node)
+			if node.Kind == yaml.AliasNode {
+				return resolveMapping(node.Alias)
+			}
+			if node.Kind != yaml.MappingNode {
+				return resolvedMapping{}, fmt.Errorf("the provider mapping or merge is not a mapping")
+			}
+			resolved := resolvedMapping{values: map[string]*yaml.Node{}, counts: map[string]int{}}
+			var merge *yaml.Node
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				key, value := node.Content[i], node.Content[i+1]
+				if key.Tag == "!!merge" {
+					if merge != nil {
+						return resolvedMapping{}, fmt.Errorf("the provider mapping gives its merge key twice")
+					}
+					merge = value
+					continue
+				}
+				resolved.values[key.Value] = value
+				resolved.counts[key.Value] += 1
+			}
+			if merge != nil {
+				mergeNodes := []*yaml.Node{merge}
+				if merge.Kind == yaml.SequenceNode {
+					mergeNodes = merge.Content
+				}
+				for _, mergeNode := range mergeNodes {
+					inherited, err := resolveMapping(mergeNode)
+					if err != nil {
+						return resolvedMapping{}, err
+					}
+					for key, value := range inherited.values {
+						// Explicit keys win, then the first mapping of a merge
+						// sequence, matching the typed yaml decoder.
+						if resolved.counts[key] == 0 {
+							resolved.values[key] = value
+							resolved.counts[key] = inherited.counts[key]
+						}
+					}
+				}
+			}
+			resolvedMappings[node] = resolved
+			return resolved, nil
 		}
-		return keyValues, keyCounts, nil
+		resolved, err := resolveMapping(mapping)
+		return resolved.values, resolved.counts, err
 	}()
 	// holds the modern provider gate off for a failure: the switch set false,
 	// and the first failure kept
