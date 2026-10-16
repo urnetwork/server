@@ -37,6 +37,11 @@ const (
 	// the URL-success rule: measured repeatedly without carrying one URL
 	ProviderStatusReasonEgressNoSuccess = "egress_no_success"
 	ProviderStatusReasonEgressUnprobed  = "egress_unprobed"
+	// the native URL-run minimums (egress_native_min_runs.go): the URL checks
+	// pass, but too few have run, or over too short a time, to admit the
+	// provider to Quality or Speed yet. The census counts it as unprobed.
+	// Apps that predate it show its reason_text.
+	ProviderStatusReasonEgressWarmingUp = "egress_warming_up"
 	ProviderStatusReasonEgressFailing   = "egress_failing"
 	// the Online URL ratio, while it is on: measured repeatedly with a
 	// success, but with too few
@@ -61,6 +66,7 @@ var ProviderStatusReasons = []string{
 	ProviderStatusReasonEgressNoSuccess,
 	ProviderStatusReasonEgressLowSuccess,
 	ProviderStatusReasonEgressUnprobed,
+	ProviderStatusReasonEgressWarmingUp,
 	ProviderStatusReasonEgressFailing,
 	ProviderStatusReasonNotModern,
 	ProviderStatusReasonSpeedTestMissing,
@@ -84,6 +90,14 @@ var providerStatusReasonTexts = map[string]string{
 	ProviderStatusReasonSpeedTestMissing:     "No speed test yet. Until one completes, clients are offered this device much less often.",
 	ProviderStatusReasonSlow:                 "This connection measured slower than clients need, so it is offered much less often.",
 	ProviderStatusReasonNone:                 "Everything checks out. How often clients are offered this device depends on demand in its region and on how it ranks against nearby providers.",
+	// true whichever minimum is short: a provider short only for Quality is
+	// offered for speed already
+	ProviderStatusReasonEgressWarmingUp: fmt.Sprintf(
+		"Building network check history. The checks on this connection are passing so far, but it's too early to be sure: clients are offered this device for speed once %d checks have passed, and for quality once %d checks spanning at least %d minutes have passed. Until then, they're offered it only when providers with more checks run out.",
+		ProviderSpeedMinMeasuredUrlRuns,
+		ProviderQualityMinMeasuredUrlRuns,
+		int(ProviderQualityMinMeasuredUrlSpan/time.Minute),
+	),
 }
 
 // The names of the ranking numbers, in the order a status lists them. A
@@ -546,6 +560,10 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonEgressNoSuccess
 	case decision.reason == ProviderExcludedLowSuccess:
 		evaluation.reason = ProviderStatusReasonEgressLowSuccess
+	case decision.reason == ProviderExcludedUnprobed && providerStatusEgressWarmingUp(egressFacts):
+		// the census's unprobed, told apart for the provider: its checks
+		// pass, on too few runs for a native bucket yet
+		evaluation.reason = ProviderStatusReasonEgressWarmingUp
 	case decision.reason == ProviderExcludedUnprobed:
 		evaluation.reason = ProviderStatusReasonEgressUnprobed
 	case decision.reason == ProviderExcludedHealth:
@@ -563,6 +581,14 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonNone
 	}
 	return evaluation
+}
+
+// Whether the URL checks pass but their runs have yet to meet a native
+// URL-run minimum (egress_native_min_runs.go). A provider without a verdict
+// is unprobed instead: it has no runs to warm up on.
+func providerStatusEgressWarmingUp(facts *providerEgressFacts) bool {
+	return facts.egressQuality != nil && *facts.egressQuality &&
+		(!facts.qualityRunsMet || !facts.speedRunsMet)
 }
 
 // Megabytes per second with one decimal, for the explanations.
