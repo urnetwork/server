@@ -200,13 +200,16 @@ func TestUrlProbeRenewalSpreadDissolvesClusteredCohortModel(t *testing.T) {
 		t.Fatalf("model no longer reproduces the clustered providers:\n%s", old)
 	}
 
-	// The fix: the bunches are gone after the first renewal cycle, and the
-	// wave is at most half as high. Each provider may keep one short gap per
-	// cycle, where the horizon, not the spacing, decides.
+	// The fix: after the first renewal cycle the bunches are down at least
+	// tenfold and keep shrinking, and the wave is at most half as high. The
+	// residue is the model's one prober: a spaced renewal delayed by a queue
+	// or a pass stop lands closer to the next renewal, which the horizon, not
+	// the spacing, decides.
 	for cycle := 2; cycle < len(spread.cycles); cycle++ {
 		stats := spread.cycles[cycle]
-		if providers/2 < stats.bunched {
-			t.Errorf("cycle %d still renews %d runs within ten minutes of the provider's previous run", cycle, stats.bunched)
+		if old.cycles[cycle].bunched/10 < stats.bunched || spread.cycles[cycle-1].bunched < stats.bunched {
+			t.Errorf("cycle %d still renews %d runs within ten minutes of the provider's previous run (previous cycle %d, oldest-run anchor %d)",
+				cycle, stats.bunched, spread.cycles[cycle-1].bunched, old.cycles[cycle].bunched)
 		}
 		if old.cycles[cycle].peakRatio/2 < stats.peakRatio {
 			t.Errorf("cycle %d renewal wave remains: peak/mean %.2f against %.2f", cycle, stats.peakRatio, old.cycles[cycle].peakRatio)
