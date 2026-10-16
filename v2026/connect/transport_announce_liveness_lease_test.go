@@ -1,11 +1,11 @@
 package connect
 
-// One announcement's part in its client's provider liveness lease
-// (transport_announce_liveness_lease.go), with its writes recorded instead of
-// sent and its worker driven one step at a time: which reads start the
-// worker, that it refreshes whatever the rounds do, which clients write at
-// all, when the lease is released, that the end of a connection writes
-// nothing, and the process's refreshes that its handler stamp vouches for.
+// The process's provider liveness lease writer (transport_announce_liveness_lease.go),
+// with its shard writes recorded instead of sent and driven one write at a
+// time: what a pending, providing and non-providing connection has written,
+// when a lease is released, that the end of a connection writes nothing, that
+// the writes are one at a time, and the vouching that the handler stamp
+// stands for.
 
 import (
 	"context"
@@ -15,106 +15,169 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/urnetwork/server/v2026"
 	"github.com/urnetwork/server/v2026/model"
 )
 
-// The writes of one connection, in order, and the errors to return.
-type livenessLeaseWritesForTest struct {
-	writes     []string
-	refreshErr error
-	releaseErr error
-	// the workers the connection asked to start, not started
-	workers []func()
+// One recorded shard write.
+type livenessLeaseShardWriteForTest struct {
+	shard    int
+	scored   []server.Id
+	extended []server.Id
+	removed  []server.Id
 }
 
-// A connection whose lease writes go to writes, with a registry of its own and
-// a clock at now, whose worker is recorded rather than run: the test drives it
-// with step.
-func newLivenessLeaseConnectionForTest(writes *livenessLeaseWritesForTest, now *time.Time) *providerLivenessLeaseConnection {
-	lease := newProviderLivenessLeaseConnection(server.NewId(), 0, func(run func()) bool {
-		writes.workers = append(writes.workers, run)
-		return true
-	}, nil)
-	lease.refreshes = newProviderLivenessRefreshes()
-	lease.now = func() time.Time {
+// A writer whose shard writes are recorded, answering each extension with held,
+// on a clock at *now, never started: the test drives it with write.
+type livenessLeaseWriterForTest struct {
+	writer *providerLivenessLeaseWriter
+	writes []livenessLeaseShardWriteForTest
+	held   map[server.Id]bool
+	err    error
+	// runs during each shard write
+	during func()
+}
+
+func newLivenessLeaseWriterForTest(now *time.Time) *livenessLeaseWriterForTest {
+	recorder := &livenessLeaseWriterForTest{
+		held: map[server.Id]bool{},
+	}
+	writer := newProviderLivenessLeaseWriter(model.ProviderLivenessLeaseRefreshInterval)
+	// never started by begin
+	writer.startOnce.Do(func() {})
+	writer.now = func() time.Time {
 		return *now
 	}
-	lease.refreshLease = func(context.Context, server.Id) error {
-		writes.writes = append(writes.writes, "refresh")
-		return writes.refreshErr
+	writer.observe = func(string, int) {}
+	writer.writeShard = func(ctx context.Context, shard int, scored []server.Id, extended []server.Id, removed []server.Id) ([]bool, error) {
+		recorder.writes = append(recorder.writes, livenessLeaseShardWriteForTest{
+			shard:    shard,
+			scored:   slices.Clone(scored),
+			extended: slices.Clone(extended),
+			removed:  slices.Clone(removed),
+		})
+		if recorder.during != nil {
+			recorder.during()
+		}
+		if recorder.err != nil {
+			return nil, recorder.err
+		}
+		held := make([]bool, len(extended))
+		for i, clientId := range extended {
+			held[i] = recorder.held[clientId]
+		}
+		return held, nil
 	}
-	lease.releaseLease = func(context.Context, server.Id) error {
-		writes.writes = append(writes.writes, "release")
-		return writes.releaseErr
+	recorder.writer = writer
+	return recorder
+}
+
+// What the recorded writes did, in order: "score", "extend" and "remove", one
+// per client.
+func (self *livenessLeaseWriterForTest) take() []string {
+	operations := []string{}
+	for _, write := range self.writes {
+		for range write.scored {
+			operations = append(operations, "score")
+		}
+		for range write.extended {
+			operations = append(operations, "extend")
+		}
+		for range write.removed {
+			operations = append(operations, "remove")
+		}
 	}
-	return lease
+	self.writes = nil
+	return operations
+}
+
+// The connection's vouch time, zero while the process does not vouch for it.
+func livenessLeaseWriteTimeForTest(connection *providerLivenessLeaseConnection) time.Time {
+	connection.writer.stateLock.Lock()
+	defer connection.writer.stateLock.Unlock()
+	return connection.writeTime
 }
 
 var livenessLeasePublicForTest = map[model.ProvideMode]bool{model.ProvideModePublic: true}
 
-// The connection's entry in its process's refreshes, if any.
-func livenessLeaseRefreshTimeForTest(lease *providerLivenessLeaseConnection) (time.Time, bool) {
-	lease.refreshes.stateLock.Lock()
-	defer lease.refreshes.stateLock.Unlock()
-	refreshTime, ok := lease.refreshes.connectionRefreshTimes[lease]
-	return refreshTime, ok
-}
-
-// The first read that finds the client providing starts the worker once and
-// enters the connection in its process's refreshes; later providing reads
-// start nothing more. The worker refreshes at every step, without any read:
-// a round held for minutes, or reads that keep failing, never stop it.
-func TestLivenessLeaseWorkerRefreshesWithoutRounds(t *testing.T) {
-	ctx := context.Background()
-	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	if len(writes.workers) != 1 {
-		t.Fatalf("providing reads started %d workers, want 1", len(writes.workers))
-	}
-	if refreshTime, ok := livenessLeaseRefreshTimeForTest(lease); !ok || !refreshTime.Equal(now) {
-		t.Fatal("the first providing read did not enter the connection in the process's refreshes")
-	}
-	for range 4 {
-		lease.step(ctx)
-	}
-	if !slices.Equal(writes.writes, []string{"refresh", "refresh", "refresh", "refresh"}) {
-		t.Fatalf("four worker steps with no read wrote %v, want four refreshes", writes.writes)
-	}
-}
-
-// A refresh that succeeds moves the connection's entry forward; one that fails
-// leaves it, so the entry ages while refreshes fail.
-func TestLivenessLeaseRefreshMovesTheEntryOnlyOnSuccess(t *testing.T) {
+// A connection registers when its rounds start, before any read: the process
+// vouches for it from then, and the writer extends its client's lease, which
+// keeps a reconnecting provider's lease whatever its first reads do. A held
+// lease moves the vouch time to the write's start; an unheld one leaves it to
+// age, and nothing is created for a client that may not provide.
+func TestLivenessLeaseWriterExtendsAPendingConnectionsLease(t *testing.T) {
 	ctx := context.Background()
 	start := time.UnixMilli(1_800_000_000_000)
 	now := start
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	lease.afterRead(ctx, livenessLeasePublicForTest)
+	recorder := newLivenessLeaseWriterForTest(&now)
+	reconnecting := recorder.writer.begin(server.NewId(), nil)
+	unknown := recorder.writer.begin(server.NewId(), nil)
+	recorder.held[reconnecting.clientId] = true
+	if oldestTime, ok := recorder.writer.oldest(); !ok || !oldestTime.Equal(start) {
+		t.Fatal("the process does not vouch for connections pending their first read")
+	}
 
 	now = start.Add(30 * time.Second)
-	writes.refreshErr = errors.New("test: redis refused the write")
-	lease.step(ctx)
-	if refreshTime, _ := livenessLeaseRefreshTimeForTest(lease); !refreshTime.Equal(start) {
-		t.Fatal("a failed refresh moved the connection's entry")
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"extend", "extend"}) {
+		t.Fatalf("pending connections wrote %v, want an extension each", operations)
 	}
-	now = start.Add(60 * time.Second)
-	writes.refreshErr = nil
-	lease.step(ctx)
-	if refreshTime, _ := livenessLeaseRefreshTimeForTest(lease); !refreshTime.Equal(now) {
-		t.Fatal("a successful refresh did not move the connection's entry")
+	if writeTime := livenessLeaseWriteTimeForTest(reconnecting); !writeTime.Equal(now) {
+		t.Fatalf("a held extension vouched from %s, want the write's start %s", writeTime, now)
+	}
+	if writeTime := livenessLeaseWriteTimeForTest(unknown); !writeTime.Equal(start) {
+		t.Fatal("an extension the shard did not hold moved the connection's vouch time")
+	}
+	for range 3 {
+		now = now.Add(30 * time.Second)
+		recorder.writer.write(ctx, true)
+	}
+	if operations := recorder.take(); slices.Contains(operations, "score") || slices.Contains(operations, "remove") {
+		t.Fatalf("pending connections whose reads keep failing wrote %v, want extensions only", operations)
+	}
+	if writeTime := livenessLeaseWriteTimeForTest(reconnecting); !writeTime.Equal(now) {
+		t.Fatal("the reconnecting provider's lease was not extended every write")
 	}
 }
 
-// A client that provides in no discovery mode starts no worker and is never
-// entered, whatever its reads and its end.
+// The first read that finds the client providing has it scored at the next
+// write, which a woken writer runs at once for it alone, and every write after.
+// A write's success is the time it started, not the time it returned.
+func TestLivenessLeaseWriterScoresAProvidingConnectionFromTheWriteStart(t *testing.T) {
+	ctx := context.Background()
+	start := time.UnixMilli(1_800_000_000_000)
+	now := start
+	recorder := newLivenessLeaseWriterForTest(&now)
+	recorder.writer.begin(server.NewId(), nil)
+	recorder.writer.write(ctx, false)
+	recorder.take()
+
+	connection := recorder.writer.begin(server.NewId(), nil)
+	connection.afterRead(livenessLeasePublicForTest)
+	writeStart := start.Add(10 * time.Second)
+	now = writeStart
+	recorder.during = func() {
+		// the write returns well after it started
+		now = writeStart.Add(model.ProviderLivenessLeaseWriteTimeout)
+	}
+	recorder.writer.write(ctx, false)
+	recorder.during = nil
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score"}) {
+		t.Fatalf("the woken write wrote %v, want the new providing client alone", operations)
+	}
+	if writeTime := livenessLeaseWriteTimeForTest(connection); !writeTime.Equal(writeStart) {
+		t.Fatalf("the providing connection is vouched from %s, want the write's start %s", writeTime, writeStart)
+	}
+	recorder.writer.write(ctx, true)
+	operations := recorder.take()
+	slices.Sort(operations)
+	if !slices.Equal(operations, []string{"extend", "score"}) {
+		t.Fatalf("the next full write wrote %v, want the score and the other's extension", operations)
+	}
+}
+
+// A client that provides in no discovery mode is never scored or released,
+// and the process stops vouching for it at its first read.
 func TestLivenessLeaseNonProvidingClientNeverWrites(t *testing.T) {
 	ctx := context.Background()
 	now := time.UnixMilli(1_800_000_000_000)
@@ -125,18 +188,21 @@ func TestLivenessLeaseNonProvidingClientNeverWrites(t *testing.T) {
 		{model.ProvideModeFriendsAndFamily: true},
 		{model.ProvideModeStream: true},
 	} {
-		writes := &livenessLeaseWritesForTest{}
-		lease := newLivenessLeaseConnectionForTest(writes, &now)
+		recorder := newLivenessLeaseWriterForTest(&now)
+		connection := recorder.writer.begin(server.NewId(), nil)
+		// one write while pending, which extends nothing the shard holds
+		recorder.writer.write(ctx, true)
 		for range 3 {
-			lease.afterRead(ctx, provideModes)
-			lease.step(ctx)
+			connection.afterRead(provideModes)
+			recorder.writer.write(ctx, true)
 		}
-		lease.end()
-		if len(writes.workers) != 0 || len(writes.writes) != 0 {
-			t.Fatalf("modes %v started %d workers and wrote %v, want nothing", provideModes, len(writes.workers), writes.writes)
+		connection.end()
+		recorder.writer.write(ctx, true)
+		if operations := recorder.take(); !slices.Equal(operations, []string{"extend"}) {
+			t.Fatalf("modes %v wrote %v, want the one pending extension", provideModes, operations)
 		}
-		if _, ok := lease.refreshes.oldest(); ok {
-			t.Fatalf("modes %v entered the connection in the process's refreshes", provideModes)
+		if _, ok := recorder.writer.oldest(); ok {
+			t.Fatalf("modes %v: the process still vouches for the connection", provideModes)
 		}
 	}
 }
@@ -146,71 +212,70 @@ func TestLivenessLeaseNonProvidingClientNeverWrites(t *testing.T) {
 func TestLivenessLeaseLeasesANetworkOnlyProvider(t *testing.T) {
 	ctx := context.Background()
 	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	lease.afterRead(ctx, map[model.ProvideMode]bool{model.ProvideModeNetwork: true})
-	lease.step(ctx)
-	if len(writes.workers) != 1 || !slices.Equal(writes.writes, []string{"refresh"}) {
-		t.Fatalf("a Network-only provider started %d workers and wrote %v, want a worker and a refresh", len(writes.workers), writes.writes)
+	recorder := newLivenessLeaseWriterForTest(&now)
+	connection := recorder.writer.begin(server.NewId(), nil)
+	connection.afterRead(map[model.ProvideMode]bool{model.ProvideModeNetwork: true})
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score"}) {
+		t.Fatalf("a Network-only provider wrote %v, want a score", operations)
 	}
 }
 
-// The read that finds the client no longer providing removes its entry and
-// has the worker release the lease once; later steps write nothing. A client
-// that provides again is entered and refreshed again.
+// The read that finds the client no longer providing has the next write
+// release the lease once; later writes write nothing for it. A client that
+// provides again is scored again, vouched for from that read.
 func TestLivenessLeaseReleasesWhenTheClientStopsProviding(t *testing.T) {
 	ctx := context.Background()
-	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	lease.step(ctx)
-	lease.afterRead(ctx, map[model.ProvideMode]bool{})
-	if _, ok := livenessLeaseRefreshTimeForTest(lease); ok {
-		t.Fatal("the read that found the client stopping left its entry")
-	}
-	select {
-	case <-lease.wake:
-	default:
-		t.Fatal("the read that found the client stopping did not wake the worker")
+	start := time.UnixMilli(1_800_000_000_000)
+	now := start
+	recorder := newLivenessLeaseWriterForTest(&now)
+	connection := recorder.writer.begin(server.NewId(), nil)
+	connection.afterRead(livenessLeasePublicForTest)
+	recorder.writer.write(ctx, true)
+	connection.afterRead(map[model.ProvideMode]bool{})
+	if _, ok := recorder.writer.oldest(); ok {
+		t.Fatal("the read that found the client stopping left it vouched for")
 	}
 	for range 3 {
-		lease.step(ctx)
+		recorder.writer.write(ctx, true)
 	}
-	if !slices.Equal(writes.writes, []string{"refresh", "release"}) {
-		t.Fatalf("the client stopping wrote %v, want one release after the refresh", writes.writes)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score", "remove"}) {
+		t.Fatalf("the client stopping wrote %v, want one release after the score", operations)
 	}
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	lease.step(ctx)
-	if !slices.Equal(writes.writes[2:], []string{"refresh"}) {
-		t.Fatalf("the client providing again wrote %v, want a refresh", writes.writes[2:])
+	now = start.Add(time.Minute)
+	connection.afterRead(livenessLeasePublicForTest)
+	if writeTime := livenessLeaseWriteTimeForTest(connection); !writeTime.Equal(now) {
+		t.Fatal("the client providing again is not vouched for from that read")
 	}
-	if _, ok := livenessLeaseRefreshTimeForTest(lease); !ok {
-		t.Fatal("the client providing again was not entered")
+	recorder.writer.write(ctx, false)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score"}) {
+		t.Fatalf("the client providing again wrote %v, want a score", operations)
 	}
 }
 
-// A release that fails is not retried from the worker's own state: only a
+// A release that fails is not retried from the writer's own state: only a
 // later read that still finds the client not providing requests it again.
 func TestLivenessLeaseRetriesAFailedReleaseOnlyOnALaterRead(t *testing.T) {
 	ctx := context.Background()
 	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	writes.releaseErr = errors.New("test: redis refused the write")
-	lease.afterRead(ctx, map[model.ProvideMode]bool{})
-	lease.step(ctx)
-	lease.step(ctx)
-	if !slices.Equal(writes.writes, []string{"release"}) {
-		t.Fatalf("a failed release wrote %v, want it once until a later read", writes.writes)
+	recorder := newLivenessLeaseWriterForTest(&now)
+	connection := recorder.writer.begin(server.NewId(), nil)
+	connection.afterRead(livenessLeasePublicForTest)
+	recorder.writer.write(ctx, true)
+	recorder.take()
+	connection.afterRead(map[model.ProvideMode]bool{})
+	recorder.err = errors.New("test: redis refused the write")
+	recorder.writer.write(ctx, true)
+	recorder.err = nil
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"remove"}) {
+		t.Fatalf("a failed release wrote %v, want it once until a later read", operations)
 	}
-	writes.releaseErr = nil
-	lease.afterRead(ctx, map[model.ProvideMode]bool{})
-	lease.step(ctx)
-	lease.step(ctx)
-	if !slices.Equal(writes.writes, []string{"release", "release"}) {
-		t.Fatalf("the later read wrote %v, want the release again, once", writes.writes)
+	connection.afterRead(map[model.ProvideMode]bool{})
+	recorder.writer.write(ctx, true)
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"remove"}) {
+		t.Fatalf("the later read wrote %v, want the release again, once", operations)
 	}
 }
 
@@ -219,71 +284,100 @@ func TestLivenessLeaseRetriesAFailedReleaseOnlyOnALaterRead(t *testing.T) {
 // and its release failed, the client may provide again, and another of its
 // connections may hold a fresh lease that a release at the end would delete.
 // A providing connection's end leaves the lease to lapse within the window for
-// the same reason. Either way the process stops vouching for the connection,
-// and a refresh still in flight cannot enter it again.
+// the same reason. Either way the process stops vouching for the connection.
 func TestLivenessLeaseEndWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	stale := newLivenessLeaseConnectionForTest(writes, &now)
-	stale.afterRead(ctx, livenessLeasePublicForTest)
-	stale.step(ctx)
-	writes.releaseErr = errors.New("test: redis refused the write")
-	stale.afterRead(ctx, map[model.ProvideMode]bool{})
-	stale.step(ctx)
-	writes.releaseErr = nil
+	recorder := newLivenessLeaseWriterForTest(&now)
+	stale := recorder.writer.begin(server.NewId(), nil)
+	stale.afterRead(livenessLeasePublicForTest)
+	recorder.writer.write(ctx, true)
+	stale.afterRead(map[model.ProvideMode]bool{})
+	recorder.err = errors.New("test: redis refused the write")
+	recorder.writer.write(ctx, true)
+	recorder.err = nil
 	stale.end()
-	stale.step(ctx)
-	stale.afterRead(ctx, map[model.ProvideMode]bool{})
-	stale.step(ctx)
-	if !slices.Equal(writes.writes, []string{"refresh", "release"}) {
-		t.Fatalf("the end after a failed release wrote %v, want nothing more", writes.writes)
+	stale.afterRead(map[model.ProvideMode]bool{})
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score", "remove"}) {
+		t.Fatalf("the end after a failed release wrote %v, want nothing more", operations)
 	}
 
-	providingWrites := &livenessLeaseWritesForTest{}
-	providing := newLivenessLeaseConnectionForTest(providingWrites, &now)
-	providing.afterRead(ctx, livenessLeasePublicForTest)
-	providing.step(ctx)
+	providing := recorder.writer.begin(server.NewId(), nil)
+	providing.afterRead(livenessLeasePublicForTest)
+	recorder.writer.write(ctx, true)
 	providing.end()
-	providing.step(ctx)
-	if !slices.Equal(providingWrites.writes, []string{"refresh"}) {
-		t.Fatalf("the end of a providing connection wrote %v, want nothing after its refresh", providingWrites.writes)
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score"}) {
+		t.Fatalf("the end of a providing connection wrote %v, want nothing after its score", operations)
 	}
-	if _, ok := providing.refreshes.oldest(); ok {
-		t.Fatal("an ended connection is still entered in the process's refreshes")
+	if _, ok := recorder.writer.oldest(); ok {
+		t.Fatal("an ended connection is still vouched for")
 	}
 }
 
-// A write that fails because the connection's context ended is the end of the
-// connection, not a failed write.
-func TestLivenessLeaseDoesNotCountTheWritesOfAnEndedConnection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// A read of one connection that finds its client stopped is not released
+// while another connection of the process still has the client providing: its
+// read may be older, but deleting a fresh lease is worse.
+func TestLivenessLeaseKeepsALeaseAnotherConnectionProvides(t *testing.T) {
+	ctx := context.Background()
 	now := time.UnixMilli(1_800_000_000_000)
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	outcomes := []string{}
-	lease.writtenForTest = func(outcome string) {
-		outcomes = append(outcomes, outcome)
-	}
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	lease.step(ctx)
-	cancel()
-	writes.refreshErr = context.Canceled
-	failedBefore := testutil.ToFloat64(connectionLivenessLeaseWritesCounter.WithLabelValues(livenessLeaseOutcomeRefreshFailed))
-	lease.step(ctx)
-	if !slices.Equal(outcomes, []string{livenessLeaseOutcomeRefreshed}) {
-		t.Fatalf("observed %v, want the one refresh before the context ended", outcomes)
-	}
-	if testutil.ToFloat64(connectionLivenessLeaseWritesCounter.WithLabelValues(livenessLeaseOutcomeRefreshFailed)) != failedBefore {
-		t.Fatal("a write of an ended connection was counted failed")
+	recorder := newLivenessLeaseWriterForTest(&now)
+	clientId := server.NewId()
+	first := recorder.writer.begin(clientId, nil)
+	second := recorder.writer.begin(clientId, nil)
+	first.afterRead(livenessLeasePublicForTest)
+	second.afterRead(livenessLeasePublicForTest)
+	recorder.writer.write(ctx, true)
+	first.afterRead(map[model.ProvideMode]bool{})
+	recorder.writer.write(ctx, true)
+	if operations := recorder.take(); !slices.Equal(operations, []string{"score", "score"}) {
+		t.Fatalf("one connection of two finding its client stopped wrote %v, want the client scored, not removed", operations)
 	}
 }
 
-// The handler stamp vouches for the process's refreshes. A connection entered
-// at its first providing read whose refreshes fail, or never run, stops the
-// stamps once its last success is more than the withhold age old, and a
-// success resumes them; a process with no providing connection stamps.
-func TestProviderLivenessWriterWithholdsTheStampWhileARefreshIsStale(t *testing.T) {
+// The writes are one shard script at a time, one per shard, whatever the
+// number of connections: the lease path holds at most one connection of the
+// deadline-bound pool it shares with admission and debit.
+func TestLivenessLeaseWriterWritesOneShardAtATime(t *testing.T) {
+	ctx := context.Background()
+	now := time.UnixMilli(1_800_000_000_000)
+	recorder := newLivenessLeaseWriterForTest(&now)
+	inFlightLock := sync.Mutex{}
+	inFlight := 0
+	maxInFlight := 0
+	recorder.during = func() {
+		inFlightLock.Lock()
+		inFlight += 1
+		maxInFlight = max(maxInFlight, inFlight)
+		inFlightLock.Unlock()
+		time.Sleep(time.Millisecond)
+		inFlightLock.Lock()
+		inFlight -= 1
+		inFlightLock.Unlock()
+	}
+	for range 256 {
+		connection := recorder.writer.begin(server.NewId(), nil)
+		connection.afterRead(livenessLeasePublicForTest)
+	}
+	recorder.writer.write(ctx, true)
+	shards := map[int]bool{}
+	for _, write := range recorder.writes {
+		if shards[write.shard] {
+			t.Fatalf("shard %d was written twice in one write", write.shard)
+		}
+		shards[write.shard] = true
+	}
+	if maxInFlight != 1 || 32 < len(recorder.writes) {
+		t.Fatalf("256 providing connections wrote %d shard scripts, %d at once, want at most 32, one at a time", len(recorder.writes), maxInFlight)
+	}
+}
+
+// The handler stamp vouches for the process's writes. A connection whose
+// writes fail, or that is pending a first read no write can prove, stops the
+// stamps once it is vouched for more than the withhold age ago, and a
+// successful write resumes them; a process with no connection stamps.
+func TestProviderLivenessWriterWithholdsTheStampWhileAWriteIsStale(t *testing.T) {
 	ctx := context.Background()
 	handlerId := server.NewId()
 	stamps := 0
@@ -296,17 +390,16 @@ func TestProviderLivenessWriterWithholdsTheStampWhileARefreshIsStale(t *testing.
 	}
 	start := time.UnixMilli(1_800_000_000_000)
 	now := start
-	writes := &livenessLeaseWritesForTest{}
-	lease := newLivenessLeaseConnectionForTest(writes, &now)
-	refreshes := lease.refreshes
+	recorder := newLivenessLeaseWriterForTest(&now)
+	writer := recorder.writer
 	withholdAge := model.ProviderLivenessWriterWithholdAge
 
-	if outcome := stampProviderLivenessWriter(ctx, handlerId, refreshes, start, stamp); outcome != livenessLeaseOutcomeStamped {
-		t.Fatalf("a process with no providing connection: %s, want stamped", outcome)
+	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, start, stamp); outcome != livenessLeaseOutcomeStamped {
+		t.Fatalf("a process with no connection: %s, want stamped", outcome)
 	}
-	// entered at its first providing read; its refreshes then fail
-	lease.afterRead(ctx, livenessLeasePublicForTest)
-	writes.refreshErr = errors.New("test: redis refused the write")
+	connection := writer.begin(server.NewId(), nil)
+	connection.afterRead(livenessLeasePublicForTest)
+	recorder.err = errors.New("test: redis refused the write")
 	for _, c := range []struct {
 		since   time.Duration
 		outcome string
@@ -317,59 +410,62 @@ func TestProviderLivenessWriterWithholdsTheStampWhileARefreshIsStale(t *testing.
 		{since: 10 * withholdAge, outcome: livenessLeaseOutcomeStampWithheld},
 	} {
 		now = start.Add(c.since)
-		lease.step(ctx)
-		if outcome := stampProviderLivenessWriter(ctx, handlerId, refreshes, now, stamp); outcome != c.outcome {
-			t.Fatalf("%s after the last success: %s, want %s", c.since, outcome, c.outcome)
+		writer.write(ctx, true)
+		if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now, stamp); outcome != c.outcome {
+			t.Fatalf("%s after the registration: %s, want %s", c.since, outcome, c.outcome)
 		}
 	}
-	writes.refreshErr = nil
-	lease.step(ctx)
-	if outcome := stampProviderLivenessWriter(ctx, handlerId, refreshes, now, stamp); outcome != livenessLeaseOutcomeStamped {
-		t.Fatalf("after a successful refresh: %s, want stamped", outcome)
+	recorder.err = nil
+	writer.write(ctx, true)
+	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now, stamp); outcome != livenessLeaseOutcomeStamped {
+		t.Fatalf("after a successful write: %s, want stamped", outcome)
 	}
 
-	// a connection whose worker never runs: no refresh at all
-	idleWrites := &livenessLeaseWritesForTest{}
-	idle := newLivenessLeaseConnectionForTest(idleWrites, &now)
-	idle.refreshes = refreshes
-	idle.afterRead(ctx, livenessLeasePublicForTest)
-	if outcome := stampProviderLivenessWriter(ctx, handlerId, refreshes, now.Add(withholdAge+time.Millisecond), stamp); outcome != livenessLeaseOutcomeStampWithheld {
-		t.Fatalf("a connection that never refreshed: %s, want stamp_withheld", outcome)
+	// pending, with no lease to extend, its reads failing
+	pending := writer.begin(server.NewId(), nil)
+	writer.write(ctx, true)
+	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now.Add(withholdAge+time.Millisecond), stamp); outcome != livenessLeaseOutcomeStampWithheld {
+		t.Fatalf("a connection pending past the withhold age: %s, want stamp_withheld", outcome)
 	}
-	idle.end()
-	if outcome := stampProviderLivenessWriter(ctx, handlerId, refreshes, now, stamp); outcome != livenessLeaseOutcomeStamped {
-		t.Fatalf("after the idle connection ended: %s, want stamped", outcome)
+	pending.end()
+	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now, stamp); outcome != livenessLeaseOutcomeStamped {
+		t.Fatalf("after the pending connection ended: %s, want stamped", outcome)
 	}
 	if stamps != 5 {
 		t.Fatalf("stamped %d times, want the 5 that were not withheld", stamps)
 	}
 }
 
-// The default cadence fits the contract: a connection that misses one
-// refresh does not reach the withhold age.
+// The default cadence fits the contract: a connection that misses one write
+// does not reach the withhold age.
 func TestLivenessLeaseDefaultCadenceFitsTheWithholdAge(t *testing.T) {
-	lease := newProviderLivenessLeaseConnection(server.NewId(), 0, func(func()) bool { return false }, nil)
-	if lease.refreshInterval != model.ProviderLivenessLeaseRefreshInterval {
-		t.Fatalf("the default refresh interval is %s, want %s", lease.refreshInterval, model.ProviderLivenessLeaseRefreshInterval)
+	writer := newProviderLivenessLeaseWriter(model.ProviderLivenessLeaseRefreshInterval)
+	worstGap := writer.refreshInterval + model.ProviderLivenessLeaseRefreshJitter + model.ProviderLivenessLeaseWriteTimeout
+	if model.ProviderLivenessWriterWithholdAge <= 2*worstGap {
+		t.Fatalf("one missed write reaches the %s withhold age", model.ProviderLivenessWriterWithholdAge)
 	}
-	if model.ProviderLivenessWriterWithholdAge <= 2*(lease.refreshInterval+model.ProviderLivenessLeaseWriteTimeout) {
-		t.Fatalf("one missed refresh reaches the %s withhold age", model.ProviderLivenessWriterWithholdAge)
+	for range 100 {
+		if jitter := writer.jitter(); jitter < 0 || model.ProviderLivenessLeaseRefreshJitter < jitter {
+			t.Fatalf("jitter %s outside [0, %s]", jitter, model.ProviderLivenessLeaseRefreshJitter)
+		}
 	}
 }
 
-// The handler is stamped at once, then every interval, a failed stamp counted
-// and stamped again, until its context ends.
+// The handler is stamped at once, then every interval, a failed stamp
+// observed and stamped again, until its context ends.
 func TestProviderLivenessWriterStampsUntilItsContextEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	handlerId := server.NewId()
+	now := time.Now()
+	recorder := newLivenessLeaseWriterForTest(&now)
 	stampLock := sync.Mutex{}
 	stampCount := 0
 	stamped := make(chan int, 16)
-	failedBefore := testutil.ToFloat64(connectionLivenessLeaseWritesCounter.WithLabelValues(livenessLeaseOutcomeStampFailed))
+	outcomes := map[string]int{}
 	returned := make(chan struct{})
 	go func() {
 		defer close(returned)
-		runProviderLivenessWriter(ctx, handlerId, time.Millisecond, newProviderLivenessRefreshes(), func(stampCtx context.Context, stampHandlerId server.Id) error {
+		runProviderLivenessWriter(ctx, handlerId, time.Millisecond, recorder.writer, func(stampCtx context.Context, stampHandlerId server.Id) error {
 			if stampHandlerId != handlerId {
 				t.Errorf("stamped handler %s, want %s", stampHandlerId, handlerId)
 			}
@@ -385,6 +481,10 @@ func TestProviderLivenessWriterStampsUntilItsContextEnds(t *testing.T) {
 				return errors.New("test: redis refused the write")
 			}
 			return nil
+		}, func(outcome string, count int) {
+			stampLock.Lock()
+			defer stampLock.Unlock()
+			outcomes[outcome] += count
 		})
 	}()
 	for want := 1; want <= 3; want += 1 {
@@ -403,7 +503,9 @@ func TestProviderLivenessWriterStampsUntilItsContextEnds(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the stamp loop did not end with its context")
 	}
-	if failed := testutil.ToFloat64(connectionLivenessLeaseWritesCounter.WithLabelValues(livenessLeaseOutcomeStampFailed)) - failedBefore; failed != 1 {
-		t.Fatalf("counted %v failed stamps, want 1", failed)
+	stampLock.Lock()
+	defer stampLock.Unlock()
+	if outcomes[livenessLeaseOutcomeStampFailed] != 1 || outcomes[livenessLeaseOutcomeStamped] < 2 {
+		t.Fatalf("observed %v, want one failed stamp and the others stamped", outcomes)
 	}
 }
