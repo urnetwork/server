@@ -5,6 +5,7 @@ package controller
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -34,16 +35,20 @@ func TestProviderWorkFixtureCreationStoreOwnsPhysicalRoot(t *testing.T) {
 	if err := os.Symlink(realDirectory, alias); err != nil {
 		t.Fatal(err)
 	}
+	// t.TempDir creates below GOTMPDIR instead of TMPDIR when GOTMPDIR is set,
+	// as the release gate sets it, so both must name the alias.
 	t.Setenv("TMPDIR", alias)
+	t.Setenv("GOTMPDIR", alias)
 	root := filepath.Join(providerWorkPhysicalTempDir(t), "requests")
 	scope := connect.OriginalContractStoreScope{DomainHash: [32]byte{1}, ClientId: [16]byte{2}, PublicKey: [32]byte{3}, SourceGeneration: [16]byte{4}}
 	providerWorkPrepareCreationStore(t, root, scope)
 	if physical, err := filepath.EvalSymlinks(root); err != nil || physical != root {
 		t.Fatal("fresh original custody root is not physical", err)
 	}
+	// the alias path below names the root only when the root is below the alias
 	relative, err := filepath.Rel(realDirectory, root)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("custody root %s is not below the alias of %s: %v", root, realDirectory, err)
 	}
 	if err := connect.ValidateOriginalContractStore(t.Context(), filepath.Join(alias, relative), scope); err == nil {
 		t.Fatal("runtime original custody accepted a symlink ancestor")

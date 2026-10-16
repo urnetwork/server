@@ -127,6 +127,8 @@ func assertTaggedExtenderId(
 // A connection from an active address of an active extender carries that
 // extender on both families; any other address carries none.
 func TestConnectNetworkClientTagsAnActiveExtenderAddress(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -167,6 +169,8 @@ func TestConnectNetworkClientTagsAnActiveExtenderAddress(t *testing.T) {
 // active, are both invisible to the tag: the two flags are independent and the
 // lookup requires both.
 func TestConnectNetworkClientDoesNotTagAnInactiveExtenderOrAddress(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 

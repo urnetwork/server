@@ -172,6 +172,10 @@ type ConnectionAnnounceSettings struct {
 	connectionDisconnectedForTest func(server.Id, error)
 	// Replaces connectionVerifySettings.
 	verifySettingsForTest func() (*model.VerifySettings, bool)
+	// Observes each provider liveness lease write's outcome for the connection.
+	livenessLeaseWrittenForTest func(outcome string)
+	// Replaces the process's lease writer.
+	livenessLeaseWriterForTest *providerLivenessLeaseWriter
 }
 
 type LatencyTest struct {
@@ -578,6 +582,15 @@ func (self *ConnectionAnnounce) run() {
 	// sync below reads anyway
 	providerVersion := newProviderVersionConnection(defaultProviderVersionConnections, self.appVersion)
 	defer providerVersion.release()
+	// the client's provider liveness lease, written by the process's writer
+	// from now, pending the rounds below finding the client providing for
+	// discovery (transport_announce_liveness_lease.go)
+	livenessLeaseWriter := defaultProviderLivenessLeaseWriter
+	if self.settings.livenessLeaseWriterForTest != nil {
+		livenessLeaseWriter = self.settings.livenessLeaseWriterForTest
+	}
+	livenessLease := livenessLeaseWriter.begin(self.clientId, self.settings.livenessLeaseWrittenForTest)
+	defer livenessLease.end()
 
 	// register this client in the network peer registry, now that the
 	// connection has survived the announce window. 2026-07-15 outage:
@@ -708,6 +721,7 @@ func (self *ConnectionAnnounce) run() {
 
 			provideEnabled := currentProvideModes[model.ProvideModePublic]
 			providerVersion.update(provideEnabled, nextStartTime)
+			livenessLease.afterRead(currentProvideModes)
 			// stats only matter for providers
 			// avoid populating stats for non-providers
 			if provideEnabled || 0 < changedCount {

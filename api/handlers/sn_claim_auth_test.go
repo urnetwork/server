@@ -66,11 +66,7 @@ func newSnClaimAuthFixture(t testing.TB) *snClaimAuthFixture {
 	}
 	controller.SetStConfig(cfg)
 	t.Cleanup(func() { controller.SetStConfig(nil) })
-	blobRoot := t.TempDir()
-	popBlobConfig := server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf(
-		"authority: local\npath: %s\nprefix: claim-auth\nmax_bytes: %d\n", blobRoot, 16*1024*1024,
-	)))
-	t.Cleanup(popBlobConfig)
+	blobRoot := useImplicitLocalBlobStore(t)
 	store, ok := server.LoadBlobStore()
 	if !ok {
 		t.Fatal("synthetic claim artifact store unavailable")
@@ -78,6 +74,29 @@ func newSnClaimAuthFixture(t testing.TB) *snClaimAuthFixture {
 	endpoint := httptest.NewServer(http.HandlerFunc(SnPoolClaim))
 	t.Cleanup(endpoint.Close)
 	return &snClaimAuthFixture{cfg: cfg, store: store, blobRoot: blobRoot, endpoint: endpoint}
+}
+
+// The claim fixture's artifact store loads, and the root the fixture corrupts
+// artifacts under is the one the store writes to. The explicit local
+// minio.yml the fixture wrote before selected the durable volume backend,
+// which refuses without a custody declaration, so every claim test failed
+// before reaching its handler.
+func TestSnClaimAuthFixtureStoresInAPrivateLocalBlobStore(t *testing.T) {
+	fixture := newSnClaimAuthFixture(t)
+	source := filepath.Join(t.TempDir(), "object")
+	if err := os.WriteFile(source, []byte("synthetic claim artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := fixture.store.Prefix() + "/fixture/object"
+	if err := fixture.store.Put(t.Context(), key, source, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.blobRoot, filepath.FromSlash(key))); err != nil {
+		t.Fatalf("the artifact is not under the fixture's root: %v", err)
+	}
+	if !strings.HasPrefix(fixture.blobRoot, os.Getenv("WARP_SITE_HOME")+string(filepath.Separator)) {
+		t.Fatalf("the fixture's root %s is not under its private site home", fixture.blobRoot)
+	}
 }
 
 // Account and provider credentials have genuine active rows behind them.
