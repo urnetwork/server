@@ -2260,7 +2260,7 @@
             "id": 60,
             "type": "timeseries",
             "title": "provider liveness lease writes / s",
-            "description": "Provider liveness lease writes to Redis by outcome. refreshed and refresh_failed: one per sync round of each connection whose client provides for discovery (Public or Network), written before the round's provide read, so a round whose read fails still refreshes; a failed refresh is written again next round, and a lease lapses only after 150 s without one. released and release_failed: the round that reads a client no longer providing; a connection that ends writes nothing, and its client's lease lapses within the window, since another connection or a reconnect may hold it. stamped and stamp_failed: each process's handler stamp in the writer set, every 5 s; the API enforces leases only while every live handler's stamp is current.",
+            "description": "Provider liveness lease writes to Redis, by host and outcome. refreshed and refresh_failed: every 30 s from a worker of each connection whose client provides for discovery (Public or Network), independent of its sync rounds; each write is bounded at 5 s and never retried, and a lease lapses after 150 s without a refresh. released and release_failed: once when a read finds the client no longer providing, again only on a later read; a connection that ends writes nothing, and its client's lease lapses within the window, since another connection or a reconnect may hold it. stamped, stamp_failed and stamp_withheld: each process's handler stamp in the writer set every 5 s, withheld while any of its providing connections has gone 75 s without a successful refresh; the API enforces leases only while every live handler's stamp is current, so a steady stamp_withheld on a host means its leases are not being written and the API fails open.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -2292,8 +2292,8 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum by (outcome) (rate(urnetwork_connect_liveness_lease_writes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
-                    "legendFormat": "{{outcome}}"
+                    "expr": "sum by (host, outcome) (rate(urnetwork_connect_liveness_lease_writes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{outcome}} {{host}}"
                 }
             ]
         }

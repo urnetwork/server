@@ -89,11 +89,18 @@ func newConnectRouter(
 ) (*ConnectRouter, error) {
 	handlerId := model.CreateNetworkClientHandler(ctx)
 
-	// stamp the handler in the provider liveness writer set while it lives,
-	// so the API enforces leases only while every live handler writes them
+	// stamp the handler in the provider liveness writer set while it lives and
+	// every providing connection's lease refreshes succeed, so the API
+	// enforces leases only while every live handler writes them
 	// (transport_announce_liveness_lease.go)
 	go server.HandleError(func() {
-		runProviderLivenessWriter(ctx, handlerId, model.ProviderLivenessWriterInterval, model.PublishProviderLivenessWriter)
+		runProviderLivenessWriter(
+			ctx,
+			handlerId,
+			model.ProviderLivenessWriterInterval,
+			defaultProviderLivenessRefreshes,
+			model.PublishProviderLivenessWriter,
+		)
 	})
 
 	// update the heartbeat
