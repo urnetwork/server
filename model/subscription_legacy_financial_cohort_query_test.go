@@ -16,6 +16,13 @@ func TestLegacyFinancialCohortColdQueryUsesOneTypedExchange(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
+		// The observer counts every connection through its proxies. Pools
+		// with no minimum open no background connection whose startup reply
+		// could land in the observed window beside the query's own reply.
+		popPool := server.Config.PushSimpleResource(server.DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 4\n"))
+		defer popPool()
+		popMaintenancePool := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 4\n"))
+		defer popMaintenancePool()
 		protocol, cleanup := legacyFinancialRunProtocolBind(t, ctx)
 		defer cleanup()
 		ids := []server.Id{server.NewId(), server.NewId(), server.NewId()}
