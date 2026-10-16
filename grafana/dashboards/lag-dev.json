@@ -842,7 +842,7 @@
      "legendFormat": "offered"
     }
    ],
-   "description": "Extenders the lag.dev sample can offer now: an issued certificate whose name is published (C8), active addresses, and a place to pick them by (A4). Zero means every new track answers unavailable. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+   "description": "Extenders the lag.dev sample can offer now: an issued certificate whose name is published (C8) and which A8 has handed to the extender, active addresses, and a place to pick them by (A4). A new extender is counted from its first certificate poll after issuance, up to half an hour after its name is published. Zero means every new track answers unavailable. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
   },
   {
    "id": 16,

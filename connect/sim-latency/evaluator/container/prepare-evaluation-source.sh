@@ -9,7 +9,7 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
 
-readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)
+readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
 
 base_image=""
 destination=""
@@ -110,7 +110,7 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
     printf 'evaluator source lock digest mismatch\n' >&2
     exit 1
 }
-jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' '
+jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' '
     type == "object" and .schema == 1 and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and

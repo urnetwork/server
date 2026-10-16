@@ -760,6 +760,8 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 			CapCounted: true,
 			RenewTime:  now.Add(60 * 24 * time.Hour),
 		})
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].DeliverTime == nil, true)
+		beforeDelivery := server.NowUtc()
 		issued := answer("")
 		connect.AssertEqual(t, issued.State, model.NetworkExtenderMeasurementStateIssued)
 		connect.AssertEqual(t, issued.ChainPem, chainPem)
@@ -768,10 +770,17 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 			t.Fatalf("issued names = %v", issued.Names)
 		}
 		connect.AssertEqual(t, issued.KeySha256, keySha256)
+		// the answer with the chain is its delivery, which the lag.dev sample
+		// and the records wait for (A4, C10); a later answer keeps the first
+		delivered := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].DeliverTime
+		if delivered == nil || delivered.Before(beforeDelivery.Truncate(time.Microsecond)) {
+			t.Fatalf("the answer with the chain recorded its delivery as %v", delivered)
+		}
 		// held, so asking again orders nothing
 		ask()
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStateIssued)
 		connect.AssertEqual(t, len(model.GetPendingNetworkExtenderMeasurements(ctx, server.NowUtc(), 10)), 0)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)[0].DeliverTime.Equal(*delivered), true)
 
 		// the request is the client's own extender's, and no one else's
 		other, err := ExtenderMeasurementCert(&ExtenderMeasurementCertArgs{}, otherSession)

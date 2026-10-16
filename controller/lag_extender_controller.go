@@ -16,13 +16,17 @@ import (
 // that serves the measurement api now. That is the set the measurement dns
 // publishes (GetExtenderMeasurementHosts, C8) -- measurable, with a live
 // certificate for its name -- narrowed to the extenders whose request is
-// answered `issued` (A8). One withdrawn (C9), an owner's opt-out included
-// (decision 18), or waiting on a new request, is not offered, whatever
-// certificate it held. An extender has one measurement name, its id under
-// the measurement zone (N1), which resolves to its active addresses of both
-// families (N3), so there is one entry per extender. These are already
-// public through the certificate logs and dns (§2), so the sample is not
-// partitioned the way the directory's channels are.
+// answered `issued` (A8) and whose certificate A8 has handed to them. The dns
+// publishes a new name within a minute or two of its issuance, but the
+// extender installs the certificate only at its next A8 poll, up to half an
+// hour later, so a name offered before that would answer without it. One
+// withdrawn (C9), an owner's opt-out included (decision 18), or waiting on a
+// new request, is not offered, whatever certificate it held. An extender has
+// one measurement name, its id under the measurement zone (N1), which
+// resolves to its active addresses of both families (N3), so there is one
+// entry per extender. These are already public through the certificate logs
+// and dns (§2), so the sample is not partitioned the way the directory's
+// channels are.
 
 // One extender that serves the measurement api now, with where it is.
 type lagServingExtender struct {
@@ -57,23 +61,25 @@ func Testing_ResetLagServing() {
 	lagServingCache.set = nil
 }
 
-// The extenders of a cached set whose request is still answered issued, read
-// now: a withdrawal, an owner's opt-out included, takes effect at the next
-// request rather than when the cache is next read (C9). One read for the
-// extenders a request offers or tickets, at most 64.
-func lagStillIssued(ctx context.Context, extenders []*lagServingExtender) []*lagServingExtender {
+// The extenders of a cached set that still serve, read at `now`: their
+// request is answered issued and its certificate is delivered. A withdrawal,
+// an owner's opt-out included, takes effect at the next request rather than
+// when the cache is next read (C9), and so does a new key's request, whose
+// certificate the extender has yet to read. One read for the extenders a
+// request offers or tickets, at most 64.
+func lagStillServing(ctx context.Context, extenders []*lagServingExtender, now time.Time) []*lagServingExtender {
 	extenderIds := make([]server.Id, 0, len(extenders))
 	for _, extender := range extenders {
 		extenderIds = append(extenderIds, extender.ExtenderId)
 	}
-	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds)
-	issued := []*lagServingExtender{}
+	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds, now)
+	serving := []*lagServingExtender{}
 	for _, extender := range extenders {
-		if measurement := measurements[extender.ExtenderId]; measurement != nil && measurement.State == model.NetworkExtenderMeasurementStateIssued {
-			issued = append(issued, extender)
+		if measurement := measurements[extender.ExtenderId]; measurement != nil && measurement.Serving() {
+			serving = append(serving, extender)
 		}
 	}
-	return issued
+	return serving
 }
 
 // The serving set, read again when the cached one is older than maxAge.
@@ -88,12 +94,13 @@ func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *la
 	return set
 }
 
-// Reads the extenders that serve the measurement api, each placed by its
-// derived location, else by GeoLite2 City for its first address (A4). An
-// extender that cannot be placed is left out: lag.dev picks its dots by
-// distance (L3), and a dot it cannot place it cannot pick. A deployment with
-// no extender network serves none, and neither does one whose measurement
-// block is off, whose records then carry no measurement id either (C10).
+// Reads the extenders that serve the measurement api: published, issued, and
+// delivered (lagStillServing). Each is placed by its derived location, else by
+// GeoLite2 City for its first address (A4). An extender that cannot be placed
+// is left out: lag.dev picks its dots by distance (L3), and a dot it cannot
+// place it cannot pick. A deployment with no extender network serves none,
+// and neither does one whose measurement block is off, whose records then
+// carry no measurement id either (C10).
 func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 	set := &lagServingSet{
 		loadTime:  now,
@@ -110,14 +117,14 @@ func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 	for _, host := range hosts {
 		extenderIds = append(extenderIds, host.ExtenderId)
 	}
-	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds)
+	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds, now)
 	derivedPlaces := model.GetLagExtenderDerivedPlaces(ctx, extenderIds)
 	for _, host := range hosts {
 		if len(host.Ips) == 0 {
 			continue
 		}
 		measurement := measurements[host.ExtenderId]
-		if measurement == nil || measurement.State != model.NetworkExtenderMeasurementStateIssued {
+		if measurement == nil || !measurement.Serving() {
 			continue
 		}
 		place := derivedPlaces[host.ExtenderId]
@@ -234,11 +241,12 @@ func newLagExtender(extender *lagServingExtender) *LagExtender {
 // countries.
 func LagExtenders(clientSession *session.ClientSession) (*LagExtendersResult, error) {
 	settings := GetLagSettings()
-	set := getLagServing(clientSession.Ctx, server.NowUtc(), settings.ExtenderSampleCache)
+	now := server.NowUtc()
+	set := getLagServing(clientSession.Ctx, now, settings.ExtenderSampleCache)
 	result := &LagExtendersResult{
 		Extenders: []*LagExtender{},
 	}
-	for _, extender := range lagStillIssued(clientSession.Ctx, sampleLagServing(set, settings.ExtenderSample)) {
+	for _, extender := range lagStillServing(clientSession.Ctx, sampleLagServing(set, settings.ExtenderSample), now) {
 		result.Extenders = append(result.Extenders, newLagExtender(extender))
 	}
 	return result, nil
