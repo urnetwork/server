@@ -663,7 +663,9 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 // online answer is the Online pool, which does not).
 // Health/unprobed, not modern (the modern provider gate, while it is on) and
 // ARIN non-quality explain missing native membership while preserving online
-// supply.
+// supply. Unprobed also counts a passing ratio on too few URL runs for a
+// native bucket (egress_native_min_runs.go), out of Quality, and of Speed
+// below its minimum.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"
@@ -681,9 +683,12 @@ const (
 
 // Every reason label, in the order the labels were added. A provider counts
 // under the first reason decideProviderEgress finds, in this precedence:
-// reliability, arin_risk, tls, no_success, low_success, then unprobed or
-// health (exclusive of each other), then not_modern, then arin_non_quality.
-// Blackhole and country are never reported any more.
+// reliability, arin_risk, tls, no_success, low_success, then unprobed for
+// no evidence or health (exclusive of each other), then not_modern, then
+// unprobed for a passing ratio on too few runs (the native URL-run
+// minimums, egress_native_min_runs.go: the provider status's
+// egress_warming_up), then arin_non_quality. Blackhole and country are never
+// reported any more.
 var ProviderExcludedReasons = []string{
 	ProviderExcludedBlackhole,
 	ProviderExcludedTls,
