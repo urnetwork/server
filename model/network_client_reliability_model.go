@@ -1228,7 +1228,9 @@ func reliabilityRunningNeedsRecompute(
 // builds block as soon as they enter the progress view: even a new build can reach
 // its old-snapshot wait before the full-window scan finishes. The five-minute
 // floor excludes tiny routine vacuums only; bootstrap and backwards-window
-// repairs bypass this result in reliabilityRunningNeedsRecompute.
+// repairs bypass this result in reliabilityRunningNeedsRecompute. Each signal
+// is scoped to this database, like the backup check: an old-snapshot wait and
+// a vacuum horizon consider only the build's or vacuum's own database.
 func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.PgTx) (allowed bool) {
 	var establishedVacuum bool
 	var indexBuild bool
@@ -1241,11 +1243,13 @@ func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.Pg
 			SELECT 1
 			FROM pg_stat_progress_vacuum p
 			JOIN pg_stat_activity a USING (pid)
-			WHERE a.query_start <= clock_timestamp() - make_interval(secs => $1)
+			WHERE p.datname = current_database()
+				AND a.query_start <= clock_timestamp() - make_interval(secs => $1)
 			),
 			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_create_index p
+			WHERE p.datname = current_database()
 			),
 			(`+postgresLogicalBackupSnapshotActiveSQL+`)
 		`,
