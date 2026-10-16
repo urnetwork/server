@@ -186,8 +186,11 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	// Keep current release instructions aligned without rewriting historical
 	// model identities in the incident's captured validation evidence.
 	incident := strings.Join(strings.Fields(string(incidentRunbook)), " ")
-	if !strings.Contains(incident, "Have Terra medium verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Astra max reviews the repair and merges") {
+	if !strings.Contains(incident, "Have Sol medium verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Astra max reviews the repair and merges") {
 		t.Error("STAGING-4-G5-INCIDENT.md is missing the current release-review model roles")
+	}
+	if strings.Contains(incident, "Have Terra medium verify") {
+		t.Error("STAGING-4-G5-INCIDENT.md retains the superseded Terra medium release-review role")
 	}
 }
 
