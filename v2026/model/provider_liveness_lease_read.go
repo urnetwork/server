@@ -55,6 +55,11 @@ const (
 	providerLivenessFailOpenStale = "stale"
 	// more than half of a shard's candidates read offline
 	providerLivenessFailOpenOfflineFraction = "offline_fraction"
+	// more than providerLivenessReadOfflineShare of a read's judged
+	// candidates read offline
+	providerLivenessFailOpenReadOfflineFraction = "read_offline_fraction"
+	// a shard read failed within the last providerLivenessReadBackoff
+	providerLivenessFailOpenReadBackoff = "read_backoff"
 )
 
 var findProviders2LivenessCandidates = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -69,7 +74,7 @@ var findProviders2LivenessReadErrors = prometheus.NewCounter(prometheus.CounterO
 
 var findProviders2LivenessFailOpens = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_liveness_failopens_total",
-	Help: "Provider liveness lease reads that admitted candidates they could not judge, by reason: handlers and coverage, writers_error and shard_error per read, stale and offline_fraction per shard",
+	Help: "Provider liveness lease reads that admitted candidates they could not judge, by reason: handlers, coverage, writers_error, shard_error, read_backoff and read_offline_fraction per read, stale and offline_fraction per shard",
 }, []string{"reason"})
 
 // No labels: the child exists from a process's first verdict on coverage, so a
@@ -96,6 +101,25 @@ const providerLivenessReadTimeout = 150 * time.Millisecond
 // from this many candidates in one read; below it, one offline candidate is
 // too much of the sample to say anything.
 const providerLivenessBreakerMinCandidates = 8
+
+// A read in which more than this share of its judged candidates, and at
+// least providerLivenessReadBreakerMinOffline of them, read offline admits
+// them all: churn leaves 5-10% offline, and a lapse spread across shards, too
+// thin in each for the shard breaker, would otherwise empty a small location
+// or a refill page.
+const providerLivenessReadOfflineShare = 0.3
+
+// Below this many offline candidates a read is judged whatever their share,
+// so a small location keeps losing its one or two offline providers.
+const providerLivenessReadBreakerMinOffline = 3
+
+// After a shard read fails, every read of the process fails open for this
+// long rather than wait out the budget against the same slow node again.
+const providerLivenessReadBackoff = 5 * time.Second
+
+// The bound of the read of the live handlers, which runs detached from the
+// request that finds the read due.
+const providerLivenessHandlersLoadTimeout = time.Second
 
 // How long a process reuses its read of the live connect handlers.
 const providerLivenessHandlersMaxAge = 30 * time.Second
@@ -152,8 +176,12 @@ func (self *providerLivenessHandlers) get(ctx context.Context) ([]server.Id, boo
 					self.handlerIds, self.readTime = loadedHandlerIds, now
 				}
 			}()
+			// bounded, and detached from the request that found the read due,
+			// which may end before the read does
+			loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), providerLivenessHandlersLoadTimeout)
+			defer loadCancel()
 			// the heartbeats are the connect hosts' wall clocks
-			loadedHandlerIds, err = self.load(ctx, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
+			loadedHandlerIds, err = self.load(loadCtx, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
 		}()
 		if err == nil {
 			return loadedHandlerIds, true
@@ -206,7 +234,8 @@ func loadLiveNetworkClientHandlerIds(ctx context.Context, minHeartbeatTime time.
 
 // The verdict on writer coverage, reused for ProviderLivenessCoverageCacheAge
 // of this process's monotonic clock: whether every live handler has a current
-// stamp, and when not, why.
+// stamp, and when not, why. One caller judges at a time; the others take the
+// previous verdict, or none, which is not covered.
 type providerLivenessCoverage struct {
 	handlers *providerLivenessHandlers
 	now      func() time.Time
@@ -216,6 +245,7 @@ type providerLivenessCoverage struct {
 	reason    string
 	// zero before the first verdict
 	checkTime time.Time
+	judging   bool
 }
 
 var defaultProviderLivenessCoverage = &providerLivenessCoverage{
@@ -228,26 +258,38 @@ var defaultProviderLivenessCoverage = &providerLivenessCoverage{
 // error is the context's alone.
 func (self *providerLivenessCoverage) get(ctx context.Context) (covered bool, reason string, returnErr error) {
 	now := self.now()
-	cached := false
+	judge := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		if !self.checkTime.IsZero() && now.Sub(self.checkTime) < ProviderLivenessCoverageCacheAge {
-			covered, reason, cached = self.covered, self.reason, true
+			covered, reason = self.covered, self.reason
+			return
 		}
+		if self.judging {
+			// another caller is judging: its previous verdict, or none
+			if self.checkTime.IsZero() {
+				covered, reason = false, providerLivenessFailOpenCoverage
+			} else {
+				covered, reason = self.covered, self.reason
+			}
+			return
+		}
+		self.judging = true
+		judge = true
 	}()
-	if cached {
+	if !judge {
 		return
 	}
-	covered, reason, returnErr = self.read(ctx)
-	if returnErr != nil {
-		return
-	}
-	func() {
+	defer func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.covered, self.reason, self.checkTime = covered, reason, now
+		self.judging = false
+		if returnErr == nil {
+			self.covered, self.reason, self.checkTime = covered, reason, now
+		}
 	}()
+	covered, reason, returnErr = self.read(ctx)
 	return
 }
 
@@ -256,6 +298,41 @@ func (self *providerLivenessCoverage) reset() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.covered, self.reason, self.checkTime = false, "", time.Time{}
+}
+
+// When the process's shard reads last failed, by its monotonic clock.
+type providerLivenessReadHealth struct {
+	now func() time.Time
+
+	stateLock sync.Mutex
+	// zero while no read has failed
+	failTime time.Time
+}
+
+var defaultProviderLivenessReadHealth = &providerLivenessReadHealth{
+	now: time.Now,
+}
+
+// Whether a shard read failed within the last providerLivenessReadBackoff.
+func (self *providerLivenessReadHealth) backingOff() bool {
+	now := self.now()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return !self.failTime.IsZero() && now.Sub(self.failTime) < providerLivenessReadBackoff
+}
+
+func (self *providerLivenessReadHealth) failed() {
+	now := self.now()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.failTime = now
+}
+
+// Forgets the failure.
+func (self *providerLivenessReadHealth) reset() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.failTime = time.Time{}
 }
 
 // Reads the live handlers and their stamps, and sets the coverage gauge.
@@ -308,9 +385,10 @@ func (self *providerLivenessCoverage) read(ctx context.Context) (bool, string, e
 
 // Runs one pipelined read within providerLivenessReadTimeout on the
 // deadline-bound pool, which applies the deadline to its socket I/O and
-// retries no command or redirect. The read is single-key commands only, which
-// that pool's routing serves shard by shard. A command's own failure is on
-// the command; the error is the read's.
+// retries no command or redirect, without its preflight ping, which would
+// reach an arbitrary node. The read is single-key commands only, which that
+// pool's routing serves shard by shard. A command's own failure is on the
+// command; the error is the read's.
 func readProviderLiveness(ctx context.Context, queue func(context.Context, redis.Pipeliner)) error {
 	readCtx, readCancel := context.WithTimeout(ctx, providerLivenessReadTimeout)
 	defer readCancel()
@@ -323,7 +401,7 @@ func readProviderLiveness(ctx context.Context, queue func(context.Context, redis
 			return readCtx.Err()
 		}
 		return nil
-	})
+	}, server.OptRedisNoPreflight())
 }
 
 func providerLivenessZSliceFailed(cmd *redis.ZSliceCmd) bool {
@@ -429,6 +507,10 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 		failAllOpen(reason)
 		return
 	}
+	if defaultProviderLivenessReadHealth.backingOff() {
+		failAllOpen(providerLivenessFailOpenReadBackoff)
+		return
+	}
 
 	shards := slices.Sorted(maps.Keys(shardClientIds))
 	shardNewestCmds := make([]*redis.ZSliceCmd, len(shards))
@@ -448,6 +530,7 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 		return nil, nil, err
 	}
 	if readErr != nil {
+		defaultProviderLivenessReadHealth.failed()
 		findProviders2LivenessReadErrors.Inc()
 		failAllOpen(providerLivenessFailOpenShard)
 		return
@@ -492,7 +575,22 @@ func getProviderLivenessExclusions(ctx context.Context, clientIds []server.Id, n
 		findProviders2LivenessReadErrors.Inc()
 		findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenShard).Inc()
 	}
+	judgedCount := len(seenClientIds) - len(unknown)
+	if providerLivenessReadBreakerTrips(judgedCount, len(offline)) {
+		findProviders2LivenessFailOpens.WithLabelValues(providerLivenessFailOpenReadOfflineFraction).Inc()
+		for clientId := range offline {
+			unknown[clientId] = true
+		}
+		offline = map[server.Id]bool{}
+	}
 	return
+}
+
+// Whether a read is a lapse rather than churn: more than
+// providerLivenessReadOfflineShare of its judged candidates offline, and at
+// least providerLivenessReadBreakerMinOffline of them.
+func providerLivenessReadBreakerTrips(judgedCount int, offlineCount int) bool {
+	return providerLivenessReadBreakerMinOffline <= offlineCount && providerLivenessReadOfflineShare*float64(judgedCount) < float64(offlineCount)
 }
 
 // The rank mode label of a request: its mode, or unknown for a mode no
