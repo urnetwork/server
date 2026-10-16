@@ -358,9 +358,9 @@ func TestConnectionAnnounceDisconnectsOnceOnClose(t *testing.T) {
 	})
 }
 
-// The control for the raise: a location write that returns an error, here the
-// mmdb lookup that cannot place a documentation address, keeps the retry as it
-// was. The connection stays registered and connected while the retry owns its
+// The control for the raise: a location write that returns an ordinary error
+// keeps its retry. The injected lookup error is independent of the fixture
+// mmdb, which may intentionally contain documentation addresses. The connection stays registered and connected while the retry owns its
 // location, and close disconnects it exactly once.
 func TestConnectionAnnounceRetriesLocationError(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -372,6 +372,7 @@ func TestConnectionAnnounceRetriesLocationError(t *testing.T) {
 		fixture.settings.LocationRetryTimeout = time.Millisecond
 		writes := make(chan locationWriteForTest, 4)
 		firstErrs := make(chan error, 1)
+		lookupErr := errors.New("synthetic location lookup failure")
 		retried := make(chan struct{})
 		// attempts are sequential: the retry goroutine starts after the first
 		// attempt returns
@@ -389,15 +390,14 @@ func TestConnectionAnnounceRetriesLocationError(t *testing.T) {
 				}
 				return nil
 			}
-			err := controller.SetConnectionLocation(transportCtx, connectionId, clientIp)
-			firstErrs <- err
-			return err
+			firstErrs <- lookupErr
+			return lookupErr
 		})
 		defer fixture.announce.CloseAndWait()
 
 		fixture.awaitLive(t, testCtx, fixture.registered, "registering its connection")
-		if observedErrs := drainForTest(firstErrs); len(observedErrs) != 1 || observedErrs[0] == nil {
-			t.Fatalf("first location write errors = %v, want the lookup error for a documentation address", observedErrs)
+		if observedErrs := drainForTest(firstErrs); len(observedErrs) != 1 || !errors.Is(observedErrs[0], lookupErr) {
+			t.Fatalf("first location write errors = %v, want the injected lookup error", observedErrs)
 		}
 		fixture.awaitLive(t, testCtx, retried, "retrying the location write")
 		observedWrites := drainForTest(writes)
