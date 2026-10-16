@@ -76,6 +76,7 @@ func getProviderNamedSubscriberExclusions(ctx context.Context, clientIds []serve
 	if returnErr != nil {
 		return nil, nil, returnErr
 	}
+	observeSubscriberEligibilityEvent("offline", len(offline))
 	return offline, risky, nil
 }
 
