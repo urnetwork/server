@@ -9,6 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
@@ -139,8 +141,13 @@ func SetProxyWgHandoffForGeneration(
 	// sealed, never plain: the blob pairs each peer's raw public ip:port
 	// endpoint with its tunnel ClientIpv4 (joinable to client_id), so at
 	// rest it must be encrypted (server.WgHandoffSeal; key from
-	// vault/<env>/wireguard.yml)
-	sealedHandoff := server.WgHandoffSeal(handoffJson)
+	// vault/<env>/wireguard.yml). Without a key the handoff, best effort by
+	// design, is not stored at all.
+	sealedHandoff, err := server.WgHandoffSeal(handoffJson)
+	if err != nil {
+		glog.Warningf("[wg]handoff for %s/%s not stored: %s\n", proxyHost, block, err)
+		return
+	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		server.Raise(r.Set(
