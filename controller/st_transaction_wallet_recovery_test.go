@@ -55,6 +55,9 @@ func stWalletRecoveryEndpoint(t testing.TB, fixture *stDepositCustodyRpc, hook f
 					t.Error(err)
 					return
 				}
+				for index := range calls {
+					calls[index].Batched = true
+				}
 			} else {
 				var call stEpochRPCRequest
 				if err := json.Unmarshal(body, &call); err != nil {

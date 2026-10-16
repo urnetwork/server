@@ -43,15 +43,36 @@ func stTransactionEndpointFixture(t testing.TB, operator uint64, hook func(http.
 	return client, fixture
 }
 
+// The handshake is the endpoint dial's chain id probe: an eth_chainId request
+// of its own. Each deposit custody read on the verified endpoint names
+// eth_chainId three more times, each a chain identity witness inside a
+// JSON-RPC batch: the current client-key authority read opens and closes with
+// one, and the custody boundary witness is the third. A new deposit reads
+// custody twice, to prepare it and to validate its signed attempt; a deposit
+// whose stored attempt is reconciled reads it once.
+func stEndpointHandshake(call stEpochRPCRequest) bool {
+	return call.Method == "eth_chainId" && !call.Batched
+}
+
+// A chain identity witness of a deposit custody read (see stEndpointHandshake).
+func stEndpointChainIdWitness(call stEpochRPCRequest) bool {
+	return call.Method == "eth_chainId" && call.Batched
+}
+
+const stDepositCustodyChainIdWitnesses = 3
+
 // A transient first handshake occurs before any nonce or signing authority.
 // Its read retry reaches one real deposit and one persisted signed attempt.
 func TestStTransactionEndpointTransientHandshakeReachesSingleDeposit(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		var handshakes atomic.Int32
+		var handshakes, witnesses atomic.Int32
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method == "eth_chainId" && handshakes.Add(1) == 1 {
+			if stEndpointChainIdWitness(call) {
+				witnesses.Add(1)
+			}
+			if stEndpointHandshake(call) && handshakes.Add(1) == 1 {
 				writer.WriteHeader(http.StatusServiceUnavailable)
 				return true
 			}
@@ -77,9 +98,12 @@ func TestStTransactionEndpointTransientHandshakeReachesSingleDeposit(t *testing.
 			t.Fatal("endpoint read retry did not retain one finalized intent", intent)
 		}
 		attempts := model.GetStTransactionAttempts(t.Context(), intent.IntentId)
+		if handshakes.Load() != 2 || witnesses.Load() != 2*stDepositCustodyChainIdWitnesses {
+			t.Fatalf("handshakes = %d, chain identity witnesses = %d; want 2 and %d", handshakes.Load(), witnesses.Load(), 2*stDepositCustodyChainIdWitnesses)
+		}
 		fixture.stateLock.Lock()
 		defer fixture.stateLock.Unlock()
-		if handshakes.Load() != 2 || waits != 1 || len(attempts) != 1 || len(fixture.sent) != 1 || hash != attempts[0].TxHash || fixture.sent[0].Hash().Hex() != hash || fixture.sent[0].Nonce() != 7 || fixture.accountNonce != 8 || fixture.deposited.Int64() != 100 || fixture.depositNonce.Int64() != 4 {
+		if waits != 1 || len(attempts) != 1 || len(fixture.sent) != 1 || hash != attempts[0].TxHash || fixture.sent[0].Hash().Hex() != hash || fixture.sent[0].Nonce() != 7 || fixture.accountNonce != 8 || fixture.deposited.Int64() != 100 || fixture.depositNonce.Int64() != 4 {
 			t.Fatal("handshake retry changed original nonce, signature or principal")
 		}
 	})
@@ -91,9 +115,12 @@ func TestStTransactionEndpointTransientHandshakeRecoversStoredDeposit(t *testing
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		var handshakes atomic.Int32
+		var handshakes, witnesses atomic.Int32
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method == "eth_chainId" && handshakes.Add(1) == 1 {
+			if stEndpointChainIdWitness(call) {
+				witnesses.Add(1)
+			}
+			if stEndpointHandshake(call) && handshakes.Add(1) == 1 {
 				writer.WriteHeader(http.StatusServiceUnavailable)
 				return true
 			}
@@ -113,9 +140,12 @@ func TestStTransactionEndpointTransientHandshakeRecoversStoredDeposit(t *testing
 		}
 		retained := model.GetStTransactionIntent(t.Context(), intent.LogicalKey)
 		after := model.GetStTransactionAttempts(t.Context(), intent.IntentId)
+		if handshakes.Load() != 2 || witnesses.Load() != stDepositCustodyChainIdWitnesses {
+			t.Fatalf("handshakes = %d, chain identity witnesses = %d; want 2 and %d", handshakes.Load(), witnesses.Load(), stDepositCustodyChainIdWitnesses)
+		}
 		fixture.stateLock.Lock()
 		defer fixture.stateLock.Unlock()
-		if handshakes.Load() != 2 || waits != 1 || retained.Status != model.StTxFinalized || retained.CurrentTxHash == nil || *retained.CurrentTxHash != before[0].TxHash || retained.AttemptCount != 1 || !stWalletRecoveryOriginalsEqual(before, after) || len(fixture.sent) != 0 || fixture.deposited.Int64() != 100 || fixture.depositNonce.Int64() != 4 {
+		if waits != 1 || retained.Status != model.StTxFinalized || retained.CurrentTxHash == nil || *retained.CurrentTxHash != before[0].TxHash || retained.AttemptCount != 1 || !stWalletRecoveryOriginalsEqual(before, after) || len(fixture.sent) != 0 || fixture.deposited.Int64() != 100 || fixture.depositNonce.Int64() != 4 {
 			t.Fatal("endpoint recovery rewrote or repeated the original deposit")
 		}
 	})
@@ -127,11 +157,15 @@ func TestStTransactionEndpointHardHandshakePreservesStoredAttempt(t *testing.T) 
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		var handshakes, otherReads atomic.Int32
+		var handshakes, witnesses, otherReads atomic.Int32
 		var wrongChain atomic.Bool
 		wrongChain.Store(true)
 		client, fixture := stTransactionEndpointFixture(t, 1, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-			if call.Method != "eth_chainId" {
+			if stEndpointChainIdWitness(call) {
+				witnesses.Add(1)
+				return false
+			}
+			if !stEndpointHandshake(call) {
 				otherReads.Add(1)
 				return false
 			}
@@ -148,7 +182,7 @@ func TestStTransactionEndpointHardHandshakePreservesStoredAttempt(t *testing.T) 
 		client.readHooks = stRpcReadHooks{wait: func(ctx context.Context, _ time.Duration) error { waits++; return ctx.Err() }}
 		_, err := client.DepositCredit(t.Context(), 7, 1, big.NewInt(100))
 		retained := model.GetStTransactionIntent(t.Context(), intent.LogicalKey)
-		if err == nil || !strings.Contains(err.Error(), "reports chain id") || handshakes.Load() != 1 || otherReads.Load() != 0 || waits != 0 || retained.Status != intent.Status || !stWalletRecoveryOriginalsEqual(before, model.GetStTransactionAttempts(t.Context(), intent.IntentId)) {
+		if err == nil || !strings.Contains(err.Error(), "reports chain id") || handshakes.Load() != 1 || witnesses.Load() != 0 || otherReads.Load() != 0 || waits != 0 || retained.Status != intent.Status || !stWalletRecoveryOriginalsEqual(before, model.GetStTransactionAttempts(t.Context(), intent.IntentId)) {
 			t.Fatal("hard endpoint identity was retried or changed signed custody", err)
 		}
 		wrongChain.Store(false)
@@ -156,9 +190,12 @@ func TestStTransactionEndpointHardHandshakePreservesStoredAttempt(t *testing.T) 
 		if _, err := client.DepositCredit(t.Context(), 7, 1, big.NewInt(100)); err != nil {
 			t.Fatal("restored endpoint did not recover original receipt", err)
 		}
+		if handshakes.Load() != 2 || witnesses.Load() != stDepositCustodyChainIdWitnesses {
+			t.Fatalf("handshakes = %d, chain identity witnesses = %d; want 2 and %d", handshakes.Load(), witnesses.Load(), stDepositCustodyChainIdWitnesses)
+		}
 		fixture.stateLock.Lock()
 		defer fixture.stateLock.Unlock()
-		if handshakes.Load() != 2 || waits != 0 || len(fixture.sent) != 0 {
+		if waits != 0 || len(fixture.sent) != 0 {
 			t.Fatal("restored chain repeated a retained signature")
 		}
 	})
@@ -174,7 +211,7 @@ func TestStTransactionEndpointHandshakeBoundRetainsOriginalAttempt(t *testing.T)
 			var handshakes, otherReads atomic.Int32
 			operator := uint64(index + 1)
 			client, fixture := stTransactionEndpointFixture(t, operator, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
-				if call.Method != "eth_chainId" {
+				if !stEndpointHandshake(call) {
 					otherReads.Add(1)
 					return false
 				}
