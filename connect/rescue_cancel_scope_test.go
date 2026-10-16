@@ -14,6 +14,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
 
@@ -111,5 +113,80 @@ func TestConnectionAnnounceWorkerRaiseKeepsTransport(t *testing.T) {
 			t.Fatal("a child raise canceled the transport")
 		}
 		announce.closeWorkersAndWait()
+	})
+}
+
+// A raise in the resident's control consumer cancels the resident, so its
+// client reconnects to a fresh one instead of keeping a resident whose
+// control frames nothing consumes.
+func TestResidentControlConsumerRaiseCancelsResident(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		settings := DefaultExchangeSettings()
+		resident := &Resident{
+			ctx:            ctx,
+			cancel:         cancel,
+			exchange:       &Exchange{settings: settings},
+			clientId:       server.NewId(),
+			controlLimiter: newLimiter(ctx, 0),
+		}
+		resident.residentController = newResidentController(ctx, resident.clientId, nil, settings)
+		defer resident.residentController.Close()
+		resident.residentController.beforeHandleControlFramesForTest = func() {
+			panic(errors.New("synthetic control consumer fault"))
+		}
+		resident.startClientCallbackWorkers()
+		resident.controlIngress <- []*protocol.Frame{}
+		synctest.Wait()
+		if ctx.Err() == nil {
+			t.Fatal("a raise in the control consumer left the resident running without one")
+		}
+		resident.callbackWorkers.Wait()
+	})
+}
+
+// A raise in a forward shard's consumer cancels the resident, so its client
+// reconnects to a fresh one instead of keeping a resident that refuses every
+// forward to the shard's destinations. The fault comes after the forward to
+// the destination has started, and that forward ends with the resident before
+// it reads anything, so nothing looks the destination up.
+func TestResidentForwardConsumerRaiseCancelsResident(t *testing.T) {
+	// the process message pool starts its stats loop on first use, which must
+	// not be inside the bubble
+	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(64))
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		settings := DefaultExchangeSettings()
+		settings.ForwardEnforceActiveContracts = false
+		resident := &Resident{
+			ctx:            ctx,
+			cancel:         cancel,
+			exchange:       &Exchange{settings: settings},
+			clientId:       server.NewId(),
+			forwards:       map[server.Id]*ResidentForward{},
+			controlLimiter: newLimiter(ctx, 0),
+		}
+		resident.residentController = newResidentController(ctx, resident.clientId, nil, settings)
+		defer resident.residentController.Close()
+		resident.afterForwardWorkersStartedForTest = func(*ResidentForward) {
+			panic(errors.New("synthetic forward consumer fault"))
+		}
+		resident.startClientCallbackWorkers()
+		queue := resident.startClientForwardIngress(0)
+		queue <- residentForwardIngress{
+			path: clientconnect.TransferPath{
+				SourceId:      clientconnect.Id(resident.clientId),
+				DestinationId: clientconnect.Id(server.NewId()),
+			},
+			transferFrameBytes: clientconnect.MessagePoolGet(64),
+		}
+		synctest.Wait()
+		if ctx.Err() == nil {
+			t.Fatal("a raise in a forward consumer left the resident running without it")
+		}
+		resident.callbackWorkers.Wait()
+		resident.forwardWorkers.Wait()
 	})
 }
