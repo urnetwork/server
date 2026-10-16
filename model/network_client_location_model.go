@@ -6192,10 +6192,12 @@ func FindProviders2(
 		hardExcludedClientIds := map[server.Id]bool{}
 		qualityExcludedClientIds := map[server.Id]bool{}
 		// The candidates this request's live read (readQuality) found
-		// without a live connection. Each is refused Quality and leaves
-		// every draw of this request, native, borrowed and Online fallback;
-		// a named provider stays where its spec put it. Nothing outside the
-		// request keeps the verdict.
+		// without a live connection, and those with no current liveness
+		// lease (provider_liveness_lease.go). Each leaves every draw of this
+		// request, native, borrowed and Online fallback. A named provider is
+		// never read for a lease, and one the live read finds offline later
+		// stays where its spec put it. Nothing outside the request keeps the
+		// verdict.
 		offlineClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
@@ -6281,6 +6283,28 @@ func FindProviders2(
 				return err
 			}
 			maps.Copy(hardExcludedClientIds, excluded)
+			// A candidate without a current liveness lease leaves every draw
+			// of the request like one the live read finds offline. The lease
+			// read fails open (provider_liveness_lease_read.go), and judges
+			// at its own instant, which needs nothing of the request's. A
+			// named provider keeps its place whatever its lease: a redial
+			// that names its exit gets one try, and a wrong offline verdict
+			// there changes the user's IP.
+			namedClientIdSet := map[server.Id]bool{}
+			for _, clientId := range namedClientIds {
+				namedClientIdSet[clientId] = true
+			}
+			leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
+			for _, clientId := range candidateClientIds {
+				if !hardExcludedClientIds[clientId] && !namedClientIdSet[clientId] {
+					leaseClientIds = append(leaseClientIds, clientId)
+				}
+			}
+			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
+			if err != nil {
+				return err
+			}
+			maps.Copy(offlineClientIds, offline)
 			for _, clientId := range candidateClientIds {
 				exclusionReadClientIds[clientId] = true
 			}

@@ -11,13 +11,13 @@ import (
 
 var subscriberEligibilityEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_subscriber_eligibility_events_total",
-	Help: "Subscriber eligibility cache candidate events and SQL batch attempts; positive eligibility and successful requests are not cached or counted here.",
+	Help: "Subscriber eligibility cache candidate events and SQL batch attempts, and candidates a subscriber read found without a live connection (offline); positive eligibility and successful requests are not cached or counted here.",
 }, []string{"event"})
 
 var subscriberEligibilityEventCounters = map[string]prometheus.Counter{}
 
 func init() {
-	for _, event := range []string{"negative_hit", "negative_miss", "coalesced_wait", "capacity_bypass", "fresh_reread", "sql_batch"} {
+	for _, event := range []string{"negative_hit", "negative_miss", "coalesced_wait", "capacity_bypass", "fresh_reread", "sql_batch", "offline"} {
 		subscriberEligibilityEventCounters[event] = subscriberEligibilityEvents.WithLabelValues(event)
 	}
 	prometheus.MustRegister(subscriberEligibilityEvents)
@@ -33,7 +33,9 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 // The exclusions of a request that names its providers by client id and has no
 // discovery spec. Named providers keep the common exclusions in every mode. A
 // named Quality provider also needs a live connection with no live ARIN risk,
-// but not ARIN quality verification (getProviderNamedSubscriberExclusions).
+// but not ARIN quality verification (getProviderNamedSubscriberExclusions). A
+// named provider is never read for a liveness lease: a redial that names its
+// exit gets one try, and a wrong offline verdict there changes the user's IP.
 // Discovery, force_minimum included, evaluates the full subscriber evidence
 // for native Quality membership; Speed and Online borrowing use the
 // independent common exclusions, and leave out a candidate the request's own
@@ -144,6 +146,7 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 	if readErr != nil {
 		return nil, nil, nil, readErr
 	}
+	observeSubscriberEligibilityEvent("offline", len(offline))
 	return negative, risky, offline, nil
 }
 
