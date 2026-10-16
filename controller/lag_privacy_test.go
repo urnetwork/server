@@ -355,6 +355,10 @@ func TestLagStoresNoClientAddress(t *testing.T) {
 			{netip.MustParseAddr("3fff:db8::77"), 6, "3fff:db8:", "x3fff0db80000", osakaBlock, 34.6937, 135.5022},
 		}
 		for _, visit := range visits {
+			// this test's GeoLite2 places the visitor, not an ip override
+			if ipInfo, err := server.GetIpInfo(visit.addr); err != nil || ipInfo.City != visit.block.city || ipInfo.Latitude != visit.block.latitude {
+				t.Fatalf("%s is not placed by this test's GeoLite2: %+v, %v", visit.addr, ipInfo, err)
+			}
 			clientAddress := netip.AddrPortFrom(visit.addr, 51000).String()
 
 			guest := lagSessionFrom(t, ctx, clientAddress)
