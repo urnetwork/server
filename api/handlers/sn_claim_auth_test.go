@@ -506,6 +506,8 @@ func TestSnPoolClaimLegacyRefusesRetainedProviderArtifact(t *testing.T) {
 }
 
 // Missing or corrupt original bytes never downgrade to account-wallet selection.
+// The refusal names only its class: the store's own text, which holds its
+// paths or endpoint, stays in the server log.
 func TestSnPoolClaimArtifactReadFailureNeverFallsBackToLegacy(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -538,7 +540,10 @@ func TestSnPoolClaimArtifactReadFailureNeverFallsBackToLegacy(t *testing.T) {
 				tb.Fatal(err)
 			}
 			response := fixture.request(tb, token, query)
-			if response.statusCode != http.StatusInternalServerError || !strings.Contains(string(response.body), "artifact integrity failure") {
+			if strings.Contains(string(response.body), fixture.blobRoot) || strings.Contains(string(response.body), "SnPoolClaim") {
+				tb.Fatalf("%s original sent its raw error text: status=%d body=%s", fault, response.statusCode, response.body)
+			}
+			if response.statusCode != http.StatusServiceUnavailable || string(response.body) != "payout artifact integrity failure\n" {
 				tb.Fatalf("%s original did not refuse the provider read: status=%d body=%s", fault, response.statusCode, response.body)
 			}
 			query.Set("legacy_coldkey", selector)
@@ -592,7 +597,7 @@ func TestSnPoolClaimRejectsArtifactOutsideOriginalScope(t *testing.T) {
 				fixture.retain(tb, epoch, artifact)
 			}
 			response := fixture.request(tb, token, url.Values{"epoch": {strconv.FormatUint(epoch, 10)}})
-			if response.statusCode != http.StatusInternalServerError || !strings.Contains(string(response.body), "original claim scope") {
+			if response.statusCode != http.StatusServiceUnavailable || string(response.body) != "payout artifact differs from its original claim scope\n" {
 				tb.Fatalf("%s mismatch did not refuse the original scope: status=%d body=%s", fault, response.statusCode, response.body)
 			}
 		}
@@ -617,8 +622,31 @@ func TestSnPoolClaimRejectsChangedPayoutLeafRoot(t *testing.T) {
 		leaves[0].ShareBps--
 		model.SetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 50, fixture.cfg.NoId, leaves)
 		response := fixture.request(tb, token, url.Values{"epoch": {"50"}})
-		if response.statusCode != http.StatusInternalServerError || !strings.Contains(string(response.body), "retained artifact root") {
+		if response.statusCode != http.StatusServiceUnavailable || string(response.body) != "payout leaf set differs from its retained artifact root\n" {
 			tb.Fatalf("changed Sql tree escaped the retained root: status=%d body=%s", response.statusCode, response.body)
+		}
+	})
+}
+
+// A legacy selector that is not an ss58 address is the caller's error. It
+// declared no status, so it was answered as an internal failure, 500, with the
+// decoder's text and the handler's Go name.
+func TestSnPoolClaimRefusesMalformedLegacyColdkeyAsBadRequest(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		fixture := newSnClaimAuthFixture(tb)
+		account := snClaimAuthAccount(tb)
+		// A legacy pool: a finalized epoch with network-only leaves and no original.
+		model.UpsertStEpoch(tb.Context(), fixture.cfg.DeploymentKey(), &model.StEpoch{
+			Epoch: 70, StartBlock: 100, CommitDeadlineBlock: 200, TrailsDeadlineBlock: 210, FinalizeBlock: 220, Status: model.StEpochStatusFinalized,
+		})
+		model.SetStPayoutLeaves(tb.Context(), fixture.cfg.DeploymentKey(), 70, fixture.cfg.NoId, []*model.StPayoutLeaf{
+			{Epoch: 70, NoId: fixture.cfg.NoId, NetworkId: account.NetworkId, Coldkey: [32]byte{0xf1}, ShareBps: 10_000, LeafIndex: 0},
+		})
+		response := fixture.request(tb, account.Testing_Sign(), url.Values{"epoch": {"70"}, "legacy_coldkey": {"synthetic-not-ss58"}})
+		if response.statusCode != http.StatusBadRequest || string(response.body) != "legacy original coldkey is not an ss58 address\n" {
+			tb.Fatalf("malformed legacy selector was not refused as bad request: status=%d body=%s", response.statusCode, response.body)
 		}
 	})
 }

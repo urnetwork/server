@@ -275,7 +275,7 @@ func SnPoolClaim(
 	}
 
 	if artifactRecord != nil && root != artifactRecord.PayoutRoot {
-		return nil, fmt.Errorf("payout leaf set differs from its retained artifact root")
+		return nil, snPoolClaimUnavailable("payout leaf set differs from its retained artifact root", nil)
 	}
 
 	result := &SnPoolClaimResult{
