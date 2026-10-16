@@ -272,6 +272,10 @@ func defaultLocalBlobRoot() string {
 // local store is permitted only in WARP_ENV=local; elsewhere missing MinIO
 // configuration disables upload instead of filling the service host's disk.
 func LoadBlobStore() (store BlobStore, ok bool) {
+	// a test's stand-in (UseLocalBlobStoreForTest), never set in production
+	if standIn := blobStoreForTest.Load(); standIn != nil {
+		return *standIn, true
+	}
 	config, present := LoadBlobStoreConfig()
 	if !present {
 		env, _ := Env()

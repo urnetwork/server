@@ -713,6 +713,9 @@ func TestGetIpInfoHandBuiltGeoLite2City(t *testing.T) {
 		t.Fatal(err)
 	}
 	useIpDbFile(t, path)
+	// every lookup below is the file's own, even of a documentation address
+	// a portable fixture's override would answer
+	UseNoIpOverridesForTest(t)
 
 	// 0.0.0.0/1 holds the record
 	addr := netip.MustParseAddr("81.2.69.142")
@@ -807,4 +810,76 @@ func TestRepositorySyntheticIpDbKnowsNoAddress(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, *ipInfo, IpInfo{})
 	}
+}
+
+// Records the cleanups a helper registers, so a test can run them itself and
+// observe what they put back.
+type ipTestCleanups struct {
+	testing.TB
+	cleanups []func()
+}
+
+func (self *ipTestCleanups) Cleanup(cleanup func()) {
+	self.cleanups = append(self.cleanups, cleanup)
+}
+
+// A test in another package reads an address an override answers from the
+// databases instead, as a deployment without the override does, and the
+// process's overrides are back when that test ends.
+func TestUseNoIpOverridesForTestStandsInUntilTheTestEnds(t *testing.T) {
+	// a documentation address: the overrides of this test place it, and the
+	// repository's synthetic database knows no address
+	addr := netip.MustParseAddr("192.0.2.1")
+	previous := ipOverrides
+	ipOverrides = func() []*ipOverride {
+		return []*ipOverride{{prefix: netip.MustParsePrefix("192.0.2.0/24"), ipInfo: IpInfo{CountryCode: "zz"}}}
+	}
+	defer func() { ipOverrides = previous }()
+	UseIpDbFileForTest(t, filepath.Join("local", "testdata", "config", "local", "mmdb", "geolite2.mmdb"))
+
+	// the stand-in's cleanups run below, where the end of a test would run them
+	cleanups := &ipTestCleanups{TB: t}
+	UseNoIpOverridesForTest(cleanups)
+	connect.AssertEqual(t, ipOverrideFor(addr) == nil, true)
+	ipInfo, err := GetIpInfo(addr)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, *ipInfo, IpInfo{})
+
+	for i := len(cleanups.cleanups) - 1; 0 <= i; i -= 1 {
+		cleanups.cleanups[i]()
+	}
+	ipInfo, err = GetIpInfo(addr)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, ipInfo.CountryCode, "zz")
+}
+
+// The overrides belong to the process, so a test that removes them cannot go
+// on to run in parallel with the tests that read them.
+func TestUseNoIpOverridesForTestRefusesALaterParallel(t *testing.T) {
+	UseNoIpOverridesForTest(t)
+	message := func() (message string) {
+		defer func() { message = fmt.Sprint(recover()) }()
+		t.Parallel()
+		return ""
+	}()
+	if !strings.Contains(message, "t.Parallel") {
+		t.Fatalf("t.Parallel after the stand-in: expected a refusal, got %q", message)
+	}
+}
+
+// A parallel test cannot remove the process's overrides, and the refused call
+// leaves them as they were.
+func TestUseNoIpOverridesForTestRefusesAParallelTest(t *testing.T) {
+	t.Parallel()
+	addr := netip.MustParseAddr("192.0.2.1")
+	before := ipOverrideFor(addr)
+	message := func() (message string) {
+		defer func() { message = fmt.Sprint(recover()) }()
+		UseNoIpOverridesForTest(t)
+		return ""
+	}()
+	if !strings.Contains(message, "t.Parallel") {
+		t.Fatalf("the stand-in in a parallel test: expected a refusal, got %q", message)
+	}
+	connect.AssertEqual(t, ipOverrideFor(addr), before)
 }

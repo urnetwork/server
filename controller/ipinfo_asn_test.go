@@ -188,9 +188,7 @@ func TestMyIpInfoAsnJson(t *testing.T) {
 func TestGetMyIpInfoAsn(t *testing.T) {
 	// a public address, so the location reads the GeoLite2 City database,
 	// which the portable fixture does not have
-	if _, err := server.Config.ResourcePath("mmdb/geolite2.mmdb"); err != nil {
-		t.Skipf("requires the GeoLite2 City database: %s", err)
-	}
+	requireGeoLite2Database(t)
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +188,11 @@ func (self *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 }
 
 func TestProvidersList(t *testing.T) {
+	// The providers connect from 0.0.0.x, which no ip override covers, so
+	// their lookups read the GeoLite2 database, which a config home may not
+	// have: the repository's synthetic empty one stands in, and knows no
+	// address.
+	server.UseIpDbFileForTest(t, filepath.Join("..", "local", "testdata", "config", "local", "mmdb", "geolite2.mmdb"))
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		serverURL, cleanup := startTestServer(t)
 		defer cleanup()

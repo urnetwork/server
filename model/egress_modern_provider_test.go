@@ -234,9 +234,10 @@ func TestModernProviderGateOnKeepsOnlyModernProvidersInQualityAndSpeed(t *testin
 		}
 	}
 
-	// facts gathered without the evidence know no evidence
+	// facts gathered without the evidence know no evidence (the URL runs
+	// behind the passing ratio meet both native minimums)
 	quality := true
-	decision := decideProviderEgress(&providerEgressFacts{egressQuality: &quality, modernGate: true}, false)
+	decision := decideProviderEgress(&providerEgressFacts{egressQuality: &quality, qualityRunsMet: true, speedRunsMet: true, modernGate: true}, false)
 	if decision.reason != ProviderExcludedNotModern || decision.modernOutcome != ProviderModernOutcomeNoEvidence {
 		t.Errorf("facts without evidence decided %+v, want not_modern for no evidence", decision)
 	}

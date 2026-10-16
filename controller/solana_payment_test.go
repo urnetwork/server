@@ -152,7 +152,7 @@ func TestSolanaIntentRefusedPlansCreateNothing(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			connect.AssertNotEqual(t, result.Error, nil)
 			// the plan refusal, not the guest refusal
-			connect.AssertEqual(t, result.Error.Code, "")
+			connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodePlanUnavailable)
 			// an errored result must not carry a price the client could act on
 			connect.AssertEqual(t, result.AmountUsd, float64(0))
 

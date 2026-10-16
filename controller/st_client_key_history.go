@@ -100,13 +100,15 @@ func readStClientKeyAuthorityAt(ctx context.Context, client *ethclient.Client, d
 
 // Ordered failover restarts the complete read at an endpoint; it never splices
 // one endpoint's finality or chain ID into another endpoint's root signer.
+// Each endpoint's attempt is bounded, so a stalled first endpoint cannot hold
+// every registration past the point where the next endpoint would answer.
 func (self *stClientKeyAuthorityOwner) readBoundary(ctx context.Context, requested *protocol.ClientKeyEffectiveBoundary) (protocol.ClientKeyEffectiveBoundary, stabi.STCoordinatorOperatorVersion, error) {
 	if self == nil || self.client == nil || ctx == nil {
 		return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, errors.New("client-key chain owner is absent")
 	}
 	var boundary protocol.ClientKeyEffectiveBoundary
 	var operator stabi.STCoordinatorOperatorVersion
-	err := self.client.eachRpcUrls(ctx, self.rpcURLs, func(ctx context.Context, client *ethclient.Client) error {
+	err := self.client.eachRpcUrlsWithin(ctx, self.rpcURLs, self.client.clientKeyAuthorityAttemptBudget(), func(ctx context.Context, client *ethclient.Client) error {
 		var err error
 		boundary, operator, err = readStClientKeyAuthorityAt(ctx, client, self.domain, requested)
 		return err

@@ -26,6 +26,9 @@ type stEpochRPCRequest struct {
 	ID      json.RawMessage   `json:"id"`
 	Method  string            `json:"method"`
 	Params  []json.RawMessage `json:"params"`
+	// Set, never decoded, by stWalletRecoveryEndpoint for each member of a
+	// JSON-RPC batch request.
+	Batched bool `json:"-"`
 }
 
 // Minimal successful JSON-RPC envelope returned by the endpoint.

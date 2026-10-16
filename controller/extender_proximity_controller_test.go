@@ -28,6 +28,8 @@ import (
 // GeoLite2 and mapped to its continent the way the geo dns maps it. It is the
 // same answer the record's continent tag gives (SignExtenderRecord).
 func TestExtenderHintPlacesTheCallerAddress(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	ctx := context.Background()
 
 	// an address of MaxMind's published test data, which the deployed

@@ -104,8 +104,10 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 						}
 					}
 
-					// Forced and explicitly named Quality retain the requested
-					// bucket policy. They cannot promote the Speed borrower.
+					// Forced Quality retains the requested bucket policy and
+					// cannot promote the Speed borrower. A named provider keeps
+					// the common gates and, in Quality, the live connection, but
+					// not ARIN quality.
 					forced := egressTestFind(ctx, t, egressTestLocationSpec(city), mode, len(common), true, server.NewId())
 					wantForced := len(common)
 					if mode == RankModeQuality {
@@ -122,8 +124,8 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 					}
 					for _, forceMinimum := range []bool{false, true} {
 						named := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &nonQuality.clientId}}, mode, 1, forceMinimum, server.NewId())
-						if mode == RankModeQuality && len(named) != 0 || mode == RankModeSpeed && (len(named) != 1 || named[0].ClientId != nonQuality.clientId) {
-							t.Fatalf("reader=%t mode=%s forced=%t: named provider lost its requested bucket policy", nativeReader, mode, forceMinimum)
+						if len(named) != 1 || named[0].ClientId != nonQuality.clientId {
+							t.Fatalf("reader=%t mode=%s forced=%t: named live provider refused", nativeReader, mode, forceMinimum)
 						}
 						for _, excluded := range []*egressTestProvider{risk, tls, unreliable} {
 							providers := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &excluded.clientId}}, mode, 1, forceMinimum, server.NewId())
@@ -155,8 +157,12 @@ func TestFp2UrlHistoryIsIdempotentAndWindowed(t *testing.T) {
 		latest := &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now.Add(-time.Hour), OKCount: 1, Total: 1}
 		latest.UrlProbeEvidence = fp2TestUrlProbeEvidence(latest.MeasuredAt, true)
 		SetProviderEgressHealth(ctx, latest)
-		egressTestHealth(ctx, clientId, now.Add(-2*time.Hour), 2, 0)
-		egressTestHealth(ctx, clientId, now.Add(-90*time.Minute), 2, 2)
+		// one run per call, so each lands exactly at its instant: the window
+		// is read at its exclusive cutoff (egressTestRunAt spreads two or more)
+		for range 2 {
+			egressTestHealth(ctx, clientId, now.Add(-2*time.Hour), 1, 0)
+			egressTestHealth(ctx, clientId, now.Add(-90*time.Minute), 1, 1)
+		}
 		egressTestHealth(ctx, clientId, now.Add(-9*time.Hour), 100, 100)
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now.Add(-30 * time.Minute), NotMeasuredCount: 20})
 		replay := *latest

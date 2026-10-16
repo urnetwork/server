@@ -252,6 +252,8 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 // Every case creates its own endpoint clients, so the connections of one case
 // cannot leak into another.
 func TestCreateTransferEscrowWritesTheExtenderParties(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const transferByteCount = ByteCount(1024)
@@ -390,6 +392,8 @@ func TestCreateTransferEscrowWritesTheExtenderParties(t *testing.T) {
 // The no-escrow path writes the same parties. It is a separate insert from the
 // escrow path, so it needs its own proof.
 func TestCreateContractNoEscrowWritesTheExtenderParties(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -571,6 +575,8 @@ func testContractCreateTimes(
 // A companion contract reverses the endpoints, so its own source and
 // destination parties are the reverse of the origin contract's.
 func TestCreateCompanionTransferEscrowWritesTheExtenderParties(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const transferByteCount = ByteCount(1024)
@@ -662,6 +668,8 @@ func TestCreateCompanionTransferEscrowWritesTheExtenderParties(t *testing.T) {
 // orphan sweep is the safety net for a contract that went away by any other
 // path.
 func TestContractExtenderRowsGoWithTheContract(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -768,6 +776,8 @@ func TestContractExtenderRowsGoWithTheContract(t *testing.T) {
 // that has since been revoked are both attribution nothing stands behind, and
 // paying for either would credit a hop that is carrying nothing.
 func TestContractExtenderPartiesSkipAClosedConnectionAndARevokedExtender(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -853,6 +863,8 @@ func testConnectFromWithConnectionId(
 // where they have two, and a cursor that did not round trip would silently
 // leave rows behind forever.
 func TestContractExtenderOrphanSweepResumesAcrossItsCursor(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 

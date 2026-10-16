@@ -112,7 +112,8 @@ func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
 		oldestSuccessAt := now.Add(-4*time.Hour + 2*time.Minute)
 		oldestQuotaRunAt := now.Add(-3*time.Hour + time.Minute)
 		quotaExpiresAt := oldestQuotaRunAt.Add(ProviderEgressProbeRefreshAge)
-		renewalAt := quotaExpiresAt.Add(-ProviderUrlProbeRenewalHeadroom)
+		// The clean security-only receipt at now is the latest result.
+		renewalAt := testingSpreadNewRule(oldestQuotaRunAt, now)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at) VALUES($1,$2,$2)`, clientId, cycleStartedAt))
 		})

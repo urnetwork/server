@@ -11,6 +11,8 @@ import (
 // Default false flags, lookup overrides, and mixed-generation connections do
 // not prove that all of a provider's currently connected addresses were read.
 func TestProviderArinClassificationCoverageRequiresActualCurrentLookup(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Coverage", "Coverage", "Coverage", "zz")

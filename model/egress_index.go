@@ -663,7 +663,9 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 // online answer is the Online pool, which does not).
 // Health/unprobed, not modern (the modern provider gate, while it is on) and
 // ARIN non-quality explain missing native membership while preserving online
-// supply.
+// supply. Unprobed also counts a passing ratio on too few URL runs for a
+// native bucket (egress_native_min_runs.go), out of Quality, and of Speed
+// below its minimum.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"
@@ -681,9 +683,12 @@ const (
 
 // Every reason label, in the order the labels were added. A provider counts
 // under the first reason decideProviderEgress finds, in this precedence:
-// reliability, arin_risk, tls, no_success, low_success, then unprobed or
-// health (exclusive of each other), then not_modern, then arin_non_quality.
-// Blackhole and country are never reported any more.
+// reliability, arin_risk, tls, no_success, low_success, then unprobed for
+// no evidence or health (exclusive of each other), then not_modern, then
+// unprobed for a passing ratio on too few runs (the native URL-run
+// minimums, egress_native_min_runs.go: the provider status's
+// egress_warming_up), then arin_non_quality. Blackhole and country are never
+// reported any more.
 var ProviderExcludedReasons = []string{
 	ProviderExcludedBlackhole,
 	ProviderExcludedTls,
@@ -705,6 +710,12 @@ type providerEgressFacts struct {
 	reliabilityFailed       bool
 	blackholed              bool
 	tlsAuthenticationFailed bool
+	// the native URL-run minimums (egress_native_min_runs.go): the accepted
+	// URL runs behind the ratio are enough, and far enough apart, to decide
+	// Quality, and enough to decide Speed. The zero value has met neither, so
+	// facts that leave them out admit a passing ratio to no native bucket.
+	qualityRunsMet bool
+	speedRunsMet   bool
 	// a fresh probe observed the exit in a country other than the published one
 	countryMismatch bool
 	// The rollup index is a ranking diagnostic; the verdict uses current history.
@@ -769,6 +780,8 @@ func (self providerCountFilter) egressFacts(
 		reliabilityFailed:       self.reliabilityFailed[clientId],
 		blackholed:              self.isBlackholed(clientId),
 		tlsAuthenticationFailed: self.tlsAuthenticationFailed[clientId],
+		qualityRunsMet:          providerQualityUrlRunsMet(counts, urlIndex),
+		speedRunsMet:            providerSpeedUrlRunsMet(counts, urlIndex),
 		// a provider nobody has located, or whose own country is unknown,
 		// cannot contradict itself
 		countryMismatch: settings.CountryGate &&
@@ -857,17 +870,27 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		if modernOutcome == "" {
 			modernOutcome = ProviderModernOutcomeNoEvidence
 		}
+		// A passing ratio on too few runs, or for Quality on runs too close
+		// together, is no verdict for that bucket yet (the native URL-run
+		// minimums): online and counted, out of the bucket as unprobed. The
+		// modern provider gate reads only the providers the other rules
+		// admit, so one short for both buckets has no gate outcome and
+		// counts as unprobed; one the gate reads counts as not_modern first.
+		quality := !facts.arinNonQuality && facts.qualityRunsMet
+		speed := facts.speedRunsMet
 		decision := providerEgressDecision{
-			quality:                 !facts.arinNonQuality,
-			speed:                   true,
+			quality:                 quality,
+			speed:                   speed,
 			online:                  true,
 			counted:                 true,
-			qualityBeforeModernGate: !facts.arinNonQuality,
-			speedBeforeModernGate:   true,
-			modernOutcome:           modernOutcome,
+			qualityBeforeModernGate: quality,
+			speedBeforeModernGate:   speed,
+		}
+		if quality || speed {
+			decision.modernOutcome = modernOutcome
 		}
 		switch {
-		case facts.modernGate && modernOutcome != ProviderModernOutcomeModern:
+		case facts.modernGate && decision.modernOutcome != "" && modernOutcome != ProviderModernOutcomeModern:
 			// The probe has not shown end-to-end post-quantum encryption with
 			// resizable transfer windows: out of both native buckets, still
 			// online and counted. Probing goes on, and evidence of both
@@ -875,6 +898,11 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			decision.quality = false
 			decision.speed = false
 			decision.reason = ProviderExcludedNotModern
+		case !facts.qualityRunsMet || !facts.speedRunsMet:
+			// Probing goes on, and the run that meets a minimum brings the
+			// provider into that bucket on the next pass, while its ratio
+			// still passes.
+			decision.reason = ProviderExcludedUnprobed
 		case facts.arinNonQuality:
 			decision.reason = ProviderExcludedArinNonQuality
 		}
@@ -1274,6 +1302,10 @@ type ProviderEgressInspection struct {
 	ReliabilityFailed bool
 	UrlSuccessCount   int
 	UrlErrorCount     int
+	// whether the accepted URL runs in the evidence window meet the native
+	// URL-run minimums (egress_native_min_runs.go) for Quality and for Speed
+	QualityUrlRunsMet bool
+	SpeedUrlRunsMet   bool
 	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
 	// evidence window without one success, whatever the rule then decides
 	NoUrlSuccess bool
@@ -1404,6 +1436,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ArinNonQuality = facts.arinNonQuality
 	inspection.ArinServingEpoch = countFilter.arindbServingEpoch
 	inspection.ReliabilityFailed = facts.reliabilityFailed
+	inspection.QualityUrlRunsMet = facts.qualityRunsMet
+	inspection.SpeedUrlRunsMet = facts.speedRunsMet
 	inspection.ModernEvidence = countFilter.modernEvidence[clientId]
 	inspection.ModernOutcome = facts.modernOutcome
 	inspection.ModernGate = facts.modernGate

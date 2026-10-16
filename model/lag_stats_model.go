@@ -187,10 +187,14 @@ type LagResultMedians struct {
 }
 
 // How long a load keeps a track's pings from being idle after its upload
-// window ends: the extender's bound on an upload stream after its window
-// (lag.dev/PLAN.md L4, M6), while what the load queued drains. lag.dev's
-// SETTLE_MS.
-const LagLoadSpanTail = 2 * time.Second
+// window ends (lag.dev/PLAN.md L4, X9, amendment 18), while what the load
+// queued drains. The extender reads an upload stream for up to 2 s after its
+// window (M6), and on a slow uplink the browser still has data queued then,
+// which the path takes until the extender drops the connection and drains
+// after: on lag.dev's local stack a 0.5 Mbps path stayed loaded until about
+// 2.3 s after the extender's window, and 3.25 s after the page's, which ends
+// up to a second earlier. lag.dev's SETTLE_MS.
+const LagLoadSpanTail = 3500 * time.Millisecond
 
 // GetLagResultMediansSince reads, for each family, the median across the
 // results stored at or after `since` that ended with `endReason` of each
