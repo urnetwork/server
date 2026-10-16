@@ -97,10 +97,16 @@ func playPublisherEmail() (string, error) {
 	return vaultNonblankString("google.yml", "webhook", "publisher_email")
 }
 
+// The exact audience configured on the authenticated Pub/Sub subscription.
+func playAudience() (string, error) {
+	return vaultNonblankString("google.yml", "webhook", "audience")
+}
+
 // Why a Play push cannot be verified now, or nil.
 func PlayWebhookVerifiable() error {
-	_, err := playPublisherEmail()
-	return err
+	_, publisherErr := playPublisherEmail()
+	_, audienceErr := playAudience()
+	return errors.Join(publisherErr, audienceErr)
 }
 
 var playPackageName = sync.OnceValue(func() string {
@@ -1658,12 +1664,17 @@ var playIdTokenClaims = func(ctx context.Context, idToken string) (map[string]an
 	return claims, nil
 }
 
-// Fails closed: without a configured publisher every push is refused as
-// unavailable, before Google is asked about its token.
+// Fails closed: without the configured publisher and audience every push is
+// refused as unavailable, before Google is asked about its token.
 func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
 		glog.Warningf("[play]webhook refused, verification publisher unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
+	audience, err := playAudience()
+	if err != nil {
+		glog.Warningf("[play]webhook refused, verification audience unavailable: %s\n", err)
 		return nil, errWebhookVerificationUnavailable
 	}
 
@@ -1679,7 +1690,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err = verifyPlayAuth(req.Context(), authHeader, publisherEmail)
+	err = verifyPlayAuth(req.Context(), authHeader, publisherEmail, audience)
 	if err != nil {
 		glog.Infof("verifyPlayAuth failed: %v", err)
 		return nil, err
@@ -1688,7 +1699,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	return bytes.NewReader(bodyBytes), nil
 }
 
-func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string) error {
+func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, audience string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
@@ -1696,7 +1707,12 @@ func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string) err
 		if err != nil {
 			return err
 		}
-		if claims["email"] == publisherEmail {
+		// Google's tokeninfo endpoint verifies the signature. Bind that token
+		// to this subscription and its verified service account as well.
+		issuer, _ := claims["iss"].(string)
+		verified := claims["email_verified"] == true || claims["email_verified"] == "true"
+		if claims["email"] == publisherEmail && claims["aud"] == audience && verified &&
+			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com") {
 			return nil
 		}
 	}

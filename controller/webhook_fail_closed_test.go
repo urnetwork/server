@@ -256,12 +256,12 @@ func TestVerifyPlayBodyRefusesUnavailablePublisher(t *testing.T) {
 }
 
 func TestVerifyPlayBodyAcceptsPublisherToken(t *testing.T) {
-	t.Cleanup(server.Vault.PushSimpleResource("google.yml", []byte("webhook:\n  publisher_email: publisher@fixture.example\n")))
+	t.Cleanup(server.Vault.PushSimpleResource("google.yml", []byte("webhook:\n  publisher_email: publisher@fixture.example\n  audience: https://push.fixture.example/play\n")))
 	setPlayIdTokenClaims(t, func(_ context.Context, idToken string) (map[string]any, error) {
 		if idToken != "synthetic-id-token" {
 			t.Errorf("tokeninfo asked about %q", idToken)
 		}
-		return map[string]any{"email": "publisher@fixture.example"}, nil
+		return map[string]any{"email": "publisher@fixture.example", "email_verified": "true", "aud": "https://push.fixture.example/play", "iss": "https://accounts.google.com"}, nil
 	})
 	verified, err := verifyWebhookBody(t, VerifyPlayBody, `{"message":{}}`, map[string]string{"Authorization": "Bearer synthetic-id-token"})
 	if err != nil || string(verified) != `{"message":{}}` {
@@ -270,7 +270,7 @@ func TestVerifyPlayBodyAcceptsPublisherToken(t *testing.T) {
 }
 
 func TestVerifyPlayBodyRefusesOtherToken(t *testing.T) {
-	t.Cleanup(server.Vault.PushSimpleResource("google.yml", []byte("webhook:\n  publisher_email: publisher@fixture.example\n")))
+	t.Cleanup(server.Vault.PushSimpleResource("google.yml", []byte("webhook:\n  publisher_email: publisher@fixture.example\n  audience: https://push.fixture.example/play\n")))
 	setPlayIdTokenClaims(t, func(context.Context, string) (map[string]any, error) {
 		return map[string]any{"email": "other@fixture.example"}, nil
 	})
