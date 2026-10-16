@@ -4362,14 +4362,20 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	case queue <- message:
 		return
 	default:
+		// Refuse this one frame and keep the generation. The callback serves
+		// every destination of the client, so it must not wait for one
+		// destination's shard. A forwarded frame is a complete Transfer
+		// message the resident never acknowledged: its source keeps it until
+		// the destination does, and resends it. Retiring the generation added
+		// no recovery boundary, because the edge keeps the client's carrier and
+		// binds the replacement without any Transfer resynchronisation, and it
+		// turned this one refusal into the loss of everything the generation
+		// held in both directions. Control ingress, which is past the resident's
+		// own acknowledgement, still retires.
 		self.releaseForwardIngress(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
-		// This callback carries reliable Transfer frames. It cannot block the
-		// shared client receive loop, so retire this generation on saturation;
-		// reconnect/recovery can replay from a known sequence boundary.
-		self.cancel()
 		if glog.V(1) {
-			glog.Infof("[rf]retire ingress full %s->%s\n", sourceId, destinationId)
+			glog.Infof("[rf]refuse ingress full %s->%s\n", sourceId, destinationId)
 		}
 	}
 }
