@@ -103,8 +103,8 @@ var livenessLeasePublicForTest = map[model.ProvideMode]bool{model.ProvideModePub
 // A connection registers when its rounds start, before any read: the process
 // vouches for it from then, and the writer extends its client's lease, which
 // keeps a reconnecting provider's lease whatever its first reads do. A held
-// lease moves the vouch time to the write's start; an unheld one leaves it to
-// age, and nothing is created for a client that may not provide.
+// lease moves the vouch time to the write's start; an unheld one ends the
+// vouching, and nothing is created for a client that may not provide.
 func TestLivenessLeaseWriterExtendsAPendingConnectionsLease(t *testing.T) {
 	ctx := context.Background()
 	start := time.UnixMilli(1_800_000_000_000)
@@ -125,8 +125,8 @@ func TestLivenessLeaseWriterExtendsAPendingConnectionsLease(t *testing.T) {
 	if writeTime := livenessLeaseWriteTimeForTest(reconnecting); !writeTime.Equal(now) {
 		t.Fatalf("a held extension vouched from %s, want the write's start %s", writeTime, now)
 	}
-	if writeTime := livenessLeaseWriteTimeForTest(unknown); !writeTime.Equal(start) {
-		t.Fatal("an extension the shard did not hold moved the connection's vouch time")
+	if writeTime := livenessLeaseWriteTimeForTest(unknown); !writeTime.IsZero() {
+		t.Fatal("the process still vouches for a pending connection whose client the shard holds no lease for")
 	}
 	for range 3 {
 		now = now.Add(30 * time.Second)
@@ -421,11 +421,10 @@ func TestProviderLivenessWriterWithholdsTheStampWhileAWriteIsStale(t *testing.T)
 		t.Fatalf("after a successful write: %s, want stamped", outcome)
 	}
 
-	// pending, with no lease to extend, its reads failing
+	// pending, registered, before any write could say what it holds
 	pending := writer.begin(server.NewId(), nil)
-	writer.write(ctx, true)
 	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now.Add(withholdAge+time.Millisecond), stamp); outcome != livenessLeaseOutcomeStampWithheld {
-		t.Fatalf("a connection pending past the withhold age: %s, want stamp_withheld", outcome)
+		t.Fatalf("a connection pending past the withhold age with no write: %s, want stamp_withheld", outcome)
 	}
 	pending.end()
 	if outcome := stampProviderLivenessWriter(ctx, handlerId, writer, now, stamp); outcome != livenessLeaseOutcomeStamped {
@@ -436,12 +435,79 @@ func TestProviderLivenessWriterWithholdsTheStampWhileAWriteIsStale(t *testing.T)
 	}
 }
 
+// Every announcement registers, consumers included. A consumer connection
+// whose provide reads keep failing stays pending for as long as it is
+// connected; once a write finds no lease for its client the process no longer
+// vouches for it, and goes on stamping. Before, it was vouched for from its
+// registration for good, and one stuck consumer withheld the stamp, which
+// turned enforcement off fleet-wide.
+func TestProviderLivenessWriterKeepsStampingThroughAStuckConsumer(t *testing.T) {
+	ctx := context.Background()
+	start := time.UnixMilli(1_800_000_000_000)
+	now := start
+	recorder := newLivenessLeaseWriterForTest(&now)
+	writer := recorder.writer
+	stamp := func(context.Context, server.Id) error {
+		return nil
+	}
+	providing := writer.begin(server.NewId(), nil)
+	providing.afterRead(livenessLeasePublicForTest)
+	consumer := writer.begin(server.NewId(), nil)
+	for since := time.Duration(0); since <= 10*model.ProviderLivenessWriterWithholdAge; since += model.ProviderLivenessLeaseRefreshInterval {
+		now = start.Add(since)
+		writer.write(ctx, true)
+		if outcome := stampProviderLivenessWriter(ctx, server.NewId(), writer, now, stamp); outcome != livenessLeaseOutcomeStamped {
+			t.Fatalf("%s into a consumer's failing reads: %s, want stamped", since, outcome)
+		}
+	}
+	if writeTime := livenessLeaseWriteTimeForTest(consumer); !writeTime.IsZero() {
+		t.Fatal("the process vouches for a stuck consumer connection")
+	}
+}
+
+// A pass that raises is logged and ends that pass only: the writer's next
+// pass writes as planned.
+func TestLivenessLeaseWriterPassThatRaisesDoesNotStopLaterPasses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := newProviderLivenessLeaseWriter(time.Hour)
+	writer.observe = func(string, int) {}
+	calls := make(chan int, 16)
+	callCount := 0
+	callLock := sync.Mutex{}
+	writer.writeShard = func(ctx context.Context, shard int, scored []server.Id, extended []server.Id, removed []server.Id) ([]bool, error) {
+		callLock.Lock()
+		callCount += 1
+		count := callCount
+		callLock.Unlock()
+		calls <- count
+		if count == 1 {
+			panic("test: a pass that raises")
+		}
+		return make([]bool, len(extended)), nil
+	}
+	writer.start(ctx)
+	connection := writer.begin(server.NewId(), nil)
+	for want := 1; want <= 2; want += 1 {
+		select {
+		case count := <-calls:
+			if count != want {
+				t.Fatalf("shard write %d, want %d", count, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for shard write %d: a raised pass stopped the writer", want)
+		}
+		// the next pass, woken by the client's first providing read
+		connection.afterRead(livenessLeasePublicForTest)
+	}
+}
+
 // The default cadence fits the contract: a connection that misses one write
 // does not reach the withhold age.
 func TestLivenessLeaseDefaultCadenceFitsTheWithholdAge(t *testing.T) {
 	writer := newProviderLivenessLeaseWriter(model.ProviderLivenessLeaseRefreshInterval)
-	worstGap := writer.refreshInterval + model.ProviderLivenessLeaseRefreshJitter + model.ProviderLivenessLeaseWriteTimeout
-	if model.ProviderLivenessWriterWithholdAge <= 2*worstGap {
+	oneMissedWrite := 2*(writer.refreshInterval+model.ProviderLivenessLeaseRefreshJitter) + model.ProviderLivenessLeasePassTimeout
+	if model.ProviderLivenessWriterWithholdAge <= oneMissedWrite {
 		t.Fatalf("one missed write reaches the %s withhold age", model.ProviderLivenessWriterWithholdAge)
 	}
 	for range 100 {
