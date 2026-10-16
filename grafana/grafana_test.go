@@ -1500,27 +1500,56 @@ func TestSubtensorDashboardDistinguishesRealLagFromStaleExport(t *testing.T) {
 // show every one of them
 var networkMeasurementMetrics = []string{
 	"urnetwork_stats_total_networks",
-	"urnetwork_stats_block_users",
+	"urnetwork_stats_epoch_users",
 	"urnetwork_stats_countries",
 	"urnetwork_stats_staked_alpha",
-	"urnetwork_stats_block_demand_deposits_alpha",
-	"urnetwork_stats_block_miner_emissions_alpha",
+	"urnetwork_stats_epoch_demand_deposits_alpha",
+	"urnetwork_stats_epoch_miner_emissions_alpha",
 	"urnetwork_stats_alpha_usd",
-	"urnetwork_stats_prev_block_users",
-	"urnetwork_stats_prev_block_demand_deposits_alpha",
-	"urnetwork_stats_prev_block_miner_emissions_alpha",
+	"urnetwork_stats_prev_epoch_users",
+	"urnetwork_stats_prev_epoch_demand_deposits_alpha",
+	"urnetwork_stats_prev_epoch_miner_emissions_alpha",
 	"urnetwork_stats_users_24h",
 	"urnetwork_stats_online_providers",
 	"urnetwork_stats_provider_regions",
 	"urnetwork_stats_provider_cities",
+	"urnetwork_stats_epoch_number",
+	"urnetwork_stats_epoch_start_seconds",
+	"urnetwork_stats_epoch_end_seconds",
+	"urnetwork_stats_epoch_miner_claims_alpha",
+	"urnetwork_stats_epoch_miners_claimed",
+	"urnetwork_stats_prev_epoch_miner_claims_alpha",
+	"urnetwork_stats_prev_epoch_miners_claimed",
+	"urnetwork_stats_online_extenders",
+}
+
+// the settlement epoch clock's block gauges and its previous start, which
+// the public feed (warp repo, grafana/stats.go) reads and the internal
+// signals dashboard shows; the public dashboard needs none of them
+var internalEpochClockMetrics = []string{
+	"urnetwork_stats_epoch_start_block",
+	"urnetwork_stats_epoch_end_block",
+	"urnetwork_stats_prev_epoch_start_seconds",
+}
+
+// the names the epoch gauges had as Sunday block gauges, still published with
+// the epoch values for stats feeds deployed before the epoch clock
+// (controller/stats_collector.go). they stay off the public dashboards and on
+// the internal one only until they are retired
+var deprecatedBlockAliasMetrics = []string{
 	"urnetwork_stats_block_number",
 	"urnetwork_stats_block_start_seconds",
 	"urnetwork_stats_block_end_seconds",
+	"urnetwork_stats_block_users",
+	"urnetwork_stats_prev_block_users",
+	"urnetwork_stats_block_demand_deposits_alpha",
+	"urnetwork_stats_prev_block_demand_deposits_alpha",
+	"urnetwork_stats_block_miner_emissions_alpha",
+	"urnetwork_stats_prev_block_miner_emissions_alpha",
 	"urnetwork_stats_block_miner_claims_alpha",
-	"urnetwork_stats_block_miners_claimed",
 	"urnetwork_stats_prev_block_miner_claims_alpha",
+	"urnetwork_stats_block_miners_claimed",
 	"urnetwork_stats_prev_block_miners_claimed",
-	"urnetwork_stats_online_extenders",
 }
 
 // the labeled operator network measurements, read with max by (labels)
@@ -2489,6 +2518,28 @@ func TestInternalNetworkMeasurementsAreScopedAndReplicaSafe(t *testing.T) {
 		}
 		for _, expression := range expressions {
 			assertReplicaSafeReads(t, "internal network measurements", expression, metric, `{env="$env"}`)
+		}
+	}
+}
+
+// The epoch clock's internal gauges and the deprecated block aliases are on
+// the internal signals dashboard, read replica-safe, and the public dashboard
+// reads the epoch gauges rather than the aliases.
+func TestEpochClockMeasurementsAndBlockAliases(t *testing.T) {
+	expressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
+	joined := strings.Join(expressions, "\n")
+	for _, metric := range append(slices.Clone(internalEpochClockMetrics), deprecatedBlockAliasMetrics...) {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("internal network measurements is missing %s", metric)
+		}
+		for _, expression := range expressions {
+			assertReplicaSafeReads(t, "internal network measurements", expression, metric, `{env="$env"}`)
+		}
+	}
+	public := strings.Join(dashboardExpressions(readTestDashboard(t, "public-traffic.json")), "\n")
+	for _, metric := range deprecatedBlockAliasMetrics {
+		if len(metricOccurrences(public, metric)) != 0 {
+			t.Errorf("public network stats reads the deprecated alias %s", metric)
 		}
 	}
 }

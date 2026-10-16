@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-public-traffic",
   "title": "urnetwork / network stats",
-  "description": "Public network measurements: live traffic and devices, the provider network by country, growth, the weekly subnet block, and alpha economics. Weekly block values reset at 00:00 UTC Sunday; the last-finished-block values are the previous block's final values. A missing optional measurement is shown as no data rather than as zero.",
+  "description": "Public network measurements: live traffic and devices, the provider network by country, growth, the SN25 settlement epoch, and alpha economics. Epoch values reset when a settlement epoch rolls over; the last-finished-epoch values are the previous epoch's final values. A missing optional measurement is shown as no data rather than as zero.",
   "tags": [
     "urnetwork",
     "public"
@@ -539,7 +539,7 @@
     {
       "id": 11,
       "type": "stat",
-      "title": "users this block",
+      "title": "users this epoch",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -550,7 +550,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Unique top-level identities with contract usage since the current weekly block opened (00:00 UTC Sunday). Resets when the block rolls over; the last finished block's final count is under the weekly block section.",
+      "description": "Unique top-level identities with contract usage since the current settlement epoch started. Resets when the epoch rolls over; the last finished epoch's final count is under the settlement epoch section.",
       "fieldConfig": {
         "defaults": {
           "unit": "locale",
@@ -587,7 +587,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_users)",
+          "expr": "max(urnetwork_stats_epoch_users)",
           "legendFormat": "users",
           "instant": false,
           "range": true
@@ -655,7 +655,7 @@
     {
       "id": 30,
       "type": "stat",
-      "title": "current block",
+      "title": "current epoch",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -666,7 +666,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "The current subnet block number. Blocks are 1-based, 7 days long, and open and close at 00:00 UTC Sunday; block 1 opened 2026-06-28.",
+      "description": "The current SN25 settlement epoch, numbered from 0 as the subnet coordinator numbers it. An epoch is a span of chain blocks: epoch 0 was a one-day bootstrap epoch from block 9,240,028, and every epoch from 1 on is 50,400 blocks, about 7 days.",
       "fieldConfig": {
         "defaults": {
           "unit": "none",
@@ -703,7 +703,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_number)",
+          "expr": "max(urnetwork_stats_epoch_number)",
           "instant": true,
           "range": false
         }
@@ -2793,7 +2793,7 @@
     {
       "id": 17,
       "type": "timeseries",
-      "title": "weekly users",
+      "title": "users per epoch",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -2804,7 +2804,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Unique users per weekly block. The current block climbs from zero every Sunday 00:00 UTC; the last finished block is the stable reference and steps once per week.",
+      "description": "Unique users per settlement epoch. The current epoch climbs from zero at each rollover; the last finished epoch is the stable reference and steps once per epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -2847,7 +2847,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -2880,8 +2880,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_users)",
-          "legendFormat": "current block",
+          "expr": "max(urnetwork_stats_epoch_users)",
+          "legendFormat": "current epoch",
           "instant": false,
           "range": true
         },
@@ -2891,8 +2891,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_users)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_users)",
+          "legendFormat": "last finished epoch",
           "instant": false,
           "range": true
         }
@@ -2982,7 +2982,7 @@
     {
       "id": 44,
       "type": "row",
-      "title": "weekly block: current block vs last finished block",
+      "title": "settlement epoch: current epoch vs last finished epoch",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -2995,7 +2995,7 @@
     {
       "id": 45,
       "type": "gauge",
-      "title": "block progress",
+      "title": "epoch progress",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -3006,7 +3006,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "How far the current 7-day subnet block has progressed. Blocks open and close at 00:00 UTC Sunday.",
+      "description": "How far the current settlement epoch has progressed in time. Its start is its first block's timestamp; its end is projected from the chain head at 12 seconds a block.",
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -3050,7 +3050,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "clamp_max(clamp_min(100 * (time() - max(urnetwork_stats_block_start_seconds)) / (max(urnetwork_stats_block_end_seconds) - max(urnetwork_stats_block_start_seconds)), 0), 100)",
+          "expr": "clamp_max(clamp_min(100 * (time() - max(urnetwork_stats_epoch_start_seconds)) / (max(urnetwork_stats_epoch_end_seconds) - max(urnetwork_stats_epoch_start_seconds)), 0), 100)",
           "instant": true,
           "range": false
         }
@@ -3059,7 +3059,7 @@
     {
       "id": 46,
       "type": "stat",
-      "title": "time elapsed in block",
+      "title": "time elapsed in epoch",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -3070,7 +3070,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Time since the current block opened.",
+      "description": "Time since the current epoch's first block.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -3107,7 +3107,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "clamp_min(time() - max(urnetwork_stats_block_start_seconds), 0)",
+          "expr": "clamp_min(time() - max(urnetwork_stats_epoch_start_seconds), 0)",
           "instant": true,
           "range": false
         }
@@ -3116,7 +3116,7 @@
     {
       "id": 47,
       "type": "stat",
-      "title": "time left in block",
+      "title": "time left in epoch",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -3127,7 +3127,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Time until the current block closes and the next one opens.",
+      "description": "Time until the next epoch's first block, projected from the chain head at 12 seconds a block.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -3164,7 +3164,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "clamp_min(max(urnetwork_stats_block_end_seconds) - time(), 0)",
+          "expr": "clamp_min(max(urnetwork_stats_epoch_end_seconds) - time(), 0)",
           "instant": true,
           "range": false
         }
@@ -3173,7 +3173,7 @@
     {
       "id": 48,
       "type": "stat",
-      "title": "next block opens (UTC)",
+      "title": "next epoch starts (UTC)",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -3184,7 +3184,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "When the current block closes and the next block opens. Always a Sunday at 00:00 UTC.",
+      "description": "When the next epoch's first block is projected to be produced, from the chain head at 12 seconds a block.",
       "fieldConfig": {
         "defaults": {
           "unit": "dateTimeAsIso",
@@ -3219,7 +3219,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_end_seconds) * 1000",
+          "expr": "max(urnetwork_stats_epoch_end_seconds) * 1000",
           "instant": true,
           "range": false
         }
@@ -3228,7 +3228,7 @@
     {
       "id": 49,
       "type": "bargauge",
-      "title": "users: this block vs last block",
+      "title": "users: this epoch vs last epoch",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3239,7 +3239,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Unique users so far in the current block against the final count of the last finished block. The last finished block is expected to be missing until a complete block has been observed.",
+      "description": "Unique users so far in the current epoch against the final count of the last finished epoch. The last finished epoch is expected to be missing until a complete epoch has been observed.",
       "fieldConfig": {
         "defaults": {
           "unit": "locale",
@@ -3254,7 +3254,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3299,8 +3299,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_users)",
-          "legendFormat": "this block",
+          "expr": "max(urnetwork_stats_epoch_users)",
+          "legendFormat": "this epoch",
           "instant": true,
           "range": false
         },
@@ -3310,8 +3310,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_users)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_users)",
+          "legendFormat": "last finished epoch",
           "instant": true,
           "range": false
         }
@@ -3320,7 +3320,7 @@
     {
       "id": 13,
       "type": "bargauge",
-      "title": "demand deposits: this block vs last block",
+      "title": "demand deposits: this epoch vs last epoch",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3331,7 +3331,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha demand deposited during the current weekly block against the last finished block.",
+      "description": "Alpha demand deposited during the current settlement epoch against the last finished epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -3346,7 +3346,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3391,8 +3391,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_demand_deposits_alpha)",
-          "legendFormat": "this block",
+          "expr": "max(urnetwork_stats_epoch_demand_deposits_alpha)",
+          "legendFormat": "this epoch",
           "instant": true,
           "range": false
         },
@@ -3402,8 +3402,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_demand_deposits_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": true,
           "range": false
         }
@@ -3412,7 +3412,7 @@
     {
       "id": 15,
       "type": "bargauge",
-      "title": "miner emissions: this block vs last block",
+      "title": "miner emissions: this epoch vs last epoch",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3423,7 +3423,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha miner emission captured during the current weekly block against the last finished block.",
+      "description": "Alpha miner emission captured during the current settlement epoch against the last finished epoch. An epoch's emission is captured in the next epoch's first 120 blocks, so it counts in the epoch it is captured in.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -3438,7 +3438,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3483,8 +3483,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_emissions_alpha)",
-          "legendFormat": "this block",
+          "expr": "max(urnetwork_stats_epoch_miner_emissions_alpha)",
+          "legendFormat": "this epoch",
           "instant": true,
           "range": false
         },
@@ -3494,8 +3494,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_emissions_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": true,
           "range": false
         }
@@ -3504,7 +3504,7 @@
     {
       "id": 50,
       "type": "bargauge",
-      "title": "miner claims: this block vs last block",
+      "title": "miner claims: this epoch vs last epoch",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3515,7 +3515,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha claimed by miners during the current weekly block against the last finished block.",
+      "description": "Alpha claimed by miners during the current settlement epoch against the last finished epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -3530,7 +3530,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3575,8 +3575,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_claims_alpha)",
-          "legendFormat": "this block",
+          "expr": "max(urnetwork_stats_epoch_miner_claims_alpha)",
+          "legendFormat": "this epoch",
           "instant": true,
           "range": false
         },
@@ -3586,8 +3586,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_claims_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": true,
           "range": false
         }
@@ -3596,7 +3596,7 @@
     {
       "id": 51,
       "type": "bargauge",
-      "title": "miners claiming: this block vs last block",
+      "title": "miners claiming: this epoch vs last epoch",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3607,7 +3607,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Distinct miner coldkeys that claimed alpha during the current weekly block against the last finished block.",
+      "description": "Distinct miner coldkeys that claimed alpha during the current settlement epoch against the last finished epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "locale",
@@ -3622,7 +3622,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3667,8 +3667,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miners_claimed)",
-          "legendFormat": "this block",
+          "expr": "max(urnetwork_stats_epoch_miners_claimed)",
+          "legendFormat": "this epoch",
           "instant": true,
           "range": false
         },
@@ -3678,8 +3678,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miners_claimed)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_miners_claimed)",
+          "legendFormat": "last finished epoch",
           "instant": true,
           "range": false
         }
@@ -3688,7 +3688,7 @@
     {
       "id": 52,
       "type": "stat",
-      "title": "this block in USD",
+      "title": "this epoch in USD",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -3699,7 +3699,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "The current block's demand deposits, miner emissions, and miner claims valued at the current alpha price.",
+      "description": "The current epoch's demand deposits, miner emissions, and miner claims valued at the current alpha price.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -3736,7 +3736,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_demand_deposits_alpha) * max(urnetwork_stats_alpha_usd)",
+          "expr": "max(urnetwork_stats_epoch_demand_deposits_alpha) * max(urnetwork_stats_alpha_usd)",
           "legendFormat": "demand deposits",
           "instant": true,
           "range": false
@@ -3747,7 +3747,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_emissions_alpha) * max(urnetwork_stats_alpha_usd)",
+          "expr": "max(urnetwork_stats_epoch_miner_emissions_alpha) * max(urnetwork_stats_alpha_usd)",
           "legendFormat": "miner emissions",
           "instant": true,
           "range": false
@@ -3758,7 +3758,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_claims_alpha) * max(urnetwork_stats_alpha_usd)",
+          "expr": "max(urnetwork_stats_epoch_miner_claims_alpha) * max(urnetwork_stats_alpha_usd)",
           "legendFormat": "miner claims",
           "instant": true,
           "range": false
@@ -3768,7 +3768,7 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "weekly demand deposits",
+      "title": "demand deposits per epoch",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -3779,7 +3779,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha demand deposits per weekly block: the current block accumulates from zero every Sunday 00:00 UTC; the last finished block steps once per week.",
+      "description": "Alpha demand deposits per settlement epoch: the current epoch accumulates from zero at each rollover; the last finished epoch steps once per epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -3822,7 +3822,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3855,8 +3855,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_demand_deposits_alpha)",
-          "legendFormat": "current block",
+          "expr": "max(urnetwork_stats_epoch_demand_deposits_alpha)",
+          "legendFormat": "current epoch",
           "instant": false,
           "range": true
         },
@@ -3866,8 +3866,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_demand_deposits_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": false,
           "range": true
         }
@@ -3876,7 +3876,7 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "weekly miner emissions",
+      "title": "miner emissions per epoch",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -3887,7 +3887,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha miner emission captured per weekly block.",
+      "description": "Alpha miner emission captured per settlement epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -3930,7 +3930,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -3963,8 +3963,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_emissions_alpha)",
-          "legendFormat": "current block",
+          "expr": "max(urnetwork_stats_epoch_miner_emissions_alpha)",
+          "legendFormat": "current epoch",
           "instant": false,
           "range": true
         },
@@ -3974,8 +3974,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_emissions_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": false,
           "range": true
         }
@@ -3984,7 +3984,7 @@
     {
       "id": 53,
       "type": "timeseries",
-      "title": "weekly miner claims",
+      "title": "miner claims per epoch",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -3995,7 +3995,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Alpha claimed by miners per weekly block.",
+      "description": "Alpha claimed by miners per settlement epoch.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
@@ -4038,7 +4038,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "last finished block"
+              "options": "last finished epoch"
             },
             "properties": [
               {
@@ -4071,8 +4071,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_claims_alpha)",
-          "legendFormat": "current block",
+          "expr": "max(urnetwork_stats_epoch_miner_claims_alpha)",
+          "legendFormat": "current epoch",
           "instant": false,
           "range": true
         },
@@ -4082,8 +4082,8 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha)",
-          "legendFormat": "last finished block",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_claims_alpha)",
+          "legendFormat": "last finished epoch",
           "instant": false,
           "range": true
         }
@@ -4539,7 +4539,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**urnetwork network stats** — public, read-only, refreshed every minute from the operator's live fleet. Change the time range at the top right (up to 90 days of history are kept).\n\n- **Data transferred** counts bytes carried under transfer contracts and acknowledged by the receiving side — the same bytes the network settles on. Relayed traffic is counted per contract leg, so quote it as *bytes carried*, not bytes downloaded.\n- **Connected devices** are distinct client devices with a live resident on the fleet; **users** are unique top-level identities that moved data in the window.\n- **Providers** are devices with a public provide key, a valid location, and a live connection — the supply anyone on the network can use. Countries, regions, and cities are where those providers are, not where users are.\n- **Weekly blocks** are the subnet block clock: 7 days each, opening and closing at 00:00 UTC Sunday (block 1 opened 2026-06-28). Block values reset at rollover; the *last finished block* is the final value of the previous block.\n- **Alpha** figures come from the subnet contract and its event mirror (demand deposits, miner emissions, miner claims, staked total) and the alpha price from the subnet pool on GeckoTerminal. USD values are informational: amount × current price.\n- A measurement without a value shows *No data* rather than zero — for example the last finished block until one has been observed since deploy.\n\nThe same figures back the machine-readable [`/stats.json`](/stats.json) feed and the [public dashboards directory](/stats).\n"
+        "content": "**urnetwork network stats** — public, read-only, refreshed every minute from the operator's live fleet. Change the time range at the top right (up to 90 days of history are kept).\n\n- **Data transferred** counts bytes carried under transfer contracts and acknowledged by the receiving side — the same bytes the network settles on. Relayed traffic is counted per contract leg, so quote it as *bytes carried*, not bytes downloaded.\n- **Connected devices** are distinct client devices with a live resident on the fleet; **users** are unique top-level identities that moved data in the window.\n- **Providers** are devices with a public provide key, a valid location, and a live connection — the supply anyone on the network can use. Countries, regions, and cities are where those providers are, not where users are.\n- **Epochs** are SN25's settlement epochs, spans of chain blocks the subnet coordinator counts: epoch 0 was a one-day bootstrap epoch from block 9,240,028, and every epoch from 1 on is 50,400 blocks, about 7 days. An epoch starts at its first block's timestamp, and its end is projected from the chain head at 12 seconds a block. Epoch values reset at rollover; the *last finished epoch* is the final value of the previous epoch.\n- **Alpha** figures come from the subnet contract and its event mirror (demand deposits, miner emissions, miner claims, staked total) and the alpha price from the subnet pool on GeckoTerminal. USD values are informational: amount × current price.\n- A measurement without a value shows *No data* rather than zero — for example the last finished epoch's users until an epoch has been observed since deploy.\n\nThe same figures back the machine-readable [`/stats.json`](/stats.json) feed and the [public dashboards directory](/stats).\n"
       }
     }
   ]
