@@ -174,6 +174,8 @@ type ConnectionAnnounceSettings struct {
 	verifySettingsForTest func() (*model.VerifySettings, bool)
 	// Observes each provider liveness lease write's outcome.
 	livenessLeaseWrittenForTest func(outcome string)
+	// Replaces model.ProviderLivenessLeaseRefreshInterval when set.
+	livenessLeaseRefreshIntervalForTest time.Duration
 }
 
 type LatencyTest struct {
@@ -580,10 +582,16 @@ func (self *ConnectionAnnounce) run() {
 	// sync below reads anyway
 	providerVersion := newProviderVersionConnection(defaultProviderVersionConnections, self.appVersion)
 	defer providerVersion.release()
-	// the client's provider liveness lease, refreshed each round below while
-	// the client provides for discovery (transport_announce_liveness_lease.go)
-	livenessLease := newProviderLivenessLeaseConnection(self.clientId, self.settings.livenessLeaseWrittenForTest)
-	defer livenessLease.end(self.ctx)
+	// the client's provider liveness lease, refreshed by a worker of its own
+	// while the rounds below find the client providing for discovery
+	// (transport_announce_liveness_lease.go)
+	livenessLease := newProviderLivenessLeaseConnection(
+		self.clientId,
+		self.settings.livenessLeaseRefreshIntervalForTest,
+		self.startWorker,
+		self.settings.livenessLeaseWrittenForTest,
+	)
+	defer livenessLease.end()
 
 	// register this client in the network peer registry, now that the
 	// connection has survived the announce window. 2026-07-15 outage:
@@ -672,10 +680,6 @@ func (self *ConnectionAnnounce) run() {
 					return
 				}
 			*/
-
-			// Before the read, so a round whose read fails still refreshes the
-			// lease of a client the last read found providing.
-			livenessLease.beforeRead(self.ctx)
 
 			// The read comes first: a round whose read fails consumes nothing,
 			// so the next round's provide changes and stats cover this one.

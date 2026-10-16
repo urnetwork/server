@@ -1,13 +1,12 @@
-// The provider liveness lease writes of a live announcement's sync rounds, on
-// the database and Redis of the test env: a round whose provide read fails
-// still refreshes, a client that does not provide never writes, a client that
-// stops providing is released, and one connection of two ending leaves the
-// lease to the other.
+// The provider liveness lease writes of a live announcement, on the database
+// and Redis of the test env: its worker refreshes the lease while its round is
+// held and through a failed provide read, a client that does not provide never
+// writes, a client that stops providing is released, and one connection of two
+// ending leaves the lease to the other.
 package connect
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
@@ -16,10 +15,11 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// One announcement of a client with a short sync interval. Each lease write's
-// outcome is sent on writes. With holdRounds, each recorded stats round is sent
-// on rounds and the run goroutine then waits for release, as in the sync
-// tests, so the test decides what the next round meets.
+// One announcement of a client with a short sync interval and the given lease
+// refresh interval. Each lease write's outcome is sent on writes. With
+// holdRounds, each recorded stats round is sent on rounds and the run goroutine
+// then waits for release, as in the sync tests, so the test decides what the
+// next round meets.
 type livenessAnnounceForTest struct {
 	transportCtx    context.Context
 	transportCancel context.CancelFunc
@@ -44,19 +44,20 @@ func createLivenessClientForTest(ctx context.Context, provideModes ...model.Prov
 }
 
 // Announces one connection of the client at once.
-func startLivenessAnnounceForTest(ctx context.Context, networkId server.Id, clientId server.Id, holdRounds bool) *livenessAnnounceForTest {
+func startLivenessAnnounceForTest(ctx context.Context, networkId server.Id, clientId server.Id, refreshInterval time.Duration, holdRounds bool) *livenessAnnounceForTest {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	fixture := &livenessAnnounceForTest{
 		transportCtx:    transportCtx,
 		transportCancel: transportCancel,
 		registered:      make(chan server.Id, 1),
-		writes:          make(chan string, 1024),
+		writes:          make(chan string, 4096),
 		rounds:          make(chan model.ClientReliabilityStats),
 		release:         make(chan struct{}),
 	}
 	settings := DefaultConnectionAnnounceSettings()
 	settings.SyncConnectionTimeout = 50 * time.Millisecond
 	settings.LocationRetryTimeout = 0
+	settings.livenessLeaseRefreshIntervalForTest = refreshInterval
 	settings.verifySettingsForTest = func() (*model.VerifySettings, bool) {
 		return nil, false
 	}
@@ -64,7 +65,10 @@ func startLivenessAnnounceForTest(ctx context.Context, networkId server.Id, clie
 		fixture.registered <- *announce.ConnectionId()
 	}
 	settings.livenessLeaseWrittenForTest = func(outcome string) {
-		fixture.writes <- outcome
+		select {
+		case fixture.writes <- outcome:
+		default:
+		}
 	}
 	if holdRounds {
 		settings.reliabilityStatsRecordedForTest = func(_ server.Id, stats model.ClientReliabilityStats) {
@@ -122,18 +126,21 @@ func (self *livenessAnnounceForTest) awaitRound(t testing.TB, testCtx context.Co
 	}
 }
 
-// The next write, waiting for it.
-func (self *livenessAnnounceForTest) awaitWrite(t testing.TB, testCtx context.Context) string {
+// Waits for the next write of the outcome, skipping others.
+func (self *livenessAnnounceForTest) awaitOutcome(t testing.TB, testCtx context.Context, want string) {
 	t.Helper()
-	select {
-	case outcome := <-self.writes:
-		return outcome
-	case <-self.announce.done:
-		t.Fatal("the announcement ended before writing its lease")
-	case <-testCtx.Done():
-		t.Fatal("timed out waiting for a lease write")
+	for {
+		select {
+		case outcome := <-self.writes:
+			if outcome == want {
+				return
+			}
+		case <-self.announce.done:
+			t.Fatalf("the announcement ended before writing %s", want)
+		case <-testCtx.Done():
+			t.Fatalf("timed out waiting for a lease write: %s", want)
+		}
 	}
-	panic("unreachable")
 }
 
 // The writes so far, without waiting.
@@ -155,34 +162,66 @@ func (self *livenessAnnounceForTest) close() {
 	self.announce.CloseAndWait()
 }
 
-// The round after a held one meets a failed provide read, and still refreshes
-// the lease, before the read; so does the round after it. Before this change
-// no round wrote a lease; refreshed only after a successful read, the failed
-// round would have written nothing.
+// The round goroutine is held inside its first round, as a database
+// acquisition without a deadline or a failed read's retries and backoff hold
+// it, for minutes. The connection's worker keeps refreshing the lease all the
+// while. Refreshed by the rounds before this change, the lease stopped with
+// them: a round held past the window left a live provider leaseless.
+func TestConnectionAnnounceRefreshesLeaseWhileItsRoundIsHeld(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer testCancel()
+		networkId, clientId := createLivenessClientForTest(ctx, model.ProvideModePublic)
+		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, 20*time.Millisecond, true)
+		defer fixture.close()
+		fixture.awaitRegistered(t, testCtx)
+		fixture.awaitRound(t, testCtx)
+		// held from here on
+		fixture.takeWrites()
+		for range 3 {
+			fixture.awaitOutcome(t, testCtx, livenessLeaseOutcomeRefreshed)
+		}
+		if _, ok := model.Testing_GetProviderLivenessLease(ctx, clientId); !ok {
+			t.Fatal("the providing client has no lease")
+		}
+		fixture.release <- struct{}{}
+	})
+}
+
+// A round whose provide read fails changes nothing of the lease: the worker
+// refreshes it through the failed round and after it.
 func TestConnectionAnnounceRefreshesLeaseThroughFailedSyncRead(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
 		defer testCancel()
 		networkId, clientId := createLivenessClientForTest(ctx, model.ProvideModePublic)
-		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, true)
+		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, 20*time.Millisecond, true)
 		defer fixture.close()
 		fixture.awaitRegistered(t, testCtx)
-
 		fixture.awaitRound(t, testCtx)
-		if writes := fixture.takeWrites(); !slices.Equal(writes, []string{livenessLeaseOutcomeRefreshed}) {
-			t.Fatalf("the first round wrote %v, want one refresh once it read the client providing", writes)
-		}
 		failNextProvideKeyChangeReadForTest(ctx)
 		fixture.release <- struct{}{}
 
-		// the failed round records no stats; the round after it does
-		fixture.awaitRound(t, testCtx)
-		if count := provideKeyChangeReadCountForTest(ctx); count != 2 {
-			t.Fatalf("provide_key_change was read %d times, want the failed read and the next round's", count)
+		// the failed read, then refreshes
+		for provideKeyChangeReadCountForTest(ctx) < 1 {
+			select {
+			case <-fixture.announce.done:
+				t.Fatal("the announcement ended")
+			case <-testCtx.Done():
+				t.Fatal("timed out waiting for the failed read")
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
-		if writes := fixture.takeWrites(); !slices.Equal(writes, []string{livenessLeaseOutcomeRefreshed, livenessLeaseOutcomeRefreshed}) {
-			t.Fatalf("the failed round and the next wrote %v, want a refresh each, before each read", writes)
+		fixture.takeWrites()
+		for range 2 {
+			fixture.awaitOutcome(t, testCtx, livenessLeaseOutcomeRefreshed)
+		}
+		// the round after the failed one reads and records its stats
+		fixture.awaitRound(t, testCtx)
+		if count := provideKeyChangeReadCountForTest(ctx); count < 2 {
+			t.Fatalf("provide_key_change was read %d times, want the failed read and a later one", count)
 		}
 		if _, ok := model.Testing_GetProviderLivenessLease(ctx, clientId); !ok {
 			t.Fatal("the providing client has no lease")
@@ -201,7 +240,7 @@ func TestConnectionAnnounceNonProvidingClientWritesNoLease(t *testing.T) {
 		networkId, clientId := createLivenessClientForTest(ctx)
 		// counts the rounds' reads; the first fails, which writes nothing either
 		failNextProvideKeyChangeReadForTest(ctx)
-		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, false)
+		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, 20*time.Millisecond, false)
 		defer fixture.close()
 		fixture.awaitRegistered(t, testCtx)
 		for provideKeyChangeReadCountForTest(ctx) < 4 {
@@ -222,29 +261,28 @@ func TestConnectionAnnounceNonProvidingClientWritesNoLease(t *testing.T) {
 	})
 }
 
-// The read that finds the client no longer providing releases its lease.
+// The read that finds the client no longer providing has the worker release
+// its lease.
 func TestConnectionAnnounceReleasesLeaseWhenProvideStops(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
 		defer testCancel()
 		networkId, clientId := createLivenessClientForTest(ctx, model.ProvideModePublic)
-		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, true)
+		fixture := startLivenessAnnounceForTest(ctx, networkId, clientId, time.Hour, true)
 		defer fixture.close()
 		fixture.awaitRegistered(t, testCtx)
 		fixture.awaitRound(t, testCtx)
+		fixture.awaitOutcome(t, testCtx, livenessLeaseOutcomeRefreshed)
 		if _, ok := model.Testing_GetProviderLivenessLease(ctx, clientId); !ok {
 			t.Fatal("the providing client has no lease")
 		}
-		fixture.takeWrites()
 
 		model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{})
 		fixture.release <- struct{}{}
 		// the change is counted, so the round records stats
 		fixture.awaitRound(t, testCtx)
-		if writes := fixture.takeWrites(); !slices.Equal(writes, []string{livenessLeaseOutcomeRefreshed, livenessLeaseOutcomeReleased}) {
-			t.Fatalf("the round that read the client stopping wrote %v, want its refresh, then the release", writes)
-		}
+		fixture.awaitOutcome(t, testCtx, livenessLeaseOutcomeReleased)
 		if _, ok := model.Testing_GetProviderLivenessLease(ctx, clientId); ok {
 			t.Fatal("the lease of a client that stopped providing remains")
 		}
@@ -253,52 +291,38 @@ func TestConnectionAnnounceReleasesLeaseWhenProvideStops(t *testing.T) {
 }
 
 // Two connections of one client hold its lease. One ends: it writes nothing,
-// and the lease stays, scored by the latest refresh of either, while the other
-// is held between rounds and cannot refresh it. The other's next round
-// refreshes it again. A release at the end would have dropped the client from
-// every draw until then.
+// and the lease stays, at the latest refresh of either; the other, refreshing
+// only once an hour, cannot have written it since. A release at the end would
+// have dropped the client from every draw until the other's next refresh.
 func TestConnectionAnnounceLeaseOutlivesOneOfTwoConnections(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
 		defer testCancel()
 		networkId, clientId := createLivenessClientForTest(ctx, model.ProvideModePublic)
-		ending := startLivenessAnnounceForTest(ctx, networkId, clientId, false)
+		ending := startLivenessAnnounceForTest(ctx, networkId, clientId, time.Hour, false)
 		defer ending.close()
-		staying := startLivenessAnnounceForTest(ctx, networkId, clientId, true)
+		staying := startLivenessAnnounceForTest(ctx, networkId, clientId, time.Hour, false)
 		defer staying.close()
 		ending.awaitRegistered(t, testCtx)
 		staying.awaitRegistered(t, testCtx)
-
-		if outcome := ending.awaitWrite(t, testCtx); outcome != livenessLeaseOutcomeRefreshed {
-			t.Fatalf("the ending connection wrote %s, want a refresh", outcome)
-		}
-		// the staying connection's round, held: it refreshed, and waits
-		staying.awaitRound(t, testCtx)
-		if writes := staying.takeWrites(); !slices.Equal(writes, []string{livenessLeaseOutcomeRefreshed}) {
-			t.Fatalf("the staying connection wrote %v, want a refresh", writes)
+		ending.awaitOutcome(t, testCtx, livenessLeaseOutcomeRefreshed)
+		staying.awaitOutcome(t, testCtx, livenessLeaseOutcomeRefreshed)
+		before, ok := model.Testing_GetProviderLivenessLease(ctx, clientId)
+		if !ok {
+			t.Fatal("the providing client has no lease")
 		}
 
 		ending.close()
 		for _, outcome := range ending.takeWrites() {
-			if outcome != livenessLeaseOutcomeRefreshed {
-				t.Fatalf("the ending connection wrote %s", outcome)
-			}
+			t.Fatalf("the ending connection wrote %s", outcome)
 		}
-		endedTime, ok := model.Testing_GetProviderLivenessLease(ctx, clientId)
+		after, ok := model.Testing_GetProviderLivenessLease(ctx, clientId)
 		if !ok {
 			t.Fatal("one connection's end removed the lease the other connection holds")
 		}
-
-		staying.release <- struct{}{}
-		if outcome := staying.awaitWrite(t, testCtx); outcome != livenessLeaseOutcomeRefreshed {
-			t.Fatalf("the staying connection wrote %s, want a refresh", outcome)
+		if !after.Equal(before) {
+			t.Fatalf("the lease moved from %s to %s with no refresh", before, after)
 		}
-		refreshTime, ok := model.Testing_GetProviderLivenessLease(ctx, clientId)
-		if !ok || refreshTime.Before(endedTime) {
-			t.Fatalf("the staying connection's refresh scored the lease %s, want at or after %s", refreshTime, endedTime)
-		}
-		staying.awaitRound(t, testCtx)
-		staying.release <- struct{}{}
 	})
 }
