@@ -136,6 +136,8 @@ func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.T
 	})
 	server.Tx(ctx, func(tx server.PgTx) {
 		for index := range total {
+			// each run at its own time, the failures earliest (egressTestRunAt)
+			measuredAt := egressTestRunAt(measuredAt, index, total)
 			ok := 0
 			if index >= failed {
 				ok = 1

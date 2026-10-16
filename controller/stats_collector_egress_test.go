@@ -84,6 +84,11 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 			})
 			server.Tx(ctx, func(tx server.PgTx) {
 				for index := range 60 {
+					// each run at its own time over the forty minutes before
+					// measuredAt, the failures earliest: runs seeded at one
+					// instant span nothing, and Quality reads no verdict from
+					// them (model/egress_native_min_runs.go)
+					measuredAt := measuredAt.Add(-time.Duration(59-index) * (40 * time.Minute) / 59)
 					ok := 0
 					if index >= failed {
 						ok = 1
