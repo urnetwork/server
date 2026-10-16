@@ -75,12 +75,19 @@ const ProviderLivenessLeaseWindow = providerLivenessLeaseWindow
 const ProviderLivenessWriterWindow = providerLivenessWriterWindow
 
 // How often a connect process writes the leases of all its connections,
-// whatever their sync rounds do.
-const ProviderLivenessLeaseRefreshInterval = 30 * time.Second
+// whatever their sync rounds do, from the start of one pass to the next.
+const ProviderLivenessLeaseRefreshInterval = 25 * time.Second
 
 // The most a connect process adds to each refresh interval at random, so the
 // processes of a fleet restarted together do not write in step.
 const ProviderLivenessLeaseRefreshJitter = 3 * time.Second
+
+// The bound of one pass of a connect process's writer over all its shards.
+// Shards a pass leaves unwritten when it ends are written by the next.
+const ProviderLivenessLeasePassTimeout = 10 * time.Second
+
+// The most clients one shard script writes; a larger shard write is split.
+const providerLivenessLeaseScriptMaxClients = 1000
 
 // The bound of one lease write or stamp, which is never retried: the next
 // interval writes again.
@@ -94,6 +101,16 @@ const ProviderLivenessWriterWithholdAge = 75 * time.Second
 
 // How long an API process reuses its verdict on writer coverage.
 const ProviderLivenessCoverageCacheAge = 5 * time.Second
+
+// The budget of one API read of the lease: the writer set or the shards.
+const ProviderLivenessReadTimeout = 150 * time.Millisecond
+
+// The bound of an API process's read of the live connect handlers.
+const ProviderLivenessHandlersReadTimeout = time.Second
+
+// The bound of an API process's judging of writer coverage: the live handlers,
+// then the writer set.
+const ProviderLivenessCoverageJudgeTimeout = ProviderLivenessHandlersReadTimeout + ProviderLivenessReadTimeout
 
 // A handler's stamp counts as current within this window. With the withhold
 // age, the writes' bounds and the readers' coverage cache it stays under the
@@ -174,11 +191,51 @@ end
 return held
 `)
 
-// Writes one shard's leases in one bounded script, never retried: scores the
-// clients of scoredClientIds, extends those of extendedClientIds that the
-// shard holds, and removes those of removedClientIds. held says, for each
+// Writes one shard's leases, never retried: scores the clients of
+// scoredClientIds, extends those of extendedClientIds that the shard holds, and
+// removes those of removedClientIds, in bounded scripts of at most
+// providerLivenessLeaseScriptMaxClients clients each. held says, for each
 // extended client, whether the shard held it. Every client must be in shard.
+// An error is the first script's that failed; the scripts before it wrote.
 func WriteProviderLivenessLeaseShard(
+	ctx context.Context,
+	shard int,
+	scoredClientIds []server.Id,
+	extendedClientIds []server.Id,
+	removedClientIds []server.Id,
+) (held []bool, returnErr error) {
+	for _, clientIds := range [][]server.Id{scoredClientIds, extendedClientIds, removedClientIds} {
+		for _, clientId := range clientIds {
+			if providerLivenessLeaseShard(clientId) != shard {
+				return nil, fmt.Errorf("client %s is not in lease shard %d", clientId, shard)
+			}
+		}
+	}
+	held = make([]bool, 0, len(extendedClientIds))
+	for first := true; first || 0 < len(scoredClientIds)+len(extendedClientIds)+len(removedClientIds); first = false {
+		// the next chunk: scored first, then extended, then removed
+		budget := providerLivenessLeaseScriptMaxClients
+		take := func(clientIds *[]server.Id) []server.Id {
+			n := min(budget, len(*clientIds))
+			budget -= n
+			chunk := (*clientIds)[:n]
+			*clientIds = (*clientIds)[n:]
+			return chunk
+		}
+		scoredChunk := take(&scoredClientIds)
+		extendedChunk := take(&extendedClientIds)
+		removedChunk := take(&removedClientIds)
+		chunkHeld, err := writeProviderLivenessLeaseShardScript(ctx, shard, scoredChunk, extendedChunk, removedChunk)
+		if err != nil {
+			return nil, err
+		}
+		held = append(held, chunkHeld...)
+	}
+	return held, nil
+}
+
+// One bounded shard script.
+func writeProviderLivenessLeaseShardScript(
 	ctx context.Context,
 	shard int,
 	scoredClientIds []server.Id,
@@ -193,9 +250,6 @@ func WriteProviderLivenessLeaseShard(
 	args = append(args, pruneAge, len(scoredClientIds), len(extendedClientIds), len(removedClientIds))
 	for _, clientIds := range [][]server.Id{scoredClientIds, extendedClientIds, removedClientIds} {
 		for _, clientId := range clientIds {
-			if providerLivenessLeaseShard(clientId) != shard {
-				return nil, fmt.Errorf("client %s is not in lease shard %d", clientId, shard)
-			}
 			args = append(args, clientId.String())
 		}
 	}

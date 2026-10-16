@@ -8,6 +8,7 @@ package model
 import (
 	"context"
 	"encoding/binary"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -298,29 +299,81 @@ func TestProviderLivenessLeaseIsTheClients(t *testing.T) {
 
 // The contract between connect writers and API readers, in time. A healthy
 // connection survives one failed write without its process withholding the
-// stamp. A process whose writes stop, for one shard or all, has its last stamp
-// lapse at every reader, through the coverage cache, before any lease it wrote
-// lapses: a write's success is the time it started, up to a write's bound
-// before its score, then the withhold age, the stamp's own write, the stamp
-// window and the readers' cache. Stamps renew well within their window. The
-// writes run on their own interval: a refresh tied to sync rounds waited out a
-// failed read's retries (up to a minute) and the longest backoff (two
-// minutes), 180 s, past the lease window.
+// stamp: its shard's writes are a pass apart, passes start an interval and its
+// jitter apart and each ends within its bound, so two passes and a pass's
+// bound separate the successes around a failure. A process whose writes stop,
+// for one shard or all, has its last stamp lapse at every reader before any
+// lease it wrote lapses: a write's success is the time it started, up to a
+// write's bound before its score, then the withhold age, the stamp's own
+// write, the stamp window, the readers' cache and the bound of a reader's
+// judging. Stamps renew well within their window. The writes run on their own
+// interval: a refresh tied to sync rounds waited out a failed read's retries
+// (up to a minute) and the longest backoff (two minutes), 180 s, past the
+// lease window.
 func TestProviderLivenessBudgetStaysUnderTheLeaseWindow(t *testing.T) {
-	worstRefreshGap := ProviderLivenessLeaseRefreshInterval + ProviderLivenessLeaseRefreshJitter + ProviderLivenessLeaseWriteTimeout
-	if ProviderLivenessWriterWithholdAge <= 2*worstRefreshGap {
-		t.Fatalf("a connection that misses one write reaches the withhold age: %s <= 2 x %s", ProviderLivenessWriterWithholdAge, worstRefreshGap)
+	passGap := ProviderLivenessLeaseRefreshInterval + ProviderLivenessLeaseRefreshJitter
+	oneMissedWrite := 2*passGap + ProviderLivenessLeasePassTimeout
+	if ProviderLivenessWriterWithholdAge <= oneMissedWrite {
+		t.Fatalf("a connection that misses one write reaches the withhold age: %s <= %s", ProviderLivenessWriterWithholdAge, oneMissedWrite)
 	}
-	lastEnforced := ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWithholdAge + ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWindow + ProviderLivenessCoverageCacheAge
+	lastEnforced := ProviderLivenessLeaseWriteTimeout + ProviderLivenessWriterWithholdAge + ProviderLivenessLeaseWriteTimeout +
+		ProviderLivenessWriterWindow + ProviderLivenessCoverageCacheAge + ProviderLivenessCoverageJudgeTimeout
 	if ProviderLivenessLeaseWindow <= lastEnforced {
 		t.Fatalf("readers may enforce until %s after a lease's last score, past the %s lease window", lastEnforced, ProviderLivenessLeaseWindow)
 	}
 	if ProviderLivenessWriterWindow <= 2*(ProviderLivenessWriterInterval+ProviderLivenessLeaseWriteTimeout) {
 		t.Fatalf("one failed stamp lapses the writer: %s window, %s interval", ProviderLivenessWriterWindow, ProviderLivenessWriterInterval)
 	}
-	if ProviderLivenessLeaseWindow <= worstRefreshGap {
-		t.Fatalf("a healthy lease lapses between writes: %s window, %s gap", ProviderLivenessLeaseWindow, worstRefreshGap)
+	if ProviderLivenessLeaseWindow <= passGap+ProviderLivenessLeasePassTimeout {
+		t.Fatalf("a healthy lease lapses between passes: %s window", ProviderLivenessLeaseWindow)
 	}
+	if ProviderLivenessLeasePassTimeout < ProviderLivenessLeaseWriteTimeout {
+		t.Fatalf("a pass's bound %s is shorter than one write's %s", ProviderLivenessLeasePassTimeout, ProviderLivenessLeaseWriteTimeout)
+	}
+}
+
+// A shard write larger than one script's limit is split, and every client of
+// it is written: the scored all at the node's clock, the held extended
+// reported in order across the scripts.
+func TestProviderLivenessLeaseShardWriteSplitsLargeBatches(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		shard := 6
+		shardClientIds := []server.Id{}
+		for i := uint64(0); len(shardClientIds) < 2*providerLivenessLeaseScriptMaxClients+12; i += 1 {
+			var clientId server.Id
+			clientId[0] = 0x02
+			binary.BigEndian.PutUint64(clientId[8:], i)
+			if providerLivenessLeaseShard(clientId) == shard {
+				shardClientIds = append(shardClientIds, clientId)
+			}
+		}
+		scored := shardClientIds[:2*providerLivenessLeaseScriptMaxClients+7]
+		extended := []server.Id{}
+		heldWant := []bool{}
+		nodeMillis := livenessTestNodeTime(ctx, t).UnixMilli()
+		for i := range 5 {
+			clientId := shardClientIds[len(scored)+i]
+			extended = append(extended, clientId)
+			heldWant = append(heldWant, i%2 == 0)
+			if i%2 == 0 {
+				livenessTestScore(ctx, t, providerLivenessLeaseKey(shard), map[string]int64{clientId.String(): nodeMillis - 60_000})
+			}
+		}
+		held, err := WriteProviderLivenessLeaseShard(ctx, shard, scored, extended, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(held, heldWant) {
+			t.Fatalf("held %v across the split scripts, want %v", held, heldWant)
+		}
+		members := livenessTestMembers(ctx, t, providerLivenessLeaseKey(shard))
+		for _, clientId := range scored {
+			if members[clientId.String()] < nodeMillis {
+				t.Fatalf("a scored client of the split write is at %d, want at or after %d", members[clientId.String()], nodeMillis)
+			}
+		}
+	})
 }
 
 // One shard script scores, extends only what the shard holds, and removes, at
