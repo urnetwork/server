@@ -349,3 +349,132 @@ func TestContractFreeSettlementOwnerAcceptsAPayersZeroByteContract(t *testing.T)
 		}
 	})
 }
+
+// A payer whose balance is empty reserves nothing for a zero-byte contract,
+// so the contract carries its payer but no escrow, as an unanchored prober
+// contract does.
+func createUnanchoredZeroByteTestContract(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture) server.Id {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=0 WHERE balance_id=$1`, f.balanceId))
+	})
+	id := createRedisAdmissionTest(ctx, f, 0).ContractId
+	server.Db(ctx, func(conn server.PgConn) {
+		var unanchored bool
+		server.Raise(conn.QueryRow(ctx, `SELECT payer_network_id=$2 AND transfer_byte_count=0
+            AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
+            FROM transfer_contract WHERE contract_id=$1`, id, f.sourceNetworkId).Scan(&unanchored))
+		if !unanchored {
+			t.Fatal("fixture did not create an unanchored zero-byte payer contract")
+		}
+	})
+	return id
+}
+
+// A payer's zero-byte contract closed with no payout and no financial custody.
+func requirePayerZeroByteContractClosedFree(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var closed bool
+		server.Raise(conn.QueryRow(ctx, `SELECT outcome='settled' AND NOT dispute AND payer_network_id=$2
+            AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+            AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
+            AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
+            AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
+            FROM transfer_contract WHERE contract_id=$1`, id, f.sourceNetworkId).Scan(&closed))
+		if !closed {
+			t.Fatal("a payer's zero-byte contract stayed open or acquired financial custody")
+		}
+	})
+}
+
+// Each expiry route closes a payer's zero-byte contract through the no-payout
+// owner, as it closes a source-owned free contract: a contract that reserved
+// nothing had nothing to escrow. Each shape has its own database.
+func runFreeExpiryPayerZeroByteClose(t *testing.T, shape string) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		id := createUnanchoredZeroByteTestContract(t, ctx, f)
+		server.Raise(CloseContract(ctx, id, f.sourceId, 0, shape != "final"))
+		switch shape {
+		case "disputed":
+			SetContractDispute(ctx, id, true)
+		case "final":
+			// the destination's final report commits; only its outcome is refused
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `CREATE FUNCTION synthetic_zero_outcome_abort() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN RAISE EXCEPTION USING ERRCODE='57014',MESSAGE='synthetic zero-byte outcome interruption'; END;
+                    $$;
+                    CREATE TRIGGER synthetic_zero_outcome_abort BEFORE UPDATE ON transfer_contract
+                    FOR EACH ROW WHEN (OLD.outcome IS NULL AND NEW.outcome IS NOT NULL)
+                    EXECUTE FUNCTION synthetic_zero_outcome_abort();`))
+			})
+			var interrupted error
+			server.HandleError(func() { interrupted = CloseContract(ctx, id, f.destinationId, 0, false) },
+				func(err error) { interrupted = err })
+			if interrupted == nil {
+				t.Fatal("public close did not stop after the final report commit")
+			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_zero_outcome_abort ON transfer_contract; DROP FUNCTION synthetic_zero_outcome_abort();`))
+			})
+		case "partial":
+		default:
+			t.Fatal("unknown zero-byte expiry fixture")
+		}
+		expireFreeExpiryOwnerContracts(ctx, []server.Id{id}, true)
+		count, _, err := ForceCloseOpenContractIdsPage(ctx, server.NowUtc().Add(-5*time.Minute), 32, 1, 0, 0, nil)
+		if err != nil || count != 1 {
+			t.Fatal("expiry refused a payer's zero-byte contract", shape, count, err)
+		}
+		requirePayerZeroByteContractClosedFree(t, ctx, f, id)
+	})
+}
+
+// A disputed zero-byte payer contract closes through the expired dispute owner.
+func TestContractExpirationFreeDisputeClosesAPayersZeroByteContract(t *testing.T) {
+	runFreeExpiryPayerZeroByteClose(t, "disputed")
+}
+
+// Two final reports without an outcome close through the no-report recovery.
+func TestContractExpirationFreeFinalClosesAPayersZeroByteContract(t *testing.T) {
+	runFreeExpiryPayerZeroByteClose(t, "final")
+}
+
+// A missing peer report is synthesized under the no-payout owner.
+func TestContractExpirationFreePartialClosesAPayersZeroByteContract(t *testing.T) {
+	runFreeExpiryPayerZeroByteClose(t, "partial")
+}
+
+// The legacy settlement owner applies the same no-payout rule as the shared
+// helper: its payer's zero-byte intent closes free, as its funded payer intent
+// without escrow stays refused (TestLegacyFreeSettlementRetainsPayerWithoutEscrow).
+func TestLegacyFreeSettlementClosesAPayersZeroByteContract(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		id := createUnanchoredZeroByteTestContract(t, ctx, f)
+		server.Raise(CloseContract(ctx, id, f.sourceId, 0, true))
+		SetContractDispute(ctx, id, true)
+		expireFreeExpiryOwnerContracts(ctx, []server.Id{id}, true)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, id))
+			server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, true))
+		})
+		owned := context.WithValue(ctx, legacySettlementCloseScopeKey{}, ContractCloseOwner{Kind: ContractCloseOwnerPayerNetwork, Id: f.sourceNetworkId})
+		completed, busy, _, err := flushLegacySettlement(owned, id)
+		if err != nil || !completed || busy {
+			t.Fatal("the legacy owner refused its payer's zero-byte intent", completed, busy, err)
+		}
+		requirePayerZeroByteContractClosedFree(t, ctx, f, id)
+	})
+}

@@ -47,7 +47,9 @@ func (self *legacyFinancialCohortCooldown) deferProbe(shard int) {
 }
 
 // The caller separately proves no commit was attempted and cleanup has joined.
-// A stopped child alongside an unrelated body error is not deadline evidence.
+// The child's deadline is evidence only when every failure belongs to its
+// stop: a stopped statement's own lock or statement timeout counts, while an
+// unrelated body error or an operator cancel beside the stop does not.
 func legacyFinancialCohortDeadlineFallback(parent, child context.Context, err error) bool {
 	return parent.Err() == nil && errors.Is(child.Err(), context.DeadlineExceeded) && isSettlementPageCancellation(err)
 }
