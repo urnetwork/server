@@ -156,7 +156,10 @@ func TestReleaseGateServicesSuiteAuthenticationAdapters(t *testing.T) {
 		t.Fatalf("proxy WireGuard key pair differs: %v", err)
 	}
 	plain := []byte("synthetic private handoff")
-	sealed := server.WgHandoffSeal(plain)
+	sealed, err := server.WgHandoffSeal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
 	opened, authenticated, err := server.WgHandoffOpen(sealed)
 	if err != nil || !authenticated || !bytes.Equal(opened, plain) {
 		t.Fatalf("real private handoff encryption failed: %v", err)
