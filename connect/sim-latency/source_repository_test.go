@@ -78,7 +78,7 @@ func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
 // This independent fixture prevents a removed main dependency from silently
 // shrinking every serializer, validator, image copy, and source ledger together.
 func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"}
 	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
 		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
 	}
@@ -122,7 +122,7 @@ func sourceModuleGraphBytes(t *testing.T, repositories []string) []byte {
 	return encoded
 }
 
-// Removing Warp on main must not change the ten-repository evaluator lock.
+// Removing Warp on main must not change the eleven-repository evaluator lock.
 func TestSourceRepositoryCoverageRetainsFrozenDependencyRemovedFromMain(t *testing.T) {
 	locked := sourceRepositoryNames()
 	frozen := slices.Clone(locked)
@@ -452,6 +452,7 @@ write_evidence() { [[ $1 == staging-source.json ]]; printf '%s\n' "$2"; }
 		{name: "complete"},
 		{name: "missing-operator-proxy", omit: "operator-proxy"},
 		{name: "missing-warp", omit: "warp"},
+		{name: "missing-gvisor", omit: "gvisor"},
 		{name: "unexpected", extra: "unexpected"},
 		{name: "substituted", omit: "warp", extra: "unexpected"},
 		{name: "malformed-commit", change: "operator-proxy"},
@@ -581,10 +582,12 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
 		{name: "missing-operator-proxy", omit: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "missing-warp", omit: "warp", wantErr: "source lock is malformed"},
+		{name: "missing-gvisor", omit: "gvisor", wantErr: "source lock is malformed"},
 		{name: "unexpected", extra: "unexpected", wantErr: "source lock is malformed"},
 		{name: "substituted", omit: "warp", extra: "unexpected", wantErr: "source lock is malformed"},
 		{name: "operator-proxy-mismatch", change: "operator-proxy", wantErr: "repository operator-proxy does not match the source lock"},
 		{name: "warp-mismatch", change: "warp", wantErr: "repository warp does not match the source lock"},
+		{name: "gvisor-mismatch", change: "gvisor", wantErr: "repository gvisor does not match the source lock"},
 	} {
 		lockedCommits := maps.Clone(repositoryCommits)
 		if fixture.omit != "" {
