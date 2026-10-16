@@ -789,3 +789,87 @@ Also:
   sweep.
 
 Session management routes (`GET /network/sessions`, `POST /network/revoke-session`, `POST /network/revoke-other-sessions`, and `GET /network/session-operations/{operation_id}`) require network credentials; valid client credentials receive 403. API keys may list or revoke a specified session. Revoke-others requires a tagged current sign-in; API keys have none and legacy network JWTs must refresh first. The server always takes the network and kept session from authenticated identity. Untagged legacy coverage remains partial. Removing one client and revoking its sign-in are distinct: legacy descendants require active ancestors, while session/root-tagged descendants follow their selected marker/root rule and always require their own active client.
+
+## 10. The intended network (`fix/intended-network-guard`)
+
+Owner report 2026-10-16: a ur.io tab still showed network A after another tab
+signed in to network B. A browser stores one jwt for all of its tabs, so the
+stale tab's calls carried B's jwt, and its account deletion deleted B. The web
+app fences this itself (mmm 323a3dd9e). The server now also refuses such a
+request when the client says which network it means.
+
+**The header.** `X-UR-Intended-Network-Id: <network_id>`, where the value is
+the network the client's screen shows as signed in. It is the `network_id`
+claim of the jwt the screen was rendered for, as a UUID (`server.ParseId`
+also reads the 32-hex form). The header is optional, and a request without it
+is served exactly as before.
+
+**The rule.** `api.applyRouteAccess` puts `router.RefuseIntendedNetworkMismatch`
+in front of every route outside the Public class, including an unclassified
+route. These are the routes that take a URnetwork credential: 126 of the 243. A
+Public route does not act for the bearer's network and ignores the header. The
+data pack routes, for example, name their network in the body. The gate runs
+before the lag.dev guest gate and the client token gate, so a request meant for
+another network gets the same answer whatever the credential.
+
+**The check** (`session.CheckIntendedNetwork`) decides from the credential
+alone:
+
+| Request | Answer |
+|---|---|
+| no header | the handler, unchanged |
+| header that is not one network id (empty, zero id, repeated, a list) | **400** `invalid_intended_network_id` |
+| no bearer credential, or one that does not verify | the handler, whose authentication refuses it as before (its 401) |
+| token whose unverified claims name the intended network | the handler, which verifies the token |
+| token whose claims name another network, or none | verified (signature, lifetime, audience; a legacy token's network is resolved), then **412** `intended_network_mismatch` if it is another network's |
+| API key | looked up as authentication looks it up, **412** if it is another network's |
+| the network cannot be resolved because a dependency failed | **503**, as authentication answers; never served unchecked |
+
+The body is JSON `{"error": "...", "code": "..."}`. The 412 message is "This
+request was meant for a different network than the one signed in. Nothing was
+changed." The status is never 401 or 403. ur.io's session refresh signs out on
+either (`AuthContext.jsx` `refreshSession`), and the SDK's confirmed logout
+treats a 401 as a revoked credential. Signing out there would end the B
+sign-in that every tab shares. 409 was not used either, because the SDK's
+session view controller retries a 409. 412 is the status for a precondition in
+a request header that evaluated false.
+
+The gate does not validate account or session state; the handler's
+authentication still does. A revoked token of another network gets the 412,
+not the 401.
+
+**Requiring the header.** Network delete should require it once the clients
+send it, answering 428 `intended_network_required` to a request without it.
+Today every shipped client omits it, including the native apps, older ur.io
+bundles and API scripts, so requiring it now would break account deletion,
+which the App Store requires in-app. That is a later change, made when the
+clients' versions show that the old ones are gone.
+
+**Rollout.** A browser sends a custom header only after a CORS preflight whose
+`Access-Control-Allow-Headers` names it. The load balancer's list
+(warpctl `config.go`, which allowed `X-UR-ClientInfo` in c1f12e4) must allow
+`X-UR-Intended-Network-Id` and be deployed before ur.io sends it. Otherwise
+every request that carries it fails in the browser. A server without this
+change ignores the header.
+
+**Tests.**
+- `session/intended_network_test.go` (pure): the header's forms, B's network
+  and client tokens refused on a request meant for A and served on one meant
+  for B, nothing checked or looked up without the header, unverifiable
+  credentials left to the handler, API keys looked up, and a dependency
+  failure answered as unavailable.
+- `router/intended_network_test.go` (pure): the gate through a router. It
+  covers the 412 and 400 bodies before the handler, the intended network
+  served, every credential served without the header, a forged token left to
+  the handler, the gate order with the other gates, and the route's identity.
+- `api/intended_network_route_test.go` (pure): on every credential route, B's
+  network and client tokens are refused before the handler on a request meant
+  for A, and B's token is served meant for B and without the header. The
+  routes the report names are pinned. Both tests fail on the code before this
+  branch: the handler runs.
+- `api/route_authz_test.go`: exactly the non-public routes, and an
+  unclassified one, carry the gate.
+- `api/intended_network_db_test.go` (DB, real handlers): network delete
+  meant for A is refused for B's root token, API key and client token, and A
+  and B both remain. A balance code redeemed by a stale tab is refused and
+  stays unredeemed. It then redeems meant for B, and with no header.

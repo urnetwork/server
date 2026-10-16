@@ -329,12 +329,17 @@ func refuseClientAdmin(ctx context.Context, byJwt *session.ByJwt) bool {
 }
 
 // applyRouteAccess puts the client token gate in front of every admin route and
-// every own client payout route, and the lag.dev guest gate in front of every
-// route but the guest's own.
+// every own client payout route, the lag.dev guest gate in front of every route
+// but the guest's own, and the intended network gate in front of every route
+// that takes a URnetwork credential: every class but public, whose routes do
+// not act for the bearer's network (AUTHZ1.md §10). The intended network gate
+// runs first, so a request meant for another network is refused before any
+// other gate or the handler looks at it.
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
-		switch routeAccessFor(route) {
+		access := routeAccessFor(route)
+		switch access {
 		case routeAccessNetwork:
 			route = router.RefuseClientCredentials(route, router.RefuseEveryClientCredential)
 		case routeAccessAppAdmin, routeAccessOwnClientPayout:
@@ -342,6 +347,9 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 		}
 		if !lagGuestRoutes[routeAccessKey(route)] {
 			route = router.RefuseLagGuestCredentials(route)
+		}
+		if access != routeAccessPublic {
+			route = router.RefuseIntendedNetworkMismatch(route)
 		}
 		applied = append(applied, route)
 	}
