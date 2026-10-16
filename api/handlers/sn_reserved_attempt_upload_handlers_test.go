@@ -89,6 +89,13 @@ func newSnReservedAttemptEndpoint(t testing.TB, authority *snReservedAttemptAuth
 // The response body is always consumed and joined, including quota refusal.
 func snReservedAttemptRequest(t testing.TB, origin, token, header, kind string, data []byte) int {
 	t.Helper()
+	status, _ := snReservedAttemptResponse(t, origin, token, header, kind, data)
+	return status
+}
+
+// The same request, returning the bounded body as well as the status.
+func snReservedAttemptResponse(t testing.TB, origin, token, header, kind string, data []byte) (int, string) {
+	t.Helper()
 	endpoint := origin + "/sn/attempt-artifact?" + url.Values{"kind": {kind}, "hash": {snAttemptTestHash(data)}}.Encode()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
@@ -110,11 +117,26 @@ func snReservedAttemptRequest(t testing.TB, origin, token, header, kind string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if err := errors.Join(readErr, response.Body.Close()); err != nil {
 		t.Fatal(err)
 	}
-	return response.StatusCode
+	return response.StatusCode, string(body)
+}
+
+// A replica 1 intent for data, signed for the endpoint's current session.
+func snReservedAttemptIntentHeader(t testing.TB, authority *snReservedAttemptAuthority, endpoint *snReservedAttemptEndpoint, data []byte) string {
+	t.Helper()
+	sessionHash, err := protocol.ValidatorAttemptUploadSessionHash(endpoint.api.GetByJwt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := protocol.ValidatorAttemptUploadIntent{ActivationHash: authority.digest, VPK: authority.record.VPK, ReplicaNoID: 1, SessionHash: sessionHash, Kind: 1, ContentHash: sha256.Sum256(data), Size: uint64(len(data)), NotAfter: uint64(time.Now().Unix()) + 25}
+	header, err := intent.Sign(authority.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header
 }
 
 // Ordinary authenticated accounts exhaust their real Redis pool, and repeated
