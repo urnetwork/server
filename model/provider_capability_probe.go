@@ -101,8 +101,12 @@ func GetProviderCapabilityProbePage(
 // Of clientIds, in their order, those the egress rules admit to Quality or to
 // Speed before the modern provider gate: the providers whose evidence the gate
 // reads. It is the gate's own population, so a provider the gate takes out
-// for want of evidence stays measured and can return. The bulk evidence is
-// read for clientIds alone, as provider status reads it.
+// for want of evidence stays measured and can return. The native URL-run
+// minimums (egress_native_min_runs.go) come first, as they do for the gate:
+// a provider with one passing URL run is in neither bucket and is first
+// measured after its second run admits it to Speed, so a one-sample fleet
+// batch costs no tunnels. The bulk evidence is read for clientIds alone, as
+// provider status reads it.
 func FilterProviderCapabilityProbeEligible(ctx context.Context, clientIds []server.Id) []server.Id {
 	if len(clientIds) == 0 {
 		return []server.Id{}

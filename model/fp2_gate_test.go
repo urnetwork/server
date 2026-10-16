@@ -18,10 +18,12 @@ func TestFp2ClarifiedProbeGates(t *testing.T) {
 	}{
 		{name: "legacy unprobed"},
 		{name: "unprobed", facts: providerEgressFacts{egressIndex: &index}},
-		{name: "ordinary failing", facts: providerEgressFacts{egressIndex: &index, egressQuality: &failing}},
-		{name: "passing", facts: providerEgressFacts{egressIndex: &index, egressQuality: &passing}, quality: true, speed: true},
+		// the measured providers below have run often enough for both native
+		// URL-run minimums, so the probe verdict alone decides them
+		{name: "ordinary failing", facts: providerEgressFacts{egressIndex: &index, egressQuality: &failing, qualityRunsMet: true, speedRunsMet: true}},
+		{name: "passing", facts: providerEgressFacts{egressIndex: &index, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}, quality: true, speed: true},
 		{name: "cheap blackhole", facts: providerEgressFacts{blackholed: true}},
-		{name: "probe country observation", facts: providerEgressFacts{countryMismatch: true, egressIndex: &index, egressQuality: &passing}, quality: true, speed: true},
+		{name: "probe country observation", facts: providerEgressFacts{countryMismatch: true, egressIndex: &index, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}, quality: true, speed: true},
 	}
 	for _, c := range cases {
 		for _, flag := range []bool{false, true} {
@@ -65,7 +67,9 @@ func TestFp2UrlSuccessRatio(t *testing.T) {
 		if index.Evidence != c.evidence || index.Quality != c.quality {
 			t.Errorf("%d/%d: got %+v, want evidence=%t quality=%t", c.ok, c.total, index, c.evidence, c.quality)
 		}
-		decision := decideProviderEgress(&providerEgressFacts{egressQuality: index.QualityVerdict()}, false)
+		// the runs behind each ratio meet the native URL-run minimums, so the
+		// ratio alone decides
+		decision := decideProviderEgress(&providerEgressFacts{egressQuality: index.QualityVerdict(), qualityRunsMet: true, speedRunsMet: true}, false)
 		if decision.quality != c.quality || decision.speed != c.quality || !decision.online || !decision.counted || decision.hardExcluded {
 			t.Errorf("%d/%d: shared ratio gate changed bucket membership: %+v", c.ok, c.total, decision)
 		}
@@ -79,10 +83,11 @@ func TestFp2CommonAndArinQualityGates(t *testing.T) {
 		facts                  providerEgressFacts
 		quality, speed, online bool
 	}{
-		{facts: providerEgressFacts{arinNonQuality: true, egressQuality: &passing}, speed: true, online: true},
-		{facts: providerEgressFacts{arinRisk: true, egressQuality: &passing}},
-		{facts: providerEgressFacts{reliabilityFailed: true, egressQuality: &passing}},
-		{facts: providerEgressFacts{tlsAuthenticationFailed: true, egressQuality: &passing}},
+		// each passing ratio rests on enough runs for both native buckets
+		{facts: providerEgressFacts{arinNonQuality: true, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}, speed: true, online: true},
+		{facts: providerEgressFacts{arinRisk: true, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}},
+		{facts: providerEgressFacts{reliabilityFailed: true, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}},
+		{facts: providerEgressFacts{tlsAuthenticationFailed: true, egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}},
 	} {
 		decision := decideProviderEgress(&c.facts, false)
 		if decision.quality != c.quality || decision.speed != c.speed || decision.online != c.online || decision.counted != c.online {

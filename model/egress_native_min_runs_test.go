@@ -306,3 +306,32 @@ func TestNativeMinRunsComeBeforeTheModernProviderGate(t *testing.T) {
 	connect.AssertEqual(t, shadow[RankModeQuality][ProviderModernOutcomeNoEvidence], int64(1))
 	connect.AssertEqual(t, shadow[RankModeSpeed][ProviderModernOutcomeNoEvidence], int64(2))
 }
+
+// The minimums fail closed: facts that say nothing of the URL runs behind a
+// passing ratio, the zero value, admit the provider to neither native bucket.
+// It stays online and counted as unprobed, outside the modern provider gate's
+// population, until a pass gathers runs that meet a minimum.
+func TestNativeMinRunsFailClosedWithoutRuns(t *testing.T) {
+	passing := true
+	decision := decideProviderEgress(&providerEgressFacts{egressQuality: &passing}, false)
+	if decision.quality || decision.speed || decision.qualityBeforeModernGate || decision.speedBeforeModernGate || decision.modernOutcome != "" {
+		t.Fatalf("a passing ratio with no runs stated was admitted: %+v", decision)
+	}
+	if decision.reason != ProviderExcludedUnprobed || !decision.online || !decision.counted || decision.hardExcluded {
+		t.Fatalf("decision %+v, want online and counted, unprobed, no hard exclusion", decision)
+	}
+}
+
+// Each minimum met admits its own bucket alone: the Speed minimum met keeps
+// the provider out of Quality as unprobed, and both met admit both.
+func TestNativeMinRunsEachMinimumAdmitsItsBucket(t *testing.T) {
+	passing := true
+	speedOnly := decideProviderEgress(&providerEgressFacts{egressQuality: &passing, speedRunsMet: true}, false)
+	if speedOnly.quality || !speedOnly.speed || speedOnly.reason != ProviderExcludedUnprobed || !speedOnly.online || !speedOnly.counted {
+		t.Fatalf("the Speed minimum met: %+v, want Speed alone, unprobed", speedOnly)
+	}
+	both := decideProviderEgress(&providerEgressFacts{egressQuality: &passing, qualityRunsMet: true, speedRunsMet: true}, false)
+	if !both.quality || !both.speed || both.reason != "" || !both.online || !both.counted {
+		t.Fatalf("both minimums met: %+v, want Quality and Speed", both)
+	}
+}
