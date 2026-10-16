@@ -1,12 +1,16 @@
 package handlers
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 // TestVerifyHandlersFailClosedWhileSubnetDisabled is the regression for main
@@ -47,5 +51,21 @@ func TestVerifyHandlersFailClosedWhileSubnetDisabled(t *testing.T) {
 				t.Fatalf("body = %q", got)
 			}
 		})
+	}
+}
+
+// An invalid locator is the caller's error, documented as 400. It declared no
+// status, so it was answered as an internal failure, 500.
+func TestVerifyOriginalHttpRefusesInvalidLocatorAsBadRequest(t *testing.T) {
+	controller.SetStConfig(&controller.StConfig{Enabled: true})
+	t.Cleanup(func() { controller.SetStConfig(nil) })
+	body, err := json.Marshal(model.VerifyOriginalRequest{Message: []byte("synthetic request"), Signature: make([]byte, ed25519.SignatureSize)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	GetVerifyOriginalRequest(w, httptest.NewRequest(http.MethodPost, "https://operator.example/verify/original", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest || w.Body.String() != "invalid verification original request locator\n" {
+		t.Fatalf("invalid locator was not refused as bad request: status=%d body=%q", w.Code, w.Body.String())
 	}
 }
