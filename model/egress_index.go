@@ -1302,6 +1302,10 @@ type ProviderEgressInspection struct {
 	ReliabilityFailed bool
 	UrlSuccessCount   int
 	UrlErrorCount     int
+	// whether the accepted URL runs in the evidence window meet the native
+	// URL-run minimums (egress_native_min_runs.go) for Quality and for Speed
+	QualityUrlRunsMet bool
+	SpeedUrlRunsMet   bool
 	// measured at least ProviderOnlineMinMeasuredUrlRuns times in the
 	// evidence window without one success, whatever the rule then decides
 	NoUrlSuccess bool
@@ -1432,6 +1436,8 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ArinNonQuality = facts.arinNonQuality
 	inspection.ArinServingEpoch = countFilter.arindbServingEpoch
 	inspection.ReliabilityFailed = facts.reliabilityFailed
+	inspection.QualityUrlRunsMet = facts.qualityRunsMet
+	inspection.SpeedUrlRunsMet = facts.speedRunsMet
 	inspection.ModernEvidence = countFilter.modernEvidence[clientId]
 	inspection.ModernOutcome = facts.modernOutcome
 	inspection.ModernGate = facts.modernGate

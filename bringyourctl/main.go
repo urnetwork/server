@@ -2499,6 +2499,30 @@ func proxyInspect(opts docopt.Opts) {
 	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.DnsResolverSettings)
 }
 
+// The inspection's index lines: the index the accepted URL runs give now,
+// what counts as evidence (any accepted run within the evidence age; the
+// legacy min_scored_loads setting decides nothing), and the native URL-run
+// minimums Quality and Speed read the ratio from (egress_native_min_runs.go),
+// with whether the provider meets them.
+func providerInspectIndexLines(inspection *model.ProviderEgressInspection) string {
+	evidence := "no evidence"
+	if inspection.CurrentIndex.Evidence {
+		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
+	}
+	return fmt.Sprintf(
+		"  index from the latest run now %d (%s; evidence is any accepted URL run within %s)\n"+
+			"  native url-run minimums: quality %d or more runs spanning %s or more, met %t; speed %d or more runs, met %t\n",
+		inspection.CurrentIndex.Index,
+		evidence,
+		min(inspection.Settings.EvidenceMaxAge, model.ProviderEgressHealthMaxAge),
+		model.ProviderQualityMinMeasuredUrlRuns,
+		model.ProviderQualityMinMeasuredUrlSpan,
+		inspection.QualityUrlRunsMet,
+		model.ProviderSpeedMinMeasuredUrlRuns,
+		inspection.SpeedUrlRunsMet,
+	)
+}
+
 // Prints one provider as the egress rules of connect/GEOMAP.md §10.3 decide
 // it: the index, quality verdict and evidence time the rollup stored, the
 // index its latest health run gives now (what the next rollup will store), the
@@ -2558,11 +2582,7 @@ func providerInspect(opts docopt.Opts) {
 	} else {
 		fmt.Printf("  latest health run none\n")
 	}
-	evidence := "no evidence"
-	if inspection.CurrentIndex.Evidence {
-		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
-	}
-	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
+	fmt.Print(providerInspectIndexLines(inspection))
 	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
 	// the decision follows the rule as the score export published it; this
 	// host's provider.yml is shown beside it
