@@ -38,6 +38,7 @@ import (
 const bringyourctlUsage = `BringYour control.
 
 Usage:
+    bringyourctl release-preflight
     bringyourctl sn-transition-status
     bringyourctl db version
     bringyourctl db migrate
@@ -194,7 +195,9 @@ func main() {
 		panic(err)
 	}
 
-	if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
+	if preflight, _ := opts.Bool("release-preflight"); preflight {
+		releasePreflightCommand(opts)
+	} else if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
 		status, err := controller.GetProviderPayoutTransitionStatus(context.Background())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
