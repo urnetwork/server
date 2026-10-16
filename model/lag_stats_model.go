@@ -178,43 +178,121 @@ type LagResultMedians struct {
 	// 4 or 6
 	IpFamily int
 	Count    int64
-	// the median of each result's latency p50 outside every load
-	OutsideLoadLatencyP50Ms *float64
+	// the median of each result's idle latency p50 (LagLoadSpanTail)
+	IdleLatencyP50Ms *float64
 	// the median of each result's download p50
 	DownloadP50Mbps *float64
 	// the median of each result's upload p50
 	UploadP50Mbps *float64
 }
 
+// How long a load keeps a track's pings from being idle after its upload
+// window ends (lag.dev/PLAN.md L4, X9, amendment 18), while what the load
+// queued drains. The extender reads an upload stream for up to 2 s after its
+// window (M6), and on a slow uplink the browser still has data queued then,
+// which the path takes until the extender drops the connection and drains
+// after: on lag.dev's local stack a 0.5 Mbps path stayed loaded until about
+// 2.3 s after the extender's window, and 3.25 s after the page's, which ends
+// up to a second earlier. lag.dev's SETTLE_MS.
+const LagLoadSpanTail = 3500 * time.Millisecond
+
 // GetLagResultMediansSince reads, for each family, the median across the
 // results stored at or after `since` that ended with `endReason` of each
-// result's own p50s: latency outside every load, download and upload. A
-// result's figures are its own p50s, so this is the typical result, not the
-// p50 of every ping and interval pooled. Automated tracks' results are left
-// out.
+// result's own p50s: idle latency, download and upload. A result's figures
+// are its own p50s, so this is the typical result, not the p50 of every ping
+// and interval pooled. Automated tracks' results are left out.
+//
+// Idle latency is derived here, from each result's minute and the loads of
+// every result of its track, as lag.dev defines it (L4): a ping is idle only
+// when its round trip overlaps no load's span, from the load's first byte
+// until LagLoadSpanTail after its upload window ends. The track's loads run
+// back to back, 15 s apart, so a dot's minute holds its neighbours' loads as
+// well as its own, and on a link with bufferbloat their pings read as loaded
+// latency. The latency stored with each result when its report arrived
+// (outside_load_latency_*) can leave out only the dot's own load, since its
+// neighbours' reports come later. The reports' window starts are their
+// extenders' clocks, which NTP keeps within milliseconds of each other. A
+// track still reporting, at most a few minutes of the window, has its later
+// dots' loads missing until their reports arrive.
 func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason string) []*LagResultMedians {
 	medians := []*LagResultMedians{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
+			WITH counted AS (
+				SELECT
+					lag_result.lag_result_id,
+					lag_result.track_id,
+					lag_result.extender_ip_family,
+					EXTRACT(EPOCH FROM lag_result.window_start_time)::double precision * 1000 AS window_ms,
+					lag_result.ping_offset_ms,
+					lag_result.ping_micros,
+					lag_result.download_p50_mbps,
+					lag_result.upload_p50_mbps
+				FROM lag_result
+				LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
+				WHERE
+					lag_result.created_at >= $1 AND
+					lag_result.end_reason = $2 AND
+					lag_track.automated IS NOT TRUE
+			),
+			load_span AS (
+				SELECT
+					track_load.track_id,
+					EXTRACT(EPOCH FROM track_load.window_start_time)::double precision * 1000 +
+						CASE
+							WHEN 0 < track_load.download_ms THEN track_load.download_start_ms
+							ELSE track_load.upload_start_ms
+						END AS start_ms,
+					EXTRACT(EPOCH FROM track_load.window_start_time)::double precision * 1000 +
+						GREATEST(
+							CASE
+								WHEN 0 < track_load.download_ms THEN track_load.download_start_ms + track_load.download_ms
+								ELSE 0
+							END,
+							CASE
+								WHEN 0 < track_load.upload_ms THEN track_load.upload_start_ms + track_load.upload_ms
+								ELSE 0
+							END
+						) + $3::double precision AS end_ms
+				FROM lag_result AS track_load
+				WHERE
+					track_load.track_id IN (SELECT track_id FROM counted) AND
+					(0 < track_load.download_ms OR 0 < track_load.upload_ms)
+			),
+			idle AS (
+				SELECT
+					counted.lag_result_id,
+					(percentile_disc(0.5) WITHIN GROUP (ORDER BY ping.micros))::double precision / 1000 AS latency_p50_ms
+				FROM counted
+				CROSS JOIN LATERAL unnest(counted.ping_offset_ms, counted.ping_micros) AS ping(offset_ms, micros)
+				WHERE
+					0 < ping.micros AND
+					NOT EXISTS (
+						SELECT 1
+						FROM load_span
+						WHERE
+							load_span.track_id = counted.track_id AND
+							load_span.start_ms <= counted.window_ms + ping.offset_ms + ping.micros::double precision / 1000 AND
+							counted.window_ms + ping.offset_ms < load_span.end_ms
+					)
+				GROUP BY counted.lag_result_id
+			)
 			SELECT
-				extender_ip_family,
+				counted.extender_ip_family,
 				count(*),
-				percentile_cont(0.5) WITHIN GROUP (ORDER BY outside_load_latency_p50_ms),
-				percentile_cont(0.5) WITHIN GROUP (ORDER BY download_p50_mbps),
-				percentile_cont(0.5) WITHIN GROUP (ORDER BY upload_p50_mbps)
-			FROM lag_result
-			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
-			WHERE
-				lag_result.created_at >= $1 AND
-				lag_result.end_reason = $2 AND
-				lag_track.automated IS NOT TRUE
-			GROUP BY extender_ip_family
-			ORDER BY extender_ip_family
+				percentile_cont(0.5) WITHIN GROUP (ORDER BY idle.latency_p50_ms),
+				percentile_cont(0.5) WITHIN GROUP (ORDER BY counted.download_p50_mbps),
+				percentile_cont(0.5) WITHIN GROUP (ORDER BY counted.upload_p50_mbps)
+			FROM counted
+			LEFT JOIN idle ON idle.lag_result_id = counted.lag_result_id
+			GROUP BY counted.extender_ip_family
+			ORDER BY counted.extender_ip_family
 			`,
 			since.UTC(),
 			endReason,
+			float64(LagLoadSpanTail.Milliseconds()),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -222,7 +300,7 @@ func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason st
 				server.Raise(result.Scan(
 					&family.IpFamily,
 					&family.Count,
-					&family.OutsideLoadLatencyP50Ms,
+					&family.IdleLatencyP50Ms,
 					&family.DownloadP50Mbps,
 					&family.UploadP50Mbps,
 				))

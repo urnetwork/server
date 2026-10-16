@@ -1907,10 +1907,12 @@ func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
 	// with a brace, so `{env="$env"` still pins the env as the first matcher.
 	// The FindProviders2 answer metrics are the exception: each api process
 	// observes its own answers, so they are summed as rates across them, and
-	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead
+	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead. So
+	// are the ARIN canary's decision reads, each process's own counter, which
+	// TestProvidersDashboardShowsTheArindbCanaryRow pins
 	for _, expression := range expressions {
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-			if providersPerProcessMetric(metric) {
+			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric {
 				continue
 			}
 			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)

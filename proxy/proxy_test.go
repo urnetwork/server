@@ -76,8 +76,6 @@ import (
 )
 
 const (
-	testConnectServicePort = 7300
-
 	// the live target, loaded only with URNETWORK_LIVE_THIRD_PARTY_TESTS=1
 	testTargetUrl = "https://api.bringyour.com/hello"
 
@@ -434,10 +432,27 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		service := "connect"
 		block := "test"
 		routes := map[string]string{connectHost: "127.0.0.1"}
-		hostToServicePorts := map[int]int{testConnectServicePort: testConnectServicePort}
+		// The exchange's service port is the harness's own: an OS-assigned
+		// loopback listener the exchange owns. On a fixed port bound with
+		// SO_REUSEPORT on every address, another process with that port (a
+		// second proxy package, the providertunnel tests, a second gate) took a
+		// share of this harness's resident connections, and each one waited out
+		// the 30s resident wait there and failed, so flows stalled.
+		exchangeListener := listenProxyTestTcp(t)
+		exchangePort := proxyTestTcpPort(exchangeListener)
+		hostToServicePorts := map[int]int{exchangePort: exchangePort}
 
 		exchangeSettings := connectserver.DefaultExchangeSettings()
-		exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		exchange := connectserver.NewExchangeWithListeners(
+			ctx,
+			connectHost,
+			service,
+			block,
+			hostToServicePorts,
+			routes,
+			exchangeSettings,
+			map[int]net.Listener{exchangePort: exchangeListener},
+		)
 		harness.lifecycle.exchange = exchange
 
 		connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()

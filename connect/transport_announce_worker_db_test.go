@@ -63,7 +63,6 @@ func TestConnectionAnnounceMeasurementPublisherSurvivesFailedWrite(t *testing.T)
 		defer func() {
 			cancel()
 			announce.closeWorkersAndWait()
-			announce.releaseArinShadowOwner()
 		}()
 
 		announce.updateMeasurements(func() connectionMeasurements {

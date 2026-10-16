@@ -540,9 +540,12 @@ func TestEgressIndexSettingsOnlineUrlSuccess(t *testing.T) {
 		}
 	}
 	// a document that is not yaml keeps every default of the egress index, and
-	// since its kill switch cannot be read either, the rule is disabled
+	// since its kill switch cannot be read either, the rule is disabled, as is
+	// the modern provider gate for its own switch
 	unreadable := DefaultEgressIndexSettings()
 	unreadable.OnlineRequiresUrlSuccess = false
+	modernGateOff := false
+	unreadable.QualitySpeedRequiresModernProvider = &modernGateOff
 	connect.AssertEqual(t, load("online_requires_url_success: [unterminated\n"), unreadable)
 	connect.AssertEqual(t, load("egress_index:\n  max_failure_index: [9\nonline_requires_url_success: true\n"), unreadable)
 }
@@ -647,7 +650,7 @@ func TestProviderConfigWithADuplicateKeyOrATabPanicsNothing(t *testing.T) {
 				}
 			})
 			noPanic("the counts policy key", func() {
-				ProviderEgressCountsPolicyKey()
+				ProviderEgressCountsPolicyKey(0)
 			})
 			noPanic("the settings", func() {
 				settings := egressIndexSettings()
@@ -715,7 +718,7 @@ func TestProviderOnlineSuccessBaselineDocument(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	for name, document := range map[string]string{
 		"version 1":           `{"version":1,"compute_time":"2026-10-13T21:00:00Z","countries":{"us":{"measured":2,"succeeded":1,"no_success":1}}}`,
-		"version 3":           `{"version":3,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
+		"version 4":           `{"version":4,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`,
 		"no kill switch":      `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`,
 		"no floor":            `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"margin":0.03,"countries":{}}`,
 		"floor out of range":  `{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","enabled":true,"floor":1.5,"margin":0.03,"countries":{}}`,
@@ -845,7 +848,7 @@ func TestProviderOnlineSuccessBaselineReasonsReadAsClauses(t *testing.T) {
 	connect.AssertEqual(t, providerOnlineSuccessBaselineExpectedErr(errors.New("Redis is unavailable (synthetic)")), false)
 
 	for document, reason := range map[string]string{
-		`{"version":3,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`:                                                                                 "it is version 3, not 2",
+		`{"version":4,"compute_time":"2026-10-13T21:00:00Z","countries":{}}`:                                                                                 "it is version 4, not 2 or 3",
 		`{"version":2,"compute_time":"2026-10-13T21:00:00Z","publish_time":"2026-10-13T21:00:00Z","floor":0.36,"margin":0.03,"countries":{}}`:                "it does not say how the export applied the rule",
 		`{"version":2,"compute_time":"2026-10-13T19:00:00Z","publish_time":"2026-10-13T19:00:00Z","enabled":true,"floor":0.36,"margin":0.03,"countries":{}}`: "it was published 2h0m0s ago, more than 1h0m0s",
 		`{"version":2,`: "it is not json",

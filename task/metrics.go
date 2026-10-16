@@ -533,14 +533,15 @@ func (self taskQueueMetricsBound) snapshot(boundRows int64, estimate func(predic
 // Shares one database observation per interval across taskworkers. The initial
 // read is asynchronous so this optional observer cannot gate worker readiness.
 // Failed refreshes retain the previous values and their original source time.
-func StartQueueMetrics(ctx context.Context) {
+// The returned channel closes once the observer has stopped.
+func StartQueueMetrics(ctx context.Context) <-chan struct{} {
 	cache := taskQueueMetricsCache{
 		store:    redisTaskQueueMetricsStore{},
 		now:      server.NowUtc,
 		newToken: func() string { return server.NewId().String() },
 		load:     loadTaskQueueMetricsSnapshot,
 	}
-	startTaskQueueMetrics(ctx, cache.get, taskQueueMetrics, func(err error) {
+	return startTaskQueueMetrics(ctx, cache.get, taskQueueMetrics, func(err error) {
 		taskQueueSnapshotErrorsTotal.Inc()
 		glog.Infof("[taskworker]queue metrics refresh failed: %v\n", err)
 	})

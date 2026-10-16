@@ -28,9 +28,9 @@ func TestSnEvidenceCapacityRecoversExactPartialPublication(t *testing.T) {
 	for _, copies := range []int64{0, 1} {
 		root := t.TempDir()
 		limit := copies*int64(len(wire)) + int64(len(wire)) - 1
-		pop := server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf("authority: local\npath: %s\nprefix: blob\nmax_bytes: %d\n", root, limit)))
+		// the evidence store holds one byte less than the next replica
+		server.UseLocalBlobStoreForTest(t, root, "blob", limit)
 		refused := serveSnEvidence(http.MethodPost, "/sn/evidence", wire)
-		pop()
 		if refused.Code != http.StatusInsufficientStorage || !strings.Contains(refused.Body.String(), "bucket quota and disk headroom") {
 			t.Fatalf("replica boundary %d hid actionable capacity refusal: %d %s", copies, refused.Code, refused.Body.String())
 		}
@@ -39,33 +39,29 @@ func TestSnEvidenceCapacityRecoversExactPartialPublication(t *testing.T) {
 		if err != nil || len(objects) != int(copies) {
 			t.Fatalf("refusal changed partial immutable census: copies=%d objects=%d err=%v", copies, len(objects), err)
 		}
-		pop = server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf("authority: local\npath: %s\nprefix: blob\nmax_bytes: %d\n", root, 4*len(wire))))
+		// then the same root has room for every replica
+		server.UseLocalBlobStoreForTest(t, root, "blob", 4*int64(len(wire)))
 		for retry := 0; retry < 2; retry++ {
 			response := serveSnEvidence(http.MethodPost, "/sn/evidence", wire)
 			if response.Code != http.StatusOK {
-				pop()
 				t.Fatalf("original signed retry failed: %d %s", response.Code, response.Body.String())
 			}
 			var receipt startifact.Published
 			if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil {
-				pop()
 				t.Fatal(err)
 			}
 			for _, key := range []string{receipt.ContentKey, receipt.HistoryKey} {
 				reader, err := store.Get(t.Context(), key)
 				if err != nil {
-					pop()
 					t.Fatal(err)
 				}
 				raw, readErr := io.ReadAll(reader)
 				closeErr := reader.Close()
 				if readErr != nil || closeErr != nil || !bytes.Equal(raw, wire) {
-					pop()
 					t.Fatalf("capacity recovery changed immutable bytes: %v %v", readErr, closeErr)
 				}
 			}
 		}
-		pop()
 		objects, err = store.List(t.Context(), "blob/")
 		if err != nil || len(objects) != 2 {
 			t.Fatalf("idempotent recovery added duplicate objects: %d %v", len(objects), err)

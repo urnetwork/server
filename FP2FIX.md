@@ -1,16 +1,27 @@
 # FindProviders2 supply and quality-probe repair plan
 
 Latest user decision, 2026-10-14: option 4, probe-verified, shadow first.
-**Quality and Speed will require a modern provider: one the FP2 URL prober has
-measured, on a real client to provider session, negotiating end-to-end
+**Quality and Speed will require a modern provider: one the capability probe
+has measured, on a real client to provider session, negotiating end-to-end
 post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768) and advertising
 resizable transfer windows (acks carrying `receive_window_byte_count`).**
 Versions are not trusted: about 72% of providers run a custom "v3.23.0-fix"
-lineage. Online does not require it. The gate ships off
-(`quality_speed_requires_modern_provider: false` in provider.yml) while the
-dashboard counts and every score export count what it would take out, and it
-is switched on only after those shadow numbers are reviewed. Its evidence table is migration 836, which Main
-gets only once the owner approves applying it. See
+lineage. Online does not require it. The gate ships in shadow while the
+dashboard counts and every score export count what it would take out. Its
+evidence table is migration 836, which Main gets only once the owner approves
+applying it. Owner decision, the same day: the evidence comes from a separate
+capability probe task ([server/capprobe](capprobe/README.md)), not from the
+URL measurement tunnel, whose encryption stays off. Owner decision,
+2026-10-15: **the gate turns on automatically at 2026-10-21 00:00 UTC** while
+`quality_speed_requires_modern_provider` is absent from provider.yml, as it
+is on Main; `false` keeps it off (the kill switch and the way to postpone),
+`true` turns it on at once, and `quality_speed_modern_provider_start` moves
+the instant. Either override is a config release and a restart of the
+taskworkers and the API, since a running container keeps the config it was
+created with. The capability probe must be switched on and have swept the
+eligible providers before the instant, and the monitor's readiness signal
+(monitor SIGNALS.md §2.29) warns from 72 hours before if the flip would gut a
+bucket. See
 [the modern provider gate](#modern-provider-gate-2026-10-14) and the gate
 matrix below.
 
@@ -35,6 +46,20 @@ the native part of those answers. Measured on Main at about 21:25 UTC, it would
 exclude 14,164 of 63,581 Online providers (22.3%) and leave 49,417. 27 countries
 would be exempt and none emptied. See [the decision](#resolved-decisions-and-remaining-research)
 and the gate matrix below.
+
+Owner consideration, 2026-10-15, not decided: **Online may also require the
+URL success ratio that Quality and Speed use (0.8).** It is built as a
+provider.yml knob that is off by default, so the default keeps the rule above
+exactly: `online_url_success_ratio` (default `0`, off) with
+`online_url_ratio_country_exemption` (default `true`). With the ratio on, a
+provider measured at least twice in the eight hours, with a success but a
+share of successes below the ratio, leaves Quality, Speed, Online and the
+counts under the `low_success` reason until its share reaches the ratio.
+Unprobed providers and those with a single run keep Online. Measured on Main
+on 2026-10-15 at 00:14 UTC, 0.8 would leave 20,508 to 23,987 of the 43,730
+Online providers, depending on the variant. See
+[the consideration](#resolved-decisions-and-remaining-research) and the gate
+matrix below.
 
 Census implementation checkpoint, 2026-10-07: the transaction-local server
 statement deadline now has a qualified native control for snapshot release when
@@ -163,20 +188,22 @@ reclassifying the fleet.
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
-| URL success ratio ≥ 0.8 | Required | Required | Not required |
+| URL success ratio ≥ 0.8 | Required | Required | Not required; required at `online_url_success_ratio` once set (off by default, 2026-10-15) |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
-| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required once switched on | Required once switched on | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-10-21 00:00 UTC | Required from 2026-10-21 00:00 UTC | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
 
-The modern provider row (2026-10-14) is native bucket membership too, and only
-once `quality_speed_requires_modern_provider` is on; until then the dashboard
-counts and every score export count what it would take out. Probe admission, explicit client ids,
-`force_minimum` and Online never read it. See
-[the modern provider gate](#modern-provider-gate-2026-10-14).
+The modern provider row (2026-10-14) is native bucket membership too, and
+only while the gate is on: from 2026-10-21 00:00 UTC (owner decision
+2026-10-15) while `quality_speed_requires_modern_provider` is absent from
+provider.yml, never with it `false`, and at once with it `true`. Until then
+the dashboard counts and every score export count what it would take out.
+Probe admission, explicit client ids, `force_minimum` and Online never read
+it. See [the modern provider gate](#modern-provider-gate-2026-10-14).
 
 The URL-success row (2026-10-13) is a passing condition on bucket membership,
 not a common gate. Probe admission, the rolling quota and its census never read
@@ -193,6 +220,15 @@ provider.yml turns the row off. Explicit client ids, and `force_minimum` with
 ratio row. `force_minimum` with `rank_mode` online changes nothing, so that
 answer is the Online pool without the providers the row excludes; no current
 caller sends it.
+
+The ratio row's Online cell (2026-10-15) is a knob the owner is considering,
+off by default: `online_url_success_ratio` in provider.yml. Once set, it is a
+passing condition on bucket membership like the URL-success row, under the
+same kill switch, the same request-time exceptions and the same probing, for
+providers with at least two measured runs only; unprobed providers and those
+with a single run keep Online. A country the URL-success row exempts keeps its
+providers below the ratio too, unless `online_url_ratio_country_exemption` is
+`false`. See [the consideration](#resolved-decisions-and-remaining-research).
 
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
@@ -236,8 +272,10 @@ Speed requests take native speed first, then native quality, then online.
 Subscriber evidence applies to native Quality membership, including Quality
 borrowed by a Speed request. A Quality request cannot carry that Quality-only
 refusal into its lower Speed or Online tiers. Those borrowed rows keep their
-own bucket's common security gates and lower client-visible priority. Explicit
-provider IDs and force_minimum retain the explicitly requested Quality policy.
+own bucket's common security gates and lower client-visible priority.
+force_minimum retains the explicitly requested Quality policy. Explicit
+provider IDs keep its live-connection requirement and live ARIN risk, but not
+ARIN quality verification ([named Quality requests](#named-quality-requests-2026-10-15)).
 Read enough pages to fill the requested native limit after request filters,
 or establish actual exhaustion of that native source, before borrowing from
 the next bucket. Online rows cannot count toward a native quota. An initial
@@ -285,35 +323,88 @@ quality/speed/online backfill order; preserve it while fixing membership.
 ### Modern provider gate (2026-10-14)
 
 Owner decision, 2026-10-14: option 4, probe-verified, shadow first. A provider
-is modern when the FP2 URL prober has measured, on a real client to provider
-session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
+is modern when the capability probe has measured, on a real client to
+provider session, both end-to-end post-quantum encryption (the TLS 1.3 hybrid
 X25519MLKEM768, which providers answer since v2026.7.21-999024260) and
 resizable transfer windows (acks carrying `receive_window_byte_count`, since
-v2026.9.14-1046484290). Versions are not read. The implementation is
-`model/egress_modern_provider.go`.
+v2026.9.14-1046484290). Versions are not read. The gate is
+`model/egress_modern_provider.go`; its evidence is
+[server/capprobe](capprobe/README.md). A second owner decision the same day
+put the evidence in a separate capability probe task rather than in the URL
+measurement tunnel: sealing a URL measurement would stall it whenever a
+provider cannot resolve the probe client's key.
 
-- **Evidence.** A probe run that observed its session reports what it saw
-  beside its URL result (`modern_evidence`, optional on the operator's health
-  submission), and the ingest records it in `provider_modern_evidence`
-  (migration 836), one row per provider: post_quantum, key_exchange,
-  window_resizable, max_receive_window_byte_count, measured_at,
-  first_measured_at, run_count. The latest observation wins and counts a run.
-  A retried report changes nothing, an older delayed one only moves
-  first_measured_at, and a conflicting one at the same instant keeps the less
-  modern reading of each capability. A session without end-to-end encryption
-  is not post-quantum whatever else it reports. Evidence observed more than a
-  minute ahead, with a negative window or an unstorable key exchange name is
-  refused and logged; it never refuses the run. A run that observed nothing
-  records nothing. provider_egress_health_history is not touched.
+- **Evidence.** The capability probe (`work.CapabilityProbe`, a recurring
+  taskworker task) measures each provider in a short tunnel of its own and
+  records a conclusive measurement through
+  `model.RecordProviderModernEvidenceHoldingDowngrade` in
+  `provider_modern_evidence` (migration 836), one row per provider:
+  post_quantum, key_exchange, window_resizable,
+  max_receive_window_byte_count, measured_at, first_measured_at, run_count.
+  The latest observation wins and counts a run. A retried write changes
+  nothing, an older delayed one only moves first_measured_at, and a
+  conflicting one at the same instant keeps the less modern reading of each
+  capability. A session without end-to-end encryption is not post-quantum
+  whatever else it reports. Evidence observed more than a minute ahead, with
+  a negative window or an unstorable key exchange name is refused and logged.
+  A measurement that observed nothing records nothing, and neither does one
+  where either capability went untested. Two guards keep a passing fault from
+  recording a negative, which takes a provider out once the gate is on: a
+  pass records negative readings only once one of its measurements has
+  negotiated a session with some provider, so a fault on the probe's own
+  side, which shows as no provider negotiating, records nothing (the
+  breaker); and a negative reading over modern evidence still fresh is held
+  back until a negative reading in a later sweep confirms it, the hold
+  carried in the task's arguments (capprobe/README.md, "Negative readings").
+  provider_egress_health_history, the URL due queue and the URL quota are
+  not touched. The URL probe's
+  submission carries no evidence: the gate's first cut put an optional
+  `modern_evidence` on it, read through an `egresshealth.ModernEvidenceSource`
+  transport, and the capability probe branch removed that path, since a URL
+  tunnel with encryption off could only ever report nothing.
+- **Capability probe.** Each pass continues a sweep over the connected, valid
+  providers in client id order, a bounded page at a time, and keeps the due
+  ones (no evidence, modern evidence older than `modern_refresh_hours`, other
+  evidence older than `other_refresh_hours`, 72 and 72 by default) that the
+  egress rules admit to Quality or Speed before the gate, so a provider the
+  gate takes out still gets measured. It measures up to `limit` (64) of them,
+  `concurrency` (16) at once, each in a tunnel whose window pings the
+  provider and whose clients attempt opportunistic end-to-end sessions after
+  the platform has processed their key registration, recording into connect's
+  `PeerCapabilityRecorder`. A measurement stops once both capabilities
+  read conclusively (an acknowledgement read the window; the session
+  negotiated, sealed or after a ten-second seal grace, or its ClientHello
+  went unanswered for a whole 60 s establishment window counted from both the
+  send path's acceptance of the first ClientHello and the first
+  acknowledgement), and at
+  `measure_timeout_seconds` (120) whatever the reading. A provider that gave
+  no evidence is retried by the next sweep, which starts at least
+  `min_sweep_interval_minutes` (360) after the last one started. A pass
+  selects from the database first, and one that measures runs in a prober
+  shard of its own (slot 255, which the URL probe's `shard_count`, at most
+  255, never reaches): a private network, credential parent and balance, so
+  its load and funding are apart from the URL probe's quota and budget. A
+  pass with nothing to measure takes no shard. Settings are
+  `capability_probe.yml`. The probe ships switched off and then schedules
+  nothing at all; `enabled: true` there and a taskworker restart switch it
+  on (capprobe/README.md, "Switching it on"). Metrics are
+  `urnetwork_capability_probe_*` on the egress probes dashboard, and
+  SIGNALS.md §2.19g reads them.
 - **Outcomes.** Each pass classifies a provider's row: `modern`,
   `not_post_quantum`, `no_resizable_windows`, `no_evidence` or
   `stale_evidence`. Age is tested first: evidence exactly seven days old is
   stale, as a URL outcome exactly eight hours old is. Then post-quantum, then
   windows, so a row without either is `not_post_quantum`. Seven days outlasts
-  runs that observe nothing, such as a prober outage or probers rolling out
-  without the evidence. A provider in Quality or Speed is probed about ten
-  times in four hours, so its evidence is minutes old, and a downgrade shows
-  at its next run whatever the window.
+  measurements that observe nothing, such as a probe outage or a provider
+  that could not be reached. The capability probe refreshes a provider's
+  evidence after three days by default, and its settings refuse a refresh
+  that, with one sweep interval's delay, would not land inside the seven, so
+  a downgrade shows at the provider's next measurement, within about three
+  days, and a downgrade of modern evidence a sweep later still, when a
+  second negative reading confirms it. With 16 tunnels at a time the probe
+  measures several hundred providers an hour, so the first sweep over the
+  fleet's Quality and Speed providers takes about two days, and until it
+  has, the shadow's `no_evidence` is large.
 - **Shadow counts.** For the providers the other rules admit to Quality and to
   Speed, the passes count the gate's outcome whether the gate is on or off.
   The dashboard counts publish
@@ -321,35 +412,147 @@ v2026.9.14-1046484290). Versions are not read. The implementation is
   valid public providers) on the providers dashboard. Every score export logs
   one `[nclm]modern provider gate:` line with the totals over its pool. Every
   outcome but `modern` is what the gate takes out once it is on.
-- **Switch.** `quality_speed_requires_modern_provider` in provider.yml, default
-  false. It is decoded on its own key, like the URL-success rule's keys: a
-  value that is not true or false, the key given twice, or a provider.yml
-  that is not yaml leaves the gate off and resets no other key. When on, a
+- **Switch.** Three ways (owner decision 2026-10-15), by
+  `quality_speed_requires_modern_provider` in provider.yml. Absent, as on
+  Main, the gate turns on by itself at its start, 2026-10-21 00:00 UTC by
+  default, that instant included. `false` keeps it off: the kill switch and
+  the way to postpone. `true` turns it on at once.
+  `quality_speed_modern_provider_start`, an RFC 3339 instant such as
+  `2026-10-28T00:00:00Z` or a date such as `2026-10-28`, its 00:00 UTC,
+  moves the start without a code change. Either override reaches a running
+  taskworker or API only with its restart, since a container keeps the
+  config version it was created with, so it is a config release and a
+  restart (capprobe/README.md, "Switching it on"). Each key is decoded on its
+  own, like the URL-success rule's keys: a switch that is not true or false,
+  is given twice, or is given without a value
+  (`quality_speed_requires_modern_provider:` alone, `~` or `null`) reads as
+  `false`. While the switch is absent, a start that is neither an instant nor
+  a date, is given twice or is given without a value also reads as `false`,
+  where it kept the default start before: each is most likely a postponement
+  that failed, so it keeps the gate off and is logged. It also publishes no
+  start, which silences the readiness signal's windows, so the monitor
+  decodes the deployment's desired provider.yml itself and WARNs
+  `modern-gate-schedule-unreadable` with the failure
+  (`model.GetModernProviderGateFailure`). Beside a switch the start decides
+  nothing. A provider.yml that is not yaml reads as `false`
+  with the default start, and no key's failure resets a neighbour. Every reader decides at its own instant, never at a fresh
+  clock read (`EgressIndexSettings.RequiresModernProvider`): a pass at its
+  filter's `now`, set once per pass so a pass decides every provider alike,
+  and the provider status and the inspection at their own. When on, a
   provider whose outcome is not `modern` leaves Quality and Speed under the
   `not_modern` reason. That reason comes after reliability, ARIN risk, TLS,
   no_success and unprobed or health, and before arin_non_quality. The
   provider stays Online and in the location counts. The counts policy key is
-  schema 3 and carries the switch. Provider status reports `not_modern` with
+  schema 3 and carries the gate's decision at the key's instant rather than
+  its settings, so the dashboard snapshot flips at the start, workers that
+  decide alike share one, and the cache's key checks before and after a fill
+  keep a fill that spans the start from being published. Every score
+  export's `[nclm]modern provider gate:` line gives the pass's decision and
+  how provider.yml sets the gate. Provider status reports `not_modern` with
   what to do (update the app), and `bringyourctl provider inspect` prints the
-  evidence row, its outcome and the switch.
+  evidence row, its outcome, the decision with its instant, the switch and
+  the start. Each taskworker's stats collector publishes
+  `urnetwork_stats_provider_modern_gate_on` and, only while the switch is
+  absent, `urnetwork_stats_provider_modern_gate_start_seconds` from its own
+  provider.yml.
 - **Request time.** The gate is bucket membership, not a hard exclusion.
   Probe admission, the rolling quota, the hard-exclusion set, explicit client
   ids and `force_minimum` with any rank mode keep only the common gates, as
   for the URL ratio. Online is unchanged, so a Quality or Speed answer still
   reaches a non-modern provider in its Online tier, after both native
   buckets.
-- **Rollout.** Apply migration 836 on Main once the owner approves: a server
-  built with it requires it, so this work merges into main only after that.
-  Deploy with the switch off. Integrate the connect library's session
-  evidence into the prober: the probe tunnel's HTTP transport implements
-  `egresshealth.ModernEvidenceSource`, the probe client negotiates end-to-end
-  encryption (probe clients run `EncryptionModeOff` today, which would read
-  every provider as not post-quantum), and the API deploys before probers
-  send the field, since the handler refuses unknown keys. Review the shadow
-  counts until `no_evidence` is small and the not-modern providers are
-  understood. Switch the gate on only after that review;
-  `quality_speed_requires_modern_provider: false` turns it off again at each
-  pass's next settings read.
+- **Rollout.** In order. (1) Merge the connect accessor
+  (`ClientSettings.PeerCapabilityRecorder`, connect
+  feat/modern-provider-evidence, reviewed and fixed at 4a145681) into connect
+  main, and revert the capability probe branch's temporary replace of
+  connect with that worktree. Until then the branch builds only against
+  connect main with that branch merged in: the sibling sdk and the server's
+  own main need connect APIs newer than the branch's base. (2) Migration 836
+  is applied on Main, and the gate merged into server main (ebc1f95a9) with
+  the switch off, both on 2026-10-14. (3) Deploy the API and the taskworkers.
+  The capability probe ships switched off and schedules nothing, so the
+  deploy measures nothing. There is no API-first constraint any more:
+  nothing new rides the operator submission. With the automatic start (owner
+  decision 2026-10-15) the taskworkers must run it before 2026-10-21
+  00:00 UTC, since their score export decides the buckets FindProviders2
+  answers from and their stats collector the dashboard counts, and the API
+  too, so the provider status it decides per request agrees.
+  (3b) Switch the probe on by config in the chosen slot (sn-55: 2026-10-16
+  about 19:30Z or later): `main/capability_probe.yml` with `enabled: true`,
+  released through the config-updater, then a restart of every taskworker,
+  since a running container keeps the config it started with; the first
+  restarted taskworker schedules the first pass due at once
+  (capprobe/README.md, "Switching it on"). A pass that a taskworker still on
+  the old config claims ends the chain; the taskworkers with the probe
+  switched on schedule it again within ten minutes, and the monitor's
+  `capability-probe` signal (SIGNALS.md §2.19g) reports the disabled pass,
+  and a stall, until every taskworker runs the new config. Switching it off
+  is the same release and restart with `enabled: false`. (4) Review the shadow counts until
+  `no_evidence` is small and the not-modern providers are understood, with
+  the capability probe's readings: a large `post_quantum_unsealed` share
+  would mean providers whose identity proof the probe could not verify,
+  which the gate counts as post-quantum and which should be understood
+  first, and `capability-probe-breaker` and `capability-probe-downgrades`
+  (SIGNALS.md §2.19g) must be quiet and the monitor's `capability-probe`
+  signal healthy. (5) The gate turns on by itself at 2026-10-21 00:00 UTC
+  while `quality_speed_requires_modern_provider` is absent from provider.yml,
+  as on Main, so the probe's sweep and the review must be done by then. The
+  monitor's readiness signal (monitor SIGNALS.md §2.29,
+  `modern-gate-readiness`) reads the shadow from 72 hours before the start:
+  WARN when the gate would take more than half of Quality or of Speed out,
+  PAGE from 24 hours before, and PAGE when a bucket falls by more than half
+  after the start, until 18:00 UTC on the start's day. It reads the gate and
+  its start per taskworker process too, once a process has run five minutes,
+  so a restart alone does not fire: a taskworker that publishes neither,
+  decides the gate differently or schedules another start WARNs before the
+  earliest start and PAGEs from it until 18:00 UTC, and a gate decided
+  differently WARNs at any other time, with the switch set everywhere too.
+  On the start's day, from the start until 18:00 UTC, no taskworker
+  restarts except to release the kill switch, since every rollout makes the
+  fleet disagree while it runs. To postpone, set
+  `quality_speed_requires_modern_provider: false`; to move the instant, set
+  `quality_speed_modern_provider_start`. Either is a config release and a
+  restart of every taskworker and API block, as for the probe's switch, and
+  must be in place before the start to postpone it; `false` after the start
+  turns the gate off again the same way. Lowering `other_refresh_hours`
+  before the start returns an updated provider sooner, at a measurement of
+  every non-modern provider that often.
+
+### Named Quality requests (2026-10-15)
+
+Owner decision, 2026-10-15. Connect's fixed-IP feature keeps a user on the
+same exit. After a transport loss, the window asks again for the exit it lost:
+one client-id spec, count 1, its rank mode and exclusions
+(`NextDestinationsForClientId`, `ip_remote_multi_client_sticky.go`).
+
+Under policy two, that request with rank mode quality (or empty) used to
+refuse a provider without a live connection, and also one whose live
+connections were not all ARIN-quality verified. Then 20,818 of 21,069 Speed
+providers were ARIN non-quality, and Quality answers borrowed 59% of their
+providers from Speed and Online. So most Quality windows held a non-quality
+exit, its redial was refused, and the user's IP changed. Discovery would have
+handed out the same provider as a borrowed member anyway.
+
+A request that names its providers and has no discovery spec now skips only
+the ARIN quality verification
+(`getProviderNamedSubscriberExclusions`, `model/provider_named_subscriber_eligibility.go`).
+It always applies; there is no setting. It keeps:
+
+- the live-connection requirement: a connected connection on a handler that
+  heartbeated within two heartbeat timeouts, the same live relation the
+  native Quality read uses;
+- ARIN risk on a live connection (an unclassified live connection is no
+  risk, as the common gate reads it);
+- the common exclusions: reliability below 0.95, 0.7 or 0.6 on the one hour,
+  12 hour or third lookback, ARIN risk, and TLS findings;
+- the request's own `exclude_client_ids` and `exclude_destinations`.
+
+A named refusal is not cached, so a provider that reconnects is answered on
+the next redial. With policy two off, a named request still reads no
+subscriber facts. Unchanged: discovery (location, group and best-available)
+and its force_minimum, which keep the full subscriber policy for native
+Quality; a client-id spec sent together with a discovery spec; and Speed and
+Online requests.
 
 ## Metrics derived for ranking
 
@@ -1018,7 +1221,11 @@ gate matrix.
     country of a hundred or more providers where the probe works, measured
     0.46.
 - **Kill switch.** `online_requires_url_success: false` in provider.yml takes
-  effect at each pass's next settings read. provider.yml is parsed once and
+  effect at each pass's next settings read once the process sees the new
+  file. A running taskworker or API container keeps the config version it was
+  created with, so the switch is a config release and a restart of the
+  taskworkers and the API, as for the modern provider gate's switch
+  (capprobe/README.md, "Switching it on"). provider.yml is parsed once and
   each of the rule's keys is decoded on its own, so a malformed value, or a key
   the file gives twice, resets nothing else in provider.yml; before this,
   `online_requires_url_success: "false"` or a floor of `36%` reset every egress
@@ -1050,6 +1257,89 @@ gate matrix.
     of 460 regions (31 providers).
   - Largest exclusions: US 8,471, GB 1,814, DE 990, FR 727, ES 565, BR 479,
     CA 365, IT 270, TH 111 and HK 79.
+
+Under consideration, 2026-10-15, not decided: **Online may also require the
+URL success ratio (0.8) that Quality and Speed use.** The owner has not chosen
+between the variants below, so the ratio is a provider.yml knob whose default
+keeps the URL-success rule above exactly, and the owner chooses by config.
+
+- **Knobs.** `online_url_success_ratio`, within [0, 1], default `0` (off). A
+  value that cannot be read (`80%`, `"0.8"`, a key the file gives twice) or
+  one outside [0, 1] is off, the behaviour before the ratio, and is logged.
+  `online_url_ratio_country_exemption`, default `true`; a value that cannot
+  be read keeps `true`. Each key is decoded on its own, so neither resets a
+  neighbour, and a provider.yml that is not yaml disables the rule, and the
+  ratio with it. Setting or clearing either is a config release through the
+  config-updater and a restart of every taskworker block, whose passes (the
+  score export, the location counts, the dashboard counts) apply it, since a
+  running container keeps the config it was created with (the procedure of
+  server/capprobe/README.md, "Switching it on"). Provider status and inspect
+  follow the score export's published guard, not their own provider.yml.
+- **Rule.** With the ratio on, a provider with `N >= 2` measured runs and
+  `S >= 1` successes whose `S / N` is below the ratio, compared in exact
+  millionths like the country floor (19 of 24 is below 0.8, 4 of 5 is not),
+  leaves Quality, Speed, Online and the location and dashboard counts under
+  the `low_success` reason, after `no_success` and before unprobed or health.
+  It is no hard exclusion: probes, the rolling quota, explicit client ids and
+  `force_minimum` with quality or speed keep the provider, and it returns at
+  the next publication once its share reaches the ratio. `S = 0` stays
+  `no_success`. Unprobed providers and those with `N = 1` keep Online.
+  `online_requires_url_success: false` turns the ratio off with the rule.
+- **Country guard.** The exemption stays computed on the share of measured
+  providers with a success, not on the share at the ratio: a guard on the
+  share passing 0.8 would exempt 78 of the 93 countries, the US among them,
+  and leave Online at 51,410, more than today. With
+  `online_url_ratio_country_exemption: true` an exempt country keeps its
+  providers below the ratio as it keeps those without a success (variant c).
+  With `false` the ratio applies in every country, which also takes an exempt
+  country's `S = 0` providers out of Online, as `no_success`, since they are
+  below every ratio (variant a).
+- **Published guard.** While the ratio is on, the score export publishes its
+  guard as version 3, adding the ratio, the exemption switch and each
+  country's providers below the ratio, so provider status, inspect and the
+  exempt-country gauge decide by the ratio the export applied. A reader from
+  before the ratio refuses version 3 and exempts every country. While the
+  ratio is off the export publishes version 2 exactly as before, which every
+  reader trusts as the rule with the ratio off, so a rollout or a rollback
+  with the ratio off changes no reader and keeps the margin's previous state.
+  Code from before the ratio cannot follow a ratio that is on: an older
+  taskworker's passes fall back to the plain floor, and an export it runs
+  publishes version 2 with plain-floor verdicts, which drops the exemptions
+  the margin held (JP, LT and HR on 2026-10-15). So switch the ratio on only
+  once every taskworker runs this code, and before rolling a taskworker back
+  past it, switch the ratio off and let one export publish version 2.
+  Provider status and inspect need the api's and bringyourctl's code at or
+  after this change, not only a restart: one with the guard reader from
+  before the ratio refuses version 3 and reports `no_success` and
+  `low_success` providers alike as `egress_failing`.
+- **Visibility.** The counts policy schema is 4 and carries both knobs. The
+  provider status reason is `egress_low_success`. `bringyourctl provider
+  inspect` prints the ratio the export published with its exemption switch,
+  this host's, and whether the provider is below it. The providers dashboard
+  has a `low_success` panel beside `no_success`. The exempt-country gauge
+  counts the providers an exemption keeps, those below the ratio included,
+  and none while the ratio applies in every country. Each export's
+  `[nclm]online url-success rule:` line names the ratio while it is on.
+- **Measured.** Read-only on the Main primary on 2026-10-15 at 00:14 UTC:
+  the eight-hour window of policy-1 URL outcomes over the common-gate passes,
+  with the plain floor of 0.36.
+
+  | Online | Providers | Change | provider.yml |
+  | --- | ---: | ---: | --- |
+  | Today: one success is enough | 43,730 | | nothing (the default) |
+  | (a) `N >= 2` below 0.8 out in every country; unprobed and `N = 1` kept | 20,508 | −23,222 | `online_url_success_ratio: 0.8` and `online_url_ratio_country_exemption: false` |
+  | (b) as (a), with unprobed and `N = 1` out too | 16,686 | −27,044 | none: unprobed and `N = 1` providers keep Online by design |
+  | (c) as (a), with today's country exemption | 23,987 | −19,743 | `online_url_success_ratio: 0.8` |
+
+  - The dashboard would read `no_success` 15,155 and `low_success` 20,016
+    under (a), and `no_success` 11,949 and `low_success` 19,743 under (c).
+  - Countries with an Online provider: 93 today, 59 under (a) and 75 under
+    (c). (a) empties 34 countries (189 providers), (c) 18.
+  - (c) takes the exempt set of the plain floor, 34 countries. If the margin
+    also holds JP, LT and HR, (c) is 24,249.
+  - Of the 51,857 providers with `N >= 2`, 16,686 pass 0.8 (32.2%), 15,155
+    have no success and 20,016 are in between. The US keeps 11,887 of its
+    29,302 Online providers under both (a) and (c).
 
 The remaining research concerns evidence-backed virtual/hosting ISP rules and
 legitimate multinational exceptions, particularly AFRINIC allocations. Do not

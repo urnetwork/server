@@ -24,7 +24,8 @@ catalog, including synchronous reproductions of asynchronous production work.
 
 The current CLI emits active Alerts, not ticket lifecycle events. It renders
 each eligible alert batch as Markdown or JSONL on stdout; stderr carries
-diagnostics. The private legacy ticket manager and console emitter remain in
+diagnostics. In continuous mode it can also post one Slack message per alert
+transition (§3.6). The private legacy ticket manager and console emitter remain in
 the package but are not wired into this CLI. Healthy findings are filtered
 before alert emission. The current CLI does not emit an all-probes heartbeat.
 Silence is not recovery. Confirm recovery from direct healthy observations and
@@ -99,7 +100,8 @@ host, redis-cli on the redis hosts, top/ss/dmesg/journalctl/docker anywhere.
 ssh authentication is delegated to `~/.ssh/config` (host → IdentityFile),
 assumed set up on whatever runs the monitor; no key material lives in
 `vault/<env>/monitor.yml` — it carries only the login user, host roles,
-operator-disabled state, overlay IPs, and redis ports.
+operator-disabled state, overlay IPs, redis ports, and the optional Slack
+alert webhook (`alerts.slack_webhook_url`, a credential; §3.6).
 
 **ssh-exec is the universal transport.** Every command in SIGNALS.md is
 written as a run-on-the-host command, and that is exactly how the monitor
@@ -149,7 +151,8 @@ first active version in `vault/<env>/services.yml`; historical versions are
 never probe targets.
 `vault/<env>/monitor.yml` (§7) carries only what exists nowhere else: the
 monitor ssh identity, host roles, explicit operator-disabled state, overlay
-IPs (local dev), and redis port layout. The pg path has one special rule from
+IPs (local dev), redis port layout, and the Slack alert webhook that the
+monitor and Grafana's default contact point share. The pg path has one special rule from
 the 2026-07-17 incident: diagnose on **direct 5432**, never through
 pgbouncer 6432 — but *also* probe 6432 cheaply, because "6432 queues/dies
 while 5432 connects instantly" is itself a documented discriminator
@@ -330,15 +333,96 @@ downstream system's specialization.
 
 ```go
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
+type SignalExecutionHandler func(ctx context.Context, signal Signal, execution SignalExecution) error
 ```
 
-The current CLI supplies this handler to `RunLoopWithOptions`, skips empty batches, and
-writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
+The current CLI supplies a `SignalExecutionHandler` to `RunExecutionLoop`,
+which schedules exactly like `RunLoopWithOptions`. A `SignalExecution` carries
+the gated alerts an `AlertHandler` receives, the alerts the cadence gate still
+holds below their Sustain, and whether the execution failed. The handler
+writes each nonempty set of gated alerts to stdout in the selected Markdown or
+JSONL format. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
-current CLI capabilities; additional sinks remain deferred. The fixed-schema
-`monitor-log-reconcile ` diagnostic receipt described below is bounded
-collector evidence, not an Alert, ticket event, or all-probes heartbeat.
+current CLI capabilities; sinks other than the Slack notifier below remain
+deferred. The fixed-schema `monitor-log-reconcile ` diagnostic receipt
+described below is bounded collector evidence, not an Alert, ticket event, or
+all-probes heartbeat.
+
+**Slack transition notifier** (`alert_slack.go`, owner decision 2026-10-14).
+In continuous mode the handler also gives every gated execution, empty ones
+included, to a notifier that posts to `vault/<env>/monitor.yml`
+`alerts.slack_webhook_url`, the webhook Grafana's default contact point uses
+(`bringyourctl grafana reconcile-alerting`). It posts one concise message per
+transition of an incident keyed by (signal id, class, target), frame excluded
+per SIGNALS.md §7: raised, escalated once to PAGE, and cleared after two
+consecutive complete runs of every signal that reported it in which nothing
+observed it. An alert the gate holds below its Sustain, as it does for the
+first runs after a one-run dip, is still observed. A run is incomplete, and
+clears nothing, when it failed or carries an unobservable alert, gated or
+held. Every signal's unknown state is unobservable: `alert_classes.go`
+classifies every alert class the monitor emits as visibility, an unknown
+state reported in place of an incident (`cannot-observe`, every
+`*-unobservable`, `pg-cpu-unavailable`, `host-metrics-missing`, the
+`*-schema-unavailable` classes and more), or incident, and a test fails for a
+class it leaves out. Probe `monitor/visibility`, the provider, PG sample,
+settings-generation and crash-report visibility alerts, the proxy public path
+without an allocation, and the `monitor/host-scope` partial alert in a run
+with blocked hosts (not the configured exclusion settings freshness reports
+every run) are unobservable too. The classification errs toward visibility.
+A persistent unknown state, such as service-load's
+`*-capability-unobservable` during a rollout, keeps that signal's other
+incidents from clearing until it resolves. Accept filters let unobservable
+findings through, so the shared redis memory probe's `redis/node-mem`
+`cannot-observe` also appears under redis-connections and redis-buffers. See
+SIGNALS.md, the cadence-mode `Sustain` note before §1. A clear says the
+incident is no longer reported, not that it recovered.
+
+State is process-local, so a restarted watcher, or a handoff candidate,
+re-announces every active alert. The raises from each signal's first Sustain
+complete runs, within the start window, which is where such alerts first pass
+the gate, are folded into one `[ACTIVE AT START] N incident(s)` digest, pages
+first. A digest posts two minutes after its first raise, at once when it gains
+a page (a page raise or the escalation of an incident it holds), and at exit.
+Failed runs do not use up a signal's start window, but the window closes 30
+minutes after start, or after three cadence floors when that is longer (45
+minutes with `-min-probe-cadence=15m`): a signal that fails for hours posts
+its first complete run's raises one by one. A clear of a digest incident
+posts the digest first. An at-start raise carries its incident's latest
+state, so a transition of that incident still held for the summary is
+dropped rather than posted after the digest. Later raises post one by one.
+With the 15-minute floor, expect a digest for each startup wave that has
+incidents: one a few minutes in for the standing logs, then one about two
+minutes after each Sustain round of the active probes. The PG query
+sample's configured-off state (no sample flag) is never posted.
+
+Messages are capped at 10 per sliding minute. Transitions over the cap, or
+refused by a full queue, are held for one summary that names them, incidents
+with a page first, 20 lines and a count of the rest. Posts never block the
+handler: a bounded queue feeds one sender that spaces posts by a second. A
+summary or digest the full queue refuses keeps its content for the next try.
+A post that Slack refuses with a 429 or a 503 is retried once after Slack's
+Retry-After (1 s without one, at most 30 s); only the sender waits. A timeout
+or another 5xx is not retried, because Slack may have taken the post. A
+message that fails is undelivered: once a post succeeds again, one
+`[UNDELIVERED] N message(s) queued between T1 and T2 failed to post` message
+lists them, though some may have reached the channel. Without a new message,
+the sender tries that report itself at most once a minute, and once more at
+exit. At exit the CLI first restores default signal handling, so a second
+Ctrl-C or SIGTERM ends the process at once, then drains the notifier for up
+to 15 s; one stderr line counts what the deadline abandoned, and another the
+undelivered messages never reported. Message text gets the same address
+scrubbing as stdout and stderr. Two overlapping watchers both post; there is
+no poster lease.
+
+An empty webhook disables the notifier with one stderr line at startup;
+`-slack-alerts=false` disables it for a watcher that must not post. `-once`
+never posts. The webhook is a credential: it is never logged or put in a
+message, and post failures are logged as a fixed class (net/http errors embed
+the URL), once per run of failures. A changed webhook makes a running posting
+watcher's settings stale (§1.6 settings freshness). A watcher that never posts
+leaves the webhook out of its compared settings, so a rotation does not make
+it stale.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
@@ -413,7 +497,8 @@ Escalation batteries pull incident windows non-interactively with
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
-- `RunLoopWithOptions` accepts a per-watcher `MinimumProbeCadence`; the CLI
+- `RunLoopWithOptions` and `RunExecutionLoop` accept a per-watcher
+  `MinimumProbeCadence`; the CLI
   exposes `-min-probe-cadence=15m` for an explicitly requested 15-minute active
   observation floor. Zero/default preserves immediate active startup and native
   cadences. A positive floor delays the **first active probe** by that floor,
@@ -711,7 +796,8 @@ legacy ticket/console behavior is not the current CLI wiring described in §3.
    current CLI (identity/dedupe/hysteresis/auto-resolve; legacy JSON event line
    on stderr). Additional alerting channels
    (webhook, github pr, persistence/spool) deliberately DEFERRED — console
-   only for now (user decision 2026-07-17).
+   only for now (user decision 2026-07-17). The 2026-10-14 owner decision
+   added one: Slack transition messages from the continuous CLI (§3.6).
 3. **Baselines — DONE (2026-07-17).** Local history store (baseline.go:
    append-only per-metric files under ~/.urnetwork-monitor/<env>/baseline,
    14d retention, compaction); trailing-hour median brownout band live on
@@ -784,8 +870,9 @@ Decided (2026-07-17):
 
 - **Historical ticket sink**: the 2026-07-17 decision used a console emitter
   with stdout rendering and lifecycle JSON on stderr. Current CLI output is
-  the selected active-Alert format on stdout (§3.6); webhook and github-PR
-  emitters remain deferred.
+  the selected active-Alert format on stdout (§3.6), plus the optional Slack
+  transition notifier (2026-10-14); webhook and github-PR emitters for the
+  diagnosing system remain deferred.
 - **Control-plane events** (§6.4): read from the source of truth on the
   edges — the warp logs via journalctl and docker container status
   (`docker ps` state/created-at, `docker events` window) over ssh. A

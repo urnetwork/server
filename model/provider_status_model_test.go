@@ -2,11 +2,14 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -150,6 +153,20 @@ func TestProviderStatusReasonOrder(t *testing.T) {
 			counts.MeasuredAt = testingProviderStatusNow.Add(-ProviderEgressHealthMaxAge)
 			c.healthCounts[f.clientId] = counts
 		}, reason: ProviderStatusReasonEgressUnprobed},
+		// passing checks on too few runs for a native bucket: the census's
+		// unprobed, warming up to the provider
+		{name: "one passing run is warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-time.Minute), OKCount: 1, Total: 1}
+		}, reason: ProviderStatusReasonEgressWarmingUp},
+		{name: "two passing runs, short for quality alone, are warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-21 * time.Minute), OKCount: 2, Total: 2}
+		}, reason: ProviderStatusReasonEgressWarmingUp},
+		{name: "ten passing runs in ten minutes are warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-11 * time.Minute), OKCount: 10, Total: 10}
+		}, reason: ProviderStatusReasonEgressWarmingUp},
+		{name: "one failed run is failing, not warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-time.Minute), OKCount: 0, Total: 1}
+		}, reason: ProviderStatusReasonEgressFailing},
 		{name: "failing checks", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow, OKCount: 15, Total: 20}
 		}, reason: ProviderStatusReasonEgressFailing},
@@ -370,9 +387,10 @@ func TestProviderStatusMatchesExportRanking(t *testing.T) {
 		1: {reliabilityWeight: 0.97, independentReliabilityWeight: 0.97},
 		2: {reliabilityWeight: 0.8, independentReliabilityWeight: 0.8},
 	}
-	// 19 of 20 checks: passing, with a URL weight of 0.1 + 0.9·0.95
+	// 19 of 20 checks over four hours: passing, with a URL weight of
+	// 0.1 + 0.9·0.95
 	countFilter := testingProviderStatusFilter(facts)
-	countFilter.healthCounts[facts.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow, OKCount: 19, Total: 20}
+	countFilter.healthCounts[facts.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow.Add(-4 * time.Hour), OKCount: 19, Total: 20}
 	urlWeight := 0.1 + 0.9*0.95
 	evaluation, status := testingProviderStatus(facts, countFilter)
 	clientScore := evaluation.clientScore
@@ -446,5 +464,83 @@ func TestProviderStatusScopedFilterSql(t *testing.T) {
 	}
 	if strings.Contains(fleet, "ANY($1)") {
 		t.Fatal("the fleet filter is scoped")
+	}
+}
+
+// A provider whose URL checks pass on too few runs for a native bucket (the
+// native URL-run minimums) is warming up, not unprobed: the check has run and
+// passes, as its admission and url_checks show, so the status must not say it
+// hasn't run, and the census keeps counting it under the unprobed label. One
+// run is short for both buckets; two are in Speed, short for Quality alone;
+// three over forty minutes are in both.
+func TestProviderStatusExplainsEgressWarmingUp(t *testing.T) {
+	statusOf := func(counts ProviderEgressHealthCounts, arinNonQuality bool) (*providerStatusEvaluation, *ProviderStatus, string) {
+		facts := testingProviderStatusFacts()
+		facts.clientId = server.Id{2}
+		countFilter := testingProviderStatusFilter(facts)
+		countFilter.healthCounts[facts.clientId] = counts
+		countFilter.arinNonQuality[facts.clientId] = arinNonQuality
+		evaluation, status := testingProviderStatus(facts, countFilter)
+		statusBytes, err := json.Marshal(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evaluation, status, string(statusBytes)
+	}
+	measuredAt := testingProviderStatusNow.Add(-time.Minute)
+	for _, c := range []struct {
+		name           string
+		counts         ProviderEgressHealthCounts
+		quality, speed bool
+		reason         string
+	}{
+		{name: "one run", counts: ProviderEgressHealthCounts{MeasuredAt: measuredAt, FirstMeasuredAt: measuredAt, OKCount: 1, Total: 1}, reason: "egress_warming_up"},
+		{name: "two runs", counts: ProviderEgressHealthCounts{MeasuredAt: measuredAt, FirstMeasuredAt: measuredAt.Add(-20 * time.Minute), OKCount: 2, Total: 2}, speed: true, reason: "egress_warming_up"},
+		{name: "three runs over forty minutes", counts: ProviderEgressHealthCounts{MeasuredAt: measuredAt, FirstMeasuredAt: measuredAt.Add(-40 * time.Minute), OKCount: 3, Total: 3}, quality: true, speed: true, reason: ProviderStatusReasonNone},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			evaluation, status, statusJson := statusOf(c.counts, false)
+			if status.Reason != c.reason || status.ReasonText != providerStatusReasonTexts[c.reason] || status.ReasonText == "" {
+				t.Fatalf("reason %s %q, want %s", status.Reason, status.ReasonText, c.reason)
+			}
+			if c.reason == ProviderStatusReasonNone {
+				return
+			}
+			// the census and its dashboards keep the unprobed label
+			connect.AssertEqual(t, evaluation.decision.reason, ProviderExcludedUnprobed)
+			// the check has run and passes
+			if status.Admission.Egress != ProviderEgressPass || status.Admission.EgressMeasuredAt == nil {
+				t.Fatalf("admission %+v, want a passing check with its time", status.Admission)
+			}
+			urlChecks := testingProviderStatusNumber(status, ProviderStatusNumberUrlChecks)
+			if !urlChecks.HasValue || !urlChecks.Passes || urlChecks.Count != c.counts.OKCount || urlChecks.Total != c.counts.Total {
+				t.Fatalf("url_checks %+v, want the passing runs", urlChecks)
+			}
+			for _, claim := range []string{"hasn't run", "checked providers run out"} {
+				if strings.Contains(status.ReasonText, claim) {
+					t.Fatalf("reason text %q says %q of a provider whose checks ran and pass", status.ReasonText, claim)
+				}
+			}
+			// the text names the minimums the rules hold it to
+			for _, minimum := range []string{
+				fmt.Sprintf("for speed once %d checks have passed", ProviderSpeedMinMeasuredUrlRuns),
+				fmt.Sprintf("for quality once %d checks spanning at least %d minutes have passed", ProviderQualityMinMeasuredUrlRuns, int(ProviderQualityMinMeasuredUrlSpan/time.Minute)),
+			} {
+				if !strings.Contains(status.ReasonText, minimum) {
+					t.Fatalf("reason text %q does not say %q", status.ReasonText, minimum)
+				}
+			}
+			// in the pools it is admitted to, out of the others
+			if weight := testingProviderStatusNumber(status, ProviderStatusNumberWeightQuality); weight == nil || weight.Passes != c.quality {
+				t.Fatalf("weight_quality %+v, want passes=%t", weight, c.quality)
+			}
+			if weight := testingProviderStatusNumber(status, ProviderStatusNumberWeightSpeed); weight == nil || weight.Passes != c.speed {
+				t.Fatalf("weight_speed %+v, want passes=%t", weight, c.speed)
+			}
+			// ARIN non-quality while warming up reads exactly as without it
+			if _, _, arinJson := statusOf(c.counts, true); arinJson != statusJson {
+				t.Fatalf("ARIN non-quality tells the warmup apart:\n%s\n%s", arinJson, statusJson)
+			}
+		})
 	}
 }

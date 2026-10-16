@@ -7,12 +7,12 @@ package model
 // egress decision and the ranking UpdateClientScores publishes, computed for
 // the network's providers with the bulk filter scoped to their client ids. The
 // fleet-wide filter never runs for a status; the URL-success rule is the one
-// UpdateClientScores published, its kill switch, floor and country verdicts
-// included, so the status says what the export did whatever this host's
-// provider.yml says. Ranking numbers are shown with what they mean; the
-// anti-abuse signals (ARIN risk and non-quality, the URL security quarantine,
-// the legacy dark verdict) are one generic reason, and their values never
-// leave this file.
+// UpdateClientScores published, its kill switch, floor, Online URL ratio and
+// country verdicts included, so the status says what the export did whatever
+// this host's provider.yml says. Ranking numbers are shown with what they
+// mean; the anti-abuse signals (ARIN risk and non-quality, the URL security
+// quarantine, the legacy dark verdict) are one generic reason, and their
+// values never leave this file.
 
 import (
 	"context"
@@ -37,7 +37,15 @@ const (
 	// the URL-success rule: measured repeatedly without carrying one URL
 	ProviderStatusReasonEgressNoSuccess = "egress_no_success"
 	ProviderStatusReasonEgressUnprobed  = "egress_unprobed"
+	// the native URL-run minimums (egress_native_min_runs.go): the URL checks
+	// pass, but too few have run, or over too short a time, to admit the
+	// provider to Quality or Speed yet. The census counts it as unprobed.
+	// Apps that predate it show its reason_text.
+	ProviderStatusReasonEgressWarmingUp = "egress_warming_up"
 	ProviderStatusReasonEgressFailing   = "egress_failing"
+	// the Online URL ratio, while it is on: measured repeatedly with a
+	// success, but with too few
+	ProviderStatusReasonEgressLowSuccess = "egress_low_success"
 	// the modern provider gate, while it is on: the probe has not shown
 	// end-to-end post-quantum encryption with resizable transfer windows
 	ProviderStatusReasonNotModern        = "not_modern"
@@ -56,7 +64,9 @@ var ProviderStatusReasons = []string{
 	ProviderStatusReasonReliabilityLow,
 	ProviderStatusReasonNotEligible,
 	ProviderStatusReasonEgressNoSuccess,
+	ProviderStatusReasonEgressLowSuccess,
 	ProviderStatusReasonEgressUnprobed,
+	ProviderStatusReasonEgressWarmingUp,
 	ProviderStatusReasonEgressFailing,
 	ProviderStatusReasonNotModern,
 	ProviderStatusReasonSpeedTestMissing,
@@ -73,12 +83,21 @@ var providerStatusReasonTexts = map[string]string{
 	ProviderStatusReasonReliabilityLow:       "Reliability over the last hour is below what clients need. It rises with every minute this device stays connected; disconnects lower it.",
 	ProviderStatusReasonNotEligible:          "This connection isn't eligible to provide right now.",
 	ProviderStatusReasonEgressNoSuccess:      "This connection isn't passing traffic: every network check in the last 8 hours failed to load a test site through it, so clients aren't offered this device. Check that its internet connection works and that no firewall, VPN or DNS filter on it blocks traffic. Checks keep running, and it's offered again shortly after one succeeds.",
+	ProviderStatusReasonEgressLowSuccess:     "Too many test sites failed to load through this connection in the last 8 hours, so clients aren't offered this device. Check that its internet connection is steady and that no firewall, VPN or DNS filter on it blocks sites. Checks keep running, and it's offered again shortly after enough of them load.",
 	ProviderStatusReasonEgressUnprobed:       "The network check hasn't run on this connection yet. Until it passes, clients are offered this device only when checked providers run out.",
 	ProviderStatusReasonEgressFailing:        "Too many test sites failed to load through this connection in the last 8 hours. Clients are offered this device only when checked providers run out.",
-	ProviderStatusReasonNotModern:            "The network check hasn't confirmed end-to-end post-quantum encryption and resizable transfer windows on this device's connection, so clients are offered it only when providers that have both run out. The latest app supports both: update the app on this device. Checks keep running, and it's offered normally again shortly after one confirms both.",
+	ProviderStatusReasonNotModern:            "The network check hasn't confirmed end-to-end post-quantum encryption and resizable transfer windows on this device's connection, so clients are offered it only when providers that have both run out. The latest app supports both: update the app on this device. The check repeats every few days, and it's offered normally again once a check confirms both.",
 	ProviderStatusReasonSpeedTestMissing:     "No speed test yet. Until one completes, clients are offered this device much less often.",
 	ProviderStatusReasonSlow:                 "This connection measured slower than clients need, so it is offered much less often.",
 	ProviderStatusReasonNone:                 "Everything checks out. How often clients are offered this device depends on demand in its region and on how it ranks against nearby providers.",
+	// true whichever minimum is short: a provider short only for Quality is
+	// offered for speed already
+	ProviderStatusReasonEgressWarmingUp: fmt.Sprintf(
+		"Building network check history. The checks on this connection are passing so far, but it's too early to be sure: clients are offered this device for speed once %d checks have passed, and for quality once %d checks spanning at least %d minutes have passed. Until then, they're offered it only when providers with more checks run out.",
+		ProviderSpeedMinMeasuredUrlRuns,
+		ProviderQualityMinMeasuredUrlRuns,
+		int(ProviderQualityMinMeasuredUrlSpan/time.Minute),
+	),
 }
 
 // The names of the ranking numbers, in the order a status lists them. A
@@ -539,6 +558,12 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonNotEligible
 	case decision.reason == ProviderExcludedNoSuccess:
 		evaluation.reason = ProviderStatusReasonEgressNoSuccess
+	case decision.reason == ProviderExcludedLowSuccess:
+		evaluation.reason = ProviderStatusReasonEgressLowSuccess
+	case decision.reason == ProviderExcludedUnprobed && providerStatusEgressWarmingUp(egressFacts):
+		// the census's unprobed, told apart for the provider: its checks
+		// pass, on too few runs for a native bucket yet
+		evaluation.reason = ProviderStatusReasonEgressWarmingUp
 	case decision.reason == ProviderExcludedUnprobed:
 		evaluation.reason = ProviderStatusReasonEgressUnprobed
 	case decision.reason == ProviderExcludedHealth:
@@ -558,6 +583,14 @@ func evaluateProviderStatus(
 	return evaluation
 }
 
+// Whether the URL checks pass but their runs have yet to meet a native
+// URL-run minimum (egress_native_min_runs.go). A provider without a verdict
+// is unprobed instead: it has no runs to warm up on.
+func providerStatusEgressWarmingUp(facts *providerEgressFacts) bool {
+	return facts.egressQuality != nil && *facts.egressQuality &&
+		(!facts.qualityRunsMet || !facts.speedRunsMet)
+}
+
 // Megabytes per second with one decimal, for the explanations.
 func formatProviderStatusBytesPerSecond(bytesPerSecond ByteCount) string {
 	return fmt.Sprintf("%.1f MB/s", float64(bytesPerSecond)/1e6)
@@ -572,6 +605,8 @@ var providerStatusOutOfPoolReasons = map[string]bool{
 	ProviderStatusReasonLocationInvalid: true,
 	ProviderStatusReasonNotEligible:     true,
 	ProviderStatusReasonEgressNoSuccess: true,
+	// out of every bucket like no_success
+	ProviderStatusReasonEgressLowSuccess: true,
 }
 
 // The wire status of one evaluated provider. Its admission, numbers and
@@ -804,7 +839,8 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 	egressSettings := egressIndexSettings()
 	egressTestEnabled := providerEgressTestEnabled()
 	minimums := providerReliabilityMinimums()
-	countFilter := newProviderCountFilterForClients(ctx, factClientIds)
+	// Quality as the score export's published ARIN decision serves it
+	countFilter := newProviderQualityFilterForClients(ctx, factClientIds)
 	// a network's providers cannot measure their countries, so the
 	// URL-success rule, its kill switch and floor included, is the one the
 	// score export decided Online by

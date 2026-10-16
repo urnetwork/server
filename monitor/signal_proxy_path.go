@@ -188,9 +188,10 @@ type proxyHandshakeResult struct {
 
 func evaluateProxyHandshakes(ctx context.Context, env *probeEnv, target *host, families []string, allocations []proxyAllocation) []finding {
 	if len(allocations) == 0 {
+		// nothing on this host was evaluated: readiness and handshakes are unknown
 		return []finding{{
 			probeId: "proxy/public-path", tier: tierWarn,
-			class: "proxy-public-handshake", target: target.name, frame: "allocations", sustain: 2,
+			class: "proxy-public-handshake", target: target.name, frame: "allocations", sustain: 2, unobservable: true,
 			symptom:   fmt.Sprintf("no running %s proxy allocation could be discovered on %s", env.cfg.env, target.name),
 			mechanism: "Without a live container WARP_PORTS mapping, the monitor cannot pair internal readiness with the current public protocol ports; the service may be absent or deployment state may be unreadable.",
 			baseline:  "Every configured proxy host exposes at least one running allocation with service ports 80, 8080, 8081, and 8082 mapped to current host ports.",

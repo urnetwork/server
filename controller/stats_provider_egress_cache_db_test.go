@@ -170,7 +170,7 @@ func TestStatsProviderEgressCacheNativeGaugeFreshness(t *testing.T) {
 		started, completed := now.Add(-2*time.Minute), now.Add(-time.Minute)
 		counts := statsProviderEgressTestCounts()
 		value := statsProviderEgressTestWire(t, counts, started, completed)
-		key := statsProviderEgressKeys(model.ProviderEgressCountsPolicyKey()).value
+		key := statsProviderEgressKeys(statsProviderEgressPolicyKey(ctx)).value
 		set := func(value string) {
 			server.Redis(ctx, func(client server.RedisClient) {
 				server.Raise(client.Set(ctx, key, value, statsProviderEgressCacheTTL).Err())

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/stabi"
 	"github.com/urnetwork/server"
@@ -94,23 +93,10 @@ func snClientKeyObservationsWithPublicationStore(request *protocol.ClientKeyObse
 	if _, err := stabi.PlanClientKeyAuthorityRpc(queries, limits); err != nil {
 		return nil, err
 	}
-	// Dialing an Http client performs no chain read. The batch itself owns
-	// all native/network checks, and a failed owner is never reused.
-	var client *ethclient.Client
-	for _, endpoint := range owner.rpcURLs {
-		client, err = ethclient.DialContext(ctx, endpoint)
-		if err == nil {
-			break
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
-	if err != nil || client == nil {
-		return nil, errors.Join(errors.New("client-key batch has no actual chain transport"), err)
-	}
-	defer client.Close()
-	authorities, work, err := stabi.ReadClientKeyAuthoritiesContext(ctx, client, queries, limits)
+	// Dialing an Http client performs no chain read, so failover happens on the
+	// read itself. The batch owns all native/network checks at each endpoint,
+	// and a failed endpoint's client and values are never reused.
+	authorities, work, err := readStClientKeyAuthoritiesFailover(ctx, owner.rpcURLs, queries, limits)
 	if err != nil {
 		// A post-I/O failure must never be confused with fallback admission.
 		return nil, errors.New("client-key batch actual authority read failed: " + err.Error())

@@ -67,6 +67,11 @@ package controller
 //	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
 //	urnetwork_stats_provider_modern_gate_shadow      of the providers the other rules admit to quality and speed, those the modern provider gate keeps and each reason it would take one out {bucket, outcome} (db)
 //
+// the ARIN database canary gauges are internal (arindbctl/ARINDB.md,
+// "Dual-database canary"), listed in stats_arindb_canary.go and read by
+// grafana/dashboards/providers.json, the warp alert rules and monitor signal
+// §2.9d. They export the decision the score export published (redis).
+//
 // the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -394,26 +399,46 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 
 // The countries the URL-success rule exempts because the probe fails for most
 // of their providers, each with the providers the exemption keeps online,
-// under the guard the score export last published. No series while the
-// export applied the rule nowhere (its kill switch) or no trusted guard is
-// published.
+// under the guard the score export last published: those without a success,
+// and while the Online URL ratio is on with its country exemption, those
+// below it; none while the ratio applies in every country. No series while
+// the export applied the rule nowhere (its kill switch) or no trusted guard
+// is published.
 var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 	"provider_online_success_exempt",
-	"Providers measured without a URL success that the URL-success rule keeps online, per country it exempts",
+	"Providers measured without a URL success, or below the online URL ratio, that the URL-success rule keeps online, per country it exempts",
 	"country_code",
 )
 
 // The modern provider gate's shadow (FP2FIX.md, 2026-10-14): of the
 // providers the other rules admit to quality and to speed, how many the probe
-// has shown to be modern and why each other one is not, whether or not
-// quality_speed_requires_modern_provider is on. Every outcome but modern is
-// what the gate takes out of the bucket once it is on. Two buckets and five
-// outcomes, every series published every refresh, zero included.
+// has shown to be modern and why each other one is not, whether or not the
+// gate is on. Every outcome but modern is what the gate takes out of the
+// bucket once it is on. Two buckets and five outcomes, every series published
+// every refresh, zero included.
 var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 	"provider_modern_gate_shadow",
 	"Connected valid public providers the other egress rules admit to quality or speed, by what the modern provider gate decides for them",
 	"bucket",
 	"outcome",
+)
+
+// The modern provider gate under this process's provider.yml at the last
+// refresh (FP2FIX.md, owner decision 2026-10-15): one while it holds quality
+// and speed to modern providers. The monitor's readiness signal (monitor
+// SIGNALS.md §2.29) reads it with the start below, so a postponed or moved
+// flip moves the signal's windows with it.
+var statsProviderModernGateOnGauge = newStatsGauge(
+	"provider_modern_gate_on",
+	"One while the modern provider gate holds quality and speed to modern providers under this process's provider.yml",
+)
+
+// While quality_speed_requires_modern_provider is absent from provider.yml,
+// the instant the gate turns on by itself, in unix seconds. No series while
+// the switch is given, true, false or unreadable, when no flip is scheduled.
+var statsProviderModernGateStartGauge = newStatsGaugeVec(
+	"provider_modern_gate_start_seconds",
+	"Unix time the modern provider gate turns on by itself, published only while quality_speed_requires_modern_provider is absent from provider.yml",
 )
 
 var statsProviderEgressAvailableGauge = newStatsGauge(
@@ -774,9 +799,12 @@ func statsRaoToAlpha(rao *big.Int) float64 {
 
 // StartStatsCollector refreshes the public stats gauges until the context
 // is done. each refresh is isolated so a transient db, chain, or fetch
-// error never stops the collector
-func StartStatsCollector(ctx context.Context) {
+// error never stops the collector. The returned channel closes once the
+// collector has stopped, so its owner can join it.
+func StartStatsCollector(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	go server.HandleError(func() {
+		defer close(done)
 		dbTick := 0
 		for {
 			now := time.Now()
@@ -785,6 +813,10 @@ func StartStatsCollector(ctx context.Context) {
 			window := statsEpochClockState.window(now)
 			server.HandleError(func() {
 				window = statsRefreshEpochClock(ctx, now)
+			})
+			// the canary decision is one Redis read, so every tick exports it
+			server.HandleError(func() {
+				statsRefreshArindbCanary(ctx)
 			})
 			if dbTick == 0 {
 				server.HandleError(func() {
@@ -822,6 +854,7 @@ func StartStatsCollector(ctx context.Context) {
 			}
 		}
 	})
+	return done
 }
 
 // statsEpochClockState is the collector's settlement epoch clock
@@ -1040,15 +1073,36 @@ func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 }
 
 // Publishes the pool as the egress rules decide it, with the rollout flag as
-// it is now (model.CountProviderEgress).
+// it is now (model.CountProviderEgress), and the modern provider gate's
+// schedule first, so it stays current while a refresh is unavailable.
 func statsRefreshProviderEgress(ctx context.Context) {
+	statsPublishProviderModernGate(server.NowUtc())
 	statsProviderEgressAvailableGauge.set(0)
-	snapshot, err := getStatsProviderEgressSnapshot(ctx, model.ProviderEgressCountsPolicyKey())
+	snapshot, err := getStatsProviderEgressSnapshot(ctx, statsProviderEgressPolicyKey(ctx))
 	server.Raise(err)
 	statsPublishProviderEgressCounts(snapshot.Counts)
 	statsProviderEgressStartedGauge.set(statsSourceTimestampSeconds(snapshot.StartedAt))
 	statsProviderEgressCompletedGauge.set(statsSourceTimestampSeconds(snapshot.CompletedAt))
 	statsProviderEgressAvailableGauge.set(1)
+}
+
+// Publishes the modern provider gate under this process's provider.yml at
+// now: whether it is on, and the start while one is scheduled.
+func statsPublishProviderModernGate(now time.Time) {
+	on, scheduledStart := model.GetModernProviderGateSchedule(now)
+	onValue := 0.0
+	if on {
+		onValue = 1
+	}
+	statsProviderModernGateOnGauge.set(onValue)
+	startValues := []statsLabeledValue{}
+	if scheduledStart != nil {
+		startValues = append(startValues, statsLabeledValue{
+			labelValues: []string{},
+			value:       float64(scheduledStart.Unix()),
+		})
+	}
+	statsProviderModernGateStartGauge.replace(startValues)
 }
 
 func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {

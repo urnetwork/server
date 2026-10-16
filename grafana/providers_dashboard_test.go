@@ -31,6 +31,11 @@ const (
 	providersOutcomesMetric = "urnetwork_findproviders2_outcomes_total"
 )
 
+// each process's reads of the published ARIN canary decision, summed as a
+// share of every read; TestProvidersDashboardShowsTheArindbCanaryRow pins the
+// read
+const providersArindbDecisionReadsMetric = "urnetwork_arindb_decision_reads_total"
+
 // Whether a series is one of the per-process answer metrics, which are summed
 // as rates rather than read with max.
 func providersPerProcessMetric(metric string) bool {
@@ -61,6 +66,9 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 		"answers backfilled":      `sum by (rank_mode) (rate(urnetwork_provider_backfill_bucket{env="$env",le="0"}[5m]))`,
 		"short and empty answers": `sum by (rank_mode, result_count) (rate(urnetwork_findproviders2_outcomes_total{env="$env",force_minimum="false"}[5m]))`,
 		"borrowed share":          `sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env="$env"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_answered_total{env="$env"}[5m]))`,
+		"lent by evidence":        `sum by (rank_mode, evidence) (rate(urnetwork_provider_backfill_online_evidence_total{env="$env"}[5m]))`,
+		"rank measured first":     `max by (service) (urnetwork_findproviders2_rank_measured_first_enabled{env="$env",service=~"api|proxy"})`,
+		"ranked by every process": `min by (service) (max by (service, host, instance) (urnetwork_findproviders2_rank_measured_first_enabled{env="$env",service=~"api|proxy"}))`,
 		"url-success exemptions":  `max by (country_code) (urnetwork_stats_provider_online_success_exempt{env="$env"})`,
 		"modern gate, quality":    `max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env="$env",bucket="quality"})`,
 		"modern gate, speed":      `max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env="$env",bucket="speed"})`,
@@ -73,7 +81,7 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 	}
 
 	// every reason the rules report has a panel of its own
-	for _, reason := range []string{"blackhole", "tls", "country", "no_success", "health", "unprobed", "not_modern"} {
+	for _, reason := range []string{"blackhole", "tls", "country", "no_success", "health", "unprobed", "not_modern", "low_success"} {
 		read := `max(urnetwork_stats_provider_excluded{env="$env",reason="` + reason + `"})`
 		if !strings.Contains(joined, read) {
 			t.Errorf("the %s exclusion has no panel of its own (expected %s)", reason, read)
@@ -99,8 +107,9 @@ func TestProvidersDashboardShowsTheEgressBuckets(t *testing.T) {
 
 	// the backfill histogram is per process: every read of it is a rate
 	// summed across the processes, over a window wider than the staggered
-	// scrape interval, and scoped to the env
-	backfillRead := regexp.MustCompile(`sum by \((rank_mode|rank_mode, result_count)\) \(rate\((urnetwork_provider_backfill_(sum|count|bucket)|urnetwork_provider_answered_total|urnetwork_findproviders2_outcomes_total)\{env="\$env"[^}]*\}\[5m\]\)\)`)
+	// scrape interval, and scoped to the env; so is every read of the Online
+	// fallback's evidence counter
+	backfillRead := regexp.MustCompile(`sum by \((rank_mode|rank_mode, result_count|rank_mode, evidence)\) \(rate\((urnetwork_provider_backfill_(sum|count|bucket|online_evidence_total)|urnetwork_provider_answered_total|urnetwork_findproviders2_outcomes_total)\{env="\$env"[^}]*\}\[5m\]\)\)`)
 	for _, expression := range expressions {
 		series := 0
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {

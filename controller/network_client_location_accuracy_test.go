@@ -21,6 +21,8 @@ import (
 // addresses are MaxMind's published test data, which the deployed build
 // places in the United States at a country's radius.
 func TestGetLocationForIpCarriesTheAccuracyRadius(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	ctx := context.Background()
 	for _, clientIp := range []string{"67.43.156.1", "2a02:ec80::1"} {
 		ipInfo, err := server.GetIpInfoFromString(clientIp)
@@ -84,6 +86,8 @@ func testConnectionAccuracyKm(t testing.TB, ctx context.Context, connectionId se
 // from the egress probe is stored with none, since the radius describes the
 // lookup the probe replaced.
 func TestSetConnectionLocationStoresTheAccuracyRadius(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		// MaxMind test data, which GeoLite2 places only in its country

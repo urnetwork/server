@@ -7,6 +7,7 @@ package model
 import (
 	"maps"
 	"slices"
+	"time"
 )
 
 // One rank mode's performance targets (connect/GEOMAP.md §10.1): past a
@@ -137,6 +138,35 @@ func setClientScoreRanks(
 	}
 }
 
+// How long a score export's URL verdict vouches for the evidence it was
+// decided on (ClientScore.EgressValidUntil), counted from the end of the
+// evidence window the export read (providerCountFilter.healthWindowEnd). The
+// exports run back to back, about 15 an hour, so the next export decides the
+// provider again long before, and a native stays one between them. It is
+// longer than the ~24 minutes between a provider's URL runs, so while the
+// exports keep up no verdict ends sooner than at its oldest run's expiry,
+// which ended it before. An export stall past it demotes every native the
+// stalled export published to Online: nothing has looked at their evidence
+// since.
+const clientScoreEgressMaxStaleness = 30 * time.Minute
+
+// The instant a score's URL verdict stops vouching for its evidence: the
+// earlier of the newest accepted run leaving the evidence window, when none of
+// the runs the verdict was decided on is left and ComputeEgressIndex finds no
+// evidence (the exact boundary is stale for both), and
+// clientScoreEgressMaxStaleness past the end of the window the export read.
+// The oldest run leaving the window, the end before, came 0 to 24 minutes
+// after the export for a provider measured all window long, which hid a native
+// until the next export decided it again.
+func clientScoreEgressValidUntil(counts ProviderEgressHealthCounts, healthWindowEnd time.Time, egressSettings *EgressIndexSettings) time.Time {
+	evidenceEnd := counts.MeasuredAt.Add(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge))
+	stalenessEnd := healthWindowEnd.Add(clientScoreEgressMaxStaleness)
+	if stalenessEnd.Before(evidenceEnd) {
+		return stalenessEnd
+	}
+	return evidenceEnd
+}
+
 // Sets a pool score to its lowest lookback and decides it with the shared
 // egress decision: online, each mode's native membership and the weight the
 // mode draws it by. Every location and group map a provider sits in, and its
@@ -185,7 +215,7 @@ func rankClientScore(
 	clientScore.Online = decision.online && passesReliability
 	clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(countFilter.healthCounts[clientScore.ClientId])
 	if counts, ok := countFilter.healthCounts[clientScore.ClientId]; ok && counts.Total > 0 {
-		validUntil := counts.FirstMeasuredAt.Add(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge))
+		validUntil := clientScoreEgressValidUntil(counts, countFilter.healthWindowEnd, egressSettings)
 		clientScore.EgressValidUntil = &validUntil
 	}
 

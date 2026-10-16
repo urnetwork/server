@@ -61,6 +61,8 @@ func readClientLocationReliabilityForTest(ctx context.Context, clientId server.I
 // (connect/IPV6.md A8): one hash per family is valid, the location comes from
 // the v4 side when both exist, and legacy counts as v4.
 func TestClientLocationReliabilityIpFamily(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

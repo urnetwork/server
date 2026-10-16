@@ -1,10 +1,17 @@
 package model
 
 import (
+	"context"
 	"encoding/hex"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server"
 )
 
 // A prefix counter's key is the peppered hash of the /24 (/48): every address
@@ -58,4 +65,43 @@ func TestLagSignatureRateLimitKey(t *testing.T) {
 	if !strings.HasPrefix(key, "{lag_track_signature_") {
 		t.Errorf("the key %q is not in the lag limits' hash slot form", key)
 	}
+}
+
+// A counter expires at the end of the window it counts, however late in the
+// window its last count came, so no counter outlives the hour it limits
+// (lag.dev/PLAN.md A6). A TTL of the whole window from each count would keep
+// a counter last counted near the end of its window for almost two.
+func TestLagRateLimitCounterExpiresAtItsWindowEnd(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const window = time.Hour
+		windowMillis := window.Milliseconds()
+		for {
+			clientId := server.NewId()
+			before := server.NowUtc()
+			for range 2 {
+				limit, err := CheckLagClientRateLimit(ctx, "test", clientId, 10, window)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, limit.Allowed, true)
+			}
+			windowIndex := before.UnixMilli() / windowMillis
+			if server.NowUtc().UnixMilli()/windowMillis != windowIndex {
+				// the counts fell in two windows; count again in the next
+				continue
+			}
+			key := fmt.Sprintf("{lag_test_client_%s}_%d", clientId, windowIndex)
+			var count int64
+			var expireTime time.Duration
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				count, err = r.Get(ctx, key).Int64()
+				server.Raise(err)
+				expireTime, err = r.PExpireTime(ctx, key).Result()
+				server.Raise(err)
+			})
+			connect.AssertEqual(t, count, int64(2))
+			connect.AssertEqual(t, expireTime, time.Duration((windowIndex+1)*windowMillis)*time.Millisecond)
+			return
+		}
+	})
 }

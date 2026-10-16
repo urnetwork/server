@@ -6627,6 +6627,458 @@
           "legendFormat": "{{method}}"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "capability probe (server/capprobe): the modern provider gate's end-to-end post-quantum and window evidence",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 409
+      },
+      "id": 127
+    },
+    {
+      "id": 128,
+      "type": "timeseries",
+      "title": "capability probe passes / min by result, and chain restarts",
+      "description": "Capability probe passes, one task row fleet-wide, by result: measured (a pass read its sweep pages and measured what was due), waiting (between sweeps, every ten minutes, reading nothing; the next sweep starts min_sweep_interval_minutes after the last one started), disabled (the last pass of a chain once capability_probe.yml switches the probe off; nothing runs after it) and failed (its settings, prober shard, a page read or an evidence write; the task retries the same sweep page after a minute). The probe ships switched off, and every series stays at zero until capability_probe.yml enables it and the taskworkers restart. No measured or waiting pass for longer than a pass's max time, with the probe switched on, is a stopped probe (SIGNALS.md §2.19g). Chain restarts: a taskworker with the probe switched on found the chain's task row missing at its ten-minute check and scheduled a pass (urnetwork_capability_probe_chain_restarts_total), so a stale taskworker, a lost row or maintenance had ended the chain.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 410
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_capability_probe_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_chain_restarts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "chain restarts"
+        }
+      ]
+    },
+    {
+      "id": 129,
+      "type": "timeseries",
+      "title": "capability measurements / min by outcome",
+      "description": "Finished capability measurements, each one provider in a short tunnel of its own. recorded_modern, recorded_not_post_quantum and recorded_no_resizable_windows wrote evidence with that gate outcome. The rest recorded nothing: tunnel_failed (the tunnel could not be opened), no_ack (the provider never acknowledged the probe's pings), e2e_not_attempted (acknowledged, but the send path accepted no ClientHello: the probe client's encryption is off), e2e_pending (the ClientHello was still in its establishment window at the measurement's timeout), canceled (the pass ended), tunnel_lost (the tunnel's path went away, or its window client was replaced, before the reading concluded), record_failed (the write failed), downgrade_held (a negative reading of a provider whose modern evidence is still fresh, held for a later sweep to confirm) and negative_withheld (a negative reading of a pass that negotiated no session with any provider). A provider that recorded nothing is measured again by the next sweep.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 410
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_capability_probe_providers_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 130,
+      "type": "timeseries",
+      "title": "capability readings / min by capability and reading",
+      "description": "The final reading of every opened capability measurement. e2e: post_quantum_sealed (authenticated post-quantum key exchange), post_quantum_unsealed (negotiated with a post-quantum group, identity proof not verified within the seal grace; the model records it as post-quantum), classical_sealed and classical_unsealed, no_responder (a ClientHello unanswered for a whole establishment window while the provider acknowledged the probe), pending and not_tested, which are not evidence. window: resizable, fixed (acknowledgements without a window) and not_tested. A large post_quantum_unsealed share is a key resolution problem to understand before the gate is switched on.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 418
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (capability, reading) (rate(urnetwork_capability_probe_readings_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{capability}} {{reading}}"
+        }
+      ]
+    },
+    {
+      "id": 131,
+      "type": "timeseries",
+      "title": "capability probe selection / min by stage",
+      "description": "The capability probe's sweep: providers its pages scanned (connected and valid), those due for evidence (none, modern evidence older than modern_refresh_hours, other evidence older than other_refresh_hours), those of them the egress rules admit to quality or speed before the gate, and those it started measuring. Scanned with nothing due is a fleet whose evidence is fresh.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 418
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(urnetwork_capability_probe_selection_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 132,
+      "type": "timeseries",
+      "title": "capability measurement mean and p95 duration",
+      "description": "One capability measurement, from opening its tunnel to reading its evidence, teardown excluded. A modern provider reads in seconds; a provider without the end-to-end responder takes the whole 60 s establishment window after its first acknowledgement; measure_timeout_seconds bounds every one.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 426
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_capability_probe_measure_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum(rate(urnetwork_capability_probe_measure_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "mean"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_capability_probe_measure_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 133,
+      "type": "timeseries",
+      "title": "capability measurements in flight and teardown errors / min",
+      "description": "Capability measurements each taskworker has running, teardown included, which concurrency bounds per pass, and capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper (SIGNALS.md §2.25).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 426
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block, instance) (urnetwork_capability_probe_in_flight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_close_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "teardown errors / min"
+        }
+      ]
+    },
+    {
+      "id": 134,
+      "type": "timeseries",
+      "title": "capability probe sweep duration and time since the last pass",
+      "description": "How long the last completed capability probe sweep took, from its first pass's start, and the time since any taskworker last finished a measured or waiting pass. A sweep must finish well inside the gate's seven-day staleness window, less the refresh age, or evidence goes stale before it is refreshed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 434
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_capability_probe_last_sweep_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "last sweep"
+        },
+        {
+          "refId": "B",
+          "expr": "time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "since the last pass"
+        }
+      ]
+    },
+    {
+      "id": 135,
+      "type": "timeseries",
+      "title": "capability probe sweeps completed / day",
+      "description": "Capability probe sweeps the taskworkers completed in the trailing day. Between sweeps the probe waits min_sweep_interval_minutes from the last sweep's start, so a fleet whose evidence is fresh completes about one sweep an interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 434
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_capability_probe_sweeps_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1d]))",
+          "legendFormat": "sweeps"
+        }
+      ]
+    },
+    {
+      "id": 136,
+      "type": "timeseries",
+      "title": "capability probe guards / min: downgrades held and confirmed, breaker trips",
+      "description": "The two guards that keep a passing fault from recording a negative reading, which takes a provider out of Quality and Speed once the gate is on. Downgrades: held is a negative reading of a provider whose modern evidence is still fresh, held back and carried by the sweep; confirmed is a held one that a negative reading in a later sweep confirmed and recorded. Breaker trips: capability probe passes that negotiated no end-to-end session with any provider and so recorded none of their negative readings (outcome negative_withheld), which is how a fault on the probe's own side shows. Trips on every pass are a probe-side regression (SIGNALS.md §2.19g).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 442
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_capability_probe_downgrades_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "downgrades {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_breaker_trips_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "breaker trips"
+        }
+      ]
+    },
+    {
+      "id": 137,
+      "type": "timeseries",
+      "title": "capability probe shard readiness failures and cleanup errors / min",
+      "description": "Capability probe passes whose prober shard could not show it was funded, by step: funding_unknown (the balance read failed) and funding_unavailable (no active balance); the pass fails and retries after a minute. These are the capability probe's own, never counted in the URL probe's pass errors. Cleanup errors: passes whose prober shard drain or reap failed after the pass; a finished pass still stands, and the prober reaper retries the cleanup.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 442
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (step) (rate(urnetwork_capability_probe_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "readiness {{step}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_capability_probe_shard_cleanup_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "shard cleanup errors"
+        }
+      ]
     }
   ]
 }
