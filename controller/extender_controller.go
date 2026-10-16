@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -300,6 +301,17 @@ func encodeExtenderRecord(record *protocol.ExtenderRecord) (string, error) {
 // person: it needs to tell "this carrier did not answer" from "the request was
 // malformed", and it needs to keep the answer it can act on rather than an
 // http status.
+// The refusal of an extender call whose network configuration is unusable:
+// the configuration error's message. Its cause stays in the log.
+func extenderConfigRefusal(err error) string {
+	glog.Errorf("[extender]the extender network configuration is unusable: %s\n", err)
+	var configErr *extenderConfigError
+	if errors.As(err, &configErr) {
+		return configErr.message
+	}
+	return "the extender network is not configured"
+}
+
 func ExtenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
@@ -407,19 +419,19 @@ func ExtenderActivate(
 
 	config, err := EnvExtenderConfig()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 	rootPrivateKey, err := config.RootPrivateKey()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 	apiHost, err := config.ApiHost()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 	serverName, err := config.ProbeServerName()
 	if err != nil {
-		return refuse(err.Error())
+		return refuse(extenderConfigRefusal(err))
 	}
 
 	if err := model.CheckAndRecordAccountActionRateLimit(

@@ -717,7 +717,9 @@ func NetworkCreate(
 
 	}
 
-	return nil, errors.New("invalid login")
+	// The token did not verify. That includes the provider's signing keys
+	// failing to load, so this stays a 500; its fixed text is the answer.
+	return nil, errors.New("500 invalid login")
 }
 
 type networkCreateResult struct {

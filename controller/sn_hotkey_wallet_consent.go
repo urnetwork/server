@@ -43,7 +43,8 @@ type SnHotkeyWalletMappingConsentResult struct {
 // submission of too many new generations a 400, each with its message. It
 // writes no wallet projection and attaches no coldkey to the network, so the
 // ban list applies at delegation.
-func SnHotkeyWalletMappingConsent(args *SnHotkeyWalletMappingConsentArgs, clientSession *session.ClientSession) (*SnHotkeyWalletMappingConsentResult, error) {
+func SnHotkeyWalletMappingConsent(args *SnHotkeyWalletMappingConsentArgs, clientSession *session.ClientSession) (result *SnHotkeyWalletMappingConsentResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil || len(args.Originals) == 0 {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
@@ -93,7 +94,8 @@ type SnHotkeyWalletMappingHistoryResult struct {
 
 // Signature-bearing originals are public evidence. Missing history stays
 // unavailable rather than known-empty.
-func SnHotkeyWalletMappingHistory(args *SnHotkeyWalletMappingHistoryArgs, clientSession *session.ClientSession) (*SnHotkeyWalletMappingHistoryResult, error) {
+func SnHotkeyWalletMappingHistory(args *SnHotkeyWalletMappingHistoryArgs, clientSession *session.ClientSession) (result *SnHotkeyWalletMappingHistoryResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil || clientSession == nil || clientSession.Ctx == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}
@@ -126,7 +128,8 @@ type SnHotkeyNetworkDelegationChallengeArgs struct {
 // Issues the prospective delegation the hotkey signs, exactly like the network
 // consent challenge. The global chain through the head must be retained for
 // that hotkey, and the session user must still administer the network.
-func SnHotkeyNetworkDelegationChallenge(args *SnHotkeyNetworkDelegationChallengeArgs, clientSession *session.ClientSession) (*SnWalletMappingChallengeResult, error) {
+func SnHotkeyNetworkDelegationChallenge(args *SnHotkeyNetworkDelegationChallengeArgs, clientSession *session.ClientSession) (result *SnWalletMappingChallengeResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
@@ -228,7 +231,8 @@ type SnHotkeyNetworkDelegationHistoryArgs struct {
 
 // Signature-bearing originals are public evidence. Missing history stays
 // unavailable rather than known-empty.
-func SnHotkeyNetworkDelegationHistory(args *SnHotkeyNetworkDelegationHistoryArgs, clientSession *session.ClientSession) (*SnWalletMappingHistoryResult, error) {
+func SnHotkeyNetworkDelegationHistory(args *SnHotkeyNetworkDelegationHistoryArgs, clientSession *session.ClientSession) (result *SnWalletMappingHistoryResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil || clientSession == nil || clientSession.Ctx == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}

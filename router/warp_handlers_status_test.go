@@ -150,3 +150,20 @@ func TestWarpStatusDrainingIfReadyPrecedence(t *testing.T) {
 		t.Fatalf("unconditional draining: status = %q", result.Status)
 	}
 }
+
+// A peer address that does not parse makes no session. The session's error,
+// which quotes the address, was reported as the caller's address.
+func TestWarpStatusHidesSessionFailureCause(t *testing.T) {
+	setWarpStatusTestEnv(t)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "http://test/status", nil)
+	r.RemoteAddr = "synthetic-peer"
+	WarpStatus(w, r)
+	var result WarpStatusResult
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+		t.Fatalf("status http code = %d body = %q", w.Code, w.Body.String())
+	}
+	if result.ClientAddress != "error" {
+		t.Fatalf("client address carried the session error: %q", result.ClientAddress)
+	}
+}

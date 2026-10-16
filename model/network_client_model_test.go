@@ -952,7 +952,9 @@ func TestRemoveNetworkClientsRejectsOversizedRequest(t *testing.T) {
 		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
 			ClientIds: clientIds,
 		}, sess)
+		// a 400, declared so the router answers its text
 		assert.NotEqual(t, err, nil)
+		assert.Equal(t, err.Error(), fmt.Sprintf("400 Too many client ids (max %d).", MaxRemoveNetworkClientsCount))
 	})
 }
 

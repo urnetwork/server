@@ -2,7 +2,7 @@ package model
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -13,6 +13,12 @@ type SetPayoutWalletArgs struct {
 }
 
 type SetPayoutWalletResult struct{}
+
+// The payout wallet refusals the caller sees.
+var (
+	ErrPayoutWalletBittensor = errors.New("Bittensor wallets cannot be the payout wallet.")
+	ErrPayoutWalletNotOwned  = errors.New("Wallet must be an active wallet owned by the network.")
+)
 
 // the wallet must be an active wallet owned by the network,
 // so that a payout can never be directed to another network's wallet
@@ -50,7 +56,7 @@ func setPayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.I
 		}
 	})
 	if parsedBlockchain, err := ParseBlockchain(blockchain); err == nil && parsedBlockchain == TAO {
-		return fmt.Errorf("Bittensor wallets cannot be the payout wallet.")
+		return ErrPayoutWalletBittensor
 	}
 
 	tag := server.RaisePgResult(tx.Exec(
@@ -76,7 +82,7 @@ func setPayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.I
 		walletId,
 	))
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("Wallet must be an active wallet owned by the network.")
+		return ErrPayoutWalletNotOwned
 	}
 	return nil
 }

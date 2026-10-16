@@ -347,8 +347,10 @@ func TestSnAttemptUploadNativeDeadlineFailureStillJoinsClose(t *testing.T) {
 		serveSnUploadAttemptArtifact(response, request,
 			func() (server.BlobStore, bool) { stores++; return nil, false },
 			func(context.Context, server.Id, uint64) error { return nil }, snAttemptTestBounds(), slots)
-		if response.Code != http.StatusRequestTimeout || !strings.Contains(response.Body.String(), cause.Error()) || deadlines.Load() != 1 || closes.Load() != 1 || stores != 0 || len(slots) != 0 {
-			tb.Fatalf("native interruption failure escaped joined Close: status%d deadline%d close%d store%d", response.Code, deadlines.Load(), closes.Load(), stores)
+		// The joined interruption failure stays in the log; the caller learns
+		// only that the upload was canceled.
+		if response.Code != http.StatusRequestTimeout || response.Body.String() != "Upload canceled.\n" || strings.Contains(response.Body.String(), cause.Error()) || deadlines.Load() != 1 || closes.Load() != 1 || stores != 0 || len(slots) != 0 {
+			tb.Fatalf("native interruption failure escaped joined Close: status%d body%q deadline%d close%d store%d", response.Code, response.Body.String(), deadlines.Load(), closes.Load(), stores)
 		}
 	})
 }

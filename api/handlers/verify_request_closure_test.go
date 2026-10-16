@@ -128,3 +128,88 @@ func TestVerifyRequestClosureHttpBoundsAndOwnerIsolation(t *testing.T) {
 		t.Fatal("unexpected closure query reached body read", w.Code)
 	}
 }
+
+// Posts one closure to a real HTTP server, which supplies the native deadlines
+// the handler sets, and returns the status and the whole body.
+func postVerifyRequestClosure(t testing.TB, handler http.Handler, body []byte) (int, string) {
+	t.Helper()
+	front := httptest.NewServer(handler)
+	defer front.Close()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, front.URL+"/verify/original/close", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-UR-Forwarded-For", "192.0.2.44:4500")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, readErr := io.ReadAll(io.LimitReader(response.Body, 8193))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatal(readErr, closeErr)
+	}
+	return response.StatusCode, string(encoded)
+}
+
+// The database refuses the receipt write, an unexpected storage failure. Its
+// own text, and the handler's name, stay in the server log.
+func TestVerifyRequestClosureHttpHidesStorageFailure(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		raw, _ := verifyClosureHttpFixture(t)
+		server.Tx(t.Context(), func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(t.Context(), `CREATE FUNCTION synthetic_refuse_closure() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN RAISE EXCEPTION 'synthetic closure storage refusal'; END $$;
+				CREATE TRIGGER synthetic_refuse_closure BEFORE INSERT ON verify_original_request_closed
+				FOR EACH ROW EXECUTE FUNCTION synthetic_refuse_closure()`))
+		})
+		status, body := postVerifyRequestClosure(t, NewVerifyRequestClosureHandlers(), raw)
+		requirePrivateUnavailable(t, status, body, "synthetic closure storage refusal", "SQLSTATE", "VerifyRequestClosureHandlers")
+	})
+}
+
+// A seed configured where the signing key belongs makes the receipt signer
+// return an error, an unexpected signing failure.
+func TestVerifyRequestClosureHttpHidesSigningFailure(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		raw, _ := verifyClosureHttpFixture(t)
+		controller.SetVerifyServerKeys([]*controller.VerifyServerKey{{ServerKeyId: 7, PrivateKey: ed25519.PrivateKey(bytes.Repeat([]byte{85}, ed25519.SeedSize))}})
+		status, body := postVerifyRequestClosure(t, NewVerifyRequestClosureHandlers(), raw)
+		requirePrivateUnavailable(t, status, body, "tombstone", "VerifyRequestClosureHandlers")
+	})
+}
+
+// With no signing key configured, signing raises instead of returning. That is
+// still a signing failure, answered the same way rather than as a panic.
+func TestVerifyRequestClosureHttpHidesRaisedSigningFailure(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		raw, _ := verifyClosureHttpFixture(t)
+		controller.SetVerifyServerKeys([]*controller.VerifyServerKey{})
+		status, body := postVerifyRequestClosure(t, NewVerifyRequestClosureHandlers(), raw)
+		requirePrivateUnavailable(t, status, body, "index out of range", "runtime error")
+	})
+}
+
+// A refusal the controller declares keeps its status and message: the seed
+// rate limit still answers 429 with its own text.
+func TestVerifyRequestClosureHttpKeepsDeclaredRefusal(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		raw, _ := verifyClosureHttpFixture(t)
+		settings := model.DefaultVerifySettings()
+		settings.SeedRateHardLimit = 0
+		controller.SetVerifySettings(settings)
+		status, body := postVerifyRequestClosure(t, NewVerifyRequestClosureHandlers(), raw)
+		if status != http.StatusTooManyRequests || body != "verification closure rate exceeded\n" {
+			t.Fatalf("declared refusal changed: status=%d body=%q", status, body)
+		}
+	})
+}

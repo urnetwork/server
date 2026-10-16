@@ -238,7 +238,7 @@ func PayDataSolanaStatus(
 		return &PayDataSolanaStatusResult{Status: PayDataSolanaStatusUnknown}, nil
 	}
 	if !payDataLookupLimiter.allow(clientSession) {
-		return nil, errors.New("Too many status checks from this address. Try again in a minute.")
+		return nil, errors.New("429 Too many status checks from this address. Try again in a minute.")
 	}
 
 	intent := model.GetSolanaPaymentIntent(clientSession.Ctx, reference)

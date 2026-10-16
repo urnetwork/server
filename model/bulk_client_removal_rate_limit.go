@@ -38,7 +38,7 @@ const MaxBulkClientRemovalsPerDay = MaxBulkClientRemovalLookaheadBuckets * MaxBu
 
 func maxBulkClientRemovalsError() error {
 	return fmt.Errorf(
-		"The bulk client removal limit (%d per hour, %d per day) has been reached for this deployment. Please try again later.",
+		"429 The bulk client removal limit (%d per hour, %d per day) has been reached for this deployment. Please try again later.",
 		MaxBulkClientRemovalsPerBucket,
 		MaxBulkClientRemovalsPerDay,
 	)

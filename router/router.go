@@ -166,7 +166,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			func() {
 				// note the connection might be hijacked in this case
 				defer recover()
-				http.Error(writer, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
+				http.Error(writer, UnexpectedErrorMessage, http.StatusInternalServerError)
 			}()
 			if body != nil && !observation.writer.hijacked {
 				func() {

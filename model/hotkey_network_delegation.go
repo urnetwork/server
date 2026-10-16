@@ -105,7 +105,7 @@ func CreateHotkeyNetworkDelegationChallenge(ctx context.Context, owner NetworkWa
 		var pending int
 		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM hotkey_network_delegation_challenge c WHERE domain_hash=$1 AND network_id=$2 AND expires_at>=$3 AND NOT EXISTS (SELECT 1 FROM hotkey_network_delegation s WHERE s.nonce=c.nonce)`, domain[:], owner.NetworkId, now).Scan(&pending))
 		if pending >= 16 {
-			panic(walletMappingAbort{cause: errors.New("hotkey network delegation challenge capacity is temporarily full")})
+			panic(walletMappingAbort{cause: ErrHotkeyNetworkDelegationChallengeCapacity})
 		}
 		message, err = statement.Message()
 		if err != nil {
@@ -179,7 +179,7 @@ func AcceptHotkeyNetworkDelegation(ctx context.Context, owner NetworkWalletMappi
 		}
 		now := server.NowUtc()
 		if now.Unix() < statement.IssuedAt || now.Unix() > statement.ExpiresAt {
-			panic(walletMappingAbort{cause: errors.New("hotkey network delegation original challenge is expired or not yet effective")})
+			panic(walletMappingAbort{cause: ErrHotkeyNetworkDelegationChallengeExpired})
 		}
 		var previous []byte
 		var generation uint64

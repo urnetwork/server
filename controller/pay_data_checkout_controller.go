@@ -172,7 +172,7 @@ func PayDataNetworkLookup(
 		return &PayDataNetworkLookupResult{Exists: false}, nil
 	}
 	if !payDataLookupLimiter.allow(clientSession) {
-		return nil, errors.New("Too many lookups from this address. Try again in a minute.")
+		return nil, errors.New("429 Too many lookups from this address. Try again in a minute.")
 	}
 	networkId, storedName := model.FindNetworkByName(clientSession.Ctx, networkName)
 	if networkId == nil {
