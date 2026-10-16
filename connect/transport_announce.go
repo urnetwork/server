@@ -958,9 +958,8 @@ func (self *ConnectionAnnounce) samplePassiveSpeed() {
 
 // a synthetic speed test runs only when the connection has not passively
 // demonstrated `SyntheticSpeedBytesPerSecond` after `SyntheticSpeedTimeout`.
-// Busy connections prove their speed with passive samples, and a synthetic
-// test would disrupt active traffic since the client transport echoes all
-// messages upstream during the test instead of delivering them.
+// Prefer passive samples from busy connections. Synthetic probes only add
+// measurement traffic when the connection has not shown the threshold rate.
 func (self *ConnectionAnnounce) allowSyntheticSpeedWithLock() bool {
 	if !self.testConfig.AllowSpeed() {
 		return false
