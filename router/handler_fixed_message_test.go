@@ -115,3 +115,28 @@ func TestWrapWithInputAnswersAFormatterFailureWithAFixedMessage(t *testing.T) {
 	}
 	requireFixedMessage(t, fixedMessageTestServe(request, formatter), http.StatusBadRequest, InvalidRequestBodyMessage, "synthetic")
 }
+
+// An impl error that declares no status, such as a storage failure, was the
+// 500's body, with the auth wrapper's tag.
+func TestWrapAnswersAnUndeclaredImplErrorWithAFixedMessage(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "192.0.2.10:4500"
+	response := httptest.NewRecorder()
+	WrapNoAuth(func(clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		return "", errors.New(privateErrorTestCause)
+	}, response, request)
+	requireFixedMessage(t, privateErrorTestResponse{code: response.Code, body: response.Body.String()}, http.StatusInternalServerError, UnexpectedErrorMessage, "synthetic", "router")
+}
+
+// The same, for the wrapper that decodes a request body.
+func TestWrapWithInputAnswersAnUndeclaredImplErrorWithAFixedMessage(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{"name":"synthetic"}`)))
+	request.RemoteAddr = "192.0.2.10:4500"
+	response := httptest.NewRecorder()
+	WrapWithInputNoAuth(func(input map[string]string, clientSession *session.ClientSession) (string, error) {
+		defer clientSession.Cancel()
+		return "", errors.New(privateErrorTestCause)
+	}, response, request)
+	requireFixedMessage(t, privateErrorTestResponse{code: response.Code, body: response.Body.String()}, http.StatusInternalServerError, UnexpectedErrorMessage, "synthetic")
+}

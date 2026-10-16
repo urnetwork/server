@@ -122,6 +122,11 @@ func networkRemoveWithSteps(
 		// new renewal
 		glog.Infof("[network]remove %s refused: a store renewal was credited during the deletion\n", clientSession.ByJwt.NetworkId)
 		return networkRemoveError(networkRemoveStoreRenewalChangedMessage), nil
+	case model.RemoveNetworkNotFound:
+		// the caller is not the network's admin, or the network is gone
+		return nil, fmt.Errorf("403 Could not remove network")
+	case model.RemoveNetworkStripeRenewalActive:
+		return nil, fmt.Errorf("409 Could not remove network")
 	}
 
 	return nil, fmt.Errorf("Could not remove network")

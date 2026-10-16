@@ -18,10 +18,10 @@ import (
 
 type AccountErrorMessage string
 
+// 400s: the router answers the status and logs nothing for client input
 var (
-	ErrInvalidBlockchain    = errors.New("invalid blockchain, use SOL, MATIC, or TAO")
-	ErrInvalidWalletAddress = errors.New("invalid wallet address")
-	// a 400: the router answers the status and logs nothing for client input
+	ErrInvalidBlockchain       = errors.New("400 invalid blockchain, use SOL, MATIC, or TAO")
+	ErrInvalidWalletAddress    = errors.New("400 invalid wallet address")
 	ErrInvalidDefaultTokenType = errors.New("400 invalid default token type")
 )
 
@@ -85,7 +85,7 @@ func CreateAccountWalletExternal(
 	if payoutWallet == nil && blockchain != model.TAO {
 		err := model.SetPayoutWallet(session.Ctx, session.ByJwt.NetworkId, *walletId)
 		if err != nil {
-			return nil, err
+			return nil, payoutWalletAnswer(err)
 		}
 	}
 

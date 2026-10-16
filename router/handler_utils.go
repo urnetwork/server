@@ -507,6 +507,10 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 	)
 }
 
+// Answers err with the status and message it declares by the "<code> message"
+// convention. An error that declares none is an internal failure, such as
+// storage, transport or a dependency's url: it is answered with a fixed 500
+// and its text stays in the caller's log.
 func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	if errors.Is(err, session.ErrAuthUnavailable) {
 		// Only a separately declared safe unavailable body can override the
@@ -529,12 +533,12 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	}
 
 	statusCode := http.StatusInternalServerError
-	message := err.Error()
+	message := UnexpectedErrorMessage
 
 	// Error messages that start with <400..599><horizontal space>, optionally
 	// preceded by "[tag]" prefixes, have the number converted to the
 	// status code. The tags are dropped from the client-facing message.
-	if groups := httpErrorCodeRegex.FindStringSubmatch(message); groups != nil {
+	if groups := httpErrorCodeRegex.FindStringSubmatch(err.Error()); groups != nil {
 		statusCode, _ = strconv.Atoi(groups[2])
 		message = groups[3]
 		statusError = true
@@ -584,9 +588,9 @@ func DeclaresHttpStatus(err error) bool {
 
 // An impl error that declares no status is an unexpected internal failure,
 // such as storage, signing or a canceled dependency, and RaiseHttpError would
-// send its raw text with a 500. Here the text stays in the server log and the
-// caller is answered 503 with a fixed message, as the provider work routes
-// answer theirs. A declared status passes unchanged, with its message, retry
+// answer it with a 500. Here the text stays in the server log and the caller
+// is answered 503 with a fixed message, as the provider work routes answer
+// theirs. A declared status passes unchanged, with its message, retry
 // hint and result body.
 //
 // A raise inside impl is returned the same way (server.HandleError logs it), so

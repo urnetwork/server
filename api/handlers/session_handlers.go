@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -16,6 +17,7 @@ func sessionOperationFormatter(w http.ResponseWriter) router.FormatFunction[*ses
 		}
 		encoded, err := json.Marshal(result)
 		if err != nil {
+			glog.Infof("[h]session operation encoding error: %s\n", err)
 			router.RaiseHttpError(err, w)
 			return true
 		}
