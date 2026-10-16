@@ -9,7 +9,7 @@
 // every providerLivenessHandlersMaxAge per process, and the verdict on their
 // stamps is reused for ProviderLivenessCoverageCacheAge; while coverage is
 // short no shard is read at all. Every Redis read runs on the deadline-bound
-// pool within providerLivenessReadTimeout, retries nothing and fails open, so a
+// pool within ProviderLivenessReadTimeout, retries nothing and fails open, so a
 // slow or wedged node costs a request at most that budget. A shard whose read
 // fails, whose newest lease is stale, or more than half of whose candidates
 // read offline (a lost or stale-restored key, not churn) is unknown and
@@ -93,10 +93,6 @@ func init() {
 	)
 }
 
-// The budget of one Redis read of the lease, the writer set or the shards. A
-// read past it fails open.
-const providerLivenessReadTimeout = 150 * time.Millisecond
-
 // A shard is judged by the fraction of its candidates that read offline only
 // from this many candidates in one read; below it, one offline candidate is
 // too much of the sample to say anything.
@@ -116,10 +112,6 @@ const providerLivenessReadBreakerMinOffline = 3
 // After a shard read fails, every read of the process fails open for this
 // long rather than wait out the budget against the same slow node again.
 const providerLivenessReadBackoff = 5 * time.Second
-
-// The bound of the read of the live handlers, which runs detached from the
-// request that finds the read due.
-const providerLivenessHandlersLoadTimeout = time.Second
 
 // How long a process reuses its read of the live connect handlers.
 const providerLivenessHandlersMaxAge = 30 * time.Second
@@ -178,7 +170,7 @@ func (self *providerLivenessHandlers) get(ctx context.Context) ([]server.Id, boo
 			}()
 			// bounded, and detached from the request that found the read due,
 			// which may end before the read does
-			loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), providerLivenessHandlersLoadTimeout)
+			loadCtx, loadCancel := context.WithTimeout(context.WithoutCancel(ctx), ProviderLivenessHandlersReadTimeout)
 			defer loadCancel()
 			// the heartbeats are the connect hosts' wall clocks
 			loadedHandlerIds, err = self.load(loadCtx, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
@@ -234,8 +226,10 @@ func loadLiveNetworkClientHandlerIds(ctx context.Context, minHeartbeatTime time.
 
 // The verdict on writer coverage, reused for ProviderLivenessCoverageCacheAge
 // of this process's monotonic clock: whether every live handler has a current
-// stamp, and when not, why. One caller judges at a time; the others take the
-// previous verdict, or none, which is not covered.
+// stamp, and when not, why. One caller judges at a time, detached from its
+// request and within model's ProviderLivenessCoverageJudgeTimeout, so every
+// judging stores its verdict; the others take the previous verdict while it is
+// younger than twice the cache age, or else not covered.
 type providerLivenessCoverage struct {
 	handlers *providerLivenessHandlers
 	now      func() time.Time
@@ -267,11 +261,11 @@ func (self *providerLivenessCoverage) get(ctx context.Context) (covered bool, re
 			return
 		}
 		if self.judging {
-			// another caller is judging: its previous verdict, or none
-			if self.checkTime.IsZero() {
-				covered, reason = false, providerLivenessFailOpenCoverage
-			} else {
+			// another caller is judging: the previous verdict, while young
+			if !self.checkTime.IsZero() && now.Sub(self.checkTime) < 2*ProviderLivenessCoverageCacheAge {
 				covered, reason = self.covered, self.reason
+			} else {
+				covered, reason = false, providerLivenessFailOpenCoverage
 			}
 			return
 		}
@@ -289,7 +283,8 @@ func (self *providerLivenessCoverage) get(ctx context.Context) (covered bool, re
 			self.covered, self.reason, self.checkTime = covered, reason, now
 		}
 	}()
-	covered, reason, returnErr = self.read(ctx)
+	// detached from the request, which may end before the judging does
+	covered, reason, returnErr = self.read(context.WithoutCancel(ctx))
 	return
 }
 
@@ -383,14 +378,14 @@ func (self *providerLivenessCoverage) read(ctx context.Context) (bool, string, e
 	return true, "", nil
 }
 
-// Runs one pipelined read within providerLivenessReadTimeout on the
+// Runs one pipelined read within ProviderLivenessReadTimeout on the
 // deadline-bound pool, which applies the deadline to its socket I/O and
 // retries no command or redirect, without its preflight ping, which would
 // reach an arbitrary node. The read is single-key commands only, which that
 // pool's routing serves shard by shard. A command's own failure is on the
 // command; the error is the read's.
 func readProviderLiveness(ctx context.Context, queue func(context.Context, redis.Pipeliner)) error {
-	readCtx, readCancel := context.WithTimeout(ctx, providerLivenessReadTimeout)
+	readCtx, readCancel := context.WithTimeout(ctx, ProviderLivenessReadTimeout)
 	defer readCancel()
 	return server.RedisWithDeadline(readCtx, func(r server.RedisClient) error {
 		_, err := r.Pipelined(readCtx, func(pipe redis.Pipeliner) error {
