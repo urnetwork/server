@@ -378,9 +378,11 @@ func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
 
 // A losing transport dial can complete after its initiating resolver call has
 // answered. Keep the timeout page and terminal discriminator independently.
+// Proxy tun-path legs are provider-path evidence (log_doh_tun_test.go), so the
+// paging tun path here is Taskworker's.
 func TestDohDialTimeoutRetainsFiniteTerminalProvenance(t *testing.T) {
-	tailer := newLogTailer("proxy", nil)
-	line := "[synthetic-host.example][proxy][synthetic-block][cid:private-fixture] " +
+	tailer := newLogTailer("taskworker", nil)
+	line := "[synthetic-host.example][taskworker][synthetic-block][cid:private-fixture] " +
 		"[family]dial tag=doh observable=v1 path=tun attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=answer err=i/o timeout"
 	for range 10 {
 		tailer.classify(line)

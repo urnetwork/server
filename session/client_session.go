@@ -19,6 +19,10 @@ import (
 // https://www.rfc-editor.org/rfc/rfc6750
 const authBearerPrefix = "Bearer "
 
+// An API key (apikey) is sent as the bearer: "urn_" and 52 more characters.
+const apiKeyTokenPrefix = "urn_"
+const apiKeyTokenLength = 56
+
 // The Warp ingress overwrites this with the address accepted from the client.
 const urForwardedForHeader = "X-UR-Forwarded-For"
 
@@ -206,13 +210,13 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
 
-			if strings.HasPrefix(authStr, "urn_") {
+			if strings.HasPrefix(authStr, apiKeyTokenPrefix) {
 				// handle API KEY authentication
 
 				// The network_client_proxy_model uses a sha1 hash with a local secret to avoid a db lookup on fake api keys.
 				// Could use a cryptographic hash like jwt/ncpm could be a done here to mitigate possible abuse.
 
-				if len(authStr) != 56 {
+				if len(authStr) != apiKeyTokenLength {
 					return false, errors.New("Invalid API key.")
 				}
 

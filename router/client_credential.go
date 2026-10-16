@@ -51,7 +51,8 @@ func (self *Route) Pattern() string {
 }
 
 // Testing_WithHandler returns a copy of the route that serves handler behind
-// the route's gates, the client token gate and the lag.dev guest gate, so a
+// the route's gates, the client token gate, the lag.dev guest gate and the
+// intended network gate, in the order api.applyRouteAccess applies them, so a
 // test can observe what reaches it.
 func Testing_WithHandler(route *Route, handler http.HandlerFunc) *Route {
 	replaced := *route
@@ -61,6 +62,9 @@ func Testing_WithHandler(route *Route, handler http.HandlerFunc) *Route {
 	}
 	if route.lagGuestRefused {
 		replaced.handler = lagGuestGate(replaced.handler)
+	}
+	if route.intendedNetworkRefused {
+		replaced.handler = intendedNetworkGate(replaced.handler)
 	}
 	return &replaced
 }
