@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -642,7 +643,7 @@ func TestProviderLivenessReadFailsOpenWithinItsBudget(t *testing.T) {
 			}
 			if maps.Equal(want, failedOpen) {
 				if time.Second < elapsed {
-					t.Fatalf("%s: failing open took %s, want about the %s budget", label, elapsed, providerLivenessReadTimeout)
+					t.Fatalf("%s: failing open took %s, want about the %s budget", label, elapsed, ProviderLivenessReadTimeout)
 				}
 				if livenessTestMetric(t, findProviders2LivenessReadErrors)-errorsBefore != 1 {
 					t.Fatalf("%s: the read past its budget was not counted", label)
@@ -811,7 +812,7 @@ func TestProviderLivenessReadBacksOffAfterAFailedRead(t *testing.T) {
 		}
 		elapsed := time.Since(started)
 		commands := hook.shardCommands.Load()
-		if 2*providerLivenessReadTimeout+500*time.Millisecond < elapsed || 2 < commands {
+		if 2*ProviderLivenessReadTimeout+500*time.Millisecond < elapsed || 2 < commands {
 			t.Fatalf("four reads against a wedged node took %s and %d shard commands, want one read's budget and its 2 commands", elapsed, commands)
 		}
 		hook.blockPrefix.Store(nil)
@@ -924,44 +925,70 @@ func TestProviderLivenessHandlersLoadIsBoundedAndDetached(t *testing.T) {
 	if known {
 		t.Fatal("a read that hung made the handlers known")
 	}
-	if elapsed < providerLivenessHandlersLoadTimeout || 2*providerLivenessHandlersLoadTimeout < elapsed {
-		t.Fatalf("a hung read returned after %s, want its %s bound", elapsed, providerLivenessHandlersLoadTimeout)
+	if elapsed < ProviderLivenessHandlersReadTimeout || 2*ProviderLivenessHandlersReadTimeout < elapsed {
+		t.Fatalf("a hung read returned after %s, want its %s bound", elapsed, ProviderLivenessHandlersReadTimeout)
 	}
 }
 
-// One caller judges coverage at a time: the others take the previous verdict,
-// or with none, not covered, and read nothing.
+// One caller judges coverage at a time, detached from its request: the others
+// read nothing and take the previous verdict while it is younger than twice
+// the cache age, or else not covered, until the judge stores its own verdict,
+// which a canceled request's judging stores as well.
 func TestProviderLivenessCoverageJudgesOneAtATime(t *testing.T) {
 	loads := atomic.Int64{}
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	start := time.UnixMilli(1_800_000_000_000)
+	clock := start
+	clockLock := sync.Mutex{}
+	now := func() time.Time {
+		clockLock.Lock()
+		defer clockLock.Unlock()
+		return clock
+	}
 	coverage := &providerLivenessCoverage{
 		handlers: &providerLivenessHandlers{
-			load: func(context.Context, time.Time) ([]server.Id, error) {
-				if loads.Add(1) == 1 {
+			load: func(ctx context.Context, minHeartbeatTime time.Time) ([]server.Id, error) {
+				if loads.Add(1) == 2 {
 					close(entered)
 					<-release
 				}
 				return nil, errors.New("test: the database refused this read")
 			},
-			now: time.Now,
+			now: now,
 		},
-		now: time.Now,
+		now: now,
 	}
+	// a first verdict, judged for a request already canceled
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if covered, reason, err := coverage.get(canceledCtx); err != nil || covered || reason != providerLivenessFailOpenHandlers {
+		t.Fatalf("a canceled request's judging: covered %t, reason %q, err %v; want its verdict, for the handlers", covered, reason, err)
+	}
+
+	// that verdict is young while the next judging runs, then too old
+	clockLock.Lock()
+	clock = start.Add(ProviderLivenessCoverageCacheAge)
+	clockLock.Unlock()
 	judged := make(chan struct{})
 	go func() {
 		defer close(judged)
 		coverage.get(context.Background())
 	}()
 	<-entered
-	covered, reason, err := coverage.get(context.Background())
-	if err != nil || covered || reason != providerLivenessFailOpenCoverage {
-		t.Fatalf("a caller during another's judging: covered %t, reason %q, err %v; want not covered", covered, reason, err)
+	if covered, reason, err := coverage.get(context.Background()); err != nil || covered || reason != providerLivenessFailOpenHandlers {
+		t.Fatalf("during judging, a young previous verdict: covered %t, reason %q, err %v; want the previous verdict", covered, reason, err)
+	}
+	clockLock.Lock()
+	clock = start.Add(2 * ProviderLivenessCoverageCacheAge)
+	clockLock.Unlock()
+	if covered, reason, err := coverage.get(context.Background()); err != nil || covered || reason != providerLivenessFailOpenCoverage {
+		t.Fatalf("during judging, a previous verdict twice the cache age old: covered %t, reason %q, err %v; want not covered for coverage", covered, reason, err)
 	}
 	close(release)
 	<-judged
-	if count := loads.Load(); count != 1 {
-		t.Fatalf("two callers read the live handlers %d times, want once", count)
+	if count := loads.Load(); count != 2 {
+		t.Fatalf("the callers read the live handlers %d times, want once per judging", count)
 	}
 }
 
