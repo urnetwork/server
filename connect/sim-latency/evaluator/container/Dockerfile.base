@@ -55,13 +55,14 @@ COPY source/userwireguard /workspace/userwireguard
 COPY source/sn /workspace/sn
 COPY source/operator-proxy /workspace/operator-proxy
 COPY source/warp /workspace/warp
+COPY source/gvisor /workspace/gvisor
 COPY source-lock.json /opt/urnetwork/source-lock.json
 COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
 COPY evaluator/entrypoint.sh /usr/local/libexec/competition-container
 COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run
 
 # Scorers run unprivileged against the root-owned built-in tree, while runners
-# see equivalent remapped read-only mounts. Trust only the exact ten
+# see equivalent remapped read-only mounts. Trust only the exact eleven
 # repositories authenticated by source-lock.json.
 RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && source_status="$(git -C /workspace/server status --porcelain --untracked-files=all)" \
@@ -78,6 +79,7 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/sn \
     && git config --system --add safe.directory /workspace/operator-proxy \
     && git config --system --add safe.directory /workspace/warp \
+    && git config --system --add safe.directory /workspace/gvisor \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \
     && install -d -m 0755 /opt/urnetwork/bin /opt/urnetwork/submission /opt/urnetwork/go
 

@@ -78,7 +78,7 @@ var statsLagUploadP50Gauge = newStatsGaugeVec(
 
 var statsLagExtendersOfferedGauge = newStatsGauge(
 	"lag_extenders_offered",
-	"Extenders the lag.dev sample can offer now: published names, issued, placed (A4)",
+	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed (A4)",
 )
 
 var statsLagMeasurementRequestsGauge = newStatsGaugeVec(

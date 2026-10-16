@@ -49,7 +49,7 @@ evaluator image and round policy before opening epoch 1.
    trusted evaluator base with
    `connect/sim-latency/evaluator/container/build-base.sh`; its
    source-lock records the clean server/connect/proxy/sdk/glog/goidenticons/
-   userwireguard/sn/operator-proxy/warp commits and it freezes the toolchain/module
+   userwireguard/sn/operator-proxy/warp/gvisor commits and it freezes the toolchain/module
    cache. The API Dockerfile pins the Docker Official Ubuntu index rather than a floating base
    tag. Both release targets preserve BuildKit provenance, SBOM, and the pushed
    repository digest in their respective `build/image-metadata.json`; the
@@ -63,7 +63,7 @@ evaluator image and round policy before opening epoch 1.
    evaluator accepts canonical patch bytes, not miner images or URLs, and
    derives one image per `(base, patch, policy, builder)` identity with the
    fixed Dockerfile and authenticated cache reuse. Each attempt copies the
-   ten locked repositories from the authenticated base image into fresh
+   eleven locked repositories from the authenticated base image into fresh
    temporary baseline/candidate checkouts, applies the patch only to the
    evaluated server surface there, and
    mounts the selected checkout read-only at `/workspace`; the main runner

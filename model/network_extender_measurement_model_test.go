@@ -541,16 +541,18 @@ func TestReopenExpiredNetworkExtenderMeasurements(t *testing.T) {
 }
 
 // C10: every reader a record is signed from carries the latest expiry of the
-// extender's live certificates whose name is published (C8). An issued
-// certificate whose name is not yet published is none, so is one whose
-// publication was cleared until it is published again, and so is a withdrawn
-// certificate.
+// extender's live certificates that serve: their name is published (C8) and
+// A8 has handed them to the extender for the key of its latest request. An
+// issued certificate whose name is not yet published is none, so is one the
+// extender has yet to read from A8, so is one whose publication was cleared
+// until it is published again, and so is a withdrawn certificate.
 func TestNetworkExtenderRecordReadersCarryTheMeasurementCertExpiry(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		withCert := testMeasurementActivate(t, ctx, 1).Extender.ExtenderId
 		withoutCert := testMeasurementActivate(t, ctx, 2).Extender.ExtenderId
 		now := server.NowUtc().Truncate(time.Second)
+		SetNetworkExtenderMeasurementRequest(ctx, withCert, []byte("csr-key-a"), []byte("key-a"), testMeasurementNames(withCert), now)
 		cert := testMeasurementCert(withCert, []byte("key-a"), now)
 		AddNetworkExtenderMeasurementCert(ctx, cert)
 
@@ -561,7 +563,18 @@ func TestNetworkExtenderRecordReadersCarryTheMeasurementCertExpiry(t *testing.T)
 			connect.AssertEqual(t, entry.Extender.MeasurementCertNotAfter == nil, true)
 		}
 
+		// published, and the extender has yet to read it
 		connect.AssertEqual(t, PublishNetworkExtenderMeasurementNames(ctx, cert.Names, now), 1)
+		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
+		connect.AssertEqual(t, extender.MeasurementCertNotAfter == nil, true)
+		for _, entry := range GetRandomActiveNetworkExtenders(ctx, 10, server.Id{}) {
+			connect.AssertEqual(t, entry.Extender.MeasurementCertNotAfter == nil, true)
+		}
+
+		// its poll read it (A8): the first time counts, once
+		connect.AssertEqual(t, MarkNetworkExtenderMeasurementCertDelivered(ctx, cert.CertId, now), true)
+		connect.AssertEqual(t, MarkNetworkExtenderMeasurementCertDelivered(ctx, cert.CertId, now.Add(time.Hour)), false)
+		connect.AssertEqual(t, Testing_GetNetworkExtenderMeasurementCerts(ctx, withCert)[0].DeliverTime.UTC(), now)
 		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
 		connect.AssertEqual(t, extender.MeasurementCertNotAfter.UTC(), cert.NotAfter)
 		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withoutCert)
@@ -605,7 +618,28 @@ func TestNetworkExtenderRecordReadersCarryTheMeasurementCertExpiry(t *testing.T)
 		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
 		connect.AssertEqual(t, extender.MeasurementCertNotAfter.UTC(), cert.NotAfter)
 
-		WithdrawNetworkExtenderMeasurementCert(ctx, cert.CertId, "the extender is not active", now)
+		// a new key's request: the delivered certificate is for a key the
+		// extender asked to replace, so none, and none while the new key's
+		// certificate waits for the extender to read it
+		SetNetworkExtenderMeasurementRequest(ctx, withCert, []byte("csr-key-b"), []byte("key-b"), testMeasurementNames(withCert), now)
+		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
+		connect.AssertEqual(t, extender.MeasurementCertNotAfter == nil, true)
+		rotated := testMeasurementCert(withCert, []byte("key-b"), now.Add(time.Minute))
+		rotated.CapCounted = false
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, rotated), true)
+		connect.AssertEqual(t, PublishNetworkExtenderMeasurementNames(ctx, rotated.Names, now), 1)
+		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
+		connect.AssertEqual(t, extender.MeasurementCertNotAfter == nil, true)
+		for _, entry := range GetRandomActiveNetworkExtenders(ctx, 10, server.Id{}) {
+			connect.AssertEqual(t, entry.Extender.MeasurementCertNotAfter == nil, true)
+		}
+		connect.AssertEqual(t, MarkNetworkExtenderMeasurementCertDelivered(ctx, rotated.CertId, now.Add(time.Minute)), true)
+		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
+		connect.AssertEqual(t, extender.MeasurementCertNotAfter.UTC(), rotated.NotAfter)
+
+		for _, withdrawn := range []*NetworkExtenderMeasurementCert{cert, rotated} {
+			WithdrawNetworkExtenderMeasurementCert(ctx, withdrawn.CertId, "the extender is not active", now)
+		}
 		extender, _ = GetActiveNetworkExtenderForRecord(ctx, withCert)
 		connect.AssertEqual(t, extender.MeasurementCertNotAfter == nil, true)
 	})

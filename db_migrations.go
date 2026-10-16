@@ -10416,4 +10416,17 @@ var migrations = []any{
 	// earlier positive. Only network_client_location is locked, so this never
 	// waits on the rollup while it holds the location rows.
 	newSqlMigration(arinDatabaseCanaryLocationSchemaSql),
+
+	// 839: when A8 first handed each measurement certificate to its extender
+	// (lag.dev/PLAN.md A8, A4, C10). The dns reconcile publishes a new name
+	// within a minute or two of its issuance, but the extender installs the
+	// chain only when its next A8 poll reads it, up to half an hour later,
+	// and its name answers without it until then. The lag.dev sample and the
+	// records' MeasurementId wait for this time. No existing column records a
+	// delivery. A nullable column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN deliver_time timestamp NULL;
+	`),
 }

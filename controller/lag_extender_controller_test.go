@@ -56,9 +56,10 @@ func installLagTestExtenderConfig(t testing.TB, measurementEnabled bool) ed25519
 }
 
 // The extender's request for its measurement name and the live certificate
-// that answers it, issued an hour ago, with the name published, as the
-// issuance task and the dns reconcile leave them: the request is issued and
-// the name resolves. Returns the certificate.
+// that answers it, issued an hour ago, with the name published and the
+// certificate delivered, as the issuance task, the dns reconcile and the
+// extender's next poll leave them: the request is issued, the name resolves
+// and the extender serves it. Returns the certificate.
 func addLagTestCert(t testing.TB, ctx context.Context, extender *lagTestExtender, names ...string) *model.NetworkExtenderMeasurementCert {
 	t.Helper()
 	cert := addLagTestUnpublishedCert(t, ctx, extender, names...)
@@ -67,9 +68,20 @@ func addLagTestCert(t testing.TB, ctx context.Context, extender *lagTestExtender
 	return cert
 }
 
-// The request and the live certificate as addLagTestCert, before the dns
-// reconcile has published the name.
+// The request and the live certificate as addLagTestCert, delivered, before
+// the dns reconcile has published the name.
 func addLagTestUnpublishedCert(t testing.TB, ctx context.Context, extender *lagTestExtender, names ...string) *model.NetworkExtenderMeasurementCert {
+	t.Helper()
+	cert := addLagTestUndeliveredCert(t, ctx, extender, names...)
+	connect.AssertEqual(t, model.MarkNetworkExtenderMeasurementCertDelivered(ctx, cert.CertId, server.NowUtc()), true)
+	Testing_ResetLagServing()
+	return cert
+}
+
+// The request and the live certificate as the issuance task leaves them,
+// before the extender's poll has read the certificate (A8) and before the dns
+// reconcile has published its name.
+func addLagTestUndeliveredCert(t testing.TB, ctx context.Context, extender *lagTestExtender, names ...string) *model.NetworkExtenderMeasurementCert {
 	t.Helper()
 	if len(names) == 0 {
 		names = []string{ExtenderMeasurementName(extender.extenderId, lagTestMeasurementZone)}
