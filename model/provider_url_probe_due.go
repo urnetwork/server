@@ -56,17 +56,24 @@ const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 //
 // Bounds, with latest the newest accepted result and oldest the oldest of the
 // latest ten runs:
-//   - never later than oldest+3h54m, the deadline before this change, so the
-//     six-minute RenewalHeadroom and each run's four-hour evidence lifetime
-//     are untouched: the spread never lets evidence expire;
+//   - never later than oldest+3h54m, the deadline before this change, so no
+//     deadline moves later and the six-minute RenewalHeadroom is untouched;
 //   - never earlier than latest+24m unless that horizon is earlier still, so a
 //     quota-full provider is not admitted again within 24 minutes of its
 //     latest result.
 //
-// Once a provider is spread, its ten gaps are at most 24 minutes and sum to
-// 3h54m, so both bounds meet and each renewal is again due at its horizon:
-// the steady-state rate stays ten runs per 3h54m. A per-provider offset would
-// have no room there, and in the transient it only slows the spread.
+// With no turn latency no run expires before its renewal. A provider has one
+// claim at a time, though, so the renewals that the horizon decides back to
+// back at the tail of a cluster, in the first cycle after it, land a turn
+// latency apart, and the last of them can land a few minutes after the run it
+// replaces expired. Under the oldest-run anchor all ten renewals of a cluster
+// queued that way, every cycle.
+//
+// Once a provider is spread, its ten gaps are at most 24 minutes plus a turn
+// latency and sum to 3h54m plus one, so both bounds meet and each renewal is
+// again due at its horizon: the steady-state rate is the rate before this
+// change. A per-provider offset would have no room there, and in the
+// transient it only slows the spread.
 //
 // A row without a latest result (NULL) keeps the horizon alone.
 const ProviderUrlProbeRenewalSpacing = ProviderEgressProbeRefreshAge / ProviderUrlProbeRunTarget

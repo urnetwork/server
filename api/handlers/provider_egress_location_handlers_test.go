@@ -412,7 +412,9 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 		destination := egresshealth.Destination{Name: "synthetic-document", Class: egresshealth.ClassSite, Url: "https://document.example.invalid/"}
 		for _, clientId := range []server.Id{complete, expired} {
 			for index := range 10 {
-				measuredAt := now.Add(-time.Hour + time.Duration(index)*time.Minute)
+				// The latest success is within 24 minutes, so the complete
+				// provider's quota-full renewal is not yet due.
+				measuredAt := now.Add(-10*time.Minute + time.Duration(index)*time.Minute)
 				if clientId == expired && index == 0 {
 					measuredAt = now.Add(-model.ProviderEgressProbeRefreshAge - time.Minute)
 				}
