@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
@@ -11,13 +12,13 @@ import (
 
 var subscriberEligibilityEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_subscriber_eligibility_events_total",
-	Help: "Subscriber eligibility cache candidate events and SQL batch attempts; positive eligibility and successful requests are not cached or counted here.",
+	Help: "Subscriber eligibility cache candidate events and SQL batch attempts, and candidates a subscriber read found without a live connection (offline); positive eligibility and successful requests are not cached or counted here.",
 }, []string{"event"})
 
 var subscriberEligibilityEventCounters = map[string]prometheus.Counter{}
 
 func init() {
-	for _, event := range []string{"negative_hit", "negative_miss", "coalesced_wait", "capacity_bypass", "fresh_reread", "sql_batch"} {
+	for _, event := range []string{"negative_hit", "negative_miss", "coalesced_wait", "capacity_bypass", "fresh_reread", "sql_batch", "offline"} {
 		subscriberEligibilityEventCounters[event] = subscriberEligibilityEvents.WithLabelValues(event)
 	}
 	prometheus.MustRegister(subscriberEligibilityEvents)
@@ -31,16 +32,17 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 }
 
 // The exclusions of a request that names its providers by client id and has no
-// discovery spec. Named providers keep the common exclusions in every mode. A
-// named Quality provider also needs a live connection with no live ARIN risk,
-// but not ARIN quality verification (getProviderNamedSubscriberExclusions).
-// Discovery, force_minimum included, evaluates the full subscriber evidence
-// for native Quality membership; Speed and Online borrowing use the
-// independent common exclusions, and leave out a candidate the request's own
-// read found without a live connection.
+// discovery spec. Named providers keep the common exclusions in every mode,
+// and in every mode a named provider without a current liveness lease is
+// refused (provider_liveness_lease.go). A named Quality provider also needs a
+// live connection with no live ARIN risk, but not ARIN quality verification
+// (getProviderNamedSubscriberExclusions). Discovery, force_minimum included,
+// evaluates the full subscriber evidence for native Quality membership; Speed
+// and Online borrowing use the independent common exclusions, and leave out a
+// candidate the request's own read found without a live connection.
 func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mode RankMode) (map[server.Id]bool, error) {
 	excluded, err := getProviderHardExclusions(ctx, clientIds)
-	if err != nil || mode != RankModeQuality || len(clientIds) == 0 {
+	if err != nil {
 		return excluded, err
 	}
 	pending := make([]server.Id, 0, len(clientIds))
@@ -49,6 +51,19 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 			pending = append(pending, id)
 		}
 	}
+	leaseOffline, err := readFindProviders2Liveness(ctx, pending, server.NowUtc(), mode)
+	if err != nil {
+		return nil, err
+	}
+	for id := range leaseOffline {
+		excluded[id] = true
+	}
+	if mode != RankModeQuality || len(clientIds) == 0 {
+		return excluded, nil
+	}
+	pending = slices.DeleteFunc(pending, func(id server.Id) bool {
+		return leaseOffline[id]
+	})
 	offline, risky, err := getProviderNamedSubscriberExclusions(ctx, pending)
 	if err != nil {
 		return nil, err
@@ -144,6 +159,7 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 	if readErr != nil {
 		return nil, nil, nil, readErr
 	}
+	observeSubscriberEligibilityEvent("offline", len(offline))
 	return negative, risky, offline, nil
 }
 
