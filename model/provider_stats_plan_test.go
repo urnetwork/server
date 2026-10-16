@@ -205,12 +205,12 @@ func statsPlanSeed(t testing.TB, ctx context.Context, conn server.PgConn, networ
 
 	// network_client_connection: provider connections + background
 	providerConnectionTime := server.NowUtc()
-	arinRemoteInsertPopulation(t, ctx, conn, statsPlanProviderN, `
+	insertPopulationFixture(t, ctx, conn, statsPlanProviderN, `
 		INSERT INTO network_client_connection (client_id, connection_id, connected, connect_time, disconnect_time, connection_host, connection_service, connection_block)
 		SELECT ($1::uuid[])[1 + (g % array_length($1::uuid[],1))], gen_random_uuid(), true, $2::timestamp - ((g % 240) || ' hours')::interval, NULL, 'h','s','b'
 		FROM generate_series($3::integer, $4::integer) g`, providers, providerConnectionTime)
 	backgroundConnectionTime := server.NowUtc()
-	arinRemoteInsertPopulation(t, ctx, conn, statsPlanBackground, `
+	insertPopulationFixture(t, ctx, conn, statsPlanBackground, `
 		INSERT INTO network_client_connection (client_id, connection_id, connected, connect_time, disconnect_time, connection_host, connection_service, connection_block)
 		SELECT gen_random_uuid(), gen_random_uuid(), true, $1::timestamp - ((g % 500) || ' hours')::interval, NULL, 'h','s','b'
 		FROM generate_series($2::integer, $3::integer) g`, backgroundConnectionTime)

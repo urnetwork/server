@@ -64,15 +64,19 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 
 // Separate Quality membership from explicit live risk. A risk observed by this
 // guard remains a common refusal even while the published snapshot is older.
-// A candidate the read finds without any live connection is the third result,
-// offline: a Quality refusal, which discovery also keeps out of every other
-// draw of the request that read it.
+// Quality reads each live row's ARIN slot whose epoch is the published serving
+// epoch and refuses a row with neither (arindb_canary_reader.go); risk reads
+// the latest slot. A candidate the read finds without any live connection is
+// the third result, offline: a Quality refusal, which discovery also keeps out
+// of every other draw of the request that read it.
 func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id) (negative, risky, offline map[server.Id]bool, returnErr error) {
 	enabled, err := subscriberQualityPolicyEnabled()
 	if err != nil || !enabled {
 		providerSubscriberNegativeCache.reset()
 		return nil, nil, nil, err
 	}
+	// read before any database connection is taken; 0 is the latest slot
+	servingEpoch := readArindbServingEpoch(ctx)
 	// Positive decisions always read current connection facts on the primary.
 	// A one-second negative-only cache coalesces repeated rejections; its age
 	// starts before the first fact query. It cannot admit a new unknown or risky
@@ -102,7 +106,7 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 				// Connection queueing has read no facts. Start the bounded age
 				// immediately before the first query; later chunks cannot renew it.
 				markObserved()
-				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
+				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), servingEpoch)
 				if err != nil {
 					readErr = err
 					return
@@ -145,6 +149,8 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 
 // Aggregate the candidate batch together so the live-handler relation is joined
 // once per batch rather than rescanned by a correlated aggregate per candidate.
+// $3 is the serving epoch: 0 reads each row's latest slot as before the canary;
+// otherwise the slot whose epoch it is, and a row with neither is not Quality.
 const providerSubscriberExclusionsSql = `
 	WITH candidates AS MATERIALIZED (
 		SELECT DISTINCT unnest($1::uuid[]) AS client_id
@@ -165,8 +171,15 @@ const providerSubscriberExclusionsSql = `
 	LEFT JOIN network_client_location AS location ON location.connection_id = live.connection_id
 	GROUP BY candidates.client_id
 	HAVING count(live.connection_id) = 0 OR bool_and(
-		COALESCE(location.arin_quality_verified, false)
-		AND NOT COALESCE(location.arin_non_quality, true)
+		CASE
+			WHEN $3::bigint = 0 OR location.arin_database_build_epoch = $3::bigint THEN
+				COALESCE(location.arin_quality_verified, false)
+				AND NOT COALESCE(location.arin_non_quality, true)
+			WHEN location.arin_old_database_build_epoch = $3::bigint THEN
+				COALESCE(location.arin_old_quality_verified, false)
+				AND NOT COALESCE(location.arin_old_non_quality, true)
+			ELSE false
+		END
 		AND NOT COALESCE(location.arin_risk, true)
 	) IS DISTINCT FROM true
 `

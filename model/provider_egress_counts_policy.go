@@ -14,12 +14,15 @@ import (
 // observed providers and accepted health results retain the snapshot's age.
 // It resolves the rules at the moment of the call, so the key changes at the
 // modern provider gate's start; the dashboard cache checks it before and
-// after each fill, so a fill that spans the start is never published.
-func ProviderEgressCountsPolicyKey() string {
+// after each fill, so a fill that spans the start is never published. The ARIN
+// serving epoch the counts follow (ArindbServingEpoch) is part of the rules,
+// so a canary switch starts a fresh snapshot instead of serving the previous
+// choice's. The caller reads it; the key itself does no I/O.
+func ProviderEgressCountsPolicyKey(arinServingEpoch int64) string {
 	return providerEgressCountsPolicyKey(
 		egressIndexSettings(), providerEgressTestEnabled(),
 		providerReliabilityMinimums(), SelectedProviderUrlProbePolicyVersion(),
-		server.NowUtc(),
+		server.NowUtc(), arinServingEpoch,
 	)
 }
 
@@ -29,6 +32,7 @@ func providerEgressCountsPolicyKey(
 	minimums map[int]float64,
 	probePolicyVersion int,
 	now time.Time,
+	arinServingEpoch int64,
 ) string {
 	// Increment the schema when count semantics change. Request-only cache and
 	// routing settings do not change this aggregate and are intentionally absent.
@@ -40,7 +44,8 @@ func providerEgressCountsPolicyKey(
 	// providers between the buckets and that reason, and its evidence window
 	// is code. The gate is keyed by that decision, not by its switch and
 	// start, so workers that decide alike share a snapshot and none taken
-	// before the start is read after it.
+	// before the start is read after it. 4 = the URL ratio, 5 = the ARIN
+	// serving epoch.
 	policy := struct {
 		Schema                             int
 		MaxIndex                           int
@@ -60,8 +65,11 @@ func providerEgressCountsPolicyKey(
 		// the counts, and a schema 3 snapshot carries no such reason.
 		OnlineUrlSuccessRatio          float64
 		OnlineUrlRatioCountryExemption bool
+		// Schema 5 selects Quality by the published ARIN serving epoch, which
+		// a schema 4 snapshot did not.
+		ArinServingEpoch int64
 	}{
-		Schema: 4, MaxIndex: settings.MaxIndex(),
+		Schema: 5, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,
@@ -73,6 +81,7 @@ func providerEgressCountsPolicyKey(
 		OnlineSuccessCountryFloor:          settings.OnlineSuccessCountryFloor,
 		OnlineSuccessCountryFloorMargin:    settings.OnlineSuccessCountryFloorMargin,
 		QualitySpeedRequiresModernProvider: settings.RequiresModernProvider(now),
+		ArinServingEpoch:                   arinServingEpoch,
 	}
 	encoded, err := json.Marshal(policy)
 	if err != nil {

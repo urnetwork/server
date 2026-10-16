@@ -44,8 +44,8 @@ func writeSubscriberFactsForScores(ctx context.Context, scores []*ClientScore) {
 	// Each batch retains atomic connection/location facts while releasing the
 	// real session trigger's endpoint fences before the next batch. Callers
 	// publish their cache only after the complete original population exists.
-	for first := 0; first < len(ids); first += arinRemotePopulationBatchSize {
-		batchIds := ids[first:min(first+arinRemotePopulationBatchSize, len(ids))]
+	for first := 0; first < len(ids); first += populationFixtureBatchSize {
+		batchIds := ids[first:min(first+populationFixtureBatchSize, len(ids))]
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO network_client_connection

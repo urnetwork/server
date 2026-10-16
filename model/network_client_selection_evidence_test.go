@@ -145,7 +145,7 @@ func evidenceTestExportedPool(
 		}
 	}
 
-	targetMaps := newClientScoreTargetMaps(rows, nil, countFilter.hasHardEgressFailure, nil)
+	targetMaps := newClientScoreTargetMaps(rows, nil, countFilter.hasHardEgressFailure)
 	clientScores := targetMaps.locationClientScores[countryLocationId]
 	minimums := map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
 	for clientId, clientScore := range clientScores {
@@ -717,6 +717,41 @@ func TestClientScoreEvidenceRank(t *testing.T) {
 		clientScoreEvidenceReliabilityOnly.String(),
 		clientScoreEvidenceNone.String(),
 	}, []string{"url_reliability", "url", "reliability", "none"})
+}
+
+// rank_measured_first reads the export's verdict as filterPool and the live
+// api's reader do, at the same instant: a native whose oldest run left the
+// window after the export, and a measured Online provider like it, rank as
+// measured until the export's verdict ends at the bound, then by their
+// reliability score alone.
+func TestEvidenceRankFollowsTheExportVerdict(t *testing.T) {
+	snapshot := egressValidityTestSnapshot
+	bound := snapshot.Add(clientScoreEgressMaxStaleness)
+	union, _ := egressValidityTestExport(t, DefaultEgressIndexSettings(), RankModeQuality, []*egressValidityTestProvider{
+		{name: "native", newestAge: 3 * time.Minute, oldestAge: ProviderEgressHealthMaxAge - 5*time.Minute, urlOk: 20, urlTotal: 20},
+		{name: "measured_online", newestAge: 3 * time.Minute, oldestAge: ProviderEgressHealthMaxAge - 5*time.Minute, urlOk: 2, urlTotal: 10},
+	})
+	assert.Equal(t, union["native"].PassesMinimums[RankModeQuality], true)
+	assert.Equal(t, union["measured_online"].PassesMinimums[RankModeQuality], false)
+	for name, clientScore := range union {
+		for _, c := range []struct {
+			at   time.Time
+			want clientScoreEvidenceRank
+		}{
+			{at: snapshot.Add(10 * time.Minute), want: clientScoreEvidenceUrlAndReliability},
+			{at: bound.Add(-time.Nanosecond), want: clientScoreEvidenceUrlAndReliability},
+			{at: bound, want: clientScoreEvidenceReliabilityOnly},
+			{at: bound.Add(time.Minute), want: clientScoreEvidenceReliabilityOnly},
+		} {
+			current := clientScore.urlEvidenceCurrent(c.at)
+			if expired := egressValidityTestExpired(clientScore, c.at); current == expired {
+				t.Fatalf("%s at the export + %s: urlEvidenceCurrent=%t but the live api's reader expired=%t", name, c.at.Sub(snapshot), current, expired)
+			}
+			if got := evidenceTestRequestEvidence(evidenceTestMainConfigRankingOn, false, c.at)(clientScore); got != c.want {
+				t.Errorf("%s at the export + %s: rank %s, want %s", name, c.at.Sub(snapshot), got, c.want)
+			}
+		}
+	}
 }
 
 // Without evidence a facet's draw sees its candidates themselves, in one

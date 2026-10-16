@@ -380,7 +380,7 @@
             "id": 11,
             "type": "timeseries",
             "title": "ARIN database age by process",
-            "description": "Time since the build of the ARIN database each process's serving reader opened. A process that has not opened ARIN, such as a Taskworker that only consumes stored facts, reports 0 and is left out. A reader opens once per process and never follows a later config selection, so processes at different ages are a fleet not yet restarted onto a new database.",
+            "description": "Time since the build of the latest ARIN database each process opened (arindbctl/ARINDB.md, Dual-database canary). A process that has not opened its pair yet reports 0 and is left out; Taskworker opens it at its first score publication and performs no lookups. A pair opens once per process and never follows a later config selection, so processes at different ages are a fleet not yet restarted onto a new database.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -414,6 +414,170 @@
                     "refId": "A",
                     "expr": "time() - max by (service, host, block, instance) (urnetwork_arin_database_build_epoch_seconds{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"} > 0)",
                     "legendFormat": "{{service}} {{host}} {{block}} {{instance}}"
+                }
+            ]
+        },
+        {
+            "id": 12,
+            "type": "timeseries",
+            "title": "old ARIN database age by process",
+            "description": "Time since the build of the old ARIN database each process opened beside its latest, the database the canary compares the latest against and serves when the breaker trips. A process with no old database loaded (missing, identical or invalid beside its latest, or not opened yet) reports 0 and is left out; the providers dashboard's canary row shows each process's slot states.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 54
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "time() - max by (service, host, block, instance) (urnetwork_arin_old_database_build_epoch_seconds{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"} > 0)",
+                    "legendFormat": "{{service}} {{host}} {{block}} {{instance}}"
+                }
+            ]
+        },
+        {
+            "id": 13,
+            "type": "timeseries",
+            "title": "ARIN canary decision reads / s",
+            "description": "Reads of the published ARIN canary decision by the request-time readers of each process (FindProviders2 Quality validation, provider status, the provider-egress counts and inspection), by outcome. A process reads at most once per 5 seconds. An absent or expired decision, or an invalid one, serves each provider's latest ARIN slot, as before the canary; a Redis error keeps the process's last decision for up to 15 minutes, then does the same. A sustained non-ok rate during a fallback means readers are not applying it.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 54
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, outcome) (rate(urnetwork_arindb_decision_reads_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 14,
+            "type": "timeseries",
+            "title": "ARIN lookup errors / s",
+            "description": "Pair lookups of the connection address that failed in each process, by slot (arindbctl/ARINDB.md, Dual-database canary). A latest failure fails the connection's location write, so its provider never reaches the score cohort and the canary's comparison cannot see it: a release whose records fail to decode shows here, and as a cohort shrinking against its recent size on the providers dashboard. An old failure leaves that connection's old facts unavailable. Both are 0 in a healthy fleet.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 62
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, slot) (rate(urnetwork_arin_lookup_errors_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{slot}}"
+                }
+            ]
+        },
+        {
+            "id": 15,
+            "type": "timeseries",
+            "title": "ARIN lookup error share",
+            "description": "The share of each service's pair lookups that failed, by slot. A background of failures, such as GeoLite2 misses on classifier-v0 records or unparseable addresses, is normal; the providers dashboard's cohort-shrink page needs more than 1% of latest lookups failing across the fleet, unless a new pair explains the shrink.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 62
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, slot) (rate(urnetwork_arin_lookup_errors_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (service, slot) (rate(urnetwork_arin_lookups_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{slot}}"
                 }
             ]
         }

@@ -420,7 +420,7 @@ func TestProviderEgressCountsPolicyKeyCarriesTheOnlineUrlRatio(t *testing.T) {
 	key := func(config string) string {
 		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
 		defer pop()
-		return ProviderEgressCountsPolicyKey()
+		return ProviderEgressCountsPolicyKey(0)
 	}
 	off := key("")
 	ratio := key("online_url_success_ratio: 0.8\n")

@@ -1348,7 +1348,8 @@ augmentation input.
 
 Unknown origin attribution preserves the base classification, including direct
 subscriber approval and all independent risk evidence. It supplies the bounded
-current-owner research aggregate in [CAPTURE.md](../arinshadowctl/CAPTURE.md)
+current-owner research aggregate of the retired live shadow (its `CAPTURE.md`
+was removed with it; see [Dual-database canary](#dual-database-canary-proposed))
 without exporting provider addresses. Withheld origin identities remain distinct
 from unknown origins in that aggregate; neither adds an approval.
 
@@ -1674,7 +1675,9 @@ serving reader each process opened, and zero until it opens. Every service pushe
 it with its own host, service, block and instance labels, so a query over it
 shows which artifact each live process classifies with and how old that artifact
 is, including on hosts without shell access. API, Connect, MCP and Alt open the
-reader at warmup; Taskworker reports zero because it consumes stored facts.
+reader at warmup; Taskworker opens its pair at its first score publication
+(see [Dual-database canary](#dual-database-canary-proposed)) and performs no
+lookups, and reports zero until then.
 The gauge is process self-report from the published reader; it does not hash the
 mapped file or prove request-time use, and stored connection epochs remain the
 evidence of which database classified a connection.
@@ -1743,8 +1746,10 @@ enables the subscriber predicate through
 `subscriber_quality_policy_version: 2` in `provider.yml`. Missing or zero policy
 retains legacy behavior; invalid policy fails. Native Quality membership
 requires live connection evidence and all live connections to be verified,
-non-risky subscribers. Named-provider and forced-minimum checks retain the
-requested bucket's policy. Discovery, borrowing and refills evaluate the
+non-risky subscribers. Forced-minimum checks retain the requested bucket's
+policy. A named Quality provider needs a live connection without live risk,
+but not verification ([FP2FIX.md](../FP2FIX.md), "Named Quality requests").
+Discovery, borrowing and refills evaluate the
 selected bucket: a Quality request can use independently eligible Speed or
 Online supply without turning an unknown subscriber classification into
 Quality. Common risk and other hard exclusions still apply across every tier,
@@ -1770,13 +1775,16 @@ freshness, health, classification, and request latency as separate observations.
 
 ## Dual-database canary (proposed)
 
-Status: proposed on 2026-10-14 for review; nothing in this section is
-implemented yet. It replaces the live shadow comparison
-([arinshadowctl](../arinshadowctl/README.md), the in-process observers and
-the score-shadow freshness lease). That shadow needs a separate candidate
-resource, a credentialed capture session, owner inventories and a 90-second
-lease to compare two databases. The canary compares them on every score
-publication, using facts the fleet already writes.
+Status: proposed on 2026-10-14 for review, and implemented on the
+`feat/arindb-dual-canary` branches of server, warp and build (not merged or
+deployed). The independent review's fixes of 2026-10-14 are folded into the
+text below; "Open decisions" names the decisions they change. It replaces the
+live shadow comparison (the retired `arinshadowctl`, the in-process observers
+and the score-shadow freshness lease), which the server branch removes. That
+shadow needed a separate candidate resource, a credentialed capture session,
+owner inventories and a 90-second lease to compare two databases. The canary
+compares them on every score publication, using facts the fleet already
+writes.
 
 Each release directory carries two databases: the new build as `arin.mmdb`
 and a byte copy of the previously selected release as `arin-old.mmdb`. Every
@@ -1908,6 +1916,19 @@ connection has the same one, otherwise 0. Defaults of false and 0 never read as
 clean, because a slot's facts are used only when its epoch equals the
 published serving epoch (below), and 0 never does.
 
+While Connect restarts onto a new release, a provider whose connections span a
+restarted host and a waiting one has different epochs in both slots: the
+restarted connection carries (E(N), E(N−1)), the waiting one (E(N−1),
+E(N−2)). The rollup's old slot then carries the newest epoch, other than a
+common latest, that every live connection carries in one slot or the other,
+with the facts of whichever slot carries it in each connection: here E(N−1),
+from the restarted connection's old slot and the waiting one's latest slot.
+Every connection is classified under that epoch, so the facts are exact, and a
+rolling restart does not make multi-host providers unavailable under the
+database the fleet is leaving. The new latest stays unavailable for such a
+provider until every connection carries it, which only delays the comparison.
+The latest columns keep every connection's latest slot, as before.
+
 ### Comparison and breaker
 
 The indexer (`UpdateClientScores`) learns the pair (L, O) from its own loader
@@ -1928,32 +1949,81 @@ Each run ends in exactly one state:
 
 | State | When | Serving epoch S |
 | --- | --- | --- |
-| `single` | Taskworker loaded no usable old file | 0: each row's latest slot, today's behavior |
-| `warming` | Fewer than `min_coverage` of providers have facts for both L and O | O if its own coverage reaches `min_coverage`, else L if its coverage does, else whichever covers more (ties to O) |
-| `latest` | Paired coverage reached, breaker holds | L |
-| `fallback` | Paired coverage reached, breaker trips | O |
+| `single` | No usable old database, in the Taskworker's own pair or the previous decision's | 0: each row's latest slot, today's behavior |
+| `warming` | Fewer than `min_coverage` of providers have facts for both L and O, or the public cohort is empty | See below |
+| `latest` | Paired coverage reached, breaker holds, or the operator accepts L | L |
+| `fallback` | Paired coverage reached, the Quality bucket trips, or a latched fallback has not yet released | O |
+
+A database is carried when `min_coverage` of the public cohort has facts under
+it. Warming serves, in order:
+
+1. the previous decision's serving epoch while the rows still carry it, so
+   coverage hovering near `min_coverage` cannot switch the fleet back and
+   forth, and a Taskworker restarted onto the next release keeps the database
+   a fallback served while Connect still writes the previous release's slots;
+2. O when it is carried;
+3. L when it is carried and not blocked, flagged `warming_serves_latest`;
+4. O when L is blocked and O covers at least 1 − `bucket_loss_threshold` of
+   the cohort, so serving it costs no more than the loss the breaker tolerates;
+5. otherwise 0, each row's latest slot, rather than a database most rows
+   lack, whose unavailable facts would make them non-Quality.
+
+L is blocked while a fallback is latched on the pair, and when the paired
+subset reaches `min_paired_sample` (default 50) and its Quality comparison
+trips, which also sets `warming_tripped` and pages. An empty public cohort
+compares nothing, so it never verifies L: warming carries the previous
+decision's epoch and latch, or serves 0 without a previous decision. Warming
+that serves L unverified sets `warming_serves_latest`, which warns after 30
+minutes.
+
+Step 5 does not honour a block: with L blocked and O covering less than
+1 − `bucket_loss_threshold`, each row's latest slot applies the blocked L to
+every row a restarted process wrote (in a probe where O covered half the
+cohort, half the rows took L's classification). That case always pages:
+`warming_tripped` for a tripped sample, `fallback_dropped` for a latch. A
+latch held while S is not its old database, as when Connect restarts onto the
+next release before the Taskworker, sets `fallback_dropped`; so does a latch
+the decision can no longer honour, because the canary went single after it or
+the pair changed to one whose old database is the latest it held out. The
+decision carries that latch as `dropped_latch` while it lasts, and accepting
+its latest clears it.
 
 The breaker compares only the providers with facts for both databases. For a
 bucket b with old supply N_O,b > 0, it trips when the net loss
 (N_O,b − N_L,b) / N_O,b is strictly greater than `bucket_loss_threshold`
-(default 0.10). It also trips when any country has supply in b under O and
-none under L. Gross removals, additions and emptied cities are reported but do
-not trip. Using net loss tolerates a release that moves as many providers into
-a bucket as out of it.
+(default 0.10). It also trips when a country has at least
+`min_emptied_country_supply` (default 3) providers in b under O and none under
+L; a smaller emptied country is reported, so one provider connecting and
+disconnecting cannot flip the fleet. Gains, gross removals and additions, and
+emptied cities are reported but do not trip; gains and gross churn warn (see
+"Signals, alerts and dashboards"). Using net loss tolerates a release that
+moves as many providers into a bucket as out of it.
 
 The choice is one serving epoch for the whole publication; no provider is
 decided separately. Quality classification (non-quality and verified) comes
 from S. Risk always comes from the latest slot, in every state including
 `fallback`. A fallback can therefore restore Quality, but it never readmits a
-provider that the latest database calls risky. A Speed or Online trip, which
-only risk can cause, pages without an automatic repair. Facts that are
-unavailable under S count as non-Quality, never as clean; risk still applies.
-There is no hysteresis: each run decides independently, so the latest
-database is served again as soon as a run passes.
+provider that the latest database calls risky. Only a Quality trip falls back:
+S changes only Quality classification, so a Speed or Online trip, which only
+risk can cause, is reported and pages without changing S, as falling back
+would repair none of it. A Quality loss that risk causes still falls back and
+restores only non-quality. Facts that are unavailable under S count as
+non-Quality, never as clean; risk still applies.
+
+A fallback latches on its pair (L, O). The latch rides each decision, holds
+through warming, and releases only after `release_passing_runs` (default 6)
+consecutive comparisons whose Quality loss stays at or below
+`bucket_loss_threshold` − `release_margin` (default 0.02) with no tripping
+country; a comparison outside the margin starts the count again. A new pair
+decides afresh. The operator can instead accept a latest database by its
+build epoch: `accept_latest_build_epoch` serves it although it trips and
+releases its latch, and the decision says `accepted`.
 
 `provider.yml` carries the tunables under `arindb_canary`:
-`bucket_loss_threshold`, `trip_on_emptied_country` and `min_coverage`. Absent
-keys use the defaults.
+`bucket_loss_threshold`, `trip_on_emptied_country`, `min_coverage`,
+`min_paired_sample`, `min_emptied_country_supply`, `release_passing_runs`,
+`release_margin` and `accept_latest_build_epoch`. Absent keys use the
+defaults; an invalid value keeps its default and logs.
 
 ### Publication and request-time consistency
 
@@ -1970,13 +2040,16 @@ and evaluate stored facts for S, choosing each row's slot by epoch:
 
 | Reader | Facts | Change |
 | --- | --- | --- |
-| FindProviders2 Quality validation, named providers and force_minimum (`getProviderSubscriberExclusions`) | Live connection rows | Quality uses the slot whose epoch is S, and refuses otherwise; risk unchanged |
+| FindProviders2 Quality validation and force_minimum (`getProviderSubscriberExclusions`) | Live connection rows | Quality uses the slot whose epoch is S, and refuses otherwise; risk unchanged |
+| Named Quality providers (`getProviderNamedSubscriberExclusions`) | Live connection rows | Unchanged: no Quality classification is read, so S does not apply; risk always latest |
 | Provider status and provider-egress dashboard counts | Rollup rows | The same selection |
 | Hard exclusions, probe admission and URL eligibility | Rollup risk | Unchanged: always latest |
 
-When no decision is readable (absent, expired, invalid or a Redis error), a
-reader uses each row's latest slot, as today, and counts the event. Refusing
-Quality instead would let a Redis blip empty it.
+When no decision is published (absent, expired or invalid), a reader uses each
+row's latest slot, as today, and counts the event. Refusing Quality instead
+would let a lost key empty it. A Redis error or timeout keeps the process's
+last decision for up to 15 minutes, so a blip cannot drop an active fallback,
+then serves each row's latest slot too.
 
 Matching by epoch rather than by slot keeps a mixed fleet consistent:
 
@@ -1996,24 +2069,77 @@ database also admits it.
 
 | Condition | Outcome | Signal |
 | --- | --- | --- |
-| Old file missing or identical | `single`: latest served as today | warn, no page |
-| Old file invalid | `single` in that process; error logged | warn |
-| Previous database refused at build | The release ships without an old file | update manifest and release message, then warn |
-| Latest unopenable or mistyped | Process fails warmup (unchanged) | existing |
+| Old file missing or identical | `single`: latest served as today | warn, no page; page right after a fallback |
+| Old file invalid on the publishing Taskworker | It compares the previous decision's old epoch beside the same latest; `single` without one | warn |
+| Old file invalid on Connect | That process's rows carry no old facts, which lowers coverage | warming warn when sustained |
+| Previous database refused at build | The release ships without an old file | update manifest and release message, then warn; page right after a fallback |
+| Latest unopenable or mistyped | Connect and API fail warmup (unchanged) | existing |
+| Publishing Taskworker cannot open its latest | It compares the previous decision's epochs; `single` without them | page |
 | Taskworker and Connect on different pairs | `warming` serves the epoch the rows carry | warn when sustained |
 | Rollup not yet refreshed after a release | `warming` until it is | warn when sustained |
 | Coverage held below `min_coverage`, such as a stuck host | `warming` on the established database | warn |
-| Old-slot lookup error | That connection's old facts are unavailable | none |
-| Decision unreadable | Readers use the latest slot | counter |
-| Indexer stalled | The decision expires with the publication | stale warning |
-| Breaker trips | `fallback`: old classification, latest risk | page |
-| Two bad releases in a row | The second compares against the first and can pass | page on the first; pin before the next |
+| No database carried, such as right after the migration | `warming` on each row's latest slot | warn when sustained |
+| Rolling restart of a multi-host provider | Available under the release the fleet is leaving | none |
+| Empty public cohort | `warming` carries the previous choice | warn when sustained |
+| Old-slot lookup error | That connection's old facts are unavailable | lookup error counter |
+| Latest records fail to decode | Those connections fail their location write and leave the cohort | lookup error counter; cohort shrink page |
+| Decision absent, expired or invalid | Readers use the latest slot | counter; warn above 5% |
+| Redis error on a decision read | Readers keep their last decision up to 15 minutes | counter; warn above 5% |
+| Indexer stalled | The decision expires with the publication | stale warning at 30 minutes, page at 90 |
+| Quality trips | `fallback`: old classification, latest risk, latched on the pair | page |
+| Speed or Online trips | Reported; no fallback | page |
+| Paired sample trips while warming | The latest is not served | page |
+| Gain or gross churn beyond the thresholds | Reported; no fallback | warn |
+| Warming serves an unverified latest | Served until coverage returns | warn after 30 minutes |
+| A latched fallback is not served, or dropped | Each row's latest slot, or a baseline that is the held-out latest | page (`fallback_dropped`) |
+| Serving epoch switching back and forth | Bounded by the latch and warming's previous choice | page above 4 changes in six hours |
+| Two bad releases in a row | With the published decision the runner pins the protected database or pauses the ARIN refresh; without it the second compares against the first and can pass | page on the first; `fallback_dropped` on the second |
 
 Baseline drift is the main limit of copying the previous latest: after a trip,
-the next release's old file is the rejected database. When a trip is judged to
-be a bad release, the operator sets `ARIN_PREVIOUS_DATABASE_FILE` for the
-runner to the last good `arin.mmdb`. Subsequent releases then compare against
-it, and the operator clears the pin once a good release ships.
+the next release's old file would be the rejected database. The release runner
+therefore follows the published decision when it has one:
+`ARIN_CANARY_DECISION_FILE` names a copy of `{arindb_canary_decision}`, and
+`arindbctl canary-baseline` follows the database the decision protects: a
+latch's old database, held or dropped, whatever the decision serves, else the
+database it serves. It answers `copy` when that is the environment's selected
+latest (or each row's latest slot with no latch), `pin <path>` with the
+release directory's `arin.mmdb` built at that epoch otherwise, and
+`pause <reason>` when the decision is unreadable, of another version, older
+than six hours, drops a fallback without naming its database, or protects a
+database no release directory holds. A pause publishes the GeoLite2 refresh
+but no ARIN version for that release, keeps the previous ARIN release
+selected, and says why in the release message; it never fails the release. The builder has no read path to production, so delivering
+the decision to it is an operator step (open decision 8). Without the file the
+copy is not gated and the release message says so; the operator then sets
+`ARIN_PREVIOUS_DATABASE_FILE` for the runner to the last good `arin.mmdb` when
+a trip is judged to be a bad release, and clears the pin once a good release
+ships. The pin always wins over the decision.
+
+#### Accepting a release the breaker trips on
+
+`accept_latest_build_epoch` names one build epoch: the latest it accepts is
+served although it trips, and its latch, held or dropped, is released. The
+next release is compared against whatever its copy-forward selects, and the
+accept does not carry over to it. So accept the epoch actually deployed, read
+from `urnetwork_stats_arindb_database_build_epoch_seconds{database="latest"}`
+or the decision's `latest.build_epoch`, and line the next release's baseline up
+with it:
+
+1. Set `arindb_canary.accept_latest_build_epoch` in provider.yml to that epoch
+   and deploy the config.
+2. If `ARIN_PREVIOUS_DATABASE_FILE` pins the database the fallback served,
+   clear it or point it at the accepted `arin.mmdb`. Left on the old
+   database, the next release compares against it again, trips on the same
+   changes, and needs its own accept. With `ARIN_CANARY_DECISION_FILE` and no
+   pin, the decision serves the accepted latest and `canary-baseline` copies
+   it.
+3. Remove the key once a release that passes on its own has shipped.
+
+The key holds one epoch at a time, so clearing a dropped latch (accepting its
+own latest L) and accepting another release takes two config deploys, one
+after the other. With the decision delivered to the runner this does not
+arise: the gate pins the latch's old database O, and the next comparison
+against it clears the latch.
 
 ### Signals, alerts and dashboards
 
@@ -2024,17 +2150,24 @@ Each process that opens ARIN pushes its own pair:
 | `urnetwork_arin_database_build_epoch_seconds` | Existing: the latest slot's epoch, 0 until opened |
 | `urnetwork_arin_old_database_build_epoch_seconds` | The old slot's epoch, 0 when not loaded |
 | `urnetwork_arin_database_info{slot,state,sha256}` | 1 for each slot, always both, with its state and manifest hash (`none` when absent) |
+| `urnetwork_arin_lookups_total{slot}` and `urnetwork_arin_lookup_errors_total{slot}` | Pair lookups, and those that failed; a latest failure fails the connection's location write |
 
 Every Taskworker's stats collector exports the indexer's decision from the
-published document, so all hosts report the same values:
+published document, so all hosts report the same values; only the Taskworker
+that published the decision exports the per-country supply, about 900 series:
 
 | Metric | Meaning |
 | --- | --- |
 | `urnetwork_stats_arindb_canary_state{state}` | One-hot `single`, `warming`, `latest` or `fallback` |
 | `urnetwork_stats_arindb_fallback_active` | 1 while serving old because the breaker tripped |
 | `urnetwork_stats_arindb_providers{bucket,database}` | Paired providers per bucket under `latest` and `old` |
-| `urnetwork_stats_arindb_providers_by_country{bucket,database,country_code}` | The same per country |
+| `urnetwork_stats_arindb_decision_flags{flag}` | 1 while each condition holds: `warming_tripped`, `warming_serves_latest`, `latched`, `accepted`, `latest_unavailable`, `pair_carried`, `fallback_dropped` |
+| `urnetwork_stats_arindb_providers_by_country{bucket,database,country_code}` | The same per country, from the publishing Taskworker only |
 | `urnetwork_stats_arindb_loss_ratio{bucket}` | Net loss of latest against old; negative is a gain |
+| `urnetwork_stats_arindb_gain_ratio{bucket}` and `urnetwork_stats_arindb_churn_ratio{bucket}` | Net gain, and gross removals and additions, against old |
+| `urnetwork_stats_arindb_cohort_providers{reference}` and `urnetwork_stats_arindb_cohort_loss_ratio` | The cohort, its largest size over two hours, and its loss against that |
+| `urnetwork_stats_arindb_serving_changes` and `urnetwork_stats_arindb_latch_passing_runs` | Serving changes over six hours, and a latch's passing runs |
+| `urnetwork_stats_arindb_pair_since_seconds` | When the compared pair was first compared |
 | `urnetwork_stats_arindb_emptied_countries{bucket}` and `urnetwork_stats_arindb_emptied_country{bucket,country_code}` | Countries latest would empty, and old's supply in each |
 | `urnetwork_stats_arindb_emptied_cities{bucket}` | A count; names are in the decision and the indexer log |
 | `urnetwork_stats_arindb_coverage_ratio{database}` | `latest`, `old` and `paired` coverage of the cohort |
@@ -2048,27 +2181,47 @@ warp `grafana/alerting/arindb-canary.yml`:
 | Rule | Expression (sketch) | Severity |
 | --- | --- | --- |
 | ArinDbFallbackActive | `max(urnetwork_stats_arindb_fallback_active) > 0` for 10m | page |
-| ArinDbRiskSupplyLoss | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"}) > 0.10` for 10m | page |
+| ArinDbRiskSupplyLoss | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"}) > 0.10` with 20 paired providers of old supply, for 10m | page |
+
+| ArinDbWarmingTripped | flag `warming_tripped` for 10m | page |
+| ArinDbProtectionLost | flag `latest_unavailable` or `fallback_dropped` for 10m | page |
+| ArinDbCohortShrink | cohort loss above 0.10 from a reference of 100, within 2h of a new pair or with more than 1% of latest lookups failing over 30m, for 10m | page |
+| ArinDbServingFlapping | more than 4 serving changes in six hours, for 5m | page |
+| ArinDbDecisionStalled | decision older than 5400 s | page |
 | ArinDbCanaryUnavailable | state `single` for 1h | warn |
 | ArinDbCanaryWarming | state `warming` for 2h | warn |
 | ArinDbDecisionStale | `time() - max(urnetwork_stats_arindb_decision_seconds) > 1800` | warn |
+| ArinDbDecisionReadsNotOk | more than 5% of decision reads not ok over 10m, for 15m | warn |
+| ArinDbSupplyGain, ArinDbSupplyChurn | gain above 0.10, churn above 0.20, with the same sample, for 30m | warn |
+| ArinDbWarmingServesLatest | flag `warming_serves_latest` for 30m | warn |
 
-Monitor signal §2.9d reads the same series through Mimir, pages on fallback
-and risk-driven loss, warns on the others, and names the emptied countries.
-The providers dashboard gains an "ARIN database canary" row: the state and
-fallback, bucket supply under each database, losses, coverage, emptied
-countries, and each process's slot states, hashes and ages.
+Monitor signal §2.9d reads the same series through Mimir, pages and warns on
+the same conditions, and names the emptied countries. The providers dashboard
+gains an "ARIN database canary" row: the state, fallback and flags, bucket
+supply under each database, losses, gains and churn, coverage, the cohort
+against its recent size, serving changes and latch release, the share of
+decision reads that were not ok, emptied countries, and each process's slot
+states, hashes and ages. The services overview charts each process's decision
+reads, lookup errors and database ages.
 
 ### Rollout
 
-1. Merge with an additive migration: the new columns default to false and 0,
-   the old-slot write fence, and the rollup columns. Old binaries ignore the
-   columns. A new binary without an old file runs `single` with S = 0, which
-   is today's behavior, so the code can ship ahead of any paired release.
-   Taskworker, API and Connect can deploy in any order.
+1. Merge with two additive migrations, applied in order before any new
+   binary runs: 837 adds the rollup columns (it locks only
+   `network_client_location_reliability`), 838 the connection columns and the
+   old-slot write fence (it locks only `network_client_location`). Each holds
+   `lock_timeout = 5s` and fails rather than queue writers longer; rerun the
+   migration if one does. Old binaries ignore the columns. A new binary
+   without an old file runs `single` with S = 0, which is today's behavior,
+   so the code can ship ahead of any paired release. Taskworker, API and
+   Connect can deploy in any order.
 2. The next all-release build passes `--previous-config`. Its Config deploy
    restarts services onto the pair: Connect writes both slots, the rollup
-   carries them, and the indexer warms, then compares.
+   carries them, and the indexer warms, then compares. Restart a Taskworker
+   only after its host shows the new `WARP_CONFIG_VERSION` with an `arindb`
+   config tree: a Taskworker opens its pair once, and one restarted before its
+   host has the release opens the previous pair, or none (`latest_unavailable`
+   pages).
 3. Check the first comparison on the dashboards before relying on the breaker:
    losses, coverage and decision freshness. Tune `provider.yml` if needed.
 4. Remove the live shadow in the same change. It is default-off, and nothing
@@ -2121,6 +2274,58 @@ the shadow procedure point here. The shadow persists nothing beyond process
 state, the optional `ARIN_SHADOW_CAPTURE_CONFIG` file and any staged
 `arindb-shadow/` resource; an operator may delete those once the change ships.
 
+### Implementation notes
+
+Where the server branch refines the text above:
+
+- The old slot has its own write token, `arin_old_quality_write_token`, and
+  its own guard, `network_client_location_arin_old_quality_guard`, so the
+  published v751 guard of the latest slot is unchanged. A writer that predates
+  the old slot still supplies a fresh latest token, so only a separate token
+  can tell it apart. Without a fresh old token the guard revokes the old
+  positive and also sets `arin_old_database_build_epoch` to 0, so stale old
+  facts read as unavailable rather than as facts of their epoch. Two
+  migrations, stacked after the FP2 modern provider evidence at 836, carry the
+  columns, each locking one table: 837 adds the rollup's slots and 838 the
+  connection slots with their guard. A single transaction over both would hold
+  the connection rows exclusively while it waited for the rollup, which
+  `update_reliabilities` locks in the other order. The monitor pins both.
+- The indexer reads both rollup slots for its cohort in its own primary-key
+  query beside the source rows, because the source and count-filter statements
+  are pinned by DB tests; the cohort and its rows are the same.
+- A slot that a process has not opened yet reports the state `unopened`; a
+  latest that a Taskworker cannot open reports `missing` or `invalid` without
+  failing the score export, and the canary compares the previous decision's
+  epochs (`pair_carried`, `latest_unavailable`), or is `single` without them.
+  A Taskworker keeps that failure until it restarts.
+- A failed write of the decision stops that export: without it, readers would
+  apply each row's latest slot while the export served another database.
+- Request-time readers cache the decision for five seconds per process; one
+  shared read, bounded to 250 ms and detached from the triggering request,
+  refreshes it. `newProviderQualityFilterForClients` applies it to provider
+  status, the provider-egress counts and `bringyourctl provider inspect`; the
+  location counts and hard exclusions keep the latest slot. The provider-egress
+  snapshot key includes the serving epoch, so a switch starts a fresh snapshot.
+- In `warming`, the comparison over the paired subset is still reported,
+  including `tripped`, and blocks the latest once the paired subset reaches
+  `min_paired_sample`. The decision records its `serving_basis`, which the
+  parser checks against the epoch it serves.
+- The indexer reads the previous decision before deciding, for the latch, the
+  previous choice, the carried pair and the cohort's history. A failed read
+  stops the export like a failed write; a document it cannot parse is logged
+  and treated as absent.
+- The indexer skips the slot read when it cannot compare (`single`), so a
+  single decision's coverage counts only the cohort. A cohort client the slot
+  read did not return is unavailable under S, so non-Quality, in the indexer
+  and in the request-time readers.
+- Per-country counts leave out providers without a published country, and an
+  unknown country never trips the breaker. At most 100 emptied cities are named
+  per bucket; the count is complete.
+- The services overview dashboard charts each process's decision reads and old
+  database age beside the existing latest age. The alert rules group by `env`,
+  treat a missing series as OK (a build without the canary exports none), and
+  hold the stale rule for one minute.
+
 ### Open decisions
 
 1. Thresholds: a net bucket loss above 10% and any emptied country trip the
@@ -2131,12 +2336,29 @@ state, the optional `ARIN_SHADOW_CAPTURE_CONFIG` file and any staged
    added.
 3. Without a readable decision, readers use the latest slot (today's
    behavior) rather than refusing Quality.
-4. Baseline drift is handled by a manual pin, not an automatic last-good
-   baseline, which would need production state at build time.
-5. No hysteresis, so decisions can alternate near a threshold.
+4. Baseline drift (changed after review): the release runner follows the
+   published decision when it is given one, pinning the database the decision
+   serves or pausing the refresh; the manual pin remains and wins. The
+   original decision was the manual pin alone, since following the decision
+   needs production state at build time (decision 8).
+5. Hysteresis (changed after review, for the owner to confirm): a fallback
+   latches on its pair until 6 consecutive comparisons pass with a 0.02
+   margin, or the operator accepts the latest; an emptied country trips only
+   with 3 providers of old supply; warming keeps its previous choice while the
+   rows carry it. The original decision was none, so decisions could
+   alternate near a threshold.
 6. A refused copy ships the release without a canary instead of failing it.
 7. Disk: each release carries a second 0.6 GB file; pruning old `arindb`
-   versions is separate work.
+   versions is separate work. The decision-gated copy-forward needs the
+   release directory of the database a fallback serves, so pruning must keep
+   it.
+8. Delivering the published decision to the builder (added after review): the
+   release runner follows `ARIN_CANARY_DECISION_FILE`, but the builder has no
+   read path to production, so an operator step must copy
+   `{arindb_canary_decision}` to it before an all-release build. Without it
+   the copy-forward is not gated.
+9. Only a Quality trip falls back (added after review): a Speed or Online
+   trip, which only risk causes, pages without changing S.
 
 ### Implementation scope
 
@@ -2165,10 +2387,10 @@ in consumers are separate events. A successful build alone proves none of the
 later events. The Config release version, resource-directory version, MMDB build
 epoch, classifier schema, and subscriber policy version are distinct identifiers.
 
-An optional shadow comparison can measure candidate decisions against the
-current database without changing serving policy; the proposed
-[dual-database canary](#dual-database-canary-proposed) replaces it with a
-comparison on every score publication. Whether comparison occurs
+The live shadow comparison that measured candidate decisions against the
+current database is retired; the
+[dual-database canary](#dual-database-canary-proposed) compares the latest and
+previous databases on every score publication instead. Whether comparison occurs
 before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).

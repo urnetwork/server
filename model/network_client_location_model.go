@@ -56,7 +56,8 @@ const (
 	// The score writer only visits targets present in its current SQL result.
 	// Persist the last complete target set so a location that loses its final
 	// eligible provider receives an explicit empty payload instead of leaving
-	// its prior providers selectable for the cache TTL.
+	// its prior providers selectable for the cache TTL
+	// (network_client_score_target_manifest.go).
 	clientScoreTargetManifestKey = "client_score_target_manifest_v1"
 	// Published only after a complete score export whose SQL excludes derived
 	// window clients and inactive top-level clients. Monitoring uses this
@@ -78,16 +79,6 @@ type clientScoreRedisSet struct {
 	key   string
 	value []byte
 	flush bool
-}
-
-type clientScoreTargetManifestDocument struct {
-	LocationIds      []string `json:"location_ids"`
-	LocationGroupIds []string `json:"location_group_ids"`
-}
-
-type clientScoreTargetManifest struct {
-	locationIds      map[server.Id]bool
-	locationGroupIds map[server.Id]bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -3489,10 +3480,18 @@ type ConnectionLocationScores struct {
 	ArinQualityVerified    bool
 	ArinLookupAt           *time.Time
 	ArinDatabaseBuildEpoch int64
-	NetTypeHosting         int
-	NetTypePrivacy         int
-	NetTypeVirtual         int
-	NetTypeForeign         int
+	// The same facts from the old database beside the latest (arindbctl/ARINDB.md,
+	// "Connection and rollup facts"). Epoch 0 when the process loaded no old
+	// database or its lookup failed: the score export uses a slot only when its
+	// epoch is the published serving epoch, and 0 never is.
+	ArinOldRisk               bool
+	ArinOldNonQuality         bool
+	ArinOldQualityVerified    bool
+	ArinOldDatabaseBuildEpoch int64
+	NetTypeHosting            int
+	NetTypePrivacy            int
+	NetTypeVirtual            int
+	NetTypeForeign            int
 	// the lookup's accuracy radius in km, the genesis confidence of
 	// connect/GEOMAP.md §5.1; nil (NULL) for a location with none, such as an
 	// egress-probed one. It describes the genesis location below when one is
@@ -3511,6 +3510,8 @@ type ConnectionLocationScores struct {
 
 // Persist location and classification together. A fresh token on every write
 // lets the database revoke positive facts when an older writer updates the row.
+// Each ARIN slot has its own token, so a writer that predates the old slot
+// cannot leave an earlier old-slot positive or epoch in place.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -3623,9 +3624,14 @@ func SetConnectionLocation(
 		            arin_lookup_at,
 		            arin_database_build_epoch,
 		            arin_quality_verified,
-		            arin_quality_write_token
+		            arin_quality_write_token,
+		            arin_old_risk,
+		            arin_old_non_quality,
+		            arin_old_quality_verified,
+		            arin_old_database_build_epoch,
+		            arin_old_quality_write_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3644,7 +3650,12 @@ func SetConnectionLocation(
                     arin_lookup_at = $15,
                     arin_database_build_epoch = $16,
                     arin_quality_verified = $17,
-                    arin_quality_write_token = $18
+                    arin_quality_write_token = $18,
+                    arin_old_risk = $19,
+                    arin_old_non_quality = $20,
+                    arin_old_quality_verified = $21,
+                    arin_old_database_build_epoch = $22,
+                    arin_old_quality_write_token = $23
             `,
 			connectionId,
 			clientId,
@@ -3663,6 +3674,11 @@ func SetConnectionLocation(
 			connectionLocationScores.ArinLookupAt,
 			connectionLocationScores.ArinDatabaseBuildEpoch,
 			connectionLocationScores.ArinQualityVerified,
+			server.NewId(),
+			connectionLocationScores.ArinOldRisk,
+			connectionLocationScores.ArinOldNonQuality,
+			connectionLocationScores.ArinOldQualityVerified,
+			connectionLocationScores.ArinOldDatabaseBuildEpoch,
 			server.NewId(),
 		))
 	})
@@ -3905,6 +3921,9 @@ type providerCountFilter struct {
 	// The modern provider gate's evidence rows; a provider without one has
 	// no evidence.
 	modernEvidence map[server.Id]*ProviderModernEvidenceRecord
+	// The ARIN serving epoch arinNonQuality follows (arindb_canary_model.go):
+	// 0 is each row's latest slot. Risk always follows the latest slot.
+	arindbServingEpoch int64
 }
 
 // Complete means disconnected history too. The partial covering index supplies
@@ -4973,8 +4992,12 @@ type ProviderLocation struct {
 }
 
 type ClientScore struct {
-	// A cached passing ratio is valid only until its first contributing result
-	// leaves the eight-hour window. A later export recalculates the ratio.
+	// A cached URL verdict, and the native membership it gives, is valid only
+	// until the earlier of its newest contributing result leaving the
+	// eight-hour window and a bounded staleness past the export's read of the
+	// window (clientScoreEgressValidUntil). A later export recalculates it
+	// before then; a stalled export's natives fall back to Online. Nil without
+	// accepted URL outcomes.
 	EgressValidUntil             *time.Time
 	UrlProbeSuccessWeight        float64
 	ClientId                     server.Id
@@ -5274,7 +5297,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
 	knownLocationGroupIds := []server.Id{}
-	shadowScoreCapture := beginArinShadowScoreCapture()
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -5433,8 +5455,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// The URL-success rule's country guard over the public cohort, the
 	// population of the location counts and the dashboard, from the evidence
 	// just loaded, its margin held against the guard the last export
-	// published, whichever process ran it. Computed before the shadow
-	// observer reads any facts.
+	// published, whichever process ran it.
 	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
 		clientIdCountryCodes := map[server.Id]string{}
 		for _, row := range pendingScores {
@@ -5445,19 +5466,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the score export"))
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
-	var observeShadowScore func(clientScoreSourceRow)
-	if shadowScoreCapture != nil {
-		observeShadowScore = func(row clientScoreSourceRow) {
-			shadowScoreCapture.observe(row.score, row.egress.publishedCountryCode, countFilter.egressFacts(row.score.ClientId, row.egress.publishedCountryCode, row.egress.egressIndex, row.egress.egressQuality, egressSettings), egressTestEnabled)
-		}
-	}
-	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure, observeShadowScore)
-	locationClientScores := targetMaps.locationClientScores
-	locationGroupClientScores := targetMaps.locationGroupClientScores
-	clientIdEgresses := targetMaps.clientIdEgresses
-	hardExcludedClientIds := targetMaps.hardExcludedClientIds
-	pendingScores = nil
-	cohort = nil
 
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
@@ -5468,6 +5476,36 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// hour. Repeated reconnects still fail it: they are real user impact, and
 	// `client_reliability_valid` only forgives ONE per block.
 	minIndependentReliabilityWeights := providerReliabilityMinimums()
+
+	// The ARIN canary chooses this publication's serving database before any
+	// provider is decided, and publishes the choice before the export so the
+	// request-time readers apply it while targets are rewritten
+	// (arindb_canary_model.go). Without a readable decision the readers would
+	// fall back to each row's latest slot, so a failed write stops the export,
+	// and the choice follows the previous one, so a failed read of it does too.
+	arindbDecision, err := decideArindbCanaryForPublication(
+		ctx,
+		nativeSourceStartedAt,
+		pendingScores,
+		&countFilter,
+		egressSettings,
+		egressTestEnabled,
+		minIndependentReliabilityWeights,
+	)
+	if err != nil {
+		return err
+	}
+	if err := writeArindbCanaryDecision(ctx, arindbDecision, ttl); err != nil {
+		return fmt.Errorf("publish arindb canary decision: %w", err)
+	}
+
+	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure)
+	locationClientScores := targetMaps.locationClientScores
+	locationGroupClientScores := targetMaps.locationGroupClientScores
+	clientIdEgresses := targetMaps.clientIdEgresses
+	hardExcludedClientIds := targetMaps.hardExcludedClientIds
+	pendingScores = nil
+	cohort = nil
 
 	// The rules of connect/GEOMAP.md §10.3 for every provider of the pool, once
 	// each: a client sits in several location and group maps, each with its
@@ -5530,6 +5568,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
+	nativeCensus.Arindb = arindbDecision.nativeSummary()
 
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
@@ -5576,6 +5615,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if len(target.clientScores) == 0 {
 			emptyTargetCount += 1
 		}
+	}
+	// Also published empty: each target the previous export wrote from rows
+	// that no row names now, so the providers that left it stop being served
+	// before the cache ttl. The manifest of every target this export may leave
+	// readable is published before any document.
+	previousTargetManifest, err := readClientScoreTargetManifest(ctx)
+	if err != nil {
+		return fmt.Errorf("read client score target manifest: %w", err)
+	}
+	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, server.NowUtc(), ttl)
+	targets = append(targets, departedTargets...)
+	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
+		return fmt.Errorf("publish client score target manifest: %w", err)
 	}
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
 	sourceLoadSpan.finish()
@@ -5683,6 +5735,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	returnErr = finishClientScoreExport(ctx, returnErrs)
 
 	if returnErr == nil {
+		// Every departed target now holds encoded-empty documents that outlive
+		// its previous ones, so the next export compares against this export's
+		// row targets only, stamped after their last document.
+		if err := writeClientScoreTargetManifest(ctx, targetMaps.targetManifest(server.NowUtc()), ttl); err != nil {
+			// the manifest published before the documents still names the
+			// departed targets, so the next export clears them again
+			glog.Errorf("[nclm]publish client score target manifest: %s\n", err)
+		}
 		if writeLegacyUnchanged {
 			if err := markClientScoreAliasReady(ctx); err != nil {
 				return fmt.Errorf("publish client score alias migration state: %w", err)
@@ -5709,13 +5769,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
-		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(
-			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty\n",
+			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
 			len(locationClientScores),
 			len(locationGroupClientScores),
 			emptyTargetCount,
+			len(departedTargets),
 		)
 	} else {
 		glog.Infof("[nclm]update err = %s\n", returnErr)
