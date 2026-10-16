@@ -280,8 +280,10 @@ func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClient
 	settings.DataOnlyProviderProbe = cfg.DataOnlyProbe
 	// A probe tunnel lives for one bounded measurement, so its re-dial of
 	// the probed provider keeps the measured cadence instead of the paced
-	// re-dial a long-lived fixed window uses.
+	// re-dial a long-lived fixed window uses. A capability measurement paces
+	// it at about its own timeout instead.
 	settings.FixedDestinationRetryMin = 0
+	cfg.CapabilityObservation.paceRedial(settings)
 	return settings
 }
 

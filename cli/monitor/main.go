@@ -47,6 +47,7 @@ type monitorOptions struct {
 	urlProbeCoverageOutput  string
 	providerSelectionOutput string
 	sshAdmissionDirectory   string
+	slackAlerts             bool
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -216,20 +217,66 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		return runErr
 	}
-	return monitor.RunLoopWithOptions(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, func(ctx context.Context, signal servermonitor.Signal, alerts servermonitor.Alerts) error {
-		if len(alerts) == 0 {
-			return nil
-		}
-		return writeAlerts(stdout, opts.format, alerts)
-	})
+	// One-shot runs are diagnostics and never notify. The notifier logs its
+	// own startup line and drains its queue for up to 15s at exit.
+	var notifier *servermonitor.SlackAlertNotifier
+	if opts.slackAlerts {
+		notifier = servermonitor.NewSlackAlertNotifier(slackNotifierSettings(settings, opts))
+		defer drainSlackNotifier(stop, notifier.Close, 15*time.Second)
+	} else {
+		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
+	}
+	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, continuousAlertHandler(stdout, opts.format, notifier))
 }
 
+// Restores default signal handling first, so a second interrupt or SIGTERM
+// ends the process at once, then gives the notifier until timeout to post
+// what it holds.
+func drainSlackNotifier(stopSignals func(), closeNotifier func(context.Context), timeout time.Duration) {
+	stopSignals()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	closeNotifier(ctx)
+}
+
+// The notifier's production settings for this watcher. Its start window
+// covers the active probes' first two rounds under the cadence floor, where an
+// alert active at start first passes a Sustain of 2.
+func slackNotifierSettings(settings servermonitor.SignalSettings, opts monitorOptions) servermonitor.SlackAlertNotifierSettings {
+	notifierSettings := servermonitor.DefaultSlackAlertNotifierSettings()
+	notifierSettings.WebhookUrl = settings.AlertNotifications.SlackWebhookUrl
+	notifierSettings.Environment = settings.Environment
+	notifierSettings.StartWindow = max(notifierSettings.StartWindow, 3*opts.minimumProbeCadence)
+	return notifierSettings
+}
+
+// Hands every gated execution, empty ones included (absence from complete
+// executions is what clears an incident), to the optional notifier, then
+// writes nonempty gated alerts to stdout.
+func continuousAlertHandler(stdout io.Writer, format string, notifier *servermonitor.SlackAlertNotifier) servermonitor.SignalExecutionHandler {
+	return func(ctx context.Context, signal servermonitor.Signal, execution servermonitor.SignalExecution) error {
+		if notifier != nil {
+			notifier.Handle(signal, execution)
+		}
+		if len(execution.Alerts) == 0 {
+			return nil
+		}
+		return writeAlerts(stdout, format, execution.Alerts)
+	}
+}
+
+// Applies the CLI's settings options. A watcher that never posts to Slack
+// (-slack-alerts=false or -once) drops the webhook from its effective
+// settings, so a webhook rotation does not make it stale.
 func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
 	if opts.mode != "" {
 		settings.AddressMode = servermonitor.AddressMode(opts.mode)
 	}
 	if len(opts.keys) > 0 {
 		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
+	}
+	if !opts.slackAlerts || opts.once {
+		settings.AlertNotifications = servermonitor.AlertNotificationSettings{}
 	}
 	settings, err := servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
 	if err != nil {
@@ -254,6 +301,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
+	flags.BoolVar(&opts.slackAlerts, "slack-alerts", true, "in continuous mode, post one Slack message per alert transition to vault monitor.yml alerts.slack_webhook_url (empty disables)")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")

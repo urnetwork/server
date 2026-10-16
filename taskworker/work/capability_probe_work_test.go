@@ -220,19 +220,28 @@ func capabilityProbeCounterValue(t testing.TB, name string, labels map[string]st
 // error. The task retried it a minute later, measuring every provider of the
 // pass again, those without evidence at once, and the pass counted both
 // measured and failed. A finished pass stands with its own sweep and result,
-// and the cleanup failure is counted apart; a pass that failed before or in
-// FinishPass still leaves the sweep, counted once.
+// and the cleanup failure is counted apart; a pass that failed before
+// FinishPass leaves the sweep, counted once.
+//
+// Root cause (re-review finding 5): a pass that FinishPass failed returned
+// the old sweep here too, discarding the held downgrades FinishPass returned
+// with its error. It returns FinishPass's sweep, which keeps the pass's
+// place, and its failure is counted once, by FinishPass.
 func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) {
 	sweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
 	finishedSweep := capprobe.Sweep{Cursor: server.NewId(), StartedAt: sweep.StartedAt}
+	// the same place, with the held downgrades as a failed pass left them
+	failedSweep := capprobe.Sweep{Cursor: sweep.Cursor, StartedAt: sweep.StartedAt, HeldDowngrades: []capprobe.HeldDowngrade{{ClientId: server.NewId(), SweepStartedAt: sweep.StartedAt}}}
 	pass := &capprobe.PassResult{Scanned: 4, Due: 3, Eligible: 2, Started: 2, Recorded: 1}
-	outcome := capabilityProbeOutcome{sweep: finishedSweep, pass: pass}
+	finishedOutcome := capabilityProbeOutcome{sweep: finishedSweep, pass: pass}
+	failedOutcome := capabilityProbeOutcome{sweep: failedSweep, pass: pass}
 	cleanupErr := &proberShardCleanupError{err: errors.New("capability probe shard cleanup: synthetic reap failure")}
 	finishErr := errors.New("synthetic evidence write failure")
 	readinessErr := errors.New("synthetic readiness failure")
 	failedLabels := map[string]string{"result": capprobe.PassResultFailed}
 	for _, c := range []struct {
 		name      string
+		outcome   capabilityProbeOutcome
 		finished  bool
 		finishErr error
 		err       error
@@ -241,15 +250,16 @@ func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) 
 		failed    float64
 		cleanup   float64
 	}{
-		{name: "finished, cleanup failed", finished: true, err: fmt.Errorf("wrapped: %w", cleanupErr), sweep: finishedSweep, failed: 0, cleanup: 1},
-		{name: "finished, cleaned up", finished: true, sweep: finishedSweep},
-		{name: "finish failed, cleanup failed", finished: true, finishErr: finishErr, err: errors.Join(finishErr, cleanupErr), sweep: sweep, returnErr: finishErr, failed: 0, cleanup: 1},
-		{name: "failed before finish", err: readinessErr, sweep: sweep, returnErr: readinessErr, failed: 1},
-		{name: "failed before finish, cleanup failed", err: errors.Join(readinessErr, cleanupErr), sweep: sweep, returnErr: readinessErr, failed: 1, cleanup: 1},
+		{name: "finished, cleanup failed", outcome: finishedOutcome, finished: true, err: fmt.Errorf("wrapped: %w", cleanupErr), sweep: finishedSweep, failed: 0, cleanup: 1},
+		{name: "finished, cleaned up", outcome: finishedOutcome, finished: true, sweep: finishedSweep},
+		{name: "finish failed", outcome: failedOutcome, finished: true, finishErr: finishErr, err: finishErr, sweep: failedSweep, returnErr: finishErr},
+		{name: "finish failed, cleanup failed", outcome: failedOutcome, finished: true, finishErr: finishErr, err: errors.Join(finishErr, cleanupErr), sweep: failedSweep, returnErr: finishErr, failed: 0, cleanup: 1},
+		{name: "failed before finish", outcome: finishedOutcome, err: readinessErr, sweep: sweep, returnErr: readinessErr, failed: 1},
+		{name: "failed before finish, cleanup failed", outcome: finishedOutcome, err: errors.Join(readinessErr, cleanupErr), sweep: sweep, returnErr: readinessErr, failed: 1, cleanup: 1},
 	} {
 		failedBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_passes_total", failedLabels)
 		cleanupBefore := capabilityProbeCounterValue(t, "urnetwork_capability_probe_shard_cleanup_errors_total", map[string]string{})
-		next, result, err := capabilityProbeShardPassResult(sweep, outcome, c.finished, c.finishErr, c.err)
+		next, result, err := capabilityProbeShardPassResult(sweep, c.outcome, c.finished, c.finishErr, c.err)
 		if !reflect.DeepEqual(next, c.sweep) || result != pass {
 			t.Errorf("%s: returned sweep %+v and %+v, want %+v and the pass's result", c.name, next, result, c.sweep)
 		}

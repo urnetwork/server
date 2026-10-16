@@ -277,23 +277,6 @@ func SetConnectionLocation(
 	// `err` is deliberately not returned yet: a failed mmdb lookup is not a
 	// reason to discard a perfectly good probed location.
 	location, connectionLocationScores, err := GetLocationForIp(ctx, clientIp)
-	// Optional shadow observer is absent by default. Successful connection
-	// writes may compare two attested readers without retaining the address.
-	defer func() {
-		// A panic is not a successful durable write. Preserve its propagation
-		// while preventing the optional observer from recording that result.
-		if failure := recover(); failure != nil {
-			panic(failure)
-		}
-		if returnErr == nil && connectionLocationScores != nil && connectionLocationScores.ArinLookupAt != nil {
-			server.ObserveArinShadowConnection(connectionId.String(), clientIp, server.ArinShadowActiveFacts{
-				Epoch: connectionLocationScores.ArinDatabaseBuildEpoch,
-				At:    *connectionLocationScores.ArinLookupAt,
-				Risk:  connectionLocationScores.ArinRisk, NonQuality: connectionLocationScores.ArinNonQuality,
-				Verified: connectionLocationScores.ArinQualityVerified,
-			})
-		}
-	}()
 
 	// a provider probed through its own egress is located from that probe, not
 	// from a lookup on its control-connection ip: the egress is where user
@@ -412,11 +395,13 @@ func SetConnectionLocation(
 		if parseErr != nil {
 			return parseErr
 		}
-		arinInfo, arinErr := server.GetArinInfo(addr)
+		// both databases classify the connection address on this path too,
+		// so a probed provider carries the same two slots as an unprobed one
+		arinInfo, oldArinInfo, arinErr := server.GetArinInfoPair(addr)
 		if arinErr != nil {
 			return arinErr
 		}
-		setArinConnectionFacts(scores, arinInfo)
+		setArinConnectionFacts(scores, arinInfo, oldArinInfo)
 
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent

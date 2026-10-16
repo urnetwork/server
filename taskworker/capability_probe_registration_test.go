@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/capprobe"
 	"github.com/urnetwork/server/controller"
@@ -172,6 +174,136 @@ func TestProductionCapabilityProbePassesWithoutProviders(t *testing.T) {
 		}
 		if shards := capabilityProbeTestShards(t, ctx); shards != 0 {
 			t.Fatalf("switched off: the pass opened %d prober shards", shards)
+		}
+	})
+}
+
+// The capability probe's chain restarts this process has counted.
+func capabilityProbeTestChainRestarts(t testing.TB) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "urnetwork_capability_probe_chain_restarts_total" {
+			return family.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	t.Fatal("no urnetwork_capability_probe_chain_restarts_total")
+	return 0
+}
+
+// Re-review finding 2: a pass that a taskworker still running a config that
+// switched the probe off claimed ended the probe's chain, and nothing
+// scheduled it again until a taskworker restarted with the probe on. A
+// production taskworker's runtime, with capability_probe.yml switching the
+// probe on, checks the chain every interval and schedules a pass due at once
+// when the chain has no row, counting it. While the probe reads as off it
+// schedules nothing, and a row that exists keeps its run time and
+// arguments.
+func TestCapabilityProbeChainReturnsAfterAStaleTaskworkerEndsIt(t *testing.T) {
+	previousInterval := capabilityProbeEnsureInterval
+	capabilityProbeEnsureInterval = 20 * time.Millisecond
+	defer func() { capabilityProbeEnsureInterval = previousInterval }()
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		// the URL probe's endpoints and a shard geometry clear of slot 255
+		withProbePlacementGeometry(t, 4, 8, 0)
+		controller.SetStConfig(&controller.StConfig{Enabled: false})
+		defer controller.SetStConfig(nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		pop := server.Config.PushSimpleResource(capprobe.SettingsResourceName, []byte("enabled: true\n"))
+		defer func() { pop() }()
+		switchTo := func(resource string) {
+			pop()
+			pop = server.Config.PushSimpleResource(capprobe.SettingsResourceName, []byte(resource))
+		}
+		// several of the runtime's intervals
+		settle := func() {
+			select {
+			case <-ctx.Done():
+			case <-time.After(20 * capabilityProbeEnsureInterval):
+			}
+		}
+
+		// a serving taskworker, without workers of its own: the test runs
+		// the probe's passes itself
+		lifetime, cancelLifetime := context.WithCancel(ctx)
+		defer cancelLifetime()
+		runtimeOwner, err := startTaskworkerRuntime(ctx, lifetime, cancelLifetime, RunOptions{Port: 8080, Count: 0, BatchSize: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The runtime's stats collector and chain check read the st config,
+		// capability_probe.yml and the interval that the deferred calls above
+		// restore, so they are joined first: without that the race detector
+		// reports the stats collector's read against the st config's reset.
+		defer func() {
+			runtimeOwner.Drain()
+			runtimeOwner.WaitFinalHandback()
+			cancelLifetime()
+			runtimeOwner.(*taskworkerRuntimeOwner).Wait()
+		}()
+		if count, _, _ := capabilityProbeTestRow(t, ctx); count != 1 {
+			t.Fatalf("the startup schedule left %d capability probe rows, want one", count)
+		}
+
+		// a taskworker still on a config that switches the probe off claims
+		// the next pass, which ends the chain
+		switchTo("enabled: false\n")
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE run_once_key = $1`, task.RunOnce("capability_probe").String(), server.NowUtc().Add(-time.Minute)))
+		})
+		workerSettings := task.DefaultTaskWorkerSettings()
+		workerSettings.ClaimRegisteredTargetsOnly = true
+		stale := task.NewTaskWorker(ctx, workerSettings)
+		stale.AddTargets(work.NewCapabilityProbeTaskTarget())
+		finished, retried, postRetried, err := stale.EvalTasks(1)
+		stale.Close()
+		if err != nil || len(finished) != 1 || len(retried)+len(postRetried) != 0 {
+			t.Fatalf("the stale pass did not finish: finished=%d retried=%d err=%v", len(finished), len(retried)+len(postRetried), err)
+		}
+		restartsBefore := capabilityProbeTestChainRestarts(t)
+		settle()
+		if count, _, _ := capabilityProbeTestRow(t, ctx); count != 0 {
+			t.Fatalf("switched off: %d capability probe rows, want the chain ended", count)
+		}
+
+		// this taskworker reads the probe as on, and brings the chain back
+		switchTo("enabled: true\n")
+		switchedOnAt := server.NowUtc()
+		for {
+			count, runAt, args := capabilityProbeTestRow(t, ctx)
+			if count == 1 {
+				if runAt.Before(switchedOnAt.Add(-time.Second)) || runAt.After(server.NowUtc()) || args.Sweep.Cursor != (server.Id{}) || !args.Sweep.StartedAt.IsZero() || args.MaxTimeSeconds != capprobe.DefaultSettings().MaxTimeSeconds {
+					t.Fatalf("the chain returned at %s with %+v, want a pass due at once starting a new sweep", runAt, args)
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal("the switched-on taskworker did not schedule the ended chain again")
+			case <-time.After(capabilityProbeEnsureInterval):
+			}
+		}
+		if restarts := capabilityProbeTestChainRestarts(t) - restartsBefore; restarts != 1 {
+			t.Fatalf("counted %v chain restarts, want 1", restarts)
+		}
+
+		// a row that exists keeps its run time and arguments
+		later := server.NowUtc().Add(time.Hour).Truncate(time.Microsecond)
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `UPDATE pending_task SET run_at = $2 WHERE run_once_key = $1`, task.RunOnce("capability_probe").String(), later))
+		})
+		settle()
+		if count, runAt, _ := capabilityProbeTestRow(t, ctx); count != 1 || !runAt.Equal(later) {
+			t.Fatalf("the chain's row is %d rows at %s, want its own at %s", count, runAt, later)
+		}
+		if restarts := capabilityProbeTestChainRestarts(t) - restartsBefore; restarts != 1 {
+			t.Fatalf("counted %v chain restarts with the row present, want 1", restarts)
 		}
 	})
 }

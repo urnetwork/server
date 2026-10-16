@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urnetwork/glog"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 )
 
@@ -20,10 +17,9 @@ const taskworkerStartupRetryDelay = 2 * time.Second
 // Closing the owner's completion channel publishes all fields to the drain
 // owner. A failed admission never owns an execution loop or metrics cohort.
 type taskworkerStartupResult struct {
-	worker       taskworkerRuntime
-	flushStats   func()
-	closeCapture func()
-	err          error
+	worker     taskworkerRuntime
+	flushStats func()
+	err        error
 }
 
 // A bounded attempt can stop while the process remains available for a later
@@ -72,24 +68,6 @@ func startTaskworkerAfterReadiness(
 		err := readiness(attempt)
 		if err == nil {
 			err = attempt.Err()
-		}
-		if err == nil && result.closeCapture == nil {
-			// Optional capture has its own strict authority. Refusal cannot
-			// become primary worker admission or repeat on each dependency retry.
-			result.closeCapture = func() {}
-			config, captureErr := server.LoadArinShadowRuntimeConfig()
-			if captureErr == nil {
-				var capture *server.ArinShadowRuntime
-				capture, captureErr = server.StartArinShadowRuntime(lifetime, config, "native", func(ctx context.Context) (server.ArinShadowRPCHandler, func(), error) {
-					return model.NewArinShadowNativeRPC(ctx, config.Capacity)
-				})
-				if captureErr == nil {
-					result.closeCapture = func() { capture.Close() }
-				}
-			}
-			if captureErr != nil {
-				glog.Errorf("[arin-shadow]optional capture unavailable; continuing primary service startup\n")
-			}
 		}
 		if err == nil {
 			result.worker, err = startRuntime(attempt, lifetime, cancel, options)

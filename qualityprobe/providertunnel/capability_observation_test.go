@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
@@ -188,5 +189,32 @@ func TestCapabilityTunnelLostEndsWhenItsWindowClientIsReplaced(t *testing.T) {
 	monitor.emit(replacement, connect.ProviderStateRemoved)
 	if cause := context.Cause(lostCtx); !errors.Is(cause, ErrTunnelClientReplaced) {
 		t.Fatalf("a coalesced replacement left lost with %v", cause)
+	}
+}
+
+// Re-review finding 3: a capability tunnel dialed a provider whose client
+// its window failed to admit again at every resize pass, unpaced as a URL
+// probe tunnel's re-dial is, minting, registering and retiring a derived
+// client each time for the measurement's whole span. A capability tunnel
+// paces it at its RedialMin, the ceiling at least that; a URL probe tunnel,
+// and a capability tunnel without one, keep the unpaced re-dial.
+func TestCapabilityObservationPacesTheRedial(t *testing.T) {
+	recorder := connect.NewPeerCapabilityRecorder(1)
+	defaultMax := connect.DefaultMultiClientSettings().FixedDestinationRetryMax
+	for _, c := range []struct {
+		name        string
+		observation *CapabilityObservation
+		retryMin    time.Duration
+		retryMax    time.Duration
+	}{
+		{name: "URL probe tunnel", retryMin: 0, retryMax: defaultMax},
+		{name: "capability tunnel without a pace", observation: &CapabilityObservation{Recorder: recorder}, retryMin: 0, retryMax: defaultMax},
+		{name: "capability tunnel", observation: &CapabilityObservation{Recorder: recorder, RedialMin: 2 * time.Minute}, retryMin: 2 * time.Minute, retryMax: max(defaultMax, 2*time.Minute)},
+		{name: "capability tunnel past the default ceiling", observation: &CapabilityObservation{Recorder: recorder, RedialMin: defaultMax + time.Minute}, retryMin: defaultMax + time.Minute, retryMax: defaultMax + time.Minute},
+	} {
+		settings := providerTunnelMultiClientSettingsForConfig(Config{CapabilityObservation: c.observation})
+		if settings.FixedDestinationRetryMin != c.retryMin || settings.FixedDestinationRetryMax != c.retryMax {
+			t.Errorf("%s: re-dial paced from %s to %s, want %s to %s", c.name, settings.FixedDestinationRetryMin, settings.FixedDestinationRetryMax, c.retryMin, c.retryMax)
+		}
 	}
 }

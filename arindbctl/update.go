@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // update refreshes every data set the ARIN resource depends on, as far as the
@@ -18,7 +22,10 @@ import (
 //
 //	mmdb/                   GeoLite2 resource (as refresh)
 //	arindb/                 final arindb resource: arin.mmdb, manifest.json,
-//	                        registration-manifest.json, update-manifest.json
+//	                        registration-manifest.json, update-manifest.json,
+//	                        and for the canary arin-old.mmdb and
+//	                        manifest-old.json, byte copies of the previously
+//	                        selected release (copyPreviousArinDatabase)
 //	subscriber-evidence/    not a resource: the refreshed catalog and its
 //	                        pinned snapshots, the registration base and the
 //	                        catalog audit, kept for review and reproduction
@@ -75,7 +82,9 @@ func runUpdate(ctx context.Context, options commandOptions, dependencies command
 			return fmt.Errorf("registration build: %w", err)
 		}
 		manifest["subscriber_augmentation"] = "skipped: no reviewed subscriber catalog was supplied; this resource has registration evidence only"
-		return finishUpdate(stage, arinDir, manifest, "registration only (no subscriber catalog); subscriber augmentation skipped")
+		previous := copyPreviousArinDatabase(ctx, options, arinDir)
+		manifest["previous_database"] = previous
+		return finishUpdate(stage, arinDir, manifest, "registration only (no subscriber catalog); subscriber augmentation skipped; "+previousArinDatabaseSummary(previous))
 	}
 	catalogHash, err := hashArinBuildInput(ctx, options.subscriberCatalog)
 	if err != nil {
@@ -139,7 +148,175 @@ func runUpdate(ctx context.Context, options commandOptions, dependencies command
 		}
 		summary += "; unavailable evidence: " + strings.Join(ids, ", ")
 	}
+	previous := copyPreviousArinDatabase(ctx, options, arinDir)
+	manifest["previous_database"] = previous
+	summary += "; " + previousArinDatabaseSummary(previous)
 	return finishUpdate(stage, arinDir, manifest, summary)
+}
+
+// The outcomes of the copy-forward recorded under previous_database.
+const (
+	previousArinDatabaseCopied    = "copied"
+	previousArinDatabaseIdentical = "identical"
+	previousArinDatabaseNone      = "none"
+	previousArinDatabaseRefused   = "refused"
+)
+
+// Copies the previously selected database beside the new build as
+// arin-old.mmdb, with its manifest as manifest-old.json, so every process of
+// the release opens both (arindbctl/ARINDB.md, "Files and the arindbctl
+// copy-forward"). Previous means exactly the file a process of the named
+// environment would open before this release is added: the runtime resolver
+// over --previous-config, or the --previous-database pin. The file is opened
+// with the runtime decoder and refused unless its type is urnetwork arindb,
+// the manifest beside it names it in sha256["arin.mmdb"], the streamed copy
+// has that SHA-256, the manifest's built_at second is its build epoch, and
+// that epoch is strictly older than the new build's. A refusal, an identical
+// previous database or none leaves both files out. None of these fails the
+// release: blocking it would keep the suspect database in service. The record
+// says what happened and why.
+func copyPreviousArinDatabase(ctx context.Context, options commandOptions, arinDir string) map[string]any {
+	record := map[string]any{}
+	finish := func(status string, reason string) map[string]any {
+		record["status"] = status
+		if reason != "" {
+			record["reason"] = reason
+		}
+		return record
+	}
+	source := options.previousDatabase
+	switch {
+	case source != "":
+		record["selected_by"] = "previous-database"
+	case options.previousConfig != "":
+		record["selected_by"] = "previous-config"
+		record["config_root"] = options.previousConfig
+		record["env"] = options.previousEnv
+		paths, err := server.ResolveResourcePaths(options.previousConfig, options.previousEnv, "arindb/arin.mmdb")
+		if errors.Is(err, server.ErrResourceNotFound) {
+			return finish(previousArinDatabaseNone, "no arindb/arin.mmdb resolves beneath the previous config")
+		}
+		if err != nil {
+			return finish(previousArinDatabaseRefused, "resolve the previous database: "+err.Error())
+		}
+		source = paths[0]
+	default:
+		return finish(previousArinDatabaseNone, "no previous database was named")
+	}
+	record["source"] = source
+
+	newEpoch, err := server.ReadArinDatabaseBuildEpoch(filepath.Join(arinDir, "arin.mmdb"))
+	if err != nil {
+		return finish(previousArinDatabaseRefused, "open the new database: "+err.Error())
+	}
+	newManifest, err := server.ReadArinDatabaseManifest(filepath.Join(arinDir, "manifest.json"))
+	if err != nil {
+		return finish(previousArinDatabaseRefused, "read the new manifest: "+err.Error())
+	}
+	previousEpoch, err := server.ReadArinDatabaseBuildEpoch(source)
+	if err != nil {
+		return finish(previousArinDatabaseRefused, "open the previous database: "+err.Error())
+	}
+	record["build_epoch"] = previousEpoch
+	manifestPath := filepath.Join(filepath.Dir(source), "manifest.json")
+	manifestContent, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return finish(previousArinDatabaseRefused, "read the previous manifest: "+err.Error())
+	}
+	manifest, err := server.ReadArinDatabaseManifest(manifestPath)
+	if err != nil {
+		return finish(previousArinDatabaseRefused, "read the previous manifest: "+err.Error())
+	}
+	record["sha256"] = manifest.Sha256
+	if builtAt := manifest.BuiltAt.Unix(); builtAt != previousEpoch {
+		return finish(previousArinDatabaseRefused, fmt.Sprintf("the previous manifest's built_at second %d is not the database's build epoch %d", builtAt, previousEpoch))
+	}
+	if manifest.Sha256 == newManifest.Sha256 {
+		return finish(previousArinDatabaseIdentical, "the previous database is the new build")
+	}
+	if newEpoch <= previousEpoch {
+		return finish(previousArinDatabaseRefused, fmt.Sprintf("the previous build epoch %d is not older than the new build's %d", previousEpoch, newEpoch))
+	}
+
+	destination := filepath.Join(arinDir, "arin-old.mmdb")
+	size, digest, err := copyArinDatabaseFile(ctx, source, destination)
+	if err != nil {
+		os.Remove(destination)
+		return finish(previousArinDatabaseRefused, "copy the previous database: "+err.Error())
+	}
+	if digest != manifest.Sha256 {
+		os.Remove(destination)
+		return finish(previousArinDatabaseRefused, "the copied bytes do not have the previous manifest's SHA-256")
+	}
+	// the epoch and type of the bytes actually copied, not only of the source
+	if copiedEpoch, err := server.ReadArinDatabaseBuildEpoch(destination); err != nil || copiedEpoch != previousEpoch {
+		os.Remove(destination)
+		return finish(previousArinDatabaseRefused, "the copied database does not open with the previous build epoch")
+	}
+	if err := writeSyncedFile(filepath.Join(arinDir, "manifest-old.json"), manifestContent); err != nil {
+		os.Remove(destination)
+		return finish(previousArinDatabaseRefused, "write manifest-old.json: "+err.Error())
+	}
+	record["size"] = size
+	return finish(previousArinDatabaseCopied, "")
+}
+
+// Streams source to a new destination file, hashing the bytes written.
+func copyArinDatabaseFile(ctx context.Context, source string, destination string) (int64, string, error) {
+	in, err := os.Open(source)
+	if err != nil {
+		return 0, "", err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, "", err
+	}
+	hash := sha256.New()
+	size := int64(0)
+	buffer := make([]byte, 1024*1024)
+	copyErr := func() error {
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			count, readErr := in.Read(buffer)
+			if 0 < count {
+				if _, err := out.Write(buffer[:count]); err != nil {
+					return err
+				}
+				hash.Write(buffer[:count])
+				size += int64(count)
+			}
+			if readErr == io.EOF {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}()
+	if copyErr == nil {
+		copyErr = out.Sync()
+	}
+	closeErr := out.Close()
+	if copyErr != nil {
+		return 0, "", copyErr
+	}
+	if closeErr != nil {
+		return 0, "", closeErr
+	}
+	return size, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// The copy-forward's outcome for the update summary and the release message.
+func previousArinDatabaseSummary(record map[string]any) string {
+	switch record["status"] {
+	case previousArinDatabaseCopied:
+		return fmt.Sprintf("canary: previous database copied (build epoch %v)", record["build_epoch"])
+	default:
+		return fmt.Sprintf("no canary: previous database %v (%v)", record["status"], record["reason"])
+	}
 }
 
 // Validation is best effort: the Atlas archive may be unavailable, and the

@@ -546,7 +546,11 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "first_measured_at", kind: "timestamp without time zone", notNull: true},
 			snMainnetMigrationColumn{name: "run_count", kind: "integer", notNull: true, defaultExpression: "1"}),
 		snMainnetMigrationConstraints("provider_modern_evidence", "PRIMARY KEY (client_id)")),
-	migrationCurrentSuffix(837, "lag.dev measurement certificate deliver time",
+	migrationCurrentSuffix(arindbCanaryRollupMigrationVersion, "dual ARIN database canary rollup slots",
+		migrationArindbCanaryRollupArtifacts()...),
+	migrationCurrentSuffix(arindbCanaryLocationMigrationVersion, "dual ARIN database canary connection slots and old-slot write guard",
+		migrationArindbCanaryLocationArtifacts()...),
+	migrationCurrentSuffix(839, "lag.dev measurement certificate deliver time",
 		snMainnetMigrationColumns("network_extender_measurement_cert",
 			snMainnetMigrationColumn{name: "deliver_time", kind: "timestamp without time zone"})),
 }
