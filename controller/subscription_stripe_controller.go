@@ -28,10 +28,16 @@ import (
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 )
 
-var stripeWebhookSigningSecret = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
-	return c["webhook"].(map[string]any)["signing_secret"].(string)
-})
+// The key Stripe signs each webhook body with.
+func stripeWebhookSigningSecret() (string, error) {
+	return vaultNonblankString("stripe.yml", "webhook", "signing_secret")
+}
+
+// Why a Stripe webhook cannot be verified now, or nil.
+func StripeWebhookVerifiable() error {
+	_, err := stripeWebhookSigningSecret()
+	return err
+}
 
 var stripeApiToken = sync.OnceValue(func() string {
 	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
@@ -227,7 +233,16 @@ type StripeLineItemProduct struct {
 	UnitAmount int    `json:"unit_amount"`
 }
 
+// Fails closed. stripe-go accepts a signature computed under an empty key,
+// which anyone can compute, so without a configured secret every webhook is
+// refused as unavailable, before its body is read.
 func VerifyStripeBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	secret, err := stripeWebhookSigningSecret()
+	if err != nil {
+		glog.Warningf("[stripe]webhook refused, verification secret unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
+
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -236,7 +251,7 @@ func VerifyStripeBody(_ *session.ClientSession, req *http.Request) (io.Reader, e
 	_, err = stripewebhook.ConstructEventWithOptions(
 		bodyBytes,
 		req.Header.Get("Stripe-Signature"),
-		stripeWebhookSigningSecret(),
+		secret,
 		stripewebhook.ConstructEventOptions{IgnoreAPIVersionMismatch: true},
 	)
 	if err != nil {

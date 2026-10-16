@@ -21,12 +21,26 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-var brevoWebhookExpectedAuths = sync.OnceValue(func() map[string]bool {
-	brevo := server.Vault.RequireSimpleResource("brevo.yml")
+// The Authorization values a Brevo webhook may carry: each configured user as
+// a Basic credential with an empty password, lower cased. A blank user would
+// add "Basic Og==", which anyone can send, so it adds nothing. Without a usable
+// user the error says why, and every webhook is refused.
+func brevoWebhookExpectedAuths() (map[string]bool, error) {
+	brevo, err := server.Vault.SimpleResource("brevo.yml")
+	if err != nil {
+		return nil, err
+	}
+	// String panics on a malformed resource
+	if _, err := brevo.ParseE(); err != nil {
+		return nil, err
+	}
 	// TODO these are users not bearer tokens
 	bearers := brevo.String("brevo", "webhook_bearers")
 	expectedAuths := map[string]bool{}
 	for _, bearer := range bearers {
+		if strings.TrimSpace(bearer) == "" {
+			continue
+		}
 		expectedAuth := strings.ToLower(fmt.Sprintf(
 			"Basic %s",
 			base64.StdEncoding.EncodeToString([]byte(
@@ -35,8 +49,11 @@ var brevoWebhookExpectedAuths = sync.OnceValue(func() map[string]bool {
 		))
 		expectedAuths[expectedAuth] = true
 	}
-	return expectedAuths
-})
+	if len(expectedAuths) == 0 {
+		return nil, errors.New("brevo.yml: brevo.webhook_bearers names no user")
+	}
+	return expectedAuths, nil
+}
 
 var brevoApiKey = sync.OnceValue(func() string {
 	brevo := server.Vault.RequireSimpleResource("brevo.yml")
@@ -121,12 +138,17 @@ func BrevoWebhook(
 ) (*BrevoWebhookResult, error) {
 	// glog.Infof("[product_updates]brevo webhook: (%v) %v\n", clientSession.Header, webhookArgs)
 
+	// fails closed: without a usable configured user nothing is accepted
+	expectedAuths, err := brevoWebhookExpectedAuths()
+	if err != nil {
+		glog.Warningf("[product_updates]brevo webhook refused, verification users unavailable: %s\n", err)
+		return nil, errWebhookVerificationUnavailable
+	}
 	auth := func() bool {
 		auths, ok := clientSession.Header["Authorization"]
 		if !ok {
 			return false
 		}
-		expectedAuths := brevoWebhookExpectedAuths()
 		for _, auth := range auths {
 			if expectedAuths[strings.ToLower(auth)] {
 				return true

@@ -76,23 +76,8 @@ const paymentReconcileSolanaFinalityGrace = 1 * time.Hour
 // actual string scalar. Typed YAML decoding deliberately coerces numeric
 // scalars into strings, which is unsafe for credential-presence checks.
 func simpleResourceNonblankString(resource *server.SimpleResource, path ...string) bool {
-	object, err := resource.ParseE()
-	if err != nil {
-		return false
-	}
-	var value any = object
-	for _, component := range path {
-		object, ok := value.(map[string]any)
-		if !ok {
-			return false
-		}
-		value, ok = object[component]
-		if !ok {
-			return false
-		}
-	}
-	stringValue, ok := value.(string)
-	return ok && strings.TrimSpace(stringValue) != ""
+	_, err := simpleResourceNonblankStringValue(resource, path...)
+	return err == nil
 }
 
 func stripeReconcileCredentialsPresent() bool {
