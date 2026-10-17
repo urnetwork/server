@@ -16,7 +16,7 @@ and continue until the operator ends the run or its requested duration expires.
 Use two explicit, long-lived agent roles for every pass; reuse the same agents
 so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-6-sol` agent at `medium` reasoning ("Sol Medium") owns monitor execution,
+- A `gpt-6.1-sol` agent at `low` reasoning ("Sol Low") owns monitor execution,
   the monitor-test gates, and initial evidence work: preflight, immutable binary,
   authoritative watcher and tails, alert capture, bounded read-only failure
   fact collection, initial triage, evidence-authority checks, focused reruns,
@@ -26,29 +26,48 @@ so their evidence context and open causal boundaries remain intact:
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
-- A `gpt-6-astra` agent at `max` reasoning ("Astra Max") owns all
+- A `gpt-6.1-sol` agent at `medium` reasoning ("Sol Medium") owns all
   post-triage root-cause debugging, bounded read-only discriminator collection,
-  and repair for every new, changed, or unresolved causal boundary. Astra
-  consumes Sol's initial alert/triage manifest, inspects bounded relevant
+  and repair for every new, changed, or unresolved causal boundary.
+  Sol Medium consumes Sol Low's initial alert/triage manifest, inspects bounded relevant
   source, collects only the precise missing production fact under the same
   authority and privacy rules, and runs local deterministic controls. Every
   self-improvement fix to the probes, shared monitoring utilities, signal
-  catalog, or this harness also belongs to Astra Max.
+  catalog, or this harness also belongs to Sol Medium.
 
 For each such boundary, Sol sends an initial deterministic delta and triage
 manifest referencing the prior ledger record and object hashes described below;
 group shared dependency/artifact/rollout failures and keep unrelated causes
 separate. Never paste full all-signal Markdown, logs, raw evidence, or test
-output into a model handoff. Astra pulls the complete Alert and only bounded
+output into a model handoff. Sol Medium pulls the complete Alert and only bounded
 relevant source objects by hash on demand, then records any precise additional
-fact it collects. Astra returns cause/patch/regressions/prerequisites/window;
-Sol returns independent gate manifests. Keep both agents and the watcher
+fact it collects. Sol Medium returns cause/patch/regressions/prerequisites/window;
+Sol Low returns independent gate manifests. Keep both agents and the watcher
 alive unless safe promotion requires a handoff.
 
-The primary agent owns the append-only run ledger. Sol and Astra produce
+The primary agent owns the append-only run ledger. Sol Low and Sol Medium produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
 must not append ledger records themselves. This keeps process/session ownership,
 production mutation authority, and the single-writer chain in one place.
+
+## Unresolved issue handoff
+
+When Sol Medium cannot resolve an issue, write a concise Markdown handoff to
+`factury/monitor/alerts/` under the mono root (a sibling of `server/`). Create
+that directory if needed. Use one stable file per issue and update it as new
+evidence arrives, so another developer can pick it up without repeating the
+investigation. Do not silently escalate to another model.
+
+Include the alert identity and severity, observed times, confirmed impact,
+evidence paths and hashes, source/artifact identity, ranked hypotheses,
+what was tried and its results, deterministic reproducer/test status,
+false-positive and false-negative qualifiers, and the exact remaining question
+and next action. Keep credentials, raw customer identifiers, raw SQL, and private
+log contents out of the handoff; reference restricted evidence files instead.
+Check `factury/HANDOFF-MONITOR.md`, `factury/HANDOFF-MONITOR2.md` when present,
+and existing alert handoffs before assigning work already owned by another
+developer. Record the handoff path and owner in the run ledger; keep the finding
+open and continue monitoring and independent work.
 
 ## Agent contract
 
@@ -59,7 +78,7 @@ without an observation gap, and continue.
 
 Every investigation and root-cause handoff must explicitly report
 `false_positive_qualifiers` and `false_negative_qualifiers`. Sol records
-initial authority/source-completeness boundaries; Astra records the
+initial authority/source-completeness boundaries; Sol Medium records the
 post-triage candidate discriminator, its observation authority, source
 completeness, and healthy control, then decides whether the evidence establishes
 a real probe boundary. When it does, update the owning numbered
@@ -71,9 +90,9 @@ qualifier from speculation, suppress the original symptom, or wait for the
 daily research pass to record a discriminator learned during an active
 incident.
 
-This is context-delivery optimization only: use Sol at medium to run the
+This is context-delivery optimization only: use Sol 6.1 at low reasoning to run the
 monitor tests, deterministic monitoring, initial failure fact collection, and
-triage; retain Astra at max for all post-triage debugging, bounded fact
+triage; retain Sol 6.1 at medium reasoning for all post-triage debugging, bounded fact
 collection, and repair. Monitor tests are harness gates, never an implicit part
 of a production probe invocation. Never silently change those roles or efforts,
 skip a severity, lose warnings or `cannot-observe`, or delete/truncate evidence.
@@ -177,7 +196,7 @@ Before the first production command:
 6. have Sol run the local monitor tests before trusting a newly built
    detector; and
 7. have Sol capture and triage bounded initial facts for every failed gate or
-   alert before handing its manifest to Astra Max for debugging and repair.
+   alert before handing its manifest to Sol Medium for debugging and repair.
 
 The normal workstation mode is `overlay`; use `lan` only from a host with the
 configured LAN routes. An explicit `-ssh-key` may be repeated when the SSH
@@ -572,8 +591,8 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Sol and Astra may prepare manifests;
-they do not append. Do not allow two agents to append in parallel.
+make its old physical layout valid JSONL.
+Sol Low and Sol Medium may prepare manifests; they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a
@@ -961,13 +980,13 @@ Research all three directions:
    observation failure are explicit candidates, but become probe rules only
    when a bounded discriminator and healthy control establish them.
 
-Sol Medium owns the reproducible crosswalk, registry/test inventory, current
+Sol Low owns the reproducible crosswalk, registry/test inventory, current
 watcher delta, initial failure fact collection and triage, and independent test
-and verification manifests. Astra Max owns all post-triage bounded
+and verification manifests. Sol Medium owns all post-triage bounded
 investigation/fact collection, root-cause debugging, causal discrimination,
 false-positive/false-negative boundaries, and every self-improvement repair to
-a probe, shared monitoring utility, signal catalog, or this harness. Astra
-writes the smallest source and deterministic-test correction; Sol reruns the
+a probe, shared monitoring utility, signal catalog, or this harness. Sol Medium
+writes the smallest source and deterministic-test correction; Sol Low reruns the
 relevant tests and verifies the repaired observation boundary independently.
 The primary agent reviews their manifests, writes the single chained ledger
 record, and owns all source and production authority decisions.
@@ -1192,11 +1211,11 @@ triaging absent, stale, partial, disabled or overdue query evidence.
 
 ## Deterministic verification gates
 
-Every confirmed problem needs an Astra Max-authored synthetic regression. The
+Every confirmed problem needs a Sol Medium-authored synthetic regression. The
 test should construct the smallest input that reproduces the causal failure
-without production access or wall-clock sleeps. Sol Medium runs the narrow,
+without production access or wall-clock sleeps. Sol Low runs the narrow,
 package, race, and vet gates below and supplies the initial failure facts and
-triage manifest before Astra begins the repair. Cover, as applicable:
+triage manifest before Sol Medium begins the repair. Cover, as applicable:
 
 - the failing observation and exact alert identity;
 - a healthy boundary and threshold edge;
@@ -1251,6 +1270,22 @@ the watcher, and let each subshell leave that parent state unchanged on exit.
 Do not overlap the package and race gates: although no fixed-path collision is
 established, they share local PostgreSQL, proxy, CPU, and process capacity, so
 overlap can create load-dependent failures and is not formal gate evidence.
+
+Signal, timeout, and native-child experiments must not share an active native
+database fixture, even when they issue no SQL. Use an independently owned
+disposable fixture. Reuse of an idle fixture requires proof of exact PID, PPID,
+PGID and SID ownership and database noninterference through child termination;
+a terminal status and joined local launcher do not establish that proof. The
+primary agent owns that reuse admission after the fixture's prior consumers
+have terminated.
+
+The 2026-10-17 local qualification retains its first failed attempt: PostgreSQL
+logged SIGKILL at 07:20:57.408Z, followed by one connection loss and 32 setup
+refusals during recovery. The primary agent had authorized a separate timeout
+control that overlapped that window. Filesystem receipt clocks, status 137 and
+local join did not identify the signal sender. Preserve the original failure,
+authorization and clock provenance when separately admitting a fresh run after
+readiness succeeds; neither temporal overlap nor a later PASS resolves causality.
 
 Run the owning repository's full release-relevant tests for product fixes. A
 focused test is not sufficient when the change affects generated service

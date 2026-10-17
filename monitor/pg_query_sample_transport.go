@@ -19,6 +19,7 @@ type pgSampleTransportObservation struct {
 	receipt            pgSampleTransportReceipt
 	nonce              string
 	runSlotRequestedAt time.Time
+	startClock         func() time.Time
 }
 
 // Finite source facts only. Joined covers the local SSH process and its pipes,
@@ -35,6 +36,8 @@ type pgSampleTransportReceipt struct {
 	Joined                          bool   `json:"joined"`
 	NativeExitCode                  *int   `json:"native_exit_code"`
 	ProgressStatus                  string `json:"progress_status"`
+	// Only a local refusal populates this field; it is never a native Start fact.
+	StartRefusalRemainingBudgetNs *int64 `json:"start_refusal_remaining_budget_ns,omitempty"`
 }
 
 // The private key never crosses the single admitted PG-attempt context.

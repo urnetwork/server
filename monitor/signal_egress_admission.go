@@ -139,8 +139,15 @@ func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]f
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(egressAdmissionQuery(env.cfg.env))
 	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
 		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(egressAdmissionResponseMax)+" '"+queryUrl+"'")
-	if err != nil || len(out) > egressAdmissionResponseMax {
-		return []finding{egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)}, nil
+	if err != nil {
+		unobservable := egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)
+		unobservable.observed += " " + observationFailureDetails(err, classifyObservationError(err))
+		return []finding{unobservable}, nil
+	}
+	if len(out) > egressAdmissionResponseMax {
+		unobservable := egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)
+		unobservable.observed += " " + observationFailureDetails(nil, observationErrorClassBoundExceeded)
+		return []finding{unobservable}, nil
 	}
 	processes, err := parseEgressAdmission(out, env.cfg.env, env.now())
 	if err != nil {

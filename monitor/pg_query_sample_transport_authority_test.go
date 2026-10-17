@@ -157,9 +157,10 @@ func TestPgTransportAuthoritySshHelper(t *testing.T) {
 	os.Exit(94)
 }
 
-// Exercise the actual exec.CommandContext SSH lifecycle against a local Go
-// child. Startup and remote progress are proved before the parent expires.
-func TestPgTransportAuthorityPreservesRemoteProgressAtOwnerDeadline(t *testing.T) {
+// Force a passed boundary check followed by a shorter actual Start window,
+// modeling descheduling after the check. The native local child still proves
+// Start/Wait and remote progress; passing the guard never promises completion.
+func TestPgTransportAuthorityPreservesRemoteProgressAfterStartCheckRace(t *testing.T) {
 	fixture := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
@@ -189,7 +190,15 @@ func TestPgTransportAuthorityPreservesRemoteProgressAtOwnerDeadline(t *testing.T
 		t.Fatal("fixture used the injected transport instead of the owned SSH process")
 		return "", "", nil
 	})
-	env.runner.(*runner).runSSH = runSSHCommand
+	env.runner.(*runner).runSSH = func(ctx context.Context, args []string, stdin string) (string, string, error) {
+		deadline, known := ctx.Deadline()
+		if !known {
+			t.Fatal("fixture lost its original owner deadline")
+		}
+		observation := pgSampleTransportFromContext(ctx)
+		observation.startClock = func() time.Time { return deadline.Add(-pgSampleMinimumWaitBudget) }
+		return runSSHCommand(ctx, args, stdin)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	var findings []finding
