@@ -367,6 +367,9 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	cmd.Stderr = &errOut
 	observation := pgSampleTransportFromContext(ctx)
 	observation.stage("ssh_start", "not_attempted")
+	if err := observation.admitNativeStart(ctx); err != nil {
+		return "", "", err
+	}
 	err := cmd.Start()
 	if err == nil {
 		observation.started(ctx)

@@ -2821,6 +2821,14 @@ identify the responsible operation or initiating failure. Skip only these
 exact source symbols, retaining a validated caller or aggregate-only unknown
 when the remaining stack is missing or unsupported. Do not skip lookalike
 functions in application subpackages.
+The Redis callback wrappers `redisWithClient`, `Redis`, and `RedisDoOnce`
+follow the same exact-symbol rule at ordinary and versioned Server roots.
+The lower wrapper may report context expiry, preflight failure, callback
+failure, or retry exhaustion; it does not identify the business caller or
+prove a Redis outage. Both public callback adapters must be skipped too,
+otherwise attribution merely moves to another wrapper. This rule does not
+skip every recovery function: `RedisAuth`, `RedisWithDeadline`, and
+`ConnectionAnnounce.recoverLiveCall` retain their specific policy boundaries.
 Known recovery wrappers consume their function and already-validated source
 record as a pair. A `-trimpath` build can use an application-module prefix on
 that source path; it is not a second function or an unknown owner. Unsupported
@@ -2828,6 +2836,7 @@ inner function records still stop attribution before a later caller can lend
 its apparent ownership.
 The finite provider-egress classifier additionally validates `txWithConnection`
 against `db.go`, and `TxInConn`/`DbInConn` against `db_connection_owner.go`.
+Its three Redis callback wrappers each require `redis.go`.
 A different file, unknown inner symbol or wrapper-only stack cannot supply
 that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
@@ -2858,6 +2867,18 @@ not recovery. Source investigation needs a bounded original stack and safe
 error discriminator tied to an emitting artifact before choosing among begin,
 callback, rollback, commit and retry boundaries. This parser correction does
 not authorize a remote read or transaction behavior change.
+
+The later 2026-10-17 Connect observation retained a nine-lines/minute
+`server/v2026.redisWithClient` owner PAGE with unknown type and SQLSTATE.
+The source parser omitted this callback wrapper and both public adapters.
+The retained Alert supplies neither the original stack nor an emitting image;
+context failure, preflight, callback and retry exhaustion remain unresolved.
+The nearby JWT, profile, location and control-frame owners are distinct
+application boundaries, not evidence that all these panics share a cause.
+Missing rows, stale locations and expected credential refusals have separate
+source outcomes and cannot be inferred from a panic frame. Preserve generic
+PAGE counts, unknown error classes and unmatched business owners. A corrected
+caller is improved attribution, not recovery or proof of primary-work impact.
 
 For the exact `statsRefreshProviderEgress` caller/file pair, in the reviewed
 unversioned or `v2026` Server module, samples additionally retain
@@ -4102,8 +4123,8 @@ watcher repeated that result after the corrected net-escrow alert text was
 loaded. Neither emitted `tailer-reconcile`, `tailer-silent`,
 `tailer-restarting`, or `cannot-observe`.
 
-The 22:23Z Connect audit found a previously unclassified recovery defect. A
-bounded two-hour query returned 131 canonical
+The historical 2026-08-31 22:23Z Connect audit found a previously unclassified
+recovery defect. A bounded two-hour query returned 131 canonical
 `http: response.WriteHeader on hijacked connection` lines across several
 blocks, each paired in the standard library with a rejected body write. The
 same window contained zero `[h]unhandled error from route` lines. Router
@@ -4113,17 +4134,19 @@ recovery always logs that marker for an unexpected panic before attempting its
 `server.IsDoneError` panic was deliberately suppressed, but control then fell
 through to `http.Error` after net/http no longer owned the connection.
 
-Router recovery now returns immediately for that expected cancellation branch
+Server commit `02f4d29ae575ae68c2a5f0c8ba3207361b353170` made router recovery
+return immediately for that expected cancellation branch
 while retaining error accounting, the stack record, and the ordinary 500 for
 unexpected pre-hijack panics. The deterministic reproduction crosses a fake
 Hijack boundary, raises the same Done panic, and failed on the old code with
 two post-hijack writes including status 500; it now requires zero. A companion
 test preserves the unexpected-panic response. The `http-hijack-write` log
-class counts only the canonical WriteHeader line so one recovery does not look
-like two incidents. Deploy this server revision to Connect, then require ten
-minutes of ordinary H1 teardown with zero class lines. Do not silence
-net/http's logger globally: any post-fix warning accompanied by an `[h]`
-record is a real route panic with a separate root cause.
+class counts only the canonical WriteHeader line, excluding a paired body-write
+diagnostic; its rate is diagnostic volume, not unique incident cardinality.
+Compare the emitting artifact's ancestry first and deploy this fix only when
+proved missing. A warning linked to a same-event `[h]unhandled` record instead
+requires diagnosing that unexpected route panic. Do not silence net/http's
+logger globally or remove a secondary warning before identifying its cause.
 
 Monitor v160 supplied the live detector control. It was built from server
 commit `02f4d29a` (binary SHA-256
@@ -4134,10 +4157,11 @@ warning at `22:38:58Z` as `http-hijack-write` at one/minute. The same alert
 retained the mechanism, action, and verification contract above. Its generic
 200-byte evidence sample cut the final source at `router.(*Rou`, however,
 which would conceal whether a future line came from the known Router recovery
-or another post-hijack writer. The class-specific sample now preserves the
-complete `http: response.WriteHeader ... from <source>` suffix, with a
-deterministic markdown assertion for
-`router.(*Router).ServeHTTP.func1.1 (router.go:104)`.
+or another post-hijack writer. The class-specific sample prioritizes the
+`http: response.WriteHeader ... from <source>` suffix within its existing
+200-byte bound. Its synthetic Markdown control retains a complete legacy
+router frame when it fits. A long or absent frame remains partial source
+evidence, and a wrapper frame identifies only the immediate forwarding method.
 
 The `2026.8.31-outerwerld+1033803620` Connect rollout then supplied the
 deployment boundary. At `23:02Z`, `warpctl ls versions --sample` reported that
@@ -4149,8 +4173,52 @@ that image. The same fleet still emitted eight canonical
 `23:00:50Z` and `23:01:39Z`, all from the known Router recovery frame. Commit
 `02f4d29a` was made after this image was built, so the result does not regress
 the TTL fix: it proves that one newer Connect image is still required for the
-separate post-Hijack recovery fix. Re-deploying `1033803620` cannot clear that
-class.
+separate post-Hijack recovery fix at that historical boundary. Re-deploying
+`1033803620` could not clear that class; neither historical version describes
+the current running artifact.
+
+The retained 2026-10-17 warning exposes the current attribution limit. Its
+immediate source frame is `router.(*requestMetricsWriter).WriteHeader`, which
+forwards any caller's response header. The alert supplies neither the original
+event time nor a correlated caller stack or emitting artifact identity. The
+reviewed source at `55c00d3f6fb986c5130b837b23d1abebc6731172` already guards
+expected Done recovery after Hijack, while its
+unexpected-panic branch logs `[h]unhandled error from route` before attempting
+`http.Error`. This source distinction proves that the generic marker cannot
+select the historical cause; it does not prove which branch ran in production.
+
+The owning guidance therefore retains the WARN at any canonical header line
+and the same service identity, frame, threshold and count behavior. First bind
+one original warning's source timestamp and source window to its emitting
+process and immutable artifact, then compare that artifact's source ancestry
+with `02f4d29ae575ae68c2a5f0c8ba3207361b353170`. Deploy the historical correction
+only if proved missing. On an already-current artifact, use a bounded
+same-event caller stack and correlated `[h]unhandled` evidence to distinguish
+an unexpected route panic from another post-Hijack writer. A minute-wide panic
+bucket or matching wrapper name cannot supply that event correlation. Missing,
+stale, partial, corrected or ambiguous source/artifact evidence leaves cause
+unknown; a corrected observation supersedes only its exact authority boundary.
+Raw logs, request identifiers and stacks stay in private evidence.
+
+False-positive qualifiers: the warning proves an attempted header write after
+ownership transfer, not a failed handshake, a failed active transport, the Done
+branch, a missing fix or a unique incident. Historical counts and absent
+paired-error prose are not current observations. False-negative qualifiers:
+the paired body-write line is deliberately not counted, samples may truncate,
+and missing or incomplete original events, tails, reconciliation or artifact
+coverage cannot prove absence of an unexpected panic or recovery. An absent
+`[h]` marker is useful only with complete same-event source coverage.
+
+After every implicated emitter converges on a proven correction, require ten
+minutes of comparable H1 teardown with zero canonical warnings, fresh standing
+tails, two advancing complete reconciliations from the same watcher generation,
+and independent successful H1 handshake and delivery controls. Retain the
+deterministic no-write-after-Hijack Done control and the unexpected pre-hijack
+500 control. The monitor regression exercises legacy, forwarding, foreign,
+missing, malformed and truncated frames through the real reducer, preserves
+header-only counting and healthy controls, and keeps failed partial sources
+unavailable. No product correction or runtime recovery is claimed by the
+guidance repair alone.
 
 ### 1.6 Monitor settings generation freshness
 Probe: `settings-freshness`
@@ -4667,6 +4735,32 @@ Deterministic controls cover unspawned queue expiry, actual child progress and
 join before timeout receipt storage, native start/exit failures, injected
 callbacks without spawn authority, malformed/foreign progress, private output,
 complete12-frame observations and the unchanged no-early-retry cadence.
+
+Immediately before native SSH Start, after host/shared admission and command
+construction, the ordinary PG sampler refuses a known remaining owner budget
+strictly below 22 seconds. This duration comparison uses nanoseconds and only
+the eleven required two-second waits: exactly 22 seconds passes, with no extra
+reserve for connection, SQL or cleanup. An unknown deadline stays unknown;
+preexisting cancellation and non-PG transports preserve their existing paths.
+
+An ordinary local refusal keeps `pg-query-sample-unavailable` at WARN with
+source-failure `phase=local_start_budget cause=below_mandatory_waits` and
+normally `reason=source-unavailable`. Existing owner-deadline handling remains
+in force. The private `transport_observation.start_refusal_remaining_budget_ns`
+records the decision remainder, floored at zero; it is not a native Start
+measurement. Transport stays `phase=ssh_start spawn=not_attempted`, without
+asserting a Start budget, child join, native exit or remote progress. The
+refusal itself does not assert owner expiration. Previously measured dispatcher
+timing is preserved; no grant timing is invented for a direct probe.
+
+The attempt is spent and retains its terminal cadence with no immediate retry.
+Existing release paths run for this call's owned host/shared grants; a shared
+admission release failure keeps its admission classification ahead of the
+local budget cause. The 40-second owner, 12 samples, 80/30 output caps and admission
+order are unchanged. A passed check can be followed by descheduling or time
+inside Start, so the started/joined shortfall qualification below still applies
+when its own evidence requirements hold. Preserve the existing warning and
+receipt-first action; the new refusal does not establish workload health.
 
 An incomplete owner-deadline observation with an actual started/joined native
 child and less than22,000ms remaining at native Start has a proved sampling
@@ -5900,6 +5994,39 @@ the attributed attempt's bounded outcome, durable marker movement, completed
 vacuum and consecutive below-threshold samples with source coverage. Query,
 threshold, cadence, sustain and identity remain unchanged; this qualification
 does not authorize cancellation, a cadence rollout or extra collection.
+
+Interpret the projected fields within their source limits. `n_dead_tup` is a
+statistics estimate; the Alert does not carry its reset/freshness authority or
+physical dead-row verification. `configured_vacuum_threshold` reads only the
+table's fixed-threshold reloption and coalesces an absent value to zero. A
+reported zero therefore does not prove an effective zero trigger or disabled
+autovacuum. The effective trigger also depends on the live global/table
+settings, relation estimate and server version; migration source is not live
+configuration authority. Keep the existing monitor floor while diagnosing
+whether PostgreSQL is actually due to start a pass.
+
+`no vacuum currently reported` and its projected `vacuum_age_s=0` mean that
+this sample has no matching progress row. They do not establish a new pass,
+failure to launch, cancellation or a stalled worker. The displayed
+`last_autovacuum` has only month, day and minute, so it cannot establish a
+precise elapsed age without the full source timestamp and timezone. A
+seconds-old horizon candidate, including a truncated `WITH`-shaped sample,
+does not establish a persistent cleanup pin, the complete statement, or the
+writer of the warned table. Preserve the candidate and obtain independent
+owner evidence before acting.
+
+False-positive qualifier: a threshold crossing can reflect ordinary write
+churn before cleanup is due or between passes; neither a zero reloption
+projection nor absent progress proves a cleanup defect. False-negative
+qualifier: the query selects only the five largest estimates above 10M before
+applying the larger configured floors, and it has no healthy row for every
+table. Alert absence, a released candidate or one lower estimate is not a
+same-table recovery certificate. Reuse the next ordinary eligible observation
+to establish the effective trigger and advancing/completed cleanup, retaining
+statistics and source-clock limits. Require consecutive covered below-floor
+samples after completion; honor any configured cadence floor rather than
+adding five-minute readers. This qualification changes no probe, caller cap,
+threshold or production setting and leaves the separate §2.4a gap open.
 
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
@@ -19171,7 +19298,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3's short-burst handoff defect and genuine pressure beyond the bounded processing queue can both produce loss; `35453fd` corrects the former and retains bounded drop metadata under the latter. The reset alone does not prove which source is running or whether any backend is healthy. Grafana is the observation point, not affected-service attribution, and reset rate is not unique lost-record count. | Bind current Grafana/Proxy artifacts before checking Warp `1e95aef`, server `e055c98c`, and Warp `35453fd`; deploy only a proven missing fix through the authorized workflow. If present, diagnose same-process ingester source rate, gRPC send progress, and native tail counters. Missing evidence remains unknown. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. A residual EOF needs current backend attribution. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
-| `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
+| `http: response.WriteHeader on hijacked connection` | A response header was attempted after ownership transferred through Hijack. The immediate frame may be a forwarding wrapper; it cannot prove the caller, panic branch, missing fix or failed transport. The historical 2026-08-31 control isolated expected-Done fallthrough using complete source coverage; it does not diagnose a current warning. | Bind the original event and emitting artifact, then compare ancestry with `02f4d29ae575ae68c2a5f0c8ba3207361b353170`; deploy that fix only when proved missing. Otherwise correlate the same-event caller stack and `[h]unhandled` evidence to identify the current writer or route panic. Missing or partial authority remains unknown. Require ten comparable minutes with zero canonical warnings, complete current observation coverage, and independent H1 success controls after the proven correction. Preserve net/http logging. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -21460,7 +21587,7 @@ Tier-1 (warn):
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | redis-cluster host loopback reducer | §11.20d exact configured-node census of the live `latency-tracking` enum | any `yes`, or incomplete/malformed/unreachable census; immediate; Mimir series absence cannot replace source proof |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
-| http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
+| http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack line; cause requires original event and emitter ancestry | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by the transactional-email layout through the public website URL and pinned to each enabled edge under the same Host | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |

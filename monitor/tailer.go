@@ -768,17 +768,16 @@ var logClasses = []logClass{
 		action:    "Build and deploy Connect from an intentional server checkout containing the RecordConnectDay explicit UUID, varchar, and timestamp casts. Do not restart Taskworker, replay raw connection requests, or fabricate historical analytics rows; any historical repair is a separate product/data-policy decision.",
 		verify:    "A deterministic PostgreSQL test executes the real RecordConnectDay statement, records exactly one connect.day event per network and UTC day, and preserves retry after write failure; every Connect block runs the corrected artifact; and zero onboarding-connect-day-write or matching novel lines occur for ten minutes after log-ingestion delay while connections continue.",
 	},
-	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
-	// match that canonical first line rather than its paired body-write line so
-	// the alert rate remains one logical recovery boundary per occurrence.
+	// Count the canonical header diagnostic, excluding a paired body-write
+	// diagnostic. The immediate writer frame does not identify its caller.
 	{name: "http-hijack-write", re: regexp.MustCompile(`http: response\.WriteHeader on hijacked connection`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
 		sample:    httpHijackWriteLogSample,
-		meaning:   "router recovery attempted to synthesize an HTTP response after a handler transferred ownership of the H1 connection through Hijack",
-		mechanism: "Connect's GET / route hands its socket to Gorilla. The router correctly recognized a later Done panic as expected cancellation and suppressed its error accounting, but then fell through to http.Error. net/http rejected both the 500 header and body because it no longer owned the connection. A two-hour production control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors, isolating the expected-Done fallthrough rather than an application panic.",
-		context:   "The rejected 500 does not itself prove a failed handshake or active transport; it is recovery-path log amplification during connection teardown. A warning paired with [h]unhandled error from route is a different case: preserve and fix that underlying panic rather than hiding all net/http diagnostics.",
-		action:    "Deploy the router recovery fix that returns immediately for server.IsDoneError before http.Error. Do not suppress net/http's error logger globally. If any post-fix occurrence has a paired [h]unhandled route error, diagnose that route panic and its hijack ownership boundary independently.",
-		verify:    "Every Connect block runs the fixed router; normal H1 connection teardown produces zero http-hijack-write lines for 10 minutes, while deterministic recovery tests prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path.",
+		meaning:   "net/http rejected a response header after a handler transferred ownership of the H1 connection through Hijack; the responsible caller and cause remain unknown",
+		mechanism: "The canonical WriteHeader warning proves a response write after Hijack, not the responsible recovery branch. The historical 2026-08-31 Connect control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors: the expected-Done branch fell through to http.Error after Gorilla owned the socket. Server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170 corrected that branch. This log line alone does not establish that historical cause in the current emitter.",
+		context:   "A requestMetricsWriter.WriteHeader frame identifies a forwarding wrapper, not its caller. A retained sample does not establish source event time, paired route errors, or running-artifact ancestry. Samples remain bounded; a missing or truncated frame does not prove caller absence. The warning does not itself prove a failed handshake or active transport. Count only the canonical header line, not a paired body-write diagnostic; the rate is diagnostic volume, not unique incidents.",
+		action:    "Bind the original warning and source event time to the emitting process and immutable artifact; compare its source ancestry with server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170. Deploy the Done recovery fix only when proved missing. If the artifact already contains it, use same-event [h]unhandled error from route evidence and a bounded caller stack to distinguish an unexpected route panic from another post-Hijack writer. Missing, stale, partial, or ambiguous evidence leaves cause unknown; absence of a paired error is useful only with complete same-event source coverage. Do not suppress net/http's error logger globally or patch away the warning before identifying its cause.",
+		verify:    "After the last implicated emitter converges on the proven correction, require zero http-hijack-write lines for 10 minutes of comparable H1 teardown, fresh standing tails, and two advancing complete reconciliations from the same watcher generation. Keep independent successful H1 handshake and delivery controls. Deterministic recovery tests must prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path. Missing source coverage is unknown, not recovery.",
 	},
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
 		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
@@ -1285,6 +1284,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 			"server.Tx", "server.TxInConn", "server.MaintenanceTx", "server.txWithPool", "server.txWithConnection",
 			"server.OwnedTx", "server.TryOwnedTx", "server.ownedTxWithResource", "server.ownedTxWithResourcePolicy",
 			"server.PgOwnedSession.Tx", "server.PgOwnedSession.txWithResource", "server.pgOwnedConnection.run",
+			"server.Redis", "server.RedisDoOnce", "server.redisWithClient",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
 			// The next record is this wrapper's already-validated source line.
 			// A trimpath build can prefix it with the application module too.
@@ -1452,11 +1452,9 @@ func netEscrowNegativeLogSample(line string) string {
 	return truncateLinePreservingSuffix(line, marker)
 }
 
-// httpHijackWriteLogSample retains the complete net/http source frame. The
-// warp identity and its duplicate timestamps consume most of the generic
-// 200-byte prefix, while the final ServeHTTP frame is the discriminator that
-// separates the known router recovery fallthrough from another post-hijack
-// writer with a different root cause.
+// Prioritize the immediate net/http source frame within the existing 200-byte
+// sample bound. A forwarding wrapper can hide the actual caller, so this frame
+// guides source collection without proving a recovery branch or cause.
 func httpHijackWriteLogSample(line string) string {
 	const marker = "http: response.WriteHeader on hijacked connection"
 	markerIndex := strings.Index(line, marker)
