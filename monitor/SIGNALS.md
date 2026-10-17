@@ -4235,6 +4235,17 @@ discriminator does not match another reported address, partial or multiline
 diagnostics, other spellings, or a failure with stdout. These inputs retain the
 existing failure classification and remain `cannot-observe`, never healthy.
 
+Bounded diagnostic carriers must preserve a closed completion category on an
+ordinary nonzero SSH return before retaining only stderr byte counts and
+digests. This is separate from exception classification. Apply the exact
+native-diagnostic, target, status and stdout qualifiers above; unrecognized
+text stays unknown. The category records a reported failure, not remote reader
+startup or physical cause. Counts, hashes and elapsed runtime cannot reconstruct
+a discarded category; a spent receipt remains unclassified and is not retry
+authority. Qualify the actual bounded producer through the parent receipt,
+including secret-bearing, foreign-target and ambiguous inputs, while preserving
+child and lease cleanup.
+
 The monitor's built-in SSH defaults are noninteractive, identity-confined, and
 pinned to operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
 `StrictHostKeyChecking=yes`, and `UpdateHostKeys=no`. The transport uses only
