@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -16,62 +17,50 @@ import (
 	"testing"
 )
 
-// Reads the network-free `go mod edit -json` shape. Modules below a sibling
-// belong to that repository's commit, not a new independently locked source.
-// A moving main checkout cannot remove repositories from an existing lock.
-func requiredLocalSourceRepositories(moduleBytes []byte) ([]string, error) {
-	var module sourceModuleGraphFixture
-	if err := json.Unmarshal(moduleBytes, &module); err != nil {
-		return nil, err
-	}
-	requiredVersions := map[string]string{}
-	for _, requirement := range module.Require {
-		requiredVersions[requirement.Path] = requirement.Version
-	}
-	repositoryNames := []string{filepath.Base(module.Module.Path)}
-	for _, replacement := range module.Replace {
-		requiredVersion, required := requiredVersions[replacement.Old.Path]
-		if !required || replacement.New.Version != "" ||
-			(replacement.Old.Version != "" && replacement.Old.Version != requiredVersion) {
-			continue
-		}
-		repositoryPath, sibling := strings.CutPrefix(replacement.New.Path, "../")
-		components := strings.Split(repositoryPath, "/")
-		if !sibling || strings.Contains(replacement.New.Path, "\\") ||
-			slices.Contains(components, "") || slices.Contains(components, ".") || slices.Contains(components, "..") {
-			return nil, fmt.Errorf("required local module %s is outside the sibling-repository layout: %s", replacement.Old.Path, replacement.New.Path)
-		}
-		repositoryNames = append(repositoryNames, components[0])
-	}
-	slices.Sort(repositoryNames)
-	return slices.Compact(repositoryNames), nil
-}
-
-// Main can shed a dependency that the frozen evaluator still needs. A newly
-// required unpinned local repository must nevertheless fail closed.
-func requireLocalSourceRepositoryCoverage(moduleBytes []byte, lockedRepositoryNames []string) error {
-	repositoryNames, err := requiredLocalSourceRepositories(moduleBytes)
-	if err != nil {
-		return err
-	}
-	for _, repository := range repositoryNames {
-		if !slices.Contains(lockedRepositoryNames, repository) {
-			return fmt.Errorf("required local repository %s is absent from frozen source repositories %v", repository, lockedRepositoryNames)
-		}
-	}
-	return nil
-}
-
-// A real local module read catches newly required dependencies. The exact
-// evaluator graph comes from the source protocol/checkpoint, not current main.
+// A real immutable module read catches newly required measured dependencies.
+// Current main may require other local repositories for its control plane.
 func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
-	command := exec.Command("go", "mod", "edit", "-json", filepath.Join("..", "..", "go.mod"))
-	moduleBytes, err := command.Output()
+	root, err := findRepositoriesRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := requireLocalSourceRepositoryCoverage(moduleBytes, sourceRepositoryNames()); err != nil {
+	path, err := findSourceConfig(root)
+	if err != nil {
 		t.Fatal(err)
+	}
+	manifest, err := loadSourceManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commit string
+	if manifest.Schema == 2 {
+		commit = manifest.EvaluationSource.Generations[len(manifest.EvaluationSource.Generations)-1].Repositories.Server.Commit
+	} else {
+		commit = manifest.EvaluationSource.Epochs[len(manifest.EvaluationSource.Epochs)-1].Repositories.Server.Commit
+	}
+	if err := verifyFrozenSourceGraph(context.Background(), filepath.Join(root, "server"), commit); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A local fork added only to main cannot rewrite the old evaluator graph.
+// Freezing that same changed commit must still reject the missing repository.
+func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
+	root := t.TempDir()
+	frozen := sourceTestRepository(t, root, "server")
+	serverRoot := filepath.Join(root, "server")
+	content := "module module.example/server\n\ngo 1.23.0\n\nrequire gvisor.dev/gvisor v0.0.0\n\nreplace gvisor.dev/gvisor => ../gvisor\n"
+	if err := os.WriteFile(filepath.Join(serverRoot, "go.mod"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceTestGit(t, serverRoot, "add", "go.mod")
+	sourceTestGit(t, serverRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic moving main dependency")
+	current := sourceTestGit(t, serverRoot, "rev-parse", "HEAD")
+	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, frozen); err != nil {
+		t.Fatalf("moving main contaminated frozen dependency audit: %v", err)
+	}
+	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, current); err == nil || !strings.Contains(err.Error(), "gvisor is absent") {
+		t.Fatalf("new frozen base accepted an unpinned dependency: %v", err)
 	}
 }
 
@@ -86,21 +75,11 @@ func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
 
 // Synthetic module inputs contain no checkout paths, remote Git, or network
 // resolution; they exercise required/local/versioned replacement semantics.
-type sourceModuleVersionFixture struct {
-	Path    string
-	Version string
-}
+type sourceModuleVersionFixture = sourceModuleVersion
 
-type sourceModuleReplacementFixture struct {
-	Old sourceModuleVersionFixture
-	New sourceModuleVersionFixture
-}
+type sourceModuleReplacementFixture = sourceModuleReplacement
 
-type sourceModuleGraphFixture struct {
-	Module  sourceModuleVersionFixture
-	Require []sourceModuleVersionFixture
-	Replace []sourceModuleReplacementFixture
-}
+type sourceModuleGraphFixture = sourceModuleGraph
 
 func sourceModuleGraphBytes(t *testing.T, repositories []string) []byte {
 	t.Helper()

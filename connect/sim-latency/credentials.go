@@ -37,9 +37,20 @@ const (
 var credentialNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type credentialToken struct {
-	Name   string `yaml:"name"`
-	Role   string `yaml:"role"`
-	Sha256 string `yaml:"sha256"`
+	Name          string `yaml:"name"`
+	Role          string `yaml:"role"`
+	Sha256        string `yaml:"sha256"`
+	Environment   string `yaml:"environment,omitempty"`
+	CompetitionId string `yaml:"competition_id,omitempty"`
+	SeasonId      string `yaml:"season_id,omitempty"`
+	Revoked       bool   `yaml:"revoked,omitempty"`
+}
+
+// V2 capabilities are scoped explicitly; legacy roles gain no new authority.
+type credentialScope struct {
+	Environment   string
+	CompetitionId string
+	SeasonId      string
 }
 
 type credentialVault struct {
@@ -48,10 +59,13 @@ type credentialVault struct {
 }
 
 type deliveredCredential struct {
-	Name   string `json:"name"`
-	Role   string `json:"role"`
-	Token  string `json:"token"`
-	Sha256 string `json:"sha256"`
+	Name          string `json:"name"`
+	Role          string `json:"role"`
+	Token         string `json:"token"`
+	Sha256        string `json:"sha256"`
+	Environment   string `json:"environment,omitempty"`
+	CompetitionId string `json:"competition_id,omitempty"`
+	SeasonId      string `json:"season_id,omitempty"`
 }
 
 type credentialDelivery struct {
@@ -85,11 +99,16 @@ func runCredentials(opts docopt.Opts) {
 			server.NowUtc(),
 		)
 	case optBool(opts, "rotate-token"):
-		receipt, err = rotateCredentialToken(
+		receipt, err = rotateScopedCredentialToken(
 			vaultPath,
 			optString(opts, "--delivery", ""),
 			optString(opts, "--name", ""),
 			optString(opts, "--role", ""),
+			credentialScope{
+				Environment:   optString(opts, "--environment", ""),
+				CompetitionId: optString(opts, "--competition-id", ""),
+				SeasonId:      optString(opts, "--season-id", ""),
+			},
 			rand.Reader,
 			server.NowUtc(),
 		)
@@ -189,6 +208,20 @@ func rotateCredentialToken(
 	random io.Reader,
 	now time.Time,
 ) (*credentialReceipt, error) {
+	return rotateScopedCredentialToken(vaultPath, deliveryPath, name, role, credentialScope{}, random, now)
+}
+
+// Adds one scoped capability before any old key is revoked. Raw tokens go only
+// to the new private delivery file; ordinary receipts contain hashes and scope.
+func rotateScopedCredentialToken(
+	vaultPath string,
+	deliveryPath string,
+	name string,
+	role string,
+	scope credentialScope,
+	random io.Reader,
+	now time.Time,
+) (*credentialReceipt, error) {
 	if deliveryPath == "" || filepath.Clean(deliveryPath) == filepath.Clean(vaultPath) {
 		return nil, errors.New("--delivery must be a distinct new private file")
 	}
@@ -198,7 +231,7 @@ func rotateCredentialToken(
 		}
 		return nil, err
 	}
-	generated, err := generateCredentialToken(name, role, random)
+	generated, err := generateScopedCredentialToken(name, role, scope, random)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +254,10 @@ func rotateCredentialToken(
 				return errors.New("credential name or digest already exists")
 			}
 		}
-		vault.Tokens = append(vault.Tokens, credentialToken{Name: generated.Name, Role: generated.Role, Sha256: generated.Sha256})
+		vault.Tokens = append(vault.Tokens, credentialToken{
+			Name: generated.Name, Role: generated.Role, Sha256: generated.Sha256,
+			Environment: generated.Environment, CompetitionId: generated.CompetitionId, SeasonId: generated.SeasonId,
+		})
 		sortCredentialTokens(vault.Tokens)
 		if err := validateCredentialVault(vault); err != nil {
 			return err
@@ -305,11 +341,16 @@ func revokeCredentialToken(vaultPath string, name string) (*credentialReceipt, e
 }
 
 func generateCredentialToken(name string, role string, random io.Reader) (deliveredCredential, error) {
+	return generateScopedCredentialToken(name, role, credentialScope{}, random)
+}
+
+// Validates scope before consuming entropy or writing a delivery artifact.
+func generateScopedCredentialToken(name string, role string, scope credentialScope, random io.Reader) (deliveredCredential, error) {
 	if !credentialNamePattern.MatchString(name) {
 		return deliveredCredential{}, errors.New("credential name is invalid")
 	}
-	if role != "submitter" && role != "operator" {
-		return deliveredCredential{}, errors.New("credential role must be submitter or operator")
+	if err := validateCredentialCapability(role, scope); err != nil {
+		return deliveredCredential{}, err
 	}
 	raw, err := randomCredentialBytes(random)
 	if err != nil {
@@ -317,7 +358,30 @@ func generateCredentialToken(name string, role string, random io.Reader) (delive
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(token))
-	return deliveredCredential{Name: name, Role: role, Token: token, Sha256: hex.EncodeToString(digest[:])}, nil
+	return deliveredCredential{
+		Name: name, Role: role, Token: token, Sha256: hex.EncodeToString(digest[:]),
+		Environment: scope.Environment, CompetitionId: scope.CompetitionId, SeasonId: scope.SeasonId,
+	}, nil
+}
+
+// Rejects partial scopes and prevents a legacy token from being advertised as
+// scope-restricted when its legacy transport does not enforce those claims.
+func validateCredentialCapability(role string, scope credentialScope) error {
+	switch role {
+	case "submitter", "operator":
+		if scope != (credentialScope{}) {
+			return errors.New("legacy credentials do not use v2 capability scope")
+		}
+		return nil
+	case "scheduler", "reviewer", "settlement", "source_promoter":
+		if !credentialNamePattern.MatchString(scope.Environment) ||
+			!credentialNamePattern.MatchString(scope.CompetitionId) || !credentialNamePattern.MatchString(scope.SeasonId) {
+			return errors.New("v2 credentials require exact --environment, --competition-id, and --season-id")
+		}
+		return nil
+	default:
+		return errors.New("unsupported credential capability")
+	}
 }
 
 func randomCredentialBytes(random io.Reader) ([]byte, error) {
@@ -371,8 +435,10 @@ func validateCredentialVault(vault *credentialVault) error {
 		if !credentialNamePattern.MatchString(token.Name) || names[token.Name] {
 			return errors.New("credential names must be valid and unique")
 		}
-		if token.Role != "submitter" && token.Role != "operator" {
-			return fmt.Errorf("credential %s has an invalid role", token.Name)
+		if err := validateCredentialCapability(token.Role, credentialScope{
+			Environment: token.Environment, CompetitionId: token.CompetitionId, SeasonId: token.SeasonId,
+		}); err != nil {
+			return fmt.Errorf("credential %s: %w", token.Name, err)
 		}
 		decoded, err := hex.DecodeString(token.Sha256)
 		if err != nil || len(decoded) != sha256.Size || digests[token.Sha256] {
@@ -380,7 +446,9 @@ func validateCredentialVault(vault *credentialVault) error {
 		}
 		names[token.Name] = true
 		digests[token.Sha256] = true
-		roles[token.Role]++
+		if !token.Revoked {
+			roles[token.Role]++
+		}
 	}
 	if roles["submitter"] == 0 || roles["operator"] == 0 {
 		return errors.New("at least one submitter and one operator credential are required")

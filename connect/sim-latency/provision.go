@@ -445,7 +445,7 @@ func prewarmOnce(
 // Seeds deterministic test evidence on the currently active connections before
 // building the location-reliability snapshot. Completed tests belong to a
 // specific platform transport, so relying on an earlier transport's tests made
-// a newly active connection look untested and excluded it from matchmaking.
+// a newly active connection look untested and lose its performance ranking.
 // The provider-scoped snapshot restoration below handles later transport
 // replacement and pipeline refreshes.
 func writeMatureProviderConnectionPerformances(
@@ -518,7 +518,7 @@ func writeMatureProviderConnectionPerformances(
 // Restores provider-scoped mature-market performance after a location refresh.
 // A fixture provider can replace its platform transport before the new
 // connection finishes tests; the derived snapshot would otherwise discard the
-// provider's established evidence and collapse the matchmaking pool.
+// provider's established evidence and distort the mature-market ranking.
 func writeMatureProviderPerformanceSnapshot(
 	ctx context.Context,
 	performances []matureProviderPerformance,

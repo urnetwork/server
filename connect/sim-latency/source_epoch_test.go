@@ -48,6 +48,9 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 		t.Fatal(err)
 	}
 	if name == "server" {
+		if err := os.WriteFile(filepath.Join(repositoryRoot, "go.mod"), []byte("module module.example/server\n\ngo 1.23.0\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 		protectedRoot := filepath.Join(repositoryRoot, "connect", "sim-latency")
 		if err := os.MkdirAll(protectedRoot, 0700); err != nil {
 			t.Fatal(err)

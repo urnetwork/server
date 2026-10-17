@@ -305,6 +305,11 @@ func validSettings() *Settings {
 
 func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, rawScores []float64) []byte {
 	t.Helper()
+	frozenSettings, err := settingsForFrozenRound(settings, round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = frozenSettings
 	if len(rawScores) != settings.EvaluationPolicy.Replicates {
 		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), settings.EvaluationPolicy.Replicates)
 	}
@@ -339,6 +344,11 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 // model historical per-job controls must insert those legacy records explicitly.
 func testSharedBaselineOutcome(t testing.TB, settings *Settings, job *queuedJob, outcome EvaluationOutcome) EvaluationOutcome {
 	t.Helper()
+	frozenSettings, err := settingsForFrozenRound(settings, &job.Round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = frozenSettings
 	if job.RoundBaseline != nil {
 		outcome.RoundBaselineJson = job.RoundBaseline.Json
 		outcome.RoundBaselineSha256 = job.RoundBaseline.Sha256
@@ -355,6 +365,7 @@ func testSharedBaselineOutcome(t testing.TB, settings *Settings, job *queuedJob,
 		outcome.ArtifactManifest = json.RawMessage(`{"schema":1,"synthetic":true}`)
 	}
 	if outcome.Score != nil {
+		outcome.Score.Significance.TakeoverMarginPercent = settings.EvaluationPolicy.TakeoverMargin * 100
 		if outcome.Score.Diagnostics == nil {
 			outcome.Score.Diagnostics = map[string]any{}
 		}

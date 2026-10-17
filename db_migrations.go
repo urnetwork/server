@@ -10379,4 +10379,19 @@ var migrations = []any{
 		ALTER TABLE network_extender_measurement_cert
 			ADD COLUMN publish_time timestamp NULL;
 	`),
+
+	// 836: opt-in v2 seals, append-only reward revisions and fenced source automation.
+	newSqlMigration(competitionAutomationMigration),
+
+	// 837: independently scoped holds and explicit immutable integrity incidents.
+	newSqlMigration(competitionAutomationIncidentMigration),
+
+	// 838: independently fence source activation, review identity and cursor publication.
+	newSqlMigration(competitionAutomationGuardMigration),
+
+	// 839: retain safely abandoned unpublished source attempts and enforce review/revision consistency.
+	newSqlMigration(competitionAutomationFallbackMigration),
+
+	// 840: bind pre-admission source qualification to its reserved round identity.
+	newSqlMigration(competitionAutomationTargetMigration),
 }

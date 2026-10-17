@@ -1,6 +1,8 @@
 # Sim-latency season agent runbook
 
 `run-main.sh` is the fail-closed agent harness for the six-epoch competition.
+Legacy `run`/`approve`/`reject` commands retain their v1 review pause. Explicit
+v2 competitions use `supervise` below; never mix these progression paths.
 It drives the continuously deployed main API and one-shot worker while keeping
 the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
 `glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`—isolated
@@ -28,6 +30,230 @@ Candidate honesty review and source promotion apply only to production.
 Staging automatically names the highest-ranked placeable candidate passing
 every gate after close and drain, without a significance or takeover-margin
 requirement, human-review pause, or source promotion.
+
+## V2 durable supervision — disabled until qualified
+
+V2 separates the immutable evaluation seal, provisional reward decisions, and
+reviewed source. Neither payment nor reward approval authorizes source changes.
+The supervisor uses a renewable fenced database lease and append-only checkpoints.
+Existing v1 rounds and schema-1 ledger entries are not converted in place.
+
+After close and full authoritative drain, the v2 worker seals/elects. At the
+frozen source-choice deadline (zero extra review wait by default), a ready,
+separately authorized exact-source intent may be selected. Otherwise the
+supervisor stages `reviewed_source_carry_forward`, including when a provisional
+reward winner exists. It retains the approved source generation, ten commits,
+and threshold. It never calls `promote --no-winner` for an unshipped reward
+winner, fabricates approval, or uses that winner's variance recommendation.
+
+Schema 2 retains historical `evaluation_source.epochs` entries unchanged and
+adds `generations` and explicit `rounds` mappings. The evaluator's existing
+numeric `source_epoch` and `source-check --epoch N` identify the source generation
+in v2, not competition round minus one. A carried generation supports fresh
+round/seed/baseline identities. The canonical v2 lock digest hashes compact JSON
+`{schema:1,development_snapshot:false,repositories:{...}}` with sorted repository
+keys; the digest of a pretty-printed artifact file is separate. Each evaluated
+round still gets its own trusted R=9 scoring baseline; preparation is not that
+scoring control.
+
+For a future approved v2 season, freeze policy and integration digests and use
+qualified binaries. The one-time bootstrap requires an already published,
+prospectively approved schema-2 baseline-only config commit, complete source lock,
+and explicit policy-approval digest in the frozen competition configuration:
+
+```sh
+sim-latency bootstrap-source --enable-automation \
+  --owner-id=synthetic-season-supervisor --state-dir=/secure/automation/state \
+  --manifest-commit=REPLACE_WITH_APPROVED_CONFIG_COMMIT
+```
+
+Bootstrap registers generation 1/source generation 0 for epoch 1 and persists
+recovery material. It does not activate a pointer, create a round, or invent a
+review. Repeating the same command resumes the exact commit. The supervisor below
+performs the same runtime acknowledgments and full 16-hour preparation gate for
+this baseline as for later transitions. Use the same state directory and owner.
+These examples do not authorize enabling an existing live season:
+
+```sh
+export SIM_LATENCY_AUTOMATION_ENABLED=true
+export SIM_LATENCY_SUPERVISOR_ID=synthetic-season-supervisor
+export SIM_LATENCY_STATE_DIR=/secure/automation/state
+export SIM_LATENCY_WORKER_COMMAND=/secure/automation/competitionworker
+export SIM_LATENCY_WORKER_SHA256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
+export SIM_LATENCY_PREPARE_COMMAND=/secure/automation/propagate-and-qualify
+export SIM_LATENCY_PREPARE_SHA256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
+./run-main.sh supervise
+# One bounded reconciliation through the same guarded path:
+./run-main.sh supervise --once
+```
+
+Reviewed configuration must also enable v2; either missing opt-in fails closed.
+Resolve/build trusted binaries once per reviewed release, not once per poll.
+Do not leave a reviewer agent acting as the scheduler. The supervisor's default
+choice is safe carry-forward; separately prepared promotion intents require the
+real source-review, exact-base, patch and deadline interlocks before selection.
+
+Publication uses private durable clones of all ten repositories. It freezes
+expected/new refs and exact manifest bytes, records intent before any push,
+publishes source first and config last, and requires runtime readiness. Ordinary
+fast-forward pushes only; no forced update. Lost replies and partial pushes
+resume the exact commits. Published but unactivated source is staged work, not an
+incumbent. Drift, revoked approval, a different patch tree, or changed protected
+runner/dependencies blocks progress. Recovery never selects current remote heads
+or modifies product checkouts. Incomplete unpublished staging remains private
+audit material; completed recovery directories are installed atomically.
+
+For a **fresh** intent only, config staging fetches `origin/main` and preserves
+unrelated config updates made since the active manifest was published. The
+active manifest commit must remain an ancestor, and `main/sim-latency.yml` must
+still match the active manifest's exact bytes and digest, including whitespace.
+The fetched head becomes the immutable expected config parent; only the source
+manifest changes in its successor. This does not advance any evaluation source
+pin. Once an intent is staged or recorded, later config drift blocks publication:
+retries never fetch a new parent or rebase a partially published intent.
+
+The control-plane checkout need not contain newly promoted source objects.
+Bootstrap and reviewed staging audit the exact private server checkout. An
+exact pinned manifest/module read missing from a local checkout uses a new
+mode-0700 bare repository and a bounded exact-commit fetch from its origin;
+it never fetches into product checkouts or substitutes the moving branch head.
+
+Git stores immutable manifest content; the database pointer selects runtime
+authority. At least 16 hours are reserved from preparation start. Independent
+API and worker acknowledgments and production qualification precede pointer
+activation; only then is one full seven-day round committed. An unadvertised
+start is chosen after readiness, so slow preparation does not shorten admission.
+Committed schedules/source cannot change. Failed preparation remains visibly
+`preparation_blocked` and retries the same intent. Each immutable intent reserves
+`target_round_id` before preparation. The trusted host rebaseline uses that exact
+UUID and source/image; the eventual round must commit the reserved UUID. This is
+a real host-readiness check, not the scoring baseline: the immutable R=9 scoring
+control is still established after creation using the fresh round workload.
+There is no second 16-hour delay. If a chosen promotion cannot
+use an authorized pre-commit fallback, it stays blocked rather than rewriting its
+intent. A failed promotion whose eleven remote refs all remain at their expected
+predecessors may be durably abandoned; the next activation attempt carries the
+incumbent, with fresh preparation and the original source-choice deadline. Any
+advanced ref or runtime receipt forbids this automatic fallback. Automatic
+creation stops after epoch six; review/settlement obligations
+continue through their independent services.
+
+### Required deployment/preparation integration
+
+The repository supplies a reconciler, exact runtime manifest loader, authenticated
+API readiness boundary, and pinned-executable integration contract. An actual
+production fleet deployment/preparation adapter has not been identified or
+installed here. This is a remaining activation blocker: absent that adapter and
+real receipts, the supervisor stays `preparation_blocked`. A successful no-op,
+self-asserted JSON, human `git pull`, or manual per-epoch rollout is not a substitute.
+
+Configured executables must be absolute regular, non-group/world-writable files;
+their exact SHA-256 is verified before execution without shell interpolation.
+The pinned `competitionworker --supervisor-request` receives strict stdin JSON
+with `operation: run_one_epoch`, round, and lease. It authenticates the current
+round, installed runtime manifest, and live supervisor fence, then starts/resumes
+the existing one-shot worker. It cannot switch into another round or staging.
+Claims and evaluation heartbeats retain the singleton slot and check the bound
+round/fence; a read-only lease monitor stops an orphaned launcher without renewing
+its dead parent. Cancellation signals cleanup before a bounded process stop.
+The preparation adapter gets
+`operation: propagate_and_qualify`, immutable activation intent, and lease. It
+must idempotently verify published refs/image, install the exact
+`CompetitionRuntimeManifest` envelope as `generation-N.json` under configured
+`SIM_LATENCY_RUNTIME_MANIFEST_DIRECTORY` on every required runtime, run production
+host/containment/archive/worker qualification, and obtain independently durable
+API and worker readiness receipts. Receipts bind the exact manifest commit/digest,
+reserved round UUID, canonical source-lock digest, runtime image and qualification. The loader reads
+installed bytes, not request-body claims. Both roles must acknowledge before
+activation. All Git/network work remains outside database transactions.
+
+For the worker acknowledgment the adapter runs the concrete qualified command
+`competitionworker --source-readiness=N`. This derives source-only settings from
+the persisted intent, loads the installed envelope, probes the real host and
+archive, and requires its host-rebaseline marker to name `target_round_id` before
+recording a worker receipt. The API acknowledges its own installation through
+the authenticated source-readiness endpoint. The adapter must obtain both; a
+successful exit without those exact durable receipts is retried, not cached as
+`preparation_ready`. Main competition configuration is not hand-edited per epoch.
+
+The repository now supplies that concrete worker stdin mode; point the worker
+setting at its independently qualified release binary and pin the binary digest.
+It still requires its normal production evaluator configuration and privileges.
+No isolated-build broker or fleet propagation adapter is installed by these
+changes. Until those integrations are implemented and independently qualified,
+production enablement remains blocked; a missing build broker leaves no ready
+promotion proposal and therefore uses carry-forward, while missing preparation
+blocks opening a round.
+
+Source-promoter, reviewer, scheduler, submitter and settlement authority stay
+separate. Astra max still owns source review/promotion and source/config merges;
+independent Sol medium owns tests. Unattended operation grants no review authority.
+Before approving anything, the trusted main-environment reviewer can materialize
+the exact sealed patch and original archived score bytes without an existing review:
+
+```sh
+sim-latency source-review-packet --round-id=ROUND_ID --job-id=JOB_ID \
+  --out-dir=/secure/review/new-candidate-directory
+```
+
+This read-only command requires existing trusted database/archive access. It
+creates a new mode-0700 directory with read-only evidence, verifies archive
+identities, exports no seed/request secrets, and never records approval. Inspect
+the code and all six criteria. Copy the packet's `review-template.json` into a
+new private `review.json`; do not edit the read-only evidence packet. Fill every
+actual finding, explicit dispositions, public reasons and private-evidence
+digest before submitting with `review-v2`. The template includes exact evidence
+identities and expected revision but is deliberately invalid until real review
+is complete; it never supplies passing findings. After a
+genuine separate source approval, Astra may prepare a proposal ahead of the deadline:
+
+```sh
+sim-latency stage-reviewed-source --review-id=REVIEW_ID \
+  --state-dir=/secure/automation/state \
+  --build-command=/secure/automation/isolated-source-build \
+  --build-sha256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
+```
+
+This clones all ten pinned repositories, applies the exact authenticated patch,
+checks its tree and protected runner, and invokes a separately qualified isolated
+build/test broker. It pushes nothing. The broker receives only an allowlisted
+environment (no inherited main, database, vault, Git-push or seed credentials),
+explicit `config/local`/`vault/local` paths, and the
+`offline_evaluator_containment_v1` contract. It must run candidate builds/tests
+inside the existing offline evaluator/Docker containment boundary, never ordinary
+host `go test`, and must not expose source-origin credentials or host Git config.
+Its strict receipt binds review/patch/full-source identities, rebuilt evaluator
+image, qualification, containment proof, independent test-evidence digest, and
+Sol-medium test ownership. Missing or failed isolation evidence does not produce
+a selectable proposal. The trusted completion time cannot be backdated.
+
+At the deadline the supervisor selects a still-approved, unchanged-base,
+build-ready proposal (raw score, original admission time, then job id); late/obsolete/unready proposals
+leave safe carry-forward. Build readiness is distinct from the later full
+16-hour preparation interval. Completed runtime preparation is checkpointed so
+the supervisor does not rerun expensive qualification every poll while waiting.
+The v2 review score digest is the exact authenticated archived `score.json`
+byte digest. Parsed score projections never substitute a reserialized hash.
+
+For a genuine structured v2 review, put a private scoped reviewer token in
+`SIM_LATENCY_REVIEWER_TOKEN_FILE` and use the complete request body, including
+idempotency key, expected revision, exact evidence identities, six findings, and
+distinct reward/source dispositions:
+
+```sh
+./run-main.sh review-v2 --round-id ROUND_ID --evidence /secure/review/request.json
+```
+
+The authenticated principal supplies reviewer identity; the controller computes
+replacements from the original sealed ranking. Keep legacy `epoch-review` commands
+for v1. V2 review does not require an operator token or acquire `RUN-MAIN.lock`;
+it remains available while the supervisor runs. Supervision uses its fenced
+database lease, and review uses API idempotency/revision guards. Sol-medium
+verification must cover carry-forward margin/generation mapping,
+review-independent progression, exact blob/patch binding, partial-push/lost-receipt
+recovery, drift/revocation, failed readiness, fencing, crash after round creation,
+and the six-epoch limit. Astra max diagnoses/fixes failures, then Sol medium reruns.
+The schema-2 source-lock reader needs separate evaluator release qualification.
 
 ## Before starting
 
@@ -61,11 +287,15 @@ drained release boundary. Preserve old eight-repository images, locks, baseline
 artifacts, and round evidence as historical records; do not rewrite them to
 claim the new source identity.
 
-The continuously deployed main control-plane graph can later remove a module
-without changing that frozen evaluator checkpoint. Current-main coverage checks
-must still reject newly required unpinned local repositories, but cannot shrink
-an existing lock. Source loading, shell validators, image copies, and the epoch
-ledger continue to require the exact frozen ten-repository set, including Warp.
+The continuously deployed main control-plane graph can later add or remove a
+module without changing that frozen evaluator checkpoint. Coverage checks inspect
+the exact evaluated server commit's `go.mod`, never moving main. A newly frozen
+base that requires an unpinned local repository fails closed and requires a
+separately reviewed source-protocol/image expansion; it cannot borrow main's
+checkout. Source loading, shell validators, image copies, and historical ledgers
+continue to require the frozen ten-repository set, including Warp. In particular,
+the historical base uses upstream gVisor; current main's local gVisor fork does
+not retroactively enter that lock.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
