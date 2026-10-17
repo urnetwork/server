@@ -4367,6 +4367,29 @@ whole-signal and partial-target visibility preserve the same WARN, sustain and
 identity. No addresses, queue contents, underlying error text or process argv
 enter these fields.
 
+One shared-admission store retains bounded local claim ownership across a
+failed release. Only the caller's existing joined-release boundary, or an
+acquisition failure before native transport receives a grant, makes its exact
+token/owner proof recoverable. A later ordinary acquisition retries those
+proofs in one state update, bounded by one second and its inherited owner,
+before competing for capacity. The original
+one-second cleanup and its visible error remain; no retry goroutine, deadline
+renewal, cadence change or additional host contact is introduced. Claim records
+are instance-owned and capped at the existing 256-request queue limit; a full
+local record set refuses new work instead of overwriting ownership. Disk I/O
+holds no local claim mutex. Failed or ambiguous publication retains the proof;
+only successful durable removal or acknowledged absence retires it.
+
+Expiry or a live owner never makes an active reservation recoverable. A fresh
+store/process has no prior local proof and preserves unknown active work under
+the existing exact owner-gone rule. Deterministic controls cover failed cleanup
+under a held queue lock, published-grant cancellation, ambiguous enrollment and
+removal acknowledgements, expired-but-unreleased work, owner mismatch, bounded
+records and cancellation before the transport's joined-return boundary. These
+controls establish the source mechanism, not the cause of a historical ticket:
+old active claims require their own native ownership/join/release evidence.
+Later admission recovery does not establish remote completion or source health.
+
 FALSE POSITIVE QUALIFIER: joined gateway errors can contain phases from
 different attempts. A phase proves its local call boundary, not that every
 gateway failed there; `release` does not prove a native SSH spawn, remote
@@ -4814,9 +4837,20 @@ already-running slow probes can still exhaust that budget: coverage is then
 unknown, with no early retry or extra slot.
 
 The first pre-slot deadline emits `pg-query-sample-unavailable` immediately
-(`Sustain=1`), identifying `shared-slot-admission` and
+(`Sustain=1`), identifying `global-run-slot-admission` and
 `source_contact_attempted=false`. It preserves existing attempted/completed/
-next-eligible clocks without inventing a database attempt or receipt. A source
+next-eligible clocks without inventing a database attempt or receipt. This
+phase belongs to the top-level four-signal pool, including an
+ended owner immediately after grant; it is not shared SSH acquisition. Older
+`shared-slot-admission` observations from this same typed projection describe
+that same global boundary, not a shared SSH queue census. Shared SSH failures
+retain their separate `ssh_admission_failures=acquire,release,unknown` markers.
+Wrapped global admission errors preserve their phase, first-miss WARN and
+contact-false authority; wrapped SSH admission or untyped failures cannot
+acquire that global phase or prove no prior source contact. No admission order,
+owner, capacity, severity, sustain, cadence or receipt/state behavior changes.
+This correction names the boundary without explaining why it was blocked.
+An unrelated source
 or adapter failure has contact status unknown unless an owning receipt proves
 more. On October 2, the local saturated scheduler control reproduced an
 invisible first cadence under the old two-observation visibility gate. The
