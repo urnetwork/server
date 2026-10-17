@@ -55,11 +55,14 @@ var reviewedRescueCancelSites = map[rescueCancelSite]int{
 	{path: "connect/resident.go", function: "newResidentDuringAdmission", handler: "cancel"}:                   1,
 	{path: "connect/transport.go", function: "newConnectHandlerWithPacketConns", handler: "cancel"}:            1,
 	{path: "connect/transport_announce.go", function: "newConnectionAnnounceWithReconcile", handler: "cancel"}: 1,
-	{path: "proxy/proxy_api.go", function: "NewApiServer", handler: "cancel"}:                                  1,
 	{path: "proxy/proxy_client_notification.go", function: "newProxyClientNotification", handler: "cancel"}:    1,
 	{path: "proxy/server.go", function: "NewWgServer", handler: "cancel"}:                                      1,
 	{path: "search/search_local.go", function: "NewSearchLocal", handler: "cancel"}:                            1,
 	{path: "session/jwk_validator.go", function: "NewJwkValidator", handler: "cancel"}:                         1,
+	// The worker's owner should end with it: a raise leaves the resident
+	// without the consumer, and the client reconnects to a fresh resident.
+	{path: "connect/resident.go", function: "(*Resident).startClientCallbackWorkers", handler: "self.cancel"}: 1,
+	{path: "connect/resident.go", function: "(*Resident).startClientForwardIngress", handler: "self.cancel"}:  1,
 }
 
 // The helpers whose trailing arguments are rescue handlers.
