@@ -302,17 +302,18 @@ func TestFeedbackIndexFollowsPublishedAutomationMigrations(t *testing.T) {
 		competitionAutomationTargetMigration,
 	}
 	for offset, sql := range published {
-		index := 842 + offset
+		version := 842 + offset
+		index := version - 1
 		if len(migrations) <= index {
-			t.Fatalf("published automation migration index %d is missing", index)
+			t.Fatalf("published automation migration version %d is missing", version)
 		}
 		migration, ok := migrations[index].(*SqlMigration)
 		if !ok || migration.sql != sql {
-			t.Errorf("migration index %d no longer names its published automation SQL", index)
+			t.Errorf("migration version %d no longer names its published automation SQL", version)
 		}
 	}
-	if index := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time"); index != 847 {
-		t.Errorf("feedback index migration = %d, want 847 after published automation history", index)
+	if version := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time") + 1; version != 847 {
+		t.Errorf("feedback index migration version = %d, want 847 after published automation history", version)
 	}
 }
 
