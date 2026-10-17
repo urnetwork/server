@@ -13,7 +13,7 @@ func TestKeyFamiliesSignalSyntheticKeyFamilyGrowth(t *testing.T) {
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			if strings.Contains(command, "INFO memory") {
-				return "6380 9000000 10000000\n6381 4000000 10000000", nil
+				return "6380 9000000 10000000\n6381 4000000 10000000\n6382 3000000 10000000", nil
 			}
 			return "", nil
 		},
@@ -60,7 +60,7 @@ func TestKeyFamiliesSignalAggregatesBinaryFamiliesBeforeAlerting(t *testing.T) {
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			if strings.Contains(command, "INFO memory") {
-				return "6380 9000000 10000000", nil
+				return "6380 9000000 10000000\n6381 4000000 10000000\n6382 3000000 10000000", nil
 			}
 			return "", nil
 		},

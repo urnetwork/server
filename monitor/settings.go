@@ -190,8 +190,8 @@ type AppleReportingSettings struct {
 }
 
 // CredentialRequirement is a secret-free readiness result assembled while
-// loading an environment. It deliberately retains only the resource name and
-// missing field names: credential values and parser input never enter a
+// loading an environment. It deliberately retains only resource names, status,
+// and missing field names: credential values and parser input never enter a
 // SignalSettings value, an Alert, or monitor state.
 //
 // Required means the integration is expected to work in this environment. An
@@ -206,6 +206,9 @@ type CredentialRequirement struct {
 	Present       bool
 	Malformed     bool
 	MissingFields []string
+	// ActivationUnknown means the consumer's Config could not be loaded or
+	// validated. No Vault inspection or required/optional verdict is implied.
+	ActivationUnknown bool
 }
 
 // SourceAttributionSettings arms SIGNALS.md §8.8. Each configured expected

@@ -25,8 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		last := migrationCurrentSuffixContracts[len(migrationCurrentSuffixContracts)-1].artifact.requiredVersion
-		for head := 793; head <= last; head++ {
+		for head := 793; head <= server.MigrationCount(); head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {

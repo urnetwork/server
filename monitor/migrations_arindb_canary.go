@@ -6,9 +6,8 @@ package monitor
 
 import "strings"
 
-// The versions of the canary's two migrations, appended in this order at the
-// head. A migration merged ahead of them shifts both: change the rollup's
-// version here, and keep their order at the tail of db_migrations.go.
+// These published versions keep their order when later migrations append.
+// Neither a newer source head nor a longer artifact catalog renumbers them.
 const (
 	arindbCanaryRollupMigrationVersion   = 837
 	arindbCanaryLocationMigrationVersion = arindbCanaryRollupMigrationVersion + 1

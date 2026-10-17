@@ -332,7 +332,7 @@ func TestRedisMemorySignalTwoHostsJudgesEachHostsCapacity(t *testing.T) {
 				return "", nil
 			}
 			ports := host.RedisNodePorts
-			if !strings.Contains(command, fmt.Sprintf("seq %d %d", ports[0], ports[len(ports)-1])) {
+			if !strings.Contains(command, "for p in "+redisTestJoinPorts(ports)+"; do") {
 				t.Errorf("memory sweep on %s did not cover its own nodes: %s", host.Name, command)
 			}
 			rows := []string{}
@@ -418,7 +418,7 @@ func TestRedisMemorySignalTwoHostsReportsAnUnreadableHostAndJudgesTheOther(t *te
 func TestRedisKeyEventsSignalTwoHostsTargetsEachNodesHost(t *testing.T) {
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		ports := host.RedisNodePorts
-		if !strings.Contains(command, fmt.Sprintf("seq %d %d", ports[0], ports[len(ports)-1])) {
+		if !strings.Contains(command, "for p in "+redisTestJoinPorts(ports)+"; do") {
 			t.Errorf("keyevent sweep on %s did not cover its own nodes: %s", host.Name, command)
 		}
 		rows := []string{}
@@ -577,7 +577,7 @@ func TestRedisProcessSignalTwoHostsReportsEachHost(t *testing.T) {
 		if host.Name == redisTestEdge6 {
 			return "", fmt.Errorf("ssh: connect to host: connection timed out")
 		}
-		return "kernel_oom Out of memory: Killed process 1234 (redis-server)", nil
+		return "kernel_oom Out of memory: Killed process 1234 (redis-server)\nkernel_source complete\n", nil
 	}}
 	alerts, err := NewRedisProcessSignal().Run(context.Background(), redisTwoHostSettings(source))
 	if err != nil {

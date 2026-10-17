@@ -230,15 +230,15 @@ func TestProxyMemorySignalSyntheticUDPRebootAndSmallDeltaAreWarm(t *testing.T) {
 		sample := proxyMemoryDeltaFixtureSample()
 		switch call {
 		case 1:
-			sample.bootID = "boot-before-reboot"
+			sample.bootID = "00000000-0000-4000-8000-000000000001"
 			sample.udpInDatagrams = 5_000_000
 			sample.udpRcvbufErrors = 120_000
 		case 2:
-			sample.bootID = "boot-after-reboot"
+			sample.bootID = "00000000-0000-4000-8000-000000000002"
 			sample.udpInDatagrams = 1_000
 			sample.udpRcvbufErrors = 0
 		default:
-			sample.bootID = "boot-after-reboot"
+			sample.bootID = "00000000-0000-4000-8000-000000000002"
 			sample.udpInDatagrams = 101_000
 			sample.udpRcvbufErrors = 9
 		}
@@ -296,7 +296,7 @@ func proxyMemorySyntheticSettings(source SignalSource) SignalSettings {
 
 func proxyMemoryDeltaFixtureSample() proxyMemorySample {
 	return proxyMemorySample{
-		bootID:               "same-boot",
+		bootID:               "00000000-0000-4000-8000-000000000001",
 		warpctlRolloutGuard:  proxyRolloutGuardFull,
 		memTotalKiB:          128 * 1024 * 1024,
 		memAvailableKiB:      80 * 1024 * 1024,
@@ -312,7 +312,7 @@ func proxyMemoryDeltaFixtureSample() proxyMemorySample {
 
 func proxyMemoryFixture(sample proxyMemorySample) string {
 	if sample.bootID == "" {
-		sample.bootID = "synthetic-boot"
+		sample.bootID = "00000000-0000-4000-8000-000000000001"
 	}
 	if sample.warpctlRolloutGuard == "" {
 		sample.warpctlRolloutGuard = proxyRolloutGuardFull

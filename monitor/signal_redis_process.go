@@ -40,15 +40,58 @@ func (redisProcessProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 }
 
 func redisProcessHostFindings(ctx context.Context, env *probeEnv, host *host) ([]finding, error) {
-	out, err := env.runner.shell(ctx, host, `
+	command := fmt.Sprintf(`
 ps -eo pid=,pcpu=,vsz=,rss=,comm= | awk '$5 ~ /^redis-server/ {print "redis",$1,$2,$3,$4}'
-dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process.*redis' | tail -1 | sed 's/^/kernel_oom /'
-`)
+if redis_kernel_rows=$(/bin/bash -o pipefail <<'REDIS_KERNEL'
+dmesg -T 2>/dev/null | %s
+REDIS_KERNEL
+); then
+  printf '%%s\n' "$redis_kernel_rows"
+  printf 'kernel_source complete\n'
+else
+  printf 'kernel_source unavailable\n'
+fi
+`, redisProcessKernelOomSelector())
+	out, err := env.runner.shell(ctx, host, command)
 	if err != nil {
 		return nil, err
 	}
+	// Only a successful full pipeline and its terminal frame authorize kernel
+	// evidence. Buffering the selected row discards partial output on failure.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	kernelStatus := ""
+	kernelRows := 0
+	kernelMalformed := false
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "redis":
+		case "kernel_oom":
+			kernelRows++
+			if len(fields) < 2 || kernelRows > 1 {
+				kernelMalformed = true
+			}
+		case "kernel_source":
+			if len(fields) != 2 || kernelStatus != "" || index != len(lines)-1 {
+				kernelMalformed = true
+			} else {
+				kernelStatus = fields[1]
+			}
+		default:
+			kernelMalformed = true
+		}
+	}
+	var kernelErr error
+	if kernelMalformed || kernelStatus != "complete" && kernelStatus != "unavailable" {
+		kernelErr = fmt.Errorf("invalid response from Redis kernel source")
+	} else if kernelStatus == "unavailable" {
+		kernelErr = fmt.Errorf("Redis kernel source exit status failure")
+	}
 	findings := []finding{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, line := range lines {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -70,19 +113,34 @@ dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process.*redis' |
 				playbook:  "SIGNALS.md §3.4 and §5.2",
 			})
 		case "kernel_oom":
+			if kernelErr != nil {
+				continue
+			}
+			victim := redisProcessKernelOomVictim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "kernel_oom")))
+			if victim == "other" {
+				continue
+			}
+			if victim == "unknown" {
+				findings = append(findings, cannotObserveFinding(host.name+"/redis-kernel", fmt.Errorf("invalid response: kernel OOM victim is ambiguous")))
+				continue
+			}
 			findings = append(findings, finding{
 				probeId: "redis/process", tier: tierPage,
 				class: "redis-kernel-oom", target: host.name, sustain: 1,
-				symptom:   "The kernel OOM killer selected a Redis process on the cluster host.",
-				mechanism: "Aggregate Redis allocation exceeded physical memory; the killed serving master leaves a shard unavailable without replica cover.",
-				baseline:  "No Redis-related kernel OOM event.",
-				observed:  "redis-related kernel OOM event present in the current dmesg window",
-				evidence:  strings.TrimSpace(strings.TrimPrefix(line, "kernel_oom")),
-				action:    "Confirm the killed PID and cluster slot impact, restore that node, then reconcile aggregate maxmemory with host RAM.",
-				verify:    "Every node PING succeeds, cluster slots are covered, and no new OOM event appears.",
+				symptom:   "The retained kernel log identifies a redis-server OOM victim on the cluster host.",
+				mechanism: "The kernel selected a task named redis-server during an OOM event. The record alone does not identify its Redis role, the exhausted memory limit, or current cluster impact.",
+				baseline:  "No explicit Redis victim in the retained kernel records.",
+				observed:  "retained kernel record includes an explicit redis-server victim",
+				evidence:  "victim_comm=redis-server; source=kernel-oom-victim-record",
+				context:   "Kernel records may predate this observation. Confirm the event time and process identity before attributing current shard loss or recovery.",
+				action:    "Confirm the victim PID, event time, Redis process role, cgroup and host memory limits, and cluster slot impact before choosing remediation.",
+				verify:    "Every node PING succeeds, cluster slots are covered, and a bounded follow-up window records no new Redis OOM event.",
 				playbook:  "SIGNALS.md §3.4 and §5.2",
 			})
 		}
+	}
+	if kernelErr != nil {
+		findings = append(findings, cannotObserveFinding(host.name+"/redis-kernel", kernelErr))
 	}
 	if len(findings) == 0 {
 		findings = append(findings, healthyFinding("redis/process", tierWarn, "redis-process", host.name))

@@ -213,7 +213,7 @@ func TestRunMainUsesAttestedLocalSequentialMonitorGates(t *testing.T) {
 			t.Errorf("RUN-MAIN.md does not retain attested test-gate guidance %q", required)
 		}
 	}
-	if got := strings.Count(documentation, "unset WARP_ENV; source ./test-env.sh && exec go test"); got != 5 {
+	if got := strings.Count(documentation, "unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test"); got != 5 {
 		t.Fatalf("attested monitor test command count = %d, want 5", got)
 	}
 }

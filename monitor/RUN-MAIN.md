@@ -200,9 +200,9 @@ test -d "$WARP_HOME/vault"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
@@ -268,15 +268,23 @@ Use one-shot mode for an initial inventory, a focused before/after snapshot, or
 manual diagnosis:
 
 ```sh
+set -euo pipefail
 test -n "$BRINGYOUR_HOME"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapshot.XXXXXXXX")
+monitor_snapshot_warpctl=$("$BRINGYOUR_HOME/warp/warpctl/run.sh" --print-executable)
+test -x "$monitor_snapshot_warpctl"
+go version -m "$monitor_snapshot_warpctl" >"$monitor_snapshot_dir/warpctl.version.txt"
+rg -q 'vcs\.revision=[0-9a-f]{40}$' "$monitor_snapshot_dir/warpctl.version.txt"
+rg -q 'vcs\.modified=(true|false)$' "$monitor_snapshot_dir/warpctl.version.txt"
+shasum -a 256 "$monitor_snapshot_warpctl" >"$monitor_snapshot_dir/warpctl.sha256"
+monitor_snapshot_warpctl_dir=$(dirname "$monitor_snapshot_warpctl")
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_snapshot_dir/monitor"
 test -x "$monitor_snapshot_dir/monitor"
 monitor_exit=0
-WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
+PATH="$monitor_snapshot_warpctl_dir:$PATH" WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -output "$monitor_snapshot_dir/alerts.partial.md" \
   2>"$monitor_snapshot_dir/stderr.log" || monitor_exit=$?
 if rg -qx '<!-- monitor-alerts-complete -->' "$monitor_snapshot_dir/alerts.partial.md"; then
@@ -326,7 +334,7 @@ selectors are mutually exclusive; empty, unknown, or ambiguous includes fail
 closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
 
 ```sh
-WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
+PATH="$monitor_snapshot_warpctl_dir:$PATH" WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -include-signal edge-ipv6 -include-signal 20.2 \
   -format jsonl -output "$monitor_snapshot_dir/alerts.partial.jsonl" \
   && mv "$monitor_snapshot_dir/alerts.partial.jsonl" "$monitor_snapshot_dir/alerts.jsonl"
@@ -342,15 +350,36 @@ snapshot is an empty file. As with Markdown, parse only the promoted
 Build a unique immutable binary and keep its artifacts together:
 
 ```sh
+set -euo pipefail
 test -n "$BRINGYOUR_HOME"
-install -d -m 700 "$BRINGYOUR_HOME/monitor"
+install -d -m 700 "$BRINGYOUR_HOME/monitor" "$BRINGYOUR_HOME/temp"
 umask 077
 monitor_run_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.watch.XXXXXXXX")
-go build -o "$monitor_run_dir/monitor" ./cli/monitor
+monitor_build_tmp_dir=$(mktemp -d "${GOTMPDIR:-$BRINGYOUR_HOME/temp}/server-monitor-build.XXXXXXXX")
+GOTMPDIR="$monitor_build_tmp_dir" go build -o "$monitor_run_dir/monitor" ./cli/monitor
+rmdir "$monitor_build_tmp_dir"
 chmod 700 "$monitor_run_dir/monitor"
 test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
-monitor_warpctl=$(command -v warpctl)
+```
+
+Before building, record the selected Go executable, its version and effective
+`GOROOT`; an explicit toolchain override must pair the executable with its
+matching installation. Check free space on the temporary filesystem. The
+private `GOTMPDIR` above avoids a small default `/tmp`; an already configured
+`GOTMPDIR` selects its parent instead. Preserve a failed build's diagnostics and
+temporary workspace. A prior `package ... is not in std` failure does not
+establish that the installation remains incomplete when current source checks
+show the files exist.
+
+Resolve the host-native collector through the existing checkout launcher and
+record it before starting the watcher. Run the selector in Bash; a failed
+selection or identity check stops before watcher contact:
+
+```sh
+# monitor-warpctl-launch-selector
+set -euo pipefail
+monitor_warpctl=$("$BRINGYOUR_HOME/warp/warpctl/run.sh" --print-executable)
 test -n "$monitor_warpctl"
 test -x "$monitor_warpctl"
 go version -m "$monitor_warpctl" >"$monitor_run_dir/warpctl.version.txt"
@@ -359,12 +388,13 @@ rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
 shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
 monitor_warpctl_dir=$(dirname "$monitor_warpctl")
 PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
-  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m \
+  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m -slack-alerts=false \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
 
-The watcher's stderr carries one notifier line at startup:
+The command above disables external notifications explicitly. For a watcher
+started with notifications enabled, stderr carries one notifier line at startup:
 `monitor: Slack alert notifications enabled: ...` when
 `vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
 `monitor: Slack alert notifications disabled: ...` when it is empty or not an
@@ -395,17 +425,25 @@ webhook does not make it stale. A posting watcher does go stale on a rotation
 and needs the normal handoff. `-once` never posts. Never print the webhook to
 check it: the startup line is the evidence.
 
-Treat the exact Warpctl resolved by the watcher as part of the immutable
-observation boundary. Before launch, require its `go version -m` output to carry
+Treat the exact native Warpctl selected by the checkout launcher as part of the
+immutable observation boundary. Before launch, require its `go version -m`
+output to carry
 a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
 that its source revision contains every collector capability assumed by the
 active catalog. In particular, §1.5 requires the Loki live-tail cursor guard at
 Warp commit `d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`. Do not infer capability
-from the HEAD of a nearby checkout while an older executable appears first on
-ambient `PATH`. Build through the existing local Warp checkout convention when
-the resolved executable is stale, then pin only this watcher invocation's
+from the HEAD of a nearby checkout or from an ambient `PATH` entry. Executable
+mode and readable Go metadata can both pass for a foreign-architecture binary;
+they do not prove host compatibility. The launcher selects the Makefile's
+host-native artifact without executing Warpctl or contacting Main. Build through
+the existing local Warp checkout convention when that artifact is stale, then
+pin only this watcher invocation's
 `PATH` to the validated executable directory. This does not alter Warpctl's
-release/build architecture or install anything on managed hosts.
+release/build architecture, edit shell profiles, or install anything on managed
+hosts. A current wrong `PATH` proves a launch-selection defect, not the cause of
+an earlier watcher's termination or a production-service failure. Native path
+selection alone does not prove a child started; retain the loaded-image and
+standing-tail evidence below.
 
 Check support for the effective `services.yml` schema as well as collector
 capabilities, both before launch and after a settings-generation change. A
@@ -592,8 +630,8 @@ current watcher stopped observing.
 For a temporary exact-edge pause, preserve all other coverage:
 
 ```sh
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-edge-ipv6-host HOSTNAME
 ```
 
@@ -604,8 +642,8 @@ exact public IPv6 paths.
 For a whole-host pause, use repeatable exact inventory names:
 
 ```sh
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-host HOSTNAME
 ```
 
@@ -973,7 +1011,7 @@ an expected test name with `action=fail`, or native exit 1 alone, is insufficien
 Separately classify preflight, missing synthetic fixtures, compile failures,
 retry-wrapped setup panics and outer timeouts, and preserve those failed attempts
 without calling them reproductions. Pin the complete local-only resource profile
-and expose the first failure with the existing fail-fast gate setting; never use
+and expose the first failure with `WARP_TEST_ENV_FAIL_FAST=1`; never use
 production resources to make a fixture pass. Any derived metric in an evidence
 receipt must carry its unit and expression so rates per second and per minute
 cannot be silently exchanged.
@@ -1173,14 +1211,33 @@ Run the narrow test first, then the package and race suite:
 
 ```sh
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor -run "TestRelevantName" -count=1'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -run "TestRelevantName" -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 git diff --check
 ```
+
+Set `WARP_TEST_ENV_FAIL_FAST=1` after successful `test-env.sh` sourcing for
+every narrow, package, and race gate. `TestEnv.Run` otherwise permits a failed
+fixture attempt to pass on retry; the release setting limits it to one attempt,
+including explicit positive `RerunCount` values. Ordinary `testing.T` tests do
+not use that retry wrapper. Go's `-failfast` flag stops later tests and does not
+disable fixture retries. Keep `-count=1` so qualification runs the native tests.
+
+Retain each gate's exact launcher and argv, toolchain, source/config hashes,
+and relevant environment fingerprint. For the full and race gates, bind the
+actual native test child's `WARP_TEST_ENV_FAIL_FAST == "1"` observation to its
+PID, start identity, executable, and output receipts. A launcher-side assertion
+or printed Boolean alone proves only intended inheritance. A separate native
+inheritance control plus the existing hermetic release-fail-fast fixture proves
+the launcher boundary without provisioning databases. A short plain-`testing.T`
+narrow test can finish before an external environment read; preserve that limit
+and its actual result without inventing a native-child receipt. An older PASS
+without the required environment evidence remains an actual PASS, with
+first-attempt qualification unproved for retry-wrapped fixtures.
 
 `WARP_ENV=main` selects the production probe target; it is not a Go-test
 environment. Run the monitor package and race gates sequentially in separate

@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -342,11 +343,17 @@ type sshCommandRunner func(ctx context.Context, args []string, stdin string) (st
 // status. An exit-255-shaped string from another command is not SSH evidence.
 // OpenSSH's status 255 does not locate the fault: it can also be the remote
 // command's own status, so this type must not imply observer or host route loss.
-type sshCommandError struct{ err error }
+// The diagnostic marker retains a target-matched spelling, not phase authority.
+type sshCommandError struct {
+	err                      error
+	connectTimeoutDiagnostic bool
+}
 
 func (e *sshCommandError) Error() string { return e.err.Error() }
 func (e *sshCommandError) Unwrap() error { return e.err }
 
+// Start followed by exactly one Wait preserves Run's lifecycle while allowing
+// the optional PG observer to distinguish an attempted start from a child.
 func runSSHCommand(ctx context.Context, args []string, stdin string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	if stdin != "" {
@@ -355,7 +362,18 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
-	err := cmd.Run()
+	observation := pgSampleTransportFromContext(ctx)
+	observation.stage("ssh_start", "not_attempted")
+	err := cmd.Start()
+	if err == nil {
+		observation.started(ctx)
+		err = cmd.Wait()
+		if observation != nil {
+			observation.joined(cmd.ProcessState, errOut.String())
+		}
+	} else {
+		observation.stage("ssh_start", "start_failed")
+	}
 	return out.String(), errOut.String(), err
 }
 
@@ -384,6 +402,8 @@ func (self *runner) ssh(ctx context.Context, h *host, remoteCmd string, stdin st
 // deliberately slow reads (the daily keyspace scan) that exceed the default
 // budget.
 func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, stdin string, timeout time.Duration) (output string, resultErr error) {
+	observation := pgSampleTransportFromContext(ctx)
+	observation.stage("transport_preflight", "not_attempted")
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -399,12 +419,14 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	if connectTimeout <= 0 {
 		connectTimeout = 10 * time.Second
 	}
+	observation.stage("host_admission", "not_attempted")
 	release, err := self.remoteCommands.acquire(ctx, addr)
 	if err != nil {
 		return "", &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}
 	}
 	defer release()
 	if self.cfg.sharedSshAdmission != nil {
+		observation.stage("shared_admission", "not_attempted")
 		releaseShared, err := self.cfg.sharedSshAdmission.acquire(ctx, h.name)
 		if err != nil {
 			return "", &sshAdmissionUnavailableError{err: err}
@@ -429,6 +451,7 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	}
 	target := fmt.Sprintf("%s@%s", sshUser, addr)
 	sshArgs := self.sshArgsWithKeys(target, remoteCmd, connectTimeout, sshKeyPaths)
+	observation.stage("ssh_start", "unknown")
 	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return out, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
@@ -437,9 +460,24 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		return out, err
 	}
 	if err != nil {
+		stderr := strings.TrimSpace(errOut)
+		connectTimeoutDiagnostic := false
+		if out == "" {
+			// Keep only a fixed marker for a complete native diagnostic naming
+			// this attempt's selected address, with no remote stdout.
+			portAndReason, targetMatches := strings.CutPrefix(stderr, "ssh: connect to host "+addr+" port ")
+			port, reasonMatches := strings.CutSuffix(portAndReason, ": Connection timed out")
+			if targetMatches && reasonMatches {
+				portNumber, portErr := strconv.Atoi(port)
+				connectTimeoutDiagnostic = portErr == nil && 0 < portNumber && portNumber <= 65535 && strconv.Itoa(portNumber) == port
+			}
+		}
 		// Retain native SSH status for the fixed error classifier. Neither 255
 		// nor stderr alone proves a local VPN, network, or remote-host cause.
-		return out, &sshCommandError{err: fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut))}
+		return out, &sshCommandError{
+			err:                      fmt.Errorf("%s: %w: %s", h.name, err, stderr),
+			connectTimeoutDiagnostic: connectTimeoutDiagnostic,
+		}
 	}
 	return out, nil
 }

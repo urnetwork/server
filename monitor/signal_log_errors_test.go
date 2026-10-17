@@ -1297,7 +1297,7 @@ func TestLogErrorsSignalExplainsHTTPHijackWrite(t *testing.T) {
 }
 
 func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
-	line := `[edge-0][grafana][g1][cid:test][2026-08-31T21:09:30.100000Z]level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`
+	line := `[fixture-grafana.example][grafana][fixture-block][cid:fixture][2031-07-08T09:10:00Z]level=info caller=tailer.go:123 msg="tailer dropped streams is reset" length=10`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-grafana", nil
@@ -1329,17 +1329,20 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"Warp 5927527, contained by 35453fd",
 		"without enlarging either queue",
 		"Grafana is the observation service",
-		"All six active Grafana nodes were healthy",
-		"removes missing LAN identity as the current prerequisite",
+		"Current artifact ancestry and backend health are unknown from this log event",
+		"dated September artifact and ring-health controls",
+		"rate counts reset diagnostics, not unique lost records",
 		"capped service-wide query is not a total",
 		"same absolute window for each configured block",
 		"do not redeploy already-current blocks",
 		"Warp commit 1e95aef",
 		"server Proxy commit e055c98c",
 		"Warp 35453fd",
-		"contains 13fcd05's producer reductions",
-		"5927527's descriptor forwarding",
-		"cancellation-aware five-slot handoff fix",
+		"cancellation-aware five-slot handoff",
+		"only when the running artifact is proven to lack",
+		"If the fixes are already present",
+		"Missing ancestry remains unknown",
+		"bounded native tail counters on the same process generation",
 		"service-attributed loki-tail-dropped-entries",
 		"Do not raise Loki's fixed queues",
 		"suppress genuine sustained-backpressure evidence",
@@ -1357,7 +1360,7 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 	for _, staleAction := range []string{
 		"Deploy a Grafana image containing Warp commit 1e95aef",
 		"deploy server Proxy commit e055c98c or later",
-		"missing Fireside LAN identity",
+		"For the current short-burst loss, deploy",
 		"node recovery remains a prerequisite",
 	} {
 		if strings.Contains(markdown, staleAction) {
@@ -1447,7 +1450,10 @@ func TestLokiShortBurstHandoffDocumentationContract(t *testing.T) {
 		"pressure beyond 100 remains bounded and emits drop metadata",
 		"all 8,118 source journal rows matched durable Loki",
 		"1,099 ingester reset markers and 28 backend EOFs",
-		"Deploy a Grafana image containing `35453fd`",
+		"Deploy `35453fd` only when the running artifact is proven to lack it",
+		"log classifier has no current runtime ancestry or backend-health input",
+		"Missing or partial ancestry and backend evidence remain unknown",
+		"reset threshold of one/minute, or EOF threshold of five/minute",
 		"zero raw reset, service-attributed dropped-entry, plus EOF classes for ten minutes",
 	} {
 		if !strings.Contains(catalogText, want) {
@@ -1457,9 +1463,9 @@ func TestLokiShortBurstHandoffDocumentationContract(t *testing.T) {
 }
 
 func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
-	legacyEOFLine := `[edge-0][grafana][g1][cid:test][2026-08-31T19:20:51.247763Z]level=error ts=2026-08-31T19:20:51.244318653Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`
-	attributedEOFLine := `[edge-0][grafana][g1][cid:test][2026-09-01T05:00:17.247763Z]level=error ts=2026-09-01T05:00:17.244318653Z caller=tail.go:232 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`
-	canceledLine := `[edge-1][grafana][g1][cid:test][2026-08-31T19:17:37.333774Z]level=error ts=2026-08-31T19:17:37.270771087Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err="rpc error: code = Canceled desc = context canceled"`
+	legacyEOFLine := `[fixture-grafana.example][grafana][fixture-block][cid:fixture][2031-07-08T09:10:00Z]level=error caller=tail.go:123 component=tail-querier org_id=fixture msg="Error receiving response from grpc tail client" err=EOF`
+	attributedEOFLine := `[fixture-grafana.example][grafana][fixture-block][cid:fixture][2031-07-08T09:10:00Z]level=error caller=tail.go:123 component=tail-querier org_id=fixture msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`
+	canceledLine := `[fixture-grafana.example][grafana][fixture-block][cid:fixture][2031-07-08T09:10:00Z]level=error caller=tail.go:123 component=tail-querier org_id=fixture msg="Error receiving response from grpc tail client" err="rpc error: code = Canceled desc = context canceled"`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-grafana", nil
@@ -1503,32 +1509,21 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		"ring loss",
 		"long-lived HTTP/2 and gRPC connections",
 		"Canceled/context-canceled",
-		"182 exact EOFs",
-		"11,583 dropped-stream resets",
-		"48 quoted cancellations",
-		"2026.8.31+1034210530",
-		"2026.9.1-outerwerld+1035004200",
-		"clean Warp source 71731e4",
-		"rules out a stale rollout and a single failed backend",
-		"already contained 42168fe and bca37cf",
-		"restored all six active ring nodes",
-		"missing LAN identity is no longer a current prerequisite",
+		"Current artifact ancestry and backend health are unknown from this log event",
+		"dated September controls",
+		"missing frame remains unknown",
 		"Bounded log reconciliation remains required",
 		"Warp commit 1e95aef",
-		"only to older Grafana blocks",
-		"Warp commits 1e95aef and bca37cf",
+		"only when the running artifact is proven to lack",
+		"If the fixes are already present",
+		"Missing ancestry remains unknown",
+		"Warp commits 1e95aef, bca37cf, and 35453fd",
 		"Warp commit 35453fd",
-		"contains 5927527's producer reduction and bounded descriptor forwarding",
-		"five-slot ingester handoff",
-		"existing 100-slot processing queue can absorb a short burst",
+		"100-slot processing queue could absorb a short burst",
 		"residual service-attributed drop",
 		"named backend's tailer, process, ring, and network state",
+		"bounded same-window native counters and send-progress evidence",
 		"Do not raise Loki's fixed queues",
-		"2,825 unconditional Mimir `evaluation stats`",
-		"1,084 Loki table lookup records",
-		"942 bucket-index warnings",
-		"1,229 reset records",
-		"22 attributed EOFs split across every one of the six backend addresses",
 		"every configured active ring member owns its LAN identity",
 		"loki-tail-dropped-streams, service-attributed loki-tail-dropped-entries, plus loki-tail-backend-eof remain zero for 10 minutes",
 		"Genuine sustained blockage remains bounded and observable",
@@ -1541,7 +1536,7 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 	for _, staleAction := range []string{
 		"Publish and deploy a Grafana image containing Warp commit 1e95aef",
 		"restore any missing ring member or LAN identity",
-		"Fireside was absent from the active Loki ring",
+		"For the current short-burst loss, deploy",
 	} {
 		if strings.Contains(markdown, staleAction) {
 			t.Fatalf("post-fix EOF alert retained stale guidance %q:\n%s", staleAction, markdown)

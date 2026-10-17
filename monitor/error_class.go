@@ -220,6 +220,8 @@ func classifyObservationError(err error) string {
 		strings.Contains(lower, "http 401") ||
 		strings.Contains(lower, "http 403"):
 		return observationErrorClassAccessDenied
+	case sshExit255 && sshFailure.connectTimeoutDiagnostic:
+		return observationErrorClassTimeout
 	case sshExit255:
 		return observationErrorClassSSHExit255
 	case strings.Contains(lower, "exit status"):

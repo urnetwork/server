@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,15 @@ const (
 )
 
 type redisKeyEventProbe struct{}
+
+// Only complete, validated host censuses contribute these identifier-free
+// measurements to config agreement and per-node subscriber verdicts.
+type redisKeyEventNode struct {
+	host        *host
+	port        int
+	classes     string
+	pubsubConns int
+}
 
 func (self redisKeyEventProbe) id() string             { return "redis/key-events" }
 func (self redisKeyEventProbe) tier() string           { return tierWarn }
@@ -66,49 +76,16 @@ func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]find
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
 
-	type nodeState struct {
-		host        *host
-		port        int
-		classes     string
-		pubsubConns int
-	}
-	nodeStates := []nodeState{}
+	nodeStates := []redisKeyEventNode{}
 	classCounts := map[string]int{}
 	failures := []redisHostFailure{}
 	for _, nodeHost := range hosts {
-		ports := nodeHost.redisNodePorts()
-		if len(ports) == 0 {
-			return nil, fmt.Errorf("no redis node ports configured")
-		}
-		lo, hi := ports[0], ports[len(ports)-1]
-
-		// one ssh round per host: per node, the config flags and the pubsub conn count
-		script := fmt.Sprintf(`for p in $(seq %d %d); do
-  f=$(timeout 3 redis-cli -p $p CONFIG GET notify-keyspace-events 2>/dev/null | tail -1)
-  n=$(timeout 3 redis-cli -p $p CLIENT LIST TYPE pubsub 2>/dev/null | grep -c .)
-  echo "$p ${f:--} ${n:-0}"
-done`, lo, hi)
-		out, err := env.runner.shell(ctx, nodeHost, script)
+		states, err := collectRedisKeyEventNodes(ctx, env, nodeHost)
 		if err != nil {
 			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
 			continue
 		}
-
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 3 {
-				continue
-			}
-			flags := fields[1]
-			if flags == "-" {
-				flags = ""
-			}
-			state := nodeState{
-				host:        nodeHost,
-				port:        atoi(fields[0]),
-				classes:     normalizeEventClasses(flags),
-				pubsubConns: atoi(fields[2]),
-			}
+		for _, state := range states {
 			nodeStates = append(nodeStates, state)
 			classCounts[state.classes] += 1
 		}
@@ -198,4 +175,106 @@ done`, lo, hi)
 	}
 
 	return findings, nil
+}
+
+// Preserve each inner exit and validate replies before reducing them on the
+// Redis host. redis-cli renders CLIENT LIST verbatim, so only successful empty
+// output means zero subscribers. Raw client rows and error bodies stay local.
+func collectRedisKeyEventNodes(ctx context.Context, env *probeEnv, nodeHost *host) ([]redisKeyEventNode, error) {
+	ports, validPorts := redisClusterPorts(nodeHost.redisNodePorts())
+	if !validPorts {
+		return nil, fmt.Errorf("invalid response: missing or invalid Redis key-events node inventory")
+	}
+	portTexts := make([]string, len(ports))
+	for index, port := range ports {
+		portTexts[index] = strconv.Itoa(port)
+	}
+	command := `newline='
+'
+for p in ` + strings.Join(portTexts, " ") + `; do
+  config=$(timeout -k 1s 3s redis-cli -2 --raw -h 127.0.0.1 -p "$p" CONFIG GET notify-keyspace-events 2>/dev/null; result=$?; printf x; exit "$result")
+  result=$?
+  config=${config%x}
+  if [ "$result" -ne 0 ]; then
+    printf 'Redis key-events CONFIG command failed\n' >&2
+    exit "$result"
+  fi
+  case "$config" in
+    *"$newline") ;;
+    *) printf 'invalid Redis key-events CONFIG reply\n' >&2; exit 1 ;;
+  esac
+  flags=$(printf '%s' "$config" | LC_ALL=C awk '
+    NR == 1 { if ($0 != "notify-keyspace-events") invalid = 1; next }
+    NR == 2 { if ($0 !~ /^[AKEg$lshzxetdmnoca]*$/) invalid = 1; flags = $0; next }
+    { invalid = 1 }
+    END { if (invalid || NR != 2) exit 1; print flags == "" ? "-" : flags }
+  ') || { printf 'invalid Redis key-events CONFIG reply\n' >&2; exit 1; }
+  count=$({ timeout -k 1s 3s redis-cli -2 --raw -h 127.0.0.1 -p "$p" CLIENT LIST TYPE pubsub 2>/dev/null
+    result=$?
+    printf '\nredis-keyevents-client-exit %s\n' "$result"
+  } | LC_ALL=C awk '
+    $1 == "redis-keyevents-client-exit" {
+      if (ended || NF != 2 || $2 != "0" || blank != 1) invalid = 1
+      ended = 1; next
+    }
+    /^$/ { if (ended) invalid = 1; blank++; next }
+    {
+      if (ended || blank) invalid = 1
+      ids = 0; flags = 0; client_id = ""
+      for (i = 1; i <= NF; i++) {
+        separator = index($i, "=")
+        if (separator <= 1) { invalid = 1; continue }
+        key = substr($i, 1, separator - 1)
+        value = substr($i, separator + 1)
+        if (key == "id") {
+          ids++; client_id = value
+          if (value !~ /^[0-9]+$/) invalid = 1
+        } else if (key == "flags") {
+          flags++
+          if (value !~ /^[A-Za-z]+$/ || !index(value, "P")) invalid = 1
+        }
+      }
+      if (ids != 1 || flags != 1 || seen[client_id]++) invalid = 1
+      count++
+    }
+    END { if (invalid || !ended) exit 1; print count + 0 }
+  ') || { printf 'failed or invalid Redis key-events CLIENT observation\n' >&2; exit 1; }
+  printf '%s %s %s\n' "$p" "$flags" "$count"
+done`
+	out, err := env.runner.shell(ctx, nodeHost, command)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > 64*1024 {
+		return nil, fmt.Errorf("invalid response: Redis key-events census exceeds its bound")
+	}
+	expected := make(map[int]bool, len(ports))
+	for _, port := range ports {
+		expected[port] = true
+	}
+	states := make([]redisKeyEventNode, 0, len(ports))
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("invalid response: malformed Redis key-events census row")
+		}
+		port, portErr := strconv.Atoi(fields[0])
+		count, countErr := strconv.Atoi(fields[2])
+		if portErr != nil || !expected[port] || strconv.Itoa(port) != fields[0] || countErr != nil || count < 0 || strconv.Itoa(count) != fields[2] {
+			return nil, fmt.Errorf("invalid response: unexpected, duplicate or invalid Redis key-events node/count")
+		}
+		flags := fields[1]
+		if flags == "-" {
+			flags = ""
+		}
+		if len(flags) > 64 || strings.IndexFunc(flags, func(flag rune) bool { return !strings.ContainsRune("AKEg$lshzxetdmnoca", flag) }) >= 0 {
+			return nil, fmt.Errorf("invalid response: malformed Redis key-events class set")
+		}
+		delete(expected, port)
+		states = append(states, redisKeyEventNode{host: nodeHost, port: port, classes: normalizeEventClasses(flags), pubsubConns: count})
+	}
+	if len(expected) != 0 {
+		return nil, fmt.Errorf("invalid response: Redis key-events census omitted configured nodes")
+	}
+	return states, nil
 }

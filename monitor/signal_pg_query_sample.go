@@ -264,6 +264,8 @@ type pgQuerySampleReceipt struct {
 	PrivateSql                *pgSampleSqlCoverage   `json:"private_sql,omitempty"`
 	privateSqlRows            []pgSampleSqlRow
 	privateQueryIds           map[string]string
+
+	TransportObservation *pgSampleTransportReceipt `json:"transport_observation,omitempty"`
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -708,6 +710,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	ctx, cancelSample := context.WithTimeout(ctx, pgQuerySampleBudget)
 	defer cancelSample()
+	ctx, transportObservation := observePgSampleTransport(ctx)
 	h := env.cfg.hostByRole("pg-primary")
 	if h == nil {
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryMissing}
@@ -758,9 +761,11 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now, Reason: "source-unavailable"}
-	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb)})
+	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb), "transport_nonce": transportObservation.nonce})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
+	transportReceipt := transportObservation.receipt
+	transportReceipt.OwnerDeadlineExceeded = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	if failure, valid := parsePgSampleSourceFailure(out); valid {
 		r.SourceFailure = failure
 	} else if readErr != nil {
@@ -778,6 +783,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			r.SourceFailure = &pgSampleSourceFailure{Phase: "projection", Cause: "invalid_response"}
 		}
 	}
+	r.TransportObservation = &transportReceipt
 	r.FinishedAt = env.now().UTC()
 	raw, privateSql, err := pgSampleEncodeReceipts(&r)
 	if err != nil {

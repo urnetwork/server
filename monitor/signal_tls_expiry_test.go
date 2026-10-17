@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -141,10 +142,10 @@ func TestTLSExpirySignalSyntheticExpiredExactEdge(t *testing.T) {
 
 func TestTLSExpirySignalSyntheticFailureClasses(t *testing.T) {
 	now := time.Date(2026, 9, 3, 7, 20, 0, 0, time.UTC)
-	hostname := "manager.bringyour.com"
+	hostname := "manager.example"
 	certificates := map[string][]byte{
 		"192.0.2.1:443": syntheticTLSCertificate(t, []string{hostname}, now.Add(time.Hour), now.Add(90*24*time.Hour)),
-		"192.0.2.2:443": syntheticTLSCertificate(t, []string{"api.bringyour.com"}, now.Add(-time.Hour), now.Add(90*24*time.Hour)),
+		"192.0.2.2:443": syntheticTLSCertificate(t, []string{"api.example"}, now.Add(-time.Hour), now.Add(90*24*time.Hour)),
 		"192.0.2.3:443": syntheticTLSCertificate(t, []string{hostname}, now.Add(-time.Hour), now.Add(90*24*time.Hour)),
 		"192.0.2.4:443": syntheticTLSCertificate(t, []string{hostname}, now.Add(-time.Hour), now.Add(tlsExpiryWarningWindow)),
 	}
@@ -176,6 +177,11 @@ func TestTLSExpirySignalSyntheticFailureClasses(t *testing.T) {
 	if len(alerts) != 5 {
 		t.Fatalf("alerts = %d, want every distinct failure class: %+v", len(alerts), alerts)
 	}
+	catalog, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := catalogMarkerSection(t, string(catalog), "### 18.2 ", "\n### 18.2a ")
 	for _, class := range []string{
 		"tls-certificate-not-yet-valid",
 		"tls-certificate-hostname",
@@ -184,8 +190,15 @@ func TestTLSExpirySignalSyntheticFailureClasses(t *testing.T) {
 		"tls-certificate-unobservable",
 	} {
 		alert := requireAlertClass(t, alerts, class)
-		if (class == "tls-certificate-expiring" || class == "tls-certificate-unobservable") && alert.Severity != SeverityWarn {
-			t.Fatalf("%s severity = %s, want warn", class, alert.Severity)
+		wantSeverity := SeverityPage
+		if class == "tls-certificate-expiring" || class == "tls-certificate-unobservable" {
+			wantSeverity = SeverityWarn
+		}
+		if alert.Severity != wantSeverity {
+			t.Fatalf("%s severity = %s, want %s", class, alert.Severity, wantSeverity)
+		}
+		if !catalogHasExactClass(section, alert.Class) {
+			t.Errorf("emitted TLS class %q is absent from SIGNALS.md §18.2", alert.Class)
 		}
 	}
 }
