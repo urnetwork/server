@@ -100,10 +100,13 @@ func TestResidentRuntimeOwnershipChurnControl(t *testing.T) {
 					residentRuntimeControlAck(t, ctx, resident.client, clientconnect.Id(clientID))
 				}
 
+				// The two completed ACK callbacks above witness both directions.
+				// ACKs now coalesce in a fixed mailbox, so SendAckSlots correctly
+				// remains zero rather than describing a retained channel.
 				var aggregate clientconnect.TransferOwnerCensus
 				for _, entry := range owners {
 					census := entry.resident.client.MemoryOwnerCensus()
-					if census.SendWorkers == 0 || census.ReceiveWorkers == 0 || census.SendAckSlots == 0 || census.KnownChannelSlotBytes == 0 {
+					if census.SendWorkers == 0 || census.ReceiveWorkers == 0 || census.SendPackSlots == 0 || census.ReceivePackSlots == 0 || census.KnownChannelSlotBytes == 0 {
 						t.Fatalf("full resident control did not activate both transfer owners: %+v", census)
 					}
 					aggregate.Clients += census.Clients
