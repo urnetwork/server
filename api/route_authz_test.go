@@ -101,6 +101,28 @@ func TestOnlyAdminRoutesCarryTheGate(t *testing.T) {
 	}
 }
 
+// Exactly the routes outside the public class carry the intended network gate,
+// and so does a route not yet classified, which is network only until it is.
+func TestEveryCredentialRouteCarriesTheIntendedNetworkGate(t *testing.T) {
+	for _, route := range Routes() {
+		access := routeAccessFor(route)
+		if want := access != routeAccessPublic; route.RefusesIntendedNetworkMismatch() != want {
+			t.Fatalf("%s (access %d): intended network gate = %t, want %t", routeAccessKey(route), access, route.RefusesIntendedNetworkMismatch(), want)
+		}
+	}
+	unclassified := router.NewRoute("POST", "/network/new-admin-route", func(w http.ResponseWriter, r *http.Request) {})
+	if !applyRouteAccess([]*router.Route{unclassified})[0].RefusesIntendedNetworkMismatch() {
+		t.Fatal("an unclassified route has no intended network gate")
+	}
+}
+
+// The gate reads the header the clients are told to send.
+func TestTheRouteTableReadsTheIntendedNetworkHeader(t *testing.T) {
+	if session.IntendedNetworkIdHeader != "X-UR-Intended-Network-Id" {
+		t.Fatalf("header = %q", session.IntendedNetworkIdHeader)
+	}
+}
+
 // routeAccessTestPath is a request path the pattern matches.
 func routeAccessTestPath(pattern string) string {
 	path := strings.ReplaceAll(pattern, "([^/]+)", "x")
