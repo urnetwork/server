@@ -1,3 +1,5 @@
+// Exercises deterministic fixture identities and mature performance evidence
+// independently of the current provider admission policy.
 package main
 
 import (
@@ -245,6 +247,9 @@ func TestMatureProviderPerformancesRejectInvalidGroundTruth(t *testing.T) {
 	}
 }
 
+// Current provider policy permits otherwise eligible unmeasured transports.
+// Prewarm must restore exact performance evidence and ranking inputs, not
+// act as an extra admission gate or invent tests on a replacement connection.
 func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -295,32 +300,36 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 			t.Fatalf("SetConnectionLocation: %v", err)
 		}
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
-		var hasLatencyTestBefore bool
-		var hasSpeedTestBefore bool
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-				SELECT has_latency_test, has_speed_test
-				FROM network_client_location_reliability
-				WHERE client_id = $1
-				`,
-				providerClientId,
-			)
-			server.WithPgResult(result, err, func() {
-				if !result.Next() {
-					t.Fatal("provider reliability row not found before performance prewarm")
-				}
-				server.Raise(result.Scan(&hasLatencyTestBefore, &hasSpeedTestBefore))
+		assertPerformanceSnapshot := func(wantEvidence bool) {
+			t.Helper()
+			var hasLatencyTest bool
+			var hasSpeedTest bool
+			var relativeLatencyMillis int
+			var maxBytesPerSecond int64
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT has_latency_test, has_speed_test,
+						min_relative_latency_ms, max_bytes_per_second
+					FROM network_client_location_reliability
+					WHERE client_id = $1
+					`,
+					providerClientId,
+				)
+				server.WithPgResult(result, err, func() {
+					if !result.Next() {
+						t.Fatal("provider performance row not found")
+					}
+					server.Raise(result.Scan(&hasLatencyTest, &hasSpeedTest, &relativeLatencyMillis, &maxBytesPerSecond))
+				})
 			})
-		})
-		if hasLatencyTestBefore || hasSpeedTestBefore {
-			t.Fatalf(
-				"fresh connection unexpectedly had test evidence: latency=%t speed=%t",
-				hasLatencyTestBefore,
-				hasSpeedTestBefore,
-			)
+			if hasLatencyTest != wantEvidence || hasSpeedTest != wantEvidence ||
+				(wantEvidence && (relativeLatencyMillis != 30 || maxBytesPerSecond != entry.BandwidthBps)) {
+				t.Fatalf("performance evidence = latency:%t/%d speed:%t/%d, want present=%t and exact fixture values", hasLatencyTest, relativeLatencyMillis, hasSpeedTest, maxBytesPerSecond, wantEvidence)
+			}
 		}
+		assertPerformanceSnapshot(false)
 
 		reliabilities, err := matureProviderReliabilities([]ProviderEntry{entry})
 		if err != nil {
@@ -347,8 +356,8 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 		}
 
 		before := findProviders()
-		if len(before.Providers) != 0 {
-			t.Fatalf("provider without performance evidence entered matchmaking: %d", len(before.Providers))
+		if len(before.Providers) != 1 || before.Providers[0].ClientId != providerClientId || before.Providers[0].HasEstimatedBytesPerSecond {
+			t.Fatalf("unmeasured provider identity or evidence changed: %+v", before.Providers)
 		}
 		performances, err := matureProviderPerformances([]ProviderEntry{entry})
 		if err != nil {
@@ -357,9 +366,15 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 		writeMatureProviderConnectionPerformances(ctx, performances)
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
 		writeMatureProviderPerformanceSnapshot(ctx, performances)
+		assertPerformanceSnapshot(true)
 		after := findProviders()
 		if len(after.Providers) != 1 || after.Providers[0].ClientId != providerClientId {
 			t.Fatalf("matchmaking providers = %+v, want %s", after.Providers, providerClientId)
+		}
+		// Online fallback reports a fixed bucket tier, not a performance score.
+		// Its exact estimate and the snapshot above are the ranking inputs.
+		if !after.Providers[0].HasEstimatedBytesPerSecond || int64(after.Providers[0].EstimatedBytesPerSecond) != entry.BandwidthBps {
+			t.Fatalf("prewarm lost its exact performance evidence: before=%+v after=%+v", before.Providers[0], after.Providers[0])
 		}
 		model.DisconnectNetworkClient(ctx, connectionId)
 		replacementConnectionId, _, _, _, err := model.ConnectNetworkClient(
@@ -380,53 +395,44 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 			t.Fatalf("replacement SetConnectionLocation: %v", err)
 		}
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		assertPerformanceSnapshot(false)
+		assertReplacementUntested := func() {
+			t.Helper()
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx, `
+					SELECT EXISTS (SELECT 1 FROM network_client_latency WHERE connection_id = $1),
+						EXISTS (SELECT 1 FROM network_client_speed WHERE connection_id = $1)
+				`, replacementConnectionId)
+				server.WithPgResult(result, err, func() {
+					if !result.Next() {
+						t.Fatal("replacement evidence query returned no row")
+					}
+					var latencyTest, speedTest bool
+					server.Raise(result.Scan(&latencyTest, &speedTest))
+					if latencyTest || speedTest {
+						t.Fatal("provider-scoped restoration invented tests on the replacement connection")
+					}
+				})
+			})
+		}
+		assertReplacementUntested()
 		withoutRestore := findProviders()
-		if len(withoutRestore.Providers) != 0 {
-			t.Fatalf("untested replacement entered matchmaking: %+v", withoutRestore.Providers)
+		if len(withoutRestore.Providers) != 1 || withoutRestore.Providers[0].ClientId != providerClientId ||
+			withoutRestore.Providers[0].HasEstimatedBytesPerSecond {
+			t.Fatalf("untested replacement did not lose performance evidence: %+v", withoutRestore.Providers)
 		}
 		services := &Services{}
 		services.SetPrewarmed(performances)
 		services.RunPipelineOnce(ctx)
+		assertPerformanceSnapshot(true)
+		assertReplacementUntested()
 		afterRefresh := findProviders()
 		if len(afterRefresh.Providers) != 1 || afterRefresh.Providers[0].ClientId != providerClientId {
 			t.Fatalf("providers after pipeline refresh = %+v, want %s", afterRefresh.Providers, providerClientId)
 		}
 
-		var hasLatencyTest bool
-		var hasSpeedTest bool
-		var relativeLatencyMillis int
-		var maxBytesPerSecond int64
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-				SELECT has_latency_test, has_speed_test,
-					min_relative_latency_ms, max_bytes_per_second
-				FROM network_client_location_reliability
-				WHERE client_id = $1
-				`,
-				providerClientId,
-			)
-			server.WithPgResult(result, err, func() {
-				if !result.Next() {
-					t.Fatal("provider performance row not found")
-				}
-				server.Raise(result.Scan(
-					&hasLatencyTest,
-					&hasSpeedTest,
-					&relativeLatencyMillis,
-					&maxBytesPerSecond,
-				))
-			})
-		})
-		if !hasLatencyTest || !hasSpeedTest || relativeLatencyMillis != 30 || maxBytesPerSecond != entry.BandwidthBps {
-			t.Fatalf(
-				"performance evidence = latency:%t/%d speed:%t/%d",
-				hasLatencyTest,
-				relativeLatencyMillis,
-				hasSpeedTest,
-				maxBytesPerSecond,
-			)
+		if !afterRefresh.Providers[0].HasEstimatedBytesPerSecond || int64(afterRefresh.Providers[0].EstimatedBytesPerSecond) != entry.BandwidthBps {
+			t.Fatalf("pipeline did not restore the exact performance evidence: initial=%+v restored=%+v", after.Providers[0], afterRefresh.Providers[0])
 		}
 	})
 }

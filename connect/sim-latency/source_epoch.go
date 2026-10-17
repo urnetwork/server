@@ -117,8 +117,10 @@ type sourceSignificance struct {
 }
 
 type evaluationSource struct {
-	Branch string        `yaml:"branch"`
-	Epochs []sourceEpoch `yaml:"epochs"`
+	Branch      string                     `yaml:"branch"`
+	Epochs      []sourceEpoch              `yaml:"epochs,omitempty"`
+	Generations []reviewedSourceGeneration `yaml:"generations,omitempty"`
+	Rounds      []reviewedSourceRound      `yaml:"rounds,omitempty"`
 }
 
 type controlPlaneIdentity struct {
@@ -194,8 +196,14 @@ func loadSourceManifest(path string) (*sourceManifest, error) {
 
 // validateSourceManifest enforces the six-round monotonic ledger and control policy.
 func validateSourceManifest(manifest *sourceManifest) error {
+	if manifest != nil && manifest.Schema == 2 {
+		return validateReviewedSourceManifest(manifest)
+	}
 	if manifest == nil || manifest.Schema != 1 {
-		return errors.New("source config schema must be 1")
+		return errors.New("source config schema must be 1 or 2")
+	}
+	if len(manifest.EvaluationSource.Generations) != 0 || len(manifest.EvaluationSource.Rounds) != 0 {
+		return errors.New("schema 1 source config cannot contain v2 source generations or round mappings")
 	}
 	if manifest.EvaluationSource.Branch != "sim-latency" {
 		return errors.New("evaluation source branch must be sim-latency")
@@ -305,6 +313,17 @@ func validateSourceSignificance(significance *sourceSignificance) error {
 
 // epoch returns one explicitly configured source generation.
 func (self *sourceManifest) epoch(epochNumber int) (*sourceEpoch, error) {
+	if self.Schema == 2 {
+		generation, err := self.generation(epochNumber)
+		if err != nil {
+			return nil, err
+		}
+		return &sourceEpoch{
+			Epoch: epochNumber, Kind: generation.Kind,
+			SignificantImprovementPercent: generation.SignificantImprovementPercent,
+			Repositories:                  generation.Repositories,
+		}, nil
+	}
 	if epochNumber < 0 || len(self.EvaluationSource.Epochs) <= epochNumber {
 		return nil, fmt.Errorf("source config does not contain epoch %d", epochNumber)
 	}
@@ -609,6 +628,11 @@ func runSourceRecord(opts docopt.Opts) {
 	epoch, err := manifest.epoch(epochNumber)
 	if err != nil {
 		fatalf("source record config: %s", err)
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	if err := verifyFrozenSourceGraph(ctx, filepath.Join(repositoriesRoot, "server"), epoch.Repositories.Server.Commit); err != nil {
+		fatalf("source record measured dependency graph: %s", err)
 	}
 	result := sourceRecord{
 		Schema:                        1,

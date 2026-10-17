@@ -818,6 +818,18 @@ func competitionRegistry() []specEndpoint {
 		{"GET", "/competition/round/{roundId}/providers.yml", nil, nil},
 		{"POST", "/competition/score", rt(controller.ScoreArgs{}), rt(controller.ScoreAcceptedResult{})},
 		{"GET", "/competition/score/{jobId}", nil, rt(controller.ScoreJobResult{})},
+		{method: "POST", path: "/competition/v2/score", argType: rt(controller.ScoreArgs{}), resultType: rt(controller.ScoreAcceptedResult{})},
+		{method: "POST", path: "/competition/v2/score/preflight", argType: rt(controller.ScoreArgs{}), resultType: rt(model.CompetitionV2SubmissionPreflight{})},
+		{method: "GET", path: "/competition/v2/score/{jobId}", resultType: rt(controller.ScoreJobResult{})},
+		{method: "GET", path: "/competition/v2/rounds/{roundId}/result", resultType: rt(model.CompetitionV2RoundResult{})},
+		{method: "GET", path: "/competition/v2/rounds/{roundId}/decisions", resultType: rt(model.CompetitionV2RoundResult{})},
+		{method: "POST", path: "/competition/v2/rounds/{roundId}/seal", resultType: rt(model.CompetitionV2RoundResult{})},
+		{method: "POST", path: "/competition/v2/rounds/{roundId}/reviews", argType: rt(model.CompetitionIntegrityReviewRequest{}), resultType: rt(model.CompetitionIntegrityReviewResult{})},
+		{method: "GET", path: "/competition/v2/events", resultType: rt(model.CompetitionRewardEventPage{})},
+		{method: "POST", path: "/competition/v2/receipts", argType: rt(model.CompetitionSettlementReceipt{}), resultType: rt(model.CompetitionSettlementReceipt{})},
+		{method: "POST", path: "/competition/v2/source/{generation}/readiness", resultType: rt(model.CompetitionSourceReadiness{})},
+		{method: "POST", path: "/competition/v2/holds", argType: rt(model.CompetitionAutomationHoldArgs{}), resultType: rt(model.CompetitionAutomationHold{})},
+		{method: "POST", path: "/competition/v2/rounds/{roundId}/incidents", argType: rt(model.CompetitionAutomationIncidentArgs{}), resultType: rt(model.CompetitionAutomationIncident{})},
 	}
 }
 
@@ -869,6 +881,8 @@ func TestCompetitionSpecSecurity(t *testing.T) {
 		"GET /competition/info":                          true,
 		"GET /competition/leaderboard":                   true,
 		"GET /competition/round/{roundId}/providers.yml": true,
+		"GET /competition/v2/rounds/{roundId}/result":    true,
+		"GET /competition/v2/rounds/{roundId}/decisions": true,
 	}
 	for path, methodsAny := range spec.paths {
 		for method, operationAny := range asMap(methodsAny) {

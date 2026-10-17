@@ -187,9 +187,12 @@ func credentialTokenDigest(raw string) string {
 func credentialAuthenticates(vault *credentialVault, raw string, role string) bool {
 	tokens := make([]controller.Token, 0, len(vault.Tokens))
 	for _, token := range vault.Tokens {
-		tokens = append(tokens, controller.Token{Name: token.Name, Role: token.Role, Sha256: token.Sha256})
+		tokens = append(tokens, controller.Token{
+			Name: token.Name, Role: token.Role, Sha256: token.Sha256,
+			Environment: token.Environment, CompetitionId: token.CompetitionId, SeasonId: token.SeasonId, Revoked: token.Revoked,
+		})
 	}
-	request, err := http.NewRequest(http.MethodGet, "https://api.bringyour.com/competition/info", nil)
+	request, err := http.NewRequest(http.MethodGet, "https://competition.example/competition/info", nil)
 	if err != nil {
 		return false
 	}
