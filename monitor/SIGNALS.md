@@ -26691,6 +26691,23 @@ duplicated, missing, or trailing field fails closed. Raw build information,
 metric labels, rendered configuration, tenant values, and journal lines never
 leave the host.
 
+Host command and parser errors retain their original error tree through the
+per-host reducer. The shared classifier emits only the fixed `error_class`;
+raw errors, command output, credentials, URLs, SQL, and stream labels never
+enter an Alert. Lifecycle precedence, typed shared-admission failures, and
+native SSH status follow §1.7. The host keeps its existing `cannot-observe`
+WARN identity and two-cadence sustain. An `observation-unclassified` result
+still does not distinguish an unrecognized source error from zero identified
+children or an explicitly incomplete child observation.
+
+FALSE POSITIVE QUALIFIER: an observation failure can coexist with healthy Mimir;
+its class does not locate a network or service fault. Unavailable journal
+context or positive journal counts alone cannot create a direct admission
+incident when complete child counters remain flat. FALSE NEGATIVE QUALIFIER:
+an unknown host can conceal real sample loss, and unrecognized causes remain
+unclassified. Keep its prior baseline and incidents, retain positive sibling
+pages, and require the complete comparable two-hour quiet window for recovery.
+
 Mimir 3.1.1 source revision `a3d6c90f25` registers a separate
 `cortex_discarded_samples_total` CounterVec for each discard reason but does
 not instantiate a `{user,group}` child. Prometheus collection enumerates only
@@ -27017,6 +27034,34 @@ owned socket evidence, or a live connection is absent, that visibility finding
 uses the fixed `error_class=observation-state-unavailable`. This is neither a
 healthy zero nor an unclassified transport/parser failure; restore the missing
 runtime evidence before interpreting placement or reconnecting a publisher.
+
+The connection visibility warning retains the same completed sample's five
+prerequisites, in this order: `fluent_bit_active`, `process_observable`,
+`route_state`, `connections_observable`, and `connections_total`. The first,
+second, and fourth fields are booleans; route state is exactly `expected`,
+`different`, or `unobservable`; the connection count is the existing bounded
+non-negative integer. The unchanged gate requires active Fluent Bit, an
+observable stable process, expected route inputs, observable owned sockets,
+and a nonzero owned connection count. Retaining the complete tuple identifies
+every failed predicate without choosing one cause when several fail. This
+adds no remote observation or parser authority: command failure, incomplete or
+invalid schema, and an expected-front count that differs from current inventory
+cannot emit this tuple or reuse one from an earlier attempt.
+
+Counts alone do not prove current owned connections when process or socket
+visibility is unavailable. In particular, the generation fence can invalidate
+ownership after counts were collected; retaining that count must not restore
+its authority. Zero traffic can be healthy idle behavior, and observer access
+limits or a changing process can coexist with a healthy publisher. Conversely,
+a real process or route fault can fail the same gate, and unknown evidence
+must not clear an earlier connection incident or suppress independently known
+placement or sibling drift. The warning retains WARN, sustain two, the stable
+publisher `/connections` target, and `observation-state-unavailable`; the tuple
+is diagnostic evidence rather than a new incident class. No process identifiers,
+raw environment, socket rows, peer addresses, error text, or labels are added.
+Historical warnings that retained only the error class cannot recover their
+exact failed prerequisites from this later output contract. A future qualified
+sample establishes its own attempt only; it does not fill an older evidence gap.
 
 First compare active `services.yml` Grafana membership with the owning Xops
 `grafana_lan_hosts` source and explicit publisher preferences. Correct a source

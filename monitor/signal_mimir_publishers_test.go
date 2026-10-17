@@ -328,7 +328,7 @@ func TestMimirPublishersUnknownRuntimeAndZeroSocketsDoNotClearConnectionDrift(t 
 			}
 			if finding.class == "cannot-observe" {
 				unknownFound = true
-				if finding.target == "synthetic-publisher/connections" && finding.observed != "error_class="+observationErrorClassStateUnavailable {
+				if finding.target == "synthetic-publisher/connections" && strings.SplitN(finding.observed, " ", 2)[0] != "error_class="+observationErrorClassStateUnavailable {
 					t.Fatalf("connection-state visibility class = %q, want %q", finding.observed, observationErrorClassStateUnavailable)
 				}
 			}
