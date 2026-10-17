@@ -12,7 +12,9 @@ starts immediately, uses a single FIFO, and continues after close until every
 accepted submission is terminal. Each evaluation has a three-hour end-to-end
 limit. Results, hidden workload data, and leaderboard rows remain private until
 the FIFO drains and mandatory honesty review selects a winner or establishes
-that there is no winner.
+that there is no winner under the legacy v1 contract. Explicitly enabled v2
+rounds use the separate provisional-reward contract described below; this
+document does not authorize v2 activation or approve its economic policies.
 
 Apex collects the fixed USD $20 fee once for each unique production
 submission. There is no per-epoch submission-count cap. A duplicate canonical
@@ -101,6 +103,77 @@ The authoritative schema is
 adapter and conformance suite cover immutable job identity, FIFO polling,
 429/5xx retry, embargo, reveal, and leaderboard reconciliation.
 
+## Explicit v2 integration
+
+V2 is off by default. Do not convert an open round or reinterpret a legacy
+`winner`, `finalized`, or `honesty_review` field. A v2 round advertises
+`decision_mode: provisional_reward_v2` and
+`required_api_capability: competition.reward.v2` in discovery, admission, and
+polling. A legacy consumer must refuse that mode before collecting a fee.
+The Go submission adapter requires `ApexAdapterOptions.V2CompetitionId` to
+match the advertised competition; leaving it empty preserves v1 behavior.
+
+For an enabled v2 competition:
+
+1. Submit the exact canonical patch and round to
+   `POST /competition/v2/score/preflight` before the production fee. Refuse a
+   known `reward_eligible: false` exact-identity exclusion. This check does not
+   reserve admission or promise a reward; admission rechecks frozen policy.
+2. Submit through `POST /competition/v2/score`, preserving the original
+   submission identity, and persist the returned `/competition/v2/score/...`
+   URL unchanged. Existing ownership, FIFO, cache, and safe failure polling
+   rules still apply.
+3. Read `/competition/v2/rounds/{roundId}/result` or `/decisions` after close,
+   full drain, seal, and reveal. Both return the immutable evaluation seal,
+   complete reward revisions, and separately identified `integrity_review`,
+   `source_approval`, `source_decision`, and `settlement_status`. A provisional
+   winner can remain `not_reviewed`; a safe next epoch may carry the reviewed
+   incumbent forward without shipping that winner's code.
+4. Run the separately scoped settlement integration against
+   `GET /competition/v2/events?after_cursor=0&limit=100`. Persist each full page
+   before advancing its cursor. Poll again after restart or an outage; never
+   infer an event cursor from a timestamp. Replayed events are harmless only
+   when event id, revision, predecessor, scope, and payload all match.
+5. Acknowledge exact events with `POST /competition/v2/receipts`. The reference
+   `NewApexRewardFileStore`/`NewApexRewardAdapter` keeps a separate crash-safe
+   inbox, verifies the published seal and shared eligibility rules, and sends
+   `status: received` only. Its options require `Enabled: true` and its durable
+   store freezes an explicit environment, competition, and season scope.
+   It does not change emissions, calculate burn, transfer funds, or claw back
+   previous payments. A real settlement owner must implement and prove those
+   separately approved operations before production payouts are enabled.
+
+Complete round evidence is streamed under a request deadline, without the
+small control-message size cap; event pages remain bounded. The current reference
+validator still materializes the full round in memory, proportional to admitted
+work. Prove capacity for the intended deployment before activation; this is not
+a paginated evidence protocol or proof of external Apex production capacity.
+
+Submitter, scheduler, reviewer, settlement, and source-promoter credentials are
+separate. Apex's submission credential never gains reviewer, source, evaluator,
+or hidden-workload access. V2 control tokens require exact environment,
+competition, and season scope; a legacy operator is not a wildcard.
+Public results contain specific review reasons and withheld-evidence rationale,
+not private reproduction details or bearer actor names.
+
+Already transferred funds may be irreversible. Original authenticated terminal
+`completed_at` is preserved as settlement-anchor evidence, including archive
+overhead; it is not itself an approved replacement-time accounting formula.
+No-winner and integrity-invalidated decisions are explicit and distinct.
+Repeat entitlements, burn intervals, no-winner handling, appeals, and live
+settlement receipts still require the approvals in
+[`FINAL-AUTOMATE.md`](../FINAL-AUTOMATE.md). The one-sided Welch alpha is per
+candidate, not a 5% season-wide guarantee with unlimited admissions.
+
+`settlement_mode: shadow` disables live settlement authority, not admission fees.
+V2 shadow rounds use the production-shaped non-staging protocol; the reference
+submission adapter still requests the unchanged $20 fee for such rounds. A
+fee-free external conformance run requires an explicitly isolated shadow realm
+and a configured no-op fee collector. Legacy staging remains fee-free and keeps
+its original winner rules. Real Apex shadow acknowledgments and deployment
+readiness still must be demonstrated before activation; local fixtures are not
+that proof.
+
 ## Canonical patch bytes
 
 The `patch` JSON string is the exact submission and cache identity. The API
@@ -169,6 +242,11 @@ new credential before the prior credential is revoked, permitting an explicit
 overlap window. Operators exercise authentication with the new token, update
 Apex, then revoke the old named credential and prove it receives HTTP 401.
 Revocation refuses to remove the last token for either required role.
+API processes snapshot credentials at startup: deploy the revised vault and
+restart/roll every API replica before treating rotation or revocation as effective.
+Verify the old token receives HTTP 401 from every replica; changing only the file
+does not revoke a credential already loaded by a running process. Never reuse a
+credential digest under another name, role, or scope, including revoked entries.
 
 Report a suspected credential leak immediately to `support@ur.xyz`. Stop using
 the token; do not paste it into the report.

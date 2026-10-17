@@ -73,6 +73,18 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/competition/generate-round", handlers.CompetitionGenerateRound),
 		router.NewRoute("POST", "/competition/score", handlers.CompetitionSubmitScore),
 		router.NewRoute("GET", "/competition/score/([^/]+)", handlers.CompetitionGetScore),
+		router.NewRoute("POST", "/competition/v2/score", handlers.CompetitionV2SubmitScore),
+		router.NewRoute("POST", "/competition/v2/score/preflight", handlers.CompetitionV2Preflight),
+		router.NewRoute("GET", "/competition/v2/score/([^/]+)", handlers.CompetitionV2GetScore),
+		router.NewRoute("GET", "/competition/v2/rounds/([^/]+)/result", handlers.CompetitionV2RoundResult),
+		router.NewRoute("GET", "/competition/v2/rounds/([^/]+)/decisions", handlers.CompetitionV2Decisions),
+		router.NewRoute("POST", "/competition/v2/rounds/([^/]+)/seal", handlers.CompetitionV2Seal),
+		router.NewRoute("POST", "/competition/v2/rounds/([^/]+)/reviews", handlers.CompetitionV2Review),
+		router.NewRoute("GET", "/competition/v2/events", handlers.CompetitionV2Events),
+		router.NewRoute("POST", "/competition/v2/receipts", handlers.CompetitionV2Receipt),
+		router.NewRoute("POST", "/competition/v2/source/([^/]+)/readiness", handlers.CompetitionV2SourceReadiness),
+		router.NewRoute("POST", "/competition/v2/holds", handlers.CompetitionV2Hold),
+		router.NewRoute("POST", "/competition/v2/rounds/([^/]+)/incidents", handlers.CompetitionV2Incident),
 		// /stats/last-90 stays up: it serves a redis-exported blob and does not
 		// touch the db.
 		router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),

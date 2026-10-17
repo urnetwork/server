@@ -289,6 +289,34 @@ func TestPublishedMigrationVersionsRemainStable(t *testing.T) {
 	}
 }
 
+// The automation sequence reached main while the feedback index was still
+// unlanded. Keeping the index at its branch-local position would make a
+// database that already applied automation skip it and replay different SQL
+// under published migration versions.
+func TestFeedbackIndexFollowsPublishedAutomationMigrations(t *testing.T) {
+	published := []string{
+		competitionAutomationMigration,
+		competitionAutomationIncidentMigration,
+		competitionAutomationGuardMigration,
+		competitionAutomationFallbackMigration,
+		competitionAutomationTargetMigration,
+	}
+	for offset, sql := range published {
+		version := 842 + offset
+		index := version - 1
+		if len(migrations) <= index {
+			t.Fatalf("published automation migration version %d is missing", version)
+		}
+		migration, ok := migrations[index].(*SqlMigration)
+		if !ok || migration.sql != sql {
+			t.Errorf("migration version %d no longer names its published automation SQL", version)
+		}
+	}
+	if version := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time") + 1; version != 847 {
+		t.Errorf("feedback index migration version = %d, want 847 after published automation history", version)
+	}
+}
+
 // The release-1.0 testnet durably published this exact numeric prefix. New
 // migrations append after it; moving a suffix to make room changes the SQL
 // named by every shifted migration_audit version.

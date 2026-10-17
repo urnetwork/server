@@ -490,11 +490,17 @@ func artifactContentType(path string) string {
 }
 
 type Principal struct {
-	Id   string
-	Role string
+	Id            string
+	Role          string
+	Environment   string
+	CompetitionId string
+	SeasonId      string
 }
 
 func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) {
+	if settings == nil {
+		return nil, false
+	}
 	const prefix = "Bearer "
 	header := request.Header.Get("Authorization")
 	if !strings.HasPrefix(header, prefix) || strings.Contains(header[len(prefix):], " ") {
@@ -506,19 +512,26 @@ func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) 
 	}
 	digest := sha256.Sum256([]byte(raw))
 	var matched *Token
+	matchCount := 0
 	for i := range settings.Tokens {
 		expected, err := hex.DecodeString(settings.Tokens[i].Sha256)
 		if err != nil || len(expected) != sha256.Size {
 			continue
 		}
 		if subtle.ConstantTimeCompare(digest[:], expected) == 1 {
+			matchCount++
 			matched = &settings.Tokens[i]
 		}
 	}
-	if matched == nil {
+	// A revoked alias or a duplicate scope must not select a different capability
+	// merely because token configuration was reordered.
+	if matched == nil || matchCount != 1 || matched.Revoked || validateCompetitionTokenRole(*matched) != nil {
 		return nil, false
 	}
-	return &Principal{Id: matched.Name, Role: matched.Role}, true
+	return &Principal{
+		Id: matched.Name, Role: matched.Role, Environment: matched.Environment,
+		CompetitionId: matched.CompetitionId, SeasonId: matched.SeasonId,
+	}, true
 }
 
 const (
@@ -538,57 +551,62 @@ var (
 )
 
 type Settings struct {
-	Enabled                    bool             `yaml:"enabled"`
-	CompetitionId              string           `yaml:"competition_id"`
-	BaseSha                    string           `yaml:"base_sha"`
-	EvaluatorImageDigest       string           `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy      `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
-	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
-	ArtifactRoot               string           `yaml:"artifact_root"`
-	ArtifactBucket             string           `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
-	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time        `yaml:"season_ends_at"`
-	RetainUntil                time.Time        `yaml:"retain_until"`
-	WorkerLeaseSeconds         int              `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int              `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int              `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int              `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string           `yaml:"simulator_command"`
-	EvaluatorCommand           string           `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string           `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string           `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string           `yaml:"self_check_command_sha256"`
-	Tokens                     []Token          `yaml:"-"`
-	SeedKey                    []byte           `yaml:"-"`
+	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
+	Enabled                    bool                              `yaml:"enabled"`
+	CompetitionId              string                            `yaml:"competition_id"`
+	BaseSha                    string                            `yaml:"base_sha"`
+	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
+	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
+	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
+	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
+	ArtifactRoot               string                            `yaml:"artifact_root"`
+	ArtifactBucket             string                            `yaml:"artifact_bucket"`
+	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
+	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
+	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
+	RetainUntil                time.Time                         `yaml:"retain_until"`
+	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand           string                            `yaml:"simulator_command"`
+	EvaluatorCommand           string                            `yaml:"evaluator_command"`
+	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand           string                            `yaml:"self_check_command"`
+	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
+	Tokens                     []Token                           `yaml:"-"`
+	SeedKey                    []byte                            `yaml:"-"`
 	workloadGenerator          WorkloadGenerator
 	artifactArchive            artifactArchive
+	automationLease            *model.CompetitionSupervisorLease
+	automationRoundId          server.Id
+	automationTargetRoundId    server.Id
 }
 
 type settingsFile struct {
-	Enabled                    bool             `yaml:"enabled"`
-	CompetitionId              string           `yaml:"competition_id"`
-	BaseSha                    string           `yaml:"base_sha"`
-	EvaluatorImageDigest       string           `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy      `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
-	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
-	ArtifactRoot               string           `yaml:"artifact_root"`
-	ArtifactBucket             string           `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
-	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time        `yaml:"season_ends_at"`
-	RetainUntil                time.Time        `yaml:"retain_until"`
-	WorkerLeaseSeconds         int              `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int              `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int              `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int              `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string           `yaml:"simulator_command"`
-	EvaluatorCommand           string           `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string           `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string           `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string           `yaml:"self_check_command_sha256"`
+	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
+	Enabled                    bool                              `yaml:"enabled"`
+	CompetitionId              string                            `yaml:"competition_id"`
+	BaseSha                    string                            `yaml:"base_sha"`
+	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
+	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
+	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
+	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
+	ArtifactRoot               string                            `yaml:"artifact_root"`
+	ArtifactBucket             string                            `yaml:"artifact_bucket"`
+	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
+	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
+	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
+	RetainUntil                time.Time                         `yaml:"retain_until"`
+	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand           string                            `yaml:"simulator_command"`
+	EvaluatorCommand           string                            `yaml:"evaluator_command"`
+	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand           string                            `yaml:"self_check_command"`
+	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
 }
 
 type secretsFile struct {
@@ -597,9 +615,13 @@ type secretsFile struct {
 }
 
 type Token struct {
-	Name   string `yaml:"name"`
-	Role   string `yaml:"role"`
-	Sha256 string `yaml:"sha256"`
+	Name          string `yaml:"name"`
+	Role          string `yaml:"role"`
+	Sha256        string `yaml:"sha256"`
+	Environment   string `yaml:"environment,omitempty"`
+	CompetitionId string `yaml:"competition_id,omitempty"`
+	SeasonId      string `yaml:"season_id,omitempty"`
+	Revoked       bool   `yaml:"revoked,omitempty"`
 }
 
 func LoadSettings() (*Settings, error) {
@@ -624,6 +646,7 @@ func LoadSettings() (*Settings, error) {
 		return nil, fmt.Errorf("seed_key_base64: %w", err)
 	}
 	s := &Settings{
+		AutomationPolicy:           public.AutomationPolicy,
 		Enabled:                    public.Enabled,
 		CompetitionId:              strings.TrimSpace(public.CompetitionId),
 		BaseSha:                    strings.TrimSpace(public.BaseSha),
@@ -675,6 +698,9 @@ func (self *Settings) Validate() error {
 	}
 	if !self.Enabled {
 		return errors.New("competition is disabled")
+	}
+	if err := model.ValidateCompetitionAutomationPolicy(self.AutomationPolicy); err != nil {
+		return err
 	}
 	if self.CompetitionId == "" || len(self.CompetitionId) > 128 {
 		return errors.New("competition_id must contain 1..128 characters")
@@ -783,17 +809,22 @@ func (self *Settings) Validate() error {
 	}
 	roles := map[string]bool{}
 	names := map[string]bool{}
+	digests := map[string]bool{}
 	for _, token := range self.Tokens {
 		if !tokenNamePattern.MatchString(token.Name) || names[token.Name] {
 			return errors.New("competition token names must be nonempty and unique")
 		}
-		if token.Role != "submitter" && token.Role != "operator" {
-			return fmt.Errorf("competition token %q has invalid role", token.Name)
+		if err := validateCompetitionTokenRole(token); err != nil {
+			return err
 		}
 		if !sha256Pattern.MatchString(token.Sha256) {
 			return fmt.Errorf("competition token %q has an invalid SHA-256", token.Name)
 		}
+		if digests[token.Sha256] {
+			return errors.New("competition token credentials must be unique across names and scopes, including revoked tokens")
+		}
 		names[token.Name] = true
+		digests[token.Sha256] = true
 		roles[token.Role] = true
 	}
 	if !roles["submitter"] || !roles["operator"] {
@@ -1497,6 +1528,9 @@ func evaluationSourceEpoch(round *roundRecord) int {
 	if round.Staging {
 		return 0
 	}
+	if policy, err := decodeRoundPolicySnapshot(round.PolicyJson); err == nil && policy.AutomationPolicy != nil && policy.AutomationPolicy.Enabled {
+		return policy.AutomationPolicy.SourceGeneration
+	}
 	return round.Epoch - 1
 }
 
@@ -1592,6 +1626,7 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 	}
 	copy := *settings
 	if round.Staging {
+		copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
 		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 		if err != nil {
 			return nil, err
@@ -2166,7 +2201,8 @@ func requirePrincipal(w http.ResponseWriter, r *http.Request, service *Service, 
 		return nil, false
 	}
 	principal, ok := Authenticate(r, settings)
-	if !ok || operator && principal.Role != "operator" {
+	if !ok || operator && principal.Role != "operator" ||
+		!operator && principal.Role != "operator" && principal.Role != "submitter" {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="competition"`)
 		writeCompetitionJson(w, http.StatusUnauthorized, &CompetitionError{
 			Kind: "auth", Code: "unauthorized", Message: "missing or invalid competition bearer token", Retriable: false,
@@ -2813,7 +2849,7 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 	} else {
 		competitionArtifactArchiveReady.Set(0)
 	}
-	return nil
+	return refreshAutomationOperationalMetrics(ctx, settings, now)
 }
 
 var (
@@ -3257,6 +3293,22 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		evalError.Readiness = &result
 		return result, evalError
 	}
+	round, err := self.store.CurrentRound(ctx, settings)
+	if err != nil {
+		result.Checks["database"] = false
+		evalError := infrastructureError("readiness_failed", "competition round identity is unavailable")
+		evalError.Readiness = &result
+		return result, evalError
+	}
+	if competitionRoundUsesV2(round) && !round.Staging {
+		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		if err != nil {
+			result.Checks["frozen_source_activation"] = false
+			evalError := infrastructureError("source_not_ready", "the current round's approved source and frozen policy do not match runtime readiness")
+			evalError.Readiness = &result
+			return result, evalError
+		}
+	}
 	checks, err := self.readinessChecks(ctx, settings)
 	result.Checks = checks
 	if err != nil {
@@ -3411,6 +3463,7 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
 	result.PatchPolicy = policy.PatchPolicy
 	result.EvaluationPolicy = policy.EvaluationPolicy
+	applyCompetitionDecisionDiscovery(result, round)
 	return nil
 }
 
@@ -3580,20 +3633,29 @@ func (self *Service) Leaderboards(ctx context.Context, includeStaging bool) (*Se
 }
 
 func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Principal) (*ScoreAcceptedResult, int, *CompetitionError) {
+	return self.submitWithDecisionContract(ctx, args, principal, false)
+}
+
+// The selected transport contract is checked before any admission side effect.
+func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreArgs, principal *Principal, v2 bool) (*ScoreAcceptedResult, int, *CompetitionError) {
 	metricOutcome := "infrastructure_error"
 	defer func() { competitionSubmissions.WithLabelValues(metricOutcome).Inc() }()
 	settings, err := self.Settings()
 	if err != nil {
 		return nil, 503, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	patch, patchErr := ValidateAndCanonicalizePatch(args.Patch, settings.PatchPolicy)
-	if patchErr != nil {
-		metricOutcome = "rejected"
-		status := 422
-		if patchErr.Code == "patch_too_large" {
-			status = 413
+	var patch *CanonicalPatch
+	if !v2 {
+		var patchErr *CompetitionError
+		patch, patchErr = ValidateAndCanonicalizePatch(args.Patch, settings.PatchPolicy)
+		if patchErr != nil {
+			metricOutcome = "rejected"
+			status := 422
+			if patchErr.Code == "patch_too_large" {
+				status = 413
+			}
+			return nil, status, patchErr
 		}
-		return nil, status, patchErr
 	}
 	round, err := self.store.GetRound(ctx, settings, args.RoundId)
 	if errors.Is(err, ErrNotFound) {
@@ -3602,6 +3664,39 @@ func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Prin
 	}
 	if err != nil {
 		return nil, 503, infrastructureError("storage_unavailable", "competition round storage is unavailable")
+	}
+	if status, modeErr := requireRoundDecisionContract(round, v2); modeErr != nil {
+		return nil, status, modeErr
+	}
+	if v2 {
+		policy, policyErr := decodeRoundPolicySnapshot(round.PolicyJson)
+		if policyErr != nil {
+			return nil, http.StatusServiceUnavailable, infrastructureError("round_policy_mismatch", "round patch policy could not be authenticated")
+		}
+		var patchErr *CompetitionError
+		patch, patchErr = ValidateAndCanonicalizePatch(args.Patch, policy.PatchPolicy)
+		if patchErr != nil {
+			metricOutcome = "rejected"
+			status := http.StatusUnprocessableEntity
+			if patchErr.Code == "patch_too_large" {
+				status = http.StatusRequestEntityTooLarge
+			}
+			return nil, status, patchErr
+		}
+		if !round.Staging {
+			settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+			if err != nil {
+				return nil, http.StatusServiceUnavailable, infrastructureError("round_source_not_ready", "the exact activated source for this frozen round is not ready")
+			}
+		} else {
+			// Durable staging creation always retains legacy mode and has no source activation.
+			frozenAdmission := *settings
+			frozenAdmission.PatchPolicy = policy.PatchPolicy
+			settings = &frozenAdmission
+		}
+	}
+	if principal == nil || principal.Role != "submitter" && (v2 || principal.Role != "operator") {
+		return nil, http.StatusForbidden, competitionScopeDenied()
 	}
 	if !round.Staging {
 		if readyErr := self.requireSecureEvaluator(ctx, settings); readyErr != nil {
@@ -3617,12 +3712,23 @@ func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Prin
 		metricOutcome = "rejected"
 		return nil, 409, submissionError("round_not_open", "round is not open for submissions")
 	case err != nil:
+		if v2 {
+			status, evalError := competitionAutomationError(err)
+			if !evalError.Retriable {
+				metricOutcome = "rejected"
+			}
+			return nil, status, evalError
+		}
 		return nil, 503, infrastructureError("enqueue_failed", "submission could not be durably enqueued")
 	}
 	result := &ScoreAcceptedResult{
 		JobId: job.JobId, RoundId: job.RoundId, Staging: job.Staging, PatchSha256: job.PatchSha256,
 		State:    scoreJobStateView(job.State, roundPublished(&job.Round, server.NowUtc()), principal),
 		CacheHit: hit, StatusUrl: "/competition/score/" + job.JobId.String(),
+	}
+	if v2 {
+		result.StatusUrl = "/competition/v2/score/" + job.JobId.String()
+		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
 	}
 	if hit {
 		metricOutcome = "cache_hit"
@@ -3633,6 +3739,11 @@ func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Prin
 }
 
 func (self *Service) GetScore(ctx context.Context, jobId server.Id, principal *Principal) (*ScoreJobResult, int, *CompetitionError) {
+	return self.getScoreWithDecisionContract(ctx, jobId, principal, false)
+}
+
+// Both URLs are immutable contracts; neither silently reinterprets another mode.
+func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId server.Id, principal *Principal, v2 bool) (*ScoreJobResult, int, *CompetitionError) {
 	settings, err := self.Settings()
 	if err != nil {
 		return nil, 503, infrastructureError("configuration_unavailable", "competition configuration is not ready")
@@ -3644,7 +3755,16 @@ func (self *Service) GetScore(ctx context.Context, jobId server.Id, principal *P
 	if err != nil {
 		return nil, 503, infrastructureError("storage_unavailable", "score job storage is unavailable")
 	}
+	if status, modeErr := requireRoundDecisionContract(&job.Round, v2); modeErr != nil {
+		return nil, status, modeErr
+	}
+	if v2 && (principal == nil || principal.Role != "submitter") {
+		return nil, http.StatusForbidden, competitionScopeDenied()
+	}
 	result := scoreJobView(job, principal, server.NowUtc())
+	if v2 {
+		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+	}
 	return &result, 200, nil
 }
 
@@ -3672,6 +3792,13 @@ func (self *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([
 
 func (self *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionError) {
 	view := round.RoundResult
+	if competitionRoundUsesV2(round) {
+		view.DecisionMode, view.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+		view.WinnerJobId, view.FinalizedAt = nil, nil
+		if roundPublished(round, server.NowUtc()) {
+			view.Status = "sealed"
+		}
+	}
 	if roundPublished(round, server.NowUtc()) {
 		seed, err := revealRoundSecret(self.settings, round)
 		if err != nil {
@@ -3684,6 +3811,9 @@ func (self *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionEr
 }
 
 func roundPublished(round *roundRecord, now time.Time) bool {
+	if round.AutomationPublicationAt != nil {
+		return !round.Canceled && !now.Before(*round.AutomationPublicationAt)
+	}
 	if round.FinalizedAt == nil {
 		return false
 	}
@@ -3910,17 +4040,18 @@ func (self PostgresStore) dequeueSignal(ctx context.Context, settings *Settings)
 }
 
 type roundPolicySnapshot struct {
-	Schema                 int              `json:"schema"`
-	CompetitionId          string           `json:"competition_id"`
-	BaseSha                string           `json:"base_sha"`
-	EvaluatorImageDigest   string           `json:"evaluator_image_digest"`
-	EvaluatorCommand       string           `json:"evaluator_command,omitempty"`
-	EvaluatorCommandSha256 string           `json:"evaluator_command_sha256,omitempty"`
-	ScoreSchema            int              `json:"score_schema"`
-	ScorerVersion          string           `json:"scorer_version"`
-	PatchPolicy            PatchPolicy      `json:"patch_policy"`
-	EvaluationPolicy       EvaluationPolicy `json:"evaluation_policy"`
-	SeasonPolicy           SeasonPolicy     `json:"season_policy"`
+	AutomationPolicy       *model.CompetitionAutomationPolicy `json:"automation_policy,omitempty"`
+	Schema                 int                                `json:"schema"`
+	CompetitionId          string                             `json:"competition_id"`
+	BaseSha                string                             `json:"base_sha"`
+	EvaluatorImageDigest   string                             `json:"evaluator_image_digest"`
+	EvaluatorCommand       string                             `json:"evaluator_command,omitempty"`
+	EvaluatorCommandSha256 string                             `json:"evaluator_command_sha256,omitempty"`
+	ScoreSchema            int                                `json:"score_schema"`
+	ScorerVersion          string                             `json:"scorer_version"`
+	PatchPolicy            PatchPolicy                        `json:"patch_policy"`
+	EvaluationPolicy       EvaluationPolicy                   `json:"evaluation_policy"`
+	SeasonPolicy           SeasonPolicy                       `json:"season_policy"`
 }
 
 // Both policy versions remain readable for seed reveal and historical evidence.
@@ -3951,13 +4082,27 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 	} else if err := validatePinnedCommand(policy.EvaluatorCommand, policy.EvaluatorCommandSha256, "round evaluator"); err != nil {
 		return nil, err
 	}
+	if policy.AutomationPolicy != nil {
+		if policy.Schema != 2 {
+			return nil, errors.New("legacy policy cannot enable automation")
+		}
+		if err := model.ValidateCompetitionAutomationPolicy(*policy.AutomationPolicy); err != nil {
+			return nil, err
+		}
+	}
 	return policy, nil
 }
 
 // Freeze the command path as well as its bytes because it resolves sibling
 // helpers from its immutable release directory.
 func policySnapshot(settings *Settings) ([]byte, error) {
+	var automationPolicy *model.CompetitionAutomationPolicy
+	if settings.AutomationPolicy.Enabled {
+		copyPolicy := settings.AutomationPolicy
+		automationPolicy = &copyPolicy
+	}
 	return json.Marshal(roundPolicySnapshot{
+		AutomationPolicy:       automationPolicy,
 		Schema:                 2,
 		CompetitionId:          settings.CompetitionId,
 		BaseSha:                settings.BaseSha,
@@ -3994,9 +4139,18 @@ func (self PostgresStore) prepareRound(
 	args GenerateRoundArgs,
 	staging bool,
 ) (*roundRecord, error) {
+	roundId := server.NewId()
+	if settings.AutomationPolicy.Enabled && !staging {
+		// Qualification runs before admission and binds this prospectively reserved identity.
+		// Choose it before encrypting the seed or generating any round-specific artifact.
+		if settings.automationTargetRoundId == (server.Id{}) {
+			return nil, ErrConflict
+		}
+		roundId = settings.automationTargetRoundId
+	}
 	round := &roundRecord{
 		RoundResult: RoundResult{
-			RoundId:     server.NewId(),
+			RoundId:     roundId,
 			Staging:     staging,
 			ScoreSchema: ScoreSchema,
 			OpensAt:     args.OpensAt.UTC(),
@@ -4065,6 +4219,16 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
 			conflict, stateErr, discardedStagingJobs = false, nil, []server.Id{}
+			if settings.AutomationPolicy.Enabled {
+				automationScopeLockInTx(ctx, tx, settings)
+				if settings.automationLease == nil {
+					stateErr = ErrLeaseLost
+					return
+				}
+				server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "admission"))
+				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"))
+			}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var previousEpoch int
 			server.Raise(tx.QueryRow(ctx, `
@@ -4076,17 +4240,29 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				return
 			}
 			if 0 < previousEpoch {
-				var previousFinalized *time.Time
+				var previousFinalized, previousSealed *time.Time
+				var previousRoundId server.Id
 				server.Raise(tx.QueryRow(ctx, `
-					SELECT finalized_at FROM competition_round
+					SELECT round_id,finalized_at,automation_sealed_at FROM competition_round
 					WHERE competition_id = $1 AND epoch_number = $2 AND staging = false
-				`, settings.CompetitionId, previousEpoch).Scan(&previousFinalized))
-				if previousFinalized == nil {
+				`, settings.CompetitionId, previousEpoch).Scan(&previousRoundId, &previousFinalized, &previousSealed))
+				if settings.AutomationPolicy.Enabled {
+					server.Raise(ensureAutomationRoundValidInTx(ctx, tx, previousRoundId))
+				}
+				if previousFinalized == nil && (!settings.AutomationPolicy.Enabled || previousSealed == nil) {
 					stateErr = ErrPreviousEpochOpen
 					return
 				}
 			}
 			round.Epoch = previousEpoch + 1
+			if settings.AutomationPolicy.Enabled {
+				intent, loadErr := currentSourceActivationInTx(ctx, tx, settings)
+				server.Raise(loadErr)
+				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(16*time.Hour)) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
+					stateErr = ErrConflict
+					return
+				}
+			}
 			var overlap bool
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT EXISTS (
@@ -4203,6 +4379,7 @@ func (self PostgresStore) CreateStagingRound(
 		return nil, ErrSeasonComplete
 	}
 	stagingSettings := *settings
+	stagingSettings.AutomationPolicy = model.CompetitionAutomationPolicy{}
 	stagingSettings.EvaluationPolicy.TakeoverMargin = 0
 	round, err := self.prepareRound(ctx, &stagingSettings, args, true)
 	if err != nil {
@@ -4334,7 +4511,7 @@ func (self PostgresStore) CurrentRound(ctx context.Context, settings *Settings) 
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND canceled = false AND staging = false
 				ORDER BY epoch_number DESC
@@ -4364,7 +4541,7 @@ func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Set
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND canceled = false AND staging = true
 				  AND NOT EXISTS (
@@ -4407,7 +4584,7 @@ func (self PostgresStore) CloseStagingRound(
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND staging = true AND canceled = false
 				  AND NOT EXISTS (
@@ -4471,7 +4648,7 @@ func (self PostgresStore) FinalizeStagingRound(
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND epoch_number = $2
 				  AND canceled = false AND staging = true
@@ -4534,7 +4711,7 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE round_id = $1 AND competition_id = $2
 			`, roundId, settings.CompetitionId))
@@ -4686,15 +4863,22 @@ func loadCandidateReviewRound(
 	settings *Settings,
 	epoch int,
 ) (*roundRecord, error) {
-	return scanRound(tx.QueryRow(ctx, `
+	round, err := scanRound(tx.QueryRow(ctx, `
 		SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 		       seed_ciphertext, providers_sha256, providers_path,
 		       policy_json, opens_at, closes_at, reveal_at,
-		       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+		       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 		FROM competition_round
 		WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false AND staging = false
 		FOR UPDATE
 	`, settings.CompetitionId, epoch))
+	if err != nil {
+		return nil, err
+	}
+	if err = requireLegacyCompetitionRound(round); err != nil {
+		return nil, err
+	}
+	return round, nil
 }
 
 func countRejectedCandidates(ctx context.Context, tx server.PgTx, roundId server.Id) int {
@@ -4888,7 +5072,7 @@ func stagingWinnerForReview(ctx context.Context, tx server.PgTx, settings *Setti
 	round, err := scanRound(tx.QueryRow(ctx, `
 		SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 		       seed_ciphertext, providers_sha256, providers_path, policy_json, opens_at, closes_at,
-		       reveal_at, created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+		       reveal_at, created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 		FROM competition_round
 		WHERE competition_id = $1 AND epoch_number = $2 AND staging = true AND canceled = false
 		FOR UPDATE
@@ -5012,16 +5196,21 @@ func (self PostgresStore) RequirePromotionDecision(
 		server.Db(ctx, func(conn server.PgConn) {
 			var finalizedAt *time.Time
 			var recordedWinner *server.Id
+			var automationEnabled bool
 			scanErr := conn.QueryRow(ctx, `
-				SELECT finalized_at, winner_job_id
+				SELECT finalized_at, winner_job_id,COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				FROM competition_round
 				WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false AND staging = false
-			`, settings.CompetitionId, epoch).Scan(&finalizedAt, &recordedWinner)
+			`, settings.CompetitionId, epoch).Scan(&finalizedAt, &recordedWinner, &automationEnabled)
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				stateErr = ErrNotFound
 				return
 			}
 			server.Raise(scanErr)
+			if automationEnabled {
+				stateErr = ErrUnsupportedDecisionMode
+				return
+			}
 			if finalizedAt == nil {
 				stateErr = ErrReviewNotReady
 				return
@@ -5144,6 +5333,7 @@ func scanRound(row pgx.Row) (*roundRecord, error) {
 		&round.ProvidersPath, &policy, &round.OpensAt,
 		&round.ClosesAt, &round.RevealAt, &round.CreatedAt, &round.Canceled,
 		&round.FinalizedAt, &round.WinnerJobId, &round.AdmissionClosedAt,
+		&round.AutomationSealedAt, &round.AutomationPublicationAt,
 	)
 	round.PolicyJson = policy
 	round.ScoreSchema = ScoreSchema
@@ -5154,6 +5344,8 @@ func setRoundStatus(round *roundRecord, now time.Time) {
 	switch {
 	case round.Canceled:
 		round.Status = "canceled"
+	case round.AutomationSealedAt != nil:
+		round.Status = "sealed"
 	case now.Before(round.OpensAt):
 		round.Status = "scheduled"
 	case round.AdmissionClosedAt == nil && now.Before(round.ClosesAt):
@@ -5219,18 +5411,23 @@ func (self PostgresStore) Enqueue(
 	var submissionArtifact *retainedArtifact
 	var stateErr error
 	archiveRequired := false
+	archiveSettings := settings
 	// One admission pass. server.Tx can rerun the callback, so every run starts
 	// from empty results.
 	admit := func() error {
 		return captureDatabaseError(func() {
 			server.Tx(ctx, func(tx server.PgTx) {
 				job, cacheHit, stateErr, archiveRequired = nil, false, nil, false
+				archiveSettings = settings
+				if settings.AutomationPolicy.Enabled {
+					automationScopeLockInTx(ctx, tx, settings)
+				}
 				server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
 				round, scanErr := scanRound(tx.QueryRow(ctx, `
 					SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 					       seed_ciphertext, providers_sha256, providers_path,
 					       policy_json, opens_at, closes_at, reveal_at,
-					       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+					       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 					FROM competition_round WHERE round_id = $1 FOR SHARE
 				`, roundId))
 				if errors.Is(scanErr, pgx.ErrNoRows) || round.CompetitionId != settings.CompetitionId {
@@ -5240,9 +5437,41 @@ func (self PostgresStore) Enqueue(
 				server.Raise(scanErr)
 				// The upload can end after the receipt time, and production
 				// finalization does not close admission, so a finalized round refuses.
-				if round.Canceled || round.FinalizedAt != nil || !submissionWithinEpoch(round, now) {
+				if round.Canceled || round.FinalizedAt != nil || round.AutomationSealedAt != nil || !submissionWithinEpoch(round, now) {
 					stateErr = ErrRoundClosed
 					return
+				}
+				if roundUsesAutomation(round) {
+					server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "admission"))
+					server.Raise(ensureAutomationRoundValidInTx(ctx, tx, round.RoundId))
+					if !settings.AutomationPolicy.Enabled {
+						stateErr = ErrAutomationDisabled
+						return
+					}
+					policy, policyErr := decodeRoundPolicySnapshot(round.PolicyJson)
+					server.Raise(policyErr)
+					canonical, patchErr := ValidateAndCanonicalizePatch(string(patch.Bytes), policy.PatchPolicy)
+					if patchErr != nil {
+						panic(patchErr)
+					}
+					if canonical.Sha256 != patch.Sha256 || !bytes.Equal(canonical.Bytes, patch.Bytes) {
+						panic(ErrConflict)
+					}
+					frozenArchive := *settings
+					frozenArchive.PatchPolicy = policy.PatchPolicy
+					archiveSettings = &frozenArchive
+					if policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment || policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId {
+						stateErr = ErrConflict
+						return
+					}
+					if policy.AutomationPolicy.RepeatRewardPolicy == "exclude_exact_identity" {
+						duplicate, checkErr := automationRewardDuplicateInTx(ctx, tx, settings, *policy.AutomationPolicy, patch.Sha256)
+						server.Raise(checkErr)
+						if duplicate {
+							stateErr = ErrConflict
+							return
+						}
+					}
 				}
 				job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.cache_key = $1`, key), true, self.nowUtc())
 				if scanErr == nil {
@@ -5285,7 +5514,7 @@ func (self PostgresStore) Enqueue(
 			archiveTimeout = defaultSubmissionArchiveTimeout
 		}
 		archiveCtx, archiveCancel := context.WithTimeout(ctx, archiveTimeout)
-		submissionArtifact, err = settings.artifactArchive.ArchiveSubmission(archiveCtx, settings, roundId, patch)
+		submissionArtifact, err = settings.artifactArchive.ArchiveSubmission(archiveCtx, archiveSettings, roundId, patch)
 		archiveCancel()
 		if err != nil {
 			select {
@@ -5317,7 +5546,7 @@ const jobSelect = `
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
 	       r.reveal_at, r.created_at, r.canceled, r.epoch_number,
-	       r.staging, r.finalized_at, r.winner_job_id, r.admission_closed_at
+	       r.staging, r.finalized_at, r.winner_job_id, r.admission_closed_at, r.automation_sealed_at, r.automation_publication_at
 	FROM competition_job j JOIN competition_round r ON r.round_id = j.round_id
 `
 
@@ -5336,6 +5565,7 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 		&job.Round.ClosesAt, &job.Round.RevealAt, &job.Round.CreatedAt,
 		&job.Round.Canceled, &job.Round.Epoch, &job.Round.Staging, &job.Round.FinalizedAt,
 		&job.Round.WinnerJobId, &job.Round.AdmissionClosedAt,
+		&job.Round.AutomationSealedAt, &job.Round.AutomationPublicationAt,
 	)
 	if err != nil {
 		return nil, err
@@ -5518,6 +5748,14 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
 			job, discarded = nil, []server.Id{}
+			if settings.AutomationPolicy.Enabled {
+				automationScopeLockInTx(ctx, tx, settings)
+				if settings.automationLease != nil {
+					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+				}
+				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+			}
 			var slotWorker *string
 			var slotJob *server.Id
 			var slotLease *time.Time
@@ -5537,10 +5775,12 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				FROM competition_round AS round
 				WHERE job.round_id = round.round_id
 				  AND round.competition_id = $1
+				  AND ($4::uuid IS NULL OR round.round_id=$4)
+				  AND (NOT COALESCE((round.policy_json->'automation_policy'->>'enabled')::boolean,false) OR $5)
 				  AND job.state = 'queued'
 				  AND (job.submitted_at < round.opens_at OR round.closes_at <= job.submitted_at)
 				RETURNING job.job_id
-			`, settings.CompetitionId, now, string(discardError))
+			`, settings.CompetitionId, now, string(discardError), optionalAutomationRoundId(settings), settings.automationLease != nil)
 			server.WithPgResult(rows, queryErr, func() {
 				for rows.Next() {
 					var jobId server.Id
@@ -5563,9 +5803,16 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				  AND r.opens_at <= j.submitted_at
 				  AND j.submitted_at < r.closes_at
 				  AND r.finalized_at IS NULL
+				  AND r.automation_sealed_at IS NULL
+				  AND (NOT COALESCE((r.policy_json->'automation_policy'->>'enabled')::boolean,false) OR $2)
+				  AND (NOT COALESCE((r.policy_json->'automation_policy'->>'enabled')::boolean,false) OR (
+				       r.competition_id=$3 AND r.policy_json->'automation_policy'->>'environment'=$4
+				       AND r.policy_json->'automation_policy'->>'season_id'=$5
+				       AND r.policy_json->'automation_policy'->>'required_api_capability'=$6))
+				  AND ($7::uuid IS NULL OR r.round_id=$7)
 				ORDER BY j.submitted_at, j.job_id
 				LIMIT 1 FOR UPDATE OF j SKIP LOCKED
-			`, now)
+			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, model.CompetitionAutomationCapability, optionalAutomationRoundId(settings))
 			var scanErr error
 			job, scanErr = scanJob(row, true, self.nowUtc())
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -5577,6 +5824,14 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				return
 			}
 			server.Raise(scanErr)
+			if roundUsesAutomation(&job.Round) {
+				_, policyErr := settingsForFrozenRound(settings, &job.Round)
+				server.Raise(policyErr)
+				if settings.automationLease == nil || settings.automationRoundId != job.RoundId {
+					panic(ErrLeaseLost)
+				}
+				server.Raise(ensureAutomationRoundValidInTx(ctx, tx, job.RoundId))
+			}
 			baseline, baselineErr := scanRoundBaseline(tx.QueryRow(ctx, `
 				SELECT round_id, baseline_json, baseline_sha256, source_job_id,
 				       source_attempt, source_artifact_manifest_sha256, base_sha,
@@ -5635,6 +5890,18 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
 			leaseLost = false
+			if settings.AutomationPolicy.Enabled {
+				automationScopeLockInTx(ctx, tx, settings)
+				if settings.automationLease != nil {
+					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+					var actualRoundId server.Id
+					server.Raise(tx.QueryRow(ctx, `SELECT round_id FROM competition_job WHERE job_id=$1`, jobId).Scan(&actualRoundId))
+					if actualRoundId != settings.automationRoundId {
+						panic(ErrLeaseLost)
+					}
+				}
+				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+			}
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
 				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2
@@ -5690,6 +5957,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
 			retry, leaseLost = false, false
+			if settings.AutomationPolicy.Enabled {
+				automationScopeLockInTx(ctx, tx, settings)
+				if settings.automationLease != nil {
+					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+				}
+				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+			}
 			var state, owner string
 			var attempts int
 			var apiImageDigest, workerImageDigest string
@@ -5712,6 +5986,9 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			if state != "running" || owner != workerId {
 				leaseLost = true
 				return
+			}
+			if settings.automationLease != nil && roundId != settings.automationRoundId {
+				panic(ErrLeaseLost)
 			}
 			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
 				panic(errors.New("competition job runtime image identity is invalid"))
@@ -5860,6 +6137,7 @@ func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId s
 	now := self.nowUtc()
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'queued', available_at = $3,
 					lease_owner = NULL, lease_expires_at = NULL
@@ -5991,12 +6269,14 @@ type CompetitionError = model.CompetitionError
 
 type roundRecord struct {
 	RoundResult
-	CompetitionId  string
-	SeedNonce      []byte
-	SeedCiphertext []byte
-	ProvidersPath  string
-	PolicyJson     json.RawMessage
-	Canceled       bool
+	CompetitionId           string
+	SeedNonce               []byte
+	SeedCiphertext          []byte
+	ProvidersPath           string
+	PolicyJson              json.RawMessage
+	Canceled                bool
+	AutomationSealedAt      *time.Time
+	AutomationPublicationAt *time.Time
 }
 
 // This append-only row binds the exact round control bytes to the source job,
@@ -6325,6 +6605,19 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 		)
 		return true, nil
 	}
+	if roundUsesAutomation(latest) {
+		store, ok := self.store.(interface {
+			SealAndElect(context.Context, *Settings, server.Id) (*model.CompetitionV2RoundResult, error)
+		})
+		if !ok {
+			return false, ErrUnsupportedDecisionMode
+		}
+		_, err := store.SealAndElect(ctx, self.settings, latest.RoundId)
+		if errors.Is(err, ErrReviewNotReady) {
+			return false, nil
+		}
+		return err == nil, err
+	}
 	state, err := self.store.PrepareCandidateReview(ctx, self.settings, latest.Epoch)
 	if err != nil {
 		return false, err
@@ -6610,26 +6903,29 @@ var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 // staging records are explicitly fee-free. Public outcome fields are populated
 // only after the API publishes a finalized round.
 type ApexAdapterRecord struct {
-	Sequence             uint64             `json:"sequence"`
-	SubmissionId         string             `json:"submission_id"`
-	InputPatchSha256     string             `json:"input_patch_sha256"`
-	RoundId              server.Id          `json:"round_id,omitempty"`
-	JobId                server.Id          `json:"job_id,omitempty"`
-	CanonicalPatchSha256 string             `json:"canonical_patch_sha256,omitempty"`
-	StatusUrl            string             `json:"status_url,omitempty"`
-	Staging              bool               `json:"staging"`
-	FeeUsd               int                `json:"fee_usd"`
-	FeeReceipt           string             `json:"fee_receipt,omitempty"`
-	State                string             `json:"state"`
-	EvaluationStatus     string             `json:"evaluation_status,omitempty"`
-	EvaluationFailure    *EvaluationFailure `json:"evaluation_failure,omitempty"`
-	Published            bool               `json:"published"`
-	Winner               bool               `json:"winner,omitempty"`
-	HonestyReview        string             `json:"honesty_review,omitempty"`
-	Score                *ScoreResult       `json:"score,omitempty"`
-	EvalError            *CompetitionError  `json:"eval_error,omitempty"`
-	SubmittedAt          time.Time          `json:"submitted_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	Sequence              uint64             `json:"sequence"`
+	SubmissionId          string             `json:"submission_id"`
+	InputPatchSha256      string             `json:"input_patch_sha256"`
+	RoundId               server.Id          `json:"round_id,omitempty"`
+	JobId                 server.Id          `json:"job_id,omitempty"`
+	CanonicalPatchSha256  string             `json:"canonical_patch_sha256,omitempty"`
+	StatusUrl             string             `json:"status_url,omitempty"`
+	Staging               bool               `json:"staging"`
+	FeeUsd                int                `json:"fee_usd"`
+	FeeReceipt            string             `json:"fee_receipt,omitempty"`
+	State                 string             `json:"state"`
+	EvaluationStatus      string             `json:"evaluation_status,omitempty"`
+	EvaluationFailure     *EvaluationFailure `json:"evaluation_failure,omitempty"`
+	Published             bool               `json:"published"`
+	Winner                bool               `json:"winner,omitempty"`
+	HonestyReview         string             `json:"honesty_review,omitempty"`
+	Score                 *ScoreResult       `json:"score,omitempty"`
+	EvalError             *CompetitionError  `json:"eval_error,omitempty"`
+	SubmittedAt           time.Time          `json:"submitted_at"`
+	UpdatedAt             time.Time          `json:"updated_at"`
+	DecisionMode          string             `json:"decision_mode,omitempty"`
+	RequiredApiCapability string             `json:"required_api_capability,omitempty"`
+	CompetitionId         string             `json:"competition_id,omitempty"`
 }
 
 type apexAdapterState struct {
@@ -6737,11 +7033,21 @@ func (self *ApexAdapterFileStore) RecordRound(
 	staging bool,
 	now time.Time,
 ) (*ApexAdapterRecord, error) {
+	return self.recordRound(submissionId, RoundResult{RoundId: roundId, Staging: staging}, "", now)
+}
+
+// Freezes the admission contract alongside the round before the fee side effect.
+func (self *ApexAdapterFileStore) recordRound(submissionId string, round RoundResult, competitionId string, now time.Time) (*ApexAdapterRecord, error) {
+	roundId, staging := round.RoundId, round.Staging
+	if round.DecisionMode == "" {
+		competitionId = ""
+	}
 	if roundId == (server.Id{}) {
 		return nil, errors.New("Apex submission round id is required")
 	}
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
-		if record.RoundId != (server.Id{}) && (record.RoundId != roundId || record.Staging != staging) {
+		if record.RoundId != (server.Id{}) && (record.RoundId != roundId || record.Staging != staging ||
+			record.DecisionMode != round.DecisionMode || record.RequiredApiCapability != round.RequiredApiCapability || record.CompetitionId != competitionId) {
 			return errors.New("Apex submission round id changed")
 		}
 		if staging && record.FeeReceipt != "" {
@@ -6749,6 +7055,9 @@ func (self *ApexAdapterFileStore) RecordRound(
 		}
 		record.RoundId = roundId
 		record.Staging = staging
+		record.DecisionMode = round.DecisionMode
+		record.RequiredApiCapability = round.RequiredApiCapability
+		record.CompetitionId = competitionId
 		if staging {
 			record.FeeUsd = 0
 			record.State = "pending_admission"
@@ -6776,6 +7085,12 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 		}
 		if accepted.Staging != record.Staging {
 			return errors.New("competition API changed the staging admission identity")
+		}
+		if accepted.DecisionMode != record.DecisionMode || accepted.RequiredApiCapability != record.RequiredApiCapability {
+			return errors.New("competition API changed the immutable admission contract")
+		}
+		if record.DecisionMode != "" && accepted.StatusUrl != "/competition/v2/score/"+accepted.JobId.String() {
+			return errors.New("competition API returned a noncanonical v2 status URL")
 		}
 		if record.RoundId != (server.Id{}) && record.RoundId != accepted.RoundId {
 			return errors.New("competition API admitted the submission to a different round")
@@ -6907,6 +7222,12 @@ func normalizeLegacyScoreJobPoll(job *ScoreJobResult) error {
 // outcomes remain restricted to finalized leaderboard reconciliation.
 func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobResult, now time.Time) (*ApexAdapterRecord, error) {
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
+		if record.DecisionMode != "" {
+			return recordApexV2Poll(record, job, now)
+		}
+		if job.DecisionMode != "" || job.RequiredApiCapability != "" {
+			return errors.New("legacy polling cannot acquire v2 semantics")
+		}
 		if record.JobId != job.JobId || record.RoundId != job.RoundId || record.Staging != job.Staging || record.CanonicalPatchSha256 != job.PatchSha256 {
 			return errors.New("competition poll changed an immutable job identity")
 		}
@@ -7077,6 +7398,9 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 				}
 				if record.Staging != leaderboard.Staging {
 					return errors.New("leaderboard changed the staging admission identity")
+				}
+				if record.DecisionMode != "" {
+					return errors.New("legacy leaderboard cannot reinterpret a v2 provisional reward")
 				}
 				if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
 					return errors.New("leaderboard score contradicts the terminal evaluation status")
@@ -7289,6 +7613,12 @@ func validateApexAdapterState(state *apexAdapterState) error {
 	seenJobIds := map[server.Id]bool{}
 	lastSequence := uint64(0)
 	for _, record := range state.Records {
+		if record.DecisionMode != "" || record.RequiredApiCapability != "" || record.CompetitionId != "" {
+			if record.DecisionMode != model.CompetitionDecisionModeV2 || record.RequiredApiCapability != model.CompetitionAutomationCapability ||
+				!tokenNamePattern.MatchString(record.CompetitionId) || record.Winner || record.HonestyReview != "" {
+				return errors.New("Apex adapter state contains an invalid v2 contract or fabricated legacy approval")
+			}
+		}
 		if !apexSubmissionIdPattern.MatchString(record.SubmissionId) || !sha256Pattern.MatchString(record.InputPatchSha256) ||
 			record.Sequence <= lastSequence || record.Sequence > state.NextSequence || seenSubmissionIds[record.SubmissionId] ||
 			(record.Staging && (record.FeeUsd != 0 || record.FeeReceipt != "")) ||
@@ -7331,7 +7661,7 @@ func validateApexAdapterState(state *apexAdapterState) error {
 			(record.EvaluationStatus != "completed" || record.EvaluationFailure != nil) {
 			return errors.New("Apex adapter score contradicts its evaluation status")
 		}
-		if record.EvalError != nil && (!record.Staging ||
+		if record.EvalError != nil && (!record.Staging && record.DecisionMode == "" ||
 			record.EvalError.Retriable && record.EvaluationStatus != "" ||
 			validateEvaluationError(record.EvalError) != nil) {
 			return errors.New("Apex adapter state contains an invalid staging evaluation error")
@@ -7358,24 +7688,26 @@ type ApexFeeCollector interface {
 // ApexAdapterOptions exposes retry hooks so the conformance suite can force
 // every backpressure transition without timing or scheduler dependence.
 type ApexAdapterOptions struct {
-	HttpClient  *http.Client
-	MaxAttempts int
-	Wait        func(context.Context, time.Duration) error
-	Now         func() time.Time
+	HttpClient      *http.Client
+	MaxAttempts     int
+	Wait            func(context.Context, time.Duration) error
+	Now             func() time.Time
+	V2CompetitionId string
 }
 
 // ApexAdapter maps production and fee-free evaluated staging admissions onto
 // the authenticated async API. It has no evaluator, hidden-seed, MinIO,
 // Docker, or operator privileges.
 type ApexAdapter struct {
-	baseUrl      *url.URL
-	submitterJwt string
-	store        *ApexAdapterFileStore
-	feeCollector ApexFeeCollector
-	httpClient   *http.Client
-	maxAttempts  int
-	wait         func(context.Context, time.Duration) error
-	now          func() time.Time
+	baseUrl         *url.URL
+	submitterJwt    string
+	store           *ApexAdapterFileStore
+	feeCollector    ApexFeeCollector
+	httpClient      *http.Client
+	maxAttempts     int
+	wait            func(context.Context, time.Duration) error
+	now             func() time.Time
+	v2CompetitionId string
 }
 
 // NewApexAdapter constructs a fail-closed adapter. The bearer token is kept in
@@ -7425,14 +7757,15 @@ func NewApexAdapter(
 		options.Now = server.NowUtc
 	}
 	return &ApexAdapter{
-		baseUrl:      parsed,
-		submitterJwt: submitterJwt,
-		store:        store,
-		feeCollector: feeCollector,
-		httpClient:   &httpClient,
-		maxAttempts:  options.MaxAttempts,
-		wait:         options.Wait,
-		now:          options.Now,
+		baseUrl:         parsed,
+		submitterJwt:    submitterJwt,
+		store:           store,
+		feeCollector:    feeCollector,
+		httpClient:      &httpClient,
+		maxAttempts:     options.MaxAttempts,
+		wait:            options.Wait,
+		now:             options.Now,
+		v2CompetitionId: options.V2CompetitionId,
 	}, nil
 }
 
@@ -7446,6 +7779,9 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 		return nil, err
 	}
 	if record.JobId != (server.Id{}) {
+		if err := validateApexAdmissionContract(record.CompetitionId, RoundResult{DecisionMode: record.DecisionMode, RequiredApiCapability: record.RequiredApiCapability}, self.v2CompetitionId); err != nil {
+			return nil, err
+		}
 		return record, nil
 	}
 	if record.RoundId == (server.Id{}) {
@@ -7460,12 +7796,31 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 		if selectedRound == nil || selectedRound.Status != "open" || selectedRound.RoundId == (server.Id{}) {
 			return nil, errors.New("competition has no open round for Apex admission")
 		}
-		record, err = self.store.RecordRound(submissionId, selectedRound.RoundId, selectedRound.Staging, self.now())
+		if err := validateApexAdmissionContract(info.CompetitionId, *selectedRound, self.v2CompetitionId); err != nil {
+			return nil, err
+		}
+		record, err = self.store.recordRound(submissionId, *selectedRound, info.CompetitionId, self.now())
 		if err != nil {
 			return nil, err
 		}
 	}
+	if err := validateApexAdmissionContract(record.CompetitionId, RoundResult{DecisionMode: record.DecisionMode, RequiredApiCapability: record.RequiredApiCapability}, self.v2CompetitionId); err != nil {
+		return nil, err
+	}
 	if !record.Staging && record.FeeReceipt == "" {
+		if record.DecisionMode == model.CompetitionDecisionModeV2 {
+			var preflight model.CompetitionV2SubmissionPreflight
+			if err := self.requestWithRetry(ctx, http.MethodPost, "/competition/v2/score/preflight", ScoreArgs{RoundId: record.RoundId, Patch: string(patch)}, true, &preflight); err != nil {
+				return nil, err
+			}
+			if preflight.RoundId != record.RoundId || preflight.DecisionMode != record.DecisionMode || preflight.RequiredApiCapability != record.RequiredApiCapability ||
+				!sha256Pattern.MatchString(preflight.PatchSha256) || !sha256Pattern.MatchString(preflight.BaseSourceLockSha256) {
+				return nil, errors.New("v2 preflight changed an immutable submission identity")
+			}
+			if !preflight.RewardEligible {
+				return nil, errors.New("v2 submission is excluded from a new reward entitlement: " + preflight.IneligibilityReason)
+			}
+		}
 		receipt, err := self.feeCollector.CollectOnce(ctx, submissionId, apexSubmissionFeeUsd)
 		if err != nil {
 			return nil, fmt.Errorf("collect Apex submission fee: %w", err)
@@ -7478,7 +7833,11 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 
 	request := ScoreArgs{RoundId: record.RoundId, Patch: string(patch)}
 	var accepted ScoreAcceptedResult
-	if err := self.requestWithRetry(ctx, http.MethodPost, "/competition/score", request, true, &accepted); err != nil {
+	endpoint := "/competition/score"
+	if record.DecisionMode != "" {
+		endpoint = "/competition/v2/score"
+	}
+	if err := self.requestWithRetry(ctx, http.MethodPost, endpoint, request, true, &accepted); err != nil {
 		return nil, err
 	}
 	if accepted.State != "queued" && accepted.State != "running" && accepted.State != "completed" {
@@ -7495,6 +7854,9 @@ func (self *ApexAdapter) PollNext(ctx context.Context) (*ApexAdapterRecord, erro
 		return nil, err
 	}
 	record := records[0]
+	if err := validateApexAdmissionContract(record.CompetitionId, RoundResult{DecisionMode: record.DecisionMode, RequiredApiCapability: record.RequiredApiCapability}, self.v2CompetitionId); err != nil {
+		return nil, err
+	}
 	var job ScoreJobResult
 	if err := self.requestWithRetry(ctx, http.MethodGet, record.StatusUrl, nil, true, &job); err != nil {
 		return nil, err

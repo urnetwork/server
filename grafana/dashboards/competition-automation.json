@@ -1,0 +1,70 @@
+{
+  "uid": "urnetwork-competition-automation",
+  "title": "urnetwork / sim-latency automation",
+  "description": "Internal v2 control-plane health. Reward receipt is not a chain settlement or a source approval. No candidate identities or embargoed scores are queried.",
+  "tags": ["urnetwork", "competition"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "time": {"from": "now-24h", "to": "now"},
+  "links": [{"title": "Competition queue", "url": "/d/urnetwork-competition", "keepTime": true, "includeVars": true}],
+  "templating": {"list": [{"name": "env", "label": "env", "type": "query", "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "query": "label_values(urnetwork_competition_configured, env)", "refresh": 2, "sort": 1}]},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "sealed, awaiting publication",
+      "description": "Frozen reveal time still protects these sealed inventories. This is not an early leaderboard.",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_unpublished_seals{env=\"$env\"})", "instant": true}]
+    },
+    {
+      "id": 2, "type": "stat", "title": "reward events awaiting receipt",
+      "description": "Only published events count. A receipt acknowledges integration delivery, not irreversible payment, honesty approval, or safe source.",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_pending_reward_events{env=\"$env\"})", "instant": true}]
+    },
+    {
+      "id": 3, "type": "stat", "title": "oldest unacknowledged reward event",
+      "description": "Warn after five minutes. Reconcile the cursor feed and idempotent receipt before retrying; never create a replacement election to retry delivery.",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 300}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_oldest_reward_event_age_seconds{env=\"$env\"})", "instant": true}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "source activation intents pending",
+      "description": "Source approval and exact readiness receipts are required independently of provisional reward selection. Pending intents are not an active incumbent.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_pending_source_activations{env=\"$env\"})"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "supervisor durable heartbeat age",
+      "description": "Latest supervisor lease heartbeat; -1 means none registered. Warn above 30 seconds only while a supervisor is expected. The supervisor exits after the sixth seal. A stale lease cannot authorize source activation.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 30}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "min(urnetwork_competition_automation_supervisor_heartbeat_age_seconds{env=\"$env\"})"}, {"refId": "B", "expr": "max(urnetwork_competition_automation_supervisor_expected{env=\"$env\"})", "legendFormat": "supervisor required (0/1)"}]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "independent capability holds",
+      "description": "A hold pauses only the named capability. Incident safety holds need an independently authorized recovery, not ordinary winner approval. Accepted evidence remains intact.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max by (kind) (urnetwork_competition_automation_hold_active{env=\"$env\"})", "legendFormat": "{{kind}}"}]
+    },
+    {
+      "id": 7, "type": "stat", "title": "retained integrity incidents",
+      "description": "Historical incidents in this scope, not a count of dishonest miners. Invalidation does not rewrite measurements or turn an infrastructure trust failure into no improvement.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_integrity_incidents{env=\"$env\"})", "instant": true}]
+    }
+  ]
+}

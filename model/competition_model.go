@@ -75,17 +75,19 @@ type CompetitionSeasonPolicy struct {
 }
 
 type CompetitionInfoResult struct {
-	CompetitionId        string                      `json:"competition_id"`
-	Enabled              bool                        `json:"enabled"`
-	ScoreSchema          int                         `json:"score_schema"`
-	ScorerVersion        string                      `json:"scorer_version"`
-	BaseSha              string                      `json:"base_sha"`
-	EvaluatorImageDigest string                      `json:"evaluator_image_digest"`
-	PatchPolicy          CompetitionPatchPolicy      `json:"patch_policy"`
-	EvaluationPolicy     CompetitionEvaluationPolicy `json:"evaluation_policy"`
-	SeasonPolicy         CompetitionSeasonPolicy     `json:"season_policy"`
-	ActiveRound          *CompetitionRoundResult     `json:"active_round,omitempty"`
-	StagingRound         *CompetitionRoundResult     `json:"staging_round,omitempty"`
+	CompetitionId         string                      `json:"competition_id"`
+	Enabled               bool                        `json:"enabled"`
+	ScoreSchema           int                         `json:"score_schema"`
+	ScorerVersion         string                      `json:"scorer_version"`
+	BaseSha               string                      `json:"base_sha"`
+	EvaluatorImageDigest  string                      `json:"evaluator_image_digest"`
+	PatchPolicy           CompetitionPatchPolicy      `json:"patch_policy"`
+	EvaluationPolicy      CompetitionEvaluationPolicy `json:"evaluation_policy"`
+	SeasonPolicy          CompetitionSeasonPolicy     `json:"season_policy"`
+	ActiveRound           *CompetitionRoundResult     `json:"active_round,omitempty"`
+	StagingRound          *CompetitionRoundResult     `json:"staging_round,omitempty"`
+	DecisionMode          string                      `json:"decision_mode,omitempty"`
+	RequiredApiCapability string                      `json:"required_api_capability,omitempty"`
 }
 
 type CompetitionGenerateRoundArgs struct {
@@ -106,22 +108,24 @@ type CompetitionGenerateStagingRoundArgs struct {
 }
 
 type CompetitionRoundResult struct {
-	RoundId            server.Id  `json:"round_id"`
-	Epoch              int        `json:"epoch"`
-	Staging            bool       `json:"staging"`
-	Status             string     `json:"status"`
-	WorkloadCommitment string     `json:"workload_commitment"`
-	ProvidersSha256    string     `json:"providers_sha256"`
-	ScoreSchema        int        `json:"score_schema"`
-	OpensAt            time.Time  `json:"opens_at"`
-	ClosesAt           time.Time  `json:"closes_at"`
-	RevealAt           time.Time  `json:"reveal_at"`
-	CreatedAt          time.Time  `json:"created_at"`
-	AdmissionClosedAt  *time.Time `json:"admission_closed_at,omitempty"`
-	FinalizedAt        *time.Time `json:"finalized_at,omitempty"`
-	WinnerJobId        *server.Id `json:"winner_job_id,omitempty"`
-	RevealedSeed       *string    `json:"revealed_seed,omitempty"`
-	ProvidersUrl       string     `json:"providers_url,omitempty"`
+	RoundId               server.Id  `json:"round_id"`
+	Epoch                 int        `json:"epoch"`
+	Staging               bool       `json:"staging"`
+	Status                string     `json:"status"`
+	WorkloadCommitment    string     `json:"workload_commitment"`
+	ProvidersSha256       string     `json:"providers_sha256"`
+	ScoreSchema           int        `json:"score_schema"`
+	OpensAt               time.Time  `json:"opens_at"`
+	ClosesAt              time.Time  `json:"closes_at"`
+	RevealAt              time.Time  `json:"reveal_at"`
+	CreatedAt             time.Time  `json:"created_at"`
+	AdmissionClosedAt     *time.Time `json:"admission_closed_at,omitempty"`
+	FinalizedAt           *time.Time `json:"finalized_at,omitempty"`
+	WinnerJobId           *server.Id `json:"winner_job_id,omitempty"`
+	RevealedSeed          *string    `json:"revealed_seed,omitempty"`
+	ProvidersUrl          string     `json:"providers_url,omitempty"`
+	DecisionMode          string     `json:"decision_mode,omitempty"`
+	RequiredApiCapability string     `json:"required_api_capability,omitempty"`
 }
 
 type CompetitionSeasonLeaderboardResult struct {
@@ -194,32 +198,36 @@ type CompetitionScoreArgs struct {
 }
 
 type CompetitionScoreAcceptedResult struct {
-	JobId       server.Id `json:"job_id"`
-	RoundId     server.Id `json:"round_id"`
-	Staging     bool      `json:"staging"`
-	PatchSha256 string    `json:"patch_sha256"`
-	State       string    `json:"state"`
-	CacheHit    bool      `json:"cache_hit"`
-	StatusUrl   string    `json:"status_url"`
+	JobId                 server.Id `json:"job_id"`
+	RoundId               server.Id `json:"round_id"`
+	Staging               bool      `json:"staging"`
+	PatchSha256           string    `json:"patch_sha256"`
+	State                 string    `json:"state"`
+	CacheHit              bool      `json:"cache_hit"`
+	StatusUrl             string    `json:"status_url"`
+	DecisionMode          string    `json:"decision_mode,omitempty"`
+	RequiredApiCapability string    `json:"required_api_capability,omitempty"`
 }
 
 type CompetitionScoreJobResult struct {
-	JobId                server.Id                     `json:"job_id"`
-	RoundId              server.Id                     `json:"round_id"`
-	Staging              bool                          `json:"staging"`
-	PatchSha256          string                        `json:"patch_sha256"`
-	State                string                        `json:"state"`
-	EvaluationStatus     string                        `json:"evaluation_status"`
-	EvaluationFailure    *CompetitionEvaluationFailure `json:"evaluation_failure,omitempty"`
-	SubmittedAt          time.Time                     `json:"submitted_at"`
-	StartedAt            *time.Time                    `json:"started_at,omitempty"`
-	CompletedAt          *time.Time                    `json:"completed_at,omitempty"`
-	CacheKey             string                        `json:"cache_key"`
-	EvaluatorImageDigest string                        `json:"evaluator_image_digest"`
-	ApiImageDigest       string                        `json:"api_image_digest"`
-	WorkerImageDigest    string                        `json:"worker_image_digest,omitempty"`
-	Score                *CompetitionScoreResult       `json:"score,omitempty"`
-	EvalError            *CompetitionError             `json:"eval_error,omitempty"`
+	JobId                 server.Id                     `json:"job_id"`
+	RoundId               server.Id                     `json:"round_id"`
+	Staging               bool                          `json:"staging"`
+	PatchSha256           string                        `json:"patch_sha256"`
+	State                 string                        `json:"state"`
+	EvaluationStatus      string                        `json:"evaluation_status"`
+	EvaluationFailure     *CompetitionEvaluationFailure `json:"evaluation_failure,omitempty"`
+	SubmittedAt           time.Time                     `json:"submitted_at"`
+	StartedAt             *time.Time                    `json:"started_at,omitempty"`
+	CompletedAt           *time.Time                    `json:"completed_at,omitempty"`
+	CacheKey              string                        `json:"cache_key"`
+	EvaluatorImageDigest  string                        `json:"evaluator_image_digest"`
+	ApiImageDigest        string                        `json:"api_image_digest"`
+	WorkerImageDigest     string                        `json:"worker_image_digest,omitempty"`
+	Score                 *CompetitionScoreResult       `json:"score,omitempty"`
+	EvalError             *CompetitionError             `json:"eval_error,omitempty"`
+	DecisionMode          string                        `json:"decision_mode,omitempty"`
+	RequiredApiCapability string                        `json:"required_api_capability,omitempty"`
 }
 
 // CompetitionEvaluationFailure is the message-free public summary of a
@@ -385,11 +393,13 @@ func competitionFinitePositivePointer(value *float64) bool {
 }
 
 type CompetitionError struct {
-	Kind      string                      `json:"kind"`
-	Code      string                      `json:"code"`
-	Message   string                      `json:"message"`
-	Retriable bool                        `json:"retriable"`
-	Readiness *CompetitionReadinessResult `json:"readiness,omitempty"`
+	Kind                  string                      `json:"kind"`
+	Code                  string                      `json:"code"`
+	Message               string                      `json:"message"`
+	Retriable             bool                        `json:"retriable"`
+	Readiness             *CompetitionReadinessResult `json:"readiness,omitempty"`
+	CurrentRevision       int                         `json:"current_revision,omitempty"`
+	CurrentDecisionSha256 string                      `json:"current_decision_sha256,omitempty"`
 }
 
 func (self *CompetitionError) Error() string {

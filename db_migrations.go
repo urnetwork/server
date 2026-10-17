@@ -10437,7 +10437,23 @@ var migrations = []any{
 	// 841: immutable seed-window recovery metadata; signed receipt bytes stay
 	// unchanged. The existing original-transition trigger protects the column.
 	newSqlMigration(verifyOriginalWindowSchemaSql),
-	// 842: account_feedback is keyed only by feedback_id, so every read by
+
+	// 842: opt-in v2 seals, append-only reward revisions and fenced source automation.
+	newSqlMigration(competitionAutomationMigration),
+
+	// 843: independently scoped holds and explicit immutable integrity incidents.
+	newSqlMigration(competitionAutomationIncidentMigration),
+
+	// 844: independently fence source activation, review identity and cursor publication.
+	newSqlMigration(competitionAutomationGuardMigration),
+
+	// 845: retain safely abandoned unpublished source attempts and enforce review/revision consistency.
+	newSqlMigration(competitionAutomationFallbackMigration),
+
+	// 846: bind pre-admission source qualification to its reserved round identity.
+	newSqlMigration(competitionAutomationTargetMigration),
+
+	// 847: account_feedback is keyed only by feedback_id, so every read by
 	// network scans the whole table: NetworkHasFeedback in the onboarding
 	// campaign (15,804 calls at 9 ms each from the 2026-08-24 stats reset to
 	// 2026-10-12), the results job's first feedback, and the onboarding email
