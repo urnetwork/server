@@ -4864,6 +4864,47 @@ not native identity; `other`/`unset` and truncated text remain unattributed.
 Private query tokens are receipt-local ordinals, not reusable fingerprints or
 recoverable SQL. Other reservation-I/O and close-family groups remain separate.
 
+GOTCHA — retained offline device history can amplify result transfer without
+changing sweep output. On October 17 at 05:41Z, all 83 retained statement bytes
+matched the unfiltered state read in `model.SweepDeviceAuditEvents`. Nine
+ClientWrite and three no-wait samples each had peak one, with maximum query
+ages of 56.782s and 50.735s. These are grouped snapshots, not distinct calls or
+continuous wait time; the receipt contains no backend generation, caller image,
+completed row volume, plan, or healthy comparable sweep.
+
+The source retains offline state for 180 days and reads it before cleanup.
+For this device reducer, an offline prior state and an absent state both emit
+an added event for a current device; only online state can emit a removal.
+Read the online subset while retaining the transaction, current-device set,
+reassertion, event/upsert batch and retention cleanup. Do not apply this rule to
+the provider state read: its offline state can preserve known geo on reconnect.
+The declared device-state primary key does not make an unfiltered read
+selective. An online predicate may still scan the full relation; this repair
+reduces returned rows and Go materialization, not necessarily heap work, and
+does not justify an index migration or pool/timeout change.
+
+The native local regression holds 32 online devices fixed and adds 0, 4,096,
+then 65,536 retained offline states. The unchanged sweep returns 32, 4,128 and
+65,568 rows through the real pgx consumer; the corrected bound is 32 in every
+phase. Require the actual causal row assertion on old source and a pass on the
+exact corrected source fingerprint. Independent semantic controls cover absent
+versus offline state, duplicate and reordered event histories, current network
+identity, replay counters, reactivation, reassertion and retention. Explain
+rows must agree with driver completion, while elapsed time and buffer counts
+remain observations without a timing threshold. Failed, incomplete or absent
+observation cannot pass as zero work.
+
+False-positive qualifier: this deterministic excess-transfer defect does not
+prove the cause of the retained Main delay, CPU use, a broken index, or its
+runtime caller. The source taskworker and two CLI paths can share the statement.
+False-negative qualifier: all-online or small-history fixtures hide the extra
+transfer, and a predicate can leave cleanup, required-online output, consumer
+delay and other transaction costs substantial. Keep the original slow finding
+open until exact producer ancestry and successful comparable post-boundary
+sweeps establish recovery. A changed query hash or missing later alert is
+insufficient. The taskworker was under an operator rollout hold at this
+incident; source proof never overrides that ownership boundary.
+
 GOTCHA — connection lifecycle ownership can retain unnecessary head locks.
 The October 8 receipt `5e55d806` retained 12 source snapshots at
 09:08:40.392–09:09:02.930Z. Its private representatives match the frozen R40
