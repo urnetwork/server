@@ -358,6 +358,8 @@ func (e *sshCommandError) Unwrap() error { return e.err }
 // Start followed by exactly one Wait preserves Run's lifecycle while allowing
 // the optional PG observer to distinguish an attempted start from a child.
 func runSSHCommand(ctx context.Context, args []string, stdin string) (string, string, error) {
+	observation := pgSampleTransportFromContext(ctx)
+	observation.beginLocalPhase(pgLocalNativeSetup)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -365,10 +367,13 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
-	observation := pgSampleTransportFromContext(ctx)
+	observation.endLocalPhase(pgLocalNativeSetup)
 	observation.stage("ssh_start", "not_attempted")
-	if err := observation.admitNativeStart(ctx); err != nil {
-		return "", "", err
+	observation.beginLocalPhase(pgLocalFinalGuard)
+	admissionErr := observation.admitNativeStart(ctx)
+	observation.endLocalPhase(pgLocalFinalGuard)
+	if admissionErr != nil {
+		return "", "", admissionErr
 	}
 	err := cmd.Start()
 	if err == nil {
@@ -409,6 +414,7 @@ func (self *runner) ssh(ctx context.Context, h *host, remoteCmd string, stdin st
 // budget.
 func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, stdin string, timeout time.Duration) (output string, resultErr error) {
 	observation := pgSampleTransportFromContext(ctx)
+	observation.localPoint(pgLocalTransportEntry)
 	observation.stage("transport_preflight", "not_attempted")
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -426,17 +432,23 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		connectTimeout = 10 * time.Second
 	}
 	observation.stage("host_admission", "not_attempted")
+	observation.beginLocalPhase(pgLocalHostAdmission)
 	release, err := self.remoteCommands.acquire(ctx, addr)
+	observation.endLocalPhase(pgLocalHostAdmission)
 	if err != nil {
 		return "", &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}
 	}
 	defer release()
+	observation.localPoint(pgLocalHostGranted)
 	if self.cfg.sharedSshAdmission != nil {
 		observation.stage("shared_admission", "not_attempted")
+		observation.beginLocalPhase(pgLocalSharedAdmission)
 		releaseShared, err := self.cfg.sharedSshAdmission.acquire(ctx, h.name)
+		observation.endLocalPhase(pgLocalSharedAdmission)
 		if err != nil {
 			return "", &sshAdmissionUnavailableError{err: err, phase: sshAdmissionFailureAcquire}
 		}
+		observation.localPoint(pgLocalSharedGranted)
 		defer func() {
 			if err := releaseShared(); err != nil {
 				resultErr = errors.Join(resultErr, &sshAdmissionUnavailableError{err: err, phase: sshAdmissionFailureRelease})
@@ -457,6 +469,7 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	}
 	target := fmt.Sprintf("%s@%s", sshUser, addr)
 	sshArgs := self.sshArgsWithKeys(target, remoteCmd, connectTimeout, sshKeyPaths)
+	observation.localPoint(pgLocalCommandReady)
 	observation.stage("ssh_start", "unknown")
 	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
 	if cmdCtx.Err() == context.DeadlineExceeded {

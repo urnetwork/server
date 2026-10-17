@@ -4751,6 +4751,30 @@ the active holders or prove their source/host condition. Direct probes and
 older receipts without these facts keep grant timing unknown. Admission order,
 the queue-inclusive owner, caps and no-early-retry cadence are unchanged.
 
+New PG receipts optionally include fixed-schema `local_phase_timing` offsets
+in nanoseconds from the original monotonic run-slot request, or explicitly
+`sampler_observer_entry` when request timing is unavailable. Named aggregate
+spans separate settings-generation check, cadence-lock acquisition, cadence
+admission and its nested durable publication, one-shot marker publication,
+sample-command construction, host/shared admission, native setup and final
+guard. Fixed points retain sampler/transport entry, successful grants and
+command readiness. Spans include local descheduling and must not be summed
+when nested. A returned span records return, including failure; only separate
+grant and existing native lifecycle fields establish those boundaries.
+Unreached points/spans and incomplete returns are null. A regressing or
+negative clock marks the block `invalid`, retains earlier valid offsets and
+withholds subsequent offsets; the block cannot support valid elapsed-time
+attribution. Legacy receipts and non-PG transports omit the block. Preflight
+failures that previously produced no attempt receipt still produce none.
+The fixed projection carries no raw settings, identifiers, SQL, paths or
+caller-provided labels and remains under the existing receipt byte cap. It
+neither renews the original owner nor changes cadence, admission, native
+Start/Wait, source verdicts or the independent authoritative native-start
+clock. Local elapsed time does not establish remote work, CPU use or cause.
+Deterministic controls attribute separately forced settings, durable-write,
+lock, host/shared-admission and command-ready delays, preserve healthy and
+canceled lifecycle outcomes, and keep partial/invalid/absent evidence unknown.
+
 Remote progress requires two ordered, fixed records matched to this attempt's
 private stdin nonce. `remote_started` proves validated reader input;
 `database_identity` proves receipt of the first bounded identity response,

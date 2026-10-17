@@ -719,7 +719,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryDisabled}
 	}
 	if env.cfg.routerGenerationCheck != nil {
+		transportObservation.beginLocalPhase(pgLocalSettingsGeneration)
 		ok, err := env.cfg.routerGenerationCheck(ctx)
+		transportObservation.endLocalPhase(pgLocalSettingsGeneration)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightGenerationUnobservable, err: err}
 		}
@@ -733,12 +735,16 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	identity := until.UTC().Format(time.RFC3339Nano)
 	if recurring {
+		transportObservation.beginLocalPhase(pgLocalCadenceLock)
 		lock, err := lockProviderState(ctx, env.cfg.stateDir, "pg-query-sample-cadence")
+		transportObservation.endLocalPhase(pgLocalCadenceLock)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceLock, err: err}
 		}
 		defer lock.Close()
-		admitted, err := pgSampleContinuousAdmission(dir, now, p.syncAttemptFile)
+		transportObservation.beginLocalPhase(pgLocalCadenceAdmission)
+		admitted, err := pgSampleContinuousAdmissionObserved(dir, now, p.syncAttemptFile, transportObservation)
+		transportObservation.endLocalPhase(pgLocalCadenceAdmission)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceState, err: err}
 		}
@@ -751,7 +757,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	name := hex.EncodeToString(hash[:8])
 	if !recurring {
 		marker := filepath.Join(dir, name+".attempt")
+		transportObservation.beginLocalPhase(pgLocalOneShotMarker)
 		created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
+		transportObservation.endLocalPhase(pgLocalOneShotMarker)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightMarker, err: err}
 		}
@@ -761,8 +769,10 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now, Reason: "source-unavailable"}
+	transportObservation.beginLocalPhase(pgLocalSampleCommand)
 	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb), "transport_nonce": transportObservation.nonce})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
+	transportObservation.endLocalPhase(pgLocalSampleCommand)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
 	transportReceipt := transportObservation.receipt
 	transportReceipt.OwnerDeadlineExceeded = errors.Is(ctx.Err(), context.DeadlineExceeded)
