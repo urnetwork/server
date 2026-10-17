@@ -44,7 +44,7 @@ func TestLaunchPreflightVerifiesRemoteEpochWithoutChangingWorkingTrees(t *testin
 		t.Fatal(err)
 	}
 	sourceTestGit(t, serverRoot, "add", "advanced.txt")
-	sourceTestGit(t, serverRoot, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "advance branch")
+	sourceTestGit(t, serverRoot, "commit", "--no-gpg-sign", "-m", "advance branch")
 	sourceTestGit(t, serverRoot, "push", "origin", "HEAD:sim-latency")
 	if err := verifyRemoteSourceEpoch(manifest, 0, repositoriesRoot); err != nil {
 		t.Fatalf("historical reachability failed after branch advance: %v", err)

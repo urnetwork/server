@@ -17,18 +17,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// sourceTestGit runs Git with test-local author identity.
+// sourceTestGit inherits the existing global Git identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", repositoryRoot}, args...)
 	command := exec.Command("git", commandArgs...)
-	command.Env = append(
-		os.Environ(),
-		"GIT_AUTHOR_NAME=Source Test",
-		"GIT_AUTHOR_EMAIL=source-test@invalid",
-		"GIT_COMMITTER_NAME=Source Test",
-		"GIT_COMMITTER_EMAIL=source-test@invalid",
-	)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
