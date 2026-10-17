@@ -1177,15 +1177,16 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner     string
-	errorType string
-	sqlstate  string
+	owner      string
+	errorType  string
+	sqlstate   string
+	errorClass string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
 // Unknown stack symbols do not borrow a later caller's apparent ownership.
 func parsePanicLogObservation(line string) panicLogObservation {
-	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown"}
+	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown", errorClass: "unknown"}
 	if len(line) > panicLogMaxBytes {
 		return unknown
 	}
@@ -1242,6 +1243,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		return unknown
 	}
 	observation := unknown
+	observation.errorClass = panicProviderEgressErrorClass(line, errorText, stack)
 	errorType, _, _ := strings.Cut(errorText, "=")
 	switch errorType {
 	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
@@ -1308,7 +1310,11 @@ func panicLogSample(line string) string {
 	if owner == "" {
 		owner = "unknown"
 	}
-	return fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	sample := fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	if observation.errorClass != "unknown" {
+		sample += " error_class=" + observation.errorClass
+	}
+	return sample
 }
 
 // One negative mirror is an integrity defect. A hundred mutation exposures in

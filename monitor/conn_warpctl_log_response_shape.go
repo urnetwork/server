@@ -14,7 +14,7 @@ const warpctlLogNginx429Body = "<html>\n<head><title>429 Too Many Requests</titl
 // Warpctl 89a47cb logs() panics on Search failure and main() calls logs().
 // Require its complete traceback as well as the runner's command boundary;
 // unknown producer shapes and body-injected delimiters cannot supply a hint.
-var warpctlLog429OwnedStack = regexp.MustCompile(`^goroutine [1-9][0-9]* \[running\]:\nmain\.logs\([^()\r\n]*\)\n\t[^\r\n]+/warpctl/main\.go:[1-9][0-9]* \+0x[0-9a-f]+\nmain\.main\(\)\n\t[^\r\n]+/warpctl/main\.go:[1-9][0-9]* \+0x[0-9a-f]+\n$`)
+var warpctlLogOwnedStack = regexp.MustCompile(`^goroutine [1-9][0-9]* \[running\]:\nmain\.logs\([^()\r\n]*\)\n\t[^\r\n]+/warpctl/main\.go:[1-9][0-9]* \+0x[0-9a-f]+\nmain\.main\(\)\n\t[^\r\n]+/warpctl/main\.go:[1-9][0-9]* \+0x[0-9a-f]+\n$`)
 
 // Only a fixed response shape leaves this function. It is not an attribution
 // of the physical responder, loaded gateway policy or ingestion failure.
@@ -33,7 +33,7 @@ func warpctlLog429ResponseShape(err error, stderr string) string {
 		return "unknown"
 	}
 	before, stack, _ := strings.Cut(text, boundary)
-	if !warpctlLog429OwnedStack.MatchString("goroutine " + stack) {
+	if !warpctlLogOwnedStack.MatchString("goroutine " + stack) {
 		return "unknown"
 	}
 	start := 0

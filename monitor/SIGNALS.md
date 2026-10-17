@@ -2802,7 +2802,8 @@ that source path; it is not a second function or an unknown owner. Unsupported
 inner function records still stop attribution before a later caller can lend
 its apparent ownership.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
-Go error type, and a validated PostgreSQL SQLSTATE—not raw errors, stack
+Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
+error class described below—not raw errors, stack
 arguments, source paths/line numbers, endpoints, or identities. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -2811,6 +2812,39 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 200-byte prefix truncation; the owner discriminator now survives a long error
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
+
+For the exact `statsRefreshProviderEgress` caller/file pair, in the reviewed
+unversioned or `v2026` Server module, samples additionally retain
+`error_class=provider_egress_refresh_busy`, `provider_egress_unavailable`, or
+`provider_egress_snapshot_invalid`. This uses the bounded reader's exact
+function/file validation for every preceding Server wrapper and exact typed
+source literals; a foreign or unknown inner caller, wrong file, unsupported
+module, malformed/duplicate/over-cap record, or SQL/message lookalike remains
+unclassified. No raw error, policy key, lease token, identity or hash is added.
+The finite class describes only the retained sample. It does not classify
+every line in an aggregate or owner bucket, create another rate bucket, change
+the five-lines/minute PAGE, or prove an emitting image or process crash.
+
+`provider_egress_refresh_busy` means the reviewed cache path found no fresh
+valid snapshot on either read and did not acquire the shared fill lease. A
+healthy fill and a failed fill's retained 180-second retry fence both produce
+this same refusal. Neither busy nor the lease's remaining TTL proves a live
+holder, completed source read, or cache freshness. Keep refresh availability
+zero and existing source timestamps unchanged; do not suppress this diagnostic
+as healthy contention. `provider_egress_unavailable` covers multiple discarded
+Redis, source, context, policy and publication causes; `snapshot_invalid`
+identifies validation refusal without identifying its producer.
+
+The next discriminating fact is a policy-matched completed snapshot with its
+original start/completion times spanning the refusal, or the corresponding
+owner's terminal outcome. Independent per-process availability and source-time
+metrics can establish later fresh observation, but cross-process maxima,
+missing/stale series, another busy line or a current token alone cannot prove
+that exact earlier lease's outcome. Snapshot policy and emitting artifact
+remain separate authority checks. Deterministic controls cover an active fill,
+a failed fill retaining the same fence, stale/invalid data, valid all-zero
+counts, and unchanged panic thresholds/privacy; unavailable or incomplete log
+coverage never establishes recovery.
 
 The 2026-10-16 Taskworker observation retained a nine-lines/minute aggregate
 and an overlapping seven-lines/minute `server/v2026.ownedTxWithResourcePolicy`
@@ -3320,7 +3354,8 @@ Bounded Warpctl log-query failures also retain a privacy-safe terminal cause.
 The local command runner keeps stdout separate from a bounded 64 KiB stderr
 diagnostic prefix for classification while preserving the existing combined
 output contract. Only a failed `warpctl logs` query can acquire the fixed
-classes `observation-log-query-http-429`, `observation-log-query-http-502`,
+classes `observation-log-query-http-429`, `observation-log-query-http-500`,
+`observation-log-query-http-502`,
 `observation-log-query-http-503`, `observation-log-query-http-504`, or
 `observation-log-query-config-schema`. The HTTP classes require Warpctl's
 terminal `panic: Loki query error (...)` header; the config/schema class
@@ -3331,6 +3366,22 @@ Unknown, oversized, or ambiguous diagnostics remain
 `observation-command-failed`. Earlier retry records, remote stdout, and
 timestamp-framed records cannot establish the terminal query cause. A
 successful command remains successful even when stderr records failed retries.
+
+The HTTP500 class additionally requires actual native exit 2, exactly one
+terminal HTTP500 panic header, and the complete pinned `main.logs` →
+`main.main` traceback within the existing diagnostic bound. This preserves
+the known status that previously fell through to generic command failure.
+Header-only text, a different producer, incomplete or multiple traces,
+ordinary exit 2, stdout lookalikes, and oversized diagnostics remain unknown.
+Only the fixed HTTP500 class and native exit status leave this boundary;
+response bodies do not become storage, physical-responder, or service-failure
+attribution. Existing generic reconciliation failures cannot be reclassified
+from a nearby standing-tail diagnostic. Require a new complete bounded-query
+observation for its status. Native cancellation/deadline and successful-query
+recovery keep their existing precedence; the HTTP429 response hint is unchanged.
+`conn_warpctl_log_http500_test.go` covers the real joined child, runner,
+reconciliation and one-shot paths, source-envelope refusals, privacy, lifecycle,
+ordinary failed-child and healthy controls.
 
 Only the fixed class, optional native numeric exit status, and the HTTP 429
 `response_shape` enum enter the safe error; arguments, selectors, response
@@ -4524,11 +4575,22 @@ milliseconds at PG entry and after successful native Start preserve the
 inherited deadline. Their difference is elapsed owner time, not a measured
 queue cause. The 40-second owner still includes every prior queue/admission
 wait; an unstarted expiration can be correct bounded scheduling behavior.
+The ordinary CLI loop has a cancellation-only parent: the 40-second owner
+starts before global-slot admission, and the adapter/check inherit its
+deadline. Subtracting the entry value from 40,000 estimates elapsed owner time
+before that snapshot, including admission and intervening local work; it does
+not measure either separately. Completing 12 snapshots requires eleven
+intentional two-second sleeps (22 seconds), plus SSH/reader setup and catalog
+reads. A remaining budget only slightly above 22 seconds can expire without
+a slow statement. Preserve the original owner, sample count and cadence.
 
 Remote progress requires two ordered, fixed records matched to this attempt's
 private stdin nonce. `remote_started` proves validated reader input;
 `database_identity` proves receipt of the first bounded identity response,
 not primary/database/read-only authority, later SQL progress or completion.
+The marker validates the response shape and boolean types, not their values.
+It carries no phase clock or later-sample count. After an owner deadline,
+`samples=0` means no complete retained sample, not no database work.
 The existing SQL and successful stdout are unchanged. Raw SSH/child stderr,
 nonce and source identities never enter this projection. Unobserved, absent,
 invalid or over4KiB progress stays unknown; valid foreign nonces cannot claim
@@ -4539,6 +4601,18 @@ Deterministic controls cover unspawned queue expiry, actual child progress and
 join before timeout receipt storage, native start/exit failures, injected
 callbacks without spawn authority, malformed/foreign progress, private output,
 complete12-frame observations and the unchanged no-early-retry cadence.
+
+An incomplete owner-deadline observation with an actual started/joined native
+child and less than22,000ms remaining at native Start has a proved sampling
+window shortfall: the required eleven two-second sleeps alone cannot fit.
+The receipt's existing qualifiers and the unavailable alert retain
+`collection_budget=below-mandatory-waits`, the required wait milliseconds and
+the observed spawn remainder. The original reason, phase, cause, severity and
+cadence remain unchanged. The comparison is strictly below22,000ms; equality
+or a larger remainder does not prove collection can finish. Unknown or
+unstarted native execution, an unjoined child and a non-owner failure cannot
+claim this qualifier. It identifies no exact queue duration, host fault or
+failing SQL operation. Preserve the original owner, SQL and required samples.
 
 Qualify changes to the activity SQL with the exact candidate-generated query
 and a selected nonempty active statement under a size-qualified
@@ -7766,6 +7840,26 @@ Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
 never becomes a finished duration because the same pending attempt is reclaimed.
 Retain the latest overrun for 45 minutes so an immediate fast successor cannot
 erase its precursor.
+
+A `phase=completed` warning reports that retained checkpoint, not a currently
+running attempt. Its `attempt_correlated=true` marker means a durable task
+identifier was retained internally; it does not bind the completion to a host,
+container or executable. When `active_log_source=unavailable`, current task
+activity remains unknown. Repeated reports of the same completion are one
+retained incident; aging out of the window is not proof of recovery.
+
+For executor artifacts containing the policy in
+`model/subscription_close_budget.go`, the 90-second budget stops new subpages
+and the 120-second dispatch limit stops starting rows. Already started rows
+finish their required financial and cleanup work before the checkpoint returns.
+A completed duration just above 120 seconds therefore still warns, but does not
+alone establish an ignored limit or a 1,800-second timeout. Verify the exact
+executor artifact and effective expiry concurrency before applying this source
+explanation. Use ordinary close-duration, task-canary and aged-bucket samples
+with retained lifecycle evidence first. If a recurring overrun remains
+unresolved, obtain one bounded read that links the attempt's times to its
+executor before choosing a causal discriminator. Retain the existing
+thresholds, scan caps, concurrency and ownership holds.
 
 This duration probe cannot detect every failure-to-progress mode. A short
 accounting-rejected attempt may put the global singleton into long backoff;
