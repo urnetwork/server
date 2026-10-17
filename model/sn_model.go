@@ -1,19 +1,21 @@
 package model
 
 // sn_model holds the subnet (sn) block clock — the application layer
-// settlement calendar shared by the public stats collector
-// (controller/stats_collector.go), the grafana public stats feed
-// (warp repo, grafana/stats.go), and the sites.
+// calendar of the points leaderboard: its payout periods
+// (controller/points_leaderboard_controller.go), the account_payment_block
+// rollup (points_leaderboard_rollup.go) and the points readiness signal
+// (monitor/signal_points_readiness.go).
 //
-// Blocks are the subnet's 7-day settlement periods, 1-based, and every
-// block opens and closes at 00:00 UTC Sunday. Block 1 opened Sunday
-// June 28 2026 — the Sunday of the launch week. The clock is duplicated
-// in warp/grafana/stats.go (statsBlockGenesis) and ur.xyz
-// react/src/lib/network.js (BLOCK_GENESIS_MS) — keep them in sync.
+// Blocks are 7-day periods, 1-based, and every block opens and closes at
+// 00:00 UTC Sunday. Block 1 opened Sunday June 28 2026 — the Sunday of the
+// launch week.
 //
-// The subnet block is unrelated to the warp deploy block label and to the
-// ST contract epoch, which is anchored in chain blocks (see the epoch
-// machine in controller/st_controller.go).
+// The public stats no longer use this clock: since 2026-10-15 the stats
+// collector, and the grafana public stats feed that ur.xyz reads (warp repo,
+// grafana/stats.go), window by the SN25 settlement epoch instead
+// (controller/stats_epoch_clock.go). The subnet block is unrelated to the
+// warp deploy block label and to the ST contract epoch, which is anchored in
+// chain blocks (see the epoch machine in controller/st_controller.go).
 
 import (
 	"time"

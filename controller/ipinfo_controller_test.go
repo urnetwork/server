@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"maps"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -149,12 +153,80 @@ func assertMyIpInfoJsonShape(t testing.TB, resultJson []byte) {
 	}
 }
 
-func TestGetMyIpInfo(t *testing.T) {
-	// a public address, so this reads the GeoLite2 database, which the
-	// portable fixture does not have
+// Skips a test that asserts the geography the deployed GeoLite2 City build
+// gives a public address. The portable fixture has no GeoLite2 database, and
+// the repository's synthetic one places no address, so such a test runs only
+// where the config home deploys the build.
+func requireGeoLite2Database(t testing.TB) {
+	t.Helper()
 	if _, err := server.Config.ResourcePath("mmdb/geolite2.mmdb"); err != nil {
 		t.Skipf("requires the GeoLite2 City database: %s", err)
 	}
+}
+
+// Makes every address resolve to no location for the rest of the test, as the
+// deployed GeoLite2 build leaves a loopback or documentation address: no ip
+// override answers (the portable fixture places those subnets at zz), and the
+// lookup reads the repository's synthetic empty database, which knows no
+// address. The test cannot be parallel.
+func useGeolocationThatPlacesNothing(t testing.TB) {
+	t.Helper()
+	server.UseNoIpOverridesForTest(t)
+	server.UseIpDbFileForTest(t, filepath.Join("..", "local", "testdata", "config", "local", "mmdb", "geolite2.mmdb"))
+}
+
+// No GeoLite2 test can take this test binary down on a config home without
+// the GeoLite2 database, as the portable fixture's is. A lookup outside a
+// TestEnv panics past the test that made it and ends the process, so every
+// test that asserts the deployed build's geography skips first. A fresh
+// process of this binary runs each of them on an empty config home: the ones
+// whose first statement requires the database, and the three that ended the
+// process before they did. Each must skip.
+func TestGeoLite2TestsSkipWithoutTheDatabase(t *testing.T) {
+	testNames := []string{
+		"TestGetLocationForIpCarriesTheAccuracyRadius",
+		"TestResolveProviderEgressExitLooksUpGeoLite2",
+		"TestExtenderHintPlacesTheCallerAddress",
+	}
+	requiring := regexp.MustCompile(`(?m)^func (Test\w+)\(t \*testing\.T\) \{\n(?:\t//[^\n]*\n)*\trequireGeoLite2Database\(t\)\n`)
+	paths, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range requiring.FindAllStringSubmatch(string(source), -1) {
+			if !slices.Contains(testNames, match[1]) {
+				testNames = append(testNames, match[1])
+			}
+		}
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^("+strings.Join(testNames, "|")+")$", "-test.count=1", "-test.v")
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "WARP_CONFIG_HOME=") {
+			command.Env = append(command.Env, entry)
+		}
+	}
+	command.Env = append(command.Env, "WARP_CONFIG_HOME="+t.TempDir())
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the GeoLite2 tests on a config home without the database: %v\n%s", err, output)
+	}
+	for _, testName := range testNames {
+		if !strings.Contains(string(output), "--- SKIP: "+testName+" (") {
+			t.Errorf("%s did not skip without the GeoLite2 database", testName)
+		}
+	}
+}
+
+func TestGetMyIpInfo(t *testing.T) {
+	// a public address, so this reads the GeoLite2 database, which the
+	// portable fixture does not have
+	requireGeoLite2Database(t)
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

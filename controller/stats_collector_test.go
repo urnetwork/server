@@ -300,7 +300,7 @@ func TestStatsRefreshDbExportsExtenderAndContractGauges(t *testing.T) {
 		testStatsContract(ctx, now, false, true)
 		testStatsContract(ctx, now, true, false)
 
-		statsRefreshDb(ctx)
+		statsRefreshDb(ctx, newStatsEpochClock().window(now))
 
 		if value := testStatsGaugeValue(t, statsOnlineExtendersGauge); value != 3 {
 			t.Fatalf("online_extenders = %f, want 3", value)

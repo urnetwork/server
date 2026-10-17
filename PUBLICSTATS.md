@@ -4,9 +4,10 @@
 (`grafana/dashboards/public-traffic.json`, uid `urnetwork-public-traffic`,
 tagged `public`) was expanded from 20 panels to 55: a two-band KPI header,
 live traffic and devices, the provider network (world map, top countries,
-share, reach), growth, the weekly subnet block clock and ledger, and alpha
-economics. It is published read-only, no login, by
-`bringyourctl grafana load-defaults` (see `grafana/grafana.go`) and listed at
+share, reach), growth, the weekly subnet block clock and ledger (since
+2026-10-15 the settlement epoch clock), and alpha economics. It is
+published read-only, no login, by `bringyourctl grafana load-defaults` (see
+`grafana/grafana.go`) and listed at
 `<env>-grafana.<domain>/stats`; the uid is unchanged so the existing public
 url (access token) is preserved.
 
@@ -39,10 +40,55 @@ service stats pushers (`grafana.go`; series are per process, keyed by
   - `block_number`, `block_start_seconds`, `block_end_seconds` — the subnet
     block clock (`model.SubnetBlockStart` etc.), so the dashboard's progress
     gauge and countdown are `time()` arithmetic against exported truth
-    rather than a genesis constant copied into json.
+    rather than a genesis constant copied into json. Renamed `epoch_*` by
+    the settlement epoch clock below.
   - `block_miner_claims_alpha`, `block_miners_claimed` and their
     `prev_block_*` — MinerClaimed events in the st_event mirror windowed by
     chain block like deposits and emissions (`model.SumStMinerClaimedInBlockRange`).
+
+### The settlement epoch clock (2026-10-15)
+
+The stats window by the SN25 settlement epoch instead of the pre-mainnet
+Sunday block. The clock is `controller/stats_epoch_clock.go`, and it is the
+stats collector's alone: `model/sn_model.go`'s Sunday clock is unchanged,
+because the points leaderboard, its payout-period rollup
+(`account_payment_block`) and the points readiness signal still use it.
+
+- **Epochs are the coordinator's.** The collector reads the coordinator's
+  policy schedule (`policyCount`, `policyByIndex`) and computes
+  `currentEpoch`, `epochStartBlock` and `epochEndBlock` the way the contract
+  does. On mainnet epoch 0 was 7,200 blocks from block 9,240,028, and every
+  epoch from 1 on is 50,400 blocks from block 9,247,228 (the policy the
+  governance Safe scheduled at block 9,240,407). That schedule is built in
+  for the time before the first chain read; the schedule is read again in
+  each new epoch.
+- **Times are block-derived.** A mined boundary's time is its header
+  timestamp. The epoch's end, and the block the chain is at between reads,
+  are projected from the finalized head at the configured 12 s a block. The
+  head is the one chain read per minute the collector already made; the
+  schedule and the boundary timestamps are read about once an epoch.
+- **Gauges.** `epoch_number`, `epoch_start_seconds`, `epoch_end_seconds`,
+  `epoch_start_block`, `epoch_end_block`, `prev_epoch_start_seconds`, and
+  the accumulators `epoch_users`, `epoch_demand_deposits_alpha`,
+  `epoch_miner_emissions_alpha`, `epoch_miner_claims_alpha`,
+  `epoch_miners_claimed` with their `prev_epoch_*`. The accumulators sum the
+  st_event mirror over the epoch's blocks, `[epoch_start_block,
+  epoch_end_block)`, and the previous epoch's. Emissions and claims include
+  settlement v2's vault2 events (`V2EmissionCaptured`, `V2Claimed`). An
+  epoch's emission is captured in the next epoch's first 120 blocks, so it
+  counts in the epoch it is captured in.
+- **Previous users.** `prev_epoch_users` comes only from the finished
+  epoch's own snapshot (`stats.epoch_users.<epoch>`, a new redis prefix), so
+  it starts at the first rollover after deploy and a Sunday block's snapshot
+  is never read as an epoch's. A previous value that does not apply is
+  withdrawn (NaN, which warp's push receiver drops, so the series goes stale
+  within Mimir's five-minute lookback) rather than left holding an older
+  epoch's.
+- **Deprecated aliases.** Every epoch gauge is also published under its
+  former `block_*` name with the same value, for stats feeds deployed before
+  the epoch clock. The dashboards read the `epoch_*` names; the aliases are
+  only on the internal signals dashboard (`deprecatedBlockAliasMetrics`) and
+  can go once no older feed runs.
 
 ### The extender network (2026-09-13, connect/EXTENDER.md M)
 

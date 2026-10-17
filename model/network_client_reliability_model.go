@@ -1228,7 +1228,9 @@ func reliabilityRunningNeedsRecompute(
 // builds block as soon as they enter the progress view: even a new build can reach
 // its old-snapshot wait before the full-window scan finishes. The five-minute
 // floor excludes tiny routine vacuums only; bootstrap and backwards-window
-// repairs bypass this result in reliabilityRunningNeedsRecompute.
+// repairs bypass this result in reliabilityRunningNeedsRecompute. Each signal
+// is scoped to this database, like the backup check: an old-snapshot wait and
+// a vacuum horizon consider only the build's or vacuum's own database.
 func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.PgTx) (allowed bool) {
 	var establishedVacuum bool
 	var indexBuild bool
@@ -1241,11 +1243,13 @@ func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.Pg
 			SELECT 1
 			FROM pg_stat_progress_vacuum p
 			JOIN pg_stat_activity a USING (pid)
-			WHERE a.query_start <= clock_timestamp() - make_interval(secs => $1)
+			WHERE p.datname = current_database()
+				AND a.query_start <= clock_timestamp() - make_interval(secs => $1)
 			),
 			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_create_index p
+			WHERE p.datname = current_database()
 			),
 			(`+postgresLogicalBackupSnapshotActiveSQL+`)
 		`,
@@ -1783,7 +1787,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 
 		// Publish scheduling hints with the scores: the preceding location pass
 		// saw the old generation, and unrelated network work may delay the next
-		// pass. Also seed providers whose old scores prevented cycle creation.
+		// pass. Also seed providers whose old scores, or missing current
+		// history, prevented cycle creation; a new cycle starts at this admission.
 		updateProviderUrlProbeEligibility(ctx, tx)
 
 	}, server.TxReadCommitted)
@@ -1863,7 +1868,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	}
 
 	// upsert the fresh scores, then remove rows not refreshed in this round
-	// (identified by a stale max_block_number). This replaces the previous
+	// (identified by either stale window bound). This replaces the previous
 	// delete-all-and-reinsert, which rewrote the entire table every round and
 	// kept it permanently bloated.
 	server.RaisePgResult(tx.Exec(
@@ -1925,8 +1930,9 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		ctx,
 		`
 		DELETE FROM network_connection_reliability_score
-		WHERE max_block_number != $1
+		WHERE min_block_number <> $1 OR max_block_number <> $2
 		`,
+		minBlockNumber,
 		maxBlockNumber,
 	))
 }
@@ -2511,6 +2517,17 @@ type cityRegionCountry struct {
 type clientLocationReliability struct {
 	arinRisk       bool
 	arinNonQuality bool
+	// The old database's facts, folded exactly like the latest's
+	// (arindbctl/ARINDB.md, "Connection and rollup facts").
+	arinOldRisk       bool
+	arinOldNonQuality bool
+	// each slot's epoch when every folded row has the same one, otherwise 0
+	arinEpoch    arinRollupEpoch
+	arinOldEpoch arinRollupEpoch
+	// the rows folded, and per build epoch the rows that carry it in either
+	// slot with their facts under it
+	rowCount       int
+	arinEpochFacts map[int64]*arinEpochFacts
 	networkId      server.Id
 	connected      bool
 	// locations is bucketed by what each connection proved (connect/IPV6.md
@@ -2560,11 +2577,69 @@ func newClientLocationReliability(networkId server.Id, connected bool) *clientLo
 	}
 }
 
+// One database's facts over the rows that carry its epoch in either slot.
+type arinEpochFacts struct {
+	rows       int
+	risk       bool
+	nonQuality bool
+}
+
+// The old slot the rollup stores: the rows' common old epoch with its facts.
+// When the old slots differ, as while Connect restarts onto a new release and
+// a provider's connections span restarted and waiting hosts, it is the newest
+// epoch other than the common latest that every row carries in one slot or the
+// other, with the facts of whichever slot carries it: the restarted rows' old
+// slot and the waiting rows' latest slot both name the release the fleet is
+// leaving. Every row is classified under that epoch, so the facts are exact;
+// without one the slot is unavailable (epoch 0).
+func (self *clientLocationReliability) oldSlot() (epoch int64, risk bool, nonQuality bool) {
+	if !self.arinOldEpoch.mixed {
+		return self.arinOldEpoch.value(), self.arinOldRisk, self.arinOldNonQuality
+	}
+	latestEpoch := self.arinEpoch.value()
+	for candidate, facts := range self.arinEpochFacts {
+		if candidate != latestEpoch && facts.rows == self.rowCount && epoch < candidate {
+			epoch, risk, nonQuality = candidate, facts.risk, facts.nonQuality
+		}
+	}
+	return
+}
+
+// One slot's epoch over a client's rows: the common epoch when every row has
+// the same one, 0 when they differ. A client mixed in its latest slot is
+// unavailable under every serving epoch but the one oldSlot finds rather than
+// taking either row's facts.
+type arinRollupEpoch struct {
+	epoch int64
+	seen  bool
+	mixed bool
+}
+
+func (self *arinRollupEpoch) add(epoch int64) {
+	if !self.seen {
+		self.epoch = epoch
+		self.seen = true
+	} else if self.epoch != epoch {
+		self.mixed = true
+	}
+}
+
+func (self arinRollupEpoch) value() int64 {
+	if self.mixed {
+		return 0
+	}
+	return self.epoch
+}
+
 // clientLocationReliabilityRow is one connection row as both aggregation
 // queries below select it, in column order.
 type clientLocationReliabilityRow struct {
 	arinRisk              bool
 	arinNonQuality        bool
+	arinOldRisk           bool
+	arinOldNonQuality     bool
+	arinEpoch             int64
+	arinOldEpoch          int64
 	clientId              server.Id
 	networkId             server.Id
 	clientAddressHash     [32]byte
@@ -2598,6 +2673,10 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 		&row.hasLatencyTest,
 		&row.arinRisk,
 		&row.arinNonQuality,
+		&row.arinOldRisk,
+		&row.arinOldNonQuality,
+		&row.arinEpoch,
+		&row.arinOldEpoch,
 	))
 	// scanning assigns a fresh slice, so copy into the fixed-size key
 	copy(row.clientAddressHash[:], clientAddressHashSlice)
@@ -2608,6 +2687,33 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
 	self.arinRisk = self.arinRisk || row.arinRisk
 	self.arinNonQuality = self.arinNonQuality || row.arinNonQuality
+	self.arinOldRisk = self.arinOldRisk || row.arinOldRisk
+	self.arinOldNonQuality = self.arinOldNonQuality || row.arinOldNonQuality
+	self.arinEpoch.add(row.arinEpoch)
+	self.arinOldEpoch.add(row.arinOldEpoch)
+	self.rowCount += 1
+	if self.arinEpochFacts == nil {
+		self.arinEpochFacts = map[int64]*arinEpochFacts{}
+	}
+	for _, slot := range []struct {
+		epoch            int64
+		risk, nonQuality bool
+	}{
+		{epoch: row.arinEpoch, risk: row.arinRisk, nonQuality: row.arinNonQuality},
+		{epoch: row.arinOldEpoch, risk: row.arinOldRisk, nonQuality: row.arinOldNonQuality},
+	} {
+		if slot.epoch == 0 {
+			continue
+		}
+		facts, ok := self.arinEpochFacts[slot.epoch]
+		if !ok {
+			facts = &arinEpochFacts{}
+			self.arinEpochFacts[slot.epoch] = facts
+		}
+		facts.rows += 1
+		facts.risk = facts.risk || slot.risk
+		facts.nonQuality = facts.nonQuality || slot.nonQuality
+	}
 	switch ConnectionProvenIpFamily(row.ipVersion, row.ipFamilyIntent) {
 	case 4:
 		self.ipv4Proven = true
@@ -2672,8 +2778,14 @@ func (self *clientLocationReliability) Values() []any {
 	// [15] egress_index
 	// [16] egress_quality
 	// [17] egress_evidence_time
+	// [18] arin_risk
+	// [19] arin_non_quality
+	// [20] arin_old_risk
+	// [21] arin_old_non_quality
+	// [22] arin_epoch
+	// [23] arin_old_epoch
 
-	values := make([]any, 20)
+	values := make([]any, 24)
 
 	values[0] = self.networkId
 
@@ -2720,6 +2832,11 @@ func (self *clientLocationReliability) Values() []any {
 	values[17] = self.egressEvidenceTime
 	values[18] = self.arinRisk
 	values[19] = self.arinNonQuality
+	oldEpoch, oldRisk, oldNonQuality := self.oldSlot()
+	values[20] = oldRisk
+	values[21] = oldNonQuality
+	values[22] = self.arinEpoch.value()
+	values[23] = oldEpoch
 
 	return values
 }
@@ -2795,7 +2912,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			(network_client_location.arin_non_quality OR ($2::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
+			(network_client_location.arin_non_quality OR ($2::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality,
+			network_client_location.arin_old_risk,
+			(network_client_location.arin_old_non_quality OR ($2::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
+			network_client_location.arin_database_build_epoch,
+			network_client_location.arin_old_database_build_epoch
 
 		FROM network_client_connection
 
@@ -2854,7 +2975,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			(network_client_location.arin_non_quality OR ($3::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
+			(network_client_location.arin_non_quality OR ($3::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality,
+			network_client_location.arin_old_risk,
+			(network_client_location.arin_old_non_quality OR ($3::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
+			network_client_location.arin_database_build_epoch,
+			network_client_location.arin_old_database_build_epoch
 
 		FROM network_client_connection
 
@@ -3018,7 +3143,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			    egress_quality bool NULL,
 			    egress_evidence_time timestamp NULL,
 			    arin_risk bool,
-			    arin_non_quality bool
+			    arin_non_quality bool,
+			    arin_old_risk bool,
+			    arin_old_non_quality bool,
+			    arin_epoch bigint,
+			    arin_old_epoch bigint
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -3051,7 +3180,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality,
 	        egress_evidence_time,
 	        arin_risk,
-	        arin_non_quality
+	        arin_non_quality,
+	        arin_old_risk,
+	        arin_old_non_quality,
+	        arin_epoch,
+	        arin_old_epoch
 	    )
 	    SELECT
 	    	client_id,
@@ -3075,7 +3208,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality,
 	        egress_evidence_time,
 	        arin_risk,
-	        arin_non_quality
+	        arin_non_quality,
+	        arin_old_risk,
+	        arin_old_non_quality,
+	        arin_epoch,
+	        arin_old_epoch
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -3100,7 +3237,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality = EXCLUDED.egress_quality,
 	        egress_evidence_time = EXCLUDED.egress_evidence_time,
 	        arin_risk = EXCLUDED.arin_risk,
-	        arin_non_quality = EXCLUDED.arin_non_quality
+	        arin_non_quality = EXCLUDED.arin_non_quality,
+	        arin_old_risk = EXCLUDED.arin_old_risk,
+	        arin_old_non_quality = EXCLUDED.arin_old_non_quality,
+	        arin_epoch = EXCLUDED.arin_epoch,
+	        arin_old_epoch = EXCLUDED.arin_old_epoch
 	    `,
 		updateBlockNumber,
 	))

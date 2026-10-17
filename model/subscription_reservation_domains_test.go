@@ -140,8 +140,10 @@ func TestPublicRedisLongLivedGrantRetainsOriginalRequestLease(t *testing.T) {
 			server.Raise(err)
 			expiry, err := r.ZScore(ctx, keys[2], escrow.ContractId.String()).Result()
 			server.Raise(err)
-			if value != 40 || amount != 11 || expiry != originalExpiry {
-				t.Fatal("pending debit lost its consumption token or original lease", value, amount, expiry == originalExpiry)
+			// the worker alone releases the original request token, once
+			// its debit commits
+			if value != 46 || amount != 17 || expiry != originalExpiry {
+				t.Fatal("pending debit lost its request token or original lease", value, amount, expiry == originalExpiry)
 			}
 		})
 		n, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)

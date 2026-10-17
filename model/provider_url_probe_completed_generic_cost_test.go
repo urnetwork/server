@@ -55,10 +55,13 @@ func testingUrlCompletedTimestampLiteral(at time.Time) string {
 func testingSeedUrlCompletedGenericEvidence(t testing.TB, now time.Time) {
 	t.Helper()
 	server.Tx(t.Context(), func(tx server.PgTx) {
+		// The fleet seed already holds the witness lookback.
 		server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO client_connection_reliability_score
 			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,
 			reliability_score,reliability_weight,min_block_number,max_block_number)
-			SELECT client_id,i,1,1,1,1,1,1 FROM provider_egress_probe_cycle CROSS JOIN generate_series(0,2) AS i`))
+			SELECT client_id,i,1,1,1,1,1,1 FROM provider_egress_probe_cycle CROSS JOIN generate_series(0,2) AS i
+			ON CONFLICT (client_id,lookback_index) DO UPDATE
+			SET min_block_number=EXCLUDED.min_block_number,max_block_number=EXCLUDED.max_block_number`))
 		server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO provider_egress_health
 			(client_id,measured_at,ok_count,total_count,class_results,reputation_ok,reputation_total)
 			SELECT client_id,$1,1,1,'{}'::jsonb,0,0 FROM provider_egress_probe_cycle`, now))

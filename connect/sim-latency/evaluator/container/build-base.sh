@@ -89,7 +89,7 @@ install -m 0555 "$SCRIPT_DIR/entrypoint.sh" "$build_context/evaluator/entrypoint
 install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_context/evaluator/official-run.sh"
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
-readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)
+readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
 revision_args=()
 
 source_record=""
@@ -112,7 +112,7 @@ if [ "$include_worktree" = false ]; then
     fi
     jq -e \
         --argjson epoch "$source_epoch" \
-        --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' \
+        --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' \
         '.schema == 1 and .epoch == $epoch and .branch == "sim-latency" and
          (.significant_improvement_percent | type == "number" and . > 0 and . <= 50) and
          (($record.repositories | keys) == ($repositories | sort)) and

@@ -15,6 +15,9 @@ import (
 
 const testServerRunnerChildMode = "URNETWORK_TEST_SERVER_RUNNER_CHILD_MODE"
 
+// Pins the mandatory, caller-independent admission selection in the real script.
+const testServerRunnerAdmissionPattern = "^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$"
+
 // These lists pin the checked-in manifest to the resources used by the local
 // full-suite environment rather than deriving the fixture from its subject.
 var (
@@ -64,6 +67,9 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 	blockedNames := map[string]bool{}
 	for _, name := range []string{
 		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_ATTESTED_ADDRS",
+		"WARP_TEST_ENV_HOST_RESOLVER",
+		"WARP_TEST_ENV_LAUNCHER_VAULT_HOME",
 		"WARP_TEST_ENV_PORTABLE_ROOT",
 		"WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY",
 		"WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY",
@@ -236,6 +242,48 @@ esac
 		}
 	}
 	return binDir
+}
+
+// Answers fixed addresses for each synthetic name, fails any other name, and
+// records every query, so a preflight never consults the machine's resolver.
+// An empty answer list resolves the name to no address.
+func writeTestEnvironmentHostResolver(t *testing.T, answers map[string][]string) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	recordPath := filepath.Join(directory, "resolver-record")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '" + recordPath + "'\ncase \"$1\" in\n"
+	for name, addresses := range answers {
+		if strings.ContainsAny(name, "'\n") {
+			t.Fatalf("synthetic resolver name %q is not shell-safe", name)
+		}
+		script += "  '" + name + "')"
+		for _, address := range addresses {
+			if strings.ContainsAny(address, "'\n") {
+				t.Fatalf("synthetic resolver address %q is not shell-safe", address)
+			}
+			script += " printf '%s\\n' '" + address + "';"
+		}
+		script += " ;;\n"
+	}
+	script += "  *) exit 2 ;;\nesac\n"
+	resolverPath := filepath.Join(directory, "resolver")
+	if err := os.WriteFile(resolverPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return resolverPath, recordPath
+}
+
+// Reads the names a synthetic resolver was asked for, in order.
+func readTestEnvironmentResolverRecord(t *testing.T, recordPath string) []string {
+	t.Helper()
+	record, err := os.ReadFile(recordPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(record))
 }
 
 // Writes a complete launcher state under temporary paths so shell-preflight
@@ -517,8 +565,9 @@ func TestConnectTestScriptPropagatesDiscoveryFailure(t *testing.T) {
 	}
 }
 
-// Builds an isolated copy of the root runner with four synthetic package tiers
-// and injected go/grep commands; no repository test or service preflight runs.
+// Models the mandatory admission command separately from the four output-filter
+// tiers; every synthetic go invocation records its exact directory and arguments.
+// No repository test or service preflight runs.
 func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
 	t.Helper()
 	workspaceRoot := t.TempDir()
@@ -549,6 +598,20 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
 		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ] && [ \"$2\" = run-all ]\n",
 		filepath.Join(binDir, "go"): `#!/bin/sh
+printf '%s\0' "${PWD#"$URNETWORK_ROOT"/}" "${WARP_TEST_ENV_FAIL_FAST:-}" "$@" >> "$URNETWORK_ROOT/go-invocations"
+printf '\n' >> "$URNETWORK_ROOT/go-invocations"
+if [ "$PWD" = "$URNETWORK_ROOT/server" ]; then
+  if [ "$#" -ne 9 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
+     [ "$3" != -race ] || [ "$4" != -count=1 ] || [ "$5" != -timeout=5m ] ||
+     [ "$6" != ./model ] || [ "$7" != ./taskworker/work ] || [ "$8" != -run ] ||
+     [ "$9" != '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] ||
+     [ "${WARP_TEST_ENV_FAIL_FAST:-}" != 1 ]; then
+    printf 'unexpected admission invocation\n' >&2
+    exit 86
+  fi
+  printf 'test-runner-admission\n'
+  exit "${TEST_SERVER_RUNNER_ADMISSION_STATUS:-0}"
+fi
 "$TEST_SERVER_RUNNER_BINARY" -test.run="^${TEST_SERVER_RUNNER_TEST_NAME}$" -test.count=1
 test_status=$?
 if [ -n "${TEST_SERVER_RUNNER_UPSTREAM_STATUS:-}" ]; then
@@ -564,6 +627,30 @@ exit "$test_status"
 		}
 	}
 	return runnerPath, binDir, workspaceRoot
+}
+
+// Captures the exact first command independently of caller-supplied test flags.
+func testServerRunnerAdmissionInvocation() []string {
+	return []string{
+		"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m",
+		"./model", "./taskworker/work", "-run", testServerRunnerAdmissionPattern,
+	}
+}
+
+// Checks every command in order, including argument boundaries and fail-fast scope.
+func requireTestServerRunnerInvocations(t *testing.T, workspaceRoot string, invocations [][]string) {
+	t.Helper()
+	record, err := os.ReadFile(filepath.Join(workspaceRoot, "go-invocations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRecord := ""
+	for _, invocation := range invocations {
+		wantRecord += strings.Join(invocation, "\x00") + "\x00\n"
+	}
+	if string(record) != wantRecord {
+		t.Fatalf("runner invocations = %q; want %q", record, wantRecord)
+	}
 }
 
 // Binary-looking test output remains text throughout all four runner tiers, so
@@ -597,16 +684,19 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", runnerPath)
+	callerArgs := []string{"-run", "^Test selected fixture$", "-count=2", "-short"}
+	cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
 	cmd.Env = testCommandEnvironment(map[string]string{
-		"PATH":                             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TEST_SERVER_RUNNER_BINARY":        testBinary,
-		"TEST_SERVER_RUNNER_CAT":           catPath,
-		"TEST_SERVER_RUNNER_TEST_NAME":     "TestServerTestScriptTreatsBinaryOutputAsText",
-		"URNETWORK_NETWORK_TEST_LOCK_HELD": "1",
-		"URNETWORK_ROOT":                   workspaceRoot,
-		testServerRunnerChildMode:          "binary",
-	})
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_CAT":              catPath,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptTreatsBinaryOutputAsText",
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		testServerRunnerChildMode:             "binary",
+	}, "TEST_SERVER_RUNNER_UPSTREAM_STATUS")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("runner rejected binary test output: %v\n%s", err, output)
@@ -619,6 +709,16 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 		if count := bytes.Count(output, signature); count != 4 {
 			t.Fatalf("binary runner signature %q count = %d; want 4", signature, count)
 		}
+	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
+		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
+		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+		append([]string{"server/fixture", "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+	})
+	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 1 {
+		t.Fatalf("admission completion count = %d; want 1", count)
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured binary fixture leaked a synthetic failure signature")
@@ -647,19 +747,25 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nkill -TERM \"$$\"\n")
 	cmd := exec.Command("bash", runnerPath)
 	cmd.Env = testCommandEnvironment(map[string]string{
-		"PATH":                               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TEST_SERVER_RUNNER_BINARY":          testBinary,
-		"TEST_SERVER_RUNNER_TEST_NAME":       "TestServerTestScriptReportsSignaledOutputFilter",
-		"TEST_SERVER_RUNNER_UPSTREAM_STATUS": upstreamStatusPath,
-		"URNETWORK_NETWORK_TEST_LOCK_HELD":   "1",
-		"URNETWORK_ROOT":                     workspaceRoot,
-		testServerRunnerChildMode:            "filter-signal",
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptReportsSignaledOutputFilter",
+		"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		testServerRunnerChildMode:             "filter-signal",
 	})
 	output, err := cmd.CombinedOutput()
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok || exitErr.ExitCode() != 143 {
 		t.Fatalf("runner filter failure = %v, %q; want exit 143", err, output)
 	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
+	})
 	upstreamStatusBytes, readErr := os.ReadFile(upstreamStatusPath)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -672,6 +778,104 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured filter fixture leaked a synthetic failure signature")
+	}
+}
+
+// A failed mandatory admission command forwards its exact status and prevents
+// every filtered package, even when the caller requested a narrow test subset.
+func TestServerTestScriptPropagatesAdmissionFailure(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []int{53, 143} {
+		runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nprintf 'unexpected-filter\\n' >> \"$URNETWORK_ROOT/filter-invocations\"\nexit 87\n")
+		upstreamStatusPath := filepath.Join(workspaceRoot, "upstream-status")
+		cmd := exec.Command("bash", runnerPath, "-run", "^Test selected fixture$", "-short")
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TEST_SERVER_RUNNER_BINARY":           testBinary,
+			"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptTreatsBinaryOutputAsText",
+			"TEST_SERVER_RUNNER_ADMISSION_STATUS": strconv.Itoa(status),
+			"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+			"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+			"URNETWORK_ROOT":                      workspaceRoot,
+			"WARP_TEST_ENV_FAIL_FAST":             "0",
+			testServerRunnerChildMode:             "binary",
+		})
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != status {
+			t.Fatalf("admission status %d: runner = %v, %q", status, err, output)
+		}
+		requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{testServerRunnerAdmissionInvocation()})
+		for _, path := range []string{upstreamStatusPath, filepath.Join(workspaceRoot, "filter-invocations")} {
+			if record, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("admission status %d ran a later child: record=%q err=%v", status, record, err)
+			}
+		}
+		if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+			bytes.Contains(output, []byte("test-runner-binary-prefix")) ||
+			bytes.Contains(output, []byte("test output filter failed")) {
+			t.Fatalf("admission status %d crossed the filtered-output boundary: %q", status, output)
+		}
+	}
+}
+
+// A successful filter must not mask a test failure or permit the next package.
+func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "upstream-failure" {
+		payload := []byte("test-runner-upstream-failure\n")
+		writtenByteCount, err := os.Stdout.Write(payload)
+		if err != nil || writtenByteCount != len(payload) {
+			os.Exit(141)
+		}
+		os.Exit(70)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexec \"$TEST_SERVER_RUNNER_CAT\"\n")
+	upstreamStatusPath := filepath.Join(workspaceRoot, "upstream-status")
+	cmd := exec.Command("bash", runnerPath)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":           testBinary,
+		"TEST_SERVER_RUNNER_CAT":              catPath,
+		"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptPreservesUpstreamFailure",
+		"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+		"TEST_SERVER_RUNNER_UPSTREAM_STATUS":  upstreamStatusPath,
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+		"URNETWORK_ROOT":                      workspaceRoot,
+		"WARP_TEST_ENV_FAIL_FAST":             "0",
+		testServerRunnerChildMode:             "upstream-failure",
+	})
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 70 {
+		t.Fatalf("runner upstream failure = %v, %q; want exit 70", err, output)
+	}
+	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+		testServerRunnerAdmissionInvocation(),
+		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
+	})
+	upstreamStatusBytes, err := os.ReadFile(upstreamStatusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(upstreamStatusBytes) != "70\n" {
+		t.Fatalf("upstream status = %q; want 70", upstreamStatusBytes)
+	}
+	if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+		bytes.Count(output, []byte("test-runner-upstream-failure\n")) != 1 ||
+		bytes.Contains(output, []byte("test output filter failed")) {
+		t.Fatalf("successful filter masked the upstream boundary: %q", output)
 	}
 }
 
@@ -703,6 +907,8 @@ func TestSuiteProxyResourceManifestMatchesFullLocalSuiteBoundary(t *testing.T) {
 
 // The release preflight falls back to checked-in, non-secret local resources
 // when an isolated server checkout has no sibling vault or config repositories.
+// Each unmanaged service name is resolved once; the probes and the exported
+// attestation pin that one address for the rest of the run.
 func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -717,20 +923,25 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	resolverPath, resolverRecordPath := writeTestEnvironmentHostResolver(t, map[string][]string{
+		localPostgresHost: {"192.0.2.61"},
+		localRedisHost:    {"192.0.2.62"},
+	})
 	cmd := exec.Command(
 		"bash",
 		"-c",
-		`source ./test-env.sh && printf '%s\n%s\n%s\n' "$WARP_ENV" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"`,
+		`source ./test-env.sh && printf '%s\n%s\n%s\n%s\n' "$WARP_ENV" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME" "$WARP_TEST_ENV_ATTESTED_ADDRS"`,
 	)
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
 			"WARP_HOME": t.TempDir(),
 			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_HOST_RESOLVER":                     resolverPath,
 			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
 			"WARP_TEST_ENV_TCP_PROBE":                         probePath,
 			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
-			"BRINGYOUR_POSTGRES_HOSTNAME":                     "local-pg.bringyour.com",
-			"BRINGYOUR_REDIS_HOSTNAME":                        "local-redis.bringyour.com",
+			"BRINGYOUR_POSTGRES_HOSTNAME":                     localPostgresHost,
+			"BRINGYOUR_REDIS_HOSTNAME":                        localRedisHost,
 		},
 		"WARP_ENV",
 		"WARP_VAULT_HOME",
@@ -745,6 +956,7 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 		"local",
 		filepath.Join(workingDirectory, "local", "testdata", "vault"),
 		filepath.Join(workingDirectory, "local", "testdata", "config"),
+		"192.0.2.61:5432,192.0.2.62:6379",
 	}
 	if !slices.Equal(lines, expectedLines) {
 		t.Fatalf("configured environment = %q; want %q", lines, expectedLines)
@@ -753,9 +965,125 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedProbeRecord := "postgres local-pg.bringyour.com 5432\nredis local-redis.bringyour.com 6379\n"
+	expectedProbeRecord := "postgres 192.0.2.61 5432\nredis 192.0.2.62 6379\n"
 	if string(probeRecord) != expectedProbeRecord {
 		t.Fatalf("service probes = %q; want %q", probeRecord, expectedProbeRecord)
+	}
+	if queried := readTestEnvironmentResolverRecord(t, resolverRecordPath); !slices.Equal(queried, []string{localPostgresHost, localRedisHost}) {
+		t.Fatalf("resolved names = %q; want each service name once", queried)
+	}
+}
+
+// Public DNS answers the local service names with 127.0.0.1, so an unmanaged
+// name that resolves to loopback, or to more than one address, cannot be
+// pinned and stops the run before any probe. Explicit loopback authorities
+// remain available through the private portable root.
+func TestTestEnvironmentScriptRefusesUnmanagedNameWithoutOnePinnableAddress(t *testing.T) {
+	tests := []struct {
+		name      string
+		answers   []string
+		errorText string
+	}{
+		{
+			name:      "loopback answer",
+			answers:   []string{"127.0.0.1"},
+			errorText: "postgres host " + localPostgresHost + " resolves to loopback 127.0.0.1",
+		},
+		{
+			name:      "several answers",
+			answers:   []string{"192.0.2.61", "192.0.2.63"},
+			errorText: "postgres host " + localPostgresHost + " resolves to 2 addresses",
+		},
+		{
+			name:      "no answer",
+			answers:   []string{},
+			errorText: "postgres host " + localPostgresHost + " resolves to 0 addresses",
+		},
+	}
+	for _, test := range tests {
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		resolverPath, _ := writeTestEnvironmentHostResolver(t, map[string][]string{
+			localPostgresHost: test.answers,
+			localRedisHost:    {"192.0.2.62"},
+		})
+		cmd := exec.Command(
+			"bash",
+			"-c",
+			`export WARP_TEST_ENV_ATTESTED_ADDRS=192.0.2.99:1
+source ./test-env.sh
+status=$?
+printf 'attestation=%s\n' "${WARP_TEST_ENV_ATTESTED_ADDRS-unset}"
+exit "$status"`,
+		)
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"WARP_HOME": t.TempDir(),
+				"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+				"WARP_TEST_ENV_HOST_RESOLVER":                     resolverPath,
+				"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
+				"WARP_TEST_ENV_TCP_PROBE":                         filepath.Join(t.TempDir(), "unused-probe"),
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+				"BRINGYOUR_POSTGRES_HOSTNAME":                     localPostgresHost,
+				"BRINGYOUR_REDIS_HOSTNAME":                        localRedisHost,
+			},
+			"WARP_ENV",
+			"WARP_VAULT_HOME",
+			"WARP_CONFIG_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Errorf("%s: preflight = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+		if !strings.Contains(string(output), "attestation=unset") {
+			t.Errorf("%s: a refused preflight left an attestation exported: %q", test.name, output)
+		}
+		if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: unpinnable service name reached a probe: %v", test.name, err)
+		}
+	}
+}
+
+// Unmanaged services named 127.0.0.1 without the private portable root would
+// attest 127.0.0.1:5432 and 127.0.0.1:6379, which on a host running the
+// production data tunnel are production. The preflight refuses before any
+// probe and leaves no attestation.
+func TestTestEnvironmentScriptRefusesUnmanagedLoopbackWithoutPrivateRoot(t *testing.T) {
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf 'called\\n' >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		`source ./test-env.sh
+status=$?
+printf 'attestation=%s\n' "${WARP_TEST_ENV_ATTESTED_ADDRS-unset}"
+exit "$status"`,
+	)
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"WARP_HOME": t.TempDir(),
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
+			"WARP_TEST_ENV_TCP_PROBE":                         probePath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":                     "127.0.0.1",
+			"BRINGYOUR_REDIS_HOSTNAME":                        "127.0.0.1",
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "loopback services need the private portable root") {
+		t.Fatalf("unmanaged loopback preflight = %v, %q; want a private-root refusal", err, output)
+	}
+	if !strings.Contains(string(output), "attestation=unset") {
+		t.Fatalf("a refused preflight left an attestation exported: %q", output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unmanaged loopback service reached a probe: %v", err)
 	}
 }
 
@@ -781,7 +1109,7 @@ func TestTestEnvironmentScriptAcceptsSuiteProxyState(t *testing.T) {
 	cmd := exec.Command(
 		"bash",
 		"-c",
-		`source ./test-env.sh && printf '%s\n%s\n%s\n' "$BRINGYOUR_POSTGRES_HOSTNAME" "$BRINGYOUR_REDIS_HOSTNAME" "$TEST_ENV_SUITE_PROXY_MODE"`,
+		`source ./test-env.sh && printf '%s\n%s\n%s\n%s\n' "$BRINGYOUR_POSTGRES_HOSTNAME" "$BRINGYOUR_REDIS_HOSTNAME" "$TEST_ENV_SUITE_PROXY_MODE" "$WARP_TEST_ENV_ATTESTED_ADDRS"`,
 	)
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
@@ -804,7 +1132,9 @@ func TestTestEnvironmentScriptAcceptsSuiteProxyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("suite proxy test environment: %v\n%s", err, output)
 	}
-	expectedOutput := suiteProxyTestAddress + "\n" + suiteProxyTestAddress + "\n1\n"
+	// The suite proxy's direct host-IP endpoints are the run's only attestation.
+	expectedOutput := suiteProxyTestAddress + "\n" + suiteProxyTestAddress + "\n1\n" +
+		suiteProxyTestAddress + ":15432," + suiteProxyTestAddress + ":16379\n"
 	if string(output) != expectedOutput {
 		t.Fatalf("suite proxy exports = %q; want %q", output, expectedOutput)
 	}
@@ -1568,7 +1898,9 @@ func TestTestEnvironmentScriptRejectsUnattestedLocalTopology(t *testing.T) {
 }
 
 // A complete attestation tied to the live lock, selected endpoints, and sole
-// managed aliases admits the existing first-attempt service probes.
+// managed aliases admits the first-attempt service probes once both names
+// resolve to the launcher's address. The probes and the exported attestation
+// use that address literal, never a name that could re-resolve later.
 func TestTestEnvironmentScriptAcceptsLauncherManagedServices(t *testing.T) {
 	lockDir, hostsPath := writeTestEnvironmentLauncherState(
 		t,
@@ -1586,10 +1918,15 @@ func TestTestEnvironmentScriptAcceptsLauncherManagedServices(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", "./test-env.sh")
+	resolverPath, resolverRecordPath := writeTestEnvironmentHostResolver(t, map[string][]string{
+		localPostgresHost: {localDedicatedAddress},
+		localRedisHost:    {localDedicatedAddress},
+	})
+	cmd := exec.Command("bash", "-c", `source ./test-env.sh && printf '%s\n' "$WARP_TEST_ENV_ATTESTED_ADDRS"`)
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
 			"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+			"WARP_TEST_ENV_HOST_RESOLVER":           resolverPath,
 			"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
 			"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
 			"WARP_TEST_ENV_TCP_PROBE":               probePath,
@@ -1605,14 +1942,250 @@ func TestTestEnvironmentScriptAcceptsLauncherManagedServices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("managed service preflight: %v\n%s", err, output)
 	}
+	expectedAttestation := localDedicatedAddress + ":5432," + localDedicatedAddress + ":6379\n"
+	if string(output) != expectedAttestation {
+		t.Fatalf("managed attestation = %q; want %q", output, expectedAttestation)
+	}
 	probeRecord, err := os.ReadFile(probeRecordPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := "postgres " + localPostgresHost + " 5432\n" +
-		"redis " + localRedisHost + " 6379\n"
+	expected := "postgres " + localDedicatedAddress + " 5432\n" +
+		"redis " + localDedicatedAddress + " 6379\n"
 	if string(probeRecord) != expected {
 		t.Fatalf("managed service probes = %q; want %q", probeRecord, expected)
+	}
+	if queried := readTestEnvironmentResolverRecord(t, resolverRecordPath); !slices.Equal(queried, []string{localPostgresHost, localRedisHost}) {
+		t.Fatalf("resolved names = %q; want both managed names checked once", queried)
+	}
+}
+
+// Public DNS answers both local service names with 127.0.0.1, where a
+// production data tunnel can listen. However valid the launcher's lock, record
+// and hosts block look, a managed name the resolver does not map only to the
+// launcher's address stops the run before any probe and leaves no attestation.
+func TestTestEnvironmentScriptRefusesManagedNameResolvingElsewhere(t *testing.T) {
+	tests := []struct {
+		name           string
+		postgresAnswer []string
+		redisAnswer    []string
+		errorText      string
+	}{
+		{
+			name:           "postgres name falls through to public loopback",
+			postgresAnswer: []string{"127.0.0.1"},
+			redisAnswer:    []string{localDedicatedAddress},
+			errorText:      "postgres host " + localPostgresHost + " (port 5432) resolves to loopback 127.0.0.1",
+		},
+		{
+			name:           "redis name falls through to public loopback",
+			postgresAnswer: []string{localDedicatedAddress},
+			redisAnswer:    []string{"127.0.0.1"},
+			errorText:      "redis host " + localRedisHost + " (port 6379) resolves to loopback 127.0.0.1",
+		},
+		{
+			name:           "IPv6 loopback",
+			postgresAnswer: []string{localDedicatedAddress},
+			redisAnswer:    []string{"::1"},
+			errorText:      "redis host " + localRedisHost + " (port 6379) resolves to loopback ::1",
+		},
+		{
+			name:           "other loopback address",
+			postgresAnswer: []string{"127.0.0.2"},
+			redisAnswer:    []string{localDedicatedAddress},
+			errorText:      "resolves to loopback 127.0.0.2",
+		},
+		{
+			name:           "loopback merged with the managed mapping",
+			postgresAnswer: []string{localDedicatedAddress, "127.0.0.1"},
+			redisAnswer:    []string{localDedicatedAddress},
+			errorText:      "resolves to loopback 127.0.0.1",
+		},
+		{
+			name:           "another address",
+			postgresAnswer: []string{localDedicatedAddress},
+			redisAnswer:    []string{"198.51.100.9"},
+			errorText:      "redis host " + localRedisHost + " (port 6379) resolves to 198.51.100.9, not the launcher-attested " + localDedicatedAddress,
+		},
+		{
+			name:           "no address",
+			postgresAnswer: []string{},
+			redisAnswer:    []string{localDedicatedAddress},
+			errorText:      "postgres host " + localPostgresHost + " resolved to no address",
+		},
+		{
+			name:           "resolver failure",
+			postgresAnswer: nil,
+			redisAnswer:    []string{localDedicatedAddress},
+			errorText:      "postgres host " + localPostgresHost + " did not resolve",
+		},
+	}
+	for _, test := range tests {
+		lockDir, hostsPath := writeTestEnvironmentLauncherState(t, localPostgresHost, "5432", localRedisHost, "6379")
+		answers := map[string][]string{localRedisHost: test.redisAnswer}
+		if test.postgresAnswer != nil {
+			answers[localPostgresHost] = test.postgresAnswer
+		}
+		resolverPath, _ := writeTestEnvironmentHostResolver(t, answers)
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf 'called\\n' >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+			t.Fatalf("%s: write probe: %v", test.name, err)
+		}
+		cmd := exec.Command(
+			"bash",
+			"-c",
+			`export WARP_TEST_ENV_ATTESTED_ADDRS=192.0.2.99:1
+source ./test-env.sh
+status=$?
+printf 'attestation=%s\n' "${WARP_TEST_ENV_ATTESTED_ADDRS-unset}"
+exit "$status"`,
+		)
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_HOST_RESOLVER":           resolverPath,
+				"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+				"WARP_TEST_ENV_TCP_PROBE":               probePath,
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+				"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+				"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+			},
+			"WARP_ENV",
+			"WARP_VAULT_HOME",
+			"WARP_CONFIG_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Errorf("%s: preflight = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+		if !strings.Contains(string(output), "attestation=unset") {
+			t.Errorf("%s: a refused preflight left an attestation exported: %q", test.name, output)
+		}
+		if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: a managed name resolving elsewhere reached a probe: %v", test.name, err)
+		}
+	}
+}
+
+// Without a test override the preflight asks the host's own resolver: glibc
+// getent where it exists, otherwise macOS dscacheutil. Both outputs reduce to
+// the distinct addresses for each name.
+func TestTestEnvironmentScriptUsesHostResolverTools(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]string{
+		"getent": `#!/bin/sh
+printf '%s\n' "$*" >> "$WARP_TEST_ENV_RESOLVER_RECORD"
+[ "$1" = ahosts ] || exit 1
+printf '%s      STREAM %s\n%s      DGRAM\n%s      RAW\n' "$WARP_TEST_RESOLVED_ADDRESS" "$2" "$WARP_TEST_RESOLVED_ADDRESS" "$WARP_TEST_RESOLVED_ADDRESS"
+`,
+		"dscacheutil": `#!/bin/sh
+printf '%s\n' "$*" >> "$WARP_TEST_ENV_RESOLVER_RECORD"
+[ "$1 $2 $3 $4" = "-q host -a name" ] || exit 1
+printf 'name: %s\nip_address: %s\n\n' "$5" "$WARP_TEST_RESOLVED_ADDRESS"
+`,
+	}
+	for _, tool := range []string{"getent", "dscacheutil"} {
+		// Only the tool under test and the commands the managed preflight runs
+		// are on PATH, so the host's own resolver tools cannot be chosen.
+		binDir := t.TempDir()
+		for _, commandName := range []string{"awk", "dirname", "find", "go", "grep", "ps", "sort"} {
+			commandPath, err := exec.LookPath(commandName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(commandPath, filepath.Join(binDir, commandName)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(binDir, tool), []byte(tools[tool]), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lockDir, hostsPath := writeTestEnvironmentLauncherState(t, localPostgresHost, "5432", localRedisHost, "6379")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(probePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		recordPath := filepath.Join(t.TempDir(), "resolver-record")
+		cmd := exec.Command(bashPath, "-c", `source ./test-env.sh && printf '%s\n' "$WARP_TEST_ENV_ATTESTED_ADDRS"`)
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"PATH":                                  binDir,
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+				"WARP_TEST_ENV_TCP_PROBE":               probePath,
+				"WARP_TEST_ENV_RESOLVER_RECORD":         recordPath,
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+				"WARP_TEST_RESOLVED_ADDRESS":            localDedicatedAddress,
+				"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+				"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+			},
+			"WARP_ENV",
+			"WARP_VAULT_HOME",
+			"WARP_CONFIG_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		expectedAttestation := localDedicatedAddress + ":5432," + localDedicatedAddress + ":6379\n"
+		if err != nil || string(output) != expectedAttestation {
+			t.Errorf("%s resolver preflight = %v, %q; want attestation %q", tool, err, output, expectedAttestation)
+			continue
+		}
+		record, err := os.ReadFile(recordPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lines := strings.Split(strings.TrimSpace(string(record)), "\n"); len(lines) != 2 ||
+			!strings.HasSuffix(lines[0], localPostgresHost) || !strings.HasSuffix(lines[1], localRedisHost) {
+			t.Errorf("%s queries = %q; want one per managed name", tool, record)
+		}
+	}
+}
+
+// A host with neither resolver tool cannot prove where the managed names lead,
+// so the preflight stops with an actionable prerequisite error.
+func TestTestEnvironmentScriptReportsMissingHostResolver(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	for _, commandName := range []string{"awk", "dirname", "find", "go", "grep", "ps", "sort"} {
+		commandPath, err := exec.LookPath(commandName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(commandPath, filepath.Join(binDir, commandName)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lockDir, hostsPath := writeTestEnvironmentLauncherState(t, localPostgresHost, "5432", localRedisHost, "6379")
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	cmd := exec.Command(bashPath, "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                  binDir,
+			"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+			"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+			"WARP_TEST_ENV_TCP_PROBE":               filepath.Join(t.TempDir(), "unused-probe"),
+			"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+			"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "missing prerequisite: getent or dscacheutil") {
+		t.Fatalf("preflight without resolver tools = %v, %q; want a prerequisite error", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unchecked managed name reached a probe: %v", err)
 	}
 }
 
@@ -1742,7 +2315,9 @@ func TestTestEnvironmentScriptRestrictsUnmanagedServiceEscape(t *testing.T) {
 // The shell preflight reads the same authority shapes as the YAML resource
 // loader without acquiring a Python/yq dependency. Exercise that observable
 // boundary through both services and keep config resources from being mistaken
-// for their same-named vault peers.
+// for their same-named vault peers. A bracketed IPv6 literal is parsed exactly,
+// then refused: the launcher maps names, so clients dialing that literal would
+// never reach the launcher's address.
 func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -1752,6 +2327,7 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 		redisHostname    string
 		postgresPort     string
 		redisPort        string
+		errorText        string
 	}{
 		{
 			name:             "plain values with comments",
@@ -1772,17 +2348,40 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 			redisPort:        "26379",
 		},
 		{
-			name:             "bracketed IPv6 values",
+			name:             "bracketed IPv6 postgres value",
 			postgresScalar:   "\"[{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}]:35432\" # postgres comment",
-			redisScalar:      "'[{{ env:BRINGYOUR_REDIS_HOSTNAME }}]:36379' # redis comment",
+			redisScalar:      "'{{ env:BRINGYOUR_REDIS_HOSTNAME }}:36379' # redis comment",
 			postgresHostname: "2001:db8:1::10",
+			redisHostname:    "redis-ipv6-test.example",
+			postgresPort:     "35432",
+			redisPort:        "36379",
+			errorText: "postgres host 2001:db8:1::10 (port 35432) resolves to 2001:db8:1::10, " +
+				"not the launcher-attested " + localDedicatedAddress,
+		},
+		{
+			name:             "bracketed IPv6 redis value",
+			postgresScalar:   "\"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:35432\" # postgres comment",
+			redisScalar:      "'[{{ env:BRINGYOUR_REDIS_HOSTNAME }}]:36379' # redis comment",
+			postgresHostname: "pg-ipv6-test.example",
 			redisHostname:    "2001:db8:2::20",
 			postgresPort:     "35432",
 			redisPort:        "36379",
+			errorText: "redis host 2001:db8:2::20 (port 36379) resolves to 2001:db8:2::20, " +
+				"not the launcher-attested " + localDedicatedAddress,
 		},
 	}
 
 	for _, test := range tests {
+		// Only the managed names resolve; an address literal is never sent to
+		// the resolver, so a literal host here fails the test if it is.
+		resolverPath, _ := writeTestEnvironmentHostResolver(t, map[string][]string{
+			"pg-shell-test.example":     {localDedicatedAddress},
+			"redis-shell-test.example":  {localDedicatedAddress},
+			"pg-quoted-test.example":    {localDedicatedAddress},
+			"redis-quoted-test.example": {localDedicatedAddress},
+			"pg-ipv6-test.example":      {localDedicatedAddress},
+			"redis-ipv6-test.example":   {localDedicatedAddress},
+		})
 		vaultDir := t.TempDir()
 		configDir := t.TempDir()
 		lockDir, hostsPath := writeTestEnvironmentLauncherState(
@@ -1820,6 +2419,7 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 				"WARP_VAULT_HOME":                       vaultDir,
 				"WARP_CONFIG_HOME":                      configDir,
 				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_HOST_RESOLVER":           resolverPath,
 				"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
 				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
 				"WARP_TEST_ENV_TCP_PROBE":               probePath,
@@ -1829,6 +2429,15 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
 		)
 		output, err := cmd.CombinedOutput()
+		if test.errorText != "" {
+			if err == nil || !strings.Contains(string(output), test.errorText) {
+				t.Errorf("%s: preflight = %v, %q; want %q", test.name, err, output, test.errorText)
+			}
+			if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s: an unmanaged address literal reached a probe: %v", test.name, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Errorf("%s: test environment preflight: %v\n%s", test.name, err, output)
 			continue
@@ -1839,8 +2448,9 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 			t.Errorf("%s: read probe record: %v", test.name, err)
 			continue
 		}
-		expectedProbeRecord := "postgres " + test.postgresHostname + " " + test.postgresPort + "\n" +
-			"redis " + test.redisHostname + " " + test.redisPort + "\n"
+		// The probes reach the launcher's address on each parsed port.
+		expectedProbeRecord := "postgres " + localDedicatedAddress + " " + test.postgresPort + "\n" +
+			"redis " + localDedicatedAddress + " " + test.redisPort + "\n"
 		if string(probeRecord) != expectedProbeRecord {
 			t.Errorf("%s: service probes = %q; want %q", test.name, probeRecord, expectedProbeRecord)
 		}
@@ -1927,11 +2537,16 @@ func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	resolverPath, _ := writeTestEnvironmentHostResolver(t, map[string][]string{
+		localPostgresHost: {"192.0.2.61"},
+		localRedisHost:    {"192.0.2.62"},
+	})
 	cmd := exec.Command("bash", "./test-env.sh")
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
 			"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_HOST_RESOLVER":                     resolverPath,
 			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
 			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
 			"BRINGYOUR_POSTGRES_HOSTNAME":                     localPostgresHost,
@@ -1950,8 +2565,9 @@ func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedProbeRecord := "-z -w 3 -- " + localPostgresHost + " 5432\n" +
-		"-z -w 3 -- " + localRedisHost + " 6379\n"
+	// nc connects to the pinned literal; it never resolves a service name.
+	expectedProbeRecord := "-z -w 3 -- 192.0.2.61 5432\n" +
+		"-z -w 3 -- 192.0.2.62 6379\n"
 	if string(probeRecord) != expectedProbeRecord {
 		t.Fatalf("default service probes = %q; want %q", probeRecord, expectedProbeRecord)
 	}

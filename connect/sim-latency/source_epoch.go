@@ -47,6 +47,7 @@ type sourceRepositories struct {
 	Sn            sourceRepository `yaml:"sn"`
 	OperatorProxy sourceRepository `yaml:"operator-proxy"`
 	Warp          sourceRepository `yaml:"warp"`
+	Gvisor        sourceRepository `yaml:"gvisor"`
 }
 
 // sourceRepositoryNames returns every repository copied into and built by the
@@ -63,6 +64,7 @@ func sourceRepositoryNames() []string {
 		"sn",
 		"operator-proxy",
 		"warp",
+		"gvisor",
 	}
 }
 
@@ -79,6 +81,7 @@ func (self sourceRepositories) commits() map[string]string {
 		"sn":             self.Sn.Commit,
 		"operator-proxy": self.OperatorProxy.Commit,
 		"warp":           self.Warp.Commit,
+		"gvisor":         self.Gvisor.Commit,
 	}
 }
 

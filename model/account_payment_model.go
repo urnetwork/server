@@ -656,7 +656,28 @@ func SetPaymentRecord(
 	tokenAmount float64,
 	paymentRecord string,
 ) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	if paymentId == (server.Id{}) || len(paymentRecord) > 4096 {
+		return ErrProviderPaymentAttemptChanged
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(paymentId, "", "", paymentRecord), func(tx server.PgTx) {
+		returnErr = nil
+		current, err := dbGetPayment(ctx, tx, paymentId)
+		server.Raise(err)
+		if current == nil || !lockProviderPaymentAttempt(ctx, tx, current) ||
+			(paymentRecord != "" && providerPaymentRecordClaimedInTx(ctx, tx, paymentRecord, current)) {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if current.PaymentRecord != nil && *current.PaymentRecord != paymentRecord {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if paymentRecord != "" && current.PaymentRecord == nil {
+			accepted := *current
+			accepted.PaymentRecord = &paymentRecord
+			accepted.TokenType, accepted.TokenAmount = &tokenType, &tokenAmount
+			retainProviderAttemptInTx(ctx, tx, &accepted, "RECORDED", "compatibility record binding")
+		}
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -691,7 +712,21 @@ func RemovePaymentRecord(
 	ctx context.Context,
 	paymentId server.Id,
 ) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	expected, err := GetPayment(ctx, paymentId)
+	if err != nil || expected == nil {
+		return ErrProviderPaymentAttemptChanged
+	}
+	record := ""
+	if expected.PaymentRecord != nil {
+		record = *expected.PaymentRecord
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(paymentId, "", "", record), func(tx server.PgTx) {
+		returnErr = nil
+		if !lockProviderPaymentAttempt(ctx, tx, expected) || expected.TxHash != nil {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		retainProviderAttemptInTx(ctx, tx, expected, "REMOVED", "explicit pre-chain record removal")
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`

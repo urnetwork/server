@@ -19,10 +19,10 @@ import (
 // Opens a fixture shard, simulating the committed initialization successor.
 func testingOpenTallyShard(t testing.TB, ctx context.Context, shard int, generation string) {
 	t.Helper()
-	if _, err := ReadProviderEgressTallyPage(ctx, shard, generation, "0-0", true); err != nil {
+	if _, err := readProviderEgressTallyPage(ctx, shard, generation, "0-0", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadProviderEgressTallyPage(ctx, shard, generation, "0-0", false); err != nil {
+	if _, err := readProviderEgressTallyPage(ctx, shard, generation, "0-0", false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -40,7 +40,7 @@ func TestProviderEgressTallyBatchCoalescesExactCounters(t *testing.T) {
 	for i := range records {
 		records[i] = record
 	}
-	batch, err := PrepareProviderEgressTallyBatch(records)
+	batch, err := prepareProviderEgressTallyBatch(records)
 	if err != nil || len(batch.Places) != 1 || len(batch.Sites) != 3 {
 		t.Fatalf("coalesced shape=%+v err=%v", batch, err)
 	}
@@ -55,8 +55,12 @@ func TestProviderEgressTallyBatchCoalescesExactCounters(t *testing.T) {
 	if batch.Sites[0].CanaryLoads != 256 || batch.Sites[0].CanaryPasses != 256 || batch.Sites[0].Loads != 0 || batch.Sites[1].CanaryPasses != 0 {
 		t.Fatal("canary evidence changed scoring counters")
 	}
-	if _, err := PrepareProviderEgressTallyBatch(append(records, record)); err == nil {
-		t.Fatal("unbounded record page accepted")
+	oversized := make([]ProviderEgressTallyRecord, providerEgressTallyDrainLength+1)
+	for i := range oversized {
+		oversized[i] = record
+	}
+	if _, err := prepareProviderEgressTallyBatch(oversized); err == nil {
+		t.Fatal("unbounded record batch accepted")
 	}
 }
 
@@ -88,23 +92,23 @@ func TestProviderEgressTallyQueueBootstrapFencesGeneration(t *testing.T) {
 		ctx := t.Context()
 		run := ProviderEgressRunTally{Place: ProviderEgressPlace{CountryCode: "zz", Region: "Synthetic"}}
 		shard := ProviderEgressTallyShard(run.Place)
-		if _, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", true); err != nil {
+		if _, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", true); err != nil {
 			t.Fatal(err)
 		}
 		if err := NewProviderEgressTallyWriter().Record(ctx, time.Now(), run, nil); err == nil {
 			t.Fatal("handoff preceded durable initialization")
 		}
-		if _, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err != nil {
+		if _, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err != nil {
 			t.Fatal(err)
 		}
 		if err := NewProviderEgressTallyWriter().Record(ctx, time.Now(), run, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-replacement", "0-0", true); err == nil {
+		if _, err := readProviderEgressTallyPage(ctx, shard, "synthetic-replacement", "0-0", true); err == nil {
 			t.Fatal("replacement owner replayed retained records from zero")
 		}
 		server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, providerEgressTallyKeys(shard)...).Err()) })
-		if _, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err == nil {
+		if _, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err == nil {
 			t.Fatal("lost initialized queue silently restarted at zero")
 		}
 	})
@@ -125,11 +129,11 @@ func TestProviderEgressTallyQueueRetainsUnacknowledgedPrefix(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		first, err := ReadProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
+		first, err := readProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		replay, err := ReadProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
+		replay, err := readProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,11 +143,11 @@ func TestProviderEgressTallyQueueRetainsUnacknowledgedPrefix(t *testing.T) {
 		if err := writer.Record(ctx, time.Now(), run, nil); err != nil {
 			t.Fatal(err)
 		}
-		next, err := ReadProviderEgressTallyPage(ctx, shard, generation, first.NextCursor, false)
+		next, err := readProviderEgressTallyPage(ctx, shard, generation, first.NextCursor, false)
 		if err != nil || len(next.Records) != 1 {
 			t.Fatalf("concurrent append lost: page=%+v err=%v", next, err)
 		}
-		last, err := ReadProviderEgressTallyPage(ctx, shard, generation, next.NextCursor, false)
+		last, err := readProviderEgressTallyPage(ctx, shard, generation, next.NextCursor, false)
 		if err != nil || len(last.Records) != 0 {
 			t.Fatalf("acknowledged prefix reappeared: %+v %v", last, err)
 		}
@@ -188,7 +192,7 @@ func TestProviderEgressTallyQueueRefusalMarksProjectionLoss(t *testing.T) {
 		if rows := GetProviderEgressPlaceTallies(ctx, time.Time{}); len(rows) != 0 {
 			t.Fatal("producer silently fell back to PostgreSQL")
 		}
-		page, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
+		page, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
 		if err != nil || len(page.Records) != 1 {
 			t.Fatalf("whole accepted run not retained: %+v %v", page, err)
 		}
@@ -214,7 +218,7 @@ func TestProviderEgressTallyQueuePageByteBound(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		page, err := ReadProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
+		page, err := readProviderEgressTallyPage(ctx, shard, generation, "0-0", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +234,7 @@ func TestProviderEgressTallyQueuePageByteBound(t *testing.T) {
 		if bytes > providerEgressTallyPageBytes {
 			t.Fatal("page exceeded its byte budget")
 		}
-		next, err := ReadProviderEgressTallyPage(ctx, shard, generation, page.NextCursor, false)
+		next, err := readProviderEgressTallyPage(ctx, shard, generation, page.NextCursor, false)
 		if err != nil || len(page.Records)+len(next.Records) != 20 {
 			t.Fatalf("excluded suffix lost: %v", err)
 		}
@@ -262,7 +266,7 @@ func TestProviderEgressTallyProjectionScopesUnavailableShards(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, providerEgressTallyKeys(shard)[1]).Err()) })
-		if _, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err == nil {
+		if _, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false); err == nil {
 			t.Fatal("lost records became an empty healthy page")
 		}
 		p := ReadProviderEgressTallyProjection(ctx, time.Now(), retention)
@@ -307,7 +311,7 @@ func TestProviderEgressTallyCanceledHandoffCarriesExactLoss(t *testing.T) {
 		if len(p.Excluded) != 1 || p.Excluded[0] != want {
 			t.Fatalf("wrong loss scope: %+v", p.Excluded)
 		}
-		page, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
+		page, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
 		if err != nil || len(page.Records) != 1 || page.Records[0].Run.Place != healthyRun.Place {
 			t.Fatalf("canceled evidence replayed or healthy handoff lost: %+v %v", page, err)
 		}
@@ -438,7 +442,7 @@ func TestProviderEgressTallyConcurrentHandoffsPreserveOwnership(t *testing.T) {
 		if err := writer.Record(ctx, now, run, nil); err != nil {
 			t.Fatal(err)
 		}
-		page, err := ReadProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
+		page, err := readProviderEgressTallyPage(ctx, shard, "synthetic-owner", "0-0", false)
 		if err != nil || len(page.Records) != 17 {
 			t.Fatalf("concurrent queue duplicated or lost records: %+v %v", page, err)
 		}

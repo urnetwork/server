@@ -39,8 +39,8 @@ BEGIN
   OR (intent->>'generation')::bigint IS DISTINCT FROM (SELECT COALESCE(max(generation),0)+1 FROM competition_source_activation
    WHERE environment=env AND competition_id=competition AND season_id=season AND generation<(intent->>'generation')::bigint)
   OR jsonb_typeof(intent->'commits') IS DISTINCT FROM 'object'
-  OR (SELECT count(*) FROM jsonb_object_keys(intent->'commits'))<>10
-  OR NOT COALESCE(intent->'commits' ?& ARRAY['server','connect','sdk','proxy','glog','goidenticons','userwireguard','sn','operator-proxy','warp'],false)
+  OR (SELECT count(*) FROM jsonb_object_keys(intent->'commits'))<>11
+  OR NOT COALESCE(intent->'commits' ?& ARRAY['server','connect','sdk','proxy','glog','goidenticons','userwireguard','sn','operator-proxy','warp','gvisor'],false)
   OR EXISTS(SELECT 1 FROM jsonb_each_text(intent->'commits') c WHERE c.value !~ '^[0-9a-f]{40}$') THEN
   RAISE EXCEPTION 'v2 source scope or complete repository identity is invalid';
  END IF;
@@ -59,7 +59,7 @@ BEGIN
   OR NOT COALESCE((intent->>'threshold')::double precision>=0 AND (intent->>'threshold')::double precision<1,false)
   OR NOT COALESCE((intent->>'prepared_at')::timestamp>'1970-01-01'::timestamp,false)
   OR jsonb_typeof(intent->'git_refs') IS DISTINCT FROM 'object'
-  OR (SELECT count(*) FROM jsonb_object_keys(intent->'git_refs'))<>11
+  OR (SELECT count(*) FROM jsonb_object_keys(intent->'git_refs'))<>12
   OR EXISTS(SELECT 1 FROM jsonb_each_text(intent->'commits') c WHERE
    intent->'git_refs'->c.key->>'commit' IS DISTINCT FROM c.value
    OR COALESCE(intent->'git_refs'->c.key->>'expected_commit','') !~ '^[0-9a-f]{40}$')

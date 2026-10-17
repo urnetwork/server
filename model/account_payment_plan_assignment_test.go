@@ -90,6 +90,8 @@ func TestPaymentPlanAssignmentResumesFromCommittedBatches(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
+		// the points rollup below only visits payments that earned points
+		defer pinPaymentPlanAccountPoints()()
 		ctx := context.Background()
 		const sweepCount = 7
 		cohort, anchorEnd, maxDuration := paymentPlanAssignmentFixture(t, ctx, sweepCount)

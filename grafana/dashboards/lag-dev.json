@@ -667,7 +667,7 @@
      "legendFormat": "{{ip_family}}"
     }
    ],
-   "description": "Latency outside every load: Over the trailing hour's complete results only (a load given up has no speeds), the median of each result's own p50, split by family. A family with no complete result in the hour has no line rather than a zero. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+   "description": "Idle latency as lag.dev shows it (L4): a dot's pings whose round trip overlaps no load of any dot in its track, from the load's first byte to 2 s after its upload, derived from each result's minute and its track's load windows when the stats refresh. Loads run back to back, so a dot's minute holds its neighbours' loads as well as its own, and those pings are not idle. Over the trailing hour's complete results only (a load given up has no speeds), the median of each result's own idle p50, split by family. A family with no complete result in the hour has no line rather than a zero. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
   },
   {
    "id": 12,
@@ -842,7 +842,7 @@
      "legendFormat": "offered"
     }
    ],
-   "description": "Extenders the lag.dev sample can offer now: an issued certificate whose name is published (C8), active addresses, and a place to pick them by (A4). Zero means every new track answers unavailable. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+   "description": "Extenders the lag.dev sample can offer now: an issued certificate whose name is published (C8) and which A8 has handed to the extender, active addresses, and a place to pick them by (A4). A new extender is counted from its first certificate poll after issuance, up to half an hour after its name is published. Zero means every new track answers unavailable. The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
   },
   {
    "id": 16,

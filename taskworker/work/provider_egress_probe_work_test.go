@@ -895,7 +895,8 @@ func TestScheduleProviderEgressProbeTasksIsIdempotentAndHostIndependent(t *testi
 	})
 }
 
-// Disabled initialization must not create a new recurring chain.
+// Disabled initialization must not create a shard chain. It seeds only the
+// disabled marker, which shows older configs that the shard set is retired.
 func TestScheduleProviderEgressProbeTasksDisabledSeedsNothing(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		settings := testProviderEgressProbeSettings(3)
@@ -924,6 +925,9 @@ func TestScheduleProviderEgressProbeTasksDisabledSeedsNothing(t *testing.T) {
 		})
 		if count != 0 {
 			t.Fatalf("disabled scheduler seeded %d probe tasks", count)
+		}
+		if marker := testPendingDisabledMarker(t, ctx); marker == nil {
+			t.Fatal("disabled scheduler did not seed the disabled marker")
 		}
 	})
 }

@@ -3,7 +3,6 @@ package handlers
 import (
 	"crypto/hmac"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -11,8 +10,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/controller"
 )
 
 // maxProviderBandwidthTestBytes bounds a single REQUEST. Without a clamp the
@@ -131,36 +129,17 @@ func ProviderBandwidthTest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SubmitProviderBandwidthArgs is an active bandwidth measurement taken by the
-// prober over a provider's tunnel.
-type SubmitProviderBandwidthArgs struct {
-	ClientId server.Id `json:"client_id"`
-	// Source names which target produced this figure
-	// (model.ProviderBandwidthSourceActiveOperator or ...ActiveCDN). It is
-	// part of the storage key, so it is what keeps the two targets' figures in
-	// separate rows instead of overwriting each other.
-	Source          string  `json:"source"`
-	BytesPerSecond  float64 `json:"bytes_per_second"`
-	SampleByteCount int64   `json:"sample_byte_count"`
-}
+// The submission and reservation shapes live in controller, which validates
+// and stores them for this handler and for the taskworker's in-process
+// operator alike.
+type SubmitProviderBandwidthArgs = controller.SubmitProviderBandwidthArgs
 
-// ProviderBandwidthResult stores an active bandwidth measurement. An active
-// probe is a point measurement rather than an aggregate over a window, so
-// window_start and window_end are both the arrival time.
-//
-// A non-positive rate or sample size is not a usable measurement, and storing
-// one would overwrite a real figure with a meaningless one -- so those are
-// rejected before anything is written.
-//
-// The source is validated against the known ACTIVE set rather than merely
-// stored. Two distinct failures are being closed off. An unrecognised source
-// is not a harmless label: the row is keyed on (client_id, source), so it
-// creates a row nothing will ever read or replace, and a prober with a typo'd
-// tag would look like it was working while writing to a tag no consumer knows.
-// And "passive" is refused specifically: that figure is derived server-side
-// from bytes the provider has already been paid to carry, which is exactly
-// what makes it ungameable, so accepting a submitted one would let this
-// endpoint overwrite the derived figure with an asserted one.
+type ReserveProviderBandwidthArgs = controller.ReserveProviderBandwidthArgs
+
+type ReserveProviderBandwidthResult = controller.ReserveProviderBandwidthResult
+
+// ProviderBandwidthResult stores an active bandwidth measurement
+// (controller.SubmitProviderBandwidth).
 func ProviderBandwidthResult(w http.ResponseWriter, r *http.Request) {
 	if !authorizeOperator(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -172,36 +151,10 @@ func ProviderBandwidthResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if args.ClientId == (server.Id{}) {
-		http.Error(w, "Missing client id.", http.StatusBadRequest)
+	if err := controller.SubmitProviderBandwidth(r.Context(), &args); err != nil {
+		writeProviderEgressIngestError(w, err)
 		return
 	}
-	if args.BytesPerSecond <= 0 {
-		http.Error(w, "bytes_per_second must be positive.", http.StatusBadRequest)
-		return
-	}
-	if args.SampleByteCount <= 0 {
-		http.Error(w, "sample_byte_count must be positive.", http.StatusBadRequest)
-		return
-	}
-	if !model.IsSubmittableProviderBandwidthSource(args.Source) {
-		http.Error(w, fmt.Sprintf(
-			"source must be one of %s, %s.",
-			model.ProviderBandwidthSourceActiveOperator,
-			model.ProviderBandwidthSourceActiveCDN,
-		), http.StatusBadRequest)
-		return
-	}
-
-	now := server.NowUtc()
-	model.StoreProviderBandwidth(r.Context(), &model.ProviderBandwidth{
-		ClientId:        args.ClientId,
-		BytesPerSecond:  args.BytesPerSecond,
-		Source:          args.Source,
-		SampleByteCount: args.SampleByteCount,
-		WindowStart:     now,
-		WindowEnd:       now,
-	})
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{}); err != nil {
@@ -209,33 +162,10 @@ func ProviderBandwidthResult(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ReserveProviderBandwidthArgs asks for budget to run one active probe.
-type ReserveProviderBandwidthArgs struct {
-	ClientId  server.Id `json:"client_id"`
-	ByteCount int64     `json:"byte_count"`
-}
-
-// ReserveProviderBandwidthResult carries the reservation the prober just took.
-// BucketStart is always the current hourly bucket (see ProviderBandwidthReserve).
-type ReserveProviderBandwidthResult struct {
-	ReservationId server.Id `json:"reservation_id"`
-	BucketStart   time.Time `json:"bucket_start"`
-}
-
 // ProviderBandwidthReserve reserves deployment-wide byte budget for one active
-// bandwidth probe. Active probing pulls real data through a provider's tunnel,
-// which is real paid contract traffic, so it is rationed
-// (model.ReserveProviderBandwidthSlot).
-//
-// The prober measures over a tunnel it already has open, right now: it has no
-// use for budget in a later hour. model.ReserveProviderBandwidthSlot will
-// happily defer a reservation into a future bucket for callers that can
-// schedule a RunAt, so when it does that here the reservation is cancelled
-// again and the request answered 429 -- the hourly ceiling would otherwise be
-// decorative, since the prober could spend the whole daily budget inside one
-// hour. Retry-After points at the bucket that does have room. (The plan
-// specifies 429 "when every lookahead bucket is full"; this returns 429 on a
-// strict superset of that, for the same "skip this provider cleanly" reason.)
+// bandwidth probe (controller.ReserveProviderBandwidth). Budget that exists
+// only in a later hour is given back and answered 429, with Retry-After
+// pointing at the bucket that does have room.
 func ProviderBandwidthReserve(w http.ResponseWriter, r *http.Request) {
 	if !authorizeOperator(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -247,47 +177,13 @@ func ProviderBandwidthReserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if args.ClientId == (server.Id{}) {
-		http.Error(w, "Missing client id.", http.StatusBadRequest)
-		return
-	}
-	if args.ByteCount <= 0 {
-		http.Error(w, "byte_count must be positive.", http.StatusBadRequest)
-		return
-	}
-	// the byte count is caller-supplied; a probe never legitimately needs more
-	// than the per-probe figure, and an oversized request must not be able to
-	// swallow a large slice of a bucket in one reservation
-	byteCount := args.ByteCount
-	if model.MaxProviderBandwidthBytesPerProbe < byteCount {
-		byteCount = model.MaxProviderBandwidthBytesPerProbe
-	}
-
-	ctx := r.Context()
-	now := server.NowUtc()
-	currentBucketStart := now.UTC().Truncate(model.ProviderBandwidthBucketDuration)
-
-	reservationId, bucketStart, err := model.ReserveProviderBandwidthSlot(ctx, args.ClientId, byteCount)
+	result, err := controller.ReserveProviderBandwidth(r.Context(), &args)
 	if err != nil {
-		// every bucket in the lookahead window is full: the deployment's daily
-		// budget is exhausted
-		writeProviderBandwidthBudgetExhausted(w, currentBucketStart.Add(model.ProviderBandwidthBucketDuration).Sub(now), err.Error())
-		return
-	}
-	if bucketStart.After(currentBucketStart) {
-		// budget exists, but not until a later hour -- of no use to a probe
-		// that runs now, so give it back rather than burning it on a request
-		// that is about to be skipped
-		model.CancelProviderBandwidthReservation(ctx, reservationId)
-		writeProviderBandwidthBudgetExhausted(w, bucketStart.Sub(now), "The active bandwidth probe budget for this hour has been reached.")
+		writeProviderEgressIngestError(w, err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	result := &ReserveProviderBandwidthResult{
-		ReservationId: reservationId,
-		BucketStart:   bucketStart,
-	}
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		glog.Infof("[pbw]could not write response. err = %s\n", err)
 	}

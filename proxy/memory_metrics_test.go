@@ -297,3 +297,14 @@ func TestProxyDeviceMemoryAdmissionMetricsHaveFixedCardinalityAndReset(t *testin
 		}
 	}
 }
+
+// Reports actual configured targets, including deliberate non-default devices.
+func TestAggregateProxyDeviceMemoryUsagePreservesConfiguredTargets(t *testing.T) {
+	usage := aggregateProxyDeviceMemoryUsage([]*sdk.DeviceLocalMemoryUsage{
+		{TargetByteCount: 32 * 1024 * 1024},
+		{TargetByteCount: 48 * 1024 * 1024},
+	})
+	if usage.DeviceCount != 2 || usage.TargetByteCount != 80*1024*1024 {
+		t.Fatalf("configured targets were replaced by a fixed default: %+v", usage)
+	}
+}

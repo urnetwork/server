@@ -6,15 +6,18 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/stmonitor"
 )
 
@@ -26,16 +29,82 @@ type Fixture struct {
 	Now      time.Time
 }
 
+// Validates the explicit administration URL: a loopback PostgreSQL fixture,
+// never on a loopback port a production data tunnel forwards (5432, 6432,
+// 6379-6427) unless this process's network is loopback only, as in the SN test
+// runner's isolated namespace, where no tunnel can reach production.
+func adminUrl(raw string, loopbackOnly bool) (*url.URL, error) {
+	value, err := url.Parse(raw)
+	if err != nil || value == nil || value.Hostname() == "" || net.ParseIP(value.Hostname()) == nil || !net.ParseIP(value.Hostname()).IsLoopback() || value.Port() == "" {
+		return nil, errors.New("STMONITOR_TEST_ADMIN_URL must name an explicitly disposable loopback PostgreSQL fixture")
+	}
+	port, err := strconv.ParseUint(value.Port(), 10, 16)
+	if err != nil {
+		return nil, errors.New("STMONITOR_TEST_ADMIN_URL has an invalid port")
+	}
+	if server.Testing_LoopbackTunnelPort(uint16(port)) && !loopbackOnly {
+		return nil, fmt.Errorf(
+			"STMONITOR_TEST_ADMIN_URL names loopback port %d, which a production data tunnel forwards; "+
+				"use a fixture on another port, or a loopback-only network namespace",
+			port,
+		)
+	}
+	return value, nil
+}
+
+// Reports whether every address on an up interface is loopback.
+func loopbackOnlyAddrs(addrs []net.Addr) bool {
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
+// Reports whether this process's network is loopback only: no up interface
+// carries another address, so no tunnel can carry a loopback port off the host.
+func loopbackOnlyNetwork() bool {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	addrs := []net.Addr{}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		ifaceAddrs, err := iface.Addrs()
+		if err != nil {
+			return false
+		}
+		addrs = append(addrs, ifaceAddrs...)
+	}
+	return loopbackOnlyAddrs(addrs)
+}
+
 // The caller supplies an explicitly local disposable PostgreSQL administration
-// URL. Every root owns a fresh database/role; existing application DBs are unused.
+// URL, never one on a production data tunnel's loopback port outside a
+// loopback-only network. Every root owns a fresh database/role; existing
+// application DBs are unused. In a WARP_ENV=local process both connections
+// also dial only the launcher-attested endpoints.
 func New(t testing.TB) *Fixture {
 	t.Helper()
-	value, err := url.Parse(os.Getenv("STMONITOR_TEST_ADMIN_URL"))
-	if err != nil || value == nil || value.Hostname() == "" || net.ParseIP(value.Hostname()) == nil || !net.ParseIP(value.Hostname()).IsLoopback() || value.Port() == "" {
-		t.Fatal("STMONITOR_TEST_ADMIN_URL must name an explicitly disposable loopback PostgreSQL fixture")
+	value, err := adminUrl(os.Getenv("STMONITOR_TEST_ADMIN_URL"), loopbackOnlyNetwork())
+	if err != nil {
+		t.Fatal(err)
 	}
 	ctx := t.Context()
-	admin, err := pgx.Connect(ctx, value.String())
+	connect := func(target *url.URL) (*pgx.Conn, error) {
+		config, err := pgx.ParseConfig(target.String())
+		if err != nil {
+			return nil, err
+		}
+		server.ConfigureLocalPgDial(config)
+		return pgx.ConnectConfig(ctx, config)
+	}
+	admin, err := connect(value)
 	if err != nil {
 		t.Fatal("connect local fixture", err)
 	}
@@ -85,7 +154,7 @@ func New(t testing.TB) *Fixture {
 	}
 	databaseCreated = true
 	value.Path = "/" + source.Database
-	connection, err := pgx.Connect(ctx, value.String())
+	connection, err := connect(value)
 	if err != nil {
 		t.Fatal(err)
 	}

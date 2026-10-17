@@ -54,7 +54,7 @@ func legacyCorrectionTestFixtureWithIdentity(t testing.TB, sweepCount int, subsi
 	return legacyCorrectionTestFixtureWithBytes(t, sweepCount, 100, subsidy, reliability)
 }
 
-func legacyCorrectionTestFixtureWithBytes(t testing.TB, sweepCount int, sweepByteCount int64, subsidy model.NanoCents, reliability model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id, *legacyCorrectionTestIdentity) {
+func legacyCorrectionTestFixtureWithBytes(t testing.TB, sweepCount int, sweepByteCount int64, subsidy model.NanoCents, reliability model.NanoCents, sweepRevenue ...model.NanoCents) (*session.ClientSession, *model.AccountPayment, server.Id, *legacyCorrectionTestIdentity) {
 	t.Helper()
 	ctx := context.Background()
 	cutoff := time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
@@ -84,16 +84,20 @@ func legacyCorrectionTestFixtureWithBytes(t testing.TB, sweepCount int, sweepByt
 	closed := cutoff.Add(-time.Hour)
 	epochEnd := cutoff.Add(-2 * time.Hour)
 	usage := fmt.Sprintf(`{"version":1,"byte_count":%d,"providers":[{"client_id":%q,"network_id":%q,"byte_count":%d}]}`, sweepByteCount, client.String(), network.String(), sweepByteCount)
+	var revenue model.NanoCents
+	if len(sweepRevenue) == 1 {
+		revenue = sweepRevenue[0]
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		for range sweepCount {
 			contract := server.NewId()
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
 				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9,true)`, contract, sourceNetwork, source, network, client, sweepByteCount, closed.Add(-time.Hour), closed, usage))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
-				VALUES($1,$2,$3,$4,$5,0,$6,$7)`, contract, balances[0].BalanceId, network, client, sweepByteCount, closed, paymentId))
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, contract, balances[0].BalanceId, network, client, sweepByteCount, revenue, closed, paymentId))
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,wallet_id,payout_byte_count,payout_nano_cents,subsidy_payout_nano_cents,reliability_subsidy_nano_cents,min_sweep_time)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, paymentId, planId, network, *wallet, sweepByteCount*int64(sweepCount), subsidy+reliability, subsidy, reliability, closed))
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, paymentId, planId, network, *wallet, sweepByteCount*int64(sweepCount), subsidy+reliability+int64(sweepCount)*revenue, subsidy, reliability, closed))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO subsidy_payment(payment_plan_id,start_time,end_time,active_user_count,paid_user_count,net_payout_byte_count_paid,net_payout_byte_count_unpaid,net_revenue_nano_cents,net_payout_nano_cents)
 			VALUES($1,$2,$3,100,10,0,0,$4,$5)`, planId, epochEnd.Add(-4*24*time.Hour), epochEnd, model.UsdToNanoCents(50000), subsidy))
 	})

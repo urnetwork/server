@@ -46,7 +46,7 @@ func TestSourcePreparationDerivesOnlySourcePolicyAndRequiresReservedRoundHost(t 
 	settings := &Settings{CompetitionId: "competition", BaseSha: strings.Repeat("0", 40), EvaluatorCommand: "/trusted/frozen-evaluator", SelfCheckCommand: "/trusted/host-check", AutomationPolicy: model.CompetitionAutomationPolicy{Enabled: true, Environment: "synthetic", SeasonId: "season", PolicyApprovalSha256: strings.Repeat("f", 64)}}
 	settings.EvaluationPolicy.HardwareId = "synthetic-hardware"
 	commits := map[string]string{}
-	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"} {
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
 		commits[name] = strings.Repeat("a", 40)
 	}
 	lock, err := model.CompetitionSourceLockDigest(commits)

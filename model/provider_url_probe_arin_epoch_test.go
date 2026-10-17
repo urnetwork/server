@@ -20,6 +20,8 @@ func TestUrlProbeArinEpochTransitionPreservesProgress(t *testing.T) {
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, &ConnectionLocationScores{
 			ArinLookupAt: &oldLookup, ArinDatabaseBuildEpoch: oldEpoch, ArinQualityVerified: true,
 		})
+		// URL admission needs current reliability history.
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		rollup := func() {
 			now := server.NowUtc()
 			UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)

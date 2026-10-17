@@ -50,7 +50,9 @@ func legacyReconcileTestTransfer(id string, state string, amount string, createD
 		WalletId:           legacyReconcileTestWalletId,
 		DestinationAddress: "0x0000000000000000000000000000000000000012",
 		Amounts:            []string{amount},
+		TokenId:            "synthetic-usdc-token",
 		CreateDate:         createDate,
+		usdcAssetVerified:  true,
 	}
 }
 

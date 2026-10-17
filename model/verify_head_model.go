@@ -122,6 +122,12 @@ func verifyHeadHashWindow(ctx context.Context, settings *VerifySettings) string 
 	return fmt.Sprintf("h%d", server.NowUtc().Unix()/int64(verifyHeadHashFallbackWindow/time.Second))
 }
 
+// Select the seed's window before its original is retained. Publication and
+// recovery must reuse this value instead of consulting a later epoch mirror.
+func SelectVerifyTrailHeadWindow(ctx context.Context, settings *VerifySettings) string {
+	return verifyHeadHashWindow(ctx, settings)
+}
+
 // How long a pin of the window lives: the window, an epoch of the mirror's
 // TEpochBlocks subtensor blocks (a mainnet epoch when it does not say), or an
 // hour, and the grace.
@@ -148,8 +154,9 @@ func SetVerifyTrailHeadWindow(ctx context.Context, trailId server.Id, m int, set
 	})
 }
 
-// GetVerifyTrailHeadWindow is the scoring window the trail was seeded in, or
-// the one in effect now for a trail whose SEED kept none.
+// GetVerifyTrailHeadWindow is the scoring window the trail was seeded in.
+// Historical originals that retained none keep the current-window fallback;
+// new originals restore their retained window before an extension.
 func GetVerifyTrailHeadWindow(ctx context.Context, trailId server.Id, settings *VerifySettings) (window string) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		var err error

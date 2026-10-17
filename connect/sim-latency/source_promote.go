@@ -323,6 +323,7 @@ func sourceRepositoriesFromCommits(repositoryCommits map[string]string) sourceRe
 		Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
 		OperatorProxy: sourceRepository{Commit: repositoryCommits["operator-proxy"]},
 		Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
+		Gvisor:        sourceRepository{Commit: repositoryCommits["gvisor"]},
 	}
 }
 

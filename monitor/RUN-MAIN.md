@@ -364,6 +364,37 @@ PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
   2>"$monitor_run_dir/stderr.log"
 ```
 
+The watcher's stderr carries one notifier line at startup:
+`monitor: Slack alert notifications enabled: ...` when
+`vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
+`monitor: Slack alert notifications disabled: ...` when it is empty or not an
+https URL. An enabled watcher posts one Slack message per alert transition
+(MONITOR.md §3.6), at most 10 messages a minute plus a summary that names the
+rest, pages first. A run that could not observe part of its source, whatever
+the signal, never clears what it did not see. Every new watcher re-announces
+the alerts active at its start, but as `[ACTIVE AT START]` digests rather than
+one raise each: the raises from each signal's first Sustain complete runs,
+within 45 minutes of start under `-min-probe-cadence=15m`. A digest posts two
+minutes after its first raise, or at once when it holds a page. Expect a
+digest a few minutes in for the standing logs, then one about two minutes
+after each Sustain round of the active probes, whose rounds start near 15 and
+30 minutes; a round without incidents posts none. The disabled PG query
+sample is never posted. A post that Slack refuses with a 429 or a 503 is
+retried once; a timeout or another 5xx is not, since Slack may have taken
+it. Messages that fail are listed in one `[UNDELIVERED]` message once Slack
+takes posts again. At exit the watcher releases signal handling, so a second
+Ctrl-C or SIGTERM stops it at once, then drains its Slack queue for up to 15
+seconds; stderr counts what it abandoned
+(`monitor: Slack alert notifier abandoned N unposted message(s) at close`) and
+any undelivered messages it never reported.
+
+Start a watcher that must never post, such as a diagnostic second watcher,
+with `-slack-alerts=false`; the flag is fixed for the process lifetime. Such a
+watcher leaves the webhook out of its compared settings, so rotating the
+webhook does not make it stale. A posting watcher does go stale on a rotation
+and needs the normal handoff. `-once` never posts. Never print the webhook to
+check it: the startup line is the evidence.
+
 Treat the exact Warpctl resolved by the watcher as part of the immutable
 observation boundary. Before launch, require its `go version -m` output to carry
 a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
@@ -732,7 +763,16 @@ parent and tail processes; a PID-only check cannot certify durable ownership.
 
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
-the new one is proven creates an observation gap.
+the new one is proven creates an observation gap. During the overlap both
+watchers post Slack transitions: there is no poster lease. The candidate
+re-announces the alerts active at its start in `[ACTIVE AT START]` digests,
+and its own transitions duplicate the predecessor's until the predecessor
+stops. A stopped predecessor never posts the clears of its open incidents.
+The candidate clears only incidents it raised itself, so an incident that
+ended before the candidate's first runs keeps its last Slack raise; the
+alert ledger, not the channel, is the record. Accept those duplicates: a
+candidate started with `-slack-alerts=false` would stay silent after
+promotion.
 
 When the operator explicitly prioritizes a no-overlap active-probe interval,
 use this alternative instead of waiting 15 minutes beside an active predecessor:

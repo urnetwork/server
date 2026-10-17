@@ -84,7 +84,9 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		clients := testingUrlCompletionClients(t, startedAt, 4)
 		for index, clientId := range clients[:3] {
 			for success := range ProviderUrlProbeRunTarget {
-				at := now.Add(-time.Hour + time.Duration(success)*time.Minute)
+				// Within 24 minutes of the latest result, so a quota-full
+				// provider is not yet due for a renewal.
+				at := now.Add(-10*time.Minute + time.Duration(success)*time.Minute)
 				if index == 2 {
 					at = startedAt.Add(time.Duration(success) * time.Minute)
 				}
@@ -119,7 +121,7 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		if full.count != 0 || full.ordinal != 0 || full.successes != ProviderUrlProbeRunTarget || full.errors != 0 || full.history != ProviderUrlProbeRunTarget {
 			t.Fatalf("quota-full provider acquired a completed turn or changed measured quota: %+v", full)
 		}
-		renewalAt := now.Add(-time.Hour + ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom)
+		renewalAt := testingSpreadNewRule(now.Add(-10*time.Minute), now.Add(-time.Minute))
 		if !full.next.Equal(renewalAt) {
 			t.Fatalf("quota-full provider lost oldest-measurement renewal pacing: got %s, want %s", full.next, renewalAt)
 		}

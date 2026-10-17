@@ -100,8 +100,15 @@ func TestFailureEvidenceFixturesResolveTempDirectoryAliases(t *testing.T) {
 	if err := os.Symlink(realDirectory, alias); err != nil {
 		t.Fatal(err)
 	}
-	// Set this before the first t.TempDir call so its parent includes the alias.
+	// Set these before the first t.TempDir call so its parent includes the
+	// alias. t.TempDir creates below GOTMPDIR instead of TMPDIR when GOTMPDIR
+	// is set, as the release gate sets it, so both must name the alias.
 	t.Setenv("TMPDIR", alias)
+	t.Setenv("GOTMPDIR", alias)
+	// the fixtures exercise the alias only when their directories are below it
+	if relative, err := filepath.Rel(alias, t.TempDir()); err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("fixture temp directory is not below the alias %s: %v", alias, err)
+	}
 	root, job, manifest := failureEvidenceAuthenticationFixture(t)
 	writeFailureAuthenticationManifest(t, root, manifest)
 	if _, present, err := authenticateFailedEvidence(root, job); err != nil || !present {

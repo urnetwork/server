@@ -30,7 +30,7 @@ func newCompetitionAutomationFixture(t testing.TB) *competitionRankingFixture {
 		PolicyApprovalSha256: strings.Repeat("a", 64), SourceLockSha256: strings.Repeat("b", 64), SourceGeneration: 0, SourceActivationGeneration: 1}
 	fixture.store = PostgresStore{now: func() time.Time { return fixture.now }}
 	commits := map[string]string{}
-	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"} {
+	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
 		commits[repository] = fixture.settings.BaseSha
 	}
 	sourceLock, sourceErr := model.CompetitionSourceLockDigest(commits)

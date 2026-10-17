@@ -102,10 +102,12 @@ func TestUrlProbeCensusGroupedHistoryTruthAndQuota(t *testing.T) {
 				(client_id,measured_at,ok_count,total_count,class_results,reputation_ok,reputation_total,legacy_tls_authentication_failure)
 				VALUES($1,$2,1,1,'{}',0,0,true)`, ids[10], now))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false WHERE client_id=$1`, ids[11]))
+			// These failing witness scores replace the fleet seed's.
 			for _, index := range []int{12, 13} {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
 					(client_id,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight,lookback_index)
-					VALUES($1,0.1,0.1,1,1,1)`, ids[index]))
+					VALUES($1,0.1,0.1,1,1,1)
+					ON CONFLICT (client_id,lookback_index) DO UPDATE SET independent_reliability_weight=EXCLUDED.independent_reliability_weight`, ids[index]))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_intent_probe_priority(client_id,priority_since,update_time) VALUES($1,$2,$2)`, ids[12], now))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location_reliability SET arin_risk=true WHERE client_id=$1`, ids[14]))

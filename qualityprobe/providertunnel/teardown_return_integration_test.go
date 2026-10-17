@@ -103,7 +103,10 @@ func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) 
 		defer sa.Close()
 
 		host := "localdrain"
-		exchange := connectserver.NewExchange(ctx, host, "connect", "test", map[int]int{7300: 7300}, map[string]string{host: "127.0.0.1"}, connectserver.DefaultExchangeSettings())
+		exchange, err := newPrivateTestExchange(ctx, host)
+		if err != nil {
+			tb.Fatal(err)
+		}
 		hs := connectserver.DefaultConnectHandlerSettings()
 		hs.ListenH3Port = 0
 		hs.ListenDnsPort = 0
@@ -234,7 +237,7 @@ func TestTunnelCloseRetiresDerivedClientOnlyAfterProviderFlowsEnd(t *testing.T) 
 			}
 		}}
 		defer useHermeticTunnelClientSettings()()
-		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true,
+		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, KeepClientKeysLocal: true,
 			ClientCredentials: authority, ClientControl: authority, CloseTimeout: 15 * time.Second,
 			DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1024 * 1024}
 		tunnel, err := Open(ctx, cfg, connect.Id(providerClientId))

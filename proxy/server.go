@@ -765,7 +765,8 @@ func NewWgServer(
 	}
 
 	go s.runRuntimeMetrics()
-	go server.HandleError(s.runSessionMetrics, cancel)
+	// a raise ends the dashboard samples only; cancel is the whole proxy's
+	go server.HandleError(s.runSessionMetrics)
 	go server.HandleError(s.run, cancel)
 
 	return s

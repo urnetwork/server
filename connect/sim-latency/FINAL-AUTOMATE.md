@@ -91,9 +91,12 @@ burn accounting. That part requires an agreed, tested external integration.
 - Production gate thresholds, one-sided Welch significance, and the calibrated
   takeover floor. Staging's zero-margin, best-placeable-winner behavior is a
   deliberate exception, not a production shortcut.
-- The complete ten-repository evaluation lock: `server`, `connect`, `sdk`,
-  `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and
-  `warp`. Evaluation and promotion use private temporary checkouts; candidate
+- The complete eleven-repository evaluation lock for new releases: `server`,
+  `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`,
+  `operator-proxy`, `warp`, and `gvisor`. Historical ten-repository locks remain
+  unchanged evidence and cannot authorize a new activation; a separately frozen
+  and qualified eleven-repository checkpoint is required. Evaluation and
+  promotion use private temporary checkouts; candidate
   code never runs in or modifies the continuously deployed main checkout.
 - Frozen evaluator/scorer/source identities and per-evaluation API/worker
   runtime digests. Main API/worker code is currently separately maintained; the
@@ -205,7 +208,7 @@ For production epoch N:
    transition if available and applicable to the exact current incumbent.
    Otherwise record `reviewed_source_carry_forward` with the actual reason
    (`review_pending`, `promotion_not_ready`, `no_reward_winner`, etc.).
-4. Freeze N+1's exact ten-repository source lock, threshold provenance, workload
+4. Freeze N+1's exact eleven-repository source lock, threshold provenance, workload
    commitment, evaluator identity, and schedule before accepting submissions.
    Reserve the existing 16-hour preparation/readiness interval unless a separate
    policy change is approved. Do not advertise an admission time that the
@@ -294,7 +297,7 @@ authorize a merge; an integrity-approved patch can remain unshipped because it
 needs maintainability work or additional product testing. Conversely, declining
 to ship an otherwise honest optimization is not automatically reward fraud.
 
-Retain the existing promotion invariants: private temporary clones of all ten
+Retain the existing promotion invariants: private temporary clones of all eleven
 locked repositories; only the evaluated allowed server patch; unchanged runner
 tree and dependencies; verified base and remote refs; independently passed
 tests; and config activation last. Product `main` shipping is a separate UR

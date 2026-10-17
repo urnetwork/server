@@ -5,7 +5,7 @@ Legacy `run`/`approve`/`reject` commands retain their v1 review pause. Explicit
 v2 competitions use `supervise` below; never mix these progression paths.
 It drives the continuously deployed main API and one-shot worker while keeping
 the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
-`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`—isolated
+`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`—isolated
 in temporary clones. Every repository is pinned per epoch on its `sim-latency` branch.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
@@ -93,7 +93,7 @@ Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
 
-Publication uses private durable clones of all ten repositories. It freezes
+Publication uses private durable clones of all eleven repositories. It freezes
 expected/new refs and exact manifest bytes, records intent before any push,
 publishes source first and config last, and requires runtime readiness. Ordinary
 fast-forward pushes only; no forced update. Lost replies and partial pushes
@@ -214,7 +214,7 @@ sim-latency stage-reviewed-source --review-id=REVIEW_ID \
   --build-sha256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
 ```
 
-This clones all ten pinned repositories, applies the exact authenticated patch,
+This clones all eleven pinned repositories, applies the exact authenticated patch,
 checks its tree and protected runner, and invokes a separately qualified isolated
 build/test broker. It pushes nothing. The broker receives only an allowlisted
 environment (no inherited main, database, vault, Git-push or seed credentials),
@@ -264,14 +264,14 @@ the worker is run from this host. Set an exact control-plane image identity in
 `WARP_IMAGE_DIGEST`; this is recorded per evaluation but is not a scoring input.
 
 Every epoch checkpoint in `config/main/sim-latency.yml` must list exactly these
-ten repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
-`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`. Each commit
+eleven repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`. Each commit
 must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
 Before staging, each repository must also expose a `sim-latency-staging` branch
-whose head exactly equals its epoch-zero commit. The harness verifies all ten
+whose head exactly equals its epoch-zero commit. The harness verifies all eleven
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
 the name used for pre-production coordination while retaining the exact frozen
@@ -280,22 +280,25 @@ a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
 The frozen evaluator module graph requires `operator-proxy` and `warp` in addition
-to the earlier eight repositories. Current tools reject incomplete checkpoints
-and source locks; they never infer the two missing commits. Prepare a reviewed
-complete checkpoint, matching remote aliases, and a new evaluator image at the
-drained release boundary. Preserve old eight-repository images, locks, baseline
-artifacts, and round evidence as historical records; do not rewrite them to
-claim the new source identity.
+to the earlier eight repositories, and `gvisor` in addition to those ten: server's
+`go.mod` replaces `gvisor.dev/gvisor` with the `../gvisor` sibling. Current tools
+reject incomplete checkpoints and source locks; they never infer a missing
+commit. Prepare a reviewed complete checkpoint, matching remote aliases, and a
+new evaluator image at the drained release boundary. Preserve old eight- and
+ten-repository images, locks, baseline artifacts, and round evidence as
+historical records; do not rewrite them to claim the new source identity.
 
 The continuously deployed main control-plane graph can later add or remove a
 module without changing that frozen evaluator checkpoint. Coverage checks inspect
 the exact evaluated server commit's `go.mod`, never moving main. A newly frozen
 base that requires an unpinned local repository fails closed and requires a
 separately reviewed source-protocol/image expansion; it cannot borrow main's
-checkout. Source loading, shell validators, image copies, and historical ledgers
-continue to require the frozen ten-repository set, including Warp. In particular,
-the historical base uses upstream gVisor; current main's local gVisor fork does
-not retroactively enter that lock.
+checkout. Current source loading, shell validators, image copies, and new epoch
+records require the exact eleven-repository set, including Warp and gvisor.
+Historical ten-repository locks and images remain unchanged evidence; the local
+gVisor fork must not be inserted into their source identities. Those checkpoints
+fail closed for new activations until a separately frozen and qualified
+eleven-repository checkpoint, matching config, and evaluator image are approved.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -374,7 +377,7 @@ on `main`. Pulling the API/worker cannot repair such an evaluator.
 
 For the approved epoch-5 repair, Astra max owns the source pull/merge and release
 review; Sol medium owns independent regression and image validation. Require
-the relevant tests to exist and pass in the image build, review all ten
+the relevant tests to exist and pass in the image build, review all eleven
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
 while epoch 4 is open or draining. After it finalizes, verify the replacement
@@ -466,7 +469,7 @@ with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
-patch, clones all ten locked repositories into a new temporary directory,
+patch, clones all eleven locked repositories into a new temporary directory,
 checks out the frozen `sim-latency` branch heads, applies the winner to the
 evaluated server surface, verifies every dependency and the protected runner
 tree are unchanged, pushes changed source branches, and pushes the config ledger

@@ -138,8 +138,9 @@ func TestUrlProbePublicAdmissionLoadedPointPlan(t *testing.T) {
 		clients := testingUrlCompletionClients(t, server.NowUtc().Add(-8*time.Hour), 100000)
 		clientId := clients[len(clients)/2]
 		server.Tx(ctx, func(tx server.PgTx) {
+			// The fleet seed already holds each witness score.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight,min_block_number,max_block_number)
-				SELECT client_id,1,1,1,1,1,0,1 FROM network_client`))
+				SELECT client_id,1,1,1,1,1,0,1 FROM network_client ON CONFLICT (client_id,lookback_index) DO NOTHING`))
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE client_connection_reliability_score`))
 		})
 		plan := testingExplainUrlCompleted(t, providerUrlProbeClientEligibilitySql(), clientId, ProvideModePublic)
@@ -221,8 +222,9 @@ func TestUrlProbePublicAdmissionUsesCurrentEligibility(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET source_client_id=$2 WHERE client_id=$1`, clients[4], clients[0]))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location_reliability SET arin_risk=true WHERE client_id=$1`, clients[5]))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location_reliability SET ipv4_proven=false,ipv6_proven=true WHERE client_id=$1`, clients[6]))
+			// This failing witness score replaces the fleet seed's.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight,min_block_number,max_block_number)
-				VALUES($1,1,0,0,0,0,0,1)`, clients[7]))
+				VALUES($1,1,0,0,0,0,0,1) ON CONFLICT (client_id,lookback_index) DO UPDATE SET independent_reliability_weight=EXCLUDED.independent_reliability_weight`, clients[7]))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security(client_id,url_key,destination,measured_at,tls_failure)
 				VALUES($1,'synthetic-security-target','{}',$2,true)`, clients[8], now))
 		})
@@ -260,6 +262,25 @@ func TestUrlProbeMissingCycleQuotaOverlapIsIndependent(t *testing.T) {
 		}
 		if claimed := ClaimProviderUrlProbeDue(ctx, now, 2, 0, 1); len(claimed) != 0 {
 			t.Fatalf("a provider without a cycle was claimable: %+v", claimed)
+		}
+		// The real publication replaces the fleet seed's scores. Twelve hours of
+		// valid observations at a complete city location keep both providers'
+		// history passing through it.
+		city := egressTestCity(ctx, "Overlap City", "Overlap Region", "Overlap Country", "zz")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location_reliability
+				SET city_location_id=$2,region_location_id=$3,country_location_id=$4 WHERE client_id=ANY($1::uuid[])`,
+				clients, city.LocationId, city.RegionLocationId, city.CountryLocationId))
+		})
+		valid := &ClientReliabilityStats{ConnectionEstablishedCount: 1, ProvideEnabledCount: 1, ReceiveMessageCount: 1}
+		for _, clientId := range clients {
+			var networkId server.Id
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id=$1`, clientId).Scan(&networkId))
+			})
+			var addressHash [32]byte
+			copy(addressHash[:], clientId[:])
+			AddClientReliabilityStatsRange(ctx, networkId, clientId, addressHash, now.Add(-ClientLookbacks[len(ClientLookbacks)-1]), now, valid)
 		}
 		UpdateClientReliabilityScores(ctx, now, false)
 		after := GetProviderUrlProbeFleet(ctx, server.NowUtc())

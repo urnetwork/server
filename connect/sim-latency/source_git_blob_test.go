@@ -62,7 +62,7 @@ func TestSourceGraphAuditsRemotePinWithoutUpdatingControlCheckout(t *testing.T) 
 	fixture := newPinnedSourceBlobFixture(t, "server")
 	approvedModule := []byte("module module.example/server\n\ngo 1.23.0\n\nrequire module.example/connect v0.0.0\n\nreplace module.example/connect => ../connect\n")
 	pin := fixture.publish(t, "go.mod", approvedModule)
-	unlockedModule := []byte("module module.example/server\n\ngo 1.23.0\n\nrequire module.example/gvisor v0.0.0\n\nreplace module.example/gvisor => ../gvisor\n")
+	unlockedModule := []byte("module module.example/server\n\ngo 1.23.0\n\nrequire module.example/synthetic-new-dependency v0.0.0\n\nreplace module.example/synthetic-new-dependency => ../synthetic-new-dependency\n")
 	newer := fixture.publish(t, "go.mod", unlockedModule)
 	refsBefore := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)")
 	objectsBefore := sourceTestGit(t, fixture.controlRoot, "count-objects", "-v")
@@ -79,7 +79,7 @@ func TestSourceGraphAuditsRemotePinWithoutUpdatingControlCheckout(t *testing.T) 
 	if err := verifyFrozenSourceGraph(context.Background(), fixture.controlRoot, pin); err != nil {
 		t.Fatalf("remote-only reviewed pin could not be audited: %v", err)
 	}
-	if err := verifyFrozenSourceGraph(context.Background(), fixture.controlRoot, newer); err == nil || !strings.Contains(err.Error(), "gvisor is absent") {
+	if err := verifyFrozenSourceGraph(context.Background(), fixture.controlRoot, newer); err == nil || !strings.Contains(err.Error(), "synthetic-new-dependency is absent") {
 		t.Fatalf("new remote pin bypassed complete graph coverage: %v", err)
 	}
 	for _, commit := range []string{pin, newer} {

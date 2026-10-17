@@ -38,6 +38,7 @@ import (
 const bringyourctlUsage = `BringYour control.
 
 Usage:
+    bringyourctl release-preflight
     bringyourctl sn-transition-status
     bringyourctl db version
     bringyourctl db migrate
@@ -140,6 +141,8 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
+    bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
+    bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
 
 Options:
     -h --help     Show this screen.
@@ -192,7 +195,9 @@ func main() {
 		panic(err)
 	}
 
-	if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
+	if preflight, _ := opts.Bool("release-preflight"); preflight {
+		releasePreflightCommand(opts)
+	} else if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
 		status, err := controller.GetProviderPayoutTransitionStatus(context.Background())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -481,6 +486,10 @@ func main() {
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
 			grafanaLoadDefaults(opts)
+		} else if reconcileAlerting, _ := opts.Bool("reconcile-alerting"); reconcileAlerting {
+			grafanaReconcileAlertingCommand(opts)
+		} else if testAlert, _ := opts.Bool("test-alert"); testAlert {
+			grafanaTestAlertCommand(opts)
 		}
 	} else {
 		fmt.Println(usage)
@@ -2493,6 +2502,30 @@ func proxyInspect(opts docopt.Opts) {
 	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.DnsResolverSettings)
 }
 
+// The inspection's index lines: the index the accepted URL runs give now,
+// what counts as evidence (any accepted run within the evidence age; the
+// legacy min_scored_loads setting decides nothing), and the native URL-run
+// minimums Quality and Speed read the ratio from (egress_native_min_runs.go),
+// with whether the provider meets them.
+func providerInspectIndexLines(inspection *model.ProviderEgressInspection) string {
+	evidence := "no evidence"
+	if inspection.CurrentIndex.Evidence {
+		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
+	}
+	return fmt.Sprintf(
+		"  index from the latest run now %d (%s; evidence is any accepted URL run within %s)\n"+
+			"  native url-run minimums: quality %d or more runs spanning %s or more, met %t; speed %d or more runs, met %t\n",
+		inspection.CurrentIndex.Index,
+		evidence,
+		min(inspection.Settings.EvidenceMaxAge, model.ProviderEgressHealthMaxAge),
+		model.ProviderQualityMinMeasuredUrlRuns,
+		model.ProviderQualityMinMeasuredUrlSpan,
+		inspection.QualityUrlRunsMet,
+		model.ProviderSpeedMinMeasuredUrlRuns,
+		inspection.SpeedUrlRunsMet,
+	)
+}
+
 // Prints one provider as the egress rules of connect/GEOMAP.md §10.3 decide
 // it: the index, quality verdict and evidence time the rollup stored, the
 // index its latest health run gives now (what the next rollup will store), the
@@ -2552,26 +2585,64 @@ func providerInspect(opts docopt.Opts) {
 	} else {
 		fmt.Printf("  latest health run none\n")
 	}
-	evidence := "no evidence"
-	if inspection.CurrentIndex.Evidence {
-		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
-	}
-	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
+	fmt.Print(providerInspectIndexLines(inspection))
 	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
-	countryGuard := "no published guard, so every country is exempt"
+	// the decision follows the rule as the score export published it; this
+	// host's provider.yml is shown beside it
+	countryGuard := "no trusted published guard, so the rule applies nowhere"
 	if inspection.OnlineSuccessBaselineKnown {
 		countryGuard = fmt.Sprintf(
-			"%d of %d measured online providers in %s have a success (guard computed %s)",
+			"the score export applied the rule %t with country floor %v and margin %v (guard computed %s, published %s); %d of %d measured online providers in %s have a success",
+			inspection.OnlineSuccessBaselineEnabled,
+			inspection.OnlineSuccessBaselineFloor,
+			inspection.OnlineSuccessBaselineMargin,
+			optionalTime(&inspection.OnlineSuccessBaselineTime),
+			optionalTime(&inspection.OnlineSuccessBaselinePublishTime),
 			inspection.OnlineSuccessCountrySucceeded,
 			inspection.OnlineSuccessCountryMeasured,
 			optionalString(inspection.PublishedCountryCode),
-			optionalTime(&inspection.OnlineSuccessBaselineTime),
 		)
 	}
-	fmt.Printf("  online url-success rule %t, country floor %v: %s; country exempt %t\n", inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, countryGuard, inspection.OnlineSuccessCountryExempt)
+	fmt.Printf("  online url-success rule: %s; country exempt %t (this host's provider.yml: rule %t, country floor %v, margin %v)\n", countryGuard, inspection.OnlineSuccessCountryExempt, inspection.Settings.OnlineRequiresUrlSuccess, inspection.Settings.OnlineSuccessCountryFloor, inspection.Settings.OnlineSuccessCountryFloorMargin)
+	// the online url ratio as the same guard published it, this host's
+	// provider.yml beside it
+	urlRatio := "no trusted published guard, so the ratio applies nowhere"
+	if inspection.OnlineSuccessBaselineKnown {
+		urlRatio = "off in the score export's guard"
+		if 0 < inspection.OnlineUrlSuccessBaselineRatio {
+			urlRatio = fmt.Sprintf("the score export applied %v, country exemption %t", inspection.OnlineUrlSuccessBaselineRatio, inspection.OnlineUrlRatioBaselineCountryExemption)
+		}
+	}
+	fmt.Printf("  online url ratio: %s; with a success but below it %t (this host's provider.yml: ratio %v, country exemption %t)\n", urlRatio, inspection.BelowOnlineUrlRatio, inspection.Settings.OnlineUrlSuccessRatio, inspection.Settings.OnlineUrlRatioCountryExemption)
+	// the evidence the probe recorded of the provider's end of its session,
+	// and what the gate decides from it now
+	modernEvidence := "none"
+	if evidence := inspection.ModernEvidence; evidence != nil {
+		modernEvidence = fmt.Sprintf(
+			"post-quantum %t (key exchange %s), resizable windows %t (largest %d bytes), measured %s, first measured %s, %d runs",
+			evidence.PostQuantum,
+			optionalString(evidence.KeyExchange),
+			evidence.WindowResizable,
+			evidence.MaxReceiveWindowByteCount,
+			optionalTime(&evidence.MeasuredAt),
+			optionalTime(&evidence.FirstMeasuredAt),
+			evidence.RunCount,
+		)
+	}
+	// the gate as the decision below applied it, at the inspection's
+	// instant, and how this host's provider.yml sets it: an absent switch
+	// turns the gate on at the start
+	modernSwitch := "absent"
+	if value := inspection.Settings.QualitySpeedRequiresModernProvider; value != nil {
+		modernSwitch = strconv.FormatBool(*value)
+	}
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t at %s (this host's provider.yml: quality_speed_requires_modern_provider %s, start %s; %s)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.ModernGate, inspection.ModernGateTime.UTC().Format(time.RFC3339), modernSwitch, inspection.Settings.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339), inspection.Settings.ModernProviderGateSchedule())
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)
+	// the ARIN canary's published choice (arindbctl/ARINDB.md); risk is
+	// always the latest database's
+	fmt.Printf("  arin quality follows serving epoch %d (0 is the provider's latest database)\n", inspection.ArinServingEpoch)
 	fmt.Printf("  quality %t, speed %t, online %t (the score cache also requires the reliability floors and the speed-mode score maximum, so a provider no client has measured is not online), counted %t, hard excluded %t\n", inspection.Quality, inspection.Speed, inspection.Online, inspection.Counted, inspection.HardExcluded)
 	fmt.Printf("  exclusion reason %s\n", optionalString(inspection.Reason))
 }

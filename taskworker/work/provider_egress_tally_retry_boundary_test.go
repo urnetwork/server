@@ -71,8 +71,8 @@ func TestProviderEgressTallyRunPostRefusalRetainsCursorAndPage(t *testing.T) {
 		if after.Applied || stored.ResultJson != string(raw) {
 			t.Fatal("refused durable Post changed its unapplied receipt")
 		}
-		page, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false)
-		if err != nil || len(page.Records) != 2 {
+		page, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false)
+		if err != nil || page.Records != 2 {
 			t.Fatalf("refused durable Post lost its retained page: %v", err)
 		}
 	})
@@ -103,8 +103,8 @@ func TestProviderEgressTallyRunPostCommittedReplayDoesNotAddTwice(t *testing.T) 
 		if !result.Applied || result.NextCursor != after.Cursor {
 			t.Fatal("durable Post lacks its committed applied receipt")
 		}
-		page, err := model.ReadProviderEgressTallyPage(h.ctx, h.shard, before.Generation, before.Cursor, false)
-		if err != nil || len(page.Records) != 2 {
+		page, err := model.DrainProviderEgressTallies(h.ctx, h.shard, before.Generation, before.Cursor, false)
+		if err != nil || page.Records != 2 {
 			t.Fatalf("lost-cleanup-ACK fixture did not retain its page: %v", err)
 		}
 	})

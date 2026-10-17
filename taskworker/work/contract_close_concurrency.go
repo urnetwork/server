@@ -64,11 +64,13 @@ func runContractOwnerBatches[T any](owners []T, parallel int, more func() bool, 
 	slots := make(chan struct{}, max(1, parallel))
 	complete = true
 	for _, owner := range owners {
+		slots <- struct{}{}
+		// A saturated page can spend the remaining dispatch budget waiting.
 		if !more() {
+			<-slots
 			complete = false
 			break
 		}
-		slots <- struct{}{}
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()

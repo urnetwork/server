@@ -1620,7 +1620,7 @@ func storedPolicyMatches(settings *Settings, stored json.RawMessage) bool {
 // Staging rounds created after the no-margin change freeze zero in their own
 // policy snapshot. Historical staging rounds retain their original margin;
 // neither case changes the production policy in process configuration.
-func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, error) {
+func settingsWithFrozenRoundMargin(settings *Settings, round *roundRecord) (*Settings, error) {
 	if settings == nil || round == nil {
 		return nil, errors.New("round policy is missing")
 	}
@@ -1635,10 +1635,20 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 			copy.EvaluationPolicy.TakeoverMargin = 0
 		}
 	}
-	if !storedPolicyMatches(&copy, round.PolicyJson) {
+	return &copy, nil
+}
+
+// The round's margin, and a check that the rest of the process policy is
+// still the one the round froze.
+func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, error) {
+	copy, err := settingsWithFrozenRoundMargin(settings, round)
+	if err != nil {
+		return nil, err
+	}
+	if !storedPolicyMatches(copy, round.PolicyJson) {
 		return nil, errors.New("round policy does not match the frozen evaluator policy")
 	}
-	return &copy, nil
+	return copy, nil
 }
 
 func validateEvaluationError(evalError *CompetitionError) error {
@@ -5824,9 +5834,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				return
 			}
 			server.Raise(scanErr)
-			roundSettings, policyErr := settingsForFrozenRound(settings, &job.Round)
-			server.Raise(policyErr)
 			if roundUsesAutomation(&job.Round) {
+				_, policyErr := settingsForFrozenRound(settings, &job.Round)
+				server.Raise(policyErr)
 				if settings.automationLease == nil || settings.automationRoundId != job.RoundId {
 					panic(ErrLeaseLost)
 				}
@@ -5840,6 +5850,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				FROM competition_round_baseline WHERE round_id = $1
 			`, job.RoundId))
 			if baselineErr == nil {
+				// The baseline records the margin its round froze, as Complete
+				// checked it. A release change is Evaluate's refusal, not a
+				// legacy claim's; automation also checks the full policy above.
+				roundSettings, roundSettingsErr := settingsWithFrozenRoundMargin(settings, &job.Round)
+				server.Raise(roundSettingsErr)
 				server.Raise(validateRoundBaselineRecord(roundSettings, &job.Round, baseline))
 				job.RoundBaseline = baseline
 			} else if !errors.Is(baselineErr, pgx.ErrNoRows) {

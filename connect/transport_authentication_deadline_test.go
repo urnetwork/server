@@ -107,12 +107,13 @@ func authenticationDeadlineEnvironment(ctx context.Context, t testing.TB, timeou
 	return env, clientId, token
 }
 
-// ConnectHandler includes persistent QUIC listener owners in activeCount.
-// Only accepted connection owners should retire while those listeners stay live.
+// ConnectHandler includes persistent QUIC listeners and one refusal-hold worker
+// in activeCount. These tests keep the handler alive; only accepted connection
+// owners should retire while its persistent owners remain joined to shutdown.
 func authenticationDeadlineActiveConnections(handler *ConnectHandler) int {
 	handler.activeLock.Lock()
 	defer handler.activeLock.Unlock()
-	return handler.activeCount - len(handler.packetEndpoints)
+	return handler.activeCount - len(handler.packetEndpoints) - 1
 }
 
 func waitForAuthenticationDeadlineConnections(ctx context.Context, handler *ConnectHandler, expected int, timeout time.Duration) bool {

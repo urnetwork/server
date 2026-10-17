@@ -28,8 +28,8 @@ import (
 // it must open within ticket_ttl, and once open it pings for as long as the
 // browser keeps it, with at most one load under the ticket's caps. The
 // extender enforces its own session and load limits (M3); the limits here
-// are per client, per /24 (/48) of the caller and per signing agent, on
-// tracks. A track from an agent browser or a hosting network is flagged
+// are per authenticated client and per /24 (/48) of the caller, on tracks.
+// A claimed agent browser or a hosting network is conservatively flagged
 // automated and kept out of every aggregate (lag_automated.go).
 //
 // A dot whose session dropped reconnects within its track (L4): the same call
@@ -41,7 +41,7 @@ import (
 // and only while it is younger than track_reissue_window; that caps how many
 // valid tickets a client can mint for an extender of its choosing.
 
-// The tracks counted per client, per /24 (/48) and per signing agent.
+// The tracks counted per authenticated client and per /24 (/48).
 const lagTrackRateLimitName = "track"
 
 // The header the lagdev command line and MCP server name themselves with,
@@ -266,23 +266,9 @@ func lagTrack(
 		), nil
 	}
 	header := http.Header(clientSession.Header)
-	if signatureAgent := lagSignatureAgent(header); signatureAgent != "" {
-		// an agent's browsers share one count wherever they run, since each
-		// track they start draws on volunteers' extenders (amendment 12)
-		signatureLimit, err := model.CheckLagSignatureRateLimit(
-			ctx,
-			lagTrackRateLimitName,
-			signatureAgent,
-			settings.TrackSignatureLimit,
-			settings.TrackLimitWindow,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if !signatureLimit.Allowed {
-			return lagTrackLimited(signatureLimit, "Too many tracks from this agent. Try again later."), nil
-		}
-	}
+	// Signature-Agent is an unverified caller claim, not an authenticated
+	// identity. It may conservatively flag automation below, but must neither
+	// spend another agent's quota nor grant relief from the caller's limits.
 
 	signer, refusal := newLagTicketSigner()
 	if refusal != nil {
@@ -308,7 +294,7 @@ func lagTrack(
 		issued[extender.ExtenderId] = true
 		dots = append(dots, &lagTrackDot{extender: extender, position: position})
 	}
-	dots = lagDotsStillIssued(ctx, dots)
+	dots = lagDotsStillServing(ctx, dots, now)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -349,12 +335,12 @@ func lagTrackSource(header http.Header) string {
 	}
 }
 
-// The track's client fields (A5): the autonomous system and the GeoLite2 City
+// The track's client fields (A5): the autonomous system and the city-level
 // place of the address the track is issued to, looked up in memory, with the
-// city's coordinates as GeoLite2 gives them when the place names a city; a
-// place resolved only to a region or country has none. The address itself, a
-// prefix of it or a hash of it is never kept (amendment 9). A lookup that
-// cannot answer leaves its fields empty.
+// city's own point when the place names a city (lagClientPlace); a place
+// resolved only to a region or country has none. The address itself, a
+// prefix of it, a hash of it or its block's coordinates are never kept
+// (amendment 9). A lookup that cannot answer leaves its fields empty.
 func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
 	addr = addr.Unmap().WithZone("")
 	client := &model.LagTrackClient{}
@@ -363,15 +349,12 @@ func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
 		client.Asn = &number
 		client.AsnOrg = asn.Organization
 	}
-	if place := lagAddressPlace(addr); place != nil {
+	if place := lagClientPlace(addr); place != nil {
 		client.CountryCode = place.CountryCode
 		client.Region = place.Region
 		client.City = place.City
-		if place.City != "" {
-			latitude, longitude := place.Latitude, place.Longitude
-			client.Latitude = &latitude
-			client.Longitude = &longitude
-		}
+		client.Latitude = place.Latitude
+		client.Longitude = place.Longitude
 	}
 	return client
 }
@@ -429,7 +412,7 @@ func lagTrackReissue(
 		}
 		dots = append(dots, &lagTrackDot{extender: extender, position: key.position})
 	}
-	dots = lagDotsStillIssued(ctx, dots)
+	dots = lagDotsStillServing(ctx, dots, now)
 	if len(dots) == 0 {
 		return lagTrackUnavailable("None of the extenders can be measured now."), nil
 	}
@@ -449,20 +432,21 @@ func lagTrackReissue(
 	return result, nil
 }
 
-// The dots whose extender's request is still answered issued, read now, so a
-// withdrawal or an opt-out within the serving set's cache gets no ticket.
-func lagDotsStillIssued(ctx context.Context, dots []*lagTrackDot) []*lagTrackDot {
+// The dots whose extender still serves, read at `now` (lagStillServing), so
+// a withdrawal or an opt-out within the serving set's cache gets no ticket,
+// and nor does an extender yet to read its certificate.
+func lagDotsStillServing(ctx context.Context, dots []*lagTrackDot, now time.Time) []*lagTrackDot {
 	extenders := make([]*lagServingExtender, 0, len(dots))
 	for _, dot := range dots {
 		extenders = append(extenders, dot.extender)
 	}
-	issued := map[server.Id]bool{}
-	for _, extender := range lagStillIssued(ctx, extenders) {
-		issued[extender.ExtenderId] = true
+	serving := map[server.Id]bool{}
+	for _, extender := range lagStillServing(ctx, extenders, now) {
+		serving[extender.ExtenderId] = true
 	}
 	kept := []*lagTrackDot{}
 	for _, dot := range dots {
-		if issued[dot.extender.ExtenderId] {
+		if serving[dot.extender.ExtenderId] {
 			kept = append(kept, dot)
 		}
 	}

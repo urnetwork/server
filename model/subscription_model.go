@@ -4798,6 +4798,100 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// try-locks. Same-payer rows of this page would refuse each other, so each
 	// waits its turn before any transaction; other rows keep full parallelism.
 	rowTurns := forceCloseRowTurnsByPayer(ctx, openContracts)
+	// Due rows sharing one balance close in owner batches. A batch takes its
+	// first row's turn; its other rows need no visit or turn of their own. A
+	// batch led from the started prefix can close rows after it: they are not
+	// in this page's receipt, and the next page, which starts before them,
+	// finds them closed.
+	// contract_close.yml can lower the batches a page runs at once, or turn
+	// them off so every row is visited alone.
+	batchParallel := forceCloseOwnerBatchParallel(ctx)
+	var rowBatches []*forceCloseOwnerBatch
+	if 0 < batchParallel {
+		rowBatches = forceCloseDeadlineOwnerBatches(ctx, openContracts, rowTurns, server.NowUtc())
+	} else {
+		rowBatches = make([]*forceCloseOwnerBatch, len(openContracts))
+	}
+	batchSlots := make(chan struct{}, max(1, batchParallel))
+	// How each batch ended, by its first row; only that row's worker writes it.
+	batchOutcomes := make([]forceCloseOwnerBatchOutcome, len(openContracts))
+	// Visits every row of one batch in a single owned turn. A held balance,
+	// found by this batch or earlier by a row of the page, leaves every row
+	// to its holder, as it leaves a row tried alone. A failed turn
+	// acknowledged no close. When it failed inside its members each row takes
+	// its own visit; when it failed before them, at the route or admission
+	// that each row alone would also meet, every row stays open with that
+	// failure for a later pass, as a row whose own admission failed does.
+	visitBatch := func(batch *forceCloseOwnerBatch) {
+		owner := forceCloseOwnerKey([]server.Id{batch.balanceId})
+		leaveToHolder := func() {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchHeld
+			for _, j := range batch.indexes {
+				ownerBusy[j], contractVisited[j] = true, true
+			}
+		}
+		if busyOwners.held(owner) {
+			leaveToHolder()
+			return
+		}
+		select {
+		case batchSlots <- struct{}{}:
+		default:
+			forceCloseOwnerBatchSlotWait(ctx)
+			select {
+			case batchSlots <- struct{}{}:
+			case <-ctx.Done():
+				// Unvisited rows withhold the page's receipt.
+				return
+			}
+		}
+		results, busy, entered, batchErr := func() (map[server.Id]*ContractDeadlineReconciliation, bool, bool, error) {
+			defer func() { <-batchSlots }()
+			return reconcileContractOwnerMembersAtDeadline(ctx, []server.Id{batch.balanceId}, batch.members)
+		}()
+		var interrupted runtime.Error
+		if errors.As(batchErr, &interrupted) {
+			// A programming panic interrupts this worker, as in a row visit.
+			panic(batchErr)
+		}
+		if batchErr != nil && ctx.Err() != nil {
+			return
+		}
+		if batchErr != nil {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchFailed
+		}
+		if batchErr != nil && !entered {
+			glog.Infof("[close-expired]owner batch of %d rows failed before its members, the rows stay open: %v\n", len(batch.indexes), batchErr)
+			rowErr := fmt.Errorf("owner batch of %d rows: %w", len(batch.indexes), batchErr)
+			for _, j := range batch.indexes {
+				contractErrors[j], leftOpen[j], contractVisited[j] = rowErr, true, true
+			}
+			return
+		}
+		if batchErr != nil {
+			glog.Infof("[close-expired]owner batch of %d rows failed, each row closes alone: %v\n", len(batch.indexes), batchErr)
+		}
+		if busy {
+			busyOwners.add(owner)
+			leaveToHolder()
+			return
+		}
+		if batchErr == nil {
+			batchOutcomes[batch.indexes[0]] = forceCloseOwnerBatchClosed
+		}
+		for _, j := range batch.indexes {
+			result := results[openContracts[j].contractId]
+			switch {
+			case batchErr != nil || result == nil:
+				visit(j)
+			case result.AlreadyClosed || result.Missing:
+				// Retired by another owner first, as a row that left the selection.
+				eligibilitySkipped[j], contractVisited[j] = true, true
+			default:
+				attempted[j], contractCompleted[j], contractVisited[j] = true, true, true
+			}
+		}
+	}
 
 	for range parallel {
 		wg.Add(1)
@@ -4810,9 +4904,17 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 						return
 					default:
 					}
+					visitRow := func() { visit(j) }
+					if batch := rowBatches[j]; batch != nil {
+						if batch.indexes[0] != j {
+							// The batch's first row visits this one.
+							continue
+						}
+						visitRow = func() { visitBatch(batch) }
+					}
 					turn := rowTurns[j]
 					if turn == nil {
-						visit(j)
+						visitRow()
 						continue
 					}
 					select {
@@ -4827,7 +4929,7 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 					}
 					func() {
 						defer func() { <-turn }()
-						visit(j)
+						visitRow()
 					}()
 				}
 			})
@@ -4981,9 +5083,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			progressed: progressed, deferredContractIds: deferredContractIds}
 		forceCloseContractCounter.WithLabelValues("operational_deferred").Add(float64(len(deferredContractIds)))
 	}
-	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_busy=%d\n",
+	ownerBatchClosedCount, ownerBatchHeldCount, ownerBatchFailedCount := forceCloseOwnerBatchSummary(rowBatches, batchOutcomes, started)
+	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t started=%d deferred=%d owner_busy=%d owner_batch_closed=%d owner_batch_held=%d owner_batch_failed=%d\n",
 		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil,
-		started, len(deferredContractIds), ownerBusyCount)
+		started, len(deferredContractIds), ownerBusyCount, ownerBatchClosedCount, ownerBatchHeldCount, ownerBatchFailedCount)
 
 	return
 }

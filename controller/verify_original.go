@@ -24,18 +24,22 @@ func verifyRetainOriginal(ctx context.Context, previousDepth int, trail *model.V
 		body.RecoveryMs = trail.Pending.AssignedMs + uint64((settings.StepTimeout + settings.StepTimeoutGrace).Milliseconds())
 	}
 	body.Scope = verifyCurrentOriginalScope()
-	if previousDepth > 0 {
+	headWindow := ""
+	if previousDepth == 0 {
+		headWindow = model.SelectVerifyTrailHeadWindow(ctx, verifySettings())
+	} else {
 		if prior := model.GetLatestVerifyOriginal(ctx, trail.TrailId); prior != nil {
 			previous := verifyDecodeOriginal(prior)
 			if (body.Scope == nil) != (previous.Scope == nil) || (body.Scope != nil && *body.Scope != *previous.Scope) {
 				panic(errors.New("verification original deployment changed during trail"))
 			}
+			headWindow = prior.HeadWindow
 		}
 	}
 	encoded, err := json.Marshal(body)
 	server.Raise(err)
 	key := verifyServerKeyById(trail.ServerKeyId)
-	original := &model.VerifyOriginalTransition{Body: encoded, Signature: ed25519.Sign(key.PrivateKey, append([]byte(model.VerifyOriginalDomain), encoded...))}
+	original := &model.VerifyOriginalTransition{Body: encoded, Signature: ed25519.Sign(key.PrivateKey, append([]byte(model.VerifyOriginalDomain), encoded...)), HeadWindow: headWindow}
 	verifyDecodeOriginal(original)
 	retained := model.RetainVerifyOriginal(ctx, original)
 	verifyDecodeOriginal(retained)
@@ -95,5 +99,6 @@ func verifyRecoverOriginal(ctx context.Context, trailId server.Id, trail *model.
 		model.PublishVerifyOriginal(ctx, original, settings)
 		return body.Trail
 	}
+	model.RestoreVerifyOriginalHeadWindow(ctx, original, settings)
 	return trail
 }

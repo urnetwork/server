@@ -159,7 +159,8 @@ func CloseExpiredContracts(
 			expiration = nil
 		}
 		c, next, expiration, err := model.ForceCloseOpenContractIdsScheduledPage(
-			clientSession.Ctx,
+			// contract_close.yml can lower the page's owner batches or turn them off.
+			model.WithForceCloseOwnerBatchParallel(clientSession.Ctx, closeExpiredContractsOwnerBatchLimit()),
 			minTime,
 			closeExpiredContractsMaxCount,
 			// contract_close.yml can lower it for the next run (close_expired_parallel.go).

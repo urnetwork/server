@@ -801,7 +801,11 @@ func newExchange(
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 
-	go server.HandleError(exchange.Run, cancel)
+	// Run only starts the listeners and waits, and each listener cancels the
+	// exchange when it stops. A raise in Run leaves the started listeners
+	// serving. A canceled exchange does not stop the process (connect/run.go),
+	// so canceling it here would leave a host taking clients it cannot serve.
+	go server.HandleError(exchange.Run)
 
 	return exchange
 }
@@ -870,7 +874,10 @@ func (self *Exchange) endConnectionWorker() {
 	self.connectionWorkers.Done()
 }
 
-// Starts one admitted exchange socket owner.
+// Starts one admitted exchange socket owner. A raise ends that owner only. The
+// exchange serves every resident on the host, so one accepted connection's
+// fault, or the cancellation raise of its narrower context, must not cancel
+// it. A listener cancels the exchange itself when it stops.
 func (self *Exchange) startConnectionWorker(run func()) bool {
 	if !self.beginConnectionWorker() {
 		return false
@@ -878,7 +885,7 @@ func (self *Exchange) startConnectionWorker(run func()) bool {
 	go server.HandleError(func() {
 		defer self.endConnectionWorker()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 
@@ -3712,6 +3719,8 @@ type Resident struct {
 	// stream-hop listener owned by Run.
 	afterStreamHopListenerStartForTest     func(*model.StreamHopListener)
 	afterStreamHopListenerCloseWaitForTest func()
+	// Observes the publishing worker's completion channel before the Run join.
+	beforeStreamAuthorizationJoinForTest func(<-chan struct{})
 
 	// streamHopListener *model.StreamHopListener
 }
@@ -3932,11 +3941,13 @@ func (self *Resident) startClientCallbackWorkers() {
 
 	self.callbackWorkers.Add(1)
 	residentCallbackWorkersGauge.Inc()
+	// A raise ends the consumer and leaves the resident running without one:
+	// later control frames fill the queue and are refused.
 	go server.HandleError(func() {
 		defer self.callbackWorkers.Done()
 		defer residentCallbackWorkersGauge.Dec()
 		self.runClientControlIngress()
-	}, self.cancel)
+	})
 }
 
 func (self *Resident) runClientControlIngress() {
@@ -4007,11 +4018,14 @@ func (self *Resident) startClientForwardIngress(shardIndex int) chan residentFor
 		shard.queue = queue
 		self.callbackWorkers.Add(1)
 		residentCallbackWorkersGauge.Inc()
+		// A raise ends the shard's consumer and leaves the resident running
+		// without one: later forwards on the shard fill its queue and are
+		// refused.
 		go server.HandleError(func() {
 			defer self.callbackWorkers.Done()
 			defer residentCallbackWorkersGauge.Dec()
 			self.runClientForwardIngress(queue)
-		}, self.cancel)
+		})
 	})
 	return shard.queue
 }
@@ -4120,7 +4134,11 @@ func (self *Resident) Run() {
 	// Lease publication is separate from the registry listener: its bounded
 	// I/O cannot block Redis key-event dispatch or the stream lifecycle owner.
 	hopSnapshots := make(chan []model.StreamHop, 1)
-	go self.runStreamAuthorizations(hopSnapshots)
+	streamAuthorizationsDone := make(chan struct{})
+	go func() {
+		defer close(streamAuthorizationsDone)
+		self.runStreamAuthorizations(hopSnapshots)
+	}()
 	streamHopListener := model.NewStreamHopListener(self.ctx, self.clientId, func(event *model.StreamHopEvent) {
 		snapshot := append([]model.StreamHop(nil), event.StreamHops...)
 		select {
@@ -4142,6 +4160,13 @@ func (self *Resident) Run() {
 	}
 	defer func() {
 		streamHopListener.CloseAndWait()
+		// No listener can enqueue again. Cancellation releases bounded grant
+		// reads and sends; the external Run owner joins the publishing worker.
+		self.cancel()
+		if self.beforeStreamAuthorizationJoinForTest != nil {
+			self.beforeStreamAuthorizationJoinForTest(streamAuthorizationsDone)
+		}
+		<-streamAuthorizationsDone
 		if self.afterStreamHopListenerCloseWaitForTest != nil {
 			self.afterStreamHopListenerCloseWaitForTest()
 		}
@@ -4810,6 +4835,10 @@ func (self *Resident) Cancel() {
 }
 
 // Starts one owned exchange-forward loop unless resident shutdown has begun.
+// A raise ends that forward only: run cancels and unpublishes it, and the next
+// packet to the destination opens a new one. The resident outlives its
+// forwards, so neither a forward's lookup failure nor the cancellation raise
+// of a retired forward's narrower context may cancel it.
 func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) bool {
 	self.forwardWorkerLock.Lock()
 	defer self.forwardWorkerLock.Unlock()
@@ -4822,7 +4851,7 @@ func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) b
 		defer self.forwardWorkers.Done()
 		defer residentForwardWorkersGauge.Dec()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 

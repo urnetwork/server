@@ -18,7 +18,7 @@ import (
 //	urnetwork_stats_lag_results_1h               results stored in the trailing hour {end_reason, ip_family} (db)
 //	urnetwork_stats_lag_tracks_1h                tracks started in the trailing hour (db)
 //	urnetwork_stats_lag_guests_1h                guest sessions created in the trailing hour (db)
-//	urnetwork_stats_lag_idle_latency_p50_ms      median of the trailing hour's complete results' latency p50 outside every load {ip_family} (db)
+//	urnetwork_stats_lag_idle_latency_p50_ms      median of the trailing hour's complete results' idle latency p50: pings during no load of their track {ip_family} (db)
 //	urnetwork_stats_lag_download_p50_mbps        median of their download p50 {ip_family} (db)
 //	urnetwork_stats_lag_upload_p50_mbps          median of their upload p50 {ip_family} (db)
 //	urnetwork_stats_lag_extenders_offered        extenders the lag.dev sample can offer now (A4)
@@ -60,7 +60,7 @@ var statsLagGuests1hGauge = newStatsGauge(
 
 var statsLagIdleLatencyP50Gauge = newStatsGaugeVec(
 	"lag_idle_latency_p50_ms",
-	"Median across the trailing hour's complete lag.dev results of each result's latency p50 outside every load, by family",
+	"Median across the trailing hour's complete lag.dev results of each result's idle latency p50: its pings whose round trip overlaps no load of any dot of its track, from the load's first byte to 2 s after its upload (lag.dev/PLAN.md L4), by family",
 	"ip_family",
 )
 
@@ -78,7 +78,7 @@ var statsLagUploadP50Gauge = newStatsGaugeVec(
 
 var statsLagExtendersOfferedGauge = newStatsGauge(
 	"lag_extenders_offered",
-	"Extenders the lag.dev sample can offer now: published names, issued, placed (A4)",
+	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed (A4)",
 )
 
 var statsLagMeasurementRequestsGauge = newStatsGaugeVec(
@@ -161,8 +161,8 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 		label := []string{statsLagIpFamilyLabel(family.IpFamily)}
 		// a family with no figure in the hour has no series, rather than a
 		// zero that would read as a measurement
-		if family.OutsideLoadLatencyP50Ms != nil {
-			idle = append(idle, statsLabeledValue{labelValues: label, value: *family.OutsideLoadLatencyP50Ms})
+		if family.IdleLatencyP50Ms != nil {
+			idle = append(idle, statsLabeledValue{labelValues: label, value: *family.IdleLatencyP50Ms})
 		}
 		if family.DownloadP50Mbps != nil {
 			download = append(download, statsLabeledValue{labelValues: label, value: *family.DownloadP50Mbps})

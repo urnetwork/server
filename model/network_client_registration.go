@@ -13,6 +13,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
@@ -175,7 +176,9 @@ func (self *networkClientRegistrationOwner) resumeInTx(tx server.PgTx, clientSes
 	server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "network-client-registration/v1:"+claims.NetworkId.String()))
 	var registrationId, requestHash, authorityHash string
 	var userId, clientId, deviceId server.Id
-	err = tx.QueryRow(ctx, `SELECT registration_id, request_sha256, authority_sha256, user_id, client_id, device_id FROM network_client_registration WHERE network_id=$1 AND (registration_id=$2 OR scope_sha256=$3) ORDER BY registration_id LIMIT 1`, claims.NetworkId, self.request.RegistrationId, self.request.ScopeSha256).Scan(&registrationId, &requestHash, &authorityHash, &userId, &clientId, &deviceId)
+	var registeredSessionId *server.Id
+	var registeredCreateTime, registeredAcceptUntil *time.Time
+	err = tx.QueryRow(ctx, `SELECT registration_id, request_sha256, authority_sha256, user_id, client_id, device_id, session_id, session_create_time, session_accept_until FROM network_client_registration WHERE network_id=$1 AND (registration_id=$2 OR scope_sha256=$3) ORDER BY registration_id LIMIT 1`, claims.NetworkId, self.request.RegistrationId, self.request.ScopeSha256).Scan(&registrationId, &requestHash, &authorityHash, &userId, &clientId, &deviceId, &registeredSessionId, &registeredCreateTime, &registeredAcceptUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false
 	}
@@ -189,7 +192,9 @@ func (self *networkClientRegistrationOwner) resumeInTx(tx server.PgTx, clientSes
 	}
 	var active bool
 	var actualDevice server.Id
-	err = tx.QueryRow(ctx, `SELECT c.active, c.device_id FROM network_client c JOIN device d ON d.device_id=c.device_id AND d.network_id=c.network_id WHERE c.client_id=$1 AND c.network_id=$2 FOR UPDATE OF c, d`, clientId, claims.NetworkId).Scan(&active, &actualDevice)
+	var associatedSessionId *server.Id
+	var associatedCreateTime *time.Time
+	err = tx.QueryRow(ctx, `SELECT c.active, c.device_id, c.session_id, c.session_create_time FROM network_client c JOIN device d ON d.device_id=c.device_id AND d.network_id=c.network_id WHERE c.client_id=$1 AND c.network_id=$2 FOR UPDATE OF c, d`, clientId, claims.NetworkId).Scan(&active, &actualDevice, &associatedSessionId, &associatedCreateTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return refused("identity_unavailable", "The registered client or device is no longer available.")
 	}
@@ -214,16 +219,58 @@ func (self *networkClientRegistrationOwner) resumeInTx(tx server.PgTx, clientSes
 	credential := self.mintCredential
 	credential.ClientId, credential.DeviceId, credential.Pro = &clientId, &deviceId, isPro
 	credential.Roles, credential.Principal = storedRoles, storedPrincipal
+	if registeredCreateTime != nil {
+		if (registeredSessionId == nil) != (associatedSessionId == nil) ||
+			registeredSessionId != nil && (*registeredSessionId != *associatedSessionId || associatedCreateTime == nil || !registeredCreateTime.Equal(*associatedCreateTime)) {
+			return refused("identity_unavailable", "The registered session no longer matches its original authority.")
+		}
+		// Independent API-key requests carry a fresh candidate, never the
+		// original credential. Signed session callers must still match it.
+		if !clientSession.ApiKeyAuthenticated && !clientSession.UnsignedIdentity && registeredSessionId != nil &&
+			(credential.SessionId == nil || *credential.SessionId != *registeredSessionId) {
+			return refused("identity_unavailable", "The registration belongs to a different session.")
+		}
+		if registeredSessionId != nil && !restoreRegistrationHorizon(credential, registeredAcceptUntil, server.NowUtc()) {
+			return refused("identity_unavailable", "The original registration session has expired.")
+		}
+		credential.SessionId = registeredSessionId
+		credential.CreateTime = *registeredCreateTime
+	} else if credential.SessionId != nil || associatedSessionId != nil {
+		return refused("identity_unavailable", "The original registration session cannot be established.")
+	}
+	server.Raise(session.ValidateSessionReplayInTx(ctx, tx, credential))
 	server.Raise(session.AssociateSessionClientInTx(ctx, tx, credential, false))
-	signed, mintErr := session.RegisterAndSignInTx(ctx, tx, credential, "legacy", nil, false)
+	kind := "legacy"
+	if clientSession.ApiKeyAuthenticated {
+		kind = "api_key_client"
+	}
+	signed, mintErr := session.RegisterAndSignInTx(ctx, tx, credential, kind, nil, false)
 	server.Raise(mintErr)
 	self.deviceId = deviceId
 	return &AuthNetworkClientResult{ByClientJwt: &signed, ClientId: &clientId}, true
 }
 
+// Renew refreshes registered claims separately from lineage. Replay recovers
+// the first expiry and its exclusive terminal boundary, never another renewal.
+// Subtract only the bounded terminal allowance, not two potentially far-apart
+// timestamps whose duration could saturate and accidentally extend authority.
+func restoreRegistrationHorizon(credential *session.ByJwt, acceptUntil *time.Time, now time.Time) bool {
+	if acceptUntil == nil || credential.ExpiresAt == nil || !now.Before(*acceptUntil) {
+		return false
+	}
+	terminalAllowance := credential.AcceptUntil().Sub(credential.ExpiresAt.Time)
+	credential.ExpiresAt.Time = acceptUntil.Add(-terminalAllowance)
+	return true
+}
+
 // Called in the existing allocation transaction after both rows exist. A
 // rollback removes the complete operation; a lost response leaves this binding.
 func (self *networkClientRegistrationOwner) bindInTx(tx server.PgTx, clientSession *session.ClientSession, clientId, deviceId server.Id) {
-	server.RaisePgResult(tx.Exec(clientSession.Ctx, `INSERT INTO network_client_registration (network_id,registration_id,request_sha256,scope_sha256,authority_sha256,user_id,client_id,device_id,create_time) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, clientSession.ByJwt.NetworkId, self.request.RegistrationId, self.requestHash, self.request.ScopeSha256, self.authorityHash, clientSession.ByJwt.UserId, clientId, deviceId, server.NowUtc()))
+	var acceptUntil *time.Time
+	if self.mintCredential.SessionId != nil {
+		deadline := self.mintCredential.AcceptUntil()
+		acceptUntil = &deadline
+	}
+	server.RaisePgResult(tx.Exec(clientSession.Ctx, `INSERT INTO network_client_registration (network_id,registration_id,request_sha256,scope_sha256,authority_sha256,user_id,client_id,device_id,create_time,session_id,session_create_time,session_accept_until) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, clientSession.ByJwt.NetworkId, self.request.RegistrationId, self.requestHash, self.request.ScopeSha256, self.authorityHash, clientSession.ByJwt.UserId, clientId, deviceId, server.NowUtc(), self.mintCredential.SessionId, self.mintCredential.CreateTime, acceptUntil))
 	self.deviceId = deviceId
 }

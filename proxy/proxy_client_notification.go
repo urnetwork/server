@@ -196,6 +196,10 @@ func (self *proxyClientNotification) watch(host string, block string) {
 			}
 		}
 		channel := model.ProxyClientChannel(host, block)
+		// A raise ends the wakes only; the watch still polls every
+		// NotificationTimeout. Canceling the notification would end every
+		// watch and the reconcile for the life of the process, since nothing
+		// restarts them, and the proxy would stop adding new clients' peers.
 		go server.HandleError(func() {
 			server.RunRedisShardSubscription(
 				self.ctx,
@@ -215,7 +219,7 @@ func (self *proxyClientNotification) watch(host string, block string) {
 					},
 				},
 			)
-		}, self.cancel)
+		})
 
 		for {
 			select {

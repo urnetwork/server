@@ -531,6 +531,7 @@ func verifySeedWithAdmission(
 	// after key rotation or directory cleanup. No new assignment is sampled.
 	if original := model.GetVerifyOriginalRequest(ctx, model.VerifyOriginalRequest{Scope: verifyCurrentOriginalScope(), ClientId: verify.ClientId, Message: seedMessage, Signature: verify.SeedSig}); original != nil {
 		body := verifyDecodeOriginal(original)
+		model.RestoreVerifyOriginalHeadWindow(ctx, original, settings)
 		return verifyDecodeCachedResponse(body.ResponseJson)
 	}
 
@@ -734,14 +735,15 @@ func verifySeedWithAdmission(
 			// A simultaneous writer won the durable request identity. Its first
 			// original response wins; do not regress a later Redis projection.
 			model.DecrVerifyActiveTrails(ctx, verify.Vpk)
+			model.RestoreVerifyOriginalHeadWindow(ctx, original, settings)
 			return verifyDecodeCachedResponse(retained.ResponseJson)
 		}
 		model.PublishVerifyOriginal(ctx, original, settings)
 	} else {
 		model.CreateVerifyTrail(ctx, trail, responseJson, settings)
+		// Poison trails have no durable original and keep their Redis window.
+		model.SetVerifyTrailHeadWindow(ctx, trailId, m, settings)
 	}
-	// every hop of the trail pins in its SEED's scoring window (§8.1)
-	model.SetVerifyTrailHeadWindow(ctx, trailId, m, settings)
 
 	if glog.V(2) {
 		glog.Infof("[verify]seed trail %s depth 1/%d (poison=%t)\n", trailId, m, poison)

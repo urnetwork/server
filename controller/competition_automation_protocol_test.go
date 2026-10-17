@@ -184,7 +184,7 @@ func TestCompetitionV2ReadinessBindsActivatedReservedRoundSource(t *testing.T) {
 	intent := &model.CompetitionSourceActivation{Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
 		Generation: 2, SourceGeneration: 1, TargetEpoch: 2, TargetRoundId: server.RequireParseId("00000000-0000-0000-0000-000000000503"),
 		EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: strings.Repeat("9", 64), Threshold: .2, ActivatedAt: &now, State: "activated", Commits: map[string]string{}}
-	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"} {
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
 		intent.Commits[name] = strings.Repeat("c", 40)
 	}
 	var err error

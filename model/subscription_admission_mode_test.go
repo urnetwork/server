@@ -112,8 +112,16 @@ func TestRedisExpiredBalanceKnownContractRecoveryAndRelease(t *testing.T) {
 		posts := settleNetEscrowOrderingTestContract(ctx, escrow.ContractId)
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
-		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 0 {
-			t.Fatalf("replayed release: %d", got)
+		// the durable debit worker releases the recovered reservation once
+		for _, want := range []int{1, 0} {
+			if applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId); err != nil ||
+				applied != want || released != want || busy {
+				t.Fatal("debit worker release", applied, released, busy, err)
+			}
+			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 0 {
+				t.Fatalf("replayed release: %d", got)
+			}
+			server.RunPosts(ctx, posts...)
 		}
 	})
 }

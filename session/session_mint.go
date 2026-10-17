@@ -189,6 +189,19 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 	return
 }
 
+// Replay has no presented original token to bound expired Redis markers. The
+// caller proves the original binding and horizon under its existing row locks;
+// this fence also refuses retained revocation journals and current state loss.
+func ValidateSessionReplayInTx(ctx context.Context, tx server.PgTx, credential *ByJwt) error {
+	if credential.SessionId != nil {
+		if err := validateHostedSessionJournalInTx(ctx, tx, credential.NetworkId, *credential.SessionId, &credential.CreateTime); err != nil {
+			return err
+		}
+	}
+	return ValidateByJwtStateInTx(ctx, tx, credential, true)
+}
+
+// Durable terminal operations outlive their finite authentication projections.
 func validateHostedSessionJournalInTx(ctx context.Context, tx server.PgTx, networkId, sessionId server.Id, lineage *time.Time) error {
 	var retired, pending bool
 	err := tx.QueryRow(ctx, `SELECT

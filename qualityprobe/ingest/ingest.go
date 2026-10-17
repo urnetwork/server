@@ -59,8 +59,9 @@ type Client struct {
 	ShardCount int
 }
 
-// The wire body of a location submission.
-type submitBody struct {
+// The wire body of a location submission, and the arguments an in-process
+// operator hands the same controller.
+type LocationSubmission struct {
 	ClientId string `json:"client_id"`
 	// The independently observed public address from an already-sampled HTTPS
 	// IP-text response through the provider. The server places it with GeoLite2;
@@ -84,6 +85,35 @@ type submitBody struct {
 	ObservedAt       time.Time `json:"observed_at"`
 }
 
+// The client-side half of Submit, shared by every transport: an address that
+// does not parse or a zero observation time is refused before any request
+// (ErrMissingExitIp, ErrMissingProbedAt) -- the server would reject both, and
+// the scheduler would only retry the same doomed submission -- and otherwise
+// the canonical address is what is submitted.
+func NewLocationSubmission(providerClientId string, exitIp string, observedAt time.Time) (*LocationSubmission, error) {
+	ip := net.ParseIP(strings.TrimSpace(exitIp))
+	if ip == nil {
+		return nil, fmt.Errorf("%w (got %q)", ErrMissingExitIp, exitIp)
+	}
+	if observedAt.IsZero() {
+		return nil, ErrMissingProbedAt
+	}
+	return &LocationSubmission{
+		ClientId:         providerClientId,
+		ExitIp:           ip.String(),
+		CountryConfident: false,
+		ObservedAt:       observedAt,
+	}, nil
+}
+
+// The error a refused request returns from either transport: ErrRejected with
+// the status the operator API answers it with and that answer's message. The
+// in-process operator builds the same error from the same controller refusal,
+// so a caller's errors.Is and its logs cannot tell the transports apart.
+func RejectedError(status int, message string) error {
+	return fmt.Errorf("%w: status %d: %s", ErrRejected, status, strings.TrimSpace(message))
+}
+
 // Posts one provider's exit address. The body shape is the contract of
 // the server's controller.SubmitProviderEgressLocationArgs (POST
 // /network/provider-egress-location, X-UR-Operator-Secret header): exit_ip
@@ -95,18 +125,9 @@ type submitBody struct {
 // server would reject both, and the scheduler would only retry the same doomed
 // POST.
 func (self *Client) Submit(ctx context.Context, providerClientId string, exitIp string, observedAt time.Time) error {
-	ip := net.ParseIP(strings.TrimSpace(exitIp))
-	if ip == nil {
-		return fmt.Errorf("%w (got %q)", ErrMissingExitIp, exitIp)
-	}
-	if observedAt.IsZero() {
-		return ErrMissingProbedAt
-	}
-	body := submitBody{
-		ClientId:         providerClientId,
-		ExitIp:           ip.String(),
-		CountryConfident: false,
-		ObservedAt:       observedAt,
+	body, err := NewLocationSubmission(providerClientId, exitIp, observedAt)
+	if err != nil {
+		return err
 	}
 
 	buf, err := json.Marshal(body)
@@ -139,7 +160,7 @@ func (self *Client) Submit(ctx context.Context, providerClientId string, exitIp 
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
 	}
 	return nil
 }

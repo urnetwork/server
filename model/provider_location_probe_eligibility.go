@@ -10,6 +10,8 @@ import (
 // Compute the fleet admission inputs before the location upsert takes row
 // locks. The prospective rollup contains every connected location; rows absent
 // from it become disconnected below and therefore cannot admit a URL probe.
+// Scores are still the previous generation's, so a connection without a
+// witness lookback score waits for the score pass (providerUrlProbeAdmissionSql).
 // Keep the calculation and publication in the caller's transaction so failures
 // still roll back locations and scheduling hints together.
 func prepareLocationProbeEligibility(ctx context.Context, tx server.PgTx) time.Time {

@@ -7,13 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"reflect"
 	"sort"
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
 
@@ -180,70 +178,64 @@ func TestNativeSpeedSampleEncodingAndRefusals(t *testing.T) {
 	}
 }
 
-// One explicitly owned loopback Redis database, with no Config/profile reads.
-// Refuse pre-existing keys and remove only this test's two keys on completion.
+// The test environment's disposable Redis database, leased to this test and
+// flushed around it, with no other Redis or profile reads. Refuse
+// pre-existing keys; the environment discards this test's two keys with the
+// database. Its client dials through the process guard's attested endpoint.
 func TestNativeSpeedSampleRedisCommitGuard(t *testing.T) {
-	if os.Getenv("ARIN_SPEED_SAMPLE_REDIS_FIXTURE") != "owned-loopback-26379-db15" {
-		t.Fatal("explicit owned Redis fixture handoff required")
-	}
-	r := redis.NewClient(&redis.Options{Addr: "127.0.0.1:26379", DB: 15, MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, ContextTimeoutEnabled: true})
-	t.Cleanup(func() { _ = r.Close() })
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	keys := []string{clientScoreNativeCensusKey, clientScoreNativeSpeedSampleKey}
-	count, err := r.Exists(ctx, keys...).Result()
-	if err != nil || count != 0 {
-		t.Fatalf("fixture keys unavailable: count=%d err=%v", count, err)
-	}
-	t.Cleanup(func() {
-		clean, stop := context.WithTimeout(context.Background(), 2*time.Second)
-		defer stop()
-		if err := r.Del(clean, keys...).Err(); err != nil {
-			t.Errorf("owned key cleanup: %v", err)
-		}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		server.Redis(t.Context(), func(r server.RedisClient) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			keys := []string{clientScoreNativeCensusKey, clientScoreNativeSpeedSampleKey}
+			count, err := r.Exists(ctx, keys...).Result()
+			if err != nil || count != 0 {
+				t.Fatalf("fixture keys unavailable: count=%d err=%v", count, err)
+			}
+			c, s, q, h := speedSampleFixture(300)
+			c.speedOnlySample = newClientScoreNativeSpeedSample(c, s, q, h)
+			raw, _ := json.Marshal(c)
+			if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err == nil {
+				t.Fatal("diagnostic accepted before census commit")
+			}
+			if n, err := r.Exists(ctx, clientScoreNativeSpeedSampleKey).Result(); err != nil || n != 0 {
+				t.Fatal("failed generation created diagnostic")
+			}
+			if err := r.Set(ctx, clientScoreNativeCensusKey, raw, time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			got, err := r.Get(ctx, clientScoreNativeSpeedSampleKey).Bytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := encodeClientScoreNativeSpeedSample(c, raw)
+			if err != nil || !bytes.Equal(got, expected) {
+				t.Fatal("committed diagnostic mismatch")
+			}
+			if ttl, err := r.PTTL(ctx, clientScoreNativeSpeedSampleKey).Result(); err != nil || ttl <= 0 || ttl > time.Minute {
+				t.Fatalf("diagnostic ttl=%s err=%v", ttl, err)
+			}
+			if err := r.Set(ctx, clientScoreNativeCensusKey, []byte(`{"new_generation":true}`), time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err == nil {
+				t.Fatal("old census overwrote a newer generation")
+			}
+			after, err := r.Get(ctx, clientScoreNativeSpeedSampleKey).Bytes()
+			if err != nil || !bytes.Equal(got, after) {
+				t.Fatal("superseded write changed diagnostic")
+			}
+			canceled, stop := context.WithCancel(ctx)
+			stop()
+			if err := writeClientScoreNativeSpeedSample(canceled, r, c, raw, time.Minute); err != context.Canceled {
+				t.Fatalf("cancellation not retained: %v", err)
+			}
+			if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, 0); err == nil {
+				t.Fatal("nonpositive ttl admitted")
+			}
+		})
 	})
-	c, s, q, h := speedSampleFixture(300)
-	c.speedOnlySample = newClientScoreNativeSpeedSample(c, s, q, h)
-	raw, _ := json.Marshal(c)
-	if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err == nil {
-		t.Fatal("diagnostic accepted before census commit")
-	}
-	if n, err := r.Exists(ctx, clientScoreNativeSpeedSampleKey).Result(); err != nil || n != 0 {
-		t.Fatal("failed generation created diagnostic")
-	}
-	if err := r.Set(ctx, clientScoreNativeCensusKey, raw, time.Minute).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	got, err := r.Get(ctx, clientScoreNativeSpeedSampleKey).Bytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected, err := encodeClientScoreNativeSpeedSample(c, raw)
-	if err != nil || !bytes.Equal(got, expected) {
-		t.Fatal("committed diagnostic mismatch")
-	}
-	if ttl, err := r.PTTL(ctx, clientScoreNativeSpeedSampleKey).Result(); err != nil || ttl <= 0 || ttl > time.Minute {
-		t.Fatalf("diagnostic ttl=%s err=%v", ttl, err)
-	}
-	if err := r.Set(ctx, clientScoreNativeCensusKey, []byte(`{"new_generation":true}`), time.Minute).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, time.Minute); err == nil {
-		t.Fatal("old census overwrote a newer generation")
-	}
-	after, err := r.Get(ctx, clientScoreNativeSpeedSampleKey).Bytes()
-	if err != nil || !bytes.Equal(got, after) {
-		t.Fatal("superseded write changed diagnostic")
-	}
-	canceled, stop := context.WithCancel(ctx)
-	stop()
-	if err := writeClientScoreNativeSpeedSample(canceled, r, c, raw, time.Minute); err != context.Canceled {
-		t.Fatalf("cancellation not retained: %v", err)
-	}
-	if err := writeClientScoreNativeSpeedSample(ctx, r, c, raw, 0); err == nil {
-		t.Fatal("nonpositive ttl admitted")
-	}
 }

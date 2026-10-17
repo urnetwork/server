@@ -106,23 +106,41 @@ func parseClientScoreNativePointer(value string) (clientScoreNativePointer, erro
 
 // All script keys retain one caller/target hash tag. A stale publisher may
 // supersede another inactive staging attempt, but cannot write the active slot.
-const clientScoreNativeBeginScript = `
+// Positive values retain standalone callers' relative millisecond ttl;
+// negative values encode an export's fixed absolute millisecond deadline.
+// The script checks expiry before touching data, including already-queued
+// commands that reach Redis after the exporter has expired.
+const clientScoreNativeExpiryScript = `
+local expiryMillis = tonumber(ARGV[3])
+local expireCommand, setExpiryOption = 'PEXPIRE', 'PX'
+if expiryMillis < 0 then
+  expiryMillis = -expiryMillis
+  local now = redis.call('TIME')
+  if expiryMillis <= tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) then
+    return redis.error_reply('client score export expired')
+  end
+  expireCommand, setExpiryOption = 'PEXPIREAT', 'PXAT'
+end
+if expiryMillis <= 0 then return redis.error_reply('client score ttl invalid') end
+`
+
+const clientScoreNativeBeginScript = clientScoreNativeExpiryScript + `
 local active = redis.call('GET', KEYS[1]) or ''
 if active ~= ARGV[1] or string.sub(active, 1, 2) == ARGV[4] .. ':' then return 0 end
 redis.call('DEL', KEYS[2])
 redis.call('HSET', KEYS[2], 'g', ARGV[2])
-redis.call('PEXPIRE', KEYS[2], ARGV[3])
+redis.call(expireCommand, KEYS[2], expiryMillis)
 return 1
 `
 
-const clientScoreNativePagesScript = `
+const clientScoreNativePagesScript = clientScoreNativeExpiryScript + `
 if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'g') ~= ARGV[2] then return 0 end
 for i = 4, #ARGV, 2 do redis.call('HSET', KEYS[2], ARGV[i], ARGV[i + 1]) end
-redis.call('PEXPIRE', KEYS[2], ARGV[3])
+redis.call(expireCommand, KEYS[2], expiryMillis)
 return 1
 `
 
-const clientScoreNativeCommitScript = `
+const clientScoreNativeCommitScript = clientScoreNativeExpiryScript + `
 if redis.call('GET', KEYS[1]) == ARGV[5] and redis.call('HGET', KEYS[2], 'g') == ARGV[2] and redis.call('HGET', KEYS[2], 'm') == ARGV[4] then return 1 end
 if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'g') ~= ARGV[2] then return 0 end
 if redis.call('HLEN', KEYS[2]) ~= 1 + (#ARGV - 5) / 2 then return 0 end
@@ -131,8 +149,8 @@ for i = 6, #ARGV, 2 do
   if not page or string.sub(page, 1, 32) ~= ARGV[i + 1] then return 0 end
 end
 redis.call('HSET', KEYS[2], 'm', ARGV[4])
-redis.call('PEXPIRE', KEYS[2], ARGV[3])
-redis.call('SET', KEYS[1], ARGV[5], 'PX', ARGV[3])
+redis.call(expireCommand, KEYS[2], expiryMillis)
+redis.call('SET', KEYS[1], ARGV[5], setExpiryOption, expiryMillis)
 return 1
 `
 
@@ -145,12 +163,16 @@ type clientScoreNativePublication struct {
 	generation string
 	slot       int
 	ttl        time.Duration
+	expiresAt  time.Time
 	pageFields []string
 }
 
 func prepareClientScoreNativePublication(ctx context.Context, r server.RedisClient, key string, ttl time.Duration) (*clientScoreNativePublication, error) {
 	if ttl < time.Millisecond {
 		return nil, fmt.Errorf("native client score publication requires positive ttl")
+	}
+	if expiresAt := clientScoreExportExpiresAt(ctx); !expiresAt.IsZero() && !server.NowUtc().Before(expiresAt) {
+		return nil, fmt.Errorf("client score export expired")
 	}
 	active, err := r.Get(ctx, key).Result()
 	if err != nil && err != redis.Nil {
@@ -167,12 +189,21 @@ func prepareClientScoreNativePublication(ctx context.Context, r server.RedisClie
 	publication := &clientScoreNativePublication{
 		pointerKey: key, slotKey: clientScoreNativeSlotKey(key, slot),
 		expected: active, generation: server.NewId().String(), slot: slot, ttl: ttl,
+		expiresAt: clientScoreExportExpiresAt(ctx),
 	}
 	return publication, nil
 }
 
+// The expiry argument shared by staging, every page batch and publication.
+func (self *clientScoreNativePublication) expiryMillis() int64 {
+	if !self.expiresAt.IsZero() {
+		return -self.expiresAt.UnixMilli()
+	}
+	return self.ttl.Milliseconds()
+}
+
 func (self *clientScoreNativePublication) begin(ctx context.Context, r server.RedisClient) error {
-	result, err := r.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.ttl.Milliseconds(), self.slot).Int()
+	result, err := r.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.expiryMillis(), self.slot).Int()
 	if err != nil {
 		return err
 	}
@@ -197,12 +228,12 @@ func beginClientScoreNativePublication(ctx context.Context, r server.RedisClient
 // Both scripts retain their guards and run in order on the same hash slot.
 // Commit remains separate: no failed or unacknowledged batch can advance it.
 func (self *clientScoreNativePublication) beginWithPages(ctx context.Context, r server.RedisClient, pages []clientScoreRedisSet) error {
-	args := []any{self.expected, self.generation, self.ttl.Milliseconds()}
+	args := []any{self.expected, self.generation, self.expiryMillis()}
 	for _, page := range pages {
 		args = append(args, page.key, page.value)
 	}
 	pipe := r.Pipeline()
-	begin := pipe.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.ttl.Milliseconds(), self.slot)
+	begin := pipe.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.expiryMillis(), self.slot)
 	write := pipe.Eval(ctx, clientScoreNativePagesScript, []string{self.pointerKey, self.slotKey}, args...)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return err
@@ -223,7 +254,7 @@ func (self *clientScoreNativePublication) beginWithPages(ctx context.Context, r 
 }
 
 func (self *clientScoreNativePublication) writePages(ctx context.Context, r server.RedisClient, pages []clientScoreRedisSet) error {
-	args := []any{self.expected, self.generation, self.ttl.Milliseconds()}
+	args := []any{self.expected, self.generation, self.expiryMillis()}
 	for _, page := range pages {
 		args = append(args, page.key, page.value)
 	}
@@ -247,7 +278,7 @@ func (self *clientScoreNativePublication) commit(ctx context.Context, r server.R
 	data := encodeClientScoreGobValue(updateClientScoresPhaseMetrics, manifest)
 	checksum := sha256.Sum256(data)
 	pointer := fmt.Sprintf("%d:%s:%x", self.slot, self.generation, checksum)
-	args := []any{self.expected, self.generation, self.ttl.Milliseconds(), data, pointer}
+	args := []any{self.expected, self.generation, self.expiryMillis(), data, pointer}
 	written := map[string]bool{}
 	for _, field := range self.pageFields {
 		if written[field] {

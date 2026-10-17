@@ -104,9 +104,10 @@ type CircleApi interface {
 }
 
 type CoreCircleApiClient struct {
-	readSettings PaymentReadSettings
-	readHooks    paymentReadHooks
-	readToken    func() string
+	readSettings    PaymentReadSettings
+	readHooks       paymentReadHooks
+	readToken       func() string
+	readUsdcAddress func(string) (string, error)
 }
 
 // The returned client's read policy is immutable and safe for concurrent GETs.
@@ -377,8 +378,11 @@ type CircleListedTransaction struct {
 	WalletId           string    `json:"walletId"`
 	DestinationAddress string    `json:"destinationAddress"`
 	Amounts            []string  `json:"amounts"`
+	TokenId            string    `json:"tokenId"`
 	TxHash             string    `json:"txHash"`
 	CreateDate         time.Time `json:"createDate"`
+	// Set only after this token id resolves to the configured chain asset.
+	usdcAssetVerified bool
 }
 
 // Circle has no lookup by idempotency key: its transaction object does not
@@ -395,6 +399,12 @@ type circleTransactionLister interface {
 // destination fails the whole listing: a partial listing is never evidence
 // that a transfer is absent.
 func (self *CoreCircleApiClient) ListDestinationTransactions(ctx context.Context, blockchain string, destinationAddress string) ([]*CircleListedTransaction, error) {
+	return self.listDestinationTransactions(ctx, blockchain, destinationAddress, nil)
+}
+
+// The decision's safe exclusions bound asset reads without weakening complete
+// pagination, destination validation, or the one per-list read deadline.
+func (self *CoreCircleApiClient) listDestinationTransactions(ctx context.Context, blockchain string, destinationAddress string, relevant func(*CircleListedTransaction) bool) ([]*CircleListedTransaction, error) {
 	ctx, cancel, err := self.beginReads(ctx)
 	if err != nil {
 		return nil, err
@@ -446,6 +456,9 @@ func (self *CoreCircleApiClient) ListDestinationTransactions(ctx context.Context
 			transactions = append(transactions, transaction)
 		}
 		uri = next
+	}
+	if err := self.verifyListedUsdcAssets(ctx, blockchain, transactions, relevant); err != nil {
+		return nil, err
 	}
 	return transactions, nil
 }

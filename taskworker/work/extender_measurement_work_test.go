@@ -609,6 +609,42 @@ func TestExtenderMeasurementWaitsForTheWeeklyCap(t *testing.T) {
 	})
 }
 
+// C7 behind a backlog: while the weekly cap is spent, a pass leaves every
+// new extender's request pending, so the same longest waiting ones come back
+// each pass. A request the cap does not hold, a rotated key's here, is still
+// served at the next pass, however many capped requests wait ahead of it, and
+// more than one pass reads.
+func TestExtenderMeasurementServesAnUncappedRequestBehindACappedBacklog(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{issueCapPerWeek: 1})
+		now := server.NowUtc()
+
+		// the week's one new certificate
+		rotating := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		requestTestMeasurementCert(t, ctx, rotating, now.Add(-2*time.Hour))
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 1)
+
+		// new extenders, waiting longer than the rotated key will, and more of
+		// them than a pass reads
+		for i := range ExtenderMeasurementPendingLimit + 1 {
+			extenderId := createTestMeasurementExtender(t, ctx, 2+i, fmt.Sprintf("198.51.100.%d", 1+i%250))
+			requestTestMeasurementCert(t, ctx, extenderId, now.Add(-time.Hour).Add(time.Duration(i)*time.Second))
+		}
+		// the first extender rotates its key: a renewal to the CA
+		requestTestMeasurementCert(t, ctx, rotating, now)
+
+		result := runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Issued, 1)
+		connect.AssertEqual(t, result.Waiting, ExtenderMeasurementPendingLimit-1)
+		certs := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, rotating)
+		connect.AssertEqual(t, len(certs), 2)
+		connect.AssertEqual(t, certs[1].CapCounted, false)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, rotating).State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, env.ca.issuedCount(), 2)
+	})
+}
+
 // The zone with every change refused.
 type testRefusingMeasurementRoute53 struct {
 	*testMeasurementRoute53
@@ -1097,6 +1133,18 @@ func TestExtenderMeasurementTasksAreInertWhenDisabled(t *testing.T) {
 	})
 }
 
+// Records that the extender's poll (A8) read each of its live certificates,
+// as the first answer with a certificate's chain does.
+func deliverTestMeasurementCerts(t testing.TB, ctx context.Context, extenderId server.Id) {
+	t.Helper()
+	now := server.NowUtc()
+	for _, cert := range model.Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId) {
+		if cert.WithdrawTime == nil && now.Before(cert.NotAfter) {
+			model.MarkNetworkExtenderMeasurementCertDelivered(ctx, cert.CertId, now)
+		}
+	}
+}
+
 // Runs the publish drip and reads the MeasurementId of the record it signed
 // last for each extender (C10). The drip's smallest batch is larger than the
 // extenders a test makes, so each run signs every one of them again.
@@ -1119,11 +1167,13 @@ func runTestMeasurementDrip(t testing.TB, ctx context.Context, env *testMeasurem
 }
 
 // C10 through the drip: a record the publish tick signs for an extender whose
-// certificate's name is published (C8) carries its id as MeasurementId, from
-// which a reader computes its name. One signed while the name is not yet
-// published carries none, and so does one signed after its records went
-// missing until a pass publishes them again, so no reader looks a name up
-// before it resolves; nor does one for an extender without a certificate.
+// certificate's name is published (C8), and whose certificate its poll has
+// read (A8), carries its id as MeasurementId, from which a reader computes
+// its name. One signed while the name is not yet published carries none, and
+// so does one signed after its records went missing until a pass publishes
+// them again, so no reader looks a name up before it resolves; so does one
+// signed before the extender read its certificate, which it serves only from
+// then; nor does one for an extender without a certificate.
 func TestExtenderPublishSignsTheMeasurementId(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1138,8 +1188,13 @@ func TestExtenderPublishSignsTheMeasurementId(t *testing.T) {
 		connect.AssertEqual(t, len(measurementIds[withCert]), 0)
 		connect.AssertEqual(t, len(measurementIds[withoutCert]), 0)
 
-		// published: its id
+		// published, and not yet read by the extender: none
 		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Published, 1)
+		measurementIds = runTestMeasurementDrip(t, ctx, env)
+		connect.AssertEqual(t, len(measurementIds[withCert]), 0)
+
+		// read: its id
+		deliverTestMeasurementCerts(t, ctx, withCert)
 		measurementIds = runTestMeasurementDrip(t, ctx, env)
 		connect.AssertEqual(t, bytes.Equal(measurementIds[withCert], withCert.Bytes()), true)
 		connect.AssertEqual(t, len(measurementIds[withCert]), 16)
@@ -1208,6 +1263,8 @@ func TestExtenderMeasurementOptOutAndBack(t *testing.T) {
 		requestTestMeasurementCert(t, ctx, staying, now)
 		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 2)
 		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Names, 2)
+		deliverTestMeasurementCerts(t, ctx, optedOut)
+		deliverTestMeasurementCerts(t, ctx, staying)
 
 		// the owner opts out, as an activation with the flag does
 		connect.AssertEqual(t, model.OptOutNetworkExtenderMeasurement(ctx, testMeasurementExtenderPublicKey(1), controller.ExtenderMeasurementOptOutReason, server.NowUtc()), 1)

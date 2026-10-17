@@ -12,7 +12,7 @@ import (
 )
 
 // Signal proxy-device-target implements SIGNALS.md §14.7d. The process-wide
-// admission gate was removed; this checks the aggregate of private 24 MiB
+// admission gate was removed; this checks the aggregate of private 32 MiB
 // targets without mistaking the aggregate for a shared budget.
 func NewProxyDeviceTargetSignal() Signal {
 	return &signalAdapter{
@@ -31,7 +31,7 @@ const (
 	proxyDeviceTargetMarker    = "monitor-signal-14.7d-proxy-device-target"
 	proxyDeviceTargetEndpoint  = "http://127.0.0.1:3100/prometheus/api/v1/query"
 	proxyDeviceTargetFreshness = 90 * time.Second
-	proxyDeviceTargetBytes     = 24 * 1024 * 1024
+	proxyDeviceTargetBytes     = 32 * 1024 * 1024
 	proxyDeviceTargetMaxBytes  = 4 << 20
 	proxyDeviceTargetMaxSeries = 1024
 	proxyDeviceTargetSource    = "__source_timestamp"
@@ -223,7 +223,7 @@ func assessProxyDeviceTargets(processes map[string]*proxyDeviceTargetProcess, ex
 		findings = append(findings, proxyDeviceTargetFinding("proxy-device-target-unobservable", "proxy-fleet", "Fresh per-device target telemetry is incomplete", strings.Join(missing, ";")))
 	}
 	if len(invalid) > 0 {
-		findings = append(findings, proxyDeviceTargetFinding("proxy-device-target-mismatch", "proxy-fleet", "Proxy devices do not each report a 24 MiB target", strings.Join(invalid, ";")))
+		findings = append(findings, proxyDeviceTargetFinding("proxy-device-target-mismatch", "proxy-fleet", "Proxy devices do not each report a 32 MiB target", strings.Join(invalid, ";")))
 	}
 	if len(pressure) > 0 {
 		findings = append(findings, proxyDeviceTargetFinding("proxy-device-target-pressure", "proxy-fleet", "Tracked private device use exceeds the sum of targets", strings.Join(pressure, ";")))
@@ -256,15 +256,15 @@ func proxyDeviceTargetFinding(class, frame, symptom, observed string) finding {
 		probeId: "runtime/proxy-device-target", tier: tierWarn, class: class, target: "proxy-fleet", frame: frame, sustain: 1,
 		symptom:   symptom,
 		mechanism: "Proxy DeviceLocal memory targets are private; a missing, inconsistent, or over-target sample needs source and host-memory correlation, not a process-wide admission change.",
-		baseline:  "Every current Proxy device has its own 24 MiB target, so target bytes equal live devices times 24 MiB in every process generation.",
+		baseline:  "Every current Proxy device has its own 32 MiB target, so target bytes equal live devices times 32 MiB in every process generation.",
 		observed:  observed,
-		context:   "Tracked use is not total RSS and 24 MiB is a steady-state target, not a hard per-device heap limit. Host reserve, OOM, and UDP loss determine hardware pressure.",
-		action:    "Verify the running artifact and metric freshness, then compare §14.7 host RSS, MemAvailable, OOM, and UDP-loss evidence. Add hardware or rebalance if physical reserve is insufficient.",
+		context:   "Tracked use is not total RSS and 32 MiB is a steady-state target, not a hard per-device heap limit. Host reserve, OOM, and UDP loss determine hardware pressure.",
+		action:    "Verify effective device_memory_budget and any deliberate override, the running artifact, and metric freshness. Then compare §14.7 host RSS, MemAvailable, OOM, and UDP-loss evidence; add hardware or rebalance if physical reserve is insufficient.",
 		verify:    "Current process generations report coherent private targets and §14.7 host reserve remains healthy under ordinary acceptance.",
 		playbook:  "SIGNALS.md §14.7d",
 	}
 	if class == "proxy-device-shared-admission" {
-		result.mechanism = "The current Proxy image still exports a positive process-wide device admission ceiling; this can refuse an otherwise valid device despite its private 24 MiB target."
+		result.mechanism = "The current Proxy image still exports a positive process-wide device admission ceiling; this can refuse an otherwise valid device despite its private 32 MiB target."
 		result.action = "Verify the running Proxy artifact and complete the rollout of the per-device admission fix. Do not raise the retired process ceiling as a substitute."
 		result.verify = "No current Proxy process exports a positive retired shared-admission ceiling, and independent device opens succeed under ordinary load."
 	}

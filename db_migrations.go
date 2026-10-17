@@ -10380,18 +10380,76 @@ var migrations = []any{
 			ADD COLUMN publish_time timestamp NULL;
 	`),
 
-	// 836: opt-in v2 seals, append-only reward revisions and fenced source automation.
+	// 836: the FP2 modern provider gate's evidence (FP2FIX.md, 2026-10-14,
+	// option 4: probe-verified, shadow first). One row per provider with
+	// what the URL prober last observed of its end of a real session:
+	// end-to-end post-quantum encryption and resizable transfer windows,
+	// when that was measured, when it first was, and how many runs advanced
+	// it (model.RecordProviderModernEvidence). The passes that decide the
+	// buckets read it by client id. A new table, with no index past its key
+	// so every newer observation can update its row in place: nothing
+	// existing is read, locked or rewritten, provider_egress_health_history
+	// included. A server built with it requires it, so it must be applied
+	// before any such server runs against a database.
+	newSqlMigration(`
+		CREATE TABLE provider_modern_evidence (
+			client_id uuid NOT NULL PRIMARY KEY,
+			post_quantum bool NOT NULL,
+			key_exchange varchar(64) NOT NULL DEFAULT '',
+			window_resizable bool NOT NULL,
+			max_receive_window_byte_count bigint NOT NULL DEFAULT 0,
+			measured_at timestamp NOT NULL,
+			first_measured_at timestamp NOT NULL,
+			run_count int NOT NULL DEFAULT 1
+		);
+	`),
+
+	// 837: the dual-database ARIN canary's rollup slots (arindbctl/ARINDB.md).
+	// The rollup carries the latest and the old database's facts with their
+	// epochs. Additive with constant defaults that read as unavailable, never
+	// clean. Only network_client_location_reliability is locked.
+	newSqlMigration(arinDatabaseCanaryRollupSchemaSql),
+
+	// 838: the dual-database ARIN canary's connection slots. Connect stamps each
+	// connection with the facts of the latest and the old database; the old
+	// slot has its own write guard so a writer predating it cannot keep an
+	// earlier positive. Only network_client_location is locked, so this never
+	// waits on the rollup while it holds the location rows.
+	newSqlMigration(arinDatabaseCanaryLocationSchemaSql),
+
+	// 839: when A8 first handed each measurement certificate to its extender
+	// (lag.dev/PLAN.md A8, A4, C10). The dns reconcile publishes a new name
+	// within a minute or two of its issuance, but the extender installs the
+	// chain only when its next A8 poll reads it, up to half an hour later,
+	// and its name answers without it until then. The lag.dev sample and the
+	// records' MeasurementId wait for this time. No existing column records a
+	// delivery. A nullable column on a small table: nothing is rewritten.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_extender_measurement_cert
+			ADD COLUMN deliver_time timestamp NULL;
+	`),
+
+	// 840: retain original registration authority for idempotent session replay.
+	// No historical binding is inferred or backfilled from mutable client rows.
+	newSqlMigration(clientRegistrationSessionSchemaSql),
+
+	// 841: immutable seed-window recovery metadata; signed receipt bytes stay
+	// unchanged. The existing original-transition trigger protects the column.
+	newSqlMigration(verifyOriginalWindowSchemaSql),
+
+	// 842: opt-in v2 seals, append-only reward revisions and fenced source automation.
 	newSqlMigration(competitionAutomationMigration),
 
-	// 837: independently scoped holds and explicit immutable integrity incidents.
+	// 843: independently scoped holds and explicit immutable integrity incidents.
 	newSqlMigration(competitionAutomationIncidentMigration),
 
-	// 838: independently fence source activation, review identity and cursor publication.
+	// 844: independently fence source activation, review identity and cursor publication.
 	newSqlMigration(competitionAutomationGuardMigration),
 
-	// 839: retain safely abandoned unpublished source attempts and enforce review/revision consistency.
+	// 845: retain safely abandoned unpublished source attempts and enforce review/revision consistency.
 	newSqlMigration(competitionAutomationFallbackMigration),
 
-	// 840: bind pre-admission source qualification to its reserved round identity.
+	// 846: bind pre-admission source qualification to its reserved round identity.
 	newSqlMigration(competitionAutomationTargetMigration),
 }

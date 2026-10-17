@@ -162,6 +162,16 @@ func testing_newAltEnv(ctx context.Context, t testing.TB, mutate func(*Settings)
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprint(w, "hello")
 		}),
+		// whether the handshake had proved the caller's address when the
+		// request was served
+		router.NewRoute("GET", "/handshake", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			if r.TLS != nil && r.TLS.HandshakeComplete {
+				fmt.Fprint(w, "complete")
+			} else {
+				fmt.Fprint(w, "early")
+			}
+		}),
 	})
 
 	altServer, err := NewAlt(ctx, connectHandler, apiHandler, settings)

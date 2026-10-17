@@ -163,6 +163,8 @@ func TestExtenderActivateStoresAndSignsPerFamily(t *testing.T) {
 // location it resolved to -- none for loopback, which the mmdb cannot place.
 // A second activation is a second row, not an overwrite.
 func TestExtenderActivateRecordsTheActivationHistory(t *testing.T) {
+	useGeolocationThatPlacesNothing(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newTestExtenderFixture(t)
@@ -736,6 +738,8 @@ func TestExtenderActivateRefusesACallerItCannotAttribute(t *testing.T) {
 // extender. A loopback caller has no geolocation, so this is exactly that case:
 // what it must not do is cost an operator its extender over a lookup.
 func TestExtenderActivateSurvivesAGeolocationThatFindsNothing(t *testing.T) {
+	useGeolocationThatPlacesNothing(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newTestExtenderFixture(t)

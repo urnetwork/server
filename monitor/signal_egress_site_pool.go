@@ -258,12 +258,17 @@ func (self egressSitePoolProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	return append(evaluateEgressSitePool(settings, poolContext, pgTarget(env), observation), healthyFinding(schema.probeId, tierWarn, schema.class, pgTarget(env))), nil
 }
 
-// The first tally day of the refresh's window, as the refresh computes it
-// (model.ProviderEgressSiteTallyWindowStart).
+// The first tally day the refresh reads, as the refresh computes it: its
+// window's first day (model.ProviderEgressSiteTallyWindowStart), or the first
+// reached-only tally day (model.ProviderEgressSiteTallyContactedSince) when
+// that is later. An earlier day counts every run that reached no provider as
+// a failure of the site it loaded, so over it a country whose exits are
+// mostly offline reads as one where every site fails.
 func egressSitePoolWindowStartSql(siteSettings *model.ProviderEgressSiteSettings) string {
 	return fmt.Sprintf(
-		`date_trunc('day', (now() AT TIME ZONE 'utc') - interval '%d seconds')::date`,
+		`GREATEST(date_trunc('day', (now() AT TIME ZONE 'utc') - interval '%d seconds')::date, DATE '%s')`,
 		siteSettings.SiteWindowSeconds,
+		model.ProviderEgressSiteTallyContactedSince.Format(time.DateOnly),
 	)
 }
 

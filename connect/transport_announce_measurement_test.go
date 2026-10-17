@@ -214,7 +214,6 @@ func TestConnectionAnnounceMeasurementRegistrationOrdersPendingResponses(t *test
 		testConfig:      V0TestConfig(),
 		measurementWake: make(chan struct{}, 1),
 	}
-	defer announce.releaseArinShadowOwner()
 	announce.settings.MaxLatencyCount = 1
 	first := &LatencyTest{TestId: server.NewId()}
 	announce.latencyTest = first
@@ -400,7 +399,6 @@ func (self *measurementPublisherForTest) close() {
 	self.cancel()
 	self.releaseWrite()
 	self.announce.closeWorkersAndWait()
-	self.announce.releaseArinShadowOwner()
 }
 
 // Missing rows have zero counts and cannot be confused with persisted samples.

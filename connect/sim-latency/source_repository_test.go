@@ -49,7 +49,7 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 	root := t.TempDir()
 	frozen := sourceTestRepository(t, root, "server")
 	serverRoot := filepath.Join(root, "server")
-	content := "module module.example/server\n\ngo 1.23.0\n\nrequire gvisor.dev/gvisor v0.0.0\n\nreplace gvisor.dev/gvisor => ../gvisor\n"
+	content := "module module.example/server\n\ngo 1.23.0\n\nrequire module.example/synthetic-new-dependency v0.0.0\n\nreplace module.example/synthetic-new-dependency => ../synthetic-new-dependency\n"
 	if err := os.WriteFile(filepath.Join(serverRoot, "go.mod"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, frozen); err != nil {
 		t.Fatalf("moving main contaminated frozen dependency audit: %v", err)
 	}
-	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, current); err == nil || !strings.Contains(err.Error(), "gvisor is absent") {
+	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, current); err == nil || !strings.Contains(err.Error(), "synthetic-new-dependency is absent") {
 		t.Fatalf("new frozen base accepted an unpinned dependency: %v", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 // This independent fixture prevents a removed main dependency from silently
 // shrinking every serializer, validator, image copy, and source ledger together.
 func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"}
 	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
 		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
 	}
@@ -101,7 +101,7 @@ func sourceModuleGraphBytes(t *testing.T, repositories []string) []byte {
 	return encoded
 }
 
-// Removing Warp on main must not change the ten-repository evaluator lock.
+// Removing Warp on main must not change the eleven-repository evaluator lock.
 func TestSourceRepositoryCoverageRetainsFrozenDependencyRemovedFromMain(t *testing.T) {
 	locked := sourceRepositoryNames()
 	frozen := slices.Clone(locked)
@@ -431,6 +431,7 @@ write_evidence() { [[ $1 == staging-source.json ]]; printf '%s\n' "$2"; }
 		{name: "complete"},
 		{name: "missing-operator-proxy", omit: "operator-proxy"},
 		{name: "missing-warp", omit: "warp"},
+		{name: "missing-gvisor", omit: "gvisor"},
 		{name: "unexpected", extra: "unexpected"},
 		{name: "substituted", omit: "warp", extra: "unexpected"},
 		{name: "malformed-commit", change: "operator-proxy"},
@@ -560,10 +561,12 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
 		{name: "missing-operator-proxy", omit: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "missing-warp", omit: "warp", wantErr: "source lock is malformed"},
+		{name: "missing-gvisor", omit: "gvisor", wantErr: "source lock is malformed"},
 		{name: "unexpected", extra: "unexpected", wantErr: "source lock is malformed"},
 		{name: "substituted", omit: "warp", extra: "unexpected", wantErr: "source lock is malformed"},
 		{name: "operator-proxy-mismatch", change: "operator-proxy", wantErr: "repository operator-proxy does not match the source lock"},
 		{name: "warp-mismatch", change: "warp", wantErr: "repository warp does not match the source lock"},
+		{name: "gvisor-mismatch", change: "gvisor", wantErr: "repository gvisor does not match the source lock"},
 	} {
 		lockedCommits := maps.Clone(repositoryCommits)
 		if fixture.omit != "" {

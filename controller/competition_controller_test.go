@@ -305,13 +305,21 @@ func validSettings() *Settings {
 
 func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, rawScores []float64) []byte {
 	t.Helper()
-	frozenSettings, err := settingsForFrozenRound(settings, round)
-	if err != nil {
-		t.Fatal(err)
+	if roundUsesAutomation(round) {
+		frozenSettings, err := settingsForFrozenRound(settings, round)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings = frozenSettings
 	}
-	settings = frozenSettings
-	if len(rawScores) != settings.EvaluationPolicy.Replicates {
-		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), settings.EvaluationPolicy.Replicates)
+	// The evaluator receives the evaluation policy its round froze, so a
+	// staging round created since the no-margin change records margin zero.
+	evaluationPolicy := settings.EvaluationPolicy
+	if policy, err := decodeRoundPolicySnapshot(round.PolicyJson); err == nil {
+		evaluationPolicy = policy.EvaluationPolicy
+	}
+	if len(rawScores) != evaluationPolicy.Replicates {
+		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), evaluationPolicy.Replicates)
 	}
 	replicates := make([]roundBaselineReplicate, 0, len(rawScores))
 	for _, rawScore := range rawScores {
@@ -330,9 +338,9 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 	content, err := json.MarshalIndent(roundBaselineManifest{
 		ScoreSchema: ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: ScorerVersion,
 		RoundId: round.RoundId.String(), ConfigSha256: round.ProvidersSha256,
-		RequestTimeoutMs: settings.EvaluationPolicy.RequestTimeoutMs,
+		RequestTimeoutMs: evaluationPolicy.RequestTimeoutMs,
 		RunFlags:         map[string]string{"official": "true"},
-		TakeoverMargin:   settings.EvaluationPolicy.TakeoverMargin, Replicates: replicates,
+		TakeoverMargin:   evaluationPolicy.TakeoverMargin, Replicates: replicates,
 	}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -537,6 +545,83 @@ func TestCompetitionRoundBaselineFreezesOnceAndIsReused(t *testing.T) {
 		})
 		if updateErr == nil || !strings.Contains(updateErr.Error(), "append-only") {
 			t.Fatalf("round baseline mutation error = %v", updateErr)
+		}
+	})
+}
+
+// A staging round freezes a zero takeover margin, and its evaluator records
+// that margin in the round baseline. The round's next claim authenticates
+// the baseline against the round's margin, not the configured production
+// margin, which would refuse every later claim in the round.
+func TestCompetitionClaimAuthenticatesAZeroMarginStagingBaseline(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-zero-margin-claim"
+		settings.ArtifactRoot = t.TempDir()
+		currentTime := server.NowUtc().Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		listKey, memberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, listKey, memberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), listKey, memberKey).Err()
+			})
+		})
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+		if err != nil || policy.EvaluationPolicy.TakeoverMargin != 0 || settings.EvaluationPolicy.TakeoverMargin == 0 {
+			t.Fatalf("staging margin = %v, configured margin = %v, error = %v",
+				policy, settings.EvaluationPolicy.TakeoverMargin, err)
+		}
+		for _, name := range []string{"zero-margin-a", "zero-margin-b"} {
+			patch, patchErr := ValidateAndCanonicalizePatch(testPatch(name), settings.PatchPolicy)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			if _, cacheHit, enqueueErr := store.Enqueue(
+				ctx, settings, round.RoundId, patch, "miner-"+name, testApiImageDigest(),
+			); enqueueErr != nil || cacheHit {
+				t.Fatalf("enqueue %s: hit=%t error=%v", name, cacheHit, enqueueErr)
+			}
+		}
+
+		first, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || first == nil || first.RoundBaseline != nil {
+			t.Fatalf("first claim = %#v, %v", first, err)
+		}
+		baselineJson := testRoundBaseline(t, settings, &first.Round, []float64{100, 101, 99})
+		var baseline roundBaselineManifest
+		if err := json.Unmarshal(baselineJson, &baseline); err != nil || baseline.TakeoverMargin != 0 {
+			t.Fatalf("evaluator baseline margin = %v, error = %v", baseline.TakeoverMargin, err)
+		}
+		baselineDigest := sha256.Sum256(baselineJson)
+		outcome := EvaluationOutcome{
+			Error:               submissionError("run_unstable", "synthetic candidate instability"),
+			ArtifactManifest:    json.RawMessage(`{"schema":1}`),
+			RoundBaselineJson:   baselineJson,
+			RoundBaselineSha256: hex.EncodeToString(baselineDigest[:]),
+		}
+		if retry, err := store.Complete(ctx, settings, "worker-a", first.JobId, outcome); err != nil || retry {
+			t.Fatalf("freeze baseline: retry=%t error=%v", retry, err)
+		}
+
+		second, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || second == nil || second.JobId == first.JobId || second.RoundBaseline == nil ||
+			second.RoundBaseline.Sha256 != outcome.RoundBaselineSha256 {
+			t.Fatalf("claim after the zero-margin baseline froze = %#v, %v", second, err)
 		}
 	})
 }
@@ -896,10 +981,16 @@ func TestStagingAdmissionBypassesProductionReadinessAndEntersQueue(t *testing.T)
 	roundId := server.NewId()
 	jobId := server.NewId()
 	now := server.NowUtc()
+	// Every stored round carries its frozen policy (policy_json is NOT NULL),
+	// and Info authenticates a staging round's policy before publishing it.
+	policyJson, err := policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stagingRound := &roundRecord{RoundResult: RoundResult{
 		RoundId: roundId, Epoch: 0, Staging: true, Status: "open",
 		OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour),
-	}}
+	}, CompetitionId: settings.CompetitionId, PolicyJson: policyJson}
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: jobId, RoundId: roundId, Staging: true, State: "queued",
@@ -2507,7 +2598,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)`,
+		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B sim-latency "$expected_commit"`,
 		`source_lock_sha256`,
@@ -2533,7 +2624,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$baseline_source_root"`,
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
-		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do`,
+		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do`,
 		`rev-parse --verify HEAD:connect/sim-latency`,
 		`candidate changed the protected sim-latency source tree`,
 		`EVALUATION_SOURCE_DIR=$source`,
@@ -2553,7 +2644,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildSubmissionBytes),
-		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do",
+		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do",
 	) {
 		t.Fatal("submission builder does not authenticate the complete source graph")
 	}
@@ -2678,7 +2769,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildBaseBytes),
-		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)",
+		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)",
 	) {
 		t.Fatal("evaluator base repository allowlist changed; re-audit config/vault exclusion")
 	}

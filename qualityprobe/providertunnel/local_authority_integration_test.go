@@ -106,7 +106,10 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 		defer sa.Close()
 		counted := &countedProbeAuthority{Authority: sa, rejectingApiUrl: trap.URL}
 		host := "localquality"
-		exchange := connectserver.NewExchange(ctx, host, "connect", "test", map[int]int{7300: 7300}, map[string]string{host: "127.0.0.1"}, connectserver.DefaultExchangeSettings())
+		exchange, err := newPrivateTestExchange(ctx, host)
+		if err != nil {
+			tb.Fatal(err)
+		}
 		hs := connectserver.DefaultConnectHandlerSettings()
 		hs.ListenH3Port = 0
 		hs.ListenDnsPort = 0
@@ -203,7 +206,7 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 		}))
 		defer payload.Close()
 		defer useHermeticTunnelClientSettings()()
-		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 15 * time.Second, DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1 << 20}
+		cfg := Config{ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: sourceJwt, ClientId: connect.Id(sourceClientId), DataOnlyProbe: true, KeepClientKeysLocal: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 15 * time.Second, DnsResolverSettings: &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}}, ContractReservationByteCount: 1 << 20}
 		tunnel, e := Open(ctx, cfg, connect.Id(providerClientId))
 		if e != nil {
 			tb.Fatal(e)

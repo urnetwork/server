@@ -1644,9 +1644,9 @@ func SumStDepositedRao(ctx context.Context, deploymentKey StDeploymentKey, epoch
 
 // SumStDepositedInBlockRangeRao sums the α (rao) of every mirrored
 // Deposited event with block_number in [minBlock, maxBlock), across epochs
-// and NOs — the demand deposits inside a wall-clock window mapped to chain
-// blocks (the public stats collector, controller/stats_collector.go). The
-// kind+block index covers the scan.
+// and NOs — the demand deposits inside a settlement epoch's chain blocks (the
+// public stats collector, controller/stats_collector.go). Deposits stay on
+// the coordinator under settlement v2. The kind+block index covers the scan.
 func SumStDepositedInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
 	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
@@ -1675,39 +1675,54 @@ func SumStDepositedInBlockRangeRao(ctx context.Context, deploymentKey StDeployme
 	return total
 }
 
-// parsePoolSweptEvent extracts the measured α (rao) from a PoolSwept
-// `st_event.data_json` (the decimal-string fields written by the event
-// decoder in st_controller.go: `no_id`, `measured`, `swept`, `move_ok`).
-// Returns ok=false on any malformed row.
-func parsePoolSweptEvent(dataJson string) (measured *big.Int, ok bool) {
+// parseEmissionCapturedEvent extracts the captured α (rao) from a mirrored
+// emission capture `st_event.data_json`: a PoolSwept row's `measured` (the
+// release-1.0 vault's EmissionCaptured, and the legacy sweep, as the event
+// decoder in st_controller.go writes them), or a V2EmissionCaptured row's
+// `amount` (vault2's EmissionCaptured, st_ledger_v2_client.go). Returns
+// ok=false on any other kind or malformed row.
+func parseEmissionCapturedEvent(kind string, dataJson string) (captured *big.Int, ok bool) {
 	var data struct {
 		Measured string `json:"measured"`
+		Amount   string `json:"amount"`
 	}
 	if err := json.Unmarshal([]byte(dataJson), &data); err != nil {
 		return nil, false
 	}
-	m, mOk := new(big.Int).SetString(data.Measured, 10)
-	if !mOk {
+	var value string
+	switch kind {
+	case "PoolSwept":
+		value = data.Measured
+	case "V2EmissionCaptured":
+		value = data.Amount
+	default:
 		return nil, false
 	}
-	return m, true
+	amount, amountOk := new(big.Int).SetString(value, 10)
+	if !amountOk {
+		return nil, false
+	}
+	return amount, true
 }
 
-// SumStPoolSweptMeasuredInBlockRangeRao sums the measured α (rao) of every
-// mirrored PoolSwept event with block_number in [minBlock, maxBlock) — the
-// miner emission captured by the D-4 sweeps inside a wall-clock window
-// mapped to chain blocks (the public stats collector,
-// controller/stats_collector.go).
-func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
+// SumStEmissionCapturedInBlockRangeRao sums the α (rao) of every mirrored
+// emission capture with block_number in [minBlock, maxBlock): PoolSwept rows,
+// which the release-1.0 settlement vault's EmissionCaptured is mirrored as,
+// and the settlement v2 vault's V2EmissionCaptured, which carries every capture
+// from v2's first epoch. The capture of an epoch's emission happens in the
+// next epoch's close window, so it lands in the next epoch's range. Read by
+// the public stats collector (controller/stats_collector.go); the kind+block
+// index covers the scan.
+func SumStEmissionCapturedInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
 	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT data_json
+                SELECT kind, data_json
                 FROM st_event
-				WHERE deployment_key = $1 AND kind = 'PoolSwept' AND $2 <= block_number AND block_number < $3
+				WHERE deployment_key = $1 AND kind IN ('PoolSwept', 'V2EmissionCaptured') AND $2 <= block_number AND block_number < $3
             `,
 			key,
 			int64(minBlock),
@@ -1715,10 +1730,11 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey St
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				var kind string
 				var dataJson string
-				server.Raise(result.Scan(&dataJson))
-				if measured, ok := parsePoolSweptEvent(dataJson); ok {
-					total.Add(total, measured)
+				server.Raise(result.Scan(&kind, &dataJson))
+				if captured, ok := parseEmissionCapturedEvent(kind, dataJson); ok {
+					total.Add(total, captured)
 				}
 			}
 		})
@@ -1727,9 +1743,12 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey St
 }
 
 // parseMinerClaimedEvent extracts the claiming coldkey and the claimed α
-// (rao) from a MinerClaimed `st_event.data_json` (the fields written by the
-// event decoder in st_controller.go: `e`, `no_id`, `coldkey`, `share_bps`,
-// `amount`, `caller`). Returns ok=false on any malformed row.
+// (rao) from a MinerClaimed or V2Claimed `st_event.data_json`. Both decoders
+// write `coldkey` as 0x hex and `amount` as a decimal string: the release-1.0
+// vault's Claimed (st_controller.go: `e`, `no_id`, `coldkey`, `share_bps`,
+// `amount`, `caller`) and vault2's Claimed (st_ledger_v2_client.go: `no_id`,
+// `root_index`, `index`, `coldkey`, `cumulative`, `amount`, `caller`), whose
+// `amount` is that claim's payment. Returns ok=false on any malformed row.
 func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, ok bool) {
 	var data struct {
 		Coldkey string `json:"coldkey"`
@@ -1745,14 +1764,15 @@ func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, o
 	if !amtOk {
 		return "", nil, false
 	}
-	return data.Coldkey, amt, true
+	return strings.ToLower(data.Coldkey), amt, true
 }
 
-// SumStMinerClaimedInBlockRange sums the α (rao) of every mirrored
-// MinerClaimed event with block_number in [minBlock, maxBlock) and counts
-// the distinct claiming coldkeys — the miner payouts claimed inside a
-// wall-clock window mapped to chain blocks (the public stats collector,
-// controller/stats_collector.go). The kind+block index covers the scan.
+// SumStMinerClaimedInBlockRange sums the α (rao) of every mirrored miner
+// claim with block_number in [minBlock, maxBlock) and counts the distinct
+// claiming coldkeys: MinerClaimed rows (the release-1.0 vault's Claimed) and
+// V2Claimed rows (vault2's), so a coldkey that claims from both vaults counts
+// once. Read by the public stats collector (controller/stats_collector.go);
+// the kind+block index covers the scan.
 func SumStMinerClaimedInBlockRange(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) (amountRao *big.Int, minerCount int64) {
 	key := requireStDeploymentKey(deploymentKey)
 	amountRao = big.NewInt(0)
@@ -1763,7 +1783,7 @@ func SumStMinerClaimedInBlockRange(ctx context.Context, deploymentKey StDeployme
 			`
                 SELECT data_json
                 FROM st_event
-				WHERE deployment_key = $1 AND kind = 'MinerClaimed' AND $2 <= block_number AND block_number < $3
+				WHERE deployment_key = $1 AND kind IN ('MinerClaimed', 'V2Claimed') AND $2 <= block_number AND block_number < $3
             `,
 			key,
 			int64(minBlock),

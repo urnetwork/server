@@ -4,11 +4,13 @@ package connect
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	// "fmt"
 	"math"
 	mathrand "math/rand"
 	"net/netip"
+	"runtime"
 	"sync"
 	"time"
 
@@ -43,9 +45,43 @@ var drainExcusesConsumedCounter = prometheus.NewCounter(
 	},
 )
 
+var connectionSyncReadFailuresCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_sync_read_failures_total",
+		Help:      "Sync rounds of live connection announcements whose read failed; the round was retried later and the transport kept",
+	},
+)
+
+// The announcement workers' writes, by operation: the measurement publisher's
+// database write and the verify egress lease refresh in Redis.
+var connectionWorkerFailuresCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_worker_failures_total",
+		Help:      "Writes of live connection announcement workers that failed; the write was retried later and the transport kept",
+	},
+	[]string{"operation"},
+)
+
+const (
+	connectionWorkerOperationMeasurementWrite  = "measurement_write"
+	connectionWorkerOperationVerifyEgressLease = "verify_egress_lease"
+)
+
 func init() {
 	prometheus.MustRegister(connectionNewCounter)
 	prometheus.MustRegister(drainExcusesConsumedCounter)
+	prometheus.MustRegister(connectionSyncReadFailuresCounter)
+	prometheus.MustRegister(connectionWorkerFailuresCounter)
+	for _, operation := range []string{
+		connectionWorkerOperationMeasurementWrite,
+		connectionWorkerOperationVerifyEgressLease,
+	} {
+		connectionWorkerFailuresCounter.WithLabelValues(operation)
+	}
 }
 
 // connectionCleanupTimeout bounds the detached database/redis cleanup that
@@ -61,6 +97,7 @@ func connectionCleanupContext(parent context.Context) (context.Context, context.
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
+		SyncRetryMaxTimeout:   2 * model.ReliabilityBlockDuration,
 		LocationRetryTimeout:  5 * time.Minute,
 		// PeerRegisterTtl is derived from ExchangeResidentTtl in
 		// NewConnectHandler (must equal the heartbeat refresh ttl or
@@ -86,7 +123,11 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 
 type ConnectionAnnounceSettings struct {
 	SyncConnectionTimeout time.Duration
-	LocationRetryTimeout  time.Duration
+	// a sync round whose read failed, or a worker write that failed, is
+	// retried after SyncConnectionTimeout, doubling with each further
+	// consecutive failure up to this bound
+	SyncRetryMaxTimeout  time.Duration
+	LocationRetryTimeout time.Duration
 	// ttl for the network peer registration made at announce
 	PeerRegisterTtl time.Duration
 	// set from ExchangeSettings.EnableNetworkPeers in NewConnectHandler (the
@@ -132,15 +173,43 @@ type ConnectionAnnounceSettings struct {
 	connectionDisconnectedForTest func(server.Id, error)
 	// Replaces connectionVerifySettings.
 	verifySettingsForTest func() (*model.VerifySettings, bool)
+	// Observes each provider liveness lease write's outcome for the connection.
+	livenessLeaseWrittenForTest func(outcome string)
+	// Replaces the process's lease writer.
+	livenessLeaseWriterForTest *providerLivenessLeaseWriter
 }
 
 type LatencyTest struct {
 	TestId server.Id
 }
 
+// The writer sends the requested bytes as probes between a start and a stop
+// control. A response counts only when the probes the reader got back between
+// the echoed controls total exactly that.
 type SpeedTest struct {
 	TestId         uint32
 	TotalByteCount model.ByteCount
+}
+
+// Each speed test probe is a zero byte, the big-endian test id, then random
+// bytes. While a test runs, the client echoes every frame over 16 bytes,
+// including user frames the platform interleaves with the probes, and keeps
+// sending its own traffic, so the reader must tell the test's probes apart. No
+// Transfer frame starts with a zero byte, which as a protobuf tag would be
+// field number zero.
+const speedTestProbeByteCount = 1024
+
+// Writes the probe header of the test over the start of the probe.
+func setSpeedTestProbeHeader(probe []byte, testId uint32) {
+	probe[0] = 0
+	binary.BigEndian.PutUint32(probe[1:5], testId)
+}
+
+// Reports whether the frame is a probe of the test.
+func isSpeedTestProbe(message []byte, testId uint32) bool {
+	return len(message) == speedTestProbeByteCount &&
+		message[0] == 0 &&
+		binary.BigEndian.Uint32(message[1:5]) == testId
 }
 
 func DefaultTestConfig() *TestConfig {
@@ -190,9 +259,13 @@ type ConnectionAnnounce struct {
 	ipFamilyIntent int
 	// the client's app version from its auth, for the provider rollout gauge
 	// (providerVersionConnection); "" when it sent none
-	appVersion      string
-	handlerId       server.Id
-	announceTimeout time.Duration
+	appVersion string
+	handlerId  server.Id
+	// the handler's reconcile, which holds this connection's row from its
+	// registration until the end of its final disconnect; nil without a
+	// handler owner (transport_announce_reconcile.go)
+	connectionReconcile *handlerConnectionReconcile
+	announceTimeout     time.Duration
 
 	settings *ConnectionAnnounceSettings
 
@@ -200,7 +273,6 @@ type ConnectionAnnounce struct {
 
 	stateLock           sync.Mutex
 	connectionId        *server.Id
-	shadowCaptureLease  *arinShadowOwnerLease
 	receiveMessageCount uint64
 	receiveByteCount    ByteCount
 	sendMessageCount    uint64
@@ -261,60 +333,14 @@ type connectionMeasurements struct {
 	speedSampleCount   uint64
 }
 
-func NewConnectionAnnounceWithDefaults(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	networkId server.Id,
-	clientId server.Id,
-	clientAddress string,
-	handlerId server.Id,
-	announceTimeout time.Duration,
-) *ConnectionAnnounce {
-	return NewConnectionAnnounce(
-		ctx,
-		cancel,
-		networkId,
-		clientId,
-		clientAddress,
-		handlerId,
-		announceTimeout,
-		DefaultTestConfig(),
-		DefaultConnectionAnnounceSettings(),
-	)
-}
-
-// NewConnectionAnnounce announces a legacy, family-agnostic connection
-// (intent 0). Family-pinned transports use NewConnectionAnnounceWithIpFamily.
-func NewConnectionAnnounce(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	networkId server.Id,
-	clientId server.Id,
-	clientAddress string,
-	handlerId server.Id,
-	announceTimeout time.Duration,
-	testConfig *TestConfig,
-	settings *ConnectionAnnounceSettings,
-) *ConnectionAnnounce {
-	return NewConnectionAnnounceWithIpFamily(
-		ctx,
-		cancel,
-		networkId,
-		clientId,
-		clientAddress,
-		0,
-		"",
-		handlerId,
-		announceTimeout,
-		testConfig,
-		settings,
-	)
-}
-
-// NewConnectionAnnounceWithIpFamily is NewConnectionAnnounce with the address
-// family the transport declared it intends to prove (0, 4 or 6) and the
-// client's app version from its auth.
-func NewConnectionAnnounceWithIpFamily(
+// The announcement of a transport that a ConnectHandler owns, the only kind in
+// production: connectionReconcile is that handler's, holds the row while the
+// transport lives, and retires it if its final disconnect fails. ipFamilyIntent
+// is the address family the transport declared it intends to prove (0, 4 or
+// 6) and appVersion the client's app version from its auth. Tests announce
+// without a reconcile through NewConnectionAnnounce*
+// (transport_announce_testing_test.go).
+func newConnectionAnnounceWithReconcile(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	networkId server.Id,
@@ -323,6 +349,7 @@ func NewConnectionAnnounceWithIpFamily(
 	ipFamilyIntent int,
 	appVersion string,
 	handlerId server.Id,
+	connectionReconcile *handlerConnectionReconcile,
 	announceTimeout time.Duration,
 	testConfig *TestConfig,
 	settings *ConnectionAnnounceSettings,
@@ -336,6 +363,7 @@ func NewConnectionAnnounceWithIpFamily(
 		ipFamilyIntent:         ipFamilyIntent,
 		appVersion:             appVersion,
 		handlerId:              handlerId,
+		connectionReconcile:    connectionReconcile,
 		announceTimeout:        announceTimeout,
 		settings:               settings,
 		testConfig:             testConfig,
@@ -356,13 +384,16 @@ func NewConnectionAnnounceWithIpFamily(
 		if lifecycleDone != nil {
 			defer lifecycleDone()
 		}
-		defer announce.releaseArinShadowOwner()
 		server.HandleError(announce.run, cancel)
 	}()
 	return announce
 }
 
 // Starts one child only while the announcement lifecycle still accepts work.
+// A raise ends that child only and leaves the client's transport connected.
+// The children write measurements and verify leases, and a failed database
+// or Redis write says nothing about the connection: canceling the transport
+// for it would disconnect every live client whose write fell in an outage.
 func (self *ConnectionAnnounce) startWorker(run func()) bool {
 	self.workerStateLock.Lock()
 	defer self.workerStateLock.Unlock()
@@ -373,7 +404,7 @@ func (self *ConnectionAnnounce) startWorker(run func()) bool {
 	go server.HandleError(func() {
 		defer self.workerGroup.Done()
 		run()
-	}, self.cancel)
+	})
 	return true
 }
 
@@ -471,23 +502,47 @@ func (self *ConnectionAnnounce) run() {
 	// FIXME compute expected latency between client and this edge
 	// FIXME store edge coordinated in the config as host variables
 	// FIXME pass the host coordinate in here so the expected latency can be set
-	connectionId, clientAddressHash, err := controller.ConnectNetworkClientWithIpFamily(
-		self.ctx,
-		self.clientId,
-		self.clientAddress,
-		self.handlerId,
-		self.settings.LocationRetryTimeout,
-		self.ipFamilyIntent,
-		self.networkId,
-	)
+	// The handler's reconcile holds the row from the moment its id returns. A
+	// registration that raises after its commit ends unheld, and the reconcile
+	// retires the row it may have left.
+	var connectionId server.Id
+	var clientAddressHash [32]byte
+	var err error
+	func() {
+		var heldConnectionId *server.Id
+		endConnect := self.connectionReconcile.beginConnect()
+		defer func() {
+			endConnect(heldConnectionId)
+		}()
+		connectionId, clientAddressHash, err = controller.ConnectNetworkClientWithIpFamily(
+			self.ctx,
+			self.clientId,
+			self.clientAddress,
+			self.handlerId,
+			self.settings.LocationRetryTimeout,
+			self.ipFamilyIntent,
+			self.networkId,
+		)
+		if err == nil {
+			heldConnectionId = &connectionId
+		}
+	}()
 	if err != nil {
 		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)
 		return
 	}
 	// Registered as soon as the committed row's id exists, so a raise in any
 	// later step still disconnects the row, exactly once. Handler retirement
-	// does not cover a row whose handler is alive.
+	// does not cover a row whose handler is alive, so when this final
+	// disconnect fails the release hands the row to the handler's reconcile.
 	cleanup = func() {
+		// whether the final disconnect was written; DisconnectNetworkClient
+		// raises a failed write, and returns an error only for a row no longer
+		// connected
+		disconnectWritten := false
+		defer func() {
+			self.connectionReconcile.release(connectionId, disconnectWritten)
+		}()
 		server.HandleError(func() {
 			// The transport is normally canceled before cleanup begins. Preserve
 			// its values but detach cancellation, then add a hard bound so a lost
@@ -495,28 +550,49 @@ func (self *ConnectionAnnounce) run() {
 			cleanupCtx, cleanupCancel := connectionCleanupContext(self.ctx)
 			defer cleanupCancel()
 			disconnectErr := model.DisconnectNetworkClient(cleanupCtx, connectionId)
+			disconnectWritten = true
 			if verifyEgressOk {
 				model.ClearVerifyConnectionEgress(cleanupCtx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}
 			if glog.V(1) {
 				glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
 			}
-			if disconnected := self.settings.connectionDisconnectedForTest; disconnected != nil {
-				disconnected(connectionId, disconnectErr)
+			if disconnectedForTest := self.settings.connectionDisconnectedForTest; disconnectedForTest != nil {
+				disconnectedForTest(connectionId, disconnectErr)
 			}
 		})
 	}
 
 	if verifyEgressOk {
-		model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+		// A lease write that fails, the first one included, is retried with
+		// the bounded backoff, never later than the regular refresh, and never
+		// ends the transport: at worst the lease lapses after EgressTtl, which
+		// withdraws the address from attribution, as a closed connection does.
+		feedFailureCount := 0
+		feed := func() {
+			if feedErr := self.recoverLiveCall(func() {
+				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+			}); feedErr != nil {
+				feedFailureCount += 1
+				defaultLiveFailureLog.record(liveFailureOperationVerifyEgressLease, feedFailureCount, feedErr)
+				return
+			}
+			feedFailureCount = 0
+		}
+		feed()
+		// only this worker feeds from here on
 		self.startWorker(func() {
 			for {
+				timeout := verifySettings.EgressRefreshInterval
+				if 0 < feedFailureCount {
+					timeout = min(timeout, self.retryTimeout(feedFailureCount))
+				}
 				select {
 				case <-self.ctx.Done():
 					return
-				case <-time.After(verifySettings.EgressRefreshInterval):
+				case <-time.After(timeout):
 				}
-				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+				feed()
 			}
 		})
 	}
@@ -531,6 +607,15 @@ func (self *ConnectionAnnounce) run() {
 	// sync below reads anyway
 	providerVersion := newProviderVersionConnection(defaultProviderVersionConnections, self.appVersion)
 	defer providerVersion.release()
+	// the client's provider liveness lease, written by the process's writer
+	// from now, pending the rounds below finding the client providing for
+	// discovery (transport_announce_liveness_lease.go)
+	livenessLeaseWriter := defaultProviderLivenessLeaseWriter
+	if self.settings.livenessLeaseWriterForTest != nil {
+		livenessLeaseWriter = self.settings.livenessLeaseWriterForTest
+	}
+	livenessLease := livenessLeaseWriter.begin(self.clientId, self.settings.livenessLeaseWrittenForTest)
+	defer livenessLease.end()
 
 	// register this client in the network peer registry, now that the
 	// connection has survived the announce window. 2026-07-15 outage:
@@ -600,15 +685,16 @@ func (self *ConnectionAnnounce) run() {
 
 	established := self.announceTimeout == 0
 	nextStartTime := server.NowUtc()
+	// consecutive sync rounds whose read failed
+	syncFailureCount := 0
 	for {
 		nextTestTimeout := nextTest()
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-time.After(nextTestTimeout):
-		case <-time.After(self.settings.SyncConnectionTimeout):
-			startTime := nextStartTime
-			nextStartTime = server.NowUtc()
+		case <-time.After(self.retryTimeout(syncFailureCount)):
+			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
 			/*
@@ -618,6 +704,21 @@ func (self *ConnectionAnnounce) run() {
 					return
 				}
 			*/
+
+			// The read comes first: a round whose read fails consumes nothing,
+			// so the next round's provide changes and stats cover this one.
+			var changedCount int
+			var currentProvideModes map[model.ProvideMode]bool
+			if readErr := self.recoverLiveCall(func() {
+				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
+			}); readErr != nil {
+				syncFailureCount += 1
+				defaultLiveFailureLog.record(liveFailureOperationSyncRead, syncFailureCount, readErr)
+				continue
+			}
+			syncFailureCount = 0
+			startTime := nextStartTime
+			nextStartTime = roundEndTime
 
 			var receiveMessageCount uint64
 			var receiveByteCount ByteCount
@@ -643,9 +744,9 @@ func (self *ConnectionAnnounce) run() {
 				SendByteCount:       sendByteCount,
 			}
 
-			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
 			provideEnabled := currentProvideModes[model.ProvideModePublic]
 			providerVersion.update(provideEnabled, nextStartTime)
+			livenessLease.afterRead(currentProvideModes)
 			// stats only matter for providers
 			// avoid populating stats for non-providers
 			if provideEnabled || 0 < changedCount {
@@ -736,6 +837,52 @@ func (self *ConnectionAnnounce) run() {
 	}
 }
 
+// Runs one database or Redis read or write of a live announcement and returns
+// its raise as an error. A raise in run() ends the announcement, and run
+// cancels the client's transport as it returns: a database outage then
+// disconnected every live connection whose sync fell in it, exactly while the
+// disconnect writes could not commit (2026-10-13). A raise in a worker ends
+// only the worker, because HandleError does not call the context.CancelFunc
+// that startWorker hands it, so the connection silently lost its measurement
+// writes or its verify lease refreshes for the rest of its life. A failed
+// read or write says nothing about the connection, so the caller keeps going
+// and retries. The announcement's own end still raises, and so does a
+// programming fault: a runtime error, or a raise that is not an error.
+func (self *ConnectionAnnounce) recoverLiveCall(call func()) (callErr error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if self.ctx.Err() != nil {
+			panic(r)
+		}
+		if _, fault := r.(runtime.Error); fault {
+			panic(r)
+		}
+		err, ok := r.(error)
+		if !ok {
+			panic(r)
+		}
+		callErr = err
+	}()
+	call()
+	return nil
+}
+
+// The wait before the next attempt after failureCount consecutive failures:
+// the sync interval for none or one, then doubling up to SyncRetryMaxTimeout.
+// The sync loop waits it between rounds, so a failed round retries at the
+// next regular tick; the workers wait it before retrying a failed write.
+func (self *ConnectionAnnounce) retryTimeout(failureCount int) time.Duration {
+	timeout := self.settings.SyncConnectionTimeout
+	maxTimeout := max(self.settings.SyncRetryMaxTimeout, timeout)
+	for i := 1; i < failureCount && timeout < maxTimeout; i += 1 {
+		timeout *= 2
+	}
+	return min(timeout, maxTimeout)
+}
+
 // Connect and API are separate processes, so the observed-egress writer must
 // resolve the same canonical verify.yml settings as the API reader. Using the
 // model defaults here creates a second, unkeyed Redis namespace whenever the
@@ -761,8 +908,6 @@ func (self *ConnectionAnnounce) setConnectionId(connectionId server.Id) {
 		speed:          0 < self.speedCount,
 		bytesPerSecond: self.maxBytesPerSecond,
 	})
-	self.shadowCaptureLease.close()
-	self.shadowCaptureLease = currentArinShadowOwners.add(connectionId, self)
 }
 
 func (self *ConnectionAnnounce) ConnectionId() *server.Id {
@@ -1064,8 +1209,14 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // one in-flight snapshot and one coalesced successor, with no additional worker
 // per connection. A database stall may delay passive sampling, as before, but
 // cannot delay the reader. Cancellation joins this child before model cleanup.
+// A write that fails keeps the transport: the snapshot stays pending, and the
+// latest one is written after the bounded backoff. Snapshots are cumulative
+// and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
 	passiveSampleTime := time.After(self.settings.PassiveSpeedWindowDuration)
+	// consecutive failed writes; while a retry waits, no write is attempted
+	writeFailureCount := 0
+	var writeRetryTime <-chan time.Time
 	for {
 		passiveSampleDue := false
 		select {
@@ -1074,6 +1225,8 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		case <-self.measurementWake:
 		case <-passiveSampleTime:
 			passiveSampleDue = true
+		case <-writeRetryTime:
+			writeRetryTime = nil
 		}
 		if self.ctx.Err() != nil {
 			return
@@ -1089,19 +1242,36 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		if passiveSampleDue {
 			self.samplePassiveSpeed()
 		}
-		measurements, pending := func() (connectionMeasurements, bool) {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if self.measurementsClosed || !self.measurementPending {
-				return connectionMeasurements{}, false
-			}
-			self.measurementPending = false
-			return self.measurementSnapshot, true
-		}()
-		if pending {
-			self.writeMeasurements(measurements)
-			if published := self.measurementPublishedForTest; published != nil {
-				published(measurements)
+		if writeRetryTime == nil {
+			measurements, pending := func() (connectionMeasurements, bool) {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.measurementsClosed || !self.measurementPending {
+					return connectionMeasurements{}, false
+				}
+				self.measurementPending = false
+				return self.measurementSnapshot, true
+			}()
+			if pending {
+				if writeErr := self.recoverLiveCall(func() {
+					self.writeMeasurements(measurements)
+				}); writeErr != nil {
+					writeFailureCount += 1
+					defaultLiveFailureLog.record(liveFailureOperationMeasurementWrite, writeFailureCount, writeErr)
+					func() {
+						self.stateLock.Lock()
+						defer self.stateLock.Unlock()
+						if !self.measurementsClosed {
+							self.measurementPending = true
+						}
+					}()
+					writeRetryTime = time.After(self.retryTimeout(writeFailureCount))
+				} else {
+					writeFailureCount = 0
+					if published := self.measurementPublishedForTest; published != nil {
+						published(measurements)
+					}
+				}
 			}
 		}
 		if passiveSampleDue {

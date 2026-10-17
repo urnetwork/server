@@ -184,6 +184,26 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert DROP COLUMN publish_time`},
 		{"required measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET NOT NULL`},
 		{"invented measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET DEFAULT now()`},
+		{"missing modern provider evidence", 836, `DROP TABLE provider_modern_evidence`},
+		{"modern provider evidence not one row per provider", 836, `ALTER TABLE provider_modern_evidence DROP CONSTRAINT provider_modern_evidence_pkey`},
+		{"nullable modern provider observation time", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN measured_at DROP NOT NULL`},
+		{"modern provider key exchange widened", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN key_exchange TYPE varchar(65)`},
+		{"modern provider receive window narrowed", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN max_receive_window_byte_count TYPE integer`},
+		{"invented modern provider run count", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN run_count SET DEFAULT 0`},
+		{"old slot verified by default", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_verified SET DEFAULT true`},
+		{"missing old slot epoch", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DROP COLUMN arin_old_database_build_epoch`},
+		{"defaulted old slot token", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_write_token SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
+		{"missing rollup old epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability DROP COLUMN arin_old_epoch`},
+		{"nullable rollup latest epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability ALTER COLUMN arin_epoch DROP NOT NULL`},
+		{"disabled old slot guard", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DISABLE TRIGGER network_client_location_arin_old_quality_guard`},
+		{"narrowed old slot guard", arindbCanaryLocationMigrationVersion, `DROP TRIGGER network_client_location_arin_old_quality_guard ON network_client_location;
+			CREATE TRIGGER network_client_location_arin_old_quality_guard BEFORE INSERT OR UPDATE OF arin_old_quality_verified
+			ON network_client_location FOR EACH ROW EXECUTE FUNCTION network_client_location_arin_old_quality_guard()`},
+		{"replaced old slot guard", arindbCanaryLocationMigrationVersion, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
+			LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{"missing measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert DROP COLUMN deliver_time`},
+		{"required measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET NOT NULL`},
+		{"invented measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET DEFAULT now()`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

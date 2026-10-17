@@ -1476,7 +1476,7 @@
     },
     {
       "type": "timeseries",
-      "title": "weekly users: current vs last finished block",
+      "title": "epoch users: current vs last finished epoch",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1518,25 +1518,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_users{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_users{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "current block"
+          "legendFormat": "current epoch"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_users{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_prev_epoch_users{env=\"$env\"})",
           "refId": "B",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished epoch"
         }
       ],
-      "description": "Unique top-level identities with contract usage. The current accumulator resets at 00:00 UTC Sunday; the previous series is the final value of the last finished block and is absent until one has been observed."
+      "description": "Unique top-level identities with contract usage. The current accumulator resets at each settlement epoch rollover; the previous series is the final value of the last finished epoch and is absent until one has been observed since deploy."
     },
     {
       "type": "timeseries",
-      "title": "weekly demand deposits: current vs last finished block",
+      "title": "epoch demand deposits: current vs last finished epoch",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1578,25 +1578,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_demand_deposits_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_demand_deposits_alpha{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "current block"
+          "legendFormat": "current epoch"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_prev_epoch_demand_deposits_alpha{env=\"$env\"})",
           "refId": "B",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished epoch"
         }
       ],
-      "description": "Alpha demand deposits measured from the mirrored contract events for the current weekly block and the last finished block."
+      "description": "Alpha demand deposits measured from the mirrored contract events over the current settlement epoch's chain blocks and the last finished epoch's."
     },
     {
       "type": "timeseries",
-      "title": "weekly miner emissions: current vs last finished block",
+      "title": "epoch miner emissions: current vs last finished epoch",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1638,21 +1638,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_emissions_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_miner_emissions_alpha{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "current block"
+          "legendFormat": "current epoch"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_emissions_alpha{env=\"$env\"})",
           "refId": "B",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished epoch"
         }
       ],
-      "description": "Alpha miner emission captured from the mirrored contract events for the current weekly block and the last finished block."
+      "description": "Alpha miner emission captured, from the mirrored contract events (v1 vault and vault2) over the current settlement epoch's chain blocks and the last finished epoch's. An epoch's emission is captured in the next epoch's first 120 blocks."
     },
     {
       "type": "timeseries",
@@ -1912,7 +1912,7 @@
           "legendFormat": "users"
         }
       ],
-      "description": "Unique top-level identities with contract usage in the trailing 24 hours (the block users predicate over a rolling window)."
+      "description": "Unique top-level identities with contract usage in the trailing 24 hours (the epoch users predicate over a rolling window)."
     },
     {
       "type": "timeseries",
@@ -1967,7 +1967,7 @@
     },
     {
       "type": "timeseries",
-      "title": "weekly miner claims: current vs last finished block",
+      "title": "epoch miner claims: current vs last finished epoch",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2009,25 +2009,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miner_claims_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_miner_claims_alpha{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "current block"
+          "legendFormat": "current epoch"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_prev_epoch_miner_claims_alpha{env=\"$env\"})",
           "refId": "B",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished epoch"
         }
       ],
-      "description": "Alpha claimed by miners (MinerClaimed events in the st_event mirror) inside the weekly block window."
+      "description": "Alpha claimed by miners (MinerClaimed and V2Claimed events in the st_event mirror) inside the settlement epoch's chain blocks."
     },
     {
       "type": "timeseries",
-      "title": "miners claiming: current vs last finished block",
+      "title": "miners claiming: current vs last finished epoch",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2069,32 +2069,32 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_miners_claimed{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_miners_claimed{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "current block"
+          "legendFormat": "current epoch"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_prev_block_miners_claimed{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_prev_epoch_miners_claimed{env=\"$env\"})",
           "refId": "B",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished epoch"
         }
       ],
-      "description": "Distinct miner coldkeys with a MinerClaimed event inside the weekly block window."
+      "description": "Distinct miner coldkeys with a MinerClaimed or V2Claimed event inside the settlement epoch's chain blocks."
     },
     {
       "type": "timeseries",
-      "title": "subnet block clock",
+      "title": "settlement epoch clock",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
       "gridPos": {
         "h": 6,
-        "w": 24,
+        "w": 8,
         "x": 0,
         "y": 109
       },
@@ -2129,16 +2129,16 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_number{env=\"$env\"})",
+          "expr": "max(urnetwork_stats_epoch_number{env=\"$env\"})",
           "refId": "A",
-          "legendFormat": "block number"
+          "legendFormat": "epoch number"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_block_end_seconds{env=\"$env\"}) - time()",
+          "expr": "max(urnetwork_stats_epoch_end_seconds{env=\"$env\"}) - time()",
           "refId": "B",
           "legendFormat": "seconds until rollover"
         },
@@ -2147,12 +2147,242 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "time() - max(urnetwork_stats_block_start_seconds{env=\"$env\"})",
+          "expr": "time() - max(urnetwork_stats_epoch_start_seconds{env=\"$env\"})",
           "refId": "C",
-          "legendFormat": "seconds since block open"
+          "legendFormat": "seconds since epoch start"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_epoch_start_seconds{env=\"$env\"}) - max(urnetwork_stats_prev_epoch_start_seconds{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "last finished epoch, seconds"
         }
       ],
-      "description": "The block clock the collector publishes for the public dashboard's progress gauge: the 1-based block number and the current block's open and close unix times (as seconds relative to now here). A flat block number with a sawtooth remaining time is healthy; a jump at any time other than Sunday 00:00 UTC is a clock or collector fault."
+      "description": "The settlement epoch clock the collector publishes (controller/stats_epoch_clock.go): the coordinator's epoch number, the current epoch's start and projected end as seconds relative to now, and the last finished epoch's length. The start is the first block's header timestamp; the end is projected from the finalized head at 12 s a block, so it moves by seconds as the head is re-read. A flat epoch number with a sawtooth remaining time is healthy; a jump while time remains is a clock or collector fault."
+    },
+    {
+      "type": "timeseries",
+      "title": "settlement epoch blocks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 109
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_epoch_start_block{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "first block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_epoch_end_block{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "next epoch's first block"
+        }
+      ],
+      "description": "The chain blocks of the current settlement epoch as the coordinator schedules them: its first block (epochStartBlock) and the next epoch's first block (epochEndBlock). Mainnet epochs from 1 on are 50,400 blocks; epoch 0 was 7,200 from block 9,240,028."
+    },
+    {
+      "type": "timeseries",
+      "title": "deprecated block aliases",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 109
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_number{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "block_number"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_start_seconds{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "block_start_seconds"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_end_seconds{env=\"$env\"})",
+          "refId": "C",
+          "legendFormat": "block_end_seconds"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_users{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "block_users"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_users{env=\"$env\"})",
+          "refId": "E",
+          "legendFormat": "prev_block_users"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_demand_deposits_alpha{env=\"$env\"})",
+          "refId": "F",
+          "legendFormat": "block_demand_deposits_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha{env=\"$env\"})",
+          "refId": "G",
+          "legendFormat": "prev_block_demand_deposits_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_emissions_alpha{env=\"$env\"})",
+          "refId": "H",
+          "legendFormat": "block_miner_emissions_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha{env=\"$env\"})",
+          "refId": "I",
+          "legendFormat": "prev_block_miner_emissions_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_claims_alpha{env=\"$env\"})",
+          "refId": "J",
+          "legendFormat": "block_miner_claims_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha{env=\"$env\"})",
+          "refId": "K",
+          "legendFormat": "prev_block_miner_claims_alpha"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miners_claimed{env=\"$env\"})",
+          "refId": "L",
+          "legendFormat": "block_miners_claimed"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miners_claimed{env=\"$env\"})",
+          "refId": "M",
+          "legendFormat": "prev_block_miners_claimed"
+        }
+      ],
+      "description": "The names the epoch gauges had as block gauges, published with the same values for stats feeds deployed before the epoch clock. Each matches its urnetwork_stats_epoch_* or urnetwork_stats_prev_epoch_* gauge; nothing in this repo reads them, and they go once no older feed runs."
     },
     {
       "type": "timeseries",

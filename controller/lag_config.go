@@ -25,7 +25,7 @@ import (
 //	# tracks and their tickets (A6)
 //	track_client_limit: 12       # per client per track_limit_window
 //	track_prefix_limit: 60       # per /24 (/48) per track_limit_window
-//	track_signature_limit: 30    # per signing agent (Signature-Agent) per track_limit_window
+//	track_signature_limit: 30    # reserved; requires authenticated agent identity, not a header claim
 //	track_limit_window: 1h
 //	track_max_extenders: 12      # 8 dots and 4 spares
 //	track_reissue_max: 8         # reissued tickets per track, for dots that reconnect

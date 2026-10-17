@@ -589,10 +589,12 @@ func preparePaymentPlanReliabilityWindow(ctx context.Context, minTime time.Time,
 				window.shiftedMaxBlockNumber(),
 				window.effectiveBlockCount,
 			))
-			// remove rows not refreshed in this round, as the single statement did
+			// Both bounds identify this fold; a later start can exclude a provider
+			// even when the previous window had the same end.
 			server.RaisePgResult(tx.Exec(
 				ctx,
-				`DELETE FROM network_connection_reliability_score WHERE max_block_number != $1`,
+				`DELETE FROM network_connection_reliability_score WHERE min_block_number <> $1 OR max_block_number <> $2`,
+				window.shiftedMinBlockNumber(),
 				window.shiftedMaxBlockNumber(),
 			))
 			server.RaisePgResult(tx.Exec(

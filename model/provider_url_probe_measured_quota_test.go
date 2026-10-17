@@ -15,7 +15,7 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 		ctx := t.Context()
 		now := server.NowUtc().Truncate(time.Microsecond)
 		clientId := testingUrlCompletionClients(t, now.Add(-3*time.Hour), 1)[0]
-		var firstAt time.Time
+		var firstAt, lastAt time.Time
 		for turn := range ProviderUrlProbeRunTarget {
 			at := now.Add(-30*time.Minute + time.Duration(turn)*2*time.Minute)
 			due := testingClaimUrlCompletion(t, ctx, clientId, at)
@@ -26,6 +26,7 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 			if turn == 0 {
 				firstAt = at
 			}
+			lastAt = at
 			result := &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId,
 				CycleStartedAt: due.CycleStartedAt, MeasuredAt: at, Total: 1}
 			testingSetUrlProbeHealth(ctx, result)
@@ -42,7 +43,7 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 		}
 		cycle := testingReadUrlCompletionCycle(t, ctx, clientId)
 		if cycle.history != 10 || cycle.successes != 0 || cycle.errors != 10 || cycle.count != 10 ||
-			!cycle.next.Equal(firstAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
+			!cycle.next.Equal(testingSpreadNewRule(firstAt, lastAt)) {
 			t.Fatalf("receipt dedup, diagnostics or failure completion pacing drifted: %+v", cycle)
 		}
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{ClientId: clientId, AttemptAt: now, ProbeFailure: "setup_failed"})

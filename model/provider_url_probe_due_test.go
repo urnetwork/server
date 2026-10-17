@@ -1,4 +1,5 @@
 // Durable URL scheduling is paced, quota-bound, and independent of process life.
+// Connected fixtures carry the current reliability history URL admission needs.
 package model
 
 import (
@@ -40,6 +41,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
@@ -89,7 +91,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 				t.Fatalf("turn %d replay changed progress: successes=%d errors=%d", turn, successes, errors)
 			}
 			if turn+1 == ProviderUrlProbeRunTarget {
-				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(firstSuccessAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
+				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(testingSpreadNewRule(firstSuccessAt, now)) {
 					t.Fatalf("rolling quota missed its replacement deadline: completion=%s next=%s first=%s", now, next, firstSuccessAt)
 				}
 			} else {
@@ -124,6 +126,9 @@ func TestUrlProbeDueUsesReliabilityAndArinRisk(t *testing.T) {
 		risk := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, &ConnectionLocationScores{ArinRisk: true})
 		tls := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
 		unreliable := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		for _, provider := range []*egressTestProvider{clean, nonQuality, risk, tls} {
+			testingInsertProviderReliabilityWitness(ctx, provider.clientId)
+		}
 		egressTestBlackhole(ctx, clean.clientId)
 		egressTestReliability(ctx, unreliable.clientId, 1, 0.1, 1)
 		testingSetUrlProbeHealth(ctx, &ProviderEgressHealth{ClientId: tls.clientId, MeasuredAt: server.NowUtc(), Total: 1, TLSAuthenticationFailure: true})
@@ -157,6 +162,9 @@ func TestUrlProbeDueCarriesEachProvidersNetwork(t *testing.T) {
 		first := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
 		second := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
 		other := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		for _, provider := range []*egressTestProvider{first, second, other} {
+			testingInsertProviderReliabilityWitness(ctx, provider.clientId)
+		}
 		// the second provider's device and client join the first's network
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE device SET network_id=$1
@@ -187,6 +195,7 @@ func TestUrlProbeLocalFailurePreservesQuotaAndEvidence(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
@@ -225,6 +234,7 @@ func TestUrlProbeEligibilityHintPreservesPacing(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
@@ -266,6 +276,7 @@ func TestUrlProbeRollingWindowExpiresOldSuccesses(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc().Truncate(time.Microsecond)
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		startedAt := now.Add(-5 * time.Hour)
@@ -298,6 +309,7 @@ func TestUrlProbeUnversionedOutcomesNeverFillQuota(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
@@ -370,7 +382,7 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 				if successes != 10 || errors != 10 || ordinal != 20 || history != 20 {
 					t.Fatalf("concurrent receipts lost or duplicated progress: success=%d error=%d ordinal=%d history=%d", successes, errors, ordinal, history)
 				}
-				renewalAt := now.Add(ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom)
+				renewalAt := testingSpreadNewRule(now, now)
 				if !next.Equal(renewalAt) {
 					t.Fatalf("concurrent receipts lost oldest-measurement renewal pacing: got %s, want %s", next, renewalAt)
 				}
@@ -387,6 +399,9 @@ func TestUrlProbeSecurityRechecksContinueAfterRollingQuota(t *testing.T) {
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		known := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
 		unknown := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		for _, provider := range []*egressTestProvider{known, unknown} {
+			testingInsertProviderReliabilityWitness(ctx, provider.clientId)
+		}
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
@@ -466,6 +481,7 @@ func TestUrlProbeFleetTracksMissingWarmupAndRollingExpiry(t *testing.T) {
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		testingInsertProviderReliabilityWitness(ctx, provider.clientId)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)

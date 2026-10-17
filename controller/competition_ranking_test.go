@@ -161,6 +161,11 @@ func TestCompetitionLegacyFinalizedLeaderboardRetainsNormalizedOrdering(t *testi
 					admission_closed_at = closes_at WHERE round_id = $1
 			`, fixture.round.RoundId, fixture.now))
 		}, server.OptReadWrite())
+		// The leaderboard reader joins the staging approval table, which
+		// migration 721 publishes, so the first board is read at that oldest
+		// schema the reader supports. The round above was scored and
+		// finalized at 677.
+		server.ApplyDbMigrationsUpTo(context.Background(), 721)
 		var original []byte
 		for iteration := range 2 {
 			if iteration == 1 {

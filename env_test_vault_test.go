@@ -80,6 +80,130 @@ func TestTestBinaryReadsFixtureVaults(t *testing.T) {
 	}
 }
 
+// A test's vault that does not exist yet is below its temp directory even when
+// the temp directory is reached through a link, as Darwin's /var is. The guard
+// used to resolve the link of the temp directory, which exists, but not of the
+// absent vault, so it refused the vault, and its lookups read as refused rather
+// than absent and were never cached. A link that leaves the temp directory
+// still leaves it.
+func TestTestBinaryReadsAnAbsentVaultBelowALinkedTempDirectory(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	temp := t.TempDir()
+	linkedTemp := filepath.Join(t.TempDir(), "linked-temp")
+	if err := os.Symlink(temp, linkedTemp); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", linkedTemp)
+	vaultHome := filepath.Join(linkedTemp, "absent", "vault")
+	if err := refuseNonFixtureVault(vaultHome, true); err != nil {
+		t.Fatalf("an absent vault below the linked temp directory was refused: %v", err)
+	}
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	if _, err := Vault.SimpleResource("fixture.yml"); !errors.Is(err, ErrResourceNotFound) || strings.Contains(err.Error(), TestRealVaultEnv) {
+		t.Fatalf("the absent vault read %v, want the plain lookup of an absent vault", err)
+	}
+
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(temp, "leaves")); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseNonFixtureVault(filepath.Join(linkedTemp, "leaves", "absent", "vault"), true); err == nil {
+		t.Fatal("an absent vault below a link out of the temp directory was accepted")
+	}
+	if err := refuseNonFixtureVault(filepath.Join(linkedTemp, "absent", "..", "..", "outside", "vault"), true); err == nil {
+		t.Fatal("an absent vault that climbs out of the temp directory was accepted")
+	}
+}
+
+// A vault home that climbs out of an absent directory and into a link, such as
+// <temp>/absent/../link, is judged as the resolver opens it: cleaned, and so
+// through the link. The guard resolved only the cleaned path's parent and
+// admitted a link from the temp directory to a vault outside every fixture
+// root, whose main/pg.yml a test then read with WARP_ENV=main. That vault is
+// refused whether the temp directory is given resolved, as Linux's /tmp is, or
+// through Darwin's /var link.
+func TestTestBinaryRefusesAVaultHomeThatClimbsIntoALink(t *testing.T) {
+	t.Setenv("WARP_ENV", "main")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	t.Setenv("WARP_TEST_ENV_LAUNCHER_VAULT_HOME", "")
+	const marker = "stand-in-for-a-main-secret"
+	for _, resolvedTemp := range []bool{false, true} {
+		secretVault := filepath.Join(t.TempDir(), "secret-vault")
+		writeResolverFixture(t, secretVault, map[string]string{
+			"main/pg.yml": "authority: pg.main.example:5432\nuser: main\npassword: " + marker + "\ndb: main\n",
+		})
+		temp := t.TempDir()
+		if resolvedTemp {
+			resolved, err := filepath.EvalSymlinks(temp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			temp = resolved
+		}
+		// the secret vault is not below the temp directory
+		t.Setenv("TMPDIR", temp)
+		if err := refuseNonFixtureVault(secretVault, true); err == nil {
+			t.Fatalf("resolved temp %t: the secret vault is a fixture", resolvedTemp)
+		}
+		if err := os.Symlink(secretVault, filepath.Join(temp, "link")); err != nil {
+			t.Fatal(err)
+		}
+		separator := string(filepath.Separator)
+		vaultHome := temp + separator + "absent" + separator + ".." + separator + "link"
+		if err := refuseNonFixtureVault(vaultHome, true); err == nil {
+			t.Errorf("resolved temp %t: %s was accepted as a fixture", resolvedTemp, vaultHome)
+		}
+		t.Setenv("WARP_VAULT_HOME", vaultHome)
+		resource, err := Vault.SimpleResource("pg.yml")
+		if err == nil && strings.Contains(string(resource.Bytes()), marker) {
+			t.Errorf("resolved temp %t: a test read main/pg.yml through %s", resolvedTemp, vaultHome)
+		} else if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), TestRealVaultEnv) {
+			t.Errorf("resolved temp %t: pg.yml read %v, want the refusal of a vault that is not a fixture", resolvedTemp, err)
+		}
+	}
+}
+
+// A resource path names a file inside its vault. One that climbs out with ..,
+// such as ../../<elsewhere>/main/pg.yml, reached any file the test could open,
+// from a fixture vault and under the explicit opt-in alike; it is refused
+// before any lookup.
+func TestTestBinaryRefusesAResourcePathThatClimbsOutOfItsVault(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
+	t.Setenv(TestRealVaultEnv, "")
+	t.Setenv("GOTMPDIR", "")
+	t.Setenv("WARP_TEST_ENV_LAUNCHER_VAULT_HOME", "")
+	const marker = "stand-in-for-a-main-secret"
+	secretVault := filepath.Join(t.TempDir(), "secret-vault")
+	writeResolverFixture(t, secretVault, map[string]string{
+		"main/pg.yml": "authority: pg.main.example:5432\nuser: main\npassword: " + marker + "\ndb: main\n",
+	})
+	vaultHome := filepath.Join(t.TempDir(), "vault")
+	writeResolverFixture(t, vaultHome, map[string]string{"local/placeholder.yml": "key: value\n"})
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	relPath, err := filepath.Rel(vaultHome, filepath.Join(secretVault, "main", "pg.yml"))
+	if err != nil || filepath.IsLocal(relPath) {
+		t.Fatalf("the resource path %q, %v does not climb out of the vault", relPath, err)
+	}
+	for _, optIn := range []string{"", "1"} {
+		t.Setenv(TestRealVaultEnv, optIn)
+		resource, err := Vault.SimpleResource(relPath)
+		if err == nil && strings.Contains(string(resource.Bytes()), marker) {
+			t.Errorf("opt-in %q: %s read a file outside the vault", optIn, relPath)
+		} else if !errors.Is(err, ErrResourceNotFound) || !strings.Contains(err.Error(), "stays inside its vault") {
+			t.Errorf("opt-in %q: %s read %v, want the refusal of a path that leaves the vault", optIn, relPath, err)
+		}
+	}
+	if resource, err := Vault.SimpleResource("placeholder.yml"); err != nil || resource.RequireString("key") != "value" {
+		t.Fatalf("the vault's own placeholder.yml read %v", err)
+	}
+}
+
 // The guard runs before the resolution cache: a resolution cached while a test
 // opted in to a non-fixture vault is refused once the opt-in is withdrawn, and
 // a refusal is never cached.

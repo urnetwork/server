@@ -2536,6 +2536,19 @@ return 1
 // caller was canceled.
 const provideMirrorUnfillTimeout = 5 * time.Second
 
+// Deletes an undecodable mode list while it still holds the value read, with
+// the take-back script over the mode list alone, so a list another writer
+// wrote meanwhile stays. The refill that follows confirms its own fill. Best
+// effort: a failure leaves the next read to try again.
+func dropUndecodableProvideMirror(ctx context.Context, clientId server.Id, undecodableProvideModesListJson string) {
+	glog.Infof("[ncm]provide mode mirror undecodable, replacing it from postgres\n")
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(provideMirrorUnfillScript.Run(ctx, r, []string{provideModesKey(clientId)}, undecodableProvideModesListJson).Err())
+		})
+	})
+}
+
 // Reads every provide key of a client in one statement. A client with no keys
 // returns an empty map, which the refill mirrors as an empty mode list.
 func loadProvideSecretKeys(ctx context.Context, clientId server.Id) (secretKeys map[ProvideMode][]byte) {
@@ -2627,7 +2640,11 @@ func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map
 	})
 }
 
+// The client's provide modes, from the Redis mirror when it holds a decodable
+// list, else from the keys in postgres, which also refill the mirror. A mirror
+// that cannot be decoded is replaced from postgres by the read that finds it.
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
+	undecodableProvideModesListJson := ""
 	server.Redis(ctx, func(r server.RedisClient) {
 		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
 		if provideModesListJson == "" {
@@ -2637,7 +2654,7 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 		var provideModesList []ProvideMode
 		err := json.Unmarshal([]byte(provideModesListJson), &provideModesList)
 		if err != nil {
-			returnErr = err
+			undecodableProvideModesListJson = provideModesListJson
 			return
 		}
 		provideModes = map[ProvideMode]bool{}
@@ -2645,6 +2662,12 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 			provideModes[provideMode] = true
 		}
 	})
+	// An undecodable mirror would stay for its ttl, since the refill never
+	// overwrites a mirror, and every read of it would go to postgres. Drop it
+	// while it still holds the value read, then refill from postgres below.
+	if undecodableProvideModesListJson != "" {
+		dropUndecodableProvideMirror(ctx, clientId, undecodableProvideModesListJson)
+	}
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
@@ -2671,6 +2694,7 @@ func GetProvideSecretKey(
 	// both together, so a list without this mode means postgres has no key.
 	provideModesListed := false
 	provideModeListed := false
+	undecodableProvideModesListJson := ""
 	server.Redis(ctx, func(r server.RedisClient) {
 		// both keys share the {pm_<clientId>} hash tag (one slot)
 		values, err := r.MGet(ctx, provideModeSecretKeyKey(clientId, provideMode), provideModesKey(clientId)).Result()
@@ -2687,6 +2711,8 @@ func GetProvideSecretKey(
 			if json.Unmarshal([]byte(provideModesListJson), &provideModesList) == nil {
 				provideModesListed = true
 				provideModeListed = slices.Contains(provideModesList, provideMode)
+			} else {
+				undecodableProvideModesListJson = provideModesListJson
 			}
 		}
 	})
@@ -2702,7 +2728,12 @@ func GetProvideSecretKey(
 	// is load-bearing for idle clients whose keys expired, not just for
 	// provide_key rows older than the redis layer. It refills the whole
 	// mirror when the mode list is missing too; a listed mode whose secret
-	// alone is missing reads postgres until its list expires.
+	// alone is missing reads postgres until its list expires. An undecodable
+	// list is dropped first, as in GetProvideModes, or the refill could never
+	// replace it.
+	if undecodableProvideModesListJson != "" {
+		dropUndecodableProvideMirror(ctx, clientId, undecodableProvideModesListJson)
+	}
 	secretKeys := loadProvideSecretKeys(ctx, clientId)
 	if !provideModesListed {
 		refillProvideMirror(ctx, clientId, secretKeys)
@@ -2912,6 +2943,11 @@ func SetProvide(
 // Every connected client's announce loop calls this on each sync. The count is
 // one statement, so it runs without a transaction: BEGIN and COMMIT would add
 // two round trips during which its pooled server sits idle in transaction.
+// The modes come from GetProvideModes, which replaces a provide mode mirror
+// that cannot be decoded from the keys in postgres. Discarding its error used
+// to report a providing client as providing nothing, which removed its live
+// connection from the provider gauge and skipped its reliability stats. A
+// failed read raises, as the change count does.
 func GetProvideKeyChanges(
 	ctx context.Context,
 	clientId server.Id,
@@ -2941,7 +2977,8 @@ func GetProvideKeyChanges(
 		})
 	})
 
-	provideModes, _ = GetProvideModes(ctx, clientId)
+	provideModes, err := GetProvideModes(ctx, clientId)
+	server.Raise(err)
 
 	return
 }
@@ -3213,7 +3250,10 @@ func ConnectNetworkClientWithIpFamily(
 
 // The exclusive endpoint fence orders retirement; read committed observes its
 // current head after a wait. Conflicts still retry within Tx's existing bound.
-// Handler expiry retires any connection left after transport cancellation.
+// This is the transport's single final write. When it fails while the
+// handler stays alive, handler expiry never reaches the row; the handler's
+// connection reconcile retires it (RetireNetworkClientHandlerConnection).
+// Handler expiry retires the rows of a handler whose process ended.
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
 	ctx = providerWorkSessionContext(ctx)
 	var disconnectErr error
@@ -3251,6 +3291,162 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 	}, server.TxReadCommitted)
 
 	return disconnectErr
+}
+
+// The connections still marked connected under a live handler, for that
+// handler's connection reconcile. The partial index
+// network_client_connection_connected_handler_id bounds the read to the
+// handler's open rows; closed rows are never visited.
+func GetConnectedNetworkClientHandlerConnectionIds(ctx context.Context, handlerId server.Id) (connectionIds []server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		connectionIds = nil
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT connection_id
+				FROM network_client_connection
+				WHERE
+					handler_id = $1 AND
+					connected
+			`,
+			handlerId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var connectionId server.Id
+				server.Raise(result.Scan(&connectionId))
+				connectionIds = append(connectionIds, connectionId)
+			}
+		})
+	})
+	return
+}
+
+// Disconnects a row that its live handler no longer holds, with the endpoint
+// fence and session events of DisconnectNetworkClient, but never queues: the
+// shared bridge, the endpoint fence, the session head and the row itself are
+// each taken with a try-lock or SKIP LOCKED, as handler expiry takes them
+// (retireNetworkClientHandlerPageInTx). Any one held elsewhere defers the row:
+// deferred is true, and the caller retries it later. A queued retire held a
+// pooled connection, and the caller's whole pass, for as long as the owner
+// kept the fence. Only a row still connected under handlerId changes: a late
+// or repeated retire never moves an earlier disconnect time, and another
+// handler's row is never touched. disconnectTime is when the transport ended,
+// or the retire time when the caller does not know it.
+func RetireNetworkClientHandlerConnection(
+	ctx context.Context,
+	handlerId server.Id,
+	connectionId server.Id,
+	disconnectTime time.Time,
+) (retired bool, deferred bool) {
+	ctx = providerWorkSessionContext(ctx)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		retired = false
+		deferred = false
+		server.Raise(ctx.Err())
+		var clientId server.Id
+		err := tx.QueryRow(
+			ctx,
+			`
+				SELECT client_id
+				FROM network_client_connection
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+			`,
+			connectionId,
+			handlerId,
+		).Scan(&clientId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		server.Raise(errors.Join(err, ctx.Err()))
+		var acquired bool
+		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared(-776::bigint)`).Scan(&acquired)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if !acquired {
+			deferred = true
+			return
+		}
+		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(776,('x'||substr(md5($1::uuid::text),1,8))::bit(32)::int)`, clientId).Scan(&acquired)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if !acquired {
+			deferred = true
+			return
+		}
+		var busy bool
+		err = tx.QueryRow(ctx, `WITH owned AS (
+			 SELECT client_id FROM provider_work_session_head WHERE client_id=$1 FOR UPDATE SKIP LOCKED)
+			 SELECT EXISTS(SELECT 1 FROM provider_work_session_head WHERE client_id=$1)
+			 AND NOT EXISTS(SELECT 1 FROM owned)`, clientId).Scan(&busy)
+		server.Raise(errors.Join(err, ctx.Err()))
+		if busy {
+			deferred = true
+			return
+		}
+		_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
+		server.Raise(errors.Join(err, ctx.Err()))
+		// the row itself: its own transport's disconnect or another owner may
+		// hold it, and a row disconnected meanwhile needs nothing
+		var lockedConnectionId server.Id
+		err = tx.QueryRow(
+			ctx,
+			`
+				SELECT connection_id
+				FROM network_client_connection
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+				FOR UPDATE SKIP LOCKED
+			`,
+			connectionId,
+			handlerId,
+		).Scan(&lockedConnectionId)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var stillConnected bool
+			err = tx.QueryRow(
+				ctx,
+				`
+					SELECT EXISTS(
+						SELECT 1 FROM network_client_connection
+						WHERE connection_id = $1 AND handler_id = $2 AND connected
+					)
+				`,
+				connectionId,
+				handlerId,
+			).Scan(&stillConnected)
+			server.Raise(errors.Join(err, ctx.Err()))
+			deferred = stillConnected
+			return
+		}
+		server.Raise(errors.Join(err, ctx.Err()))
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client_connection
+				SET
+					connected = false,
+					disconnect_time = $3
+				WHERE
+					connection_id = $1 AND
+					handler_id = $2 AND
+					connected
+			`,
+			connectionId,
+			handlerId,
+			disconnectTime.UTC(),
+		))
+		if tag.RowsAffected() == 0 {
+			return
+		}
+		retired = true
+		providerWorkRetainSessionEventsInTx(ctx, tx, clientId)
+	}, server.TxReadCommitted, server.OptNoRetry())
+
+	return
 }
 
 // `minConnectionTime` bounds how long disconnected connection rows are

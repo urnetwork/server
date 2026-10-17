@@ -69,7 +69,7 @@ func TestUrlProbeRejectedLocalWriterIsNotMeasured(t *testing.T) {
 		counted := &countedProbeAuthority{Authority: authority}
 		tunnel, err := Open(ctx, Config{
 			ApiUrl: trap.URL, PlatformUrl: "ws" + platform.URL[4:], ByJwt: token, ClientId: connect.Id(sourceClient),
-			DataOnlyProbe: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 10 * time.Second,
+			DataOnlyProbe: true, KeepClientKeysLocal: true, ClientCredentials: counted, ClientControl: counted, CloseTimeout: 10 * time.Second,
 			DnsResolverSettings:          &connect.DnsResolverSettings{EnableRemoteDoh: true, RemoteDohUrlsIpv4: []string{dns.URL + "/dns-query"}},
 			ContractReservationByteCount: 1024 * 1024,
 		}, connect.Id(providerClient))

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -101,6 +102,21 @@ type taskworkerRuntime interface {
 	WaitFinalHandback() bool
 }
 
+// The runtime startTaskworkerRuntime starts: its worker, and the lifetime
+// observers and execution loops beside it, each of which returns after the
+// lifetime context ends.
+type taskworkerRuntimeOwner struct {
+	*task.TaskWorker
+	lifetime sync.WaitGroup
+}
+
+// Wait joins the goroutines the runtime started. They return only after its
+// lifetime context ends, so a caller cancels that first. A test joins them
+// before it restores what they read.
+func (self *taskworkerRuntimeOwner) Wait() {
+	self.lifetime.Wait()
+}
+
 // startTaskworkerRuntime initializes the registered tasks, queue collector,
 // and execution loops after readiness has admitted this process.
 func startTaskworkerRuntime(admission context.Context, ctx context.Context, cancel context.CancelFunc, options RunOptions) (runtime taskworkerRuntime, returnErr error) {
@@ -133,32 +149,41 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	}
 	// Once constructed, the original worker belongs to the drain owner even
 	// if later observer startup fails. It must never become another attempt.
-	runtime = worker
+	owner := &taskworkerRuntimeOwner{TaskWorker: worker}
+	runtime = owner
 	// Retired-row cleanup is not admission work. It runs on the lifetime in
 	// its own bounded transactions, so it cannot hold the run-once rows that
 	// sibling candidates and live workers need, nor delay readiness.
 	if options.WorkloadProfile == WorkloadProfileProduction {
-		go server.HandleError(func() { reapRetiredTasks(ctx) })
+		owner.lifetime.Go(func() { server.HandleError(func() { reapRetiredTasks(ctx) }) })
+		// a chain a stale taskworker or maintenance ended returns
+		owner.lifetime.Go(func() { server.HandleError(func() { ensureCapabilityProbeChain(ctx) }) })
 	}
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
-	go server.HandleError(func() { controller.ApplyBlobRetention(ctx) })
-	controller.StartStatsCollector(ctx)
-	task.StartQueueMetrics(ctx)
+	owner.lifetime.Go(func() { server.HandleError(func() { controller.ApplyBlobRetention(ctx) }) })
+	statsCollected := controller.StartStatsCollector(ctx)
+	queueMetricsDone := task.StartQueueMetrics(ctx)
+	owner.lifetime.Go(func() {
+		<-statsCollected
+		<-queueMetricsDone
+	})
 	for range options.Count {
-		go server.HandleError(func() {
-			defer cancel()
-			for {
-				server.HandleError(worker.Run)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Second):
+		owner.lifetime.Go(func() {
+			server.HandleError(func() {
+				defer cancel()
+				for {
+					server.HandleError(worker.Run)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
 				}
-			}
+			})
 		})
 	}
-	return worker, nil
+	return owner, nil
 }
 
 func runWithDependencies(
@@ -276,9 +301,6 @@ func runWithStartupWait(
 	// not lost with the process.
 	if startup.flushStats != nil {
 		startup.flushStats()
-	}
-	if startup.closeCapture != nil {
-		startup.closeCapture()
 	}
 	logDrainAsync("[taskworker]close\n")
 	if unavailable {

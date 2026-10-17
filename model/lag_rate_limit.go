@@ -12,16 +12,16 @@ import (
 )
 
 // Rate limits of the lag API (lag.dev/PLAN.md A1, A6): guest sessions per
-// /24 (/48), and tracks per client, per /24 (/48) and per signing agent
-// (amendment 12).
+// /24 (/48), and tracks per authenticated client and per /24 (/48). An agent
+// counter is reserved for callers with a separately authenticated agent identity.
 //
 // The shared caller limiters bucket an address at /29 (/56)
 // (server.ClientIpHashForAddr). The plan counts a whole /24 (/48), the
 // smallest block a provider routes to one customer, so the key here is the
 // same peppered hash over the wider prefix. No address, prefix text or
 // address bytes are ever part of a key (amendment 9), and a counter lives in
-// Redis only: server.IncrementRateLimitWindow gives each window's key a TTL
-// of the window, so it is gone one window after its last count at most.
+// Redis only: server.IncrementRateLimitWindowToEnd expires each window's key
+// at the window's end, so no counter outlives the window it limits (A6).
 // Infrastructure subnets (WARP_LIMIT_EXCLUDE_SUBNETS) are not counted, as
 // for every caller limiter. The windows are fixed and epoch aligned.
 
@@ -66,11 +66,10 @@ func lagPrefixRateLimitKey(name string, addr netip.Addr) string {
 	return fmt.Sprintf("{lag_%s_prefix_%s}", name, hex.EncodeToString(prefixHash[:]))
 }
 
-// Counts one attempt of `name` by the agent a request's Signature-Agent
-// names (Web Bot Auth) against limit per window, so one agent's browsers
-// cannot draw on the extenders without bound (amendment 12). The key is a
-// hash of the header's value, which lives only as long as the window's
-// counter.
+// Counts one attempt of `name` by an already authenticated agent identity.
+// This helper does not authenticate: a raw Signature-Agent header must never
+// supply the identity. The lag track endpoint currently has no agent verifier
+// and does not use this reserved counter.
 func CheckLagSignatureRateLimit(
 	ctx context.Context,
 	name string,
@@ -84,8 +83,8 @@ func CheckLagSignatureRateLimit(
 	return checkLagRateLimit(ctx, lagSignatureRateLimitKey(name, signatureAgent), limit, window)
 }
 
-// The counter key of `name` for a Signature-Agent value: a hash of the value,
-// so a key is bounded whatever the header holds.
+// The counter key of `name` for an authenticated agent identity: a hash keeps
+// the key bounded without retaining the identity text.
 func lagSignatureRateLimitKey(name string, signatureAgent string) string {
 	digest := sha256.Sum256([]byte(signatureAgent))
 	return fmt.Sprintf("{lag_%s_signature_%s}", name, hex.EncodeToString(digest[:]))
@@ -112,7 +111,7 @@ func checkLagRateLimit(
 	if limit <= 0 || window < time.Millisecond {
 		return LagRateLimitResult{}, fmt.Errorf("invalid lag rate limit %d per %s", limit, window)
 	}
-	count, err := server.IncrementRateLimitWindow(ctx, key, window)
+	count, err := server.IncrementRateLimitWindowToEnd(ctx, key, window)
 	if err != nil {
 		return LagRateLimitResult{}, err
 	}

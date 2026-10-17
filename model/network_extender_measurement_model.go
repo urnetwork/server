@@ -32,7 +32,12 @@ import (
 //     sync on every authoritative server, and is cleared when they stop being
 //     published (C8). A name is published while any live certificate for it
 //     says so, which carries a name across a renewal; the lag.dev sample
-//     offers only published names (A4).
+//     offers only published names (A4). deliver_time is when A8 first
+//     answered the extender with the certificate's chain, which the extender
+//     installs only when it reads it there: up to half an hour after its
+//     name is published. The lag.dev sample (A4) and the records'
+//     MeasurementId (C10) wait for a delivered certificate for the key of
+//     the extender's latest request.
 //   - network_extender.measurement_ever_issued is set before an order is
 //     placed and never cleared, and measurement_exposure_accepted is an
 //     operator's override (A9). A check constraint keeps every writer from
@@ -119,6 +124,10 @@ type NetworkExtenderMeasurementCert struct {
 	// when the dns reconcile found its names published, in sync on every
 	// authoritative server; nil while they are not (C8, A4)
 	PublishTime *time.Time
+	// when A8 first answered the extender with this certificate's chain; nil
+	// until then. The extender installs a chain only when it reads it there
+	// (A8, A4, C10)
+	DeliverTime *time.Time
 }
 
 // A request or a certificate with the extender it belongs to, which is what
@@ -170,22 +179,27 @@ const networkExtenderMeasurementColumns = `
 	update_time
 `
 
-func scanNetworkExtenderMeasurement(result server.PgResult) *NetworkExtenderMeasurement {
+// Scans a row that starts with networkExtenderMeasurementColumns, and its
+// columns after those into `extra`.
+func scanNetworkExtenderMeasurement(result server.PgResult, extra ...any) *NetworkExtenderMeasurement {
 	measurement := &NetworkExtenderMeasurement{}
 	var names string
-	server.Raise(result.Scan(
-		&measurement.ExtenderId,
-		&measurement.Csr,
-		&measurement.PublicKey,
-		&names,
-		&measurement.State,
-		&measurement.Reason,
-		&measurement.RequestTime,
-		&measurement.PendingTime,
-		&measurement.RetryTime,
-		&measurement.FailureCount,
-		&measurement.UpdateTime,
-	))
+	server.Raise(result.Scan(append(
+		[]any{
+			&measurement.ExtenderId,
+			&measurement.Csr,
+			&measurement.PublicKey,
+			&names,
+			&measurement.State,
+			&measurement.Reason,
+			&measurement.RequestTime,
+			&measurement.PendingTime,
+			&measurement.RetryTime,
+			&measurement.FailureCount,
+			&measurement.UpdateTime,
+		},
+		extra...,
+	)...))
 	measurement.Names = splitNetworkExtenderMeasurementNames(names)
 	return measurement
 }
@@ -209,7 +223,8 @@ const networkExtenderMeasurementCertColumns = `
 	withdraw_reason,
 	revoke_time,
 	revoke_failure_count,
-	publish_time
+	publish_time,
+	deliver_time
 `
 
 func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtenderMeasurementCert {
@@ -235,6 +250,7 @@ func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtender
 		&cert.RevokeTime,
 		&cert.RevokeFailureCount,
 		&cert.PublishTime,
+		&cert.DeliverTime,
 	))
 	cert.Names = splitNetworkExtenderMeasurementNames(names)
 	return cert
@@ -491,8 +507,15 @@ func RefuseNetworkExtenderMeasurementRequest(
 }
 
 // GetPendingNetworkExtenderMeasurements reads the issuance queue (C5, C7):
-// pending requests whose backoff has passed, longest waiting first, each with
-// its extender.
+// pending requests whose backoff has passed, each with its extender. First
+// come the requests the weekly cap does not hold, those for names with an
+// unexpired certificate (HasUnexpiredNetworkExtenderMeasurementCertForNames),
+// which the CA renews outside its weekly budget: a returning extender, a
+// rotated key, an owner turning measurement back on. Then come the rest. Each
+// part is longest waiting first. A pass notes a capped request and leaves it
+// pending, so while the cap is spent the same capped requests come back every
+// pass; without this order, `limit` of them waiting longer would keep every
+// request the cap does not hold from ever being read.
 func GetPendingNetworkExtenderMeasurements(
 	ctx context.Context,
 	now time.Time,
@@ -508,7 +531,16 @@ func GetPendingNetworkExtenderMeasurements(
 			WHERE
 				state = $1 AND
 				(retry_time IS NULL OR retry_time <= $2)
-			ORDER BY pending_time ASC, extender_id ASC
+			ORDER BY
+				EXISTS (
+					SELECT 1
+					FROM network_extender_measurement_cert
+					WHERE
+						network_extender_measurement_cert.names = network_extender_measurement.names AND
+						$2 < network_extender_measurement_cert.not_after
+				) DESC,
+				pending_time ASC,
+				extender_id ASC
 			LIMIT $3
 			`,
 			NetworkExtenderMeasurementStatePending,
@@ -1279,6 +1311,31 @@ func UnpublishNetworkExtenderMeasurementNamesExcept(ctx context.Context, keepNam
 	return
 }
 
+// MarkNetworkExtenderMeasurementCertDelivered records that A8 answered the
+// extender with this certificate's chain, the first time it did (A8). The
+// extender installs a chain only when it reads it there, at its first poll
+// after the issuance, which comes up to half an hour later (an hour after a
+// refusal), while the dns reconcile publishes the name within a minute or
+// two. Until then the name answers without the certificate, so the lag.dev
+// sample (A4) and the records' MeasurementId (C10) wait for this. A later
+// answer keeps the first time. Returns whether this call marked it.
+func MarkNetworkExtenderMeasurementCertDelivered(ctx context.Context, certId server.Id, deliverTime time.Time) (marked bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET deliver_time = $2
+			WHERE cert_id = $1 AND deliver_time IS NULL
+			`,
+			certId,
+			deliverTime.UTC(),
+		))
+		marked = tag.RowsAffected() == 1
+	})
+	return
+}
+
 // WithdrawNetworkExtenderMeasurementCert withdraws one live certificate (C9):
 // the dns reconcile stops publishing its names at its next pass, and the
 // issuance task revokes it. The extender's request for those names becomes
@@ -1536,15 +1593,18 @@ func GetNetworkExtenderMeasurementForClient(
 	return
 }
 
-// The latest expiry of the extender's live certificates whose name is
-// published, nil when it holds none, inside the caller's transaction. A record
-// signed in the same transaction says the extender serves the measurement API
-// while this is after its issue time (C10). An unpublished name is left out
+// The latest expiry of the extender's live certificates that serve, nil when
+// it holds none, inside the caller's transaction. A record signed in the same
+// transaction says the extender serves the measurement API while this is
+// after its issue time (C10). A certificate serves once its name is published
+// and A8 has handed it to the extender for the key of its latest request
+// (networkExtenderMeasurementCertServesSql). An unpublished name is left out
 // for the same reason the lag.dev sample leaves it out (A4): a reader that
 // computed it from the record would look it up before it resolves. So the id
 // goes from the records signed while publication is cleared -- a withdrawal,
 // an opt-out, records gone missing -- and comes back with the reconcile pass
-// that publishes the name again (C8).
+// that publishes the name again (C8). An undelivered certificate is left out
+// because the name answers without it until the extender reads it from A8.
 func networkExtenderMeasurementCertNotAfterInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1554,12 +1614,11 @@ func networkExtenderMeasurementCertNotAfterInTx(
 	result, err := tx.Query(
 		ctx,
 		`
-		SELECT MAX(not_after)
+		SELECT MAX(network_extender_measurement_cert.not_after)
 		FROM network_extender_measurement_cert
 		WHERE
-			extender_id = $1 AND
-			withdraw_time IS NULL AND
-			publish_time IS NOT NULL
+			network_extender_measurement_cert.extender_id = $1 AND
+			`+networkExtenderMeasurementCertServesSql+`
 		`,
 		extenderId,
 	)
@@ -1571,8 +1630,27 @@ func networkExtenderMeasurementCertNotAfterInTx(
 	return notAfter
 }
 
+// The condition on a network_extender_measurement_cert row that it serves
+// the measurement api, whatever its expiry (C10, A4): it is not withdrawn,
+// its name is published (C8), and A8 has handed it to the extender
+// (deliver_time) for the key of the extender's latest request. A certificate
+// for any other key is one the extender asked to replace, and holds no key
+// for once it has a new one.
+const networkExtenderMeasurementCertServesSql = `
+	network_extender_measurement_cert.withdraw_time IS NULL AND
+	network_extender_measurement_cert.publish_time IS NOT NULL AND
+	network_extender_measurement_cert.deliver_time IS NOT NULL AND
+	EXISTS (
+		SELECT 1
+		FROM network_extender_measurement
+		WHERE
+			network_extender_measurement.extender_id = network_extender_measurement_cert.extender_id AND
+			network_extender_measurement.public_key = network_extender_measurement_cert.public_key
+	)
+`
+
 // The same for several extenders on the caller's connection; an extender
-// with no live certificate whose name is published has no entry.
+// with no live certificate that serves has no entry.
 func getNetworkExtenderMeasurementCertNotAftersInConn(
 	ctx context.Context,
 	conn server.PgConn,
@@ -1585,13 +1663,14 @@ func getNetworkExtenderMeasurementCertNotAftersInConn(
 	result, err := conn.Query(
 		ctx,
 		`
-		SELECT extender_id, MAX(not_after)
+		SELECT
+			network_extender_measurement_cert.extender_id,
+			MAX(network_extender_measurement_cert.not_after)
 		FROM network_extender_measurement_cert
 		WHERE
-			extender_id = ANY($1) AND
-			withdraw_time IS NULL AND
-			publish_time IS NOT NULL
-		GROUP BY extender_id
+			network_extender_measurement_cert.extender_id = ANY($1) AND
+			`+networkExtenderMeasurementCertServesSql+`
+		GROUP BY network_extender_measurement_cert.extender_id
 		`,
 		extenderIds,
 	)

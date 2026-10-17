@@ -3,14 +3,17 @@ package server
 import (
 	// "bytes"
 	// "encoding/hex"
-	// "errors"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"iter"
-	// "io"
 	"net"
 	"net/netip"
-	// "os"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -34,7 +37,11 @@ import (
 )
 
 func init() {
-	prometheus.MustRegister(arinDatabaseBuildEpochGauge)
+	prometheus.MustRegister(arinDatabaseBuildEpochGauge, arinOldDatabaseBuildEpochGauge, arinDatabaseInfoCollector{}, arinLookups, arinLookupErrors)
+	for _, slot := range []string{"latest", "old"} {
+		arinLookups.WithLabelValues(slot)
+		arinLookupErrors.WithLabelValues(slot)
+	}
 
 	OnWarmup(WarmupTargetIPDatabase, func() {
 		db, _ := ipDb()
@@ -46,7 +53,17 @@ func init() {
 			db.Metadata.BuildTime().UTC().Format(time.DateOnly),
 		)
 
-		arinDb()
+		// an unopenable or mistyped latest fails warmup; the old slot never does
+		pair, err := arinDbPair()
+		if err != nil {
+			panic(err)
+		}
+		glog.Infof(
+			"[ip]ARIN latest build %d, old slot %s build %d\n",
+			pair.latestIdentity.BuildEpoch,
+			pair.oldIdentity.State,
+			pair.oldIdentity.loadedBuildEpoch(),
+		)
 	})
 }
 
@@ -238,7 +255,7 @@ const (
 // MaxMind GeoLite2 City (connect/GEOMAP.md §3), the one packaged source of
 // location. It carries no ip-quality verdicts: hosting and proxy come only
 // from the egress prober, and the foreign check from our own ARIN build
-// (`arinDb`).
+// (`arinDbPair`).
 var ipDb = sync.OnceValues(loadIpDb)
 
 // Opens the deployed GeoLite2 City file of the config resources.
@@ -664,42 +681,327 @@ func DistanceKm(
 	return km
 }
 
-// Published only after the serving reader is opened and its schema accepted.
-// Bounded diagnostics load this reference without triggering initialization.
-var arinServingReader atomic.Pointer[mmdb.Reader]
+// The dual-database canary (arindbctl/ARINDB.md, "Dual-database canary"). A
+// release directory carries the new build as arin.mmdb and a byte copy of the
+// previously selected release as arin-old.mmdb, each with its manifest. Every
+// process that classifies addresses opens both once, and stamps each
+// connection with the facts of both; the score export chooses which one
+// Quality follows. The old file is opened only beside the resolved latest and
+// is never resolved on its own: the resolver picks the highest version
+// directory holding the requested name, so an independent lookup could pair
+// this release's latest with another release's old file.
+const (
+	arinDatabaseResource = "arindb/arin.mmdb"
+	arinManifestName     = "manifest.json"
+	arinOldDatabaseName  = "arin-old.mmdb"
+	arinOldManifestName  = "manifest-old.json"
+)
 
-// The reader opens once per process and never follows a later Config
-// selection, so the selected resource does not say which database a process
-// classifies with. Pushed with the process's own labels, this makes fleet
-// adoption and artifact age measurable without host access. It reads the
-// published reader at scrape time and never opens one: zero means the process
-// has not opened ARIN, as in a Taskworker that only consumes stored facts.
-var arinDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-	Namespace: "urnetwork",
-	Name:      "arin_database_build_epoch_seconds",
-	Help:      "Build epoch of the ARIN database the serving reader opened; 0 until it opens",
-}, func() float64 {
-	return float64(CurrentArinCauseReaderEpoch())
-})
+// The state of one slot of the pair a process opened.
+const (
+	// not opened yet, as in a Taskworker before its first score publication
+	ArinDatabaseUnopened = "unopened"
+	// valid, and for the old slot strictly older than the latest
+	ArinDatabaseLoaded = "loaded"
+	// no file: the old slot beside the latest, or the latest resource itself
+	ArinDatabaseMissing = "missing"
+	// the old file is the latest build again
+	ArinDatabaseIdentical = "identical"
+	// present but unusable; only an invalid latest fails a process
+	ArinDatabaseInvalid = "invalid"
+)
 
-var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
-	path, err := Config.ResourcePath("arindb/arin.mmdb")
+// One database of the pair. The hash is the SHA-256 that arindbctl recorded
+// in the slot's manifest when it built or copied the bytes; the runtime never
+// rehashes whole files. The epoch is the MMDB metadata's build epoch.
+type ArinDatabaseIdentity struct {
+	State      string
+	Path       string
+	BuildEpoch int64
+	// "" when no manifest names one
+	Sha256 string
+}
+
+// The latest database and the old one beside it. Both stay memory mapped for
+// the process lifetime and opening reads only metadata; processes on one host
+// share the read-only mapping. Immutable once published, so lookups are safe
+// for concurrent use.
+type arinDatabasePair struct {
+	latest         *mmdb.Reader
+	latestIdentity ArinDatabaseIdentity
+	// nil unless the old slot is loaded
+	old         *mmdb.Reader
+	oldIdentity ArinDatabaseIdentity
+}
+
+// What the runtime and arindbctl read from an arindbctl manifest.
+type ArinDatabaseManifest struct {
+	// the recorded SHA-256 of arin.mmdb, lowercase hex
+	Sha256 string
+	// the build time; its second is the database's MMDB build epoch
+	BuiltAt time.Time
+}
+
+var arinManifestSha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// Reads the arin.mmdb hash and build time of the manifest at path. A missing
+// or malformed hash or build time is an error, never an empty identity.
+func ReadArinDatabaseManifest(path string) (ArinDatabaseManifest, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		panic(err)
+		return ArinDatabaseManifest{}, err
 	}
+	defer file.Close()
+	// a manifest is a few kilobytes; a bound keeps a wrong file from being read whole
+	content, err := io.ReadAll(io.LimitReader(file, 16*1024*1024))
+	if err != nil {
+		return ArinDatabaseManifest{}, err
+	}
+	var document struct {
+		BuiltAt *time.Time        `json:"built_at"`
+		Sha256  map[string]string `json:"sha256"`
+	}
+	if err := json.Unmarshal(content, &document); err != nil {
+		return ArinDatabaseManifest{}, fmt.Errorf("unreadable ARIN manifest %s: %w", path, err)
+	}
+	hash := document.Sha256["arin.mmdb"]
+	if !arinManifestSha256Pattern.MatchString(hash) {
+		return ArinDatabaseManifest{}, fmt.Errorf("ARIN manifest %s names no arin.mmdb SHA-256", path)
+	}
+	if document.BuiltAt == nil || document.BuiltAt.IsZero() {
+		return ArinDatabaseManifest{}, fmt.Errorf("ARIN manifest %s has no build time", path)
+	}
+	return ArinDatabaseManifest{Sha256: hash, BuiltAt: document.BuiltAt.UTC()}, nil
+}
 
+// Opens path as the runtime opens every ARIN database, the type checked
+// before any lookup. The caller owns the reader.
+func openArinDatabase(path string) (*mmdb.Reader, error) {
 	db, err := mmdb.Open(path)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	if schemaType(db.Metadata.DatabaseType) != schemaTypeArinDb {
 		db.Close()
-		panic(fmt.Errorf("expected ARIN database, got %q", db.Metadata.DatabaseType))
+		return nil, fmt.Errorf("expected ARIN database, got %q", db.Metadata.DatabaseType)
 	}
+	return db, nil
+}
 
-	arinServingReader.Store(db)
-	return db, schemaType(db.Metadata.DatabaseType)
+// The build epoch of the ARIN database at path, opened with the runtime's
+// decoder and closed again. arindbctl judges a previous release with it.
+func ReadArinDatabaseBuildEpoch(path string) (int64, error) {
+	db, err := openArinDatabase(path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	return db.Metadata.BuildTime().Unix(), nil
+}
+
+// Opens the pair of the resolved latest path. Only the latest can fail: an
+// unopenable or mistyped latest is an error, as it always was. Every old-slot
+// problem leaves the old slot unloaded and is logged, and a latest without a
+// readable manifest still serves with an unknown hash.
+func openArinDatabasePair(latestPath string) (*arinDatabasePair, error) {
+	latest, err := openArinDatabase(latestPath)
+	if err != nil {
+		return nil, err
+	}
+	pair := &arinDatabasePair{
+		latest: latest,
+		latestIdentity: ArinDatabaseIdentity{
+			State:      ArinDatabaseLoaded,
+			Path:       latestPath,
+			BuildEpoch: latest.Metadata.BuildTime().Unix(),
+		},
+	}
+	dir := filepath.Dir(latestPath)
+	if manifest, err := ReadArinDatabaseManifest(filepath.Join(dir, arinManifestName)); err == nil {
+		pair.latestIdentity.Sha256 = manifest.Sha256
+	}
+	pair.old, pair.oldIdentity = openArinOldDatabase(dir, pair.latestIdentity)
+	return pair, nil
+}
+
+// The old slot of release directory dir, judged against its latest. It is
+// loaded only when it opens as an ARIN database, manifest-old.json names its
+// hash with a build time in the database's build second, and it is strictly
+// older than the latest. The same epoch and hash is the latest again; an equal
+// epoch with any other hash, or a newer epoch, is invalid.
+func openArinOldDatabase(dir string, latest ArinDatabaseIdentity) (*mmdb.Reader, ArinDatabaseIdentity) {
+	path := filepath.Join(dir, arinOldDatabaseName)
+	identity := ArinDatabaseIdentity{State: ArinDatabaseMissing, Path: path}
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		glog.Infof("[ip]no old ARIN database beside %s; the canary is unavailable in this process\n", latest.Path)
+		return nil, identity
+	}
+	invalid := func(db *mmdb.Reader, reason string) (*mmdb.Reader, ArinDatabaseIdentity) {
+		if db != nil {
+			db.Close()
+		}
+		identity.State = ArinDatabaseInvalid
+		glog.Errorf("[ip]old ARIN database %s is invalid and unused: %s\n", path, reason)
+		return nil, identity
+	}
+	db, err := openArinDatabase(path)
+	if err != nil {
+		return invalid(nil, err.Error())
+	}
+	identity.BuildEpoch = db.Metadata.BuildTime().Unix()
+	manifest, err := ReadArinDatabaseManifest(filepath.Join(dir, arinOldManifestName))
+	if err != nil {
+		return invalid(db, err.Error())
+	}
+	identity.Sha256 = manifest.Sha256
+	if builtAt := manifest.BuiltAt.Unix(); builtAt != identity.BuildEpoch {
+		return invalid(db, fmt.Sprintf("manifest build time %d differs from build epoch %d", builtAt, identity.BuildEpoch))
+	}
+	switch {
+	case identity.BuildEpoch == latest.BuildEpoch && latest.Sha256 != "" && identity.Sha256 == latest.Sha256:
+		db.Close()
+		identity.State = ArinDatabaseIdentical
+		glog.Infof("[ip]old ARIN database %s is the latest build again; the canary is unavailable in this process\n", path)
+		return nil, identity
+	case identity.BuildEpoch == latest.BuildEpoch:
+		return invalid(db, fmt.Sprintf("build epoch %d equals the latest's with a different or unknown hash", identity.BuildEpoch))
+	case latest.BuildEpoch < identity.BuildEpoch:
+		return invalid(db, fmt.Sprintf("build epoch %d is not older than the latest's %d", identity.BuildEpoch, latest.BuildEpoch))
+	}
+	identity.State = ArinDatabaseLoaded
+	return db, identity
+}
+
+// Published once this process has opened its pair, or failed to open the
+// latest. Gauges and diagnostics load it at read time and never open anything.
+var arinServingPair atomic.Pointer[arinDatabasePair]
+
+// The pair of the selected resource, opened once per process. A pair never
+// follows a later Config selection: a restart is the only point at which a
+// process reads a new database.
+var arinDbPair = sync.OnceValues(loadArinDatabasePair)
+
+func loadArinDatabasePair() (*arinDatabasePair, error) {
+	unopened := ArinDatabaseIdentity{State: ArinDatabaseUnopened}
+	path, err := Config.ResourcePath(arinDatabaseResource)
+	if err != nil {
+		state := ArinDatabaseInvalid
+		if errors.Is(err, ErrResourceNotFound) {
+			state = ArinDatabaseMissing
+		}
+		arinServingPair.Store(&arinDatabasePair{latestIdentity: ArinDatabaseIdentity{State: state}, oldIdentity: unopened})
+		return nil, err
+	}
+	pair, err := openArinDatabasePair(path)
+	if err != nil {
+		arinServingPair.Store(&arinDatabasePair{latestIdentity: ArinDatabaseIdentity{State: ArinDatabaseInvalid, Path: path}, oldIdentity: unopened})
+		return nil, err
+	}
+	arinServingPair.Store(pair)
+	return pair, nil
+}
+
+// The pair this process published, unopened when it has none yet.
+func servingArinDatabaseIdentities() (latest ArinDatabaseIdentity, old ArinDatabaseIdentity) {
+	pair := arinServingPair.Load()
+	if pair == nil {
+		unopened := ArinDatabaseIdentity{State: ArinDatabaseUnopened}
+		return unopened, unopened
+	}
+	return pair.latestIdentity, pair.oldIdentity
+}
+
+// The identities of this process's pair, opening it on first use without any
+// lookup. Taskworker learns which pair it compares this way at its first score
+// publication. An unopenable latest is the error; the old slot never is.
+func ArinDatabaseIdentities() (latest ArinDatabaseIdentity, old ArinDatabaseIdentity, err error) {
+	if _, err := arinDbPair(); err != nil {
+		latest, old = servingArinDatabaseIdentities()
+		return latest, old, err
+	}
+	latest, old = servingArinDatabaseIdentities()
+	return latest, old, nil
+}
+
+// The epoch of a loaded slot, 0 for any other state.
+func (self ArinDatabaseIdentity) loadedBuildEpoch() int64 {
+	if self.State != ArinDatabaseLoaded {
+		return 0
+	}
+	return self.BuildEpoch
+}
+
+// The pair opens once per process and never follows a later Config
+// selection, so the selected resource does not say which databases a process
+// classifies with. Pushed with the process's own labels, these make fleet
+// adoption and artifact age measurable without host access. They read the
+// published pair at scrape time and never open one.
+var arinDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_database_build_epoch_seconds",
+	Help:      "Build epoch of the latest ARIN database the process opened; 0 until it opens",
+}, func() float64 {
+	latest, _ := servingArinDatabaseIdentities()
+	return float64(latest.loadedBuildEpoch())
 })
+
+var arinOldDatabaseBuildEpochGauge = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_old_database_build_epoch_seconds",
+	Help:      "Build epoch of the old ARIN database the process opened beside the latest; 0 when it is not loaded",
+}, func() float64 {
+	_, old := servingArinDatabaseIdentities()
+	return float64(old.loadedBuildEpoch())
+})
+
+// Pair lookups, and those that failed, by slot. A latest failure fails the connection's
+// location write, so its provider never reaches the score cohort and the
+// canary's comparison cannot see it: a release whose records fail to decode
+// shows here, and as a cohort that shrinks against its recent size. An old
+// failure leaves that connection's old facts unavailable.
+var arinLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_lookups_total",
+	Help:      "ARIN pair lookups, by slot; with urnetwork_arin_lookup_errors_total, the share that failed",
+}, []string{"slot"})
+
+var arinLookupErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "arin_lookup_errors_total",
+	Help:      "ARIN pair lookups that failed, by slot: a latest failure fails the connection's location write, an old failure leaves its old facts unavailable",
+}, []string{"slot"})
+
+var arinDatabaseInfoDesc = prometheus.NewDesc(
+	"urnetwork_arin_database_info",
+	"1 for each ARIN slot the process holds, latest and old, with its state and manifest SHA-256 (none when unknown)",
+	[]string{"slot", "state", "sha256"},
+	nil,
+)
+
+// Both slots on every scrape, whatever their state, so an absent old file
+// reads as a state rather than as a missing series.
+type arinDatabaseInfoCollector struct{}
+
+func (arinDatabaseInfoCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- arinDatabaseInfoDesc
+}
+
+func (arinDatabaseInfoCollector) Collect(ch chan<- prometheus.Metric) {
+	latest, old := servingArinDatabaseIdentities()
+	for _, slot := range []struct {
+		name     string
+		identity ArinDatabaseIdentity
+	}{
+		{name: "latest", identity: latest},
+		{name: "old", identity: old},
+	} {
+		hash := slot.identity.Sha256
+		if hash == "" {
+			hash = "none"
+		}
+		ch <- prometheus.MustNewConstMetric(arinDatabaseInfoDesc, prometheus.GaugeValue, 1, slot.name, slot.identity.State, hash)
+	}
+}
 
 type ArinInfo struct {
 	schemaType      schemaType
@@ -825,6 +1127,8 @@ func GetArinInfoFromIp(ip net.IP) (*ArinInfo, error) {
 	}
 }
 
+// Reads addr from the latest database. An unopenable latest panics, on every
+// call, as it fails warmup.
 func GetArinInfo(addr netip.Addr) (*ArinInfo, error) {
 	if ipInfo := ipOverrideFor(addr); ipInfo != nil {
 		// org matches the override country, so the net type is never foreign
@@ -833,8 +1137,53 @@ func GetArinInfo(addr netip.Addr) (*ArinInfo, error) {
 		}, nil
 	}
 
-	arinDb, schemaType := arinDb()
-	return getArinInfoFromDatabase(arinDb, schemaType, addr)
+	pair, err := arinDbPair()
+	if err != nil {
+		panic(err)
+	}
+	return getArinInfoFromDatabase(pair.latest, schemaTypeArinDb, addr)
+}
+
+// Reads addr from both databases of the pair. The latest is GetArinInfo, with
+// its error. The old facts are nil when the old slot is not loaded, when its
+// lookup fails, or when an override answered without querying a database: an
+// old-slot failure never fails the latest lookup or the caller's write.
+func GetArinInfoPair(addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err error) {
+	if ipInfo := ipOverrideFor(addr); ipInfo != nil {
+		return &ArinInfo{
+			OrgCountryCodes: []string{ipInfo.CountryCode},
+		}, nil, nil
+	}
+
+	pair, pairErr := arinDbPair()
+	if pairErr != nil {
+		panic(pairErr)
+	}
+	return getArinInfoPairFromDatabases(pair, addr)
+}
+
+// The pair lookup over opened readers.
+func getArinInfoPairFromDatabases(pair *arinDatabasePair, addr netip.Addr) (latest *ArinInfo, old *ArinInfo, err error) {
+	arinLookups.WithLabelValues("latest").Inc()
+	latest, err = getArinInfoFromDatabase(pair.latest, schemaTypeArinDb, addr)
+	if err != nil {
+		arinLookupErrors.WithLabelValues("latest").Inc()
+		return nil, nil, err
+	}
+	if pair.old != nil {
+		arinLookups.WithLabelValues("old").Inc()
+		oldInfo, oldErr := getArinInfoFromDatabase(pair.old, schemaTypeArinDb, addr)
+		if oldErr != nil {
+			arinLookupErrors.WithLabelValues("old").Inc()
+			// the connection's old facts are unavailable, and nothing else
+			if glog.V(1) {
+				glog.Infof("[ip]old ARIN lookup failed; old facts unavailable: %s\n", oldErr)
+			}
+		} else {
+			old = oldInfo
+		}
+	}
+	return latest, old, nil
 }
 
 // Bind successful no-record lookups to the same database generation as hits.

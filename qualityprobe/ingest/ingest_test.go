@@ -14,7 +14,7 @@ import (
 // Tests of the location submission: the wire shape, local refusals and the
 // status contract.
 
-// Locks down the wire shape of submitBody against
+// Locks down the wire shape of LocationSubmission against
 // the server's contract (controller.SubmitProviderEgressLocationArgs): the
 // exit address the /ip echo saw and when, with the vendor-consensus fields
 // present for one release and empty, and country_confident false. A field

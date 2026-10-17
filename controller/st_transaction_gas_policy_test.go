@@ -406,6 +406,13 @@ func TestStOperatorGasLifetimeIncreaseKeepsOriginalRevertAllocation(t *testing.T
 	})
 }
 
+// SV-1 (retries; the deposit key): a pending execution reservation never
+// becomes a cancellation. Once the deposit's deadline has finalized,
+// reconciliation asks for the cancellation that retires an expired deposit,
+// but the reservation is signed as the execution it holds: the signer is asked
+// once more, for the reserved bytes, and the intent's one attempt is that
+// execution. The gas ledger holds what it held, and the deposit reverts
+// without moving principal.
 func TestStOperatorGasPendingExecutionCannotBecomeCancellation(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		client, _, fixture := newStDepositCustodyFixture(tb, 1)
@@ -420,15 +427,322 @@ func TestStOperatorGasPendingExecutionCannotBecomeCancellation(t *testing.T) {
 		if _, err := client.DepositCredit(context.Background(), 7, 1, big.NewInt(100)); !errors.Is(err, lost) {
 			tb.Fatal(err)
 		}
-		fixture.boundary.Block = 2000
-		fixture.boundary.Hash = [32]byte(stTransactionReconcileBlockHash(2000))
-		if _, err := client.DepositCredit(context.Background(), 7, 1, big.NewInt(100)); !errors.Is(err, model.ErrStOperatorGasAllowance) {
-			tb.Fatal("expired unknown execution became cancellation", err)
+		intent := model.GetStTransactionIntent(context.Background(), stGasCurrentLogical(tb, client))
+		pending, err := model.GetPendingStTransactionGasReservation(context.Background(), intent.IntentId)
+		if err != nil || pending == nil || pending.Kind != model.StTxAttemptExecution {
+			tb.Fatal("fixture did not retain the pending execution", err)
 		}
-		if signs != 1 || len(fixture.sent) != 0 {
+		stDepositCustodyExpire(fixture)
+		client.transactionSigner = func(_ context.Context, tx *types.Transaction, signer types.Signer, key *ecdsa.PrivateKey) (*types.Transaction, error) {
+			signs++
+			if strings.ToLower(signer.Hash(tx).Hex()) != pending.SigningHash {
+				tb.Error("signer was asked for other bytes than the pending execution's")
+			}
+			return types.SignTx(tx, signer, key)
+		}
+		_, err = client.DepositCredit(context.Background(), 7, 1, big.NewInt(100))
+		attempts := model.GetStTransactionAttempts(context.Background(), intent.IntentId)
+		if len(attempts) != 1 || err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+attempts[0].TxHash+" reverted") {
+			tb.Fatal("expired pending execution was not signed as reserved", err)
+		}
+		sent, _, _, deposited, _ := stGasFixtureChain(fixture)
+		if signs != 2 || attempts[0].Kind != model.StTxAttemptExecution || len(sent) != 1 || deposited != 0 {
 			tb.Fatal("cancellation request rewrote pending original signature")
 		}
 		stGasFixtureSnapshot(tb, p, "600000", 1)
+	})
+}
+
+// Reserves the execution of epoch 7's deposit at nonce 7 and stops before its
+// signature, as a process stopped there leaves it.
+func stGasReserveUnsignedDeposit(tb testing.TB, client *CoreStClient) (*model.StTransactionIntent, *model.StTransactionGasReservation) {
+	tb.Helper()
+	ctx := context.Background()
+	stopped := errors.New("process stopped between the reservation and the signature")
+	client.transactionSigner = func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error) {
+		return nil, stopped
+	}
+	if _, err := client.DepositCredit(ctx, 7, client.cfg.NoId, big.NewInt(100)); !errors.Is(err, stopped) {
+		tb.Fatalf("deposit: %v", err)
+	}
+	client.transactionSigner = nil
+	intent := model.GetStTransactionIntent(ctx, stGasCurrentLogical(tb, client))
+	pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+	if intent.Nonce != 7 || intent.AttemptCount != 0 || pending == nil || pending.Kind != model.StTxAttemptExecution || err != nil {
+		tb.Fatalf("deposit intent %+v, reservation %+v, %v", intent, pending, err)
+	}
+	return intent, pending
+}
+
+// Reads, under the fixture's lock, the transactions it was sent, its staged
+// and source stake, the epoch's deposited principal and the coordinator's
+// deposit nonce.
+func stGasFixtureChain(fixture *stDepositCustodyRpc) (sent []*types.Transaction, staged, source, deposited, depositNonce int64) {
+	fixture.stateLock.Lock()
+	defer fixture.stateLock.Unlock()
+	return append([]*types.Transaction(nil), fixture.sent...), fixture.staged.Int64(), fixture.source.Int64(), fixture.deposited.Int64(), fixture.depositNonce.Int64()
+}
+
+// Routes client through an endpoint at which the send run under stopCtx stops
+// after its broadcast, as a process stopped there leaves it: its first receipt
+// read after a broadcast is answered with no receipt and cancels stopCtx.
+// resume ends the stop, and later sends see every receipt.
+func stGasStopAfterBroadcast(tb testing.TB, client *CoreStClient, fixture *stDepositCustodyRpc) (stopCtx context.Context, resume func()) {
+	tb.Helper()
+	stopCtx, stop := context.WithCancel(context.Background())
+	tb.Cleanup(stop)
+	var stopping, broadcast atomic.Bool
+	stopping.Store(true)
+	url, endpoint := stWalletRecoveryEndpoint(tb, fixture, func(writer http.ResponseWriter, call stEpochRPCRequest) bool {
+		switch {
+		case !stopping.Load():
+		case call.Method == "eth_sendRawTransaction":
+			broadcast.Store(true)
+		case call.Method == "eth_getTransactionReceipt" && broadcast.Load():
+			stop()
+			stWalletRecoveryReply(writer, call, nil, false)
+			return true
+		}
+		return false
+	})
+	client.cfg.RpcUrls = []string{url}
+	client.clients = map[string]*ethclient.Client{url: endpoint}
+	return stopCtx, func() { stopping.Store(false) }
+}
+
+// SV-1 (retries; the deposit key): a deposit takes its nonce together with
+// its first attempt's reservation, and the process may stop before the
+// signature. Here epoch 7's deposit, whose deadline is block 1999, is reserved
+// at nonce 7 and not signed, and block 2000, epoch 8's first, is finalized.
+// The deposit is expired, and the reservation refuses the cancellation that
+// retires an expired deposit. The deposit key's next send, epoch 8's deposit,
+// signs the reserved deposit instead, once and exactly as reserved, and sends
+// it. The coordinator reverts a deposit past its deadline before any stake
+// moves, rolling back its reentrancy guard's write: no principal moves and the
+// coordinator's deposit nonce stays 3, though the inclusion spends gas. That
+// send reports the revert, the signature adds nothing to the gas ledger, and
+// the nonce is free: the send after it deposits epoch 8's principal at nonce 8.
+func TestStOperatorGasPendingExpiredDepositIsSignedOnceAndFreesTheDepositKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		client, _, fixture := newStDepositCustodyFixture(tb, 1)
+		fixture.staged.SetInt64(102)
+		p, _, _ := stGasFixturePolicy(tb, client, nil)
+		intent, pending := stGasReserveUnsignedDeposit(tb, client)
+		stDepositCustodyExpire(fixture)
+		var signed []*types.Transaction
+		client.transactionSigner = func(_ context.Context, tx *types.Transaction, signer types.Signer, key *ecdsa.PrivateKey) (*types.Transaction, error) {
+			result, err := types.SignTx(tx, signer, key)
+			signed = append(signed, result)
+			return result, err
+		}
+
+		_, err := client.DepositCredit(ctx, 8, 1, big.NewInt(100))
+		sent, staged, source, deposited, depositNonce := stGasFixtureChain(fixture)
+		if len(signed) != 1 || len(sent) != 1 || err == nil || !strings.Contains(err.Error(), "st: finalized transaction "+strings.ToLower(sent[0].Hash().Hex())+" reverted") {
+			tb.Fatalf("send behind the expired deposit: %v, %d signed, %d sent", err, len(signed), len(sent))
+		}
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(client.cfg.ChainId))
+		if deposit := sent[0]; deposit.Hash() != signed[0].Hash() || deposit.Nonce() != 7 || !bytes.Equal(deposit.Data(), intent.Calldata) || strings.ToLower(signer.Hash(deposit).Hex()) != pending.SigningHash {
+			tb.Fatalf("the deposit went out as nonce %d data %x, not as reserved", deposit.Nonce(), deposit.Data())
+		}
+		if staged != 102 || source != 10_000 || deposited != 0 || depositNonce != 3 {
+			tb.Fatalf("the reverted deposit moved stake: %d staged, %d source, %d deposited, deposit nonce %d", staged, source, deposited, depositNonce)
+		}
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:7:1:3", model.StTxReverted, sent[0])
+		if attempts := model.GetStTransactionAttempts(ctx, intent.IntentId); len(attempts) != 1 || attempts[0].Kind != model.StTxAttemptExecution {
+			tb.Fatalf("expired deposit attempts %+v", attempts)
+		}
+		stGasFixtureSnapshot(tb, p, "600000", 1)
+
+		hash, err := client.DepositCredit(ctx, 8, 1, big.NewInt(100))
+		sent, staged, _, deposited, depositNonce = stGasFixtureChain(fixture)
+		if err != nil || len(signed) != 2 || signed[1].Nonce() != 8 || len(sent) != 2 || sent[1].Hash() != signed[1].Hash() || !strings.EqualFold(hash, sent[1].Hash().Hex()) || staged != 0 || deposited != 100 || depositNonce != 4 {
+			tb.Fatalf("deposit on the freed key: %s, %v, %d signed, %d sent", hash, err, len(signed), len(sent))
+		}
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:8:1:3", model.StTxFinalized, sent[1])
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:7:1:3", model.StTxReverted, sent[0])
+		// Each deposit's 60,000 gas at 10 wei.
+		stGasFixtureSnapshot(tb, p, "1200000", 2)
+	})
+}
+
+// SV-1 (retries; the deposit key): until its deadline has passed at the
+// finalized head, a deposit reserved and not signed keeps today's custody
+// validation. Here epoch 7's deposit is reserved at nonce 7, and block 1998,
+// the one before its deadline, is finalized. Its staging no longer holds
+// principal plus the rounding allowance, so custody refuses the reserved
+// execution: nothing is signed or sent, and the reservation and the gas ledger
+// are as they were. Once the staging holds both again, the next send signs it
+// exactly as reserved, and it deposits its principal at block 1999.
+func TestStOperatorGasPendingDepositBeforeItsDeadlineKeepsCustodyValidation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		client, _, fixture := newStDepositCustodyFixture(tb, 1)
+		fixture.staged.SetInt64(102)
+		p, _, _ := stGasFixturePolicy(tb, client, nil)
+		intent, pending := stGasReserveUnsignedDeposit(tb, client)
+		fixture.stateLock.Lock()
+		fixture.boundary.Block, fixture.boundary.Hash = 1_998, [32]byte(stTransactionReconcileBlockHash(1_998))
+		fixture.staged.SetInt64(101)
+		fixture.stateLock.Unlock()
+		signs := 0
+		client.transactionSigner = func(_ context.Context, tx *types.Transaction, signer types.Signer, key *ecdsa.PrivateKey) (*types.Transaction, error) {
+			signs++
+			return types.SignTx(tx, signer, key)
+		}
+		if _, err := client.DepositCredit(ctx, 7, 1, big.NewInt(100)); err == nil || err.Error() != "st: deposit staging lacks principal plus exact reserve rounding allowance" {
+			tb.Fatalf("reserved deposit with short staging: %v", err)
+		}
+		retained, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		sent, _, _, _, _ := stGasFixtureChain(fixture)
+		if err != nil || retained == nil || retained.SigningHash != pending.SigningHash || signs != 0 || len(sent) != 0 {
+			tb.Fatalf("custody refusal signed or dropped the reservation: %+v, %v, %d signed, %d sent", retained, err, signs, len(sent))
+		}
+		stGasFixtureSnapshot(tb, p, "600000", 1)
+
+		fixture.stateLock.Lock()
+		fixture.staged.SetInt64(102)
+		fixture.stateLock.Unlock()
+		if _, err := client.DepositCredit(ctx, 7, 1, big.NewInt(100)); err != nil {
+			tb.Fatalf("reserved deposit once staged: %v", err)
+		}
+		sent, staged, _, deposited, depositNonce := stGasFixtureChain(fixture)
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(client.cfg.ChainId))
+		if signs != 1 || len(sent) != 1 || sent[0].Nonce() != 7 || strings.ToLower(signer.Hash(sent[0]).Hex()) != pending.SigningHash || staged != 0 || deposited != 100 || depositNonce != 4 {
+			tb.Fatalf("reserved deposit once staged: %d signed, %d sent, %d staged, %d deposited, deposit nonce %d", signs, len(sent), staged, deposited, depositNonce)
+		}
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:7:1:3", model.StTxFinalized, sent[0])
+		stGasFixtureSnapshot(tb, p, "600000", 1)
+	})
+}
+
+// SV-1 (retries; the deposit key): the revert of an expired deposit's
+// reserved execution is reported once across restarts. The process signs and
+// broadcasts the reserved deposit, which is included, and stops before it
+// reads the receipt: the deposit reverts while it is down. Of the restarted
+// process's sends, exactly one reports the revert, and the others deposit
+// epoch 8's principal once, at nonce 8.
+func TestStOperatorGasRevertOfAPendingExpiredDepositIsReportedOnceAcrossRestarts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		client, _, fixture := newStDepositCustodyFixture(tb, 1)
+		fixture.staged.SetInt64(102)
+		stGasFixturePolicy(tb, client, nil)
+		stGasReserveUnsignedDeposit(tb, client)
+		stDepositCustodyExpire(fixture)
+		stopCtx, resume := stGasStopAfterBroadcast(tb, client, fixture)
+		_, err := client.DepositCredit(stopCtx, 8, 1, big.NewInt(100))
+		sent, _, _, _, _ := stGasFixtureChain(fixture)
+		if !errors.Is(err, context.Canceled) || len(sent) != 1 || sent[0].Nonce() != 7 {
+			tb.Fatalf("the reserved deposit before the stop: %v, %d sent", err, len(sent))
+		}
+		deposit := sent[0]
+		resume()
+
+		reports, credited := 0, 0
+		restarted := client
+		for range 4 {
+			restarted = stGasFixtureRestart(restarted)
+			if _, err := restarted.DepositCredit(ctx, 8, 1, big.NewInt(100)); err == nil {
+				credited++
+			} else if strings.Contains(err.Error(), "st: finalized transaction "+strings.ToLower(deposit.Hash().Hex())+" reverted") {
+				reports++
+			} else {
+				tb.Fatalf("deposit after a restart: %v", err)
+			}
+		}
+		sent, _, _, deposited, _ := stGasFixtureChain(fixture)
+		if reports != 1 || credited != 3 || len(sent) != 2 || sent[1].Nonce() != 8 || deposited != 100 {
+			tb.Fatalf("%d reports of the revert, %d deposits, %d sent, %d deposited", reports, credited, len(sent), deposited)
+		}
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:7:1:3", model.StTxReverted, deposit)
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:8:1:3", model.StTxFinalized, sent[1])
+	})
+}
+
+// SV-1 (retries; the deposit key): signing an expired deposit's reserved
+// execution respects the cap of three attempts. Epoch 7's deposit is signed
+// at nonce 7 twice, with its 3,400,000-gas floor at 10 and 12 wei, neither
+// sent, and its third attempt, at 14 wei, is reserved and not signed. Once its
+// deadline has finalized, the deposit key's next send signs that third attempt
+// exactly as reserved, which adds no reservation to the gas ledger; the node
+// refuses its broadcast as underfunded, and the process stops. A cancellation
+// would be a fourth signature, which the cap refuses, so the send after it
+// signs nothing and sends the third attempt's stored bytes again: the deposit
+// reverts without moving principal, that send reports the revert, and the
+// send after it deposits epoch 8's principal at nonce 8.
+func TestStOperatorGasPendingExpiredDepositAtTheAttemptCapSignsNothingMore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		client, rpcClient, fixture := newStDepositCustodyFixture(tb, 1)
+		fixture.staged.SetInt64(102)
+		p, _, _ := stGasFixturePolicy(tb, client, func(policy *server.StOperatorGasPolicy) {
+			policy.MaximumGas, policy.MaximumIntentLiabilityWei, policy.MaximumLifetimeLiabilityWei = 3_500_000, "100000000", "1000000000"
+		})
+		intent, _ := stGasReserveUnsignedDeposit(tb, client)
+		var previous *model.StTransactionAttempt
+		for attempt := 1; attempt < stTxMaxAttempts; attempt++ {
+			signed, err := client.buildTransactionAttempt(ctx, rpcClient, client.cfg.DepositKey, intent, previous, model.StTxAttemptExecution)
+			if err != nil || signed.Attempt != attempt {
+				tb.Fatalf("attempt %d: %+v, %v", attempt, signed, err)
+			}
+			intent.AttemptCount, previous = attempt, signed
+		}
+		stopped := errors.New("process stopped between the reservation and the signature")
+		client.transactionSigner = func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error) {
+			return nil, stopped
+		}
+		if _, err := client.buildTransactionAttempt(ctx, rpcClient, client.cfg.DepositKey, intent, previous, model.StTxAttemptExecution); !errors.Is(err, stopped) {
+			tb.Fatalf("third attempt: %v", err)
+		}
+		client.transactionSigner = nil
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if err != nil || pending == nil || pending.Attempt != stTxMaxAttempts || pending.Kind != model.StTxAttemptExecution {
+			tb.Fatalf("third attempt reservation %+v, %v", pending, err)
+		}
+		// The nonce's charge is its largest attempt's, 3,400,000 gas at 14 wei.
+		stGasFixtureSnapshot(tb, p, "47600000", 3)
+
+		stDepositCustodyExpire(fixture)
+		fixture.stateLock.Lock()
+		fixture.balance = new(big.Int)
+		fixture.stateLock.Unlock()
+		stopCtx, resume := stGasStopAfterBroadcast(tb, client, fixture)
+		_, err = client.DepositCredit(stopCtx, 8, 1, big.NewInt(100))
+		attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
+		sent, _, _, _, _ := stGasFixtureChain(fixture)
+		if !errors.Is(err, context.Canceled) || len(attempts) != stTxMaxAttempts || attempts[0].Attempt != stTxMaxAttempts || attempts[0].Kind != model.StTxAttemptExecution || len(sent) != 0 {
+			tb.Fatalf("the reserved third attempt: %v, %d attempts, %d sent", err, len(attempts), len(sent))
+		}
+		stGasFixtureSnapshot(tb, p, "47600000", 3)
+
+		resume()
+		fixture.stateLock.Lock()
+		fixture.balance = nil
+		fixture.stateLock.Unlock()
+		_, err = client.DepositCredit(ctx, 8, 1, big.NewInt(100))
+		sent, staged, source, deposited, depositNonce := stGasFixtureChain(fixture)
+		if !errors.Is(err, errStTransactionAttemptLimit) || len(sent) != 1 || !strings.Contains(err.Error(), "st: finalized transaction "+attempts[0].TxHash+" reverted") {
+			tb.Fatalf("send behind the third attempt: %v, %d sent", err, len(sent))
+		}
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(client.cfg.ChainId))
+		if third := sent[0]; !strings.EqualFold(third.Hash().Hex(), attempts[0].TxHash) || third.Nonce() != 7 || third.Gas() != stV1DepositGasFloor || third.GasPrice().Int64() != 14 || strings.ToLower(signer.Hash(third).Hex()) != pending.SigningHash {
+			tb.Fatalf("sent nonce %d gas %d price %s, not the reserved third attempt", third.Nonce(), third.Gas(), third.GasPrice())
+		}
+		if after := model.GetStTransactionAttempts(ctx, intent.IntentId); len(after) != stTxMaxAttempts || staged != 102 || source != 10_000 || deposited != 0 || depositNonce != 3 {
+			tb.Fatalf("%d attempts; %d staged, %d source, %d deposited, deposit nonce %d", len(after), staged, source, deposited, depositNonce)
+		}
+		requireLedgerV2Intent(tb, ctx, client.cfg, "deposit:7:1:3", model.StTxReverted, sent[0])
+		stGasFixtureSnapshot(tb, p, "47600000", 3)
+
+		hash, err := client.DepositCredit(ctx, 8, 1, big.NewInt(100))
+		sent, _, _, deposited, _ = stGasFixtureChain(fixture)
+		if err != nil || len(sent) != 2 || sent[1].Nonce() != 8 || !strings.EqualFold(hash, sent[1].Hash().Hex()) || deposited != 100 {
+			tb.Fatalf("deposit on the freed key: %s, %v, %d sent", hash, err, len(sent))
+		}
+		// Epoch 8's deposit adds its 3,400,000-gas floor at 10 wei.
+		stGasFixtureSnapshot(tb, p, "81600000", 4)
 	})
 }
 

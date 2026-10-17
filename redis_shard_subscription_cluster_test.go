@@ -37,14 +37,21 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	if authority == "" {
 		t.Skip("WARP_TEST_REDIS_CLUSTER names no disposable local cluster")
 	}
-	authorityHost, _, err := net.SplitHostPort(authority)
+	authorityHost, authorityPort, err := net.SplitHostPort(authority)
 	if err != nil || !redisLoopbackHost(authorityHost) {
 		t.Fatalf("WARP_TEST_REDIS_CLUSTER=%s is not a loopback host:port", authority)
+	}
+	// A production data tunnel forwards its cluster to these loopback ports.
+	if port, err := strconv.ParseUint(authorityPort, 10, 16); err != nil || testEnvLoopbackTunnelPort(uint16(port)) {
+		t.Fatalf("WARP_TEST_REDIS_CLUSTER=%s is a production data tunnel port; use a disposable cluster on other ports", authority)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{authority}})
+	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:  []string{authority},
+		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+	})
 	defer clusterClient.Close()
 
 	// read-only checks that this is a disposable cluster
@@ -170,7 +177,10 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	requireSubscribed(true, "the moved slot was never subscribed again")
 	publish("after-move")
 
-	target := redis.NewClient(&redis.Options{Addr: targetAddr})
+	target := redis.NewClient(&redis.Options{
+		Addr:   targetAddr,
+		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+	})
 	defer target.Close()
 	subscriberCounts, err := target.PubSubShardNumSub(ctx, channel).Result()
 	if err != nil {
@@ -213,7 +223,10 @@ func testRedisSlotOwner(t *testing.T, ctx context.Context, clusterClient *redis.
 func testRedisMoveSlot(t *testing.T, ctx context.Context, slot int64, sourceAddr string, targetAddr string, masterAddrs []string) {
 	nodeClients := map[string]*redis.Client{}
 	for _, masterAddr := range masterAddrs {
-		nodeClients[masterAddr] = redis.NewClient(&redis.Options{Addr: masterAddr})
+		nodeClients[masterAddr] = redis.NewClient(&redis.Options{
+			Addr:   masterAddr,
+			Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+		})
 	}
 	defer func() {
 		for _, nodeClient := range nodeClients {

@@ -4,6 +4,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 )
 
@@ -12,9 +13,9 @@ var competitionSourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // Hashes the compact evaluator-lock object. Artifact file digests remain
 // separate: pretty-printed copies need not have this canonical content hash.
 func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
-	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"}
+	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"}
 	if len(commits) != len(repositoryNames) {
-		return "", errors.New("source lock requires exactly the frozen ten repositories")
+		return "", fmt.Errorf("source lock requires exactly %d frozen repositories", len(repositoryNames))
 	}
 	for _, repository := range repositoryNames {
 		if !competitionSourceCommitPattern.MatchString(commits[repository]) {

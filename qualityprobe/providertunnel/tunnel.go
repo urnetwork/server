@@ -31,6 +31,10 @@ type Config struct {
 	// the caller's DNS and URL traffic owns evaluation, without provider IpPing.
 	// The default retains the ordinary initial/continuous ping behavior.
 	DataOnlyProbe bool
+	// Keeps each generated client's identity key local when nothing reads it
+	// (skipUnreadClientKeyPublication). Only the taskworker's URL probe sets
+	// it; every other caller's clients publish as before.
+	KeepClientKeysLocal bool
 
 	ApiUrl      string
 	PlatformUrl string
@@ -92,6 +96,12 @@ type Config struct {
 	// Bounds that whole wait, for a provider that never goes quiet. It sits
 	// inside CloseTimeout. Zero or negative means 5s.
 	ReturnDrainTimeout time.Duration
+	// Optional, for a capability measurement in a tunnel of its own
+	// (server/capprobe). Nil, what the URL probe and every other probe
+	// tunnel use, leaves the clients the tunnel generates exactly as they
+	// were: end-to-end sessions off, nothing observed, and no wait for key
+	// registration.
+	CapabilityObservation *CapabilityObservation
 }
 
 // Returns CloseTimeout, or its default when unset.
@@ -204,14 +214,19 @@ func providerReturnReceiver(write func([]byte) (int, error), returns *providerRe
 
 // The cause (context.Cause) of Tunnel.Lost when the
 // tunnel's path to its provider went away while the tunnel was open: the
-// pinned provider left the multi-client with nothing added in its place, or
-// the packet pump's read from the tun failed. A measurement in flight when it
+// pinned provider left the multi-client with nothing added in its place, the
+// packet pump's read from the tun failed, or a capability measurement
+// tunnel's window client was replaced. A measurement in flight when it
 // happens is not a measurement of the provider, and the prober reports it as
 // aborted rather than as the failures a dead tunnel produces.
 var ErrTunnelLost = errors.New("providertunnel: the tunnel's path to the provider is gone")
 
 // Lost's cause once the tunnel has been closed on purpose.
 var ErrTunnelClosed = errors.New("providertunnel: the tunnel was closed")
+
+// Joined to ErrTunnelLost in Lost's cause when a capability measurement
+// tunnel's window client was replaced (watchCapabilityWindowClient).
+var ErrTunnelClientReplaced = errors.New("providertunnel: the window's client was replaced")
 
 // Negative reservation targets are malformed, not a request for defaults.
 var ErrContractReservation = errors.New("providertunnel: contract reservation byte count must not be negative")
@@ -265,8 +280,10 @@ func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClient
 	settings.DataOnlyProviderProbe = cfg.DataOnlyProbe
 	// A probe tunnel lives for one bounded measurement, so its re-dial of
 	// the probed provider keeps the measured cadence instead of the paced
-	// re-dial a long-lived fixed window uses.
+	// re-dial a long-lived fixed window uses. A capability measurement paces
+	// it at about its own timeout instead.
 	settings.FixedDestinationRetryMin = 0
+	cfg.CapabilityObservation.paceRedial(settings)
 	return settings
 }
 
@@ -286,6 +303,37 @@ func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *conne
 		contracts.StandardContractTransferByteCount = min(contracts.StandardContractTransferByteCount, reservationByteCount)
 	}
 	return settings
+}
+
+// Keeps a generated client's identity key local when nothing reads it, for a
+// tunnel whose Config opts in with KeepClientKeysLocal.
+//
+// Every URL probe mints a derived client with a fresh key, and each key the
+// client published became a permanent signed registration: one
+// st_client_key_history row plus its evidence blobs, the largest share of the
+// table's growth on 2026-10-14. A URL tunnel's client never uses its key.
+// Encryption is off, so it signs no certificate or identity proof for a
+// provider to verify. It has no close-report domain, so it signs no original
+// close report. It does not wait for registration. Contract creation, the
+// provider's admission (an HMAC under the provide secret) and settlement
+// (acked byte counts) do not read client keys.
+//
+// A client that can use its key keeps publishing: any session mode, a
+// required registration (a capability measurement's opportunistic clients)
+// or a close-report domain. So this runs after every other change to the
+// generated settings. A reader that appears later, such as a post-quantum
+// profile raising the sessions, makes connect log an error and publish anyway.
+func skipUnreadClientKeyPublication(settings *connect.ClientSettings) {
+	if settings.ClientKeyRegistrationRequired {
+		return
+	}
+	if settings.EncryptionSettings != nil && settings.EncryptionSettings.Mode != connect.EncryptionModeOff {
+		return
+	}
+	if settings.ContractManagerSettings != nil && settings.ContractManagerSettings.CloseReportDomainHash != ([32]byte{}) {
+		return
+	}
+	settings.SkipClientKeyPublication = true
 }
 
 // A read failure while the tunnel is live makes the data path silently stop,
@@ -376,6 +424,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if cfg.ContractReservationByteCount < 0 {
 		return nil, ErrContractReservation
 	}
+	if err := cfg.CapabilityObservation.validate(); err != nil {
+		return nil, err
+	}
 	resolver, err := providerDnsResolverSettings(cfg)
 	if err != nil {
 		return nil, err
@@ -426,7 +477,14 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cfg.Version,
 		&cfg.ClientId,
 		func() *connect.ClientSettings {
-			return newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			// nil for every tunnel but a capability measurement's
+			cfg.CapabilityObservation.apply(settings)
+			// last, after every other change to the settings
+			if cfg.KeepClientKeysLocal {
+				skipUnreadClientKeyPublication(settings)
+			}
+			return settings
 		},
 		generatorSettings,
 	)
@@ -468,7 +526,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// read failure to say why, and it is ended by Close, not by the caller's
 	// ctx -- the caller ending is its own signal, not the tunnel's loss.
 	lost, lose := context.WithCancelCause(context.Background())
-	unwatch := watchProviderPath(multiClient.Monitor(), lose)
+	unwatch := watchTunnelPath(multiClient.Monitor(), lose, cfg.CapabilityObservation != nil)
 	unwatchSetup := setup.watch(multiClient.Monitor())
 
 	// pump tun -> provider
@@ -530,7 +588,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 // Returns a context that is done once the tunnel's path to its provider is
 // gone for good while the tunnel is open -- context.Cause says why, wrapping
-// ErrTunnelLost -- and once the tunnel is closed, with ErrTunnelClosed. A probe's egresshealth.Path
+// ErrTunnelLost, and ErrTunnelClientReplaced too when a capability
+// measurement tunnel's window client was replaced -- and once the tunnel is
+// closed, with ErrTunnelClosed. A probe's egresshealth.Path
 // reports it as the current client's loss signal, so a run or check whose
 // tunnel dies part-way re-creates it for the loads it had not finished,
 // instead of failing them: a provider that disconnected mid-run did not refuse
@@ -576,6 +636,67 @@ func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCa
 		}
 		if wasAdded.Load() {
 			lose(fmt.Errorf("%w: the provider left the multi-client and nothing was added in its place", ErrTunnelLost))
+		}
+	})
+}
+
+// Ends lost when the tunnel's path to its provider goes away
+// (watchProviderPath) and, for a capability measurement tunnel, also when
+// its window client is replaced (watchCapabilityWindowClient). Returns the
+// unsubscribe of every watcher it added.
+func watchTunnelPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc, capabilityObservation bool) func() {
+	unwatchPath := watchProviderPath(monitor, lose)
+	if !capabilityObservation {
+		return unwatchPath
+	}
+	unwatchClient := watchCapabilityWindowClient(monitor, lose)
+	return func() {
+		unwatchPath()
+		unwatchClient()
+	}
+}
+
+// Ends lost, with ErrTunnelClientReplaced, when a second client takes a
+// capability measurement tunnel's window: a replacement added before the
+// first client leaves, or after it. Returns the unsubscribe.
+//
+// The pinned provider's window holds one client at a time, and the
+// measurement's recorder merges what every client recorded. After a
+// replacement, the first attempt and the first acknowledgement it reads
+// belong to a client that is leaving or gone, and the new client's
+// ClientHello would be read against an establishment window that began
+// before it was sent: the provider could be read as having no responder
+// while the new ClientHello is still within its own window. So the
+// measurement ends there, with what it has. A candidate that never got into
+// the window is no replacement. The first client leaving with nothing in its
+// place is watchProviderPath's loss.
+func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
+	var stateLock sync.Mutex
+	var windowClientId *connect.Id
+	replaced := false
+	return monitor.AddMonitorEventCallback(func(_ *connect.WindowExpandEvent, events map[connect.Id]*connect.ProviderEvent, _ bool) {
+		replacedNow := func() bool {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if replaced {
+				return false
+			}
+			for clientId, event := range events {
+				// Removed is emitted only for a client that was in the
+				// window, so a coalesced Added still counts
+				if event == nil || !(event.State.IsActive() || event.State == connect.ProviderStateRemoved) {
+					continue
+				}
+				if windowClientId == nil {
+					windowClientId = &clientId
+				} else if *windowClientId != clientId {
+					replaced = true
+				}
+			}
+			return replaced
+		}()
+		if replacedNow {
+			lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
 		}
 	})
 }

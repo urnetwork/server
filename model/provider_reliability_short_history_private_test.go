@@ -10,6 +10,7 @@ import (
 
 // This is a current-policy discriminator, not an eligibility policy change.
 // A short all-valid history differs from both missing and observed-bad history.
+// Only URL admission waits for history, so the missing control is not claimed.
 func TestPrivateHealthyShortHistoryPublicationChangesEligibility(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -23,9 +24,10 @@ func TestPrivateHealthyShortHistoryPublicationChangesEligibility(t *testing.T) {
 			client, network server.Id
 			observations    int64
 			wantAfter       bool
+			wantClaim       bool
 		}
 		providers := []fixture{
-			{label: "full_healthy", observations: 721, wantAfter: true},
+			{label: "full_healthy", observations: 721, wantAfter: true, wantClaim: true},
 			{label: "short_healthy", observations: 1},
 			{label: "missing", wantAfter: true},
 		}
@@ -85,8 +87,8 @@ func TestPrivateHealthyShortHistoryPublicationChangesEligibility(t *testing.T) {
 			claimed[claim.ClientId] = true
 		}
 		for _, p := range providers {
-			if claimed[p.client] != p.wantAfter {
-				t.Fatalf("%s current URL claim=%t want=%t", p.label, claimed[p.client], p.wantAfter)
+			if claimed[p.client] != p.wantClaim {
+				t.Fatalf("%s current URL claim=%t want=%t", p.label, claimed[p.client], p.wantClaim)
 			}
 		}
 	})

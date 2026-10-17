@@ -402,6 +402,42 @@ lifecycle event, not loss of production visibility, and must not emit a
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
 
+An empty gated tick is therefore not evidence of absence. After a one-tick
+dip the gate holds a returning alert for `Sustain - 1` more ticks, and it
+holds a failed run's two-cadence `cannot-observe` alert on its first failure,
+so either tick reaches a consumer with no gated alerts. A consumer that tracks
+incidents across ticks takes the run loop's `SignalExecution`, which also
+carries the held alerts and whether the run failed: a held alert is still
+observed, and a failed run or one with an unobservable alert, gated or held,
+is incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only
+after two complete ticks in which nothing observed it. Healthy control: one
+dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
+complete ticks without the alert post one clear.
+
+An unknown state is unobservable whatever signal reports it.
+`alert_classes.go` classifies every alert class as visibility, an unknown
+state reported in place of an incident, or incident, and
+`TestEveryAlertClassIsClassified` fails for a class the table leaves out,
+including one a signal computes, which the test lists with every class it can
+take. The classes `cannot-observe` and `*-unobservable` are always
+visibility, and the probe id `monitor/visibility` is reserved for unknown
+states. The classification errs toward visibility: over-marking only delays a
+signal's other clears while the state lasts, but under-marking lets an
+incident clear because its signal could not see it. A class whose findings
+are unknown only in some states stays an incident, and those findings set
+their `unobservable` field, as the host-scope partial finding of a run with
+blocked hosts and the proxy public path without an allocation do. An Alert
+built directly sets the alert's marker exactly when its class is visibility,
+as the provider, crash-report and settings-generation visibility alerts do,
+and the test checks it. Accept filters let unobservable findings through,
+because a probe shared by several signals that loses part of its source has
+lost it for each of them. Deterministic controls: a redis node's PAGE is
+kept, not cleared and raised again, while its INFO times out for two runs; a
+pg-cpu PAGE is kept while its database host does not answer for two runs; and
+a configured host exclusion without blocked hosts, which settings freshness
+reports every run, leaves the run complete.
+
+
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
 settlement and public evidence. A healthy §17 result does not satisfy §22.
@@ -9218,6 +9254,121 @@ healthy lists, thresholds, partial positive evidence, old/missing/stale/reset
 sources, cancellation and redaction; model regressions exercise the actual
 selector and backward-compatible directory cache.
 
+### 2.9d ARIN database canary — fallback, losses the breaker cannot see, protection and staleness
+Probe: `arindb-canary`
+
+Every score publication compares the latest and the previously selected ARIN
+databases and publishes one decision to `{arindb_canary_decision}` before its
+export (arindbctl/ARINDB.md, "Dual-database canary"). Every Taskworker's stats
+collector exports that document as the `urnetwork_stats_arindb_*` gauges, so
+all hosts report the same values; only the publishing Taskworker exports the
+per-country supply. This signal reads those gauges through Mimir, the
+replica-safe max of each, and the share of every process's decision reads that
+were not ok over ten minutes. They are the series the providers dashboard's
+"ARIN database canary" row and the warp rules in
+`grafana/alerting/arindb-canary.yml` read.
+
+- `arindb-fallback-active` **PAGE**, sustained 10 minutes: the latest database
+  tripped the breaker on Quality (its net loss strictly above
+  `bucket_loss_threshold`, or a country of at least
+  `min_emptied_country_supply` providers left with none), so the export serves
+  the old database's Quality classification. The fallback latches on its pair
+  until `release_passing_runs` consecutive comparisons pass with
+  `release_margin`, or `accept_latest_build_epoch` names the latest. The page
+  names the countries the latest would empty, with the old supply of each, and
+  every bucket's net loss. Risk still comes from the latest database: a
+  fallback restores Quality and never readmits a provider the latest calls
+  risky.
+- `arindb-risk-supply-loss` **PAGE**, sustained 10 minutes: the Speed or Online
+  net loss of latest against old is above 0.10, with at least 20 paired
+  providers of old supply in the bucket. Only risk can cause it, and risk
+  always follows the latest database, so the canary does not fall back for it.
+- `arindb-supply-gain` and `arindb-supply-churn` **WARN**, sustained 30
+  minutes: a bucket's net gain above 0.10, or its gross churn (removals plus
+  additions against old) above 0.20, with the same sample floor. The breaker
+  trips only on net losses, so a flood or a wholesale reshuffle passes it; a
+  deliberate catalog expansion does too, so these warn rather than page.
+- `arindb-warming-tripped` **PAGE**, sustained 10 minutes: the canary is
+  warming and its paired sample of at least `min_paired_sample` providers
+  trips, so the latest is held out before the cohort is covered. While the old
+  database covers at least 1 − `bucket_loss_threshold` of the cohort, warming
+  serves it; below that it serves each provider's latest slot, which applies
+  the blocked latest to every row a restarted process wrote (in a probe where
+  the old covered half the cohort, half the rows took the latest's
+  classification). The page is the protection in that case.
+- `arindb-warming-serves-latest` **WARN**, sustained 30 minutes: warming
+  serves the latest unverified, because its paired sample is below
+  `min_paired_sample` or passes.
+- `arindb-protection-lost` **PAGE**, sustained 10 minutes: the publishing
+  Taskworker could not open its latest database (`latest_unavailable`; it
+  compares the previous decision's epochs while it can, else it is single), or
+  a latched fallback's old database is not served (`fallback_dropped`): warming
+  serves each provider's latest slot while the latch is held, as when Connect
+  restarts onto the next release before the Taskworker; the canary went single
+  after the fallback; or a release compares against the latest the latch held
+  out, which the decision carries as its `dropped_latch`.
+- `arindb-cohort-shrink` **PAGE**, sustained 10 minutes: the public cohort is
+  more than 10% below its largest of the last two hours, from a reference of
+  at least 100, within two hours of a new pair or while more than 1% of latest
+  lookups fail over thirty minutes; a background of failures, such as GeoLite2
+  misses on classifier-v0 records, stays below that.
+  A provider whose latest lookup fails never writes a location, so it leaves
+  the cohort before the comparison can see it; outside those windows a
+  shrinking cohort is a Connect outage or a restart, which page on their own.
+- `arindb-serving-flapping` **PAGE**, sustained 5 minutes: the serving epoch
+  changed more than 4 times in six hours, switching every provider's Quality
+  classification back and forth.
+- `arindb-decision-stalled` **PAGE**: the last decision is more than 90 minutes
+  old. A fallback the export published is still served but no longer
+  re-decided.
+- `arindb-canary-unavailable` **WARN**, state `single` for an hour: the
+  publishing Taskworker has no usable old database (a refused or skipped copy
+  at build, an identical copy, or an invalid one), so a bad release takes
+  effect unchecked.
+- `arindb-canary-warming` **WARN**, state `warming` for two hours: fewer than
+  `min_coverage` of the public cohort carry facts for both databases, such as
+  a stuck host on an older pair or a rollup that has not refreshed.
+- `arindb-decision-stale` **WARN**: the last decision is more than 30 minutes
+  old. Every publication writes one, so this is a stalled score export
+  (§2.8); the decision expires with the publication's 300 minute ttl, after
+  which readers serve each provider's latest slot.
+- `arindb-decision-reads-not-ok` **WARN**, sustained 15 minutes: more than 5%
+  of decision reads over ten minutes were absent, invalid or Redis errors.
+  Absent and invalid reads serve each provider's latest slot; an error keeps a
+  process's last decision for up to 15 minutes.
+- `arindb-canary-unobservable` **WARN**, sustained 15 minutes: no Taskworker
+  exports the state and decision time.
+
+Action on a fallback: judge whether the latest database is a bad release from
+the losses and emptied countries, its catalog audit and its Atlas validation.
+If it is, the next all-release build must not compare against it. With
+`ARIN_CANARY_DECISION_FILE` the release runner pins the database the decision
+protects automatically, and pauses the ARIN refresh when it cannot; without
+it, set `ARIN_PREVIOUS_DATABASE_FILE` to the last good `arin.mmdb` and clear it
+once a good release ships. If the latest is good after all, accept it as
+arindbctl/ARINDB.md describes ("Accepting a release the breaker trips on"):
+the accept names one build epoch, so clear or move the pin with it.
+Do not restart processes or delete `arin-old.mmdb` to clear the page: a
+process reads a new pair only at restart, and without the old file the canary
+is single, which pages as `fallback_dropped`.
+
+False-positive qualifiers: thresholds are net losses over the paired
+providers only, so a small cohort can trip on a few providers; an emptied
+country needs `min_emptied_country_supply` providers, and the Speed, Online,
+gain and churn pages need 20 paired providers of old supply. False-negative
+qualifiers: a release that is wrong but removes little supply passes (the
+reviewed rules, catalog audit and Atlas validation remain the quality gates);
+a refused copy at build ships a release without a canary, which is the
+`arindb-canary-unavailable` warning, or the `fallback_dropped` page right after
+a fallback.
+
+Implementation: `signal_arindb_canary.go` and its synthetic test file,
+registered in `NewSignals`. Controls cover a healthy latest state, a fallback
+with named emptied countries, Speed and Online losses at and above the
+threshold with and without their sample, each page and warning the breaker
+cannot see at and below its threshold, the cohort page's release gate, the
+reads warning, the unavailable, warming and stale warnings and missing gauges.
+
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
 
@@ -10727,6 +10878,148 @@ handler whose heartbeat is older than 2 × 60 s once the database returns, and
 each Connect process whose handler is gone cancels itself on its next
 heartbeat. An outage longer than about 105–110 s therefore drops every Connect
 process. Stop the Taskworker before a planned primary restart (§5.13).
+
+### 2.16a Live handler connection reconcile — rows a running process no longer holds
+Probe: `connection-reconcile`
+
+§2.16 finds open rows whose handler is gone. A row can also stay open under a
+handler that is alive: each announcement writes its connection row once and
+disconnects it once, and before the handler connection reconcile a final
+disconnect that failed (a database outage, a pooler stall) was dropped. Handler
+expiry never reached the row, because the process kept heartbeating its
+handler, so the row stayed connected until that process restarted, and every
+reader of connected rows counted the provider: the location reliability
+writer, FP2 and URL probe admission and census, location and provider counts.
+
+Each Connect handler now reconciles: it holds the rows of the connections its
+process holds, reads the handler's connected rows every five minutes, and
+retires the unheld rows on their second sighting, at most 256 per pass. A
+failed final disconnect moves the next pass up to 15 s after the last one, and
+passes keep that 15 s interval while rows known to be stale remain: rows of
+failed final disconnects, and stale rows not retired yet. A row unheld for a
+moment during ordinary churn (a registration in flight, a disconnect
+committing) waits for the regular pass; before this, any such row kept the
+15 s interval, so a busy handler read its rows every 15 s. A retire takes the
+transport disconnect's fences with try-locks and defers a row whose endpoint
+is busy; a retire that fails leaves its row for a later pass, tried after the
+others, and three consecutive failures end the pass. It exports, per process:
+
+- `urnetwork_connect_connection_reconcile_unheld`: rows the last pass found
+  connected under the handler but not held;
+- `urnetwork_connect_connection_reconcile_retired_total`: rows it retired;
+- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`;
+- `urnetwork_connect_connection_reconcile_unretired_total{reason="failed|busy"}`:
+  stale rows a pass left, because the retire raised or a fence or the row was
+  busy.
+
+The probe evaluates them per block in one Mimir query:
+
+```promql
+label_replace(max by (host,block) (urnetwork_connect_connection_reconcile_unheld{env="main"}),"monitor_metric","unheld","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_retired_total{env="main"}[15m])),"monitor_metric","retired","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="ok"}[15m])),"monitor_metric","ok_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="error"}[15m])),"monitor_metric","error_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="failed"}[15m])),"monitor_metric","failed_retires","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="busy"}[15m])),"monitor_metric","busy_retires","__name__",".*")
+```
+
+- HEALTHY: every block's unheld count stays below 256, or falls while the
+  reconcile retires rows. After a database outage a block can hold thousands of
+  unheld rows for a few minutes while it drains them.
+- STUCK (`connection-reconcile-stuck`, two probes): a block holds at least 256
+  unheld rows and retired none in 15 minutes. Its retires fail, are deferred
+  behind busy endpoint fences or find nothing, its batch is zero, or a
+  registration it waits for never ends.
+- FAILING (`connection-reconcile-failing`, two probes): in 15 minutes every
+  pass on a block raised, or its retires failed and none succeeded; the
+  database path of that process is down. A failed retire fails only its row
+  and its pass completes, so the pass results alone miss it.
+- UNOBSERVABLE (`connection-reconcile-unobservable`, two probes): no block
+  exports a fresh gauge. Expected until Connect runs an artifact with the
+  reconcile; until then compare a block's connected provider rows with its
+  `urnetwork_connect_provider_connections` gauge.
+
+2026-10-14 production evidence: about 29.6k provider rows were connected under
+live handlers of eight blocks whose processes survived the 2026-10-13 primary
+restarts (06:40Z, 08:10Z) and PgBouncer livelock (16:45-17:30Z). Each block's
+excess over its own provider gauge matched, within 40 rows, its rows of clients
+absent from `client_reliability` plus rows replaced by a newer row of the same
+live client. Connect logged `query_wait_timeout (SQLSTATE 08P01)` and `context
+deadline exceeded` from the final `DisconnectNetworkClient` in those windows.
+About 9.8k providers in the FP2 population were connected only through such
+rows; they took about 12% of URL probe runs and 26% of the no-contact failures.
+
+Do not update connection rows or delete handlers manually. Rows of a process
+that predates the reconcile are retired by restarting that Connect block:
+handler expiry then retires all of its rows, at the cost of its live
+connections reconnecting. The same release keeps a live transport through a
+failed sync read, so an outage no longer disconnects every provider whose sync
+fell in it.
+
+Implementation convention: SIGNALS.md §2.16a (`connection-reconcile`) maps to
+`signal_connection_reconcile.go` and `signal_connection_reconcile_test.go`.
+Synthetic tests cover a healthy fleet, a draining block, a stuck block, a
+failing block, failing retires and an absent gauge. The reconcile itself is tested in
+`connect/transport_announce_reconcile_test.go` and
+`connect/transport_announce_reconcile_db_test.go`.
+
+### 2.16b Live connection announcement failures — reads and writes retried with the transport kept
+Probe: `connection-live-failures`
+
+A live Connect announcement reads its provide key changes every sync round,
+publishes its connection's measurements, and refreshes its verify egress
+lease. Before 2026-10-14 a failed sync read or lease write raised and tore
+the transport down, so a database outage disconnected every provider whose
+sync fell in it, and a failed measurement write ended the publisher for the
+connection's life. Each now keeps the transport and retries with a backoff of
+at most 2 minutes, counting every failure:
+
+- `urnetwork_connect_connection_sync_read_failures_total`;
+- `urnetwork_connect_connection_worker_failures_total{operation="measurement_write|verify_egress_lease"}`.
+
+Each failure is logged at V(1), and the process logs them unconditionally at
+most once a minute, with the failures by operation since its last line and the
+latest error:
+
+```text
+[t]live connection failures retried with the transport kept (in 1m0s): measurement_write=412 sync_read=1803; latest sync_read: <error>
+```
+
+The probe evaluates, per host, block and operation, the failures in the
+fewest-failure 2 minute window of the last 15 minutes and in the whole range:
+
+```promql
+label_replace(label_replace(min_over_time((sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[2m])))[15m:1m]),"operation","sync_read","__name__",".*"),"monitor_metric","window_min","__name__",".*")
+or label_replace(label_replace(sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[15m])),"operation","sync_read","__name__",".*"),"monitor_metric","total","__name__",".*")
+or label_replace(min_over_time((sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[2m])))[15m:1m]),"monitor_metric","window_min","__name__",".*")
+or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[15m])),"monitor_metric","total","__name__",".*")
+```
+
+- HEALTHY: failures are isolated, or only one connection fails. One
+  connection retries at most every 2 minutes, so it fails about 8 times in
+  the range, below the floor of 30.
+- SUSTAINED (`connection-live-failures-sustained`, two probes): a block
+  operation failed in every 2 minute window and at least 30 times in 15
+  minutes. The block's PostgreSQL or Redis path keeps failing: sync_read stops
+  its providers' mode changes and reliability stats, measurement_write stops
+  its measurements reaching the reliability writer, verify_egress_lease lets
+  its leases lapse after their ttl. Read the block's unconditional log line
+  for the latest error, then restore the database path (§2.11, §2.2) or Redis
+  (§3). Do not restart the block for these failures alone: the transports are
+  kept, and a restart reconnects every connection.
+- UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
+  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  same processes export the reconcile gauge, whose unobservable class covers a
+  fleet that does not export them.
+
+Panels 58 (sync reads retried) and 59 (worker writes retried, by operation) of
+the Connect dashboard chart the counters.
+
+Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
+maps to `signal_connection_live_failures.go` and
+`signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
+fleet, one failing connection below the floor, a sustained block and a stale
+sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
 
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
@@ -13704,7 +13997,8 @@ probe task, which holds every load of a run, therefore records each one in
 marks the loads whose exit was **healthy** — it passed at least nine in ten of
 the *other* scored sites of the same run, after their retries. A site's
 failure share is its failed healthy loads over its healthy loads in the
-window (`SiteWindow`, three days), per class:
+window (`SiteWindow`, three days, from no day before the first reached-only
+tally day below), per class:
 
 ```sql
 SELECT d.name, d.class,
@@ -13713,7 +14007,8 @@ SELECT d.name, d.class,
 FROM provider_egress_destination d
 JOIN provider_egress_site_tally t ON t.name = d.name
 WHERE d.active
-  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+  AND GREATEST(date_trunc('day', now() at time zone 'utc' - interval '3 days')::date,
+               DATE '2026-10-14') <= t.tally_day
 GROUP BY d.name, d.class;
 ```
 
@@ -13722,7 +14017,11 @@ refresh judges it on all of its loads and says so in its log line. Either way
 only runs that reached their provider are tallied: a URL that failed before
 any destination answered (`dial_dns`, `dial_tcp` and their timeout and
 combined stages, with no status, response byte, redirect or TLS verdict) is an
-offline or unreachable exit, which says nothing about the site. The
+offline or unreachable exit, which says nothing about the site. Tally days
+before 2026-10-14 (`model.ProviderEgressSiteTallyContactedSince`) still count
+those runs as site failures, so neither the refresh nor this signal reads a
+day before it; the refresh's `[egresssites]` log line says when that cuts the
+window short. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
@@ -13861,7 +14160,11 @@ loaded there anyway, unscored — and is unmarked after `SiteRegionCooldown`
 Action: a sustained backfill is a degradation with a cause, and the alert
 is closed by finding it, never by the answers looking full. Read the
 exclusion-reason and index panels beside the backfill metric: a wave of
-"unprobed" is the prober or its capacity (§2.19, §2.19a); a wave over the
+"unprobed" that holds is the prober or its capacity (§2.19, §2.19a), while
+one that drains within the hour is new providers warming up, whose URL
+checks pass on too few runs yet for the native minimums (Quality: 3 runs
+spanning 30 minutes; Speed: 2; model/egress_native_min_runs.go), which a
+new provider's paced runs meet about 40 minutes after its first; a wave over the
 one-in-ten line with the pool healthy is the exits — new evidence is needed
 before ranking them again, whether more sites, a longer window, or a source
 of quality this design does not yet read; a wave in one place is the
@@ -13876,7 +14179,10 @@ because retiring sites during a prober fault empties the pool for nothing —
 the refresh skips its run while the failure share of the loads that reached
 their provider is above the prober-fault line for that reason (a run that
 never reached its provider is no evidence of a prober fault, and is counted
-apart in the refresh's `[egresssites]` log line). Verify: the site's failure share on healthy exits falls under
+apart in the refresh's `[egresssites]` log line), and while fewer than
+`SiteProberFaultReachedShare` (20 %) of the recent loads reached their
+provider at all, the shape of a fault that ends runs before any destination
+answers. Verify: the site's failure share on healthy exits falls under
 the retire line within one refresh cadence after the swap, and the
 quality-bucket count of §2.9a stops falling.
 
@@ -14927,6 +15233,31 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+First admission waits for current reliability history: URL admission needs a
+one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
+intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
+12 hours) and a lookback's row is deleted once its window holds no
+observation, so a provider back after more than an hour offline has only its
+12 hour row and waits for the score pass to write its hour. The first cycle
+opens at the first admission that sees passing history, usually the score pass
+that writes it; a later location pass or public-mode change (`SetProvide`) can
+open it too. Before the rule the location pass, which commits before the score
+pass, admitted a connection with no scores as neutral, and later a returning
+provider on its 12 hour row alone. The census counted it and the scheduler
+claimed it until the score pass wrote its failing scores 20 to 130 seconds
+later. A new connection's cycle also made its real admission about eight hours
+later count as mature with no runs. Cycles opened that way before the rule
+shipped are not reset, so each such provider still adds one mature deficit
+when it is first really admitted.
+
+During a reliability rollup stall the location pass still runs, but
+`UpdateReliabilities` skips the score pass until `ClientReliabilityRollupSynced`
+holds, so no score row is written or deleted. New providers, and providers
+whose hour row was deleted before the stall, serve as neutral but are not
+URL-probed until the rollup recovers and the score pass writes their hour. A
+provider that leaves during the stall keeps its frozen rows and is readmitted
+on them when it returns. Accepted by the owner 2026-10-14.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,
@@ -15582,6 +15913,196 @@ or Main policy activation. Missing observation coverage can hide either losses
 or gains. Publishing candidate MMDB bytes is itself a serving change on current
 binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
+
+### 2.19g Modern provider evidence — the capability probe must keep measuring
+Probe: `capability-probe`
+
+WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
+`provider_modern_evidence`, and only the capability probe writes it: the
+recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
+at a time fleet-wide, each provider measured in a short tunnel of its own
+whose clients attempt opportunistic end-to-end sessions. The URL probe writes
+no evidence. While the gate's switch is off a stopped probe only freezes the
+shadow; once it is on, a stopped probe ages every provider's evidence toward
+`stale_evidence` and the gate takes Quality and Speed away from providers
+that are modern. Every series below is per taskworker process
+(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
+row); sum across the env's taskworkers and remember a process restart resets
+counters.
+
+The probe ships switched off (sn-55) and then schedules nothing: no task
+row, no prober shard, no pass, so every series stays at zero. It is
+switched on by `enabled: true` in `capability_probe.yml` and a restart of
+the taskworkers, whose containers keep the config they started with
+(capprobe/README.md, "Switching it on"). Until then nothing below applies,
+and silence is not a finding.
+
+Healthy shape:
+
+- `passes_total{result="measured"}` advances after every pass of a sweep
+  under way, a few seconds apart when nothing is due and a few minutes apart
+  while providers are measured; between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started,
+  `result="waiting"` advances every ten minutes, reading nothing. So
+  `last_pass_timestamp_seconds` is never older than a pass's
+  `max_time_seconds` (900) plus a few seconds.
+- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
+  time.
+- `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
+  dominates while most providers run the custom lineage.
+- `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
+  responder takes the whole establishment window after its first
+  acknowledgement) and never above `measure_timeout_seconds` (120); modern
+  providers read in seconds.
+- `selection_total` in steady state: `scanned` far above `due`; during the
+  first sweep after deployment, about two days, `due` and `eligible` are
+  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
+  finding then.
+- `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
+  whose few providers all lack the responder; `downgrades_total` low, a
+  `held` now and then that the next sweep mostly answers with a modern
+  reading rather than a `confirmed` one; `readiness_failures_total` and
+  `shard_cleanup_errors_total` flat.
+- `chain_restarts_total` flat. Each count is a taskworker with the probe
+  switched on that found the chain without its task row, ended by a pass on
+  a taskworker with an older config or by maintenance, and scheduled a pass
+  due at once, which starts a new sweep. A count right after maintenance is
+  expected; counts while `capability-probe-disabled-pass` holds are its
+  stale taskworker ending the chain again.
+
+Signals:
+
+- `capability-probe-stalled` — WARN when no taskworker has finished a
+  measured or waiting pass for 30 minutes while `capability_probe.yml`
+  enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
+  PAGE after six hours with the gate on: on any running taskworker as their
+  stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
+  which is what is deployed; while no taskworker publishes it, by the desired
+  provider.yml, `quality_speed_requires_modern_provider: true` or that switch
+  absent and the gate's start (2026-10-21 00:00 UTC by default,
+  `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
+  model's own provider.yml decoder reads them, so the automatic switch-on
+  arms the page. The finding names its `gate_source`. Evidence stays fresh
+  for seven days after its measurement, so a shorter stall, planned
+  database maintenance included, takes no provider out and only warns. The newest pass is read
+  over six hours (`max_over_time`), so a pass of a process that exited
+  since counts; a fleet whose taskworkers all started after it, as the
+  switch-on restart starts them, is given the 30 minutes from its oldest
+  process's start (`process_start_time_seconds`), since the first pass can
+  take its whole `max_time_seconds`. Running taskworkers that export no
+  probe series (`taskworkers_exporting=0`) run an image without the probe.
+  Read
+  `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
+  task error lines: unreadable or invalid settings, the URL probe's
+  included, whose `shard_count` past 255 would reach the capability probe's
+  prober shard slot 255; shard allocation, identity or funding readiness
+  (`readiness_failures_total{step}`, the capability probe's own, never the
+  URL probe's pass errors); a page read; or an evidence write. A failed pass
+  retries the same sweep page after a minute, so a persistent failure
+  repeats once a minute. A `passes_total{result="disabled"}` pass is the last
+  of a chain that `enabled: false` ended, deliberately or not; nothing runs
+  after it until a taskworker with the probe switched on schedules the
+  chain again, at its start or within ten minutes after
+  (`chain_restarts_total`), so check the deployed `capability_probe.yml`
+  before reading the silence as a stall.
+- `capability-probe-disabled-pass` — WARN on any disabled pass while
+  `capability_probe.yml` enables the probe: an increase of
+  `passes_total{result="disabled"}` over 30 minutes, or a running
+  taskworker whose total is above zero, which also shows a pass it ran
+  before its first scrape. A taskworker container keeps the config it
+  started with, so one that started before the switch-on, or before its
+  host published the new config, reads the probe as off and ends the chain
+  at each pass it claims; the taskworkers that read it as on schedule the
+  chain again within ten minutes, and its sweep starts over. Find the
+  taskworkers whose disabled total is above zero, confirm their hosts
+  publish the current config (`WARP_CONFIG_VERSION`) and restart them.
+- `capability-probe-no-evidence` — WARN when measurements finish for an hour
+  and none records (`providers_total` rising with every `recorded_*` flat).
+  The outcome says where: `tunnel_failed` is the probe's own setup (shard
+  credentials, local control, control plane); `no_ack` everywhere is the
+  probe's tunnels reaching no provider, so compare §2.19's URL probe health
+  before suspecting the fleet; `e2e_not_attempted` means the send path
+  accepted no ClientHello of the probe's while the provider acknowledged its
+  pings, so the probe client's sessions are off, a code or settings
+  regression in which every reading would be wrong, never something to
+  record around; `e2e_pending` means setup ate the measurement's margin over
+  the 60 s window; `tunnel_lost` means the tunnel's path went away, or its
+  window client was replaced, before the reading concluded, so a provider
+  that drops its connection shows it, and a share rising fleet-wide points at
+  the probe's windows or the platform rather than at providers;
+  `negative_withheld` everywhere is `capability-probe-breaker`;
+  `record_failed` is the database write, and fails the pass.
+- `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
+  passes for an hour, PAGE after two hours with the gate on (as for
+  `capability-probe-stalled`): the
+  probe negotiates no end-to-end session with any provider, so its negative
+  readings are all withheld (`providers_total{outcome="negative_withheld"}`)
+  and its evidence ages toward `stale_evidence`. That is a fault on the
+  probe's side, the probe client's sessions or key registration, a connect or
+  settings change, or its tunnels reaching the wrong peers; the fleet cannot
+  lose its responders at once. `readings_total{capability="e2e"}` then shows
+  only `no_responder`, `pending` and `not_tested`. Fix the probe; never
+  record around the breaker. A trip on the odd small tail pass of a sweep is
+  not a finding.
+- `capability-probe-downgrades` — INFO for the shadow review, WARN when
+  `downgrades_total{result="confirmed"}` over a day exceeds 5% of the
+  `recorded_modern` measurements: a negative reading of a provider whose
+  modern evidence was fresh is held for a later sweep (`held`), and only a
+  second negative reading there records the downgrade (`confirmed`). Held
+  ones that the next sweep answers with a modern reading were transient.
+  Confirmed ones in bulk mean modern providers turned legacy, a downgrading
+  release, or a probe fault the breaker does not see, such as windows read
+  as missing; compare `readings_total{capability="window"}` before
+  attributing it to the fleet.
+- `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
+  10% over a day: of the negotiated post-quantum readings
+  (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
+  `post_quantum_unsealed`. Those providers negotiated the hybrid group but
+  the probe could not verify their identity proof within the seal grace (no
+  published provider key, or the probe's key read failing). The model counts
+  them post-quantum, so understand the share before the switch goes on.
+- `capability-probe-staleness-risk` — WARN when
+  `last_sweep_seconds` exceeds the seven-day staleness window less
+  `modern_refresh_hours` and the sweep interval (about 3.75 days at the
+  defaults), or when the shadow's
+  `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
+  rises for a day: the probe no longer refreshes evidence before the gate
+  reads it as stale. Raise `concurrency` or find what fails first; never
+  lengthen the staleness window to hide it.
+- `capability-probe-teardown-errors` — WARN while
+  `close_errors_total` rises for an hour: capability tunnels fail to retire
+  their derived clients, which the prober reaper then owns. Cross-check
+  §2.25's derived-client retirement before attributing it. The capability
+  probe mints and retires its derived clients through the URL probe's
+  in-process credential owner, so
+  `urnetwork_egress_probe_internal_credentials_total` counts both probes;
+  this counter is the capability probe's own. `shard_cleanup_errors_total`
+  rising is a pass's prober shard whose drain or reap failed afterwards: the
+  pass stands, and the prober reaper retries the cleanup, so read the
+  reaper's progress on slot 255 before anything else.
+
+Not signals: a large `no_evidence` share in the first two days after the
+first deployment; `not_post_quantum` dominating the shadow; a provider that
+gives no evidence being measured again only by the next sweep (that is the
+probe's retry spacing, by design); `waiting` passes between sweeps; a
+modern provider's downgrade showing a sweep after its first negative
+reading (the hold, by design).
+
+Do not backfill evidence rows by hand, route evidence through URL probe
+runs, or switch the gate on while the first sweep is incomplete or
+`capability-probe-stalled` or `capability-probe-breaker` holds. A
+measurement records only when both capabilities read conclusively; a
+capability that was not tested is never recorded as a negative, and neither
+is a negative reading a pass withheld or a sweep holds, so "missing
+negatives" are not a defect to repair.
+
+Implementation convention: `signal_capability_probe.go` (probe
+`taskworker/capability-probe`) implements `capability-probe-stalled` and
+`capability-probe-disabled-pass` from fleet aggregates in Mimir, read
+against the desired `capability_probe.yml` and `provider.yml`; while the
+config switches the probe off, both are healthy. The other classes are
+dashboard reads of the series above, and a probe for them belongs in the
+same file with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -17064,6 +17585,166 @@ including repeated malformed auth shapes that spend no budget, orphan fields
 that cannot create unintended seedphrase accounts or consume either limiter,
 and corrected exhausted requests retaining 429/Retry-After. Fixed input-shape
 messages omit tokens, identities, provider input, and internal classification.
+
+### 2.29 Modern provider gate readiness — the automatic flip must not empty Quality or Speed
+Probe: `modern-gate-readiness`
+
+The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
+takes every provider the capability probe has not shown to be modern out of
+Quality and Speed under the `not_modern` reason, keeping it Online. Owner
+decision 2026-10-15: it turns on by itself at 2026-10-21 00:00 UTC, the
+code's default start, while `quality_speed_requires_modern_provider` is
+absent from provider.yml; every pass and request decides at its own instant.
+Its evidence comes from the capability probe (server/capprobe), which ships
+switched off and must be switched on and have swept the eligible providers
+before the start. Without
+that evidence a provider reads `no_evidence`, and the flip would empty or
+gut both native buckets. This signal gives the owner warning while turning
+the gate on can still be postponed.
+
+HOW: one Mimir instant query every five minutes, at the monitor's clock,
+through a services gateway, reads thirteen labelled parts from the
+configured environment. Over job `taskworker`: the `count` of
+`urnetwork_stats_provider_modern_gate_on` and of
+`process_start_time_seconds`, and the `max` of
+`urnetwork_stats_provider_modern_gate_start_seconds`, over every process;
+and over the settled processes, those whose `process_start_time_seconds` is
+older than five minutes (`< time() - 300`), the `count` of those processes
+and the `count`, `min` and `max` of the gate and of the start, matched to
+them by `and on(instance)`. Then
+`max(urnetwork_stats_provider_egress_source_started_seconds)`,
+`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
+`sum by (bucket) (max by (bucket, index)
+(urnetwork_stats_provider_egress_index))` for quality and speed. Each
+taskworker's stats collector publishes the gate and its start from its own
+provider.yml at every refresh: whether the gate holds Quality and Speed now,
+and, only while the switch is absent, the start. Read per settled process
+against the settled processes, they show a fleet that does not agree: a
+taskworker on code without the automatic start publishes neither, one on an
+older config decides the gate the other way, which the `min` catches where
+the `max` would hide it, and one that missed a moved start schedules
+another. Only settled processes are compared because each push carries a
+random per-process `instance`: a new process registers the gate at its
+stats collector's first refresh, a minute or two after it starts, and a
+drained process's series stay readable for Mimir's five-minute lookback, so
+over every process a restart alone would read as a taskworker without the
+gate. The latest start over every process places the shadow's windows and
+the watch after it. The shadow counts, for the connected valid public
+providers the other rules admit to each bucket, what the gate decides for
+them, whether or not it is on: every outcome but `modern` is what it takes
+out.
+
+- `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
+  the published start, more than half of a bucket's admitted providers are
+  not `modern` in the shadow (exactly half does not fire). WARN from 72 hours
+  before, PAGE from 24 hours before, under the same identity so the warning
+  escalates. The shadow is judged only on dashboard counts whose source read
+  started within 30 minutes and that carry every bucket and outcome;
+  otherwise the run is `cannot-observe`.
+- `modern-gate-flip-drop` (frame the bucket, sustain 1, PAGE): after the
+  start, until 18:00 UTC on the start's day (and at least an hour after the
+  start), while the kill switch can still be released, a bucket holds less
+  than half the providers it had in the last sample a second before the
+  start. It clears when the bucket recovers or the gate is off on every
+  taskworker. Counts read before the start, or published before every
+  taskworker flipped, are no verdict yet; a missing sample before the start
+  is `cannot-observe`.
+- `modern-gate-fleet-disagrees` (sustain 2), judged on the settled
+  processes: they decide the gate differently (`min` below `max`); fewer
+  publish the gate than run, inside the windows, where one without the gate
+  will not flip with the rest, or anywhere while the gate is on somewhere,
+  since one without it decides it off; or, inside the windows while a start
+  is ahead, fewer schedule a start than publish the gate or their starts
+  differ. Outside the windows a taskworker without the gate beside a gate
+  off everywhere agrees for now, as in a rollout from code before the gate
+  ahead of the start. Inside the windows WARN from 72 hours before
+  the earliest start, since some will not flip with the rest, and PAGE from
+  it until the watch after the latest start ends: Quality and Speed then
+  follow whichever taskworker ran the last score export. Outside them, and
+  while provider.yml sets the switch on every taskworker so that none
+  publishes a start, a gate decided differently WARNs: a taskworker that
+  comes back on an older config after 18:00 UTC on the start's day is seen.
+  With no taskworker process series in Mimir inside the windows the run is
+  `cannot-observe`.
+- `modern-gate-schedule-unreadable` (frame `provider.yml`, sustain 1, WARN,
+  an unknown state): the deployment's desired provider.yml, as the
+  monitor's own copy of the decoder reads it
+  (`model.GetModernProviderGateFailure`), holds the gate off by a failure: a
+  switch that cannot be read or has no value, or, while the switch is
+  absent, a start that is neither an RFC 3339 instant nor a date, is given
+  twice or has no value, or a provider.yml that cannot be read. Each reads
+  as the kill switch and publishes no start, which silences everything
+  above, though it is most likely a postponement that failed; the finding
+  names the failure as a fixed text, never the value given. It is read
+  apart from Mimir, beside `cannot-observe` when Mimir cannot be read.
+
+Outside 72 hours before the earliest start to the end of the watch after the
+latest the signal is otherwise quiet, whatever the gauges say. A part the
+verdict cannot read is `cannot-observe`, beside the findings the rest of it
+gives. No start series means the switch is set, true, false or unreadable,
+so no flip is scheduled and only the fleet's agreement is judged: the
+owner's postponement silences the rest, and a moved start moves its windows.
+When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
+inside the windows of the code's default start, the taskworkers do not run
+the code that flips the gate, or their stats collector is down: the run is
+`cannot-observe`, never quiet. Outside those windows a failed read stays
+quiet.
+
+ACTION: decide before the start. To postpone, set
+`quality_speed_requires_modern_provider: false` in provider.yml: the kill
+switch, after which the next score export restores the buckets. To move the
+flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
+as `2026-10-28T00:00:00Z`, or a date such as `2026-10-28`, its 00:00 UTC.
+Either is a config release through the config-updater and a restart of every
+taskworker and API block, since a running container keeps the config version
+it was created with (the same procedure as server/capprobe/README.md,
+"Switching it on"), and it postpones the flip only when the restarts finish
+before the start. A switch given without a value, or a start that cannot be
+read, keeps the gate off and is logged, as a postponement that failed, and
+publishes no start, which would silence this signal: the monitor's own
+decode of the desired provider.yml WARNs `modern-gate-schedule-unreadable`
+for it. Confirm the moved start on
+`urnetwork_stats_provider_modern_gate_start_seconds` or with
+`bringyourctl provider inspect` after the restart. To let it flip, first
+switch the capability probe on and let it sweep the eligible providers until
+`no_evidence` is small. After the start, a `modern-gate-flip-drop` page
+whose drop the shadow explains is answered with the same kill switch; a drop
+the shadow does not explain has another cause (§2.19, §2.23) and the gate is
+not the thing to turn off. Operational rule for the start's day: from the
+start until 18:00 UTC no taskworker restarts except to release the kill
+switch, since every rollout makes the fleet disagree while it runs.
+
+False positive: a URL probe outage or other bucket loss in the watch after
+the start pages `modern-gate-flip-drop` though the gate took little; read
+the shadow beside it. A restart alone does not fire, since a process is
+compared only once settled, but a config release that sets the switch or
+moves the start makes the fleet disagree until its last taskworker has
+restarted and the drained processes' series have gone stale, up to five
+minutes after each drain: the kill switch's own rollout after the start can
+page `modern-gate-fleet-disagrees` until it completes. A process that
+disagrees is seen only once settled, five minutes after its start. False
+negative: the dashboard counts cover connected valid public providers, the
+score export's Online population. API processes decide the gate for their
+own readers but publish no gauge, so an API block on an older config is not
+seen.
+
+Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
+`signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
+registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
+values cover quiet outside the windows, the warning from 72 hours, the page
+from 24 hours, the page after the flip and its exact-half boundaries, the
+watch to 18:00 UTC on the start's day and its clears, a fleet that
+disagrees on the gate or the schedule before and after the start, a moved
+start a taskworker missed, the WARN outside the windows and with the switch
+set everywhere, a rollout from code before the gate that stays quiet until
+the windows, findings kept beside what cannot be read, counts read
+before the flip, a set switch, a moved start, an unpublished schedule, and
+stale or incomplete counts; synthetic Mimir answers, built from taskworker
+processes as the query reads them, drive the signal's own queries for the
+page before the start, the page after it, a disagreeing fleet, a restart
+that is not judged until its process has settled, and a failed
+postponement in the desired provider.yml, beside a Mimir that answers and
+one that cannot be read.
 
 ---
 
@@ -20040,6 +20721,12 @@ Tier-0 (page):
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
 | pgbouncer-pool-starved | Grafana rule on the PgBouncer pool exporter | §2.11a `max by (env,host,pgbouncer)(pgbouncer_pool_starved_seconds)` | > 15 for 30s; no data is OK because exporter-down covers it | host and instance; waiting clients, servers, logins, maximum wait |
 | postgres-application-backends-collapsed | Grafana rule on postgres_exporter | §2.11a `min by (env,host)(pg_stat_database_numbackends{job="postgres",datname="bringyour"})` | < 300 for 1m | normal 710–770; the series holds its last value through a full PostgreSQL stop |
+| arindb-fallback-active | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_fallback_active)` | > 0 for 10m | emptied countries and per-bucket net losses; serving epoch |
+| arindb-risk-supply-loss | Grafana rule on the published canary decision; monitor §2.9d | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"})` with at least 20 paired providers of old supply | > 0.10 for 10m | emptied countries; no fallback repairs a risk loss |
+| arindb-warming-tripped / arindb-protection-lost | Grafana rules on the published canary decision; monitor §2.9d | `max by (flag) (urnetwork_stats_arindb_decision_flags)` for warming_tripped, latest_unavailable and fallback_dropped | > 0 for 10m | the flag; losses and emptied countries |
+| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with more than 1% of latest lookups failing (`urnetwork_arin_lookup_errors_total` over `urnetwork_arin_lookups_total`) | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup error share |
+| arindb-serving-flapping | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_serving_changes)` | > 4 for 5m | serving changes in six hours |
+| arindb-decision-stalled | Grafana rule on the published canary decision; monitor §2.9d | `time() - max(urnetwork_stats_arindb_decision_seconds)` | > 5400 s | decision time |
 
 Tier-1 (warn):
 | id | source | check | threshold |
@@ -20146,6 +20833,10 @@ Tier-1 (warn):
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
+| arindb-canary-unavailable / arindb-canary-warming / arindb-decision-stale | Grafana rules on the published canary decision; monitor §2.9d | state single, state warming, and `time() - max(urnetwork_stats_arindb_decision_seconds)` | single for 1h; warming for 2h; > 1800 s |
+| arindb-decision-reads-not-ok | Grafana rule on every process's decision reads; monitor §2.9d | `sum(rate(urnetwork_arindb_decision_reads_total{outcome!="ok"}[10m])) / sum(rate(urnetwork_arindb_decision_reads_total[10m]))` | > 0.05 for 15m |
+| arindb-supply-gain / arindb-supply-churn | Grafana rules on the published canary decision; monitor §2.9d | `max by (bucket)` of `urnetwork_stats_arindb_gain_ratio` and `urnetwork_stats_arindb_churn_ratio`, with at least 20 paired providers of old supply | > 0.10 gain or > 0.20 churn for 30m |
+| arindb-warming-serves-latest | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_decision_flags{flag="warming_serves_latest"})` | > 0 for 30m |
 
 ### Fixed emitted-class crosswalk
 
@@ -20186,7 +20877,14 @@ legacy ticket manager's five-healthy-tick resolution events. The current CLI
 does not emit an all-probes heartbeat. Silence is not recovery. Require direct
 healthy observations held for the applicable verification window, including
 the five-minute healthy-band check where specified, and record recovery
-confirmation in the run ledger (6.8).
+confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
+(MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
+incident on (probe, class, target) per the identity discipline below, and its
+`[CLEARED]` means only that two complete runs no longer reported the incident.
+Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
+which can repeat earlier announcements; it does not date the incidents. A
+state the configuration chose, such as the PG query sample without its flag,
+is never posted.
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:
@@ -29558,13 +30256,14 @@ standalone DeviceLocal worked because it did not arrive behind that saturated
 process queue. `WindowStatus.Failed` remained a presentation latch; it did not
 stop enumeration or retry.
 
-Current proxy builds give each hosted DeviceLocal one private carrier budget
-derived from `config/main/proxy.yml: device_memory_budget` (24 MiB in main).
+Current proxy builds explicitly select the shared SDK low-memory profile for
+each hosted DeviceLocal, including on Linux. Its private budgets derive from
+`config/main/proxy.yml: device_memory_budget` (32 MiB by default in main).
 Devices share one manager-lifetime NetworkSpace for immutable metadata and
 discovery, but each owns its mutable JWT/refresh session, control client
 strategy (including DoH concurrency and dial pacing), and memory admission.
 The private strategy's idle sockets and DoH cache are not a hard-RSS component
-of the 24 MiB DeviceLocal target; compare host reserve and per-device RSS trend
+of the 32 MiB DeviceLocal target; compare host reserve and per-device RSS trend
 after deployment before claiming spare physical capacity.
 
 **Private-control lifecycle qualifier:** the strategy is device-owned, but its
@@ -29583,7 +30282,7 @@ generation before assigning an incident to this mechanism.
 Use these aggregate, identity-free metrics:
 
 - `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
-  `urnetwork_proxy_devices_live * 24 MiB` in main.
+  `urnetwork_proxy_devices_live * 32 MiB` in main's canonical configuration.
 - `urnetwork_proxy_platform_transports_max`: should scale as
   `urnetwork_proxy_devices_live * 16`; a flat 16 with multiple live devices is
   a pre-fix/shared-budget deployment.
@@ -29656,7 +30355,8 @@ For a reported proxy failure, correlate pending H1 with these owner-window
 aggregates and bounded available retry controls. If pending remains zero while the window repeatedly enumerates and
 evaluates candidates, investigate provider reachability/auth. If pending is
 sustained, compare `transports_used` with `transports_max` and verify both the
-24 MiB config and the per-device SDK build before blaming the provider fleet.
+32 MiB canonical config (or its deliberate override) and the per-device SDK
+build before blaming the provider fleet.
 
 The `proxy-transport` probe performs that identity-free aggregate check on the
 newest actual-scrape-fresh process generation. Its authoritative denominator is
@@ -30707,12 +31407,23 @@ pressure, and newest-generation selection during rollout.
 ### 14.7d Proxy private device memory targets
 Probe: `proxy-device-target`
 
-Every hosted Proxy `DeviceLocal` owns its own 24 MiB steady-state memory target
+Every hosted Proxy `DeviceLocal` defaults to its own 32 MiB steady-state target
 and private transport admission budget. No manager-wide sum of targets may
-reject an otherwise valid device open. This is **not** a 24 MiB hard cap on
+reject an otherwise valid device open. This is **not** a 32 MiB hard cap on
 each device's RSS, and removing the old process-wide gate does not create
 physical RAM. Device count and host reserve must be considered together; more
 hardware or rebalancing is required when the active-client load cannot fit.
+
+The proxy selects the SDK low profile explicitly instead of inferring it from
+the host OS. A positive `device_memory_budget` override changes per-device
+sizing while keeping that profile; zero, negative, and malformed values remain
+invalid. Metrics report the actual installed targets, including overrides.
+The monitor below checks the canonical main target: a deliberate different
+target produces a policy-mismatch warning, not a runtime admission refusal.
+Reconcile an approved override before treating the warning as an old build.
+This per-owner choice does not change the process Go memory limit, global
+message pools, or normal Server/Connect settings. The separate proxy TUN and
+other process allocations remain outside the SDK tracked-use sum.
 
 Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
@@ -30720,7 +31431,7 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
 Use the active services.yml Proxy host/block topology as denominator, select
 the newest fresh generation per slot, and require fresh source timestamps.
-For each process, the aggregate target must equal live devices × 24 MiB. The
+For canonical main, the aggregate target must equal live devices × 32 MiB. The
 aggregate is observation only; it is not an admission budget.
 Also query the former `urnetwork_proxy_device_memory_budget_bytes` metric as
 optional rollout evidence. A fresh positive value on the newest process

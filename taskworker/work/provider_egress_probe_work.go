@@ -26,6 +26,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/providertunnel"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/localoperator"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -33,8 +34,16 @@ import (
 
 const (
 	defaultProviderEgressProbeShardCount = 4
-	maxProviderEgressProbeShardCount     = 256
+	// The prober shard registry's slots (model.BeginProberShard).
+	maxProviderEgressProbeShardCount = 256
+	// The most URL probe shards. They take slots [0, shard_count), and the
+	// registry's last slot is the capability probe's.
+	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 1
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
+	// In-process operator calls one pass runs at once (operator_concurrency).
+	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
+	// probe ingest calls against its database pool at once.
+	defaultProviderEgressOperatorConcurrency = 8
 )
 
 // Admission refusal is not task cancellation or a successful empty pass.
@@ -84,6 +93,10 @@ type ProviderEgressProbeArgs struct {
 	LoadAttempts                 int `json:"load_attempts"`
 	LoadRetryMeanIntervalSeconds int `json:"load_retry_mean_interval_seconds"`
 	TunnelRecreateAttempts       int `json:"tunnel_recreate_attempts"`
+	// The config version that wrote this snapshot, and when. It is not pass
+	// geometry; it orders snapshots written by taskworkers on different
+	// configs (provider_url_probe_geometry.go).
+	ConfigStamp
 	// The dark and batch-guard rules, snapshotted with the rest; the api
 	// reads the same keys from the same file at ingest.
 	model.ProviderEgressRules
@@ -95,6 +108,9 @@ type ProviderEgressProbeResult struct {
 	Backlog        bool `json:"backlog"`
 	UrlDue         int  `json:"url_due"`
 	UrlNotMeasured int  `json:"url_not_measured"`
+	// An older config left a newer geometry to newer instances: the post-step
+	// reschedules the same arguments.
+	HandedBack bool `json:"handed_back,omitempty"`
 	// Deprecated result fields for existing task snapshots and diagnostics.
 	Full                  bool `json:"full"`
 	Stale                 bool `json:"stale"`
@@ -127,6 +143,21 @@ type providerEgressProbeSettings struct {
 	// instance may run across all of its shard passes. A change does not make
 	// pending pass snapshots stale.
 	InstanceUrlConcurrency int `yaml:"instance_url_concurrency"`
+	// Placement only, never a task argument: how this instance reaches the
+	// operator ingest (due claims, attempts, health, blackhole checks, pins and
+	// the destination pool). Empty, the default, or "http" uses the public
+	// operator API with its vault ingest secret, as the taskworker always has;
+	// "local" opts in to calling the controller in-process, with no API
+	// request. Read at each pass's start.
+	OperatorTransport string `yaml:"operator_transport"`
+	// Placement only, never a task argument: how many operator calls one pass
+	// runs at once in-process (operator_transport: local). Over the API those
+	// calls held the API fleet's database connections; in-process they hold
+	// this taskworker's, which every other task shares, so the pass's workers
+	// must not be able to take the pool. Each pass owns its own slots, and a
+	// call beyond them waits for one within its 30-second call bound. Read at
+	// each pass's start.
+	OperatorConcurrency int `yaml:"operator_concurrency"`
 	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
 	Blackhole                    ProviderEgressProbeBatchArgs `yaml:"blackhole"`
@@ -156,6 +187,7 @@ func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettin
 			ProbeTimeoutSeconds: 60,
 		},
 		InstanceUrlConcurrency: defaultProviderUrlProbeInstanceConcurrency,
+		OperatorConcurrency:    defaultProviderEgressOperatorConcurrency,
 		Full: ProviderEgressProbeBatchArgs{
 			Limit: 8,
 			// one round: every provider of a batch waits out its retries
@@ -261,8 +293,8 @@ func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error 
 	if args.UrlProbe != nil {
 		return validateProviderUrlProbeArgs(args)
 	}
-	if args.ShardCount < 1 || maxProviderEgressProbeShardCount < args.ShardCount {
-		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderEgressProbeShardCount, args.ShardCount)
+	if args.ShardCount < 1 || maxProviderUrlProbeShardCount < args.ShardCount {
+		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderUrlProbeShardCount, args.ShardCount)
 	}
 	if args.IdleDelaySeconds < 1 || args.MaxTimeSeconds < 1 {
 		return fmt.Errorf("provider egress probe idle delay and max time must be positive")
@@ -313,6 +345,16 @@ func (self providerEgressProbeSettings) validate() error {
 	}
 	if self.UrlProbe != nil && self.InstanceUrlConcurrency < 1 {
 		return fmt.Errorf("URL probe instance_url_concurrency must be positive")
+	}
+	switch self.OperatorTransport {
+	case "", providerEgressOperatorLocal, providerEgressOperatorHttp:
+	default:
+		return fmt.Errorf("provider egress probe operator_transport must be %q or %q", providerEgressOperatorLocal, providerEgressOperatorHttp)
+	}
+	// whatever the transport, so switching to local cannot meet a bound that
+	// was never checked
+	if self.OperatorConcurrency < 1 {
+		return fmt.Errorf("provider egress probe operator_concurrency must be positive")
 	}
 	return validateProviderEgressProbeArgsConfig(providerEgressProbeArgs(self, 0))
 }
@@ -387,15 +429,67 @@ func allProviderEgressProbeArgs(settings providerEgressProbeSettings) []*Provide
 }
 
 // ScheduleProviderEgressProbeTasks ensures every configured shard has exactly
-// one pending task. RunOnce makes repeated initialization idempotent.
+// one pending task. RunOnce makes repeated initialization idempotent, and an
+// existing row keeps its arguments. While a newer config's geometry is live in
+// a configured shard, the shard set is that config's and nothing is scheduled.
+// A config that disables probing schedules no shard and seeds its disabled
+// marker instead (provider_url_probe_disabled.go).
 func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx server.PgTx) {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
+	now := server.NowUtc()
 	if !settings.Enabled {
+		scheduleProviderEgressProbeDisabledAt(clientSession, tx, &ProviderEgressProbeDisabledArgs{ConfigStamp: newConfigStamp(now)}, now)
+		return
+	}
+	if _, newerGenerationLive := readProviderEgressProbeShardRowsInTx(clientSession.Ctx, tx, settings.ShardCount, now); newerGenerationLive {
 		return
 	}
 	for _, args := range allProviderEgressProbeArgs(settings) {
-		scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc())
+		scheduleProviderEgressProbeAt(clientSession, tx, stampProviderEgressProbeArgs(args, now), now)
+	}
+}
+
+// Recreates each configured shard that has no pending row, stamped from this
+// instance's settings and due at once, so a shard lost since the last
+// taskworker start returns after the next pass of any other shard. A row that
+// exists, claimed or waiting, keeps its arguments, run time and backoff.
+//
+// It runs in a read committed transaction of its own after a pass's
+// finishing transaction commits, so it holds no shard's key but the ones it
+// inserts. Rows are found by a plain snapshot read first, so a row that a
+// pass is finishing counts as present and is never waited on. Only keys
+// missing from the snapshot are inserted, in shard order; an insert can wait
+// only for another writer inserting the same key, the startup schedule or
+// another recreation, and those take keys in shard order too, so the waits
+// form no cycle. While a newer config's geometry is live in a configured
+// shard, the shard set is that config's and nothing is recreated.
+func ensureProviderEgressProbeShardsInTx(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	settings providerEgressProbeSettings,
+	now time.Time,
+) {
+	presentShardIndexes, newerGenerationLive := readProviderEgressProbeShardRowsInTx(clientSession.Ctx, tx, settings.ShardCount, now)
+	if newerGenerationLive {
+		return
+	}
+	for _, args := range allProviderEgressProbeArgs(settings) {
+		if presentShardIndexes[args.ShardIndex] {
+			continue
+		}
+		scheduled, _ := task.ScheduleTaskInTxIfAbsent(
+			tx,
+			ProviderEgressProbe,
+			stampProviderEgressProbeArgs(args, now),
+			clientSession,
+			providerEgressProbeRunOnce(args.ShardIndex),
+			task.RunAt(now),
+			task.MaxTime(time.Duration(args.MaxTimeSeconds)*time.Second),
+		)
+		if scheduled {
+			glog.Infof("[egress]recreated missing provider egress probe shard %d/%d\n", args.ShardIndex, args.ShardCount)
+		}
 	}
 }
 
@@ -412,10 +506,16 @@ func ProviderEgressProbeTaskFunctionNames() []string {
 // enabled deployment after probing is disabled. Claims are deliberately not a
 // barrier: the task reaper deletes every matching row, so stale and actively
 // leased generations cannot perpetuate themselves through their post hook.
+// An older config does not disable a newer config's live geometry: while one
+// is pending, every row stays, and this config's own rows retire as their
+// passes are claimed.
 func RemoveDisabledProviderEgressProbeTasks(ctx context.Context, tx server.PgTx) int64 {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
 	if settings.Enabled {
+		return 0
+	}
+	if _, newerGenerationLive := readProviderEgressProbeShardRowsInTx(ctx, tx, maxProviderEgressProbeShardCount, server.NowUtc()); newerGenerationLive {
 		return 0
 	}
 	var removedCount int64
@@ -427,6 +527,11 @@ func RemoveDisabledProviderEgressProbeTasks(ctx context.Context, tx server.PgTx)
 
 // The run-once key is shard-index stable so initialization and post scheduling
 // cannot create duplicate owners for one slice.
+func providerEgressProbeRunOnce(shardIndex int) *task.RunOnceOption {
+	return task.RunOnce("provider_egress_probe", shardIndex)
+}
+
+// Schedules one shard's pass, merging into a pending row of its key.
 func scheduleProviderEgressProbeAt(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
@@ -438,7 +543,7 @@ func scheduleProviderEgressProbeAt(
 		ProviderEgressProbe,
 		args,
 		clientSession,
-		task.RunOnce("provider_egress_probe", args.ShardIndex),
+		providerEgressProbeRunOnce(args.ShardIndex),
 		task.RunAt(runAt),
 		task.MaxTime(time.Duration(args.MaxTimeSeconds)*time.Second),
 	)
@@ -493,6 +598,13 @@ func ProviderEgressProbe(
 	if err != nil {
 		return nil, err
 	}
+	// An older config does not judge a newer config's live geometry, including
+	// its enablement: the post-step reschedules it unchanged for the instances
+	// configured with it.
+	if providerEgressProbeHandsBack(clientSession.Ctx, args, settings, server.NowUtc()) {
+		configHandbacks.WithLabelValues("provider_egress_probe").Inc()
+		return &ProviderEgressProbeResult{HandedBack: true}, nil
+	}
 	// A disabled deployment may still have an old claimed row in a worker's
 	// input batch. Retire it before touching its arguments or the execution
 	// path, which is where identity, Vault credentials, and network clients are
@@ -535,6 +647,9 @@ func ProviderEgressProbe(
 
 // ProviderEgressProbePost checkpoints one batch before scheduling its
 // successor. Backlog drains immediately; a partial batch waits its idle cadence.
+// A handed-back pass keeps its newer arguments; otherwise the successor takes
+// this instance's settings, stamped with its config version. It writes only
+// its own shard's key, whose claimed row the finishing transaction deleted.
 func ProviderEgressProbePost(
 	args *ProviderEgressProbeArgs,
 	result *ProviderEgressProbeResult,
@@ -545,21 +660,123 @@ func ProviderEgressProbePost(
 	if err != nil {
 		return err
 	}
+	now := server.NowUtc()
+	// The handed-back arguments wait their own idle cadence, so an instance
+	// configured with them can claim the shard, and keep the fields this
+	// build does not decode.
+	if result != nil && result.HandedBack && args != nil {
+		runAt := now.Add(time.Duration(max(1, args.IdleDelaySeconds)) * time.Second)
+		rescheduleHandedBackTaskInTx(clientSession, tx, providerEgressProbeRunOnce(args.ShardIndex), runAt, func() {
+			scheduleProviderEgressProbeAt(clientSession, tx, args, runAt)
+		})
+		return nil
+	}
 	if !settings.Enabled {
 		return nil
 	}
-	if args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
+	if args == nil || args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
 		return nil
 	}
 
-	nextArgs := providerEgressProbeArgs(settings, args.ShardIndex)
-	runAt := server.NowUtc()
+	nextArgs := stampProviderEgressProbeArgs(providerEgressProbeArgs(settings, args.ShardIndex), now)
+	runAt := now
 	if !result.Stale && !result.Backlog && !result.Full {
 		runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
 	}
 	scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
 	return nil
 }
+
+// The registered post-step: ProviderEgressProbePost in the finishing
+// transaction, then, once that commits, the startup schedule again for missing
+// rows only, so a shard lost since the last taskworker start returns without
+// a restart. A handed-back pass recreates nothing. A recreation that fails or
+// never runs loses nothing that the next pass's post-step does not repeat.
+func ProviderEgressProbeCommitPost(
+	args *ProviderEgressProbeArgs,
+	result *ProviderEgressProbeResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) ([]server.PostFunction, error) {
+	if err := ProviderEgressProbePost(args, result, clientSession, tx); err != nil {
+		return nil, err
+	}
+	if result != nil && result.HandedBack {
+		return nil, nil
+	}
+	// The post's session ends with the post; the recreation keeps only its values.
+	ctx := context.WithoutCancel(clientSession.Ctx)
+	return []server.PostFunction{func() any {
+		recreateMissingProviderEgressProbeShards(ctx)
+		return nil
+	}}, nil
+}
+
+// The probe's task target as the taskworker registers it.
+func NewProviderEgressProbeTaskTarget() *task.TaskTarget[*ProviderEgressProbeArgs, *ProviderEgressProbeResult] {
+	return task.NewTaskTargetWithCommitPost(ProviderEgressProbe, ProviderEgressProbeCommitPost)
+}
+
+// One bounded recreation, after a finishing transaction committed.
+func recreateMissingProviderEgressProbeShards(ctx context.Context) {
+	settings, err := getProviderEgressProbeSettings()
+	if err != nil || !settings.Enabled {
+		return
+	}
+	recreateCtx, cancel := context.WithTimeout(ctx, task.DefaultTaskFinalizeTimeout)
+	defer cancel()
+	clientSession := session.NewLocalClientSession(recreateCtx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	server.Tx(recreateCtx, func(tx server.PgTx) {
+		ensureProviderEgressProbeShardsInTx(clientSession, tx, settings, server.NowUtc())
+	}, server.TxReadCommitted)
+}
+
+// The transports a pass's operator calls may take (operator_transport).
+const (
+	providerEgressOperatorLocal = "local"
+	providerEgressOperatorHttp  = "http"
+)
+
+// A pass's operator calls use the public operator API, authenticated with the
+// vault's ingest secret, unless operator_transport opts in to "local": the
+// taskworker already holds the database the API handlers write, so it can run
+// them in-process through the same controller code (server/localoperator),
+// with the HTTP client's 30-second request bound per call, at most
+// operator_concurrency at once, and no API request, secret or encoding. Empty
+// is "http", so a deployment without the key keeps the API; the standalone
+// egress-prober always uses it.
+func newProviderEgressOperatorForSettings(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) (ingest.Operator, error) {
+	switch transport := settings.OperatorTransport; transport {
+	case providerEgressOperatorLocal:
+		// this pass's own slots, never shared with another pass
+		operator, err := newLocalProviderEgressOperator(args.ShardIndex, args.ShardCount, providerEgressControlPlaneTimeout, settings.OperatorConcurrency)
+		if err != nil {
+			return nil, err
+		}
+		return operator, nil
+	case "", providerEgressOperatorHttp:
+		operatorSecret, err := readProviderEgressOperatorSecret()
+		if err != nil {
+			return nil, err
+		}
+		return &ingest.Client{
+			ServerUrl:      args.APIURL,
+			OperatorSecret: operatorSecret,
+			ShardIndex:     args.ShardIndex,
+			ShardCount:     args.ShardCount,
+			Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
+		}, nil
+	default:
+		return nil, fmt.Errorf("provider egress probe operator_transport %q is not %q or %q", transport, providerEgressOperatorLocal, providerEgressOperatorHttp)
+	}
+}
+
+// Package-level seams like executeProviderEgressProbe: immutable in
+// production, replaced by tests that must observe every operator call or what
+// a pass's settings give the in-process operator.
+var newProviderEgressOperator = newProviderEgressOperatorForSettings
+var newLocalProviderEgressOperator = localoperator.New
 
 // The ingest credential stays in Vault and is never copied into task JSON.
 func readProviderEgressOperatorSecret() (string, error) {
@@ -1828,7 +2045,13 @@ func runProviderEgressProbe(
 	if !ok {
 		return nil, fmt.Errorf("provider egress probe requires a durable task execution owner")
 	}
-	operatorSecret, err := readProviderEgressOperatorSecret()
+	settings, err := getProviderEgressProbeSettings()
+	if err != nil {
+		return nil, err
+	}
+	// Before any durable shard state: an unusable transport (the operator API
+	// without its vault secret) fails the pass without allocating a shard.
+	operator, err := newProviderEgressOperator(args, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -1837,13 +2060,6 @@ func runProviderEgressProbe(
 		credentials, err := newProviderEgressCredentials(identity)
 		if err != nil {
 			return nil, err
-		}
-		operator := &ingest.Client{
-			ServerUrl:      args.APIURL,
-			OperatorSecret: operatorSecret,
-			ShardIndex:     args.ShardIndex,
-			ShardCount:     args.ShardCount,
-			Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
 		}
 		return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
 			tunnelConfig := providertunnel.Config{
@@ -1861,34 +2077,7 @@ func runProviderEgressProbe(
 				ClientControl:           localControl,
 			}
 
-			// every finding the prober submits passes through the metrics reporter
-			// first (see provider_egress_probe_metrics.go), then to the operator
-			reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
-			readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
-
-			pass := &providerEgressProbePass{
-				urlProbes: true,
-				readiness: readiness,
-				fullDue:   operator.Due,
-				loadPins: func(ctx context.Context) (map[string][]string, error) {
-					servedPins, err := operator.GeolocationPins(ctx)
-					if err != nil {
-						return nil, err
-					}
-					return fleetprobe.ValidatePins(servedPins)
-				},
-				loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
-					return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
-				},
-				fullOptions: fleetprobe.FullOptions{
-					UrlProbe:     true,
-					TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
-				},
-				fullSink:     reporter,
-				recordTally:  newProviderEgressTallyRecorder(),
-				runFull:      fleetprobe.RunUrlProbes,
-				refreshFleet: providerUrlProbeFleetHeartbeat(args),
-			}
+			pass := newProviderUrlProbePass(args, operator, tunnelConfig, *identity.NetworkId)
 			result, err := runWithProviderUrlProbeFleetHeartbeat(ctx, args,
 				pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
 			outcome := "ok"
@@ -1916,16 +2105,82 @@ func runProviderEgressProbe(
 	})
 }
 
+// The production URL pass over one operator. Every operator call -- due
+// claims, the catalogs, and through the metrics reporter (see
+// provider_egress_probe_metrics.go) every finding -- goes through operator, so
+// with the in-process operator (operator_transport: local) the pass makes no
+// API request.
+//
+// Its tunnels opt in to KeepClientKeysLocal: each URL probe mints a derived
+// client whose identity key nothing reads, and only this pass may skip
+// publishing it.
+func newProviderUrlProbePass(
+	args *ProviderEgressProbeArgs,
+	operator ingest.Operator,
+	tunnelConfig providertunnel.Config,
+	networkId server.Id,
+) *providerEgressProbePass {
+	tunnelConfig.KeepClientKeysLocal = true
+	return &providerEgressProbePass{
+		urlProbes: true,
+		readiness: newProviderEgressProbeReadiness(networkId),
+		fullDue:   operator.Due,
+		loadPins: func(ctx context.Context) (map[string][]string, error) {
+			servedPins, err := operator.GeolocationPins(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return fleetprobe.ValidatePins(servedPins)
+		},
+		loadPool: operator.DestinationPool,
+		fullOptions: fleetprobe.FullOptions{
+			UrlProbe:     true,
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+		},
+		fullSink:     newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry),
+		recordTally:  newProviderEgressTallyRecorder(),
+		runFull:      fleetprobe.RunUrlProbes,
+		refreshFleet: providerUrlProbeFleetHeartbeat(args),
+	}
+}
+
 // The callback owns and joins its tunnels/control client before returning. This
 // boundary persists cleanup even when the caller cancels or a callback fails.
-func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (result *ProviderEgressProbeResult, returnErr error) {
+func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (*ProviderEgressProbeResult, error) {
 	credit, err := providerUrlProbeShardCredit(args)
 	if err != nil {
 		return nil, err
 	}
-	owner, err := model.BeginProberShard(ctx, key, credit, time.Duration(args.MaxTimeSeconds)*time.Second)
+	return runWithProberShard(ctx, "provider egress", key, credit, time.Duration(args.MaxTimeSeconds)*time.Second, run)
+}
+
+// A prober shard's drain or reap failure after its pass, joined to whatever
+// the pass returned. The recurring prober reaper retries the cleanup, so a
+// caller can tell it from the pass's own failure. Its text is the cleanup
+// step's.
+type proberShardCleanupError struct {
+	err error
+}
+
+func (self *proberShardCleanupError) Error() string {
+	return self.err.Error()
+}
+
+func (self *proberShardCleanupError) Unwrap() error {
+	return self.err
+}
+
+// One prober shard's whole lifetime around run: allocation with credit, the
+// identity, and the drain and reap after run returns, which the probe named
+// by label owns. The callback owns and joins its tunnels/control client
+// before returning; this boundary persists cleanup even when the caller
+// cancels or a callback fails, and joins a cleanup failure to run's result
+// as a proberShardCleanupError. The URL probe and the capability probe each
+// run their passes in one, in shard slots of their own.
+func runWithProberShard[R any](ctx context.Context, label string, key model.ProberShardKey, credit model.ByteCount, lifetime time.Duration, run func(*model.ProberIdentity) (R, error)) (result R, returnErr error) {
+	owner, err := model.BeginProberShard(ctx, key, credit, lifetime)
 	if err != nil {
-		return nil, fmt.Errorf("provider egress shard allocation: %w", err)
+		return result, fmt.Errorf("%s shard allocation: %w", label, err)
 	}
 	defer func() {
 		// runWithProviderEgressControl and its tunnel owners have joined before
@@ -1934,16 +2189,16 @@ func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, a
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := model.DrainProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard drain: %w", err))
+			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard drain: %w", label, err)})
 			return
 		}
 		if _, err := model.ReapProberShard(cleanupCtx, key); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard cleanup: %w", err))
+			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard cleanup: %w", label, err)})
 		}
 	}()
 	identity, err := model.ProberShardIdentity(ctx, owner)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	return run(identity)
 }

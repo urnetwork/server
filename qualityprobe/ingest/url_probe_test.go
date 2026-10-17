@@ -16,9 +16,9 @@ import (
 
 // An ambiguous first acknowledgement and an explicit retry carry one run id.
 func TestUrlProbeReportRetryKeepsRunAndCycleIdentity(t *testing.T) {
-	bodies := []submitEgressHealthBody{}
+	bodies := []EgressHealthSubmission{}
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body submitEgressHealthBody
+		var body EgressHealthSubmission
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}

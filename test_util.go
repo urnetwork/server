@@ -152,7 +152,7 @@ func acquireTestRedisDbLease(
 	offset int,
 	ttl time.Duration,
 ) *testRedisDbLease {
-	client := redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr:         authority,
 		Password:     password,
 		DB:           testRedisLeaseCoordinatorDb,
@@ -163,7 +163,9 @@ func acquireTestRedisDbLease(
 		// internal command and dial attempt instead of letting one nested
 		// retry extend beyond the setup horizon.
 		ContextTimeoutEnabled: true,
-	})
+	}
+	configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(options.DialTimeout).DialContext)
+	client := redis.NewClient(options)
 
 	var config map[string]string
 	err := retryTestRedisLeaseConnectionOperation(ctx, func(operationCtx context.Context) error {
@@ -612,6 +614,7 @@ func probeTestEnvironmentServiceWithNetwork(
 			return fmt.Errorf("parse PostgreSQL test configuration: %w", err)
 		}
 		connectionConfig.LookupFunc = lookupHost
+		connectionConfig.DialFunc = dialContext
 		connection, err := pgx.ConnectConfig(ctx, connectionConfig)
 		if err != nil {
 			return fmt.Errorf("authenticate PostgreSQL test connection: %w", err)
@@ -660,19 +663,25 @@ func probeTestEnvironmentServiceWithNetwork(
 
 // Authenticates and checks the exact read-only capabilities setup needs before
 // it can safely enter longer Redis operation retries or create a database.
+// Both probes reach only the endpoints test-env.sh attested; without that
+// attestation no fixture connection is attempted.
 func probeTestEnvironmentService(
 	ctx context.Context,
 	serviceName string,
 	configuration testEnvironmentConfiguration,
 ) error {
+	guard := currentTestEnvDialGuard()
+	if err := guard.requireAttested(); err != nil {
+		return err
+	}
 	resolver := newTestEnvironmentProbeResolver()
 	dialer := &net.Dialer{Resolver: resolver}
 	return probeTestEnvironmentServiceWithNetwork(
 		ctx,
 		serviceName,
 		configuration,
-		resolver.LookupHost,
-		dialer.DialContext,
+		guard.lookupFunc(serviceName, resolver.LookupHost),
+		guard.wrapDial(serviceName, dialer.DialContext),
 	)
 }
 
@@ -1136,7 +1145,12 @@ func (self *TestEnv) setup() func() {
 	}
 
 	ctx := context.Background()
-	pg, maintenancePg, popResolvedPg, resolveErr := prepareResolvedTestPgResources(ctx, newTestEnvironmentProbeResolver().LookupHost)
+	// The pinned PostgreSQL address must be one the launcher attested; a
+	// refusal here names the host before any orphan sweep or CREATE runs.
+	pg, maintenancePg, popResolvedPg, resolveErr := prepareResolvedTestPgResources(
+		ctx,
+		currentTestEnvDialGuard().lookupFunc("postgres", newTestEnvironmentProbeResolver().LookupHost),
+	)
 	Raise(resolveErr)
 	// This outer scope spans orphan sweep, CREATE, the independent owner,
 	// migrated pools (including PgReset/reconnect), and DROP. Pop it last.
@@ -1313,6 +1327,8 @@ cluster: %t`,
 // a live fixture even when a stalled test outlives the orphan age.
 func acquireTestPgDbLease(ctx context.Context, datname string) *pgx.Conn {
 	configuration := testPgDbLeaseConfiguration(safeMaintenancePool.open().Config().ConnConfig, datname)
+	// The copied pool configuration already carries the guarded dialer.
+	configuration.LookupFunc = currentTestEnvDialGuard().lookupFunc("postgres", configuration.LookupFunc)
 	connection, err := pgx.ConnectConfig(ctx, configuration)
 	Raise(err)
 	return connection

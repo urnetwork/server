@@ -68,6 +68,11 @@ func testingLocalWorkerCompletionReleasesFinishedLease(t *testing.T, unstarted b
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location_reliability
 				(client_id,network_id,update_block_number,country_location_id,client_address_hash_count,location_count,connected)
 				VALUES($1,$2,1,$3,1,1,true)`, client, network, location.CountryLocationId))
+			// URL admission needs a one hour score, its current history witness,
+			// which a client always holds alongside its 12 hour score.
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
+				(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
+				VALUES($1,1,1,1,1,1),($1,2,1,1,1,1)`, client))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at,eligible)
 				VALUES($1,$2,$3,true)`, client, now.Add(-8*time.Hour), now))
 		})

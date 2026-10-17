@@ -2117,6 +2117,185 @@
                     "legendFormat": "usage drain {{service}} {{result}}"
                 }
             ]
+        },
+        {
+            "id": 57,
+            "type": "timeseries",
+            "title": "connection reconcile: unheld rows and retirements",
+            "description": "Each connect handler compares the rows the database holds connected under it with the connections its process holds. Unheld counts the rows the last pass found connected but not held: a final disconnect that failed, or a registration that raised after its commit. The reconcile retires such a row on its second sighting, once every registration in flight at the first has ended. Retired counts those disconnects; passes counts passes by result, and an error pass is retried after the backlog interval. Unretired counts stale rows a pass left: a retire that raised (tried after the other rows next pass) or a busy fence or row (deferred to the next pass).",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 201
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host, block) (urnetwork_connect_connection_reconcile_unheld{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "unheld {{host}} {{block}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (host, block) (increase(urnetwork_connect_connection_reconcile_retired_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "retired {{host}} {{block}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (host, block, result) (increase(urnetwork_connect_connection_reconcile_passes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "passes {{host}} {{block}} {{result}}"
+                },
+                {
+                    "refId": "D",
+                    "expr": "sum by (host, block, reason) (increase(urnetwork_connect_connection_reconcile_unretired_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "unretired {{host}} {{block}} {{reason}}"
+                }
+            ]
+        },
+        {
+            "id": 58,
+            "type": "timeseries",
+            "title": "connection sync reads retried / s",
+            "description": "Sync rounds of live connection announcements whose read (provide changes and modes) failed. The round is skipped and retried after the sync interval, doubling with each further consecutive failure up to its bound; the transport and its row stay, and the next successful round records the skipped round's stats. Before this, each such failure tore down the client's transport, so a database outage disconnected the providers whose sync fell in it.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 209
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host, block) (rate(urnetwork_connect_connection_sync_read_failures_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "retried {{host}} {{block}}"
+                }
+            ]
+        },
+        {
+            "id": 59,
+            "type": "timeseries",
+            "title": "connection worker writes retried / s",
+            "description": "Writes of live connection announcement workers that failed: the measurement publisher's latency and speed write to PostgreSQL, and the verify egress lease write to Redis. The write is retried after the sync interval, doubling with each further consecutive failure up to its bound (a lease write never later than the regular refresh), and the publisher, the lease refresh and the transport keep going; a measurement retry writes the latest cumulative snapshot. Before this, a failed measurement write ended the publisher for the rest of the connection, a failed lease refresh ended the refresh, and a failed first lease write tore down the transport.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 209
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host, block, operation) (rate(urnetwork_connect_connection_worker_failures_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{operation}} {{host}} {{block}}"
+                }
+            ]
+        },
+        {
+            "id": 60,
+            "type": "timeseries",
+            "title": "provider liveness lease writes / s",
+            "description": "Provider liveness lease writes to Redis, by host and outcome, per client. The process's one writer writes each shard once per 30 s (plus up to 3 s of jitter), one bounded 2 s script for all of the shard's clients, and new connections at once, so the lease path holds one connection of the deadline-bound pool at a time and never starves admission or debit. refreshed and refresh_failed: clients that provide for discovery (Public or Network); extended: a connection pending its first sync read whose client's lease the shard held, kept for a reconnecting provider whatever its reads do; released and release_failed: once when a read finds the client no longer providing, again only on a later read; a connection that ends writes nothing. stamped, stamp_failed and stamp_withheld: each process's handler stamp in the writer set every 5 s, withheld while any pending or providing connection has gone 75 s without a successful write; the API enforces leases only while every live handler's stamp is current, so a steady stamp_withheld on a host means the API fails open.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 217
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host, outcome) (rate(urnetwork_connect_liveness_lease_writes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{outcome}} {{host}}"
+                }
+            ]
         }
     ]
 }

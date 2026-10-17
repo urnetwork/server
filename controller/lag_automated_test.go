@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,52 @@ func TestLagTrackAutomatedReason(t *testing.T) {
 	}
 }
 
+// Without the GeoLite2 ASN database no track has a network, so none from a
+// hosting or cloud network is flagged automated, and nothing else would show
+// it: the first track issued so logs it, loudly, once per process
+// (amendment 12). A database that does not know an address is no gap, and
+// logs nothing.
+func TestLagTrackLogsAMissingAsnDatabase(t *testing.T) {
+	logged := []string{}
+	previousLogf := lagAsnDatabaseMissingLogf
+	lagAsnDatabaseMissingLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() {
+		lagAsnDatabaseMissingLogf = previousLogf
+	})
+	previousLogged := lagAsnDatabaseMissingLogged.Load()
+	t.Cleanup(func() {
+		lagAsnDatabaseMissingLogged.Store(previousLogged)
+	})
+	lagAsnDatabaseMissingLogged.Store(false)
+
+	// the database is there and does not know the address
+	useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		"192.0.2.0/24": {Number: 64500, Organization: "Example"},
+	}))
+	connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
+	connect.AssertEqual(t, len(logged), 0)
+
+	// no database: one line however many tracks, naming the file and the
+	// flag that goes unset
+	useIpAsnDb(t, "")
+	for range 3 {
+		connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
+	}
+	connect.AssertEqual(t, len(logged), 1)
+	for _, want := range []string{geoLite2AsnResourcePath, model.LagAutomatedReasonDatacenterAsn} {
+		if !strings.Contains(logged[0], want) {
+			t.Fatalf("the missing database is logged as %q, without %q", logged[0], want)
+		}
+	}
+	// a signing agent is flagged without the database, and logs nothing
+	signed := http.Header{}
+	signed.Set("Signature-Agent", `"https://chatgpt.com"`)
+	connect.AssertEqual(t, lagTrackAutomatedReason(signed, nil), model.LagAutomatedReasonSignatureAgent)
+	connect.AssertEqual(t, len(logged), 1)
+}
+
 // The hosting list names real autonomous systems, each with its network, and
 // every reason a track can have is one the stats publish.
 func TestLagDatacenterAsns(t *testing.T) {
@@ -86,9 +133,9 @@ func TestStatsLagAutomatedValues(t *testing.T) {
 	connect.AssertEqual(t, len(statsLagAutomatedValues(map[string]int64{})), len(model.LagAutomatedReasons))
 }
 
-// A track is stored automated with its reason for a signing agent and for a
-// hosting network, and a visitor's is not; one agent's tracks are capped
-// wherever its browsers run, apart from another agent's (amendment 12).
+// A claimed agent and a hosting network are conservatively stored as
+// automated; a visitor is not. An unverified agent claim cannot impose a
+// shared quota on independent authenticated clients.
 func TestLagTrackAutomated(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -135,7 +182,7 @@ func TestLagTrackAutomated(t *testing.T) {
 		connect.AssertEqual(t, automated, true)
 		connect.AssertEqual(t, *reason, model.LagAutomatedReasonDatacenterAsn)
 
-		// a fresh agent per run, so a rerun within the hour starts its own count
+		// a synthetic claimed agent; its name is not an authenticated identity
 		agent := fmt.Sprintf(`"https://agent-%s.example"`, server.NewId())
 		first := issue("198.51.100.31:1234", agent)
 		automated, reason = row(first)
@@ -144,15 +191,14 @@ func TestLagTrackAutomated(t *testing.T) {
 		connect.AssertEqual(t, model.GetLagTrack(ctx, *first.TrackId).AutomatedReason, model.LagAutomatedReasonSignatureAgent)
 		connect.AssertEqual(t, model.GetLagTrack(ctx, *first.TrackId).Automated(), true)
 
-		// the agent's second track is allowed, and its third is capped, from
-		// another network as from the first
+		// repeated claims stay automated without spending a global quota,
+		// including a third independent client from another network
 		row(issue("198.51.100.32:1234", agent))
-		capped := issue("203.0.113.31:1234", agent)
-		connect.AssertEqual(t, capped.TrackId, (*server.Id)(nil))
-		connect.AssertEqual(t, capped.Error.Code, LagErrorCodeLimit)
-		connect.AssertEqual(t, 0 < capped.Error.RetryAfterMs, true)
+		automated, reason = row(issue("203.0.113.31:1234", agent))
+		connect.AssertEqual(t, automated, true)
+		connect.AssertEqual(t, *reason, model.LagAutomatedReasonSignatureAgent)
 
-		// another agent keeps its own count
+		// changing the claimed name does not change admission either
 		row(issue("198.51.100.33:1234", fmt.Sprintf(`"https://agent-%s.example"`, server.NewId())))
 	})
 }

@@ -429,7 +429,12 @@ func runCommand(ctx context.Context, options commandOptions, output io.Writer) e
 
 // Signals request one shared shutdown and return only after all service drains.
 func main() {
-	server.ScrubProcessLogs()
+	// Every way out of main flushes the scrubbed logs first, so the last
+	// lines written are not lost: the deferred Flush for a return or a panic,
+	// and logs.Exit for the failure exit, whose report would otherwise still
+	// be in the scrubber's pipe when the process ends (server.ScrubCommandLogs).
+	logs := server.ScrubCommandLogs()
+	defer logs.Flush()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer stop()
 	err := func() (returnErr error) {
@@ -446,6 +451,6 @@ func main() {
 	}()
 	if err != nil && (ctx.Err() == nil || !cancellationOnly(err)) {
 		fmt.Fprintf(os.Stderr, "all: %v\n", err)
-		os.Exit(1)
+		logs.Exit(1)
 	}
 }

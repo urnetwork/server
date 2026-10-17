@@ -211,7 +211,11 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 			return nil, ErrAuthUnavailable
 		}
 	}
-	leaseCtx, cancel := context.WithCancel(ctx)
+	// The caller's state-query source names the final check above, a query of
+	// the caller's own admission. Rechecks are the lease's later work, which
+	// that source does not describe and no other covers yet, so they count as
+	// unknown.
+	leaseCtx, cancel := context.WithCancel(WithStateQuerySource(ctx, StateQueryUnknown))
 	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check, started: start}
 	go lease.runTimer()
 	go lease.runChecks()

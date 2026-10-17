@@ -39,7 +39,14 @@ type clientScoreEmptyTargetFixture struct {
 	excludeLocationNetworkIds map[server.Id]map[server.Id]bool
 	blockEligibleCallerId     server.Id
 	targetMaps                *clientScoreTargetMaps
+	// the manifest the previous export published, if any, and this export's
+	// instant (network_client_score_target_manifest.go)
+	previousTargets *clientScoreTargetManifest
+	exportedAt      time.Time
 }
+
+// the taskworker's score cache ttl (taskworker/work UpdateClientScores)
+const clientScoreExportTestTtl = 300 * time.Minute
 
 // Builds the target maps through the production builder, then marks the
 // admitted P2 online as the ranking pass would.
@@ -104,7 +111,6 @@ func newClientScoreEmptyTargetFixture() *clientScoreEmptyTargetFixture {
 		func(clientId server.Id) bool {
 			return clientId == self.excludedClientId
 		},
-		nil,
 	)
 	// what rankClientScore decides for an admitted provider without native
 	// membership: online, so both modes' union pools carry it
@@ -130,7 +136,8 @@ type clientScoreExportCapture struct {
 
 // Runs every target through the production key builders, encoder and fanout
 // in all four export modes, as one UpdateClientScores pass does after its
-// alias and ip family migrations completed.
+// alias and ip family migrations completed: the targets of the maps, then the
+// departed targets of the previous manifest.
 func exportClientScoreTargetsForTest(t testing.TB, fixture *clientScoreEmptyTargetFixture) *clientScoreExportCapture {
 	t.Helper()
 	capture := &clientScoreExportCapture{
@@ -143,7 +150,8 @@ func exportClientScoreTargetsForTest(t testing.TB, fixture *clientScoreEmptyTarg
 		}
 		return nil
 	}
-	for _, target := range fixture.targetMaps.targets() {
+	departedTargets, _ := fixture.targetMaps.departedTargets(fixture.previousTargets, fixture.exportedAt, clientScoreExportTestTtl)
+	for _, target := range append(fixture.targetMaps.targets(), departedTargets...) {
 		for _, forceMinimum := range []bool{false, true} {
 			for rankMode := range clientScorePerformanceTargets {
 				keys := newClientScoreTargetKeys(forceMinimum, rankMode, target)

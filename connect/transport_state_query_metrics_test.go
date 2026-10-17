@@ -46,10 +46,14 @@ func connectObservedCounter(t testing.TB, name string, want map[string]string) f
 	return 0
 }
 
-// One handshake sends one JWT-state query. Both H1 authentication forms and
-// H1+ share H1's bucket; QUIC has a separate trusted source. This test measures
-// admission queries, not subsequent packet processing or provider throughput.
+// One handshake sends two JWT-state queries: its authentication, and the
+// authorization lease's final check before admission, which closes the race
+// between authentication and the connection's registration. Both H1
+// authentication forms and H1+ share H1's bucket; QUIC has a separate trusted
+// source. This test measures admission queries, not subsequent packet
+// processing or provider throughput.
 func TestConnectStateQueryMetricActualHandshakes(t *testing.T) {
+	const handshakeStateQueries = 2
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
@@ -68,7 +72,7 @@ func TestConnectStateQueryMetricActualHandshakes(t *testing.T) {
 			}
 			admitted := TestingWaitForConnectCondition(ctx, 3*time.Second, time.Millisecond, func(context.Context) (bool, string) {
 				observed := connectStateQueryMetric(t, caller, "handshake", "client", "state_valid")
-				return observed == before+1, "waiting for attributed state query"
+				return observed == before+handshakeStateQueries, "waiting for attributed state queries"
 			})
 			if admitted != nil {
 				client.close()
@@ -80,7 +84,7 @@ func TestConnectStateQueryMetricActualHandshakes(t *testing.T) {
 				t.Fatal("carrier did not join")
 			}
 			got := connectStateQueryMetric(t, caller, "handshake", "client", "state_valid") - before
-			if got != 1 || connectStateQueryMetric(t, "unknown", "unknown", "client", "state_valid") != unknownBefore {
+			if got != handshakeStateQueries || connectStateQueryMetric(t, "unknown", "unknown", "client", "state_valid") != unknownBefore {
 				t.Fatalf("carrier=%s query_delta=%.0f: query source lost or handshake revalidated", carrier, got)
 			}
 			t.Logf("carrier=%s handshake_state_queries=%.0f", carrier, got)

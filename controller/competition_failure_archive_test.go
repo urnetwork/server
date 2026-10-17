@@ -91,6 +91,13 @@ func failureArchiveEvaluatorFixture(t *testing.T, body func(*Settings, *queuedJo
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A round freezes its evaluator command and that command's digest, so
+	// this round freezes the synthetic command written above. The seed's
+	// commitment binds only the competition, round and base identities.
+	job.Round.PolicyJson, err = policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
 	archive := &failureArchiveTestArchive{}
 	settings.artifactArchive = archive
 	t.Cleanup(func() {

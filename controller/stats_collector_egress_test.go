@@ -47,9 +47,14 @@ func statsEgressTestUrlEvidence(at time.Time, ok bool) *egresshealth.UrlProbeEvi
 // leaves the provider online for health, no outcomes leave it online as
 // unprobed, and a blackhole verdict is not an admission gate. The index is
 // the failure fraction scaled to the settings' largest index, rounded up.
+// The modern provider gate's start is pinned ahead, so the counts read the
+// gate off whatever day the test runs; moving the start behind the next
+// refresh flips the shared dashboard snapshot at once.
 func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		pinnedStart := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("quality_speed_modern_provider_start: 2100-01-01T00:00:00Z\n")))
 		city := &model.Location{
 			LocationType: model.LocationTypeCity,
 			City:         "Palo Alto",
@@ -84,6 +89,11 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 			})
 			server.Tx(ctx, func(tx server.PgTx) {
 				for index := range 60 {
+					// each run at its own time over the forty minutes before
+					// measuredAt, the failures earliest: runs seeded at one
+					// instant span nothing, and Quality reads no verdict from
+					// them (model/egress_native_min_runs.go)
+					measuredAt := measuredAt.Add(-time.Duration(59-index) * (40 * time.Minute) / 59)
 					ok := 0
 					if index >= failed {
 						ok = 1
@@ -111,6 +121,15 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 		blackholed := connectProvider("192.0.2.13:0")
 		health(blackholed, 0)
 		model.Testing_SetProviderBlackholed(ctx, blackholed, server.NowUtc())
+		// the modern provider gate's evidence for the healthy provider only
+		connect.AssertEqual(t, model.RecordProviderModernEvidence(ctx, healthy, model.ProviderModernEvidence{
+			E2eNegotiated:             true,
+			KeyExchange:               "X25519MLKEM768",
+			PostQuantum:               true,
+			WindowAdvertised:          true,
+			MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+			ObservedAt:                server.NowUtc().Add(-time.Minute),
+		}), nil)
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		statsRefreshProviderEgress(ctx)
@@ -143,7 +162,80 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 		connect.AssertEqual(t, excluded(model.ProviderExcludedHealth), float64(1))
 		connect.AssertEqual(t, excluded(model.ProviderExcludedUnprobed), float64(1))
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderExcludedGauge.gauge, "urnetwork_stats_provider_excluded"), len(model.ProviderExcludedReasons))
+		// the gate is off, so it takes nothing out
+		connect.AssertEqual(t, excluded(model.ProviderExcludedNotModern), float64(0))
+
+		// the modern provider gate's shadow: of the two providers quality and
+		// speed admit, the healthy one is modern and the blackholed one has no
+		// evidence; every bucket and outcome is published, zero included
+		shadow := func(bucket string, outcome string) float64 {
+			return testutil.ToFloat64(statsProviderModernGateShadowGauge.gauge.WithLabelValues(bucket, outcome))
+		}
+		for _, bucket := range []string{model.RankModeQuality, model.RankModeSpeed} {
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeModern), float64(1))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoEvidence), float64(1))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNotPostQuantum), float64(0))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoResizableWindows), float64(0))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeStaleEvidence), float64(0))
+		}
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 2*len(model.ProviderModernOutcomes))
+		// the gate's schedule beside the counts: off, and on at the pinned start
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(0))
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(pinnedStart.Unix()))
+
+		// the start moved behind the next refresh: its policy key is new, so
+		// it counts afresh with the gate on, and the blackholed provider,
+		// which has no evidence, leaves quality and speed under not_modern
+		start := server.NowUtc().Truncate(time.Second)
+		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte(fmt.Sprintf("quality_speed_modern_provider_start: %s\n", start.Format(time.RFC3339)))))
+		statsRefreshProviderEgress(ctx)
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderEgressAvailableGauge.gauge), float64(1))
+		connect.AssertEqual(t, excluded(model.ProviderExcludedNotModern), float64(1))
+		connect.AssertEqual(t, index(model.RankModeQuality, "0"), float64(0))
+		connect.AssertEqual(t, index(model.RankModeSpeed, "0"), float64(0))
+		connect.AssertEqual(t, index(model.RankModeQuality, "1"), float64(1))
+		connect.AssertEqual(t, index(model.ProviderEgressBucketOnline, "0"), float64(2))
+		for _, bucket := range []string{model.RankModeQuality, model.RankModeSpeed} {
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeModern), float64(1))
+			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoEvidence), float64(1))
+		}
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(start.Unix()))
 	})
+}
+
+// The modern provider gate's schedule as the monitor reads it: on or off at
+// the refresh's instant, and the start only while the switch is absent, so a
+// switched gate has no flip to watch for.
+func TestStatsPublishProviderModernGateSchedule(t *testing.T) {
+	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
+	for _, c := range []struct {
+		config string
+		now    time.Time
+		on     float64
+		start  bool
+	}{
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), on: 0, start: true},
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 1, start: true},
+		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 0, start: false},
+		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(0, 0, -1), on: 1, start: false},
+	} {
+		func() {
+			pop := server.Config.PushSimpleResource("provider.yml", []byte(c.config))
+			defer pop()
+			statsPublishProviderModernGate(c.now)
+		}()
+		if on := testutil.ToFloat64(statsProviderModernGateOnGauge.gauge); on != c.on {
+			t.Errorf("%q at %s: on %v, want %v", c.config, c.now, on, c.on)
+		}
+		series := testutil.CollectAndCount(statsProviderModernGateStartGauge.gauge, "urnetwork_stats_provider_modern_gate_start_seconds")
+		if (series == 1) != c.start {
+			t.Errorf("%q at %s: %d start series, want one %t", c.config, c.now, series, c.start)
+		}
+		if c.start {
+			connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(start.Unix()))
+		}
+	}
 }
 
 // The index labels: every index to the settings' largest, "none", and any
@@ -156,7 +248,9 @@ func TestStatsProviderEgressIndexLabels(t *testing.T) {
 // The exempt-country gauge reads the guard the score export published: a
 // country where the probe fails for most providers is listed with the
 // providers its exemption keeps online, a country where it works is not, and
-// the kill switch removes every series.
+// the export's kill switch removes every series. The gauge follows the
+// export, not this process's provider.yml: the kill switch here changes
+// nothing until an export applies it.
 func TestStatsRefreshProviderOnlineSuccessExemptPublishesExemptCountries(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -222,7 +316,12 @@ func TestStatsRefreshProviderOnlineSuccessExemptPublishesExemptCountries(t *test
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 1)
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderOnlineSuccessExemptGauge.gauge.WithLabelValues("vn")), float64(2))
 
-		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("online_requires_url_success: false\n")))
+		// popped when this run returns, so a rerun starts with the rule on
+		pop := server.Config.PushSimpleResource("provider.yml", []byte("online_requires_url_success: false\n"))
+		defer pop()
+		statsRefreshProviderOnlineSuccessExempt(ctx)
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 1)
+		connect.AssertEqual(t, model.UpdateClientScores(ctx, time.Hour, 1), nil)
 		statsRefreshProviderOnlineSuccessExempt(ctx)
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderOnlineSuccessExemptGauge.gauge, "urnetwork_stats_provider_online_success_exempt"), 0)
 	})

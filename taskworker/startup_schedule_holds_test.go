@@ -281,6 +281,8 @@ func TestTaskworkerRuntimeAdmitsBeforeRetiredReap(t *testing.T) {
 			defer close(started)
 			runtimeOwner, startErr = startTaskworkerRuntime(ctx, lifetime, cancelLifetime, RunOptions{Port: 8080, Count: 1, BatchSize: 1})
 		}()
+		// The runtime's observers outlive neither this test nor its
+		// database: they are joined once the lifetime ends.
 		defer func() {
 			cancel()
 			release()
@@ -290,6 +292,9 @@ func TestTaskworkerRuntimeAdmitsBeforeRetiredReap(t *testing.T) {
 				runtimeOwner.WaitFinalHandback()
 			}
 			cancelLifetime()
+			if runtimeOwner != nil {
+				runtimeOwner.(*taskworkerRuntimeOwner).Wait()
+			}
 		}()
 
 		// A reap waiting behind the holder is acceptable only outside the

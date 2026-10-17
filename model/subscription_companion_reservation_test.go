@@ -177,10 +177,21 @@ func TestProberCompanionReservationSeparatesDerivedProbeTunnels(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		payerNetworkId, parentId, providerNetworkId, providerId := companionReservationFixture(ctx, true)
+		// the auth transaction validates the session: the parent's credential
+		// names its device and the network's admin user
+		var adminUserId, parentDeviceId server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(tx.QueryRow(ctx, `SELECT network.admin_user_id, network_client.device_id
+				FROM network_client JOIN network USING (network_id) WHERE network_client.client_id = $1`,
+				parentId).Scan(&adminUserId, &parentDeviceId))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_user (user_id, user_name, auth_type)
+				VALUES ($1, 'synthetic-probe-admin', $2)`, adminUserId, AuthTypePassword))
+		})
 		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
 			NetworkId: payerNetworkId,
-			UserId:    server.NewId(),
+			UserId:    adminUserId,
 			ClientId:  &parentId,
+			DeviceId:  &parentDeviceId,
 		})
 		defer clientSession.Cancel()
 		clients := []server.Id{}

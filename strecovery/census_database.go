@@ -10,10 +10,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/urnetwork/server"
 )
 
 // Each call owns and joins one connection selected by a private pinned URL.
 // No production vault, process-global database pool or fallback is selected.
+// In a WARP_ENV=local process the connection dials only the launcher-attested
+// endpoints, as every local PostgreSQL connection does
+// (server.ConfigureLocalPgDial).
 type PostgresReader struct {
 	ReadTimeout time.Duration
 	// A private deterministic barrier may refuse, never manufacture a connection.
@@ -50,6 +55,7 @@ func (self PostgresReader) Snapshot(ctx context.Context, source DatabaseSource, 
 	deadline, _ := ctx.Deadline()
 	config.Fallbacks, config.ConnectTimeout = nil, time.Until(deadline)
 	config.RuntimeParams = map[string]string{"application_name": "urnetwork-operator-census", "timezone": "UTC"}
+	server.ConfigureLocalPgDial(config)
 	if self.beforeConnect != nil {
 		if err := self.beforeConnect(ctx, config); err != nil {
 			return nil, &CensusReadError{Source: source.Id, Stage: "connection admission", Cause: errors.Join(err, ctx.Err())}

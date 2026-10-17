@@ -476,6 +476,67 @@ func TestEgressSitePoolQueriesReturnNoProviderIdentity(t *testing.T) {
 	}
 }
 
+// Every tally query of the signal reads from the refresh's own first day: the
+// later of its window's first day and the first reached-only tally day.
+func TestEgressSitePoolTallyQueriesReadFromTheFirstReachedOnlyDay(t *testing.T) {
+	poolContext := testEgressSitePoolContext()
+	settings := DefaultEgressSitePoolSettings()
+	cutoff := fmt.Sprintf("DATE '%s'", model.ProviderEgressSiteTallyContactedSince.Format(time.DateOnly))
+	if cutoff != "DATE '2026-10-14'" {
+		t.Fatalf("the first reached-only tally day = %s, want 2026-10-14", cutoff)
+	}
+	start := egressSitePoolWindowStartSql(poolContext.siteSettings)
+	if !strings.HasPrefix(start, "GREATEST(date_trunc('day', ") || !strings.HasSuffix(start, ", "+cutoff+")") {
+		t.Fatalf("the window start = %s, want the later of the window's first day and %s", start, cutoff)
+	}
+	for name, query := range map[string]string{
+		"regional":  egressSitePoolRegionalQuery(settings, poolContext.siteSettings),
+		"places":    egressSitePoolPlaceThinQuery(settings, poolContext.siteSettings),
+		"countries": egressSitePoolUnreachableQuery(settings, poolContext.siteSettings),
+	} {
+		if !strings.Contains(query, start+" <= ") || strings.Count(query, "tally_day") != strings.Count(query, start+" <= ") {
+			t.Errorf("the %s query reads a tally day from another start: %s", name, query)
+		}
+	}
+}
+
+// The signal reads the tally from the refresh's own first day. Read at the
+// refresh of 2026-10-15, whose window reaches back to 2026-10-12, a country
+// whose one site failed nearly every load on 2026-10-12 -- when every run that
+// reached no provider counted as a failure of its site -- and passed the
+// loads that reached their provider since 2026-10-14 is no country where every
+// site fails; a country whose site fails since 2026-10-14 still is.
+func TestEgressSitePoolCountrySqlReadsOnlyTheReachedOnlyTally(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		query := egressSitePoolUnreachableQuery(DefaultEgressSitePoolSettings(), testEgressSitePoolContext().siteSettings)
+		// the database's clock at the refresh of 2026-10-15
+		query = strings.ReplaceAll(query, "now()", "TIMESTAMPTZ '2026-10-15 03:26:09+00'")
+		query = strings.Replace(query, "WITH site_country AS (", `WITH
+provider_egress_destination(name, active, probation) AS (
+ VALUES ('offline-exits.example', true, false), ('refusing.example', true, false)
+), provider_egress_site_tally(name, country_code, tally_day, load_count, failure_count) AS (
+ VALUES ('offline-exits.example', 'xa', DATE '2026-10-12', 400, 396), ('offline-exits.example', 'xa', DATE '2026-10-14', 40, 2),
+  ('refusing.example', 'xb', DATE '2026-10-12', 400, 400), ('refusing.example', 'xb', DATE '2026-10-14', 40, 40)
+), provider_egress_place_tally(country_code, tally_day, run_count, echo_failure_count) AS (
+ VALUES ('xa', DATE '2026-10-12', 400, 0), ('xa', DATE '2026-10-14', 80, 0), ('xb', DATE '2026-10-12', 400, 0), ('xb', DATE '2026-10-14', 80, 0)
+), site_country AS (`, 1)
+		if strings.Contains(query, "now()") {
+			tb.Fatal("the query's clock was not pinned")
+		}
+		rows, err := (&egressSitePoolDatabaseSource{}).PostgreSQL(context.Background(), query)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		countries := []string{}
+		for _, row := range rows {
+			countries = append(countries, row[0])
+		}
+		if !slices.Equal(countries, []string{"xb"}) {
+			tb.Fatalf("countries where every site fails = %v, want xb alone: xa failed only on the tally day that counts every offline exit", countries)
+		}
+	})
+}
+
 // A source that runs the signal's queries against the test's own database.
 type egressSitePoolDatabaseSource struct {
 	syntheticSource

@@ -18,7 +18,9 @@ package api
 //     fields not in the spec are logged as drift, not failed.
 //
 //   - TestSpecRoutesImplemented: every spec path+method has a matching route in
-//     Routes(). Extra impl routes (webhooks, txt, legacy aliases) are logged.
+//     Routes(), and every route Routes() serves, streaming routes included, is
+//     documented: a /competition/ route in sn/api/competition.yml, every other
+//     route here. An undocumented route fails.
 //
 // Security/auth parity is intentionally out of scope (not reflectable).
 
@@ -29,11 +31,16 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/urfoundation/sn/payoutartifact"
+	snprotocol "github.com/urfoundation/sn/protocol"
+	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
@@ -155,6 +162,14 @@ func registry() []specEndpoint {
 		// oneOf request (VerifySeed|VerifyExtend); VerifyArgs is the superset.
 		// Response is a polymorphic interface{}, so it stays unchecked (nil).
 		{"POST", "/verify", rt(controller.VerifyArgs{}), nil},
+		// the streaming posts (router.NewStreamingRoute): the provider work
+		// intake and the request closure take signed originals. The request
+		// and authority receipts are anonymous structs in the handler.
+		{"POST", "/provider-work/v1/owners", rt(protocol.OriginalWorkOwnerEnrollment{}), rt(protocol.OriginalWorkOwnerReceipt{})},
+		{"POST", "/provider-work/v1/requests", rt(protocol.OriginalWorkRequest{}), nil},
+		{"POST", "/provider-work/v1/cuts", rt(protocol.OriginalWorkCutSubmission{}), rt(protocol.OriginalWorkCutReceipt{})},
+		{"POST", "/provider-work/v1/authorities", rt(payoutartifact.WholeWorkAuthority{}), nil},
+		{"POST", "/verify/original/close", rt(snprotocol.ProviderAttemptRequestClosure{}), rt(model.VerifyRequestClosureResult{})},
 		{"GET", "/key/{clientId}", nil, rt(controller.GetClientKeyResult{})},
 		{"GET", "/key/{clientId}/history", nil, rt(controller.GetClientKeyHistoryResult{})},
 		{"GET", "/hello", nil, rt(controller.HelloResult{})},
@@ -729,20 +744,66 @@ func TestSpecRoutesImplemented(t *testing.T) {
 		t.Errorf("spec endpoint %q has no matching route in Routes()", k)
 	}
 
-	// Impl routes absent from the spec (webhooks, txt, legacy aliases): logged.
-	var extra []string
-	for k := range implKeys {
-		if !specKeys[k] {
-			extra = append(extra, k)
-		}
-	}
-	sort.Strings(extra)
-	for _, k := range extra {
-		t.Logf("[route not in spec] %s", k)
+	undocumented := undocumentedRoutes(implKeys, specKeys, specOperationKeys(loadCompetitionSpec(t)))
+	for _, k := range undocumented {
+		t.Errorf("route %q is served but not documented", k)
 	}
 
-	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes not in spec",
-		len(specKeys), len(implKeys), len(missing), len(extra))
+	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes undocumented",
+		len(specKeys), len(implKeys), len(missing), len(undocumented))
+}
+
+// specOperationKeys returns the normalized "METHOD path" key of every
+// operation a spec documents.
+func specOperationKeys(spec *specDoc) map[string]bool {
+	keys := map[string]bool{}
+	for path, methodsAny := range spec.paths {
+		for method := range asMap(methodsAny) {
+			switch method {
+			case "get", "post", "put", "delete", "patch":
+				keys[strings.ToUpper(method)+" "+normalizePath(path)] = true
+			}
+		}
+	}
+	return keys
+}
+
+// undocumentedRoutes returns, sorted, the served route keys no spec documents.
+// A /competition/ route is documented by sn/api/competition.yml
+// (competitionKeys), every other route by bringyour.yml (specKeys); a route
+// listed only in the other document is undocumented.
+func undocumentedRoutes(implKeys, specKeys, competitionKeys map[string]bool) []string {
+	var undocumented []string
+	for key := range implKeys {
+		documented := specKeys[key]
+		if _, path, _ := strings.Cut(key, " "); strings.HasPrefix(path, "/competition/") {
+			documented = competitionKeys[key]
+		}
+		if !documented {
+			undocumented = append(undocumented, key)
+		}
+	}
+	sort.Strings(undocumented)
+	return undocumented
+}
+
+// A served route that no spec documents is reported, a streaming route like
+// any other, and a competition route counts as documented only by
+// sn/api/competition.yml.
+func TestSpecUndocumentedRoutesAreReported(t *testing.T) {
+	implKeys := map[string]bool{
+		"GET /hello":                  true,
+		"POST /provider-work/v1/cuts": true,
+		"GET /competition/info":       true,
+		"POST /competition/score":     true,
+	}
+	specKeys := map[string]bool{"GET /hello": true, "POST /competition/score": true}
+	competitionKeys := map[string]bool{"GET /competition/info": true}
+	got := undocumentedRoutes(implKeys, specKeys, competitionKeys)
+	want := []string{"POST /competition/score", "POST /provider-work/v1/cuts"}
+	if !slices.Equal(got, want) {
+		t.Errorf("undocumented routes = %v, want %v", got, want)
+	}
 }
 
 func competitionRegistry() []specEndpoint {

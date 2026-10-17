@@ -92,16 +92,16 @@ func TestSubmitEgressHealthSendsAWellFormedBody(t *testing.T) {
 		t.Errorf("content-type = %q", gotContentType)
 	}
 
-	var got submitEgressHealthBody
+	var got EgressHealthSubmission
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal body: %s (raw = %s)", err, raw)
 	}
-	want := submitEgressHealthBody{
+	want := EgressHealthSubmission{
 		RunId:      got.RunId,
 		ClientId:   "provider-1",
 		OkCount:    9,
 		TotalCount: 11,
-		ClassResults: map[string]egressHealthClassBody{
+		ClassResults: map[string]EgressHealthClassTally{
 			"dns":          {Ok: 3, Total: 3},
 			"connectivity": {Ok: 2, Total: 2},
 			"cdn":          {Ok: 1, Total: 3},
@@ -205,7 +205,7 @@ func TestSubmitEgressHealthClassResultsDecomposeTheScore(t *testing.T) {
 		t.Fatalf("SubmitEgressHealth: %s", err)
 	}
 
-	var got submitEgressHealthBody
+	var got EgressHealthSubmission
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal body: %s", err)
 	}

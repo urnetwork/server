@@ -888,12 +888,14 @@ var playAuthHeaderFunc = playAuthHeader
 // Replaceable only by the terminal-renewal error-path test. Production always
 // ends through the network-and-purchase-token-scoped model transaction.
 var endPlaySubscriptionEntitlement = func(
+	connOwner server.PgConn,
 	ctx context.Context,
 	networkId server.Id,
 	purchaseToken string,
 	now time.Time,
 ) (bool, error) {
-	return model.EndReconciledEntitlementForNetworkPurchaseToken(
+	return model.EndReconciledEntitlementForNetworkPurchaseTokenInConn(
+		connOwner,
 		ctx,
 		networkId,
 		model.SubscriptionMarketGoogle,
@@ -1484,6 +1486,7 @@ func endTerminalPlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	expiryTime time.Time,
 ) (*PlaySubscriptionRenewalResult, error) {
 	ended, err := endPlaySubscriptionEntitlement(
+		connOwner,
 		clientSession.Ctx,
 		playSubscriptionRenewal.NetworkId,
 		playSubscriptionRenewal.PurchaseToken,

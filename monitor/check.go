@@ -81,6 +81,23 @@ type finding struct {
 	action    string
 	verify    string
 	playbook  string
+
+	// the finding reports an unknown state although its class is an incident
+	// (see isUnobservable)
+	unobservable bool
+	// the configuration turned the observation off: a standing state of this
+	// watcher, not an incident
+	configuredOff bool
+}
+
+// An unobservable finding reports an unknown state in place of an incident:
+// part of its signal's source could not be observed or evaluated, so the
+// execution that produced it is no evidence that anything else is absent. Its
+// class says so (alertClassKinds), the probe id monitor/visibility is
+// reserved for such findings, and a finding sets unobservable when only its
+// state, not its class, makes it unknown.
+func (self finding) isUnobservable() bool {
+	return self.unobservable || self.probeId == "monitor/visibility" || isVisibilityAlertClass(self.class)
 }
 
 // probe is one SIGNALS.md signal encoded as an automated check.
