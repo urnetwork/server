@@ -3332,9 +3332,9 @@ Unknown, oversized, or ambiguous diagnostics remain
 timestamp-framed records cannot establish the terminal query cause. A
 successful command remains successful even when stderr records failed retries.
 
-Only the fixed class and optional native numeric exit status enter the safe
-error; arguments, selectors, response bodies, raw stderr, addresses, and
-credentials are not copied. Reconciliation strips block/continuation wrappers
+Only the fixed class, optional native numeric exit status, and the HTTP 429
+`response_shape` enum enter the safe error; arguments, selectors, response
+bodies, raw stderr, addresses, and credentials are not copied. Reconciliation strips block/continuation wrappers
 around this typed error before storing alert text. Existing `tailer-reconcile`
 and one-shot `cannot-observe` identities, WARN severity, two-cadence sustain,
 partial-output rejection, and successful-query recovery remain unchanged.
@@ -3350,6 +3350,42 @@ tail freshness for recovery. Deterministic controls in
 `conn_warpctl_log_error_test.go` cover each class, cancellation, native exit
 status, concurrent stdout/stderr capture, private-text exclusion, unknown and
 successful controls, and unchanged one-shot/standing visibility identities.
+
+The HTTP 429 response hint uses only the existing bounded query's private
+stderr after the runner joins its native process. A known shape requires
+actual native exit 2, one terminal HTTP 429 panic, and the complete
+`main.logs` → `main.main` traceback of the pinned Warpctl query producer.
+The exact trimmed Loki literal `too many outstanding requests` becomes
+`response_shape=loki-outstanding-requests`; the exact default HTML 429 body
+with a versionless nginx footer becomes `response_shape=nginx-default-429`.
+All other HTTP 429 forms retain `response_shape=unknown` and their original
+status/class. This adds no HTTP request, host read, retry, sampling window,
+query budget, severity, or visibility identity.
+
+The source contract is Warpctl
+`89a47cb6561d003a903d7f1b7b2b39ac4884ddbf` (`warpctl/loki/client.go` trims
+the non-200 body and `warpctl/main.go` panics on the terminal Search error),
+[Loki v3.7.3's frontend outstanding-request literal](https://github.com/grafana/loki/blob/v3.7.3/pkg/lokifrontend/frontend/v1/frontend.go),
+and [nginx 1.26.3's default 429 page and versionless footer](https://github.com/nginx/nginx/blob/release-1.26.3/src/http/ngx_http_special_response.c).
+Warpctl's configuration generator sets `server_tokens off`; generated source
+does not establish the serving process's loaded configuration. The versions
+describe recognized formats, not inferred deployed Loki or nginx versions.
+False-positive qualifier: an exact response shape is not proof of a physical
+responder, gateway rate policy, Loki queue cause, or ingestion loss; a proxy
+can relay or reproduce the same body. Healthy service output, successful
+child stderr, retry-only/nonterminal text, another command or artifact, and
+the standing follow stream cannot acquire a known shape. Authoritative
+cancellation/deadline, native exit 255, nonnative status text, truncation,
+multiple terminal delimiters, and versioned/custom/lookalike bodies also
+cannot acquire one. False-negative qualifier: a changed Warpctl traceback,
+body formatting, or producer version leaves the hint unknown while the
+original visibility failure remains. Missing hints and zero records from a
+capped single-host access-log sample do not establish health or the absence
+of query traffic. Never use this hint to backfill earlier unknown responses.
+`conn_warpctl_log_response_shape_test.go` and its control companion cover the
+causal natural-query/reconciliation path, real joined local child capture,
+healthy payloads, lifecycle precedence, strict framing, bounded capture,
+privacy, unchanged identity, and recovery.
 
 The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
 an interrupted WebSocket internally, so an explicit `Tail read error ... no
@@ -4145,6 +4181,41 @@ Existing more-specific timeout, access-denied, and SSH-admission classifications
 retain precedence. Parent cancellation remains watcher lifecycle rather than
 an SSH failure, including cancellation while waiting for a shared command slot;
 the per-command deadline retains its timeout classification.
+
+Shared-admission errors also retain `ssh_admission_failures`, a fixed,
+deduplicated list in `acquire,release,unknown` order containing only the phases
+present in the returned error tree. The transport stamps `acquire` at the
+failed shared acquisition and `release` at failed cleanup; an older or
+unrecognized typed phase stays `unknown`. A wrapped deadline or cancellation
+keeps its existing `error_class` and the independent local phase. Both
+whole-signal and partial-target visibility preserve the same WARN, sustain and
+identity. No addresses, queue contents, underlying error text or process argv
+enter these fields.
+
+FALSE POSITIVE QUALIFIER: joined gateway errors can contain phases from
+different attempts. A phase proves its local call boundary, not that every
+gateway failed there; `release` does not prove a native SSH spawn, remote
+completion or a healthy source. Even `acquire` describes only that failed
+attempt, not an earlier gateway. FALSE NEGATIVE QUALIFIER: an absent marker
+leaves admission phase unobserved, not successful. Untyped failures, host-slot
+and probe-local waits, settings refusal, SSH/native and remote execution phases
+remain separate unknowns. Successful gateway fallback retains its existing
+behavior and does not return earlier failed-attempt markers. A later sample
+cannot recover a historical discarded phase.
+
+For the standard continuous CLI, the shutdown/config and journal host probes
+(§11.21, §8.5b) and these loopback-query probes (§2.9a, §11.20d, §14.7d) have no
+queue-inclusive owner deadline. The CLI parent supplies cancellation, while
+the command deadline starts after host and shared admission. The shared queue's
+own bounded deadline returns `observation-admission-unavailable`; that plain
+refusal alone does not explain `observation-timeout`. Native/command timeouts
+and a deadline during the separately bounded release cleanup remain distinct
+possibilities. This source contract differs from the finite PG sampler owner.
+Host batches stamp Alerts after joining all results, so equal observation
+times and six failed hosts do not establish simultaneous SSH spawns. The
+missing discriminator is same-attempt local phase plus native Start/Wait and,
+where needed, remote-source progress; the PG sampler's private projection is
+not authority for these ordinary shell calls.
 
 An early native SSH connection timeout also retains
 `error_class=observation-timeout` before that outer deadline. The adapter marks
@@ -18366,9 +18437,16 @@ Probe: `redis-connections`
   short-lived rise occurred between scrapes. A zero denominator, restart,
   uptime reset, missing family/node, stale sample, source warning, malformed
   value, future timestamp, or duplicate/ambiguous sample remains unknown.
-- The temporal coverage finding is `cannot-observe`, with probe id
-  `redis/clients-spike`, the same configured host:port target, and stable frame
-  `clients-history`. It preserves known native-median violations and complete
+- Temporal coverage findings use `cannot-observe`, with probe id
+  `redis/clients-spike` and stable frame `clients-history`. A failed shared
+  transport, invalid response, or response with no configured-node series is
+  one incident on stable target `redis-clients-history`, with finite configured
+  and unobservable node counts. It covers the whole configured census, keeping
+  previously raised node spikes open until actual healthy observations satisfy
+  the usual recovery hold. This shared dependency is not repeated per node and
+  cannot fill the notification budget with duplicate source failures. A usable
+  partial response retains the affected configured host:port identities for
+  node-local gaps. Coverage findings preserve known native-median violations and complete
   historical siblings. No combined healthy finding is emitted until both arms
   can actually be evaluated. Each observation reads the window again, so
   corrected history replaces the prior verdict rather than inheriting a cached

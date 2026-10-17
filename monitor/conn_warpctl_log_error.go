@@ -21,12 +21,13 @@ const (
 	observationErrorClassLogConfigSchema = "observation-log-query-config-schema"
 )
 
-// Store only a fixed class and the native execution cause, never stderr or argv.
+// Store only fixed class/response enums and the native cause, never stderr or argv.
 // Unwrap preserves cancellation and exit-status checks without exposing them in
 // alerts that render Error. HTTP classes describe the query, not a remote app.
 type warpctlLogQueryError struct {
-	class string
-	err   error
+	class         string
+	responseShape string
+	err           error
 }
 
 func (self *warpctlLogQueryError) Error() string {
@@ -34,6 +35,15 @@ func (self *warpctlLogQueryError) Error() string {
 	var exitErr *exec.ExitError
 	if errors.As(self.err, &exitErr) {
 		message += fmt.Sprintf(" exit_status=%d", exitErr.ExitCode())
+	}
+	if self.class == observationErrorClassLogHttp429 {
+		shape := self.responseShape
+		switch shape {
+		case "loki-outstanding-requests", "nginx-default-429":
+		default:
+			shape = "unknown"
+		}
+		message += " response_shape=" + shape
 	}
 	return message
 }
@@ -51,7 +61,11 @@ func newWarpctlLogQueryError(err error, stderr string) *warpctlLogQueryError {
 	case len(stderr) <= warpctlLogDiagnosticLimit:
 		class = warpctlLogDiagnosticClass(stderr)
 	}
-	return &warpctlLogQueryError{class: class, err: err}
+	responseShape := ""
+	if class == observationErrorClassLogHttp429 {
+		responseShape = warpctlLog429ResponseShape(err, stderr)
+	}
+	return &warpctlLogQueryError{class: class, responseShape: responseShape, err: err}
 }
 
 // Warpctl terminates Search failures with a Go panic on stderr. Earlier retry

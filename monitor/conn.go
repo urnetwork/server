@@ -429,11 +429,11 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		observation.stage("shared_admission", "not_attempted")
 		releaseShared, err := self.cfg.sharedSshAdmission.acquire(ctx, h.name)
 		if err != nil {
-			return "", &sshAdmissionUnavailableError{err: err}
+			return "", &sshAdmissionUnavailableError{err: err, phase: sshAdmissionFailureAcquire}
 		}
 		defer func() {
 			if err := releaseShared(); err != nil {
-				resultErr = errors.Join(resultErr, &sshAdmissionUnavailableError{err: err})
+				resultErr = errors.Join(resultErr, &sshAdmissionUnavailableError{err: err, phase: sshAdmissionFailureRelease})
 			}
 		}()
 	}
