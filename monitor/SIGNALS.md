@@ -4524,11 +4524,22 @@ milliseconds at PG entry and after successful native Start preserve the
 inherited deadline. Their difference is elapsed owner time, not a measured
 queue cause. The 40-second owner still includes every prior queue/admission
 wait; an unstarted expiration can be correct bounded scheduling behavior.
+The ordinary CLI loop has a cancellation-only parent: the 40-second owner
+starts before global-slot admission, and the adapter/check inherit its
+deadline. Subtracting the entry value from 40,000 estimates elapsed owner time
+before that snapshot, including admission and intervening local work; it does
+not measure either separately. Completing 12 snapshots requires eleven
+intentional two-second sleeps (22 seconds), plus SSH/reader setup and catalog
+reads. A remaining budget only slightly above 22 seconds can expire without
+a slow statement. Preserve the original owner, sample count and cadence.
 
 Remote progress requires two ordered, fixed records matched to this attempt's
 private stdin nonce. `remote_started` proves validated reader input;
 `database_identity` proves receipt of the first bounded identity response,
 not primary/database/read-only authority, later SQL progress or completion.
+The marker validates the response shape and boolean types, not their values.
+It carries no phase clock or later-sample count. After an owner deadline,
+`samples=0` means no complete retained sample, not no database work.
 The existing SQL and successful stdout are unchanged. Raw SSH/child stderr,
 nonce and source identities never enter this projection. Unobserved, absent,
 invalid or over4KiB progress stays unknown; valid foreign nonces cannot claim
@@ -7766,6 +7777,26 @@ Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
 never becomes a finished duration because the same pending attempt is reclaimed.
 Retain the latest overrun for 45 minutes so an immediate fast successor cannot
 erase its precursor.
+
+A `phase=completed` warning reports that retained checkpoint, not a currently
+running attempt. Its `attempt_correlated=true` marker means a durable task
+identifier was retained internally; it does not bind the completion to a host,
+container or executable. When `active_log_source=unavailable`, current task
+activity remains unknown. Repeated reports of the same completion are one
+retained incident; aging out of the window is not proof of recovery.
+
+For executor artifacts containing the policy in
+`model/subscription_close_budget.go`, the 90-second budget stops new subpages
+and the 120-second dispatch limit stops starting rows. Already started rows
+finish their required financial and cleanup work before the checkpoint returns.
+A completed duration just above 120 seconds therefore still warns, but does not
+alone establish an ignored limit or a 1,800-second timeout. Verify the exact
+executor artifact and effective expiry concurrency before applying this source
+explanation. Use ordinary close-duration, task-canary and aged-bucket samples
+with retained lifecycle evidence first. If a recurring overrun remains
+unresolved, obtain one bounded read that links the attempt's times to its
+executor before choosing a causal discriminator. Retain the existing
+thresholds, scan caps, concurrency and ownership holds.
 
 This duration probe cannot detect every failure-to-progress mode. A short
 accounting-rejected attempt may put the global singleton into long backoff;
