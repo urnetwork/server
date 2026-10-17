@@ -26,6 +26,7 @@ type runSlotWaiter struct {
 func newRunSlotPool(limit int) *runSlotPool { return &runSlotPool{limit: limit} }
 
 func (p *runSlotPool) acquire(ctx context.Context, priority bool) (func(), error) {
+	pgSampleTransportFromContext(ctx).runSlotRequested()
 	p.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		p.mu.Unlock()
@@ -95,6 +96,7 @@ func (p *runSlotPool) dispatch() {
 		} else {
 			p.priorityGrants = 0
 		}
+		pgSampleTransportFromContext(w.ctx).runSlotGranted(w.ctx)
 		close(w.ready)
 	}
 }

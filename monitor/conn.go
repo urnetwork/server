@@ -185,6 +185,9 @@ type monitorConfig struct {
 	pgDb          string
 
 	grafanaAdminPassword string
+	mimirQueryDomain     string
+	mimirQueryUsername   string
+	mimirQueryPassword   string
 
 	sourceIPv4URL           string
 	sourceIPv6URL           string

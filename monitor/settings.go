@@ -146,11 +146,14 @@ type PostgreSQLSettings struct {
 	Database      string
 }
 
-// GrafanaSettings carries only the credential needed to exercise provisioned
-// datasources through Grafana itself. The monitor sends it as HTTP Basic Auth
-// in memory; it is never included in an alert, command line, or query body.
+// Separate admin and query-role credentials stay in memory. QueryDomain is the
+// native primary services domain, not an arbitrary endpoint or proxy override.
+// The complete effective value participates in private generation comparison.
 type GrafanaSettings struct {
 	AdminPassword string
+	QueryDomain   string
+	QueryUsername string
+	QueryPassword string
 }
 
 // AlertNotificationSettings configures the continuous watcher's optional
@@ -681,7 +684,14 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 		// thresholds, matching MONITOR.md §3.3.
 		baseline, _ = newBaselineStore(filepath.Join(settings.StateDir, "baseline"))
 	}
-	return &probeEnv{cfg: cfg, runner: transport, baseline: baseline, now: settings.Now}, nil
+	var queryClient grafanaHTTPClient
+	if settings.Source != nil {
+		queryClient, _ = settings.Source.(grafanaHTTPClient)
+		if queryClient == nil {
+			queryClient = unavailableMimirQuerySource{}
+		}
+	}
+	return &probeEnv{cfg: cfg, runner: transport, baseline: baseline, now: settings.Now, mimirQueryClient: queryClient}, nil
 }
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
@@ -707,6 +717,9 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgPassword:              settings.PostgreSQL.Password,
 		pgDb:                    settings.PostgreSQL.Database,
 		grafanaAdminPassword:    settings.Grafana.AdminPassword,
+		mimirQueryDomain:        settings.Grafana.QueryDomain,
+		mimirQueryUsername:      settings.Grafana.QueryUsername,
+		mimirQueryPassword:      settings.Grafana.QueryPassword,
 		sourceIPv4URL:           settings.SourceAttribution.IPv4URL,
 		sourceIPv6URL:           settings.SourceAttribution.IPv6URL,
 		expectedSourceIPv4:      settings.SourceAttribution.ExpectedIPv4,

@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,9 +23,9 @@ type selectionOutputSource struct {
 	calls   int
 }
 
-func (self *selectionOutputSource) Host(context.Context, servermonitor.HostSettings, string) (string, error) {
+func (self *selectionOutputSource) Do(*http.Request) (*http.Response, error) {
 	self.calls++
-	return self.payload, nil
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(self.payload))}, nil
 }
 
 func selectionOutputPayload(t *testing.T, now time.Time, reason string) string {
@@ -77,6 +78,7 @@ func TestMonitorProviderSelectionOutputAppendsEveryState(t *testing.T) {
 				Hosts:       []servermonitor.HostSettings{{Name: "api-fixture", Roles: []string{"services"}}},
 				LogServices: []string{"api"}, LogServiceHosts: map[string][]string{"api": {"api-fixture"}},
 				LogServiceBlocks: map[string][]string{"api": {"blue"}},
+				Grafana:          servermonitor.GrafanaSettings{QueryDomain: "metrics.example", QueryUsername: "query-synthetic", QueryPassword: "private-query-password"},
 			}
 			if reason == "unknown" {
 				settings.LogServiceBlocks = nil

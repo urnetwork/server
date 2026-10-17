@@ -12,30 +12,64 @@ import (
 	"time"
 )
 
-// One PG attempt owns this optional projection through its synchronous SSH
-// call. Only native Start/Wait supplies process authority; an injected runner
-// or an earlier wrapper refusal stays unknown. Methods are not concurrent.
+// One PG attempt owns this optional projection. The run-slot dispatcher writes
+// before publishing its ready channel; the admitted caller then owns transport
+// facts synchronously. Only native Start/Wait supplies process authority.
 type pgSampleTransportObservation struct {
-	receipt pgSampleTransportReceipt
-	nonce   string
+	receipt            pgSampleTransportReceipt
+	nonce              string
+	runSlotRequestedAt time.Time
 }
 
 // Finite source facts only. Joined covers the local SSH process and its pipes,
 // not remote descendants. Remote progress is neither SQL authority nor health.
 type pgSampleTransportReceipt struct {
-	Phase                  string `json:"phase"`
-	Spawn                  string `json:"spawn"`
-	RemotePhase            string `json:"remote_phase"`
-	RemainingBudgetMs      int64  `json:"remaining_budget_ms"`
-	SpawnRemainingBudgetMs *int64 `json:"spawn_remaining_budget_ms"`
-	OwnerDeadlineExceeded  bool   `json:"owner_deadline_exceeded"`
-	Joined                 bool   `json:"joined"`
-	NativeExitCode         *int   `json:"native_exit_code"`
-	ProgressStatus         string `json:"progress_status"`
+	Phase                           string `json:"phase"`
+	Spawn                           string `json:"spawn"`
+	RemotePhase                     string `json:"remote_phase"`
+	RemainingBudgetMs               int64  `json:"remaining_budget_ms"`
+	RunSlotWaitMs                   *int64 `json:"run_slot_wait_ms,omitempty"`
+	RunSlotGrantedRemainingBudgetMs *int64 `json:"run_slot_granted_remaining_budget_ms,omitempty"`
+	SpawnRemainingBudgetMs          *int64 `json:"spawn_remaining_budget_ms"`
+	OwnerDeadlineExceeded           bool   `json:"owner_deadline_exceeded"`
+	Joined                          bool   `json:"joined"`
+	NativeExitCode                  *int   `json:"native_exit_code"`
+	ProgressStatus                  string `json:"progress_status"`
 }
 
 // The private key never crosses the single admitted PG-attempt context.
 type pgSampleTransportContextKey struct{}
+
+// Only the scheduled PG request receives this empty recorder. Every cadence
+// gets a fresh context; direct probes and ordinary signals have no grant proof.
+func observePgSampleRunSlot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, pgSampleTransportContextKey{}, &pgSampleTransportObservation{})
+}
+
+// Measure the actual request, including pool-lock wait, without changing its
+// deadline. Other signals have no recorder and retain their existing path.
+func (self *pgSampleTransportObservation) runSlotRequested() {
+	if self != nil {
+		self.runSlotRequestedAt = time.Now()
+	}
+}
+
+// The dispatcher owns the grant timestamp. Its ready channel publishes both
+// values before the admitted caller can create the transport observation.
+func (self *pgSampleTransportObservation) runSlotGranted(ctx context.Context) {
+	if self == nil || self.runSlotRequestedAt.IsZero() {
+		return
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return
+	}
+	grantedAt := time.Now()
+	waitMs := grantedAt.Sub(self.runSlotRequestedAt).Milliseconds()
+	remainingMs := min(pgQuerySampleBudget.Milliseconds(), max(int64(0), deadline.Sub(grantedAt).Milliseconds()))
+	self.receipt.RunSlotWaitMs = &waitMs
+	self.receipt.RunSlotGrantedRemainingBudgetMs = &remainingMs
+}
 
 // Preserve the inherited owner; observation never creates a fresh deadline.
 // The nonce is private stdin correlation, absent from argv and receipts.
@@ -51,6 +85,10 @@ func observePgSampleTransport(ctx context.Context) (context.Context, *pgSampleTr
 			ProgressStatus:    "unobserved",
 		},
 		nonce: hex.EncodeToString(nonceBytes[:]),
+	}
+	if prior := pgSampleTransportFromContext(ctx); prior != nil {
+		observation.receipt.RunSlotWaitMs = prior.receipt.RunSlotWaitMs
+		observation.receipt.RunSlotGrantedRemainingBudgetMs = prior.receipt.RunSlotGrantedRemainingBudgetMs
 	}
 	return context.WithValue(ctx, pgSampleTransportContextKey{}, observation), observation
 }

@@ -279,6 +279,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		home = "."
 	}
 	stConfiguration := loadSTConfigurationObservation(env)
+	queryDomain, queryUsername, queryPassword := loadMimirQuerySettings(env, services)
 	settings := SignalSettings{
 		Routers:                cloneRouterSettings(y.Routers),
 		PublicUdp:              clonePublicUdpSettings(y.PublicUdp),
@@ -309,6 +310,9 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		},
 		Grafana: GrafanaSettings{
 			AdminPassword: grafanaVault.Grafana.AdminPassword,
+			QueryDomain:   queryDomain,
+			QueryUsername: queryUsername,
+			QueryPassword: queryPassword,
 		},
 		SourceAttribution: SourceAttributionSettings{
 			IPv4URL:      y.SourceAttribution.IPv4URL,

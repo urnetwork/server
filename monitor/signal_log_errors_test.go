@@ -1583,7 +1583,8 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "payout-invalid-destination").Markdown()
 	for _, detail := range []string{
-		"invalid for its declared chain",
+		"does not prove typed rejection, current chain compatibility, or guarded-reset outcome",
+		"HTTP 400 with parsed code 155219 or the exact normalized invalid-address message",
 		"safely releases only that pre-chain submit attempt",
 		"when its guarded reset succeeds",
 		"select the same invalid payout_wallet configuration",

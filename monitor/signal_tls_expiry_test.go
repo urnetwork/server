@@ -216,13 +216,11 @@ func TestTLSExpirySignalSyntheticObserverNoRouteAggregatesIPv6AndKeepsIPv4(t *te
 	routeCalls := 0
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
-			if name != "/sbin/route" || strings.Join(args, " ") != "-n get -inet6 "+ipv6ObserverRouteProbeAddress {
+			if !ipv6ObserverRouteTestCommand(name, args) {
 				return "", fmt.Errorf("unexpected local command %s %s", name, strings.Join(args, " "))
 			}
 			routeCalls++
-			// macOS route can report an absent route in its output while
-			// still exiting zero. The diagnostic text remains authoritative.
-			return "route: writing to routing socket: not in table\n", nil
+			return ipv6ObserverRouteTestResult("route: writing to routing socket: not in table\n")
 		},
 		tlsFn: func(network, address, _ string) (TLSCertificateObservation, error) {
 			if network == "tcp4" {

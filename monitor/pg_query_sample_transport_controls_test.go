@@ -221,10 +221,11 @@ func TestPgTransportAuthorityNativeTerminalControls(t *testing.T) {
 		}
 		env := pgSampleTestEnv(t, func([]string, string) (string, string, error) { t.Fatal("injected runner used"); return "", "", nil })
 		env.runner.(*runner).runSSH = runSSHCommand
-		if _, err := (pgQuerySampleProbe{}).check(t.Context(), env); err != nil {
+		findings, err := (pgQuerySampleProbe{}).check(t.Context(), env)
+		if err != nil {
 			t.Fatal(err)
 		}
-		receipt, _ := pgTransportReadControlReceipt(t, env)
+		receipt, raw := pgTransportReadControlReceipt(t, env)
 		proof := receipt.TransportObservation
 		if receipt.Complete != testCase.complete || proof.Phase != "ssh_running" || proof.Spawn != "started" || !proof.Joined || proof.NativeExitCode == nil || *proof.NativeExitCode != testCase.exit || proof.OwnerDeadlineExceeded || proof.SpawnRemainingBudgetMs == nil || *proof.SpawnRemainingBudgetMs > proof.RemainingBudgetMs {
 			t.Fatalf("mode %s lost native terminal authority or renewed its owner", testCase.mode)
@@ -235,6 +236,14 @@ func TestPgTransportAuthorityNativeTerminalControls(t *testing.T) {
 			}
 		} else if receipt.SourceFailure == nil || proof.RemotePhase != "unknown" || proof.ProgressStatus != "absent" {
 			t.Fatal("native failure invented remote progress")
+		}
+		if strings.Contains(string(raw), "collection_budget=") {
+			t.Fatal("completed or non-owner failure invented an owner-window shortfall")
+		}
+		for _, finding := range findings {
+			if strings.Contains(finding.observed, "collection_budget=") {
+				t.Fatal("completed or non-owner finding invented an owner-window shortfall")
+			}
 		}
 	}
 }

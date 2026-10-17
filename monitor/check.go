@@ -21,6 +21,7 @@ import (
 type probeEnv struct {
 	cfg                          *monitorConfig
 	runner                       probeRunner
+	mimirQueryClient             grafanaHTTPClient
 	baseline                     *baselineStore
 	now                          func() time.Time
 	urlProbeCoverageObservation  *UrlProbeCoverageObservation

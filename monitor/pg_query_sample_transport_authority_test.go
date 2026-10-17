@@ -82,9 +82,11 @@ func TestPgTransportAuthorityPreservesUnspawnedAdmissionDeadline(t *testing.T) {
 	env.cfg.sharedSshAdmission = admission
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	var findings []finding
 	done := make(chan error, 1)
 	go func() {
-		_, err := (pgQuerySampleProbe{}).check(ctx, env)
+		var err error
+		findings, err = (pgQuerySampleProbe{}).check(ctx, env)
 		done <- err
 	}()
 	select {
@@ -109,6 +111,9 @@ func TestPgTransportAuthorityPreservesUnspawnedAdmissionDeadline(t *testing.T) {
 	}
 	if proof.Phase != "shared_admission" || proof.Spawn != "not_attempted" || proof.RemotePhase != "unknown" || proof.SpawnRemainingBudgetMs != nil || proof.Joined || !proof.OwnerDeadlineExceeded || proof.RemainingBudgetMs <= 0 || proof.RemainingBudgetMs > 5000 {
 		t.Fatal("unstarted shared admission receipt invented execution or reset its parent budget")
+	}
+	if len(findings) != 1 || strings.Contains(findings[0].observed, "collection_budget=") {
+		t.Fatal("unstarted admission invented a native-spawn sampling-window shortfall")
 	}
 }
 
@@ -187,9 +192,11 @@ func TestPgTransportAuthorityPreservesRemoteProgressAtOwnerDeadline(t *testing.T
 	env.runner.(*runner).runSSH = runSSHCommand
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	var findings []finding
 	done := make(chan error, 1)
 	go func() {
-		_, err := (pgQuerySampleProbe{}).check(ctx, env)
+		var err error
+		findings, err = (pgQuerySampleProbe{}).check(ctx, env)
 		done <- err
 	}()
 	type readyProof struct {
@@ -233,5 +240,12 @@ func TestPgTransportAuthorityPreservesRemoteProgressAtOwnerDeadline(t *testing.T
 	}
 	if proof.Phase != "ssh_running" || proof.Spawn != "started" || proof.RemotePhase != "database_identity" || !proof.Joined || !proof.OwnerDeadlineExceeded || proof.RemainingBudgetMs <= 0 || proof.RemainingBudgetMs > 5000 || proof.SpawnRemainingBudgetMs == nil || *proof.SpawnRemainingBudgetMs <= 0 || *proof.SpawnRemainingBudgetMs > proof.RemainingBudgetMs {
 		t.Fatal("owned SSH deadline lost its remote phase or renewed its parent budget")
+	}
+	if len(findings) != 1 || findings[0].class != "pg-query-sample-unavailable" || findings[0].tier != tierWarn || findings[0].sustain != 1 || !strings.Contains(findings[0].observed, "reason=deadline phase=host_transport cause=observation-timeout") {
+		t.Fatal("sampling-window qualification changed the original failed observation")
+	}
+	want := fmt.Sprintf("collection_budget=below-mandatory-waits minimum_wait_ms=22000 spawn_remaining_budget_ms=%d", *proof.SpawnRemainingBudgetMs)
+	if !strings.Contains(findings[0].observed, want) || !strings.Contains(string(raw), want) {
+		t.Fatal("actual started/joined deadline hid the proved insufficient mandatory-wait budget")
 	}
 }

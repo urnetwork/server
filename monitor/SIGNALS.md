@@ -1802,6 +1802,28 @@ not freed capacity. That postgres-exporter series also holds its last value
 while PostgreSQL is down (it read 721 throughout a full stop), so it cannot
 show that PostgreSQL is serving; use a direct 5432 read.
 
+The 2026-10-17 direct control at 04:31:05Z counted 902 of 1,021 normal-role
+slots: 845 idle, 26 active, and 31 idle in transaction. Idle clients alone
+exceeded the warning threshold of 766 clients. Even if every idle transaction
+released its slot, 871 clients would remain (85.3%, with 150 slots free), still
+a warning. This arithmetic does not authorize cancellation or prove that idle
+reserve is incorrectly retained. An idle-in-transaction count alone cannot
+explain this whole capacity warning or establish an application leak.
+
+The ten retained owner groups covered 880 of 902 clients, including 29 of the
+31 idle-in-transaction clients in groups with rounded `oldest_state_s=0`.
+`state_change` age and `backend_start` age are not transaction age; a young
+state can belong to an older transaction. The 22 unretained clients remain an
+owner-attribution gap, while the complete aggregate still proves capacity
+pressure. The largest group, 575 idle loopback clients, does not identify a
+PgBouncer process or application owner. Before assigning a transaction-lifetime
+cause, match the current backend generation and transaction start/continuity to
+the caller's phase and configured deadline. Rotating short transactions on old
+pooled backends are a healthy lifetime control compatible with these ages;
+unchanged aggregate counts do not prove that the same backends persisted.
+Missing or failed source evidence remains unknown. Keep this capacity finding
+separate from query/CPU attribution and operator-owned pool configuration.
+
 ### 1.3b PgBouncer idle-backend retention
 Probe: `pool-retention`
 
@@ -2790,7 +2812,10 @@ module-relative function owners.
 The database wrapper set includes `OwnedTx`, `TryOwnedTx`, their private
 resource/policy adapters, `PgOwnedSession.Tx`/`txWithResource`, and the
 `pgOwnedConnection.run` recovery adapter, at ordinary and versioned Server
-module roots. These wrappers can raise acquisition, admission, cleanup, or
+module roots. The shared `txWithConnection` implementation and explicit-owner
+`TxInConn`/`DbInConn` entry points are also wrappers: the pool and caller-owned
+paths must both reach the first remaining application caller. These wrappers
+can raise acquisition, admission, cleanup, or
 transaction errors for different business callers; their name alone does not
 identify the responsible operation or initiating failure. Skip only these
 exact source symbols, retaining a validated caller or aggregate-only unknown
@@ -2801,8 +2826,14 @@ record as a pair. A `-trimpath` build can use an application-module prefix on
 that source path; it is not a second function or an unknown owner. Unsupported
 inner function records still stop attribution before a later caller can lend
 its apparent ownership.
+The finite provider-egress classifier additionally validates `txWithConnection`
+against `db.go`, and `TxInConn`/`DbInConn` against `db_connection_owner.go`.
+A different file, unknown inner symbol or wrapper-only stack cannot supply
+that finite error class. Application subpackages with the same short names
+remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
-Go error type, and a validated PostgreSQL SQLSTATE—not raw errors, stack
+Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
+error class described below—not raw errors, stack
 arguments, source paths/line numbers, endpoints, or identities. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -2811,6 +2842,55 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 200-byte prefix truncation; the owner discriminator now survives a long error
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
+
+The 2026-10-17 Proxy observation retained a seven-lines/minute aggregate and
+an overlapping seven-lines/minute `server/v2026.txWithConnection` owner view.
+The prior parser skipped `txWithPool` but omitted its shared connection
+implementation. The same omission affected explicit-connection adapters.
+This is another source-attribution gap in the wrapper family; it does not
+establish the same initiating failure as the earlier OwnedTx observation.
+The retained type and SQLSTATE were unknown, and the original ErrorJson was
+not retained. Neither a phase, business caller, emitting image, database
+failure nor a relationship to provider-egress busy or transfer-debit flushing
+can be recovered from those projections. Preserve the aggregate PAGE and
+the unchanged thresholds for any newly resolved caller; changing a frame is
+not recovery. Source investigation needs a bounded original stack and safe
+error discriminator tied to an emitting artifact before choosing among begin,
+callback, rollback, commit and retry boundaries. This parser correction does
+not authorize a remote read or transaction behavior change.
+
+For the exact `statsRefreshProviderEgress` caller/file pair, in the reviewed
+unversioned or `v2026` Server module, samples additionally retain
+`error_class=provider_egress_refresh_busy`, `provider_egress_unavailable`, or
+`provider_egress_snapshot_invalid`. This uses the bounded reader's exact
+function/file validation for every preceding Server wrapper and exact typed
+source literals; a foreign or unknown inner caller, wrong file, unsupported
+module, malformed/duplicate/over-cap record, or SQL/message lookalike remains
+unclassified. No raw error, policy key, lease token, identity or hash is added.
+The finite class describes only the retained sample. It does not classify
+every line in an aggregate or owner bucket, create another rate bucket, change
+the five-lines/minute PAGE, or prove an emitting image or process crash.
+
+`provider_egress_refresh_busy` means the reviewed cache path found no fresh
+valid snapshot on either read and did not acquire the shared fill lease. A
+healthy fill and a failed fill's retained 180-second retry fence both produce
+this same refusal. Neither busy nor the lease's remaining TTL proves a live
+holder, completed source read, or cache freshness. Keep refresh availability
+zero and existing source timestamps unchanged; do not suppress this diagnostic
+as healthy contention. `provider_egress_unavailable` covers multiple discarded
+Redis, source, context, policy and publication causes; `snapshot_invalid`
+identifies validation refusal without identifying its producer.
+
+The next discriminating fact is a policy-matched completed snapshot with its
+original start/completion times spanning the refusal, or the corresponding
+owner's terminal outcome. Independent per-process availability and source-time
+metrics can establish later fresh observation, but cross-process maxima,
+missing/stale series, another busy line or a current token alone cannot prove
+that exact earlier lease's outcome. Snapshot policy and emitting artifact
+remain separate authority checks. Deterministic controls cover an active fill,
+a failed fill retaining the same fence, stale/invalid data, valid all-zero
+counts, and unchanged panic thresholds/privacy; unavailable or incomplete log
+coverage never establishes recovery.
 
 The 2026-10-16 Taskworker observation retained a nine-lines/minute aggregate
 and an overlapping seven-lines/minute `server/v2026.ownedTxWithResourcePolicy`
@@ -3320,7 +3400,8 @@ Bounded Warpctl log-query failures also retain a privacy-safe terminal cause.
 The local command runner keeps stdout separate from a bounded 64 KiB stderr
 diagnostic prefix for classification while preserving the existing combined
 output contract. Only a failed `warpctl logs` query can acquire the fixed
-classes `observation-log-query-http-429`, `observation-log-query-http-502`,
+classes `observation-log-query-http-429`, `observation-log-query-http-500`,
+`observation-log-query-http-502`,
 `observation-log-query-http-503`, `observation-log-query-http-504`, or
 `observation-log-query-config-schema`. The HTTP classes require Warpctl's
 terminal `panic: Loki query error (...)` header; the config/schema class
@@ -3331,6 +3412,22 @@ Unknown, oversized, or ambiguous diagnostics remain
 `observation-command-failed`. Earlier retry records, remote stdout, and
 timestamp-framed records cannot establish the terminal query cause. A
 successful command remains successful even when stderr records failed retries.
+
+The HTTP500 class additionally requires actual native exit 2, exactly one
+terminal HTTP500 panic header, and the complete pinned `main.logs` →
+`main.main` traceback within the existing diagnostic bound. This preserves
+the known status that previously fell through to generic command failure.
+Header-only text, a different producer, incomplete or multiple traces,
+ordinary exit 2, stdout lookalikes, and oversized diagnostics remain unknown.
+Only the fixed HTTP500 class and native exit status leave this boundary;
+response bodies do not become storage, physical-responder, or service-failure
+attribution. Existing generic reconciliation failures cannot be reclassified
+from a nearby standing-tail diagnostic. Require a new complete bounded-query
+observation for its status. Native cancellation/deadline and successful-query
+recovery keep their existing precedence; the HTTP429 response hint is unchanged.
+`conn_warpctl_log_http500_test.go` covers the real joined child, runner,
+reconciliation and one-shot paths, source-envelope refusals, privacy, lifecycle,
+ordinary failed-child and healthy controls.
 
 Only the fixed class, optional native numeric exit status, and the HTTP 429
 `response_shape` enum enter the safe error; arguments, selectors, response
@@ -4235,6 +4332,17 @@ discriminator does not match another reported address, partial or multiline
 diagnostics, other spellings, or a failure with stdout. These inputs retain the
 existing failure classification and remain `cannot-observe`, never healthy.
 
+Bounded diagnostic carriers must preserve a closed completion category on an
+ordinary nonzero SSH return before retaining only stderr byte counts and
+digests. This is separate from exception classification. Apply the exact
+native-diagnostic, target, status and stdout qualifiers above; unrecognized
+text stays unknown. The category records a reported failure, not remote reader
+startup or physical cause. Counts, hashes and elapsed runtime cannot reconstruct
+a discarded category; a spent receipt remains unclassified and is not retry
+authority. Qualify the actual bounded producer through the parent receipt,
+including secret-bearing, foreign-target and ambiguous inputs, while preserving
+child and lease cleanup.
+
 The monitor's built-in SSH defaults are noninteractive, identity-confined, and
 pinned to operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
 `StrictHostKeyChecking=yes`, and `UpdateHostKeys=no`. The transport uses only
@@ -4524,11 +4632,31 @@ milliseconds at PG entry and after successful native Start preserve the
 inherited deadline. Their difference is elapsed owner time, not a measured
 queue cause. The 40-second owner still includes every prior queue/admission
 wait; an unstarted expiration can be correct bounded scheduling behavior.
+The ordinary CLI loop has a cancellation-only parent: the 40-second owner
+starts before global-slot admission, and the adapter/check inherit its
+deadline. Subtracting the entry value from 40,000 estimates elapsed owner time
+before that snapshot, including admission and intervening local work; it does
+not measure either separately. Completing 12 snapshots requires eleven
+intentional two-second sleeps (22 seconds), plus SSH/reader setup and catalog
+reads. A remaining budget only slightly above 22 seconds can expire without
+a slow statement. Preserve the original owner, sample count and cadence.
+
+Scheduled PG receipts also retain optional `run_slot_wait_ms` and
+`run_slot_granted_remaining_budget_ms`: the monotonic request-to-grant interval
+at the global four-signal pool and the same inherited budget at that grant.
+Compare these with entry budget to separate time before and after the grant.
+The measured interval includes pool-lock and dispatch delay; it does not name
+the active holders or prove their source/host condition. Direct probes and
+older receipts without these facts keep grant timing unknown. Admission order,
+the queue-inclusive owner, caps and no-early-retry cadence are unchanged.
 
 Remote progress requires two ordered, fixed records matched to this attempt's
 private stdin nonce. `remote_started` proves validated reader input;
 `database_identity` proves receipt of the first bounded identity response,
 not primary/database/read-only authority, later SQL progress or completion.
+The marker validates the response shape and boolean types, not their values.
+It carries no phase clock or later-sample count. After an owner deadline,
+`samples=0` means no complete retained sample, not no database work.
 The existing SQL and successful stdout are unchanged. Raw SSH/child stderr,
 nonce and source identities never enter this projection. Unobserved, absent,
 invalid or over4KiB progress stays unknown; valid foreign nonces cannot claim
@@ -4539,6 +4667,18 @@ Deterministic controls cover unspawned queue expiry, actual child progress and
 join before timeout receipt storage, native start/exit failures, injected
 callbacks without spawn authority, malformed/foreign progress, private output,
 complete12-frame observations and the unchanged no-early-retry cadence.
+
+An incomplete owner-deadline observation with an actual started/joined native
+child and less than22,000ms remaining at native Start has a proved sampling
+window shortfall: the required eleven two-second sleeps alone cannot fit.
+The receipt's existing qualifiers and the unavailable alert retain
+`collection_budget=below-mandatory-waits`, the required wait milliseconds and
+the observed spawn remainder. The original reason, phase, cause, severity and
+cadence remain unchanged. The comparison is strictly below22,000ms; equality
+or a larger remainder does not prove collection can finish. Unknown or
+unstarted native execution, an unjoined child and a non-owner failure cannot
+claim this qualifier. It identifies no exact queue duration, host fault or
+failing SQL operation. Preserve the original owner, SQL and required samples.
 
 Qualify changes to the activity SQL with the exact candidate-generated query
 and a selected nonempty active statement under a size-qualified
@@ -7187,15 +7327,27 @@ transfer_contract autovacuum phase. Apply the bounded retention correction only
 if that attribution is confirmed; the historical episodes below are not proof
 of the current running path.
 
+The five- and thirty-minute creation-age buckets measure age, not expiry status.
+Current source uses a 12-minute quiet cutoff for `CloseExpiredContracts`. A
+stored deadline, or the 60-minute maximum lifetime from creation when that
+deadline is NULL, can make a contract due despite recent reports. A population
+older than thirty minutes does not distinguish unexpired contracts from those
+past their deadline. Match the executing Taskworker artifact before applying
+this source policy to an observation; the observer artifact is not that proof.
+
 The scheduled closer retains two independent per-task totals of at most 25,000:
-aged open contracts and aged disputed/nonfinal contracts. It now visits raw
-subpages of at most 256 per scan and checks a 15-second elapsed budget between
-completed subpages. A subpage finishes its existing financial and cleanup
-phases before yielding; this is a cooperative budget, not a new cancellation
-deadline. Parent cancellation and operational failures remain errors. Only a
-complete, classified prefix can supply the next task's cursor; accounting
-rejections retain their typed failure and verified sibling counts. A skipped or
-durably delegated raw prefix can advance without claiming any financial close.
+aged open contracts and aged disputed/nonfinal contracts. It visits raw
+subpages of at most 256 per scan and checks a 90-second elapsed budget between
+completed subpages before starting another. A separate 120-second dispatch limit
+stops starting new rows after the initial worker wave. Already started rows finish
+their financial and cleanup phases before the subpage checkpoints its started
+prefix, so either admission budget can be exceeded by in-flight work. Neither
+limit replaces the task's 30-minute cancellation deadline. Parent cancellation
+and operational failures remain errors. Only a complete, classified prefix can
+supply the next task's
+cursor; accounting rejections retain their typed failure and verified sibling
+counts. A skipped or durably delegated raw prefix can advance without claiming
+any financial close.
 The whole task's deduplicated union can still reach 50,000 candidates. A merged
 selection above 25,000 does not prove a legacy deployment; establish the exact
 executor source and per-scan cap/count authority before prescribing a cap
@@ -7264,9 +7416,9 @@ first page's quiet cutoff. A later cutoff reopens the interval for reports that
 became quiet, and a later pass can extend to a newer fresh lower. Fresh keeps
 its alternating share; catch-up rotates with the two original backlog lanes
 over the remaining subpages. All lanes share the existing 256-row subpages,
-15-second cooperative budget, concurrency, classified-error boundary, expiry
-proof, and financial posts. Completing backlog or catch-up cannot discard
-another unfinished lane. No larger rolling window, cursor rewind, financial
+cooperative admission budgets described above, concurrency, classified-error
+boundary, expiry proof, and financial posts. Completing backlog or catch-up cannot
+discard another unfinished lane. No larger rolling window, cursor rewind, financial
 adjustment, or new schema is required.
 
 Legacy NULL `expiration_time` is not proof of an immortal active Redis
@@ -7766,6 +7918,26 @@ Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
 never becomes a finished duration because the same pending attempt is reclaimed.
 Retain the latest overrun for 45 minutes so an immediate fast successor cannot
 erase its precursor.
+
+A `phase=completed` warning reports that retained checkpoint, not a currently
+running attempt. Its `attempt_correlated=true` marker means a durable task
+identifier was retained internally; it does not bind the completion to a host,
+container or executable. When `active_log_source=unavailable`, current task
+activity remains unknown. Repeated reports of the same completion are one
+retained incident; aging out of the window is not proof of recovery.
+
+For executor artifacts containing the policy in
+`model/subscription_close_budget.go`, the 90-second budget stops new subpages
+and the 120-second dispatch limit stops starting rows. Already started rows
+finish their required financial and cleanup work before the checkpoint returns.
+A completed duration just above 120 seconds therefore still warns, but does not
+alone establish an ignored limit or a 1,800-second timeout. Verify the exact
+executor artifact and effective expiry concurrency before applying this source
+explanation. Use ordinary close-duration, task-canary and aged-bucket samples
+with retained lifecycle evidence first. If a recurring overrun remains
+unresolved, obtain one bounded read that links the attempt's times to its
+executor before choosing a causal discriminator. Retain the existing
+thresholds, scan caps, concurrency and ownership holds.
 
 This duration probe cannot detect every failure-to-progress mode. A short
 accounting-rejected attempt may put the global singleton into long backoff;
@@ -9015,7 +9187,8 @@ at each bound, monotonic and reset-free. New/mixed/transient generations, old
 producers, temporarily excluded/unenrolled desired slots and missing children
 stay unknown.
 The query permits at most 32 expected slots, four generations per slot, 8,192
-rows and 4MiB; one gateway, a 15s transport timeout, no retry or failover.
+rows and 4MiB per response. The native HTTPS pilot below makes one 15s request
+with the unchanged POST query and fixed evaluation time.
 Schema/warnings/nonfinite values/duplicate rows fail closed without exposing
 response labels or bodies. Positive complete-process deltas survive a missing
 sibling, but are explicitly an observed-process subset, not fleet totals.
@@ -9051,15 +9224,55 @@ and missing local SSH identity/host-key setup for reachable siblings. On an
 inventory-authorized sibling, strict authenticated SSH then returned a healthy
 `vector(1)` and the exact bounded picker query (HTTP 200, 1,200 vector rows,
 no warnings). This establishes an observation-path defect, not empty provider
-supply or Mimir failure. Picker now tries the existing authorized services
+supply or Mimir failure. The original correction tried authorized services
 gateways in order, retaining the identical query, evaluation time and desired
 API inventory. Disabled and operator-excluded hosts remain uncontacted. Only
-a transport failure permits the next gateway; a received malformed, partial
+a failed source command permits the next gateway; a received malformed, partial
 or stale response remains unknown under the existing reducer. Healthy and
 genuinely empty sibling controls preserve their distinct verdicts, and loss of
-every gateway cannot clear visibility. Correct observer key permissions and
-host-key trust before promotion; a reachable socket alone proves neither
+every gateway cannot clear visibility. Those SSH paths still require correct
+observer key permissions and host-key trust; a reachable socket alone proves neither
 authenticated transport nor complete process coverage.
+
+Source-command failures retain `reason=bounded-source-unavailable` and the
+shared finite `error_class`, plus any typed `ssh_admission_failures` phases.
+The 2026-10-17 source review found these adapters discarded that existing
+authority. That correction preserved the original class, identity, sustain,
+query, bounds and gateway order; it added no transport or source request.
+False-positive qualifier: an admission/transport failure is not evidence of
+missing picker counters, a metric policy, HTTP status, or a Mimir storage fault.
+Joined acquisition/release phases describe the returned error tree, not every
+attempt or native contact; release failure is not proof of precontact refusal.
+False-negative qualifier: older coarse alerts cannot recover discarded causes,
+and a finite command-error class still does not establish HTTP/query authority.
+A successful empty or malformed envelope keeps its separate parser reason.
+Require an exact query/source receipt and producer/policy evidence before
+attribution; unavailable evidence and partial healthy subsets retain prior
+PAGE findings. Synthetic adapter, healthy/empty gateway and cadence/notifier
+controls cover that distinction without raw source text.
+
+The 2026-10-17 native HTTPS pilot replaces ordered SSH gateway failover only
+for the logical picker and selection fleet queries. It sends one authenticated
+POST to the public Grafana Mimir query endpoint, with the same query, evaluation
+time, 15s budget, 4MiB body cap and existing reducers. Exact node, ring and
+physical observations still use their owning SSH paths. Ordinary Config roles
+and Vault passwords resolve through the server's existing Resolver; selection
+matches native QueryUser preference and primary-domain order. The full private
+settings generation must match before sending and before accepting the body.
+No admin credential, proxy, redirect, replay, IPv4 fallback, hidden retry or
+SSH fallback participates. This trades gateway failover for independence from
+management SSH; public DNS/TLS or query-role failures remain unknown.
+The configured public and loopback routes share a Mimir proxy with multitenancy
+disabled; this is source equivalence, not runtime replica/tenant attestation.
+Additive `mimir_query_phase` and a received `http_status` retain finite native
+authority alongside the existing error details, without bodies, labels, URLs,
+credentials or secret-derived fingerprints. A 200 response still requires the
+complete original schema, clock, generation and inventory checks. HTTP success
+is not cache-mount capacity or historical responder identity. Historical coarse
+failures and Loki ENOSPC remain unresolved; recovery requires this exact
+scheduled query after qualified promotion. Causal SSH-unavailable/native-healthy,
+empty/warning/partial, byte-bound, TLS, cancellation, rotation and privacy
+controls preserve unknowns and prior PAGEs.
 
 False positives: intentional caller-country exclusions can produce a truly
 empty initial list without global supply loss; invalid queries and legitimate
@@ -9361,8 +9574,8 @@ inflight is released on every return/panic. These model stages exclude HTTP
 authentication before model entry and do not prove response delivery or a
 successful provider route.
 
-The registered read-only probe queries Mimir once per minute through an enabled
-services gateway, bounded to 15 seconds, 4 MiB and 8,192 rows. It privately joins
+The registered read-only probe queries Mimir once per minute through the native
+HTTPS pilot described in §2.9b, bounded to 15 seconds, 4 MiB and 8,192 rows. It privately joins
 exact API host/block/instance and unchanged process start across a five-minute
 window against configured API placement (maximum 32 slots), requires an unchanged
 supported schema (1 or 2)
@@ -9374,6 +9587,22 @@ consume its row budget. Process/schema witnesses remain unfiltered for every
 configured slot, including fully quiet processes. Quiet complete authority is
 not positive request traffic or proof of target-level supply; the lazy first
 event can still be unobserved by a counter increase.
+
+Source-command failures retain `reason=bounded-source-unavailable` with the
+shared finite `error_class` and any typed `ssh_admission_failures` phases,
+under the same observation-authority qualifications as §2.9b. The 2026-10-17
+adapter correction preserves the existing unknown identity and source counts.
+False-positive qualifier: this path runs before parsing, so it cannot establish
+absent selection metrics, disabled metric policy or an HTTP/backend cause.
+Matching coarse reasons across selection and picker do not join their causes.
+False-negative qualifier: old alerts lost these details, and current finite
+legacy classes do not recover an HTTP status or exact query error. Native pilot
+failures add only their closed request phase and an actually received status.
+Missing/lazy
+partitions remain absent, never zero; partial healthy data and source failures
+cannot clear a prior invariant PAGE. The retained selection observation remains
+incomplete with no invented outcome rows. Require exact query/source authority
+and independent producer/policy evidence to distinguish these boundaries.
 
 `-provider-selection-output <path>` appends one JSONL observation for every
 existing probe execution, including qualified nonempty/quiet windows and
@@ -13793,9 +14022,13 @@ the same failure share directly from the database. Missing or newly created
 auxiliary series are unknown, not healthy zero. These auxiliary controls are not
 added to the fixed admission query or its alert thresholds.
 
-The reusable probe runs once per minute using one fixed nine-family Mimir
-instant query through an inventory services gateway. It returns values plus
-their underlying source timestamps, with a 15-second request limit and 2 MiB
+The reusable probe has a one-minute native cadence, subject to the operator's
+active-probe floor, using one fixed nine-family Mimir instant query through an
+inventory services gateway. The same request returns current values and values
+at a fixed one-minute offset, each with its original scrape timestamp from
+`timestamp(metric{selectors} offset 1m)` on the historical side. This is not a
+timestamp of the query evaluation or a second observer-held value. It retains
+the 15-second request limit and 2 MiB
 remote/in-process response cap. The observation timestamp alone is insufficient.
 The parser requires exact environment/job/host/block/instance joins, both roles,
 all fixed zero series, capability=1, a coherent source scrape at most 90 seconds
@@ -13805,17 +14038,45 @@ labels differ, partial warning responses, or malformed bodies fail closed. No
 remote body, raw error, ignored label, or process identity enters Alert Markdown.
 The raw response remains bounded adapter input, not exported evidence.
 
-Two complete advancing observations of the same process/start are needed for
-deltas; they must be at most three minutes apart. First observation, missing
+Two complete advancing native source points of the same process/start are
+needed for deltas; their original scrape clocks must be at most three minutes
+apart. Validate each side's freshness against its own evaluation clock and
+require one coherent source timestamp for every fixed cell on that side.
+Observer state retains only previously seen process/start/source-clock authority
+for warmup and repeated-source rejection; it supplies no counter history.
+The first observation of an observer or a new process generation remains warmup.
+First observation, missing
 roles/capability/fixed series, source staleness, mixed telemetry, overlapping
 same-block generations, reused instances with a new start, counter reset, and
 nonadvancing scrapes yield `egress-admission-unobservable` WARN. Selected deltas
 without a request delta are also unobservable: even cross-family scrape
 interleaving must not manufacture a coherent admission event. The observer keeps
-only the previous complete process snapshots in memory and warms up after its
-own restart. Discovery of entirely absent processes remains owned by provenance
+only these warmup clocks in memory and warms up after its own restart. Missing
+either native side cannot be repaired with the preceding observer invocation.
+Discovery of entirely absent processes remains owned by provenance
 and scrape-continuity probes; this probe does not infer fleet completeness from
 the surviving Mimir series.
+
+The native interval is a recent sample, not coverage of all time between active
+observations. In particular, the required fifteen-minute floor leaves residual
+time outside the one-request source pair unsampled. A complete clean pair ends
+current visibility loss for that sampled interval; it does not establish that
+the residual gap was healthy or retrospectively clear an old incident. Existing
+recovery still requires two fresh clean traffic-bearing native intervals plus
+the direct deadline/submission controls after the repaired boundary. Those
+controls can close the current symptom while the historical gap remains an
+immutable unknown, rather than an impossible requirement to reconstruct lost
+history. Events already present at the historical native point are not new
+recent events. Keep every incident threshold, severity and sustain unchanged.
+
+The historical observer-gap limit of three minutes was incompatible with the
+operator's fifteen-minute active floor: even perfect source bundles could never
+produce a delta. The three-minute limit now applies to native source-point
+separation. Deterministic real-loop controls retain the fifteen-minute floor,
+one request per tick, warmup and reset/generation guards; the pinned native
+engine separately verifies every fixed family and its original offset scrape
+clock. Both window positions must fit the unchanged response bound; an oversized
+or partial response remains unknown, never a truncated healthy observation.
 
 Any confirmed expired selected-return delta yields `egress-admission-expired`
 WARN by fixed lane. Any unsupported/canceled/error-or-unknown submission delta
@@ -14246,7 +14507,14 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   and `<class>/candidates-exhausted`): a class's active pool is below
   `SitePoolSize` for that class, or no candidate is left to promote, so the
   next retirement cannot be replaced; candidates listed in
-  `egress-sites.yml` and not yet synced count;
+  `egress-sites.yml` and not yet synced count. These are eligible candidates,
+  not evidence of successful host checks. A pool deficit with a nonempty
+  reserve is not candidate exhaustion, and the active count alone does not
+  establish a short compatible per-run sample. Preserve the target deficit
+  while checking completed refreshes, protective skip reasons, opened
+  vacancies and candidate host-check outcomes. A non-skipped refresh opens
+  at most `SiteMaxRetirePerRun` extra vacancies per class; several completed
+  refresh cadences may be needed to reach the target and retain a reserve;
 - **regional failure unmarked** (`egress-site-regional-failure-unmarked`,
   frame `<site>@<country>` or `<site>@<country>/<region>`): an active site
   fails at least `SiteRegionFailShare` (90 %) of healthy exits in one country
@@ -14373,8 +14641,12 @@ place's pool or its route (the conditions above). Then, for the pool:
 confirm the refresh task's last run and its `[egresssites]` log lines
 (retired, promoted, on probation, marked incompatible, candidates remaining
 per class); if a class or a place's pool is thin, extend the candidate list
-for that class and place in `egress-sites.yml` (a site retired for good
-returns by raising its entry's `revision`); if the fleet-wide share is high,
+only when no eligible candidate remains or bounded candidate host checks
+and place-suitability evidence establish that the reserve cannot fill the
+opening. With eligible candidates, first inspect refresh completion, skip
+reasons, opened vacancies and check outcomes. New candidates belong to that
+class and place in `egress-sites.yml` (a site retired for good returns by
+raising its entry's `revision`); if the fleet-wide share is high,
 check the prober's request profile and capacity before touching the pool,
 because retiring sites during a prober fault empties the pool for nothing —
 the refresh skips its run while the failure share of the loads that reached
@@ -16775,8 +17047,12 @@ establish:
   verify every paid writer locks an existing network before consuming its
   idempotency ledger or payment intent. Stripe deletion additionally requires
   provider-confirmed cancellation before local deletion and propagates every
-  provider/local-close failure. Apple and Google deletion disposition remains
-  separate product policy; the Stripe workflow does not settle it.
+  provider/local-close failure. Google deletion stops future Play payments
+  before removal and rechecks the same store snapshot under the deletion lock;
+  a failed cancellation or newly credited, unchecked renewal retains the
+  network. Successful cancellation preserves paid local history, so this WARN
+  alone cannot establish a Google billing failure. The Apple and Google store
+  workflows remain separate from Stripe cancellation.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -16873,10 +17149,10 @@ use Read Committed. A writer waiting behind a committed delete observes no
 network and fails without consuming payment evidence. A delete waiting behind
 a Stripe credit sees its newly committed active renewal and refuses deletion,
 including a future/queued renewal whose start has not arrived. This Stripe
-guard also makes the direct CLI fail closed. If an Apple, Google, Solana, or
-x402 credit wins first, its post-credit deletion disposition remains the
-owning product policy rather than being silently treated as Stripe
-cancellation.
+guard also makes the direct CLI fail closed. At that correction's boundary,
+an Apple, Google, Solana, or x402 credit that won first still needed its owning
+product policy rather than being silently treated as Stripe cancellation.
+The later Google cancellation and store-snapshot safeguards are described below.
 
 Automatic balance-code fulfillment now exposes both recovery outcomes. With a
 purchase email, a failed optional auto-application still sends the durable
@@ -16906,6 +17182,31 @@ race would require an explicit create/delete lifecycle protocol rather than an
 incident-only monitor change. Keep that architectural decision separate; do
 not overstate the bounded discovery fix or infer provenance for historical
 orphan rows from their aggregate shape.
+
+The 2026-10-17 source review of a retained Google orphan WARN found stale
+market-specific guidance, not proof of current provider billing. Server commit
+`1a67d9d3` already makes Google Play cancellation a prerequisite to account
+deletion, and `cd881b22` passes one store snapshot through cancellation and the
+locked removal check, refusing a newly credited renewal outside that snapshot.
+The direct model/CLI path without store checks also refuses an active Google
+renewal. Compare the exact running API artifact with those capabilities and
+the API/Taskworker paid-writer fence from `2b28387a`; the frozen checkout alone
+does not establish the historical deletion artifact, deletion time, or current
+deployment. Repair or deploy only where the required capability is absent.
+
+A successful Google cancellation stops future payments without cutting short
+the paid period or erasing local renewal history. This is the healthy control
+for the same orphan aggregate, so neither a new local orphan nor a nonzero
+count proves failed cancellation. Retain the WARN and establish each deleted
+owner's provider-side disposition through authorized tooling. Software closure
+requires attributable cancellation and snapshot safeguards plus no new
+unresolved provider disposition through two reconciliation/deletion windows;
+confirmed canceled history may remain until expiry. Renewal start ages cannot
+date deletion, and natural expiry cannot prove causal closure. This probe has
+no provider status or cancellation receipt and covers only in-window local
+renewals: missing local metadata, future or expired windows, an unavailable
+source, or missing provider evidence cannot establish a healthy provider
+inventory. Keep these limits separate from the other payment findings.
 
 The 2026-09-10 Main runtime audit found the five-owner Stripe aggregate stable
 across repeated samples, but every API and Taskworker block still reported
@@ -16954,6 +17255,9 @@ Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
 numeric validation, privacy boundaries, severity, and Markdown rendering.
+Google orphan controls also retain the warning for canceled paid history,
+require the implemented deletion capabilities, reject healthy inference from
+unavailable/partial evidence, and keep other markets' guidance separate.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
@@ -18893,7 +19197,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
-| `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
+| `payout-invalid-destination` — HTTP `400 Bad Request` plus `invalid destination address` text (taskworker, Circle payment path) | This text class does not prove the typed response, current chain compatibility, or guarded-reset outcome. In the inspected product source, only a typed HTTP 400 with parsed code `155219` or the exact normalized invalid-address message permits a guarded pre-chain reset. A code-only response need not match this text class. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; a current request/wallet join must establish whether that cause applies. A Circle-client diagnostic precedes the reset and can accompany its later failure. Without an evaluator line, logical event cardinality is unknown while the diagnostic WARN remains visible. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay using complete current observations. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
@@ -18902,7 +19206,11 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 For `payout-invalid-destination`, `invalid_destination_events` is the
 exact-replay-deduplicated task-evaluator event count, not an additional Alert
-class or a unique-payout count. The separate reset-failure class similarly
+class or a unique-payout count. If the window has destination diagnostics but
+no evaluator line, report `invalid_destination_events=unknown` and
+`canonical_source=absent`; retain the diagnostic line count, threshold, WARN,
+and alert identity. Missing canonical evidence cannot establish zero logical
+failures. The separate reset-failure class similarly
 reports `invalid_destination_reset_failed_events` for exact-replay-deduplicated
 evaluator lines; that is neither a unique-payment count nor a proof of a
 successful reset. The internal correlation-only state named
@@ -19307,6 +19615,23 @@ mixed causes, ordinary rejection, healthy windows, replay deduplication, and
 private suffix/address/identifier redaction. Their Go execution remains a
 separate validation gate; alert absence alone does not close the payment
 boundary.
+
+The retained 2026-10-17 `payout-invalid-destination` WARN contained two
+Circle-client diagnostics and no canonical evaluator line. It displayed a
+logical count of zero and asserted a current declared-chain mismatch, although
+its source ran before the typed-error check and guarded reset. The monitor now
+uses its existing unknown-cardinality path for that missing evaluator evidence
+and preserves the two diagnostic lines and WARN. HTTP 400/code `155219` text
+does not establish a typed error object, a reset attempt or outcome, or the
+current wallet's compatibility. The smallest discriminator is an unambiguous
+private join to the exact failed-payment audit and retained attempt, with the
+emitting artifact, typed rejection eligibility, reset outcome, current wallet
+selection, and chain-compatibility result. Missing, stale, partial, or ambiguous
+evidence remains unknown; an older historical cohort or the separate payout
+planner's performance branch does not supply that join. Healthy controls keep
+a complete empty log window quiet, preserve one canonical event for an
+evaluator-plus-provider replay, and retain the distinct reset-failure class.
+No payout or account correction follows from this monitoring repair.
 
 Two 2026-08-29 task-family variants were formerly hidden behind the raw-row
 limit:
@@ -24181,6 +24506,36 @@ at or above 20% as `host-cpu-pressure`; a missing SSH result, hostname mismatch,
 or malformed sample is `host-cpu-pressure-unavailable`, never a healthy zero.
 An operator-disabled host must not be contacted.
 
+The unavailable WARN retains its per-host identity and two-observation sustain.
+It includes `failure_phase=source|parse`, the shared fixed `error_class`, and
+any typed `ssh_admission_failures=acquire,release,unknown` markers present in
+the returned error tree. `source` covers the source call's preflight,
+admission, command, timeout, and cleanup failures. These local boundaries do
+not prove a native SSH child started or a remote command completed. `parse`
+follows a successful source return but failed remote-identity or PSI parsing;
+it uses `observation-invalid-response`, including empty stdout. Valid-looking
+PSI stdout accompanying a source error remains unavailable. Never include raw
+stdout, stderr, or error text in this diagnostic.
+
+Diagnostic boundary (2026-10-17): the prior reducer discarded every source and
+parser error after rendering only `source_status=unavailable`. Its historical
+warnings cannot recover the failed phase or distinguish a common cause. The
+Alert clock is assigned after the serial host loop; equal Alert timestamps
+are not per-host source-time or simultaneity evidence. A future classified
+warning cannot backfill those older records. Require the classified producer's
+actual artifact and source match before using its added detail.
+
+False-positive qualifier for unavailable evidence: a native
+`observation-ssh-exit-255` is a process-status discriminator, not proof of
+local VPN loss, failed host routing, or CPU exhaustion; the remote command can
+also return that status. A shared admission release error can accompany an
+otherwise valid body. Preserve the source failure and correlate native owner
+evidence before assigning contact or completion. False-negative qualifier:
+an absent warning is not a healthy host control without a complete matched
+sample from that host and current watcher generation. Require two consecutive
+valid reads at the effective cadence, including any active cadence floor;
+promotion or missing PSI alone cannot close an earlier visibility finding.
+
 This closes a demonstrated §8.14 false negative, not a replacement for its
 CPU-mode or I/O-wait measurement. At 2026-09-26 08:59 UTC, edge-4 had load1
 about 195 on 72 logical CPUs and CPU `some avg60` about 54%, but roughly
@@ -24219,7 +24574,9 @@ Implementation convention: SIGNALS.md §8.14a (`host-pressure`) maps to
 `signal_host_pressure.go` and `signal_host_pressure_test.go`. Synthetic tests
 cover the high-PSI/under-90%-execution discriminator, healthy host control,
 missing and malformed evidence, wrong-host identity, disabled-host exclusion,
-and Markdown detail.
+native SSH status versus status-looking text, admission acquisition/release
+with a retained native error, empty successful stdout, unchanged healthy zero
+and below-threshold samples, and Markdown/privacy detail.
 
 ### 8.14b Database-host memory: page tables, NUMA nodes and huge pages
 
@@ -34528,6 +34885,39 @@ a later timeout), malformed native observation, or different failure shape
 prevents this all-target attribution. Preserve the independently observed
 per-target classes and visibility gaps in those mixed cohorts.
 
+The shared observer-route control must use the monitor host's native platform:
+Darwin uses its bounded `route` lookup; Linux uses one bounded
+`ip -j -6 route get` lookup for the fixed control destination. Neither lookup
+sends a public probe or changes a route. Linux requires one complete JSON route
+record, the requested destination, a nonempty device, and a unicast type when
+the type is present. Duplicate fields, multiple records, trailing diagnostics,
+missing fields, unsupported types, failed commands, and oversized output remain
+unobservable. Only a native exit 2 with an exact fixed no-route diagnostic proves
+Linux route absence. Missing `ip`, an unsupported option, opaque error text, or
+an empty result cannot become route absence or a healthy observer.
+
+**Native-platform false-positive qualifiers:** a present local route proves
+routing-table visibility, not externally routed reachability, target health,
+or a common physical cause. Preserve the existing complete-cohort requirement
+and each independent host defect; a healthy sibling is a separate same-family
+control. **Native-platform false-negative qualifiers:** unavailable route work
+and unavailable host identity/source-egress work remain distinct coverage gaps.
+A route-qualified native public timeout retains its PAGE even when those host
+controls are missing; it does not become upstream-drop or policy-route without
+their own affirmative evidence. The fixed control destination cannot establish
+the route selected for every target-specific prefix.
+
+A 2026-10-17 source review found that the Linux observer still selected the
+Darwin-only command and parser. The native adapter corrects that monitor
+capability defect. Deterministic controls cover a native Linux route, absence,
+missing/partial/ambiguous output, independent public timeouts with host-source
+gaps, and TLS timeouts that remain per-endpoint unknown. This source correction
+does not localize the retained public connection timeouts or close any physical
+edge. After the ordinary gated watcher promotion, qualify route visibility in
+the next eligible same-generation observation and retain the external controls
+and exact-target repair windows below; do not obtain an extra retry by resetting
+cadence or treating a build as recovery.
+
 The 2026-09-18 recurrence exposed the TLS-timeout variant. The observer's
 stored-router lifetime reached zero at 23:11:11.954Z, its IPv6 network state
 disappeared at 23:11:11.991Z, and the snapshot recorded eight exact-peer TLS
@@ -34877,6 +35267,16 @@ and all parse, date, SAN, and trust findings continue independently. Never
 infer certificate validity from host-local HTTPS or from repairing the
 observer route; require the exact externally routed handshakes and the closure
 window in §18.1.
+
+Use the shared native-platform route adapter and completeness rules in §18.1;
+a Darwin command failure on a Linux observer is unavailable observation, not
+evidence that the target lacks a route. A TCP connection timeout has no
+certificate authority and does not satisfy this signal's all-target no-route
+predicate, even when the independent local lookup proves route absence.
+Preserve the endpoint WARN and its unknown certificate state. Successful IPv4
+coverage does not qualify IPv6, and a shared host/interface name across HTTPS
+and TLS observations does not prove identical address, settings generation,
+source time, or physical cause.
 
 The 2026-09-03 manager incident is the defining synthetic reproduction. The
 alias entered active `services.yml` on 2026-08-21, after the 2026-08-12 SAN

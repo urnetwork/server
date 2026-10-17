@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -122,14 +123,12 @@ func TestProviderSelectionSignalSmallResultReasonsStayBounded(t *testing.T) {
 	}
 }
 
-// A real Signal adapter and bounded source command, with no network access.
+// A real Signal adapter and bounded native request, with no network access.
 func selectionTestSettings(t testing.TB, raw string) SignalSettings {
 	t.Helper()
-	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "api-synthetic" || !strings.Contains(command, "--max-time 15 --max-filesize 4194304") || !strings.Contains(command, "urnetwork_findproviders2_selection_schema_version") || !strings.Contains(command, "offset 5m") || !strings.Contains(command, "timestamp(") || !strings.Contains(command, "resets(") || !strings.Contains(command, `host=~"api-synthetic"`) {
-			return "", errors.New("unexpected bounded selection source command")
-		}
-		return raw, nil
+	source := &providerHttpsTestSource{syntheticSource: &syntheticSource{}, do: func(request *http.Request) (*http.Response, error) {
+		providerHttpsTestRequest(t, request, true)
+		return providerHttpsTestResponse(raw), nil
 	}}
 	settings := syntheticSettings(source)
 	settings.Environment, settings.Now = "synthetic", pickerTestNow
@@ -137,6 +136,7 @@ func selectionTestSettings(t testing.TB, raw string) SignalSettings {
 	settings.LogServices = []string{"api"}
 	settings.LogServiceHosts = map[string][]string{"api": {"api-synthetic"}}
 	settings.LogServiceBlocks = map[string][]string{"api": {"blue"}}
+	providerHttpsTestCredentials(t, &settings)
 	return settings
 }
 

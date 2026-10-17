@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -55,11 +56,9 @@ func pickerTestPayload(t testing.TB, rows []map[string]any) string {
 
 func pickerTestSettings(t testing.TB, raw string) SignalSettings {
 	t.Helper()
-	source := &syntheticSource{hostFn: func(h HostSettings, command string) (string, error) {
-		if h.Name != "api-synthetic" || !strings.Contains(command, "--max-time 15 --max-filesize 4194304") || !strings.Contains(command, "urnetwork_provider_picker_outcomes_total") || !strings.Contains(command, "offset 5m") || !strings.Contains(command, "timestamp(") || !strings.Contains(command, "resets(") {
-			return "", fmt.Errorf("unexpected bounded picker query")
-		}
-		return raw, nil
+	source := &providerHttpsTestSource{syntheticSource: &syntheticSource{}, do: func(request *http.Request) (*http.Response, error) {
+		providerHttpsTestRequest(t, request, false)
+		return providerHttpsTestResponse(raw), nil
 	}}
 	settings := syntheticSettings(source)
 	settings.Environment = "synthetic"
@@ -68,6 +67,7 @@ func pickerTestSettings(t testing.TB, raw string) SignalSettings {
 	settings.LogServices = []string{"api"}
 	settings.LogServiceHosts = map[string][]string{"api": {"api-synthetic"}}
 	settings.LogServiceBlocks = map[string][]string{"api": {"blue"}}
+	providerHttpsTestCredentials(t, &settings)
 	return settings
 }
 

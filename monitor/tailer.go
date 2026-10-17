@@ -916,14 +916,15 @@ var logClasses = []logClass{
 	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
 		canonical: &logCanonical{
-			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
-			name:    "invalid_destination_events",
+			eventRe:           regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:              "invalid_destination_events",
+			unknownWhenAbsent: true,
 		},
-		meaning:   "Circle definitively rejected a payout destination before creating a transfer because the configured wallet address is invalid for its declared chain",
-		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt when its guarded reset succeeds. After that successful reset, an unchanged account wallet causes the next retry to select the same invalid payout_wallet configuration.",
-		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
-		action:    "Confirm the guarded reset succeeded and inspect the current wallet selection before correcting a proven chain mismatch through the supported account API. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
-		verify:    "After the payout wallet is corrected, the next natural retry selects it with a fresh key released only by the prior definitive rejection, completes without a duplicate transfer, invalid_destination_events remains zero, and the durable processor-invalid-destination count converges to zero within 90 minutes plus log-ingestion delay.",
+		meaning:   "The log reports an HTTP 400 invalid-destination response; text matching alone does not prove typed rejection, current chain compatibility, or guarded-reset outcome",
+		mechanism: "A Circle-client diagnostic precedes the controller's typed-error check and any guarded reset. In the inspected source, a reset is eligible only after a typed HTTP 400 with parsed code 155219 or the exact normalized invalid-address message; it safely releases only that pre-chain submit attempt when its guarded reset succeeds. Historical chain-blind validation admitted cross-chain wallet shapes. Only a current request/wallet join can establish whether an unchanged incompatible selection will select the same invalid payout_wallet configuration on retry.",
+		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Without an evaluator line, the logical event count is unknown. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
+		action:    "Establish the typed rejection, emitting artifact, guarded-reset outcome, and current wallet selection before correcting a proven chain mismatch through the supported account API after a confirmed safe reset. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
+		verify:    "After a confirmed safe reset and authorized wallet correction, the next natural retry selects the corrected wallet with a fresh key released only by the prior definitive rejection and completes without a duplicate transfer. Require complete current evaluator and durable-state observations, zero invalid_destination_events, and the durable processor-invalid-destination count converging to zero within 90 minutes plus log-ingestion delay; missing evaluator evidence remains unknown.",
 		redactIDs: true},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
@@ -1177,15 +1178,16 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner     string
-	errorType string
-	sqlstate  string
+	owner      string
+	errorType  string
+	sqlstate   string
+	errorClass string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
 // Unknown stack symbols do not borrow a later caller's apparent ownership.
 func parsePanicLogObservation(line string) panicLogObservation {
-	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown"}
+	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown", errorClass: "unknown"}
 	if len(line) > panicLogMaxBytes {
 		return unknown
 	}
@@ -1242,6 +1244,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		return unknown
 	}
 	observation := unknown
+	observation.errorClass = panicProviderEgressErrorClass(line, errorText, stack)
 	errorType, _, _ := strings.Cut(errorText, "=")
 	switch errorType {
 	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
@@ -1278,8 +1281,8 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		switch wrapperOwner {
 		case "server.HandleError", "server.HandleError1", "server.HandleError2", "server.HandleErrorWithReturn",
 			"server.Raise", "server.RaisePgResult", "server.WithPgResult",
-			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
-			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
+			"server.Db", "server.DbInConn", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
+			"server.Tx", "server.TxInConn", "server.MaintenanceTx", "server.txWithPool", "server.txWithConnection",
 			"server.OwnedTx", "server.TryOwnedTx", "server.ownedTxWithResource", "server.ownedTxWithResourcePolicy",
 			"server.PgOwnedSession.Tx", "server.PgOwnedSession.txWithResource", "server.pgOwnedConnection.run",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
@@ -1308,7 +1311,11 @@ func panicLogSample(line string) string {
 	if owner == "" {
 		owner = "unknown"
 	}
-	return fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	sample := fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	if observation.errorClass != "unknown" {
+		sample += " error_class=" + observation.errorClass
+	}
+	return sample
 }
 
 // One negative mirror is an integrity defect. A hundred mutation exposures in
