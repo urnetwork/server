@@ -1985,11 +1985,16 @@ bounded 20-second SSH command. The Linux/systemd command takes two observations
 five seconds apart of every active, running `postgresql@*.service` unit's
 `CPUAccounting`, `CPUUsageNSec`, and `InvocationID`, along with the remote short
 hostname, boot ID, monotonic uptime, wall time, and online logical CPU count.
-Parse and reduce these fields in Go. The host must match inventory, accounting
-must be enabled, and the active unit set, invocation IDs, boot, and capacity must
+Parse and reduce these fields in Go. The host must match inventory, a usable
+CPU counter must be present, and the active unit set, invocation IDs, boot, and capacity must
 agree across the pair. Reject missing/unsupported counters, decreases, malformed
 or duplicate fields, a collection span over 0.5 seconds, a sample interval
 outside 4–15 seconds, and wall-time evidence more than 30 seconds old or ahead.
+`CPUAccounting` may be absent: systemd 258 deprecated the switch because CPU
+accounting is always available on the unified hierarchy. When the legacy
+property is present, it must still be `yes`; missing, empty or sentinel
+`CPUUsageNSec` remains unavailable. The optional switch never replaces the
+independent counter or the paired identity and reset checks.
 Do not emit raw unit incarnations, process arguments, query text, or customer
 identifiers.
 
@@ -2008,7 +2013,7 @@ including waits; it is never a CPU counter.
   claim. It requires neither the 90% CPU band nor load/core >= 1.25 from §8.14.
 - PAGE: at least 85% in two consecutive one-minute observations.
 - UNAVAILABLE: `pg-cpu-unavailable` warns after two incomplete observations.
-  An inactive-only census, missing accounting, a restart/reset, stale data, or
+  An inactive-only census, unusable accounting, a restart/reset, stale data, or
   a changed CPU count is unknown, not zero; it cannot resolve `pg-cpu-high`.
 - FALSE-POSITIVE QUALIFIERS: a legitimate query, vacuum, backup, or maintenance
   workload can explain high consumption. The signal proves resource use, not
@@ -4703,6 +4708,25 @@ an index for the redundant scan or cancel a live bounded attempt. Verify zero
 new legacy executions in both `pg_stat_activity` and `pg_stat_statements`, then
 require the same Payout row to commit and clear its error.
 
+Selected-payment earning admission in `account_payment_transition.go` is a
+separate reader. Its complete aggregate computes existence, exact byte and
+revenue sums, invalid provenance and latest contract close together, with
+contract-key lookups scoped to the selected sweeps. It must inspect every
+component, including zero-value and missing-contract rows; a diagnostic sample
+or limit cannot establish payment authority. Canceled recovery keeps its exact
+original byte census, and bonus, subsidy, cutoff, completion and review holds
+retain their existing rules. The same reader serves sends, bonus authority,
+canceled recovery, reconciliation and the locked replacement release.
+
+`TestProviderAttributionSelectedRowWork` captures the actual payment-path SQL
+and checks native PostgreSQL `EXPLAIN (ANALYZE, BUFFERS)` row visits across
+selected sizes, id layouts and canceled states. The accounting and complete
+census controls preserve integer precision, refusal semantics and a corrupt
+final component beyond 2,048 valid entries. This establishes local query work
+and correctness; production frequency, running artifact identity, wall time,
+buffer efficiency and contribution to database CPU require separate evidence.
+No new index, migration or broader financial admission follows from this fix.
+
 Payout finalization is a different shape: `UPDATE transfer_escrow_sweep AS
 sweep` joins `temp_account_payment` and `temp_payment_network_ids` to assign
 the selected sweeps' payment IDs. On 2026-09-27 at 14:59:52Z, the existing
@@ -4927,6 +4951,15 @@ fleet of queued probes from repeatedly taking every newly released slot. Four
 already-running slow probes can still exhaust that budget: coverage is then
 unknown, with no early retry or extra slot.
 
+Shared SSH admission retains bounded cleanup ownership in the same store when
+removal fails after a transport returns or an acquisition never hands out its
+grant. A later ordinary acquisition retries those exact token/owner proofs in
+one local state update with a one-second context capped by its inherited
+deadline. This does not reclaim unknown active claims, infer a join from
+cancellation or age, start a retry worker, or reconstruct proofs lost by an
+older process. A full local claim set refuses new enrollment at the existing
+256-request queue bound.
+
 The first pre-slot deadline emits `pg-query-sample-unavailable` immediately
 (`Sustain=1`), identifying `global-run-slot-admission` and
 `source_contact_attempted=false`. It preserves existing attempted/completed/
@@ -5092,6 +5125,18 @@ preserving the same warning and sampling limits. Application names are declared,
 not native identity; `other`/`unset` and truncated text remain unattributed.
 Private query tokens are receipt-local ordinals, not reusable fingerprints or
 recoverable SQL. Other reservation-I/O and close-family groups remain separate.
+
+The device-audit sweep reads only prior online device states. Offline history
+cannot change its transition decision: a currently connected device with an
+offline or absent state emits the same added event. Filtering that history in
+SQL bounds delivered rows and Go state allocations by the online set; a heap
+scan can still examine offline rows. Retain reconnect, last-connection removal,
+periodic reassertion, historical events and independent offline-state expiry.
+The provider sweep differs: it recovers known geography from offline state, so
+the same filter cannot be copied there without preserving that lookup. Verify
+the actual sweep and native query output over a large synthetic offline cohort.
+A result-volume improvement does not identify a sampled ClientWrite caller,
+attribute CPU or prove production wait recovery; those need their own evidence.
 
 GOTCHA — connection lifecycle ownership can retain unnecessary head locks.
 The October 8 receipt `5e55d806` retained 12 source snapshots at
@@ -22859,6 +22904,9 @@ signal timestamp does not reread the Vault. Keep the §1.6 settings-generation
 comparison and current mounted-consumer evidence separate.
 The browser client and audience lists are cached on first use per API process,
 so a later monitor-ready resource alone cannot prove consumer recovery.
+These shape checks affect only sign-in fields; unrelated structured credentials
+keep their existing presence rules. A usable shape does not prove successful
+template expansion or registered redirect agreement.
 
 Coinbase readiness follows the fields current Server code actually consumes.
 The exchange-rate client reads `api.host` for its unauthenticated public request,
@@ -35091,10 +35139,22 @@ A missing linked payment is not silently equated with a resumable linked-payment
 backfill. Only counts, ages, block numbers and booleans are returned; no
 network, payment, chain deployment or contract identity is rendered.
 
-The rollup commits resumable contract batches outside payout write transactions.
-Its 1000-distinct-contract limit bounds output, not sweep rows examined; one
-contract can have many sweeps. The 45-second run budget is checked between
-batches and does not impose an in-flight statement deadline.
+The rollup uses bounded resumable batches outside payout write transactions.
+Its payment/contract index bounds exclude completed cursor history in both
+custom and generic prepared plans. The inclusive zero-UUID floor keeps a null
+cursor distinct from an actual zero cursor; the original strict predicate and
+paid batch membership remain. Empty batches produce null paid-range bounds.
+Eligibility still excludes a payment plan with unfinished sweep assignment.
+Native regression measures base sweep-row visits separately for the batch and
+paid producers, with exact earning blocks, cursor and completion controls.
+This is a work bound over selected contracts and their sweep fanout, not a
+constant-time guarantee: an index scan over interleaved, non-all-visible heap
+rows can touch more buffers than a sequential scan. Compare these producer
+costs separately from inclusive root counters; do not infer production CPU
+attribution or incident recovery from the local query qualification.
+The 1000-distinct-contract limit bounds output; a selected contract can still
+have many sweeps. The 45-second run budget is checked between batches and does
+not impose an in-flight statement deadline.
 While incomplete, a new snapshot preserves total-point ranks but marks block
 metrics unavailable. Snapshot publication and source progress are separate
 reads/transactions: a new pending payment does not invalidate an earlier snapshot.
@@ -36207,6 +36267,11 @@ evidence, but require two consecutive five-minute cadences before alerting.
 One transport miss cannot establish missing bytes, edge bundle drift, or a
 cached error and must not prescribe invalidation. A one-shot diagnostic still
 returns the first sample.
+
+Scope the diagnosis to the actual responses. One exact-edge 404 does not prove
+every edge lacks the image; retain successful peers as controls. Exact-edge
+transport checks omitted under §18.1 leave image contents unknown and prevent
+an all-edges-healthy conclusion, even when the remaining checked edges pass.
 
 Retired contract history: before 2026-09-01 the templates referenced six
 `https://bringyour.com/res/emails/...` assets through a CloudFront

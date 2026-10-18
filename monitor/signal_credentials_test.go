@@ -24,6 +24,7 @@ func TestCredentialsCatalogNamesEveryLiteralClassAndSummaryBoundary(t *testing.T
 	}
 	section := catalog[start:end]
 	for _, class := range []string{
+		"credential-activation-unobservable",
 		"credential-resource-missing",
 		"credential-resource-malformed",
 		"credential-fields-missing",

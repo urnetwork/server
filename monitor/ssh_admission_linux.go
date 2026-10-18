@@ -122,6 +122,8 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
 		deadline = parentDeadline
 	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	// Ordinary signals may have a cancellation-only parent. Recovery must not
 	// park a fresh acquisition indefinitely behind an old cleanup's file lock.
 	recovery, cancelRecovery := context.WithTimeout(ctx, time.Second)
