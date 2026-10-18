@@ -10473,4 +10473,20 @@ var migrations = []any{
 		CREATE INDEX account_feedback_network_id_feedback_time
 		ON account_feedback (network_id, feedback_time)
 	`),
+
+	// 849: an account may hold one sign-in wallet per chain (a Solana and a
+	// Bittensor wallet), so network_user_auth_wallet is keyed by
+	// (user_id, blockchain) instead of user_id. The new key cannot fail on
+	// existing rows: the old one allowed at most one row per user. The key is
+	// byte exact; model.addWalletAuthInTx classifies the chain and refuses a
+	// second wallet of one chain. The foreign key and
+	// UNIQUE (wallet_address, blockchain) are unchanged, and no table
+	// references this key. Swapping it takes an exclusive lock on a small
+	// table (one row per wallet user) while its index is rebuilt.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_user_auth_wallet
+			DROP CONSTRAINT network_user_auth_wallet_pkey,
+			ADD CONSTRAINT network_user_auth_wallet_pkey PRIMARY KEY (user_id, blockchain);
+	`),
 }

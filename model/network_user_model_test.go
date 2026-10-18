@@ -154,19 +154,19 @@ func TestAddUserAuthWallet(t *testing.T) {
 		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, walletAuth.PublicKey)
 
 		/**
-		 * A DIFFERENT wallet on an account that already has one is refused.
+		 * A DIFFERENT wallet of the same chain on an account that already has
+		 * one is refused.
 		 *
 		 * This case used to assert the opposite -- that the second wallet
 		 * silently overwrote the first. That was the behaviour before
-		 * addWalletAuthInTx grew its bound-wallet check, and the check landed
-		 * without this test being updated, so it has been failing on the base
-		 * branch. The refusal is the correct behaviour: the upsert is
-		 * ON CONFLICT (user_id), so an overwrite discards the only credential
-		 * that could still sign a wallet-only user in.
+		 * addWalletAuthInTx grew its bound-wallet check. The refusal is the
+		 * correct behaviour: an overwrite discards the only credential that
+		 * could still sign a wallet-only user in.
 		 *
-		 * The cross-chain form of the same rule, and the reason the refusal
-		 * names generating a seedphrase, are in
-		 * TestAddWalletAuthRefusesASecondWalletOfAnotherChain.
+		 * Both chains' form of the same rule, and the reason the refusal names
+		 * generating a seedphrase, are in
+		 * TestAddWalletAuthRefusesASecondWalletOfTheSameChain; a wallet of the
+		 * other chain is accepted (TestAddWalletAuthAcceptsOneWalletPerChain).
 		 */
 		firstWalletAddress := walletAuth.PublicKey
 		signer = newSolanaAcceptanceWalletSigner(t)
