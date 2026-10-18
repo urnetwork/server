@@ -17117,7 +17117,8 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
   `entitlement_repaired` repair in the last 24 hours, grouped only by
   store/action;
 - every non-dry-run `credit_unfulfillable` Stripe event in the last 24 hours,
-  reduced to distinct provider evidence, observation/run counts, and age.
+  reduced to distinct provider evidence, observation/run counts, and age;
+  the complete unresolved-webhook tuple belongs to the separate §2.22 WARN.
 
 `payment-reconciliation-watermark-stale` warns when one store's last
 successful watermark is more than three hours old and pages when it is more
@@ -17176,8 +17177,10 @@ distinct provider evidence value identifies a paid Stripe invoice whose
 destination is no longer creditable. `destination_deleted` means an explicit
 metadata or checkout destination was absent when the ledger-gated credit
 obtained its lifecycle lock. `destination_unresolved` means complete expanded
-invoice and checkout-session reads, followed by the existing legacy-email
-lookup where present, found no intended account. These exact terminal
+invoice and checkout-session reads found neither a subscription `network_id`
+nor a checkout `client_reference_id`. The customer-email fallback is removed
+(UPGRADE.md S11); an unresolved destination does not prove account deletion.
+These exact terminal
 conditions write `credit_unfulfillable`, not `error`: each consumes no
 `stripe_invoice` row, renewal, or balance and does not pin the Stripe watermark
 or suppress genuine provider, schema, transport, or database failures. Missing
@@ -17185,15 +17188,32 @@ or malformed authority data is not proof of an unresolved destination.
 `payment-reconciliation-credit-unfulfillable-invalid` is a separate PAGE when
 the bounded aggregate finds a record without provider evidence, an audited
 `destination_deleted`/`destination_unresolved` reason, or the `credit` leg.
-It is a historical writer-contract or audit-data problem, not an authorized
-terminal disposition and not a reason to suppress the reconciliation signal.
+There is one separate valid writer contract: nonblank evidence with
+`reason=destination_unresolved` and `leg=webhook`. The API intentionally writes
+this tuple after complete destination reads, durably preserves the payment,
+and then acknowledges the webhook. It is excluded from both §2.21 terminal
+aggregates and remains visible as `payment-credit-unfulfillable` WARN in §2.22.
+Missing/blank evidence, missing/unknown reasons or legs, and
+`destination_deleted` with `leg=webhook` still PAGE as invalid; the current
+webhook writer does not produce that deleted-destination tuple. Valid
+`leg=credit` records retain their existing reconciliation PAGE. No heartbeat
+join is used to hide an incomplete or malformed audit record.
 **False-positive qualifier:** this aggregate cannot identify a current Stripe
 provider failure, a destination, or whether the invalid record predates the
-current writer; inspect only the restricted audit trail before assigning cause.
+current writer. A monitor that predates the S11 webhook contract incorrectly
+pages its valid tuple as invalid; compare the exact monitor and API sources
+before blaming a writer. Restricted reason/leg/evidence-presence counts can
+classify the affected cohort without exposing provider objects. An adjacent
+§2.22 WARN is not by itself a join to the same payment.
 **False-negative qualifier:** a zero aggregate covers only the bounded 24-hour
 non-dry-run event window and cannot prove that the Taskworker writer artifact
 has the terminal-disposition capability. Require deployed-source convergence
 and two natural reconciliation runs before claiming repair.
+The webhook-classification correction requires only a refreshed monitor;
+it changes no API or Taskworker writer, ledger, watermark, or payment state.
+Confirm a complete webhook tuple produces only the §2.22 WARN while genuine
+credit exceptions and malformed records retain their PAGE classifications.
+Keep payment disposition open independently of that monitor correction.
 Incomplete checkout pagination and conflicting checkout references remain
 errors and retain the watermark. Dry runs use the same read-only destination
 resolution and existence check, but the monitor excludes their rows. Repeated hourly overlap
@@ -17407,16 +17427,23 @@ establish:
   email or manually edit a balance.
 - `payment-credit-unfulfillable` (WARN): a paid Stripe invoice was not
   credited because neither its subscription's `network_id` metadata nor its
-  checkout session's `client_reference_id` names a live account. The
-  customer-email fallback is removed (UPGRADE.md S11), so such an invoice is
-  acknowledged to Stripe and recorded as a `credit_unfulfillable`
-  `payment_reconciliation_event` (evidence = invoice id; details carry the
-  subscription, customer, customer email, amount and paid period). The count
-  is distinct invoices. Establish the paying account from authoritative
+  checkout session's `client_reference_id` resolves a creditable account.
+  The customer-email fallback is removed (UPGRADE.md S11). With complete
+  reads but neither destination, the webhook records `destination_unresolved`
+  with `leg=webhook` before acknowledging delivery. Reconciliation uses
+  `leg=credit` for unresolved destinations and for a named network absent
+  under the credit lifecycle lock (`destination_deleted`). The aggregate
+  does not distinguish those reasons or establish deletion or provider failure.
+  Each `credit_unfulfillable` `payment_reconciliation_event` retains invoice
+  evidence; unresolved-webhook details also carry the subscription, customer,
+  customer email, amount and paid period. The count is distinct invoices.
+  Establish the paying account from authoritative
   payment/support evidence, set `network_id` metadata on the Stripe
   subscription, then resend the `invoice.paid` event from the Stripe dashboard
   so the ledger-gated credit runs; otherwise record an authorized refund or
   support disposition. Email alone is not safe write authority.
+  The 24-hour audit count can persist after resolution, and aging out or a
+  fresh reconciliation watermark is not proof of payment disposition.
 - `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
   fulfillment durably created a balance code, automatic redemption failed,
   and no email recovery channel exists. Preserve the code and provider ledger;
@@ -21895,8 +21922,8 @@ traceable; their owning numbered sections remain the full contracts.
 | `mimir-child-missing` | §11.18 `mimir-index` | An expected active Mimir child is absent from the exact-process index view; require the complete active child set. |
 | `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
 | `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
-| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination or complete legacy resolution finds no recipient; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
-| `payment-reconciliation-credit-unfulfillable-invalid` | §2.21 `payment-reconciliation` | A purported terminal Stripe credit disposition lacks its required bounded evidence/reason/leg contract; classify it through restricted audit evidence and repair the writer or record an explicit authorized disposition. |
+| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination or complete metadata/checkout resolution finds no recipient; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. Valid unresolved-webhook tuples belong to §2.22. |
+| `payment-reconciliation-credit-unfulfillable-invalid` | §2.21 `payment-reconciliation` | A purported terminal Stripe disposition satisfies neither the credit nor unresolved-webhook evidence/reason/leg contract; compare exact monitor/writer sources and restricted audit evidence before repair or authorized disposition. |
 | `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
 | `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |
