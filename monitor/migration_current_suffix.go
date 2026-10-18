@@ -568,6 +568,20 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery),
 	migrationCurrentSuffix(847, "isolated automation staging and current lifecycle guards", competitionMigration847ArtifactQuery),
 	migrationCurrentSuffix(848, "network-leading account feedback time index", competitionMigration848ArtifactQuery),
+	migrationCurrentSuffix(849, "wallet authentication key by user and chain",
+		migrationFp2Table("network_user_auth_wallet"),
+		snMainnetMigrationColumns("network_user_auth_wallet",
+			snMainnetMigrationColumn{name: "user_id", kind: "uuid", notNull: true},
+			snMainnetMigrationColumn{name: "blockchain", kind: "character varying(32)", notNull: true}),
+		`EXISTS (SELECT 1 FROM pg_constraint k JOIN pg_index i ON i.indexrelid=k.conindid
+ WHERE k.conrelid=to_regclass('public.network_user_auth_wallet')
+ AND k.conname='network_user_auth_wallet_pkey' AND k.contype='p'
+ AND k.convalidated AND NOT k.condeferrable AND NOT k.condeferred
+ AND pg_get_constraintdef(k.oid)='PRIMARY KEY (user_id, blockchain)'
+ AND i.indrelid=k.conrelid AND i.indisprimary AND i.indisunique AND i.indimmediate
+ AND i.indisvalid AND i.indisready
+ AND pg_get_indexdef(i.indexrelid)='CREATE UNIQUE INDEX network_user_auth_wallet_pkey ON public.network_user_auth_wallet USING btree (user_id, blockchain)'
+ AND i.indexprs IS NULL AND i.indpred IS NULL)`),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

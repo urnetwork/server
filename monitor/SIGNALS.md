@@ -23432,6 +23432,26 @@ readiness. A failed or canceled catalog query remains unknown. This detector
 repair does not apply migrations, activate automation, or establish Main's
 migration head or runtime health.
 
+Version 849 replaces the wallet-authentication primary key on `user_id` with
+`(user_id, blockchain)`. Its artifact requires the durable table, the published
+non-NULL `uuid`/`varchar(32)` key columns without defaults, and the named,
+validated, immediate primary key bound to its exact valid, ready unique btree
+index in that order. A numeric head and matching migration identity cannot
+substitute for this operative key. A missing key, the legacy or reversed key,
+a unique index without a primary-key constraint, a deferred key, or a different
+index shape remains schema drift at head 849. Before 849, the legacy key is a
+pending migration rather than drift. No earlier monitor wallet-key contract
+needs retirement; the older cascade foreign key may legitimately remain
+`NOT VALID` and is unchanged by this append.
+
+This detector check does not establish that migration 849 has run in Main or
+that an API artifact is compatible with it. The published migration requires
+an owner-coordinated API cutover: older wallet writers use `ON CONFLICT
+(user_id)`, which the replacement key cannot satisfy, and their wallet-removal
+behavior is unsafe after an account holds wallets on two chains. Follow that
+published rollout contract; the monitor does not authorize a migration,
+restart, or service rollback. Failed catalog reads remain unknown.
+
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
 permits retirement with unchanged, previously retained excluded proof. The
