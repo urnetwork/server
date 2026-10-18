@@ -31,6 +31,21 @@ type signalAdapter struct {
 	accept func(finding) bool
 }
 
+// A completed probe can return a source failure after its parent ends. Keep
+// both causes without replacing the parent's lifecycle verdict or error text.
+type signalContextError struct {
+	contextErr error
+	sourceErr  error
+}
+
+// Rendering an interrupted run must not expose its private source error.
+func (self *signalContextError) Error() string { return self.contextErr.Error() }
+
+// The source has already returned; retaining it requires no wait or contact.
+func (self *signalContextError) Unwrap() []error {
+	return []error{self.contextErr, self.sourceErr}
+}
+
 func (s *signalAdapter) Number() string         { return s.number }
 func (s *signalAdapter) Key() string            { return s.key }
 func (s *signalAdapter) ID() string             { return s.probe.id() }
@@ -65,8 +80,11 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	}
 	findings, err := s.probe.check(ctx, env)
 	if scoped, ok := env.runner.(*hostScopeRunner); ok {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if contextErr := ctx.Err(); contextErr != nil {
+			if err == nil || err == contextErr {
+				return nil, contextErr
+			}
+			return nil, &signalContextError{contextErr: contextErr, sourceErr: err}
 		}
 		if hostScopeOnlyError(err) {
 			err = nil

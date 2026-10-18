@@ -4411,6 +4411,16 @@ whole-signal and partial-target visibility preserve the same WARN, sustain and
 identity. No addresses, queue contents, underlying error text or process argv
 enter these fields.
 
+When host observation policy is active, a parent that ends while a probe runs
+still withholds that probe's findings and retains the parent's cancellation or
+deadline verdict. If the probe has already returned a source error, retain it
+alongside the parent cause for `errors.Is`/`errors.As` and the fixed admission
+phase projection. A source deadline, provider class or SSH-reset diagnostic
+must not override that parent verdict or reveal private source text. No result
+wait is introduced, and a nil source error keeps the original context sentinel.
+This preservation does not explain ordinary continuous probes' timeouts or
+establish that a native command started; those require same-attempt evidence.
+
 One shared-admission store retains bounded local claim ownership across a
 failed release. Only the caller's existing joined-release boundary, or an
 acquisition failure before native transport receives a grant, makes its exact
