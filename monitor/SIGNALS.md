@@ -3649,13 +3649,47 @@ advancing hot partition after eight pages.
 Successful reconciliation remains outside alert-only stdout/JSONL. Each
 standing-log cadence writes the exact diagnostic prefix
 `monitor-log-reconcile ` followed by one fixed-schema JSON object to retained
-stderr. Schema 1 contains `schema`, `observed_at`, integer `collectors`,
-`enabled`, `fresh`, `consecutive_two`, and `{oldest,newest}` UTC timestamp
-ranges `collector_started_at`, `previous_window_start`, `latest_window_start`,
-`previous_completed_at`, and `latest_completed_at`; unavailable endpoints are
-JSON null. It contains no service, host, block, stream label, record content,
-or raw error. This is collector evidence, not an Alert, ticket event, or
-all-probes heartbeat. Emission failure is nonfatal and cannot change findings.
+stderr. Historical schema 1 contains `schema`, `observed_at`, integer
+`collectors`, `enabled`, `fresh`, `consecutive_two`, and `{oldest,newest}` UTC
+timestamp ranges `collector_started_at`, `previous_window_start`,
+`latest_window_start`, `previous_completed_at`, and `latest_completed_at`;
+unavailable endpoints are JSON null. Schema 1 remains aggregate-only: counts
+and time ranges cannot identify missing collectors, and older retained Alerts
+are not a same-cycle scope map.
+
+Schema 2 preserves every aggregate value and adds `collector_scopes`, sorted by
+the fixed public keys alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web.
+Each row contains `service_key`, `collector_count`, `enabled`,
+`collector_started_at`, `last_success_at`, the four previous/latest query
+start/completion timestamps, `fresh`, `consecutive_two`, `coverage_state`, and
+`last_failure_present`. Zero timestamps are null; partial and future timestamps
+are retained. Coverage states are disabled, no-valid-window, invalid-time,
+stale-window, fresh-one-window, fresh-two-windows, or ambiguous. The booleans
+use the existing predicates and do not override aggregate calculations.
+`invalid-time` can coexist with `fresh=true` or `consecutive_two=true` when
+another stored clock (collector start, historical success, or previous pair)
+is future-dated while the original latest/pair predicates still pass. Such a
+row does not qualify a fully coherent time window; preserve the original
+booleans and inspect all clock qualifiers rather than silently rewriting the
+aggregate. Null metadata likewise supplies no missing timestamp authority.
+`last_failure_present` is only existing error presence: it is not an error
+class, proof of HTTP429, current request state, or a cause. Cancellation can
+invalidate a pair without setting an error. `last_success_at` remains
+historical after a pair is invalidated and cannot supply current freshness.
+
+`unsupported_collectors` counts arbitrary service names without emitting them.
+`duplicate_service_keys` counts repeated fixed keys; their one ambiguous row
+contains the count but null clocks/authority booleans, choosing no collector.
+`scope_projection_complete` means nonempty uniquely identified supported
+inventory, not healthy coverage. Unsupported/duplicate scope leaves the map
+incomplete without changing aggregates. A receipt is a sequence of per-collector
+locked snapshots, not an atomic fleet instant or an in-flight request census.
+
+Rows are capped at ten and the entire diagnostic write, including framing, at
+8 KiB. Serialization failure, overflow, or sink failure drops diagnostic
+evidence only and cannot change collection, findings or cadence. It contains no
+arbitrary service, host, block, stream label, record content or raw error. This
+is collector evidence, not an Alert, ticket event, or all-probes heartbeat.
 
 Keep only two successful query receipts in each collector's current in-memory
 generation. A failed, incomplete, or canceled query resets the pair. Two

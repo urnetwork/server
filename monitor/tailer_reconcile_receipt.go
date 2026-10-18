@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// SIGNALS.md §1.5: a successful overlap is not an Alert. Retain only a bounded
-// pair of query starts/completions and emit aggregate proof on diagnostics.
+// SIGNALS.md §1.5: a successful overlap is not an Alert. Project the existing
+// bounded success pairs through fixed public service keys on diagnostics.
 type logReconcileSuccess struct {
 	start     time.Time
 	completed time.Time
@@ -42,30 +42,125 @@ func (r *logReconcileTimeRange) add(value time.Time) {
 }
 
 const logReconcileReceiptPrefix = "monitor-log-reconcile "
+const logReconcileReceiptMaxBytes = 8 * 1024
 
-// Fixed schema: no service/block/host identifiers, labels, contents, or errors.
+// Only these public service keys may leave the collector snapshot. An unknown
+// name contributes a count, never an arbitrary identifier or a synthetic key.
+var logReconcileServiceKeys = [...]string{
+	"alt", "api", "app", "connect", "gossip", "grafana", "mcp", "proxy", "taskworker", "web",
+}
+
+// A row describes coverage, not request progress, a failure cause, or service
+// health. Partial and future clocks remain visible; zero clocks are null.
+type logReconcileCollectorScope struct {
+	ServiceKey          string     `json:"service_key"`
+	CollectorCount      int        `json:"collector_count"`
+	Enabled             *bool      `json:"enabled"`
+	CollectorStartedAt  *time.Time `json:"collector_started_at"`
+	LastSuccessAt       *time.Time `json:"last_success_at"`
+	PreviousWindowStart *time.Time `json:"previous_window_start"`
+	PreviousCompletedAt *time.Time `json:"previous_completed_at"`
+	LatestWindowStart   *time.Time `json:"latest_window_start"`
+	LatestCompletedAt   *time.Time `json:"latest_completed_at"`
+	Fresh               *bool      `json:"fresh"`
+	ConsecutiveTwo      *bool      `json:"consecutive_two"`
+	CoverageState       string     `json:"coverage_state"`
+	LastFailurePresent  *bool      `json:"last_failure_present"`
+}
+
+// Return a separate UTC value without modifying the collector's clock.
+func logReconcileTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	value = value.UTC()
+	return &value
+}
+
+// The ordered fixed table bounds row count and rejects arbitrary names.
+func logReconcileServiceIndex(service string) int {
+	for index, key := range logReconcileServiceKeys {
+		if service == key {
+			return index
+		}
+	}
+	return -1
+}
+
+// Use only existing coverage predicates; error presence never names a cause.
+func logReconcileScope(service string, enabled bool, started, lastSuccess time.Time, failed bool,
+	previous, latest logReconcileSuccess, now time.Time) logReconcileCollectorScope {
+	fresh, two := false, false
+	row := logReconcileCollectorScope{
+		ServiceKey: service, CollectorCount: 1, Enabled: &enabled, Fresh: &fresh, ConsecutiveTwo: &two,
+		CollectorStartedAt: logReconcileTime(started), LastSuccessAt: logReconcileTime(lastSuccess),
+		PreviousWindowStart: logReconcileTime(previous.start), PreviousCompletedAt: logReconcileTime(previous.completed),
+		LatestWindowStart: logReconcileTime(latest.start), LatestCompletedAt: logReconcileTime(latest.completed),
+		LastFailurePresent: &failed, CoverageState: "disabled",
+	}
+	if !enabled {
+		return row
+	}
+	fresh = latest.valid() && !now.Before(latest.completed) && now.Sub(latest.completed) < 2*logReconcileInterval
+	two = fresh && previous.advancesTo(latest)
+	switch {
+	case started.After(now) || lastSuccess.After(now) || latest.start.After(now) || latest.completed.After(now) ||
+		previous.start.After(now) || previous.completed.After(now) ||
+		(!latest.start.IsZero() && !latest.completed.IsZero() && !latest.completed.After(latest.start)):
+		row.CoverageState = "invalid-time"
+	case !latest.valid():
+		row.CoverageState = "no-valid-window"
+	case !fresh:
+		row.CoverageState = "stale-window"
+	case two:
+		row.CoverageState = "fresh-two-windows"
+	default:
+		row.CoverageState = "fresh-one-window"
+	}
+	return row
+}
+
+// Versioned schema: only fixed public service keys, never arbitrary service,
+// block/host identifiers, labels, contents, or errors.
 // Empty time ranges are null, never zero-valued claims of completed coverage.
 type logReconcileReceipt struct {
-	Schema              int                   `json:"schema"`
-	ObservedAt          time.Time             `json:"observed_at"`
-	Collectors          int                   `json:"collectors"`
-	Enabled             int                   `json:"enabled"`
-	Fresh               int                   `json:"fresh"`
-	ConsecutiveTwo      int                   `json:"consecutive_two"`
-	CollectorStartedAt  logReconcileTimeRange `json:"collector_started_at"`
-	PreviousWindowStart logReconcileTimeRange `json:"previous_window_start"`
-	LatestWindowStart   logReconcileTimeRange `json:"latest_window_start"`
-	PreviousCompletedAt logReconcileTimeRange `json:"previous_completed_at"`
-	LatestCompletedAt   logReconcileTimeRange `json:"latest_completed_at"`
+	CollectorScopes         []logReconcileCollectorScope `json:"collector_scopes"`
+	ScopeProjectionComplete bool                         `json:"scope_projection_complete"`
+	UnsupportedCollectors   int                          `json:"unsupported_collectors"`
+	DuplicateServiceKeys    int                          `json:"duplicate_service_keys"`
+	Schema                  int                          `json:"schema"`
+	ObservedAt              time.Time                    `json:"observed_at"`
+	Collectors              int                          `json:"collectors"`
+	Enabled                 int                          `json:"enabled"`
+	Fresh                   int                          `json:"fresh"`
+	ConsecutiveTwo          int                          `json:"consecutive_two"`
+	CollectorStartedAt      logReconcileTimeRange        `json:"collector_started_at"`
+	PreviousWindowStart     logReconcileTimeRange        `json:"previous_window_start"`
+	LatestWindowStart       logReconcileTimeRange        `json:"latest_window_start"`
+	PreviousCompletedAt     logReconcileTimeRange        `json:"previous_completed_at"`
+	LatestCompletedAt       logReconcileTimeRange        `json:"latest_completed_at"`
 }
 
 func (self *logTailProbe) reconcileReceipt(now time.Time) logReconcileReceipt {
-	receipt := logReconcileReceipt{Schema: 1, ObservedAt: now.UTC(), Collectors: len(self.tailers)}
+	receipt := logReconcileReceipt{Schema: 2, ObservedAt: now.UTC(), Collectors: len(self.tailers),
+		CollectorScopes: make([]logReconcileCollectorScope, 0, len(logReconcileServiceKeys))}
+	var scopes [len(logReconcileServiceKeys)]logReconcileCollectorScope
 	for _, tailer := range self.tailers {
 		tailer.stateLock.Lock()
 		enabled, started := tailer.reconcile != nil, tailer.startedAt
+		service, lastSuccess, failed := tailer.service, tailer.lastReconcileTime, tailer.lastReconcileError != ""
 		previous, latest := tailer.reconcileSuccesses[0], tailer.reconcileSuccesses[1]
 		tailer.stateLock.Unlock()
+		index := logReconcileServiceIndex(service)
+		if index < 0 {
+			receipt.UnsupportedCollectors++
+		} else if scopes[index].CollectorCount == 0 {
+			scopes[index] = logReconcileScope(service, enabled, started, lastSuccess, failed, previous, latest, now)
+		} else {
+			count := scopes[index].CollectorCount + 1
+			// Do not choose one duplicate's clocks or health as authoritative.
+			scopes[index] = logReconcileCollectorScope{ServiceKey: service, CollectorCount: count, CoverageState: "ambiguous"}
+		}
 		receipt.CollectorStartedAt.add(started)
 		if !enabled {
 			continue
@@ -88,15 +183,34 @@ func (self *logTailProbe) reconcileReceipt(now time.Time) logReconcileReceipt {
 			}
 		}
 	}
+	for _, scope := range scopes {
+		if scope.CollectorCount > 0 {
+			receipt.CollectorScopes = append(receipt.CollectorScopes, scope)
+		}
+		if scope.CollectorCount > 1 {
+			receipt.DuplicateServiceKeys++
+		}
+	}
+	receipt.ScopeProjectionComplete = receipt.Collectors > 0 && receipt.UnsupportedCollectors == 0 && receipt.DuplicateServiceKeys == 0
 	return receipt
 }
 
+// Encoding failure or the fixed byte bound drops only diagnostic evidence.
+func encodeLogReconcileReceipt(receipt logReconcileReceipt) []byte {
+	encoded, err := json.Marshal(receipt)
+	if err != nil || len(encoded)+len(logReconcileReceiptPrefix)+2 > logReconcileReceiptMaxBytes {
+		return nil
+	}
+	return encoded
+}
+
+// One existing diagnostic write per cadence, with no collection or I/O changes.
 func (self *logTailProbe) writeReconcileReceipt(now time.Time) {
 	if self.reconcileDiagnostics == nil {
 		return
 	}
-	encoded, err := json.Marshal(self.reconcileReceipt(now))
-	if err != nil {
+	encoded := encodeLogReconcileReceipt(self.reconcileReceipt(now))
+	if encoded == nil {
 		return
 	}
 	// One bounded Write, with a leading separator in case another diagnostic

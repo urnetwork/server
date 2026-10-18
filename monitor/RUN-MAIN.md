@@ -922,7 +922,7 @@ Use the existing SSH and Warpctl transports and the commands documented in
 host while trying to improve denominator coverage.
 
 For a two-reconciliation closure gate, retain the exact `monitor-log-reconcile `
-prefix plus schema-1 JSON from the current watcher generation's stderr artifact.
+prefix plus supported versioned JSON from the current watcher generation's stderr artifact.
 Require `collectors=enabled=fresh=consecutive_two > 0`, matching the intended
 collector inventory. Check `collector_started_at`, `previous_window_start`,
 `latest_window_start`, `previous_completed_at`, and `latest_completed_at`:
@@ -934,7 +934,20 @@ source-record timestamps or live-stream liveness; retain those independent
 controls and the required no-loss window. Missing, malformed, stale, or
 partial-scope receipts leave completion unknown; alert absence alone is
 insufficient. This diagnostic does not change alert-only JSONL or invent
-healthy Alerts. See `SIGNALS.md` §1.5 and `MONITOR.md` §3.7 for the fixed schema.
+healthy Alerts. Schema 1 is aggregate-only; it cannot identify deficient
+collectors. Schema 2 uses `collector_scopes` with fixed public service keys
+alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+`scope_projection_complete`; this is identity completeness, not healthy
+coverage. Unsupported or duplicate services leave the scope map incomplete.
+Null, partial and future timestamps retain their authority qualifiers.
+`last_failure_present` does not identify HTTP429 or a cause. The `fresh` and
+`consecutive_two` booleans retain the original latest/pair predicates:
+`invalid-time` can coexist with `fresh=true` when another stored clock is
+future-dated. Such a row does not qualify a fully coherent time window; do not
+silently rewrite aggregate booleans. An older retained scope Alert is not a
+same-receipt row. Update version-aware readers before promotion; never
+reconstruct predecessor scope rows from aggregate ranges. See `SIGNALS.md`
+§1.5 and `MONITOR.md` §3.7 for the fixed schema.
 
 ## Daily three-way improvement research
 
