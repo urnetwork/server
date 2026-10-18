@@ -19,6 +19,36 @@ func TestH3DiagnosticReceiveCounterDeltasCoverEveryField(t *testing.T) {
 	})
 }
 
+// Hold-promise shortfalls and exit withdrawals are independent interval events,
+// not end gauges; old events must not reappear in an unchanged interval.
+func TestH3DiagnosticReceiveHoldPromiseCounterDeltas(t *testing.T) {
+	snapshot := func(shortfallCount, withdrawCount uint64) clientconnect.ClientReceiveStatsSnapshot {
+		return clientconnect.ClientReceiveStatsSnapshot{
+			ReceiveQueueCommitShortfallCount: shortfallCount,
+			ReceiveQueueExitWithdrawCount:    withdrawCount,
+		}
+	}
+	cases := []struct {
+		name                          string
+		start, end                    clientconnect.ClientReceiveStatsSnapshot
+		shortfallCount, withdrawCount uint64
+	}{
+		{name: "unchanged", start: snapshot(11, 17), end: snapshot(11, 17)},
+		{name: "shortfall-only", start: snapshot(11, 17), end: snapshot(14, 17), shortfallCount: 3},
+		{name: "withdrawal-only", start: snapshot(11, 17), end: snapshot(11, 22), withdrawCount: 5},
+		{name: "both", start: snapshot(11, 17), end: snapshot(14, 22), shortfallCount: 3, withdrawCount: 5},
+		{name: "first-events", start: snapshot(0, 0), end: snapshot(3, 5), shortfallCount: 3, withdrawCount: 5},
+	}
+	for _, c := range cases {
+		actual := subtractH3FullTunReceive(c.start, c.end)
+		if actual.ReceiveQueueCommitShortfallCount != c.shortfallCount || actual.ReceiveQueueExitWithdrawCount != c.withdrawCount {
+			t.Errorf("%s: shortfalls=%d withdrawals=%d, want %d/%d", c.name,
+				actual.ReceiveQueueCommitShortfallCount, actual.ReceiveQueueExitWithdrawCount,
+				c.shortfallCount, c.withdrawCount)
+		}
+	}
+}
+
 // Recovery gauges describe end state rather than monotonic interval counts.
 func TestH3DiagnosticRecoveryCounterDeltasCoverEveryField(t *testing.T) {
 	testH3DiagnosticCounterDeltas(t, subtractH3FullTunRecovery, map[string]bool{
