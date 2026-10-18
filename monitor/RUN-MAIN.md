@@ -55,7 +55,7 @@ production mutation authority, and the single-writer chain in one place.
 
 When Sol Medium cannot resolve an issue, write a concise Markdown handoff to
 `factury/monitor/alerts/` under the mono root (a sibling of `server/`). For each
-new issue, create one stable directory `alerts/<issue>/` containing `message.md`
+new issue, create one stable directory `alerts/<number><issue>/` containing `message.md`
 and `log.yml`. Keep the current handoff in `message.md`; append chronological
 entries to `log.yml` summarizing all decisions and work, including ownership,
 evidence reviewed, attempted actions, results, verification and next steps.
