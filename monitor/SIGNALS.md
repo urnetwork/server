@@ -32426,6 +32426,67 @@ pins the 32-byte keepalive discriminator, larger encrypted-data event, privacy
 boundary, and fixed ring capacity. This client-side boundary does not require
 or substitute for a Proxy service deployment.
 
+**Packet-flow pressure: refusal, repair dispatch and delivery custody.** The
+[October 16–17 postmortem](../../factury/postmortem/2026-10-17-packetflow-regression.md)
+reports controlled source failures and scoped corrections; it does not join
+them to the reported phone pauses or historical zero-success experiment.
+Its P1 pacing and P3 receive-custody references remain privately scoped at the
+recorded checkpoint. Apply §8.12 artifact provenance and the
+[receive/ownership rules](../../connect/CODESTYLE.md) before transferring these
+mechanisms to a live event. WiFi, a service name or an H3/P2P family does not
+identify the actual physical lane. Retain bounded same-attempt stage and
+flow and sequence generation joins privately; do not export identities or payloads.
+
+| Pressure boundary | Discriminator and required healthy control |
+| --- | --- |
+| Local complete-message refusal versus terminal damage | Establish the refused unit and the exact point at which ownership would transfer. A complete frame refused before socket-queue admission can remain retriable without retiring a resident or shared connection. Require immediate shared-callback refusal, return of the extra pooled share, unrelated-flow progress and an originating retry that delivers exactly once. Include reverse ACK and NoAck controls; NoAck retains its loss semantics. Unreplayed raw-stream fragments, malformed framing, partial socket writes, authentication failure and explicit shutdown keep their own terminal rules. |
+| Selected repair versus executable repair | Join pacing entry, repair selection, drain exit and actual dispatch on the same sequence/drain generation. A selected retry cannot repair a drain if the only dispatch worker is still held inside that drain. For the postmortem's P1 reference, selection must cover the retained earlier tail before the paced younger original; preserve paid pacing/FIFO debt and controls for mixed carriers, unrelated tails, earlier holes and ACK/cancel order. Initial pacing precedes the physical writer timer, so that timer is not an upper bound on the initial wait. Constructed fake-clock waits are not measured user pauses. |
+| Carrier/Transfer acceptance versus downstream byte retention | At refusal, establish receive-head advancement, selective/cumulative ACK promises and who still retains the exact bytes. Removing cancellation alone is insufficient if a retry below the advanced head can be acknowledged without delivery. Exercise public Multi → Transfer → provider TCP with a forced reorder refusal, gap fill and public retry; a lower-layer helper pass bypasses durable duplicate coverage. For Multi TCP duplicate-coverage repair, authority comes from a valid advancing inner TCP ACK in the current flow/provider generation; carrier/Transfer ACKs and outgoing ACK fields do not supply it. Keep overlap, wraparound, failed-admission and late-winner controls. |
+| Flow retirement versus wider parent lifetime | Hold ACK work at both Transfer and return-memory admission, retire only its originating flow generation and keep the provider and healthy siblings live. Join the actual child owner; releasing unrelated capacity later must not admit its stale ACK. Cancellation must return refused/retained pooled ownership while preserving ownership already accepted by Transfer. Ancestor cancellation alone cannot qualify this boundary. |
+
+**Measuring workloads under pressure:** report attempted, successful, failed and
+unfinished/canceled outcomes under one measurement version alongside latency
+quantiles; successful-probe percentiles omit failures. Preserve calibration
+failures and require a valid paired control, equivalent useful work, direction,
+scenario/profile/seed and completion boundary before assigning performance
+credit. Direct body receipt and tunnel completion including reverse signaling
+and server join are different endpoints. A fixed throughput cutoff above the
+shaped link rate cannot independently identify a stall. Record observer
+overhead; two sampled stacks showing different packet objects do not prove one
+continuously stuck packet. Keep first failures and the declared repeat schedule;
+one selected pair or a passing child does not complete a campaign.
+
+For a capacity experiment, record effective settings after constructor/profile
+clamps and distinguish message count, encoded bytes, retained roots, ancestor
+budgets and decode/receipt capacity. Queue descriptor preallocation can sit
+outside payload admission. Include it, native allocations and whole process
+memory with cold-flow fairness and joined reclamation (§8.15, §14.7a/d).
+Zero final pool outstanding does not validate a footprint ceiling. Preserve
+results against the original ceiling; a larger replacement limit cannot make
+the earlier run pass. Extra queue depth cannot release a drain waiting on its
+own dispatcher or restore lost retry custody. Label an iOS profile on
+Android as a surrogate, and require native iOS evidence for native iOS memory
+or incident-resolution claims. A microbenchmark must activate the changed ACK
+and collapse-prevention paths; report its residual cost without converting it
+into application-throughput proof.
+
+False-positive qualifiers: these reported scoped counterfactuals establish
+neither affected-device/fleet attribution nor a relationship to the existing
+JWT/database panic or peerconn-teardown findings. Qualification fixture,
+collector or dependency-acquisition failures remain separate from packet-flow
+causes. A causal regression must reach the production transition through real
+constructors/public paths and fail its semantic assertion on old behavior;
+compile/vet/setup/timeout failures do not supply that proof. A fixture
+incorrectly rejecting a partial first write is distinct from the separately
+reproduced defect that credited a later frame after an incomplete middle frame. False-negative qualifiers: lower-layer acceptance,
+success-only quantiles, parent-only cancellation and zero pool roots can each
+hide the next boundary's failure. Missing native runs, unverified external
+receipts or incomplete declared suites leave qualification unknown. Reported normal/race
+process counts cover only their selected scope; incident closure also needs
+calibrated end-to-end outcomes and the original symptom checked on attested
+affected-device/provider builds. Preserve independent rollout, telemetry and
+capacity owners while those joins remain open.
+
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
@@ -33603,7 +33664,9 @@ total retains stale old instances and resets per process. Interpret with a
 known traffic stimulus:
 
 - H3 accepts + rising received/sent events = auth, negotiation, and routed app
-  traffic are all using H3. This is the strongest server-side success signal.
+  traffic are all using H3. This establishes the authenticated carrier boundary;
+  it does not establish downstream Transfer custody or inner TCP/application
+  delivery. Use the pressure/retention controls in §14.6 for that next boundary.
 - H3 accepts + flat events while a test client sends known routed messages =
   handshake/auth only; inspect client Auto-mode election and route selection.
 - Flat events with no known traffic is inconclusive, not broken.
