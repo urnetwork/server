@@ -2867,6 +2867,22 @@ arguments, source paths/line numbers, endpoints, or identities. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
 admitted, and the cap resets on drain. Typed classes retain precedence.
+The optional `[legacy_registration_db]` annotation accompanies only a returned
+failed acquisition in close-owner registration. It leaves the original
+`Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner
+rates unchanged. The separate fixed record carries invocation-owned context
+budget snapshots, pool-open and Acquire wall time, and entry/return Stat from
+the exact local pool reference. It contains no raw errors, SQL, identities or
+auxiliary metrics from an uncertain pool generation; successful registration
+and post-acquisition failures emit no such annotation. An absent annotation
+is unknown, including older artifacts and a failed diagnostic sink.
+These snapshots distinguish source entry and remaining allowance, not a
+resource-queue, DNS, connection, Ping or pooler cause. Pool counters include
+concurrent work, and context state/cause reads are not an atomic cancellation
+ownership proof. This record is diagnostic context, not another alert or a
+replacement for unchanged panic thresholds. The prefix receives no ignore rule;
+unexpected error-shaped text remains eligible for the normal novel detector.
+
 The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 200-byte prefix truncation; the owner discriminator now survives a long error
 body without retaining it. Ownership identifies a call and recovery boundary,
