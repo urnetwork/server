@@ -104,6 +104,9 @@ type ClientScoreNativeCensus struct {
 	DenominatorWindow string                                  `json:"denominator_window"`
 	Buckets           map[string]ClientScoreNativeBucketCount `json:"buckets"`
 	EgressRatio       *ClientScoreNativeEgressRatio           `json:"egress_ratio,omitempty"`
+	// The ARIN canary's choice for this publication (arindb_canary_model.go).
+	// Older readers ignore it.
+	Arindb *ClientScoreNativeArindb `json:"arindb,omitempty"`
 }
 
 // One provider may appear in several locations and groups. Count admission in

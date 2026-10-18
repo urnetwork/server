@@ -118,7 +118,7 @@ func TestSessionAdmissionRevokedAfterRegistrationCannotPassFinalCheck(t *testing
 				var admitted atomic.Int32
 				var env *peerDiscoveryEnv
 				env = testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
-					settings.testingBeforeAuthorizationLease = func(value *session.ByJwt) {
+					settings.testingBeforeAuthorizationLease = func(_ context.Context, value *session.ByJwt) {
 						env.exchange.stateLock.Lock()
 						registered := len(env.exchange.connections[*value.ClientId]) > 0
 						env.exchange.stateLock.Unlock()
@@ -216,15 +216,21 @@ func TestSessionAdmissionClientInfoRoundTripsAcrossCarriers(t *testing.T) {
 	})
 }
 
-func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing.T) {
+// Only definitive answers retire an admitted transport: a confirmed revocation
+// closes with the revoked cause and the credential's horizon with the expired
+// cause. An unavailable store keeps the transport (session package tests); the
+// revocation is found by a recheck the test drives (drivenLeaseRechecks).
+func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndExpired(t *testing.T) {
 	environment := server.DefaultTestEnv()
 	environment.RerunCount = 0
 	environment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		leases := make(chan *session.AuthorizationLease, 2)
+		leases := make(chan *drivenLeaseRechecks, 2)
 		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
-			settings.testingAfterAuthorizationLease = func(_ *session.ByJwt, lease *session.AuthorizationLease) { leases <- lease }
+			settings.testingAfterAuthorizationLease = func(_ *session.ByJwt, lease *session.AuthorizationLease) {
+				leases <- newDrivenLeaseRechecks(lease)
+			}
 		})
 		defer env.Close()
 		for _, revoked := range []bool{false, true} {
@@ -234,8 +240,8 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing
 				t.Fatal(err)
 			}
 			defer closeClient()
-			lease := <-leases
-			want := uint32(session.AuthorizationUnavailableCloseCode - 4000)
+			rechecks := <-leases
+			want := uint32(session.AuthorizationExpiredCloseCode - 4000)
 			if revoked {
 				actor := session.NewLocalClientSession(ctx, "192.0.2.1:1", session.NewByJwt(claims.NetworkId, claims.UserId, claims.NetworkName, false, false))
 				_, err := session.RevokeNetworkSession(&session.RevokeSessionArgs{SessionId: *claims.SessionId, OperationId: server.NewId()}, actor)
@@ -244,9 +250,10 @@ func TestSessionAdmissionLeaseCloseDistinguishesRevokedAndUnavailable(t *testing
 					t.Fatal(err)
 				}
 				want = uint32(session.AuthorizationRevokedCloseCode - 4000)
-				lease.Recheck()
+				rechecks.findRevocation(ctx, t)
 			} else {
-				lease.Testing_Expire(time.Now().Add(91 * time.Second))
+				// beyond any credential horizon (exp plus the session grace)
+				rechecks.lease.Testing_Expire(time.Now().Add(366 * 24 * time.Hour))
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
 			for {

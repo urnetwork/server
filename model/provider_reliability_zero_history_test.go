@@ -11,7 +11,8 @@ import (
 
 // Exercise raw stats, running maintenance, score publication, both common
 // gates, published FP2 selection and paced URL admission. Missing history is
-// an independent healthy control; no score rows are manufactured by this test.
+// an independent healthy control for serving, while URL admission waits for
+// history; no score rows are manufactured by this test.
 func TestFp2ReliabilityWriterPreservesObservedZero(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -22,14 +23,15 @@ func TestFp2ReliabilityWriterPreservesObservedZero(t *testing.T) {
 		invalid := valid
 		invalid.ReceiveMessageCount = 0
 		providers := []struct {
-			name          string
-			client        server.Id
-			network       server.Id
-			wantRawValid  int64
-			wantRawCount  int64
-			wantAdmission bool
+			name             string
+			client           server.Id
+			network          server.Id
+			wantRawValid     int64
+			wantRawCount     int64
+			wantAdmission    bool
+			wantUrlAdmission bool
 		}{
-			{name: "healthy", wantRawValid: 721, wantRawCount: 721, wantAdmission: true},
+			{name: "healthy", wantRawValid: 721, wantRawCount: 721, wantAdmission: true, wantUrlAdmission: true},
 			{name: "observed_zero", wantRawCount: 721},
 			{name: "one_valid", wantRawValid: 1, wantRawCount: 721},
 			{name: "missing", wantAdmission: true},
@@ -124,8 +126,8 @@ func TestFp2ReliabilityWriterPreservesObservedZero(t *testing.T) {
 			seenDue[provider.ClientId] = true
 		}
 		for _, provider := range providers {
-			if seenDue[provider.client] != provider.wantAdmission {
-				t.Errorf("%s URL admission: admitted=%t want=%t", provider.name, seenDue[provider.client], provider.wantAdmission)
+			if seenDue[provider.client] != provider.wantUrlAdmission {
+				t.Errorf("%s URL admission: admitted=%t want=%t", provider.name, seenDue[provider.client], provider.wantUrlAdmission)
 			}
 		}
 	})
@@ -184,7 +186,8 @@ func TestReliabilityObservedZeroRollingAndExpiry(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE client_reliability_running_window
 				SET last_recompute_block=last_recompute_block-$1`, ReliabilityRunningRecomputeBlocks+1))
 		})
-		UpdateClientReliabilityScores(ctx, next, false)
+		// the checkpoint owns the optional re-anchor
+		UpdateClientReliabilityScoresCheckpointed(ctx, next)
 		assertZero()
 		UpdateClientReliabilityScores(ctx, next.Add(ClientLookbacks[0]+ReliabilityBlockDuration), false)
 		if _, present := GetAllClientReliabilityScores(ctx)[0][failed]; present {

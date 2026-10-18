@@ -90,8 +90,10 @@ type StWallet struct {
 }
 
 // A provider association read from account history or verified original
-// consent. SetTime orders account projections only; payout selection requires
-// the independently approved consent chain and its effective earning epoch.
+// consent. SetTime orders account projections only. A configured roster's
+// payout selects only the approved consent chain effective at the epoch;
+// without a roster, an account-history wallet pays only a provider that has no
+// signed wallet evidence at all.
 type StProviderWallet struct {
 	ClientId          server.Id
 	NetworkId         server.Id
@@ -991,6 +993,30 @@ func ReserveStTransactionIntent(
 	calldata []byte,
 	pendingNonce uint64,
 ) *StTransactionIntent {
+	var intent *StTransactionIntent
+	server.Tx(ctx, func(tx server.PgTx) {
+		intent, _ = reserveStTransactionIntent(ctx, tx, logicalKey, profile, deploymentId, deploymentKey, chainId, genesisHash, fromAddress, toAddress, calldataHash, calldata, pendingNonce)
+	})
+	return intent
+}
+
+// reserveStTransactionIntent is ReserveStTransactionIntent inside tx. created
+// reports a new generation, which took a new nonce.
+func reserveStTransactionIntent(
+	ctx context.Context,
+	tx server.PgTx,
+	logicalKey string,
+	profile string,
+	deploymentId string,
+	deploymentKey StDeploymentKey,
+	chainId uint64,
+	genesisHash string,
+	fromAddress string,
+	toAddress string,
+	calldataHash string,
+	calldata []byte,
+	pendingNonce uint64,
+) (intent *StTransactionIntent, created bool) {
 	if chainId > uint64(^uint64(0)>>1) || pendingNonce > uint64(^uint64(0)>>1) {
 		panic(fmt.Errorf("st transaction chain id or nonce exceeds postgres bigint"))
 	}
@@ -1001,51 +1027,48 @@ func ReserveStTransactionIntent(
 		genesisErr != nil || len(genesisBytes) != 32 {
 		panic("st transaction chain identity and addresses must be canonical lowercase")
 	}
-	var intent *StTransactionIntent
-	server.Tx(ctx, func(tx server.PgTx) {
-		var ignored any
-		server.Raise(tx.QueryRow(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-			stTransactionAdvisoryLockKey(chainId, genesisHash, fromAddress),
-		).Scan(&ignored))
+	var ignored any
+	server.Raise(tx.QueryRow(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		stTransactionAdvisoryLockKey(chainId, genesisHash, fromAddress),
+	).Scan(&ignored))
 
-		row := tx.QueryRow(ctx,
-			`SELECT `+stTransactionIntentColumns+`
+	row := tx.QueryRow(ctx,
+		`SELECT `+stTransactionIntentColumns+`
 			 FROM st_transaction_intent WHERE logical_key = $1
 			 ORDER BY generation DESC LIMIT 1`,
-			logicalKey,
-		)
-		var existing StTransactionIntent
-		var existingChain, existingNonce int64
-		err := row.Scan(
-			&existing.IntentId, &existing.IntentKey, &existing.LogicalKey, &existing.Generation,
-			&existing.Profile, &existing.DeploymentId, &existing.DeploymentKey, &existingChain, &existing.GenesisHash,
-			&existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
-			&existing.Calldata, &existingNonce, &existing.Status, &existing.CurrentTxHash,
-			&existing.AttemptCount, &existing.Error, &existing.CreateTime, &existing.UpdateTime,
-		)
-		generation := 0
-		if err == nil {
-			existing.ChainId, existing.Nonce = uint64(existingChain), uint64(existingNonce)
-			if existing.DeploymentKey != deploymentKey || existing.ChainId != chainId || existing.GenesisHash != genesisHash ||
-				existing.FromAddress != fromAddress || existing.ToAddress != toAddress ||
-				existing.CalldataHash != calldataHash || !bytes.Equal(existing.Calldata, calldata) {
-				panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", logicalKey))
-			}
-			if existing.Status != StTxReverted {
-				intent = &existing
-				return
-			}
-			generation = existing.Generation + 1
+		logicalKey,
+	)
+	var existing StTransactionIntent
+	var existingChain, existingNonce int64
+	err := row.Scan(
+		&existing.IntentId, &existing.IntentKey, &existing.LogicalKey, &existing.Generation,
+		&existing.Profile, &existing.DeploymentId, &existing.DeploymentKey, &existingChain, &existing.GenesisHash,
+		&existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
+		&existing.Calldata, &existingNonce, &existing.Status, &existing.CurrentTxHash,
+		&existing.AttemptCount, &existing.Error, &existing.CreateTime, &existing.UpdateTime,
+	)
+	generation := 0
+	if err == nil {
+		existing.ChainId, existing.Nonce = uint64(existingChain), uint64(existingNonce)
+		if existing.DeploymentKey != deploymentKey || existing.ChainId != chainId || existing.GenesisHash != genesisHash ||
+			existing.FromAddress != fromAddress || existing.ToAddress != toAddress ||
+			existing.CalldataHash != calldataHash || !bytes.Equal(existing.Calldata, calldata) {
+			panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", logicalKey))
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			if err != nil {
-				server.Raise(err)
-			}
+		if existing.Status != StTxReverted {
+			return &existing, false
 		}
+		generation = existing.Generation + 1
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil {
+			server.Raise(err)
+		}
+	}
 
-		var nonce int64
-		server.Raise(tx.QueryRow(ctx, `
+	var nonce int64
+	server.Raise(tx.QueryRow(ctx, `
 			SELECT GREATEST(
 				$4::bigint,
 				COALESCE(MAX(nonce) + 1, $4::bigint)
@@ -1054,10 +1077,10 @@ func ReserveStTransactionIntent(
 			WHERE chain_id = $1 AND genesis_hash = $2 AND from_address = $3
 		`, int64(chainId), genesisHash, fromAddress, int64(pendingNonce)).Scan(&nonce))
 
-		now := server.NowUtc()
-		intentId := server.NewId()
-		intentKey := stTransactionIntentKey(logicalKey, generation)
-		server.RaisePgResult(tx.Exec(ctx, `
+	now := server.NowUtc()
+	intentId := server.NewId()
+	intentKey := stTransactionIntentKey(logicalKey, generation)
+	server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_transaction_intent (
 				intent_id, intent_key, logical_key, generation,
 				profile, deployment_id, deployment_key, chain_id, genesis_hash,
@@ -1065,16 +1088,14 @@ func ReserveStTransactionIntent(
 				status, create_time, update_time
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
 		`, intentId, intentKey, logicalKey, generation, profile, deploymentId, key,
-			int64(chainId), genesisHash, fromAddress, toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
-		intent = &StTransactionIntent{
-			IntentId: intentId, IntentKey: intentKey, LogicalKey: logicalKey, Generation: generation,
-			Profile: profile, DeploymentId: deploymentId, DeploymentKey: deploymentKey,
-			ChainId: chainId, GenesisHash: genesisHash, FromAddress: fromAddress,
-			ToAddress: toAddress, CalldataHash: calldataHash, Calldata: append([]byte(nil), calldata...),
-			Nonce: uint64(nonce), Status: StTxPrepared, CreateTime: now, UpdateTime: now,
-		}
-	})
-	return intent
+		int64(chainId), genesisHash, fromAddress, toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
+	return &StTransactionIntent{
+		IntentId: intentId, IntentKey: intentKey, LogicalKey: logicalKey, Generation: generation,
+		Profile: profile, DeploymentId: deploymentId, DeploymentKey: deploymentKey,
+		ChainId: chainId, GenesisHash: genesisHash, FromAddress: fromAddress,
+		ToAddress: toAddress, CalldataHash: calldataHash, Calldata: append([]byte(nil), calldata...),
+		Nonce: uint64(nonce), Status: StTxPrepared, CreateTime: now, UpdateTime: now,
+	}, true
 }
 
 // Returns the latest generation, or nil when no such logical operation exists.
@@ -1623,9 +1644,9 @@ func SumStDepositedRao(ctx context.Context, deploymentKey StDeploymentKey, epoch
 
 // SumStDepositedInBlockRangeRao sums the α (rao) of every mirrored
 // Deposited event with block_number in [minBlock, maxBlock), across epochs
-// and NOs — the demand deposits inside a wall-clock window mapped to chain
-// blocks (the public stats collector, controller/stats_collector.go). The
-// kind+block index covers the scan.
+// and NOs — the demand deposits inside a settlement epoch's chain blocks (the
+// public stats collector, controller/stats_collector.go). Deposits stay on
+// the coordinator under settlement v2. The kind+block index covers the scan.
 func SumStDepositedInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
 	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
@@ -1654,39 +1675,54 @@ func SumStDepositedInBlockRangeRao(ctx context.Context, deploymentKey StDeployme
 	return total
 }
 
-// parsePoolSweptEvent extracts the measured α (rao) from a PoolSwept
-// `st_event.data_json` (the decimal-string fields written by the event
-// decoder in st_controller.go: `no_id`, `measured`, `swept`, `move_ok`).
-// Returns ok=false on any malformed row.
-func parsePoolSweptEvent(dataJson string) (measured *big.Int, ok bool) {
+// parseEmissionCapturedEvent extracts the captured α (rao) from a mirrored
+// emission capture `st_event.data_json`: a PoolSwept row's `measured` (the
+// release-1.0 vault's EmissionCaptured, and the legacy sweep, as the event
+// decoder in st_controller.go writes them), or a V2EmissionCaptured row's
+// `amount` (vault2's EmissionCaptured, st_ledger_v2_client.go). Returns
+// ok=false on any other kind or malformed row.
+func parseEmissionCapturedEvent(kind string, dataJson string) (captured *big.Int, ok bool) {
 	var data struct {
 		Measured string `json:"measured"`
+		Amount   string `json:"amount"`
 	}
 	if err := json.Unmarshal([]byte(dataJson), &data); err != nil {
 		return nil, false
 	}
-	m, mOk := new(big.Int).SetString(data.Measured, 10)
-	if !mOk {
+	var value string
+	switch kind {
+	case "PoolSwept":
+		value = data.Measured
+	case "V2EmissionCaptured":
+		value = data.Amount
+	default:
 		return nil, false
 	}
-	return m, true
+	amount, amountOk := new(big.Int).SetString(value, 10)
+	if !amountOk {
+		return nil, false
+	}
+	return amount, true
 }
 
-// SumStPoolSweptMeasuredInBlockRangeRao sums the measured α (rao) of every
-// mirrored PoolSwept event with block_number in [minBlock, maxBlock) — the
-// miner emission captured by the D-4 sweeps inside a wall-clock window
-// mapped to chain blocks (the public stats collector,
-// controller/stats_collector.go).
-func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
+// SumStEmissionCapturedInBlockRangeRao sums the α (rao) of every mirrored
+// emission capture with block_number in [minBlock, maxBlock): PoolSwept rows,
+// which the release-1.0 settlement vault's EmissionCaptured is mirrored as,
+// and the settlement v2 vault's V2EmissionCaptured, which carries every capture
+// from v2's first epoch. The capture of an epoch's emission happens in the
+// next epoch's close window, so it lands in the next epoch's range. Read by
+// the public stats collector (controller/stats_collector.go); the kind+block
+// index covers the scan.
+func SumStEmissionCapturedInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
 	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT data_json
+                SELECT kind, data_json
                 FROM st_event
-				WHERE deployment_key = $1 AND kind = 'PoolSwept' AND $2 <= block_number AND block_number < $3
+				WHERE deployment_key = $1 AND kind IN ('PoolSwept', 'V2EmissionCaptured') AND $2 <= block_number AND block_number < $3
             `,
 			key,
 			int64(minBlock),
@@ -1694,10 +1730,11 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey St
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				var kind string
 				var dataJson string
-				server.Raise(result.Scan(&dataJson))
-				if measured, ok := parsePoolSweptEvent(dataJson); ok {
-					total.Add(total, measured)
+				server.Raise(result.Scan(&kind, &dataJson))
+				if captured, ok := parseEmissionCapturedEvent(kind, dataJson); ok {
+					total.Add(total, captured)
 				}
 			}
 		})
@@ -1706,9 +1743,12 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey St
 }
 
 // parseMinerClaimedEvent extracts the claiming coldkey and the claimed α
-// (rao) from a MinerClaimed `st_event.data_json` (the fields written by the
-// event decoder in st_controller.go: `e`, `no_id`, `coldkey`, `share_bps`,
-// `amount`, `caller`). Returns ok=false on any malformed row.
+// (rao) from a MinerClaimed or V2Claimed `st_event.data_json`. Both decoders
+// write `coldkey` as 0x hex and `amount` as a decimal string: the release-1.0
+// vault's Claimed (st_controller.go: `e`, `no_id`, `coldkey`, `share_bps`,
+// `amount`, `caller`) and vault2's Claimed (st_ledger_v2_client.go: `no_id`,
+// `root_index`, `index`, `coldkey`, `cumulative`, `amount`, `caller`), whose
+// `amount` is that claim's payment. Returns ok=false on any malformed row.
 func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, ok bool) {
 	var data struct {
 		Coldkey string `json:"coldkey"`
@@ -1724,14 +1764,15 @@ func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, o
 	if !amtOk {
 		return "", nil, false
 	}
-	return data.Coldkey, amt, true
+	return strings.ToLower(data.Coldkey), amt, true
 }
 
-// SumStMinerClaimedInBlockRange sums the α (rao) of every mirrored
-// MinerClaimed event with block_number in [minBlock, maxBlock) and counts
-// the distinct claiming coldkeys — the miner payouts claimed inside a
-// wall-clock window mapped to chain blocks (the public stats collector,
-// controller/stats_collector.go). The kind+block index covers the scan.
+// SumStMinerClaimedInBlockRange sums the α (rao) of every mirrored miner
+// claim with block_number in [minBlock, maxBlock) and counts the distinct
+// claiming coldkeys: MinerClaimed rows (the release-1.0 vault's Claimed) and
+// V2Claimed rows (vault2's), so a coldkey that claims from both vaults counts
+// once. Read by the public stats collector (controller/stats_collector.go);
+// the kind+block index covers the scan.
 func SumStMinerClaimedInBlockRange(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) (amountRao *big.Int, minerCount int64) {
 	key := requireStDeploymentKey(deploymentKey)
 	amountRao = big.NewInt(0)
@@ -1742,7 +1783,7 @@ func SumStMinerClaimedInBlockRange(ctx context.Context, deploymentKey StDeployme
 			`
                 SELECT data_json
                 FROM st_event
-				WHERE deployment_key = $1 AND kind = 'MinerClaimed' AND $2 <= block_number AND block_number < $3
+				WHERE deployment_key = $1 AND kind IN ('MinerClaimed', 'V2Claimed') AND $2 <= block_number AND block_number < $3
             `,
 			key,
 			int64(minBlock),

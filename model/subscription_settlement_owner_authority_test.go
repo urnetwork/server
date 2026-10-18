@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
 
@@ -63,23 +62,22 @@ func TestSettlementOwnerReadsReportsAfterContractWait(t *testing.T) {
 
 // A real sibling joins the stream after billing reads its participants. Its
 // commit must remain visible to the later usage participant read.
-type settlementOwnerParticipantTx struct {
-	server.PgTx
+type settlementOwnerParticipant struct {
 	reads int
 	join  func()
 }
 
-// Complete the original rows before the independent stream owner runs.
-func (self *settlementOwnerParticipantTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	rows, err := self.PgTx.Query(ctx, sql, args...)
-	if err != nil || !strings.Contains(sql, "FROM contract_extender") {
-		return rows, err
-	}
-	self.reads++
-	if self.reads != 1 {
-		return rows, nil
-	}
-	return &legacyGrantOwnerDiagnosticRows{Rows: rows, close: self.join}, nil
+// The sibling joins once billing's participant rows are consumed.
+func (self *settlementOwnerParticipant) hook() *legacyStatementHook {
+	return &legacyStatementHook{after: func(sql string, _ time.Duration, err error) {
+		if err != nil || !strings.Contains(sql, "FROM contract_extender") {
+			return
+		}
+		self.reads++
+		if self.reads == 1 {
+			self.join()
+		}
+	}}
 }
 
 // Retained participants are stream-scoped, so this deliberately preserves the
@@ -99,15 +97,18 @@ func TestLegacySettlementOwnerKeepsFreshUsageParticipants(t *testing.T) {
                 VALUES($1,$2,$3,$4,$5,100,true)`, sibling, f.sourceId, f.sourceNetworkId, f.destinationId, f.destinationNetworkId))
 		})
 		server.Raise(SetContractStream(ctx, id, streamId, []server.Id{}))
-		owner := &settlementOwnerParticipantTx{join: func() {
+		owner := &settlementOwnerParticipant{join: func() {
 			server.Raise(SetContractStream(ctx, sibling, streamId, []server.Id{provider}))
 		}}
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
-			owner.PgTx = tx
 			var completed, busy bool
 			var err error
-			posts, completed, busy, _, err = flushLegacySettlementInTx(ctx, owner, id)
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, owner.hook())
+			defer unhook()
+			posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
 			server.Raise(err)
 			if !completed || busy {
 				t.Fatal("stream control failed to settle")

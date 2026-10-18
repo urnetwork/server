@@ -24,7 +24,8 @@ catalog, including synchronous reproductions of asynchronous production work.
 
 The current CLI emits active Alerts, not ticket lifecycle events. It renders
 each eligible alert batch as Markdown or JSONL on stdout; stderr carries
-diagnostics. The private legacy ticket manager and console emitter remain in
+diagnostics. In continuous mode it can also post one Slack message per alert
+transition (§3.6). The private legacy ticket manager and console emitter remain in
 the package but are not wired into this CLI. Healthy findings are filtered
 before alert emission. The current CLI does not emit an all-probes heartbeat.
 Silence is not recovery. Confirm recovery from direct healthy observations and
@@ -68,8 +69,8 @@ the applicable verification window, and record that evidence in the run ledger.
    hosts themselves — not from a side-channel feed or a dashboard. The same
    rule everywhere: pg state from pg_stat_* on the primary, redis state from
    the nodes' own INFO/CLUSTER NODES, host state from the host. Dashboards and
-   inferred aggregates are not probe inputs. The narrow exceptions are §2.12
-   and §11.20:
+   inferred aggregates are not probe inputs. The narrow exceptions are §2.12,
+   §11.20 and §11.6a:
    Go runtime counters are emitted by the process itself and queried from
    Mimir with host/block/instance identity plus a 90-second freshness bound,
    because `/proc` RSS cannot distinguish allocated Go heap from retained
@@ -78,7 +79,11 @@ the applicable verification window, and record that evidence in the run ledger.
    that every sampled byte remains reachable. The Mimir-continuity probe tests
    the metric store itself with the raw range of an always-emitted build-info
    control; it never treats a dashboard rendering or traffic aggregate as the
-   signal.
+   signal. The MinIO probe (§11.6a) reads MinIO's own v3 drive, usage, quota
+   and request series from Mimir with the host's inventory identity and a
+   180-second freshness bound. MinIO's metrics endpoint is authenticated, and
+   its bearer token, like the root `mc` alias, stays root-only on the MinIO
+   host; the monitor holds neither.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
    per SIGNALS.md §6. Rate is reported; volume is never severity. The current
    cadence gate deduplicates an identity within a batch, counts its consecutive
@@ -95,7 +100,8 @@ host, redis-cli on the redis hosts, top/ss/dmesg/journalctl/docker anywhere.
 ssh authentication is delegated to `~/.ssh/config` (host → IdentityFile),
 assumed set up on whatever runs the monitor; no key material lives in
 `vault/<env>/monitor.yml` — it carries only the login user, host roles,
-operator-disabled state, overlay IPs, and redis ports.
+operator-disabled state, overlay IPs, redis ports, and the optional Slack
+alert webhook (`alerts.slack_webhook_url`, a credential; §3.6).
 
 **ssh-exec is the universal transport.** Every command in SIGNALS.md is
 written as a run-on-the-host command, and that is exactly how the monitor
@@ -145,7 +151,8 @@ first active version in `vault/<env>/services.yml`; historical versions are
 never probe targets.
 `vault/<env>/monitor.yml` (§7) carries only what exists nowhere else: the
 monitor ssh identity, host roles, explicit operator-disabled state, overlay
-IPs (local dev), and redis port layout. The pg path has one special rule from
+IPs (local dev), redis port layout, and the Slack alert webhook that the
+monitor and Grafana's default contact point share. The pg path has one special rule from
 the 2026-07-17 incident: diagnose on **direct 5432**, never through
 pgbouncer 6432 — but *also* probe 6432 cheaply, because "6432 queues/dies
 while 5432 connects instantly" is itself a documented discriminator
@@ -326,15 +333,96 @@ downstream system's specialization.
 
 ```go
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
+type SignalExecutionHandler func(ctx context.Context, signal Signal, execution SignalExecution) error
 ```
 
-The current CLI supplies this handler to `RunLoopWithOptions`, skips empty batches, and
-writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
+The current CLI supplies a `SignalExecutionHandler` to `RunExecutionLoop`,
+which schedules exactly like `RunLoopWithOptions`. A `SignalExecution` carries
+the gated alerts an `AlertHandler` receives, the alerts the cadence gate still
+holds below their Sustain, and whether the execution failed. The handler
+writes each nonempty set of gated alerts to stdout in the selected Markdown or
+JSONL format. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
-current CLI capabilities; additional sinks remain deferred. The fixed-schema
-`monitor-log-reconcile ` diagnostic receipt described below is bounded
-collector evidence, not an Alert, ticket event, or all-probes heartbeat.
+current CLI capabilities; sinks other than the Slack notifier below remain
+deferred. The fixed-schema `monitor-log-reconcile ` diagnostic receipt
+described below is bounded collector evidence, not an Alert, ticket event, or
+all-probes heartbeat.
+
+**Slack transition notifier** (`alert_slack.go`, owner decision 2026-10-14).
+In continuous mode the handler also gives every gated execution, empty ones
+included, to a notifier that posts to `vault/<env>/monitor.yml`
+`alerts.slack_webhook_url`, the webhook Grafana's default contact point uses
+(`bringyourctl grafana reconcile-alerting`). It posts one concise message per
+transition of an incident keyed by (signal id, class, target), frame excluded
+per SIGNALS.md §7: raised, escalated once to PAGE, and cleared after two
+consecutive complete runs of every signal that reported it in which nothing
+observed it. An alert the gate holds below its Sustain, as it does for the
+first runs after a one-run dip, is still observed. A run is incomplete, and
+clears nothing, when it failed or carries an unobservable alert, gated or
+held. Every signal's unknown state is unobservable: `alert_classes.go`
+classifies every alert class the monitor emits as visibility, an unknown
+state reported in place of an incident (`cannot-observe`, every
+`*-unobservable`, `pg-cpu-unavailable`, `host-metrics-missing`, the
+`*-schema-unavailable` classes and more), or incident, and a test fails for a
+class it leaves out. Probe `monitor/visibility`, the provider, PG sample,
+settings-generation and crash-report visibility alerts, the proxy public path
+without an allocation, and the `monitor/host-scope` partial alert in a run
+with blocked hosts (not the configured exclusion settings freshness reports
+every run) are unobservable too. The classification errs toward visibility.
+A persistent unknown state, such as service-load's
+`*-capability-unobservable` during a rollout, keeps that signal's other
+incidents from clearing until it resolves. Accept filters let unobservable
+findings through, so the shared redis memory probe's `redis/node-mem`
+`cannot-observe` also appears under redis-connections and redis-buffers. See
+SIGNALS.md, the cadence-mode `Sustain` note before §1. A clear says the
+incident is no longer reported, not that it recovered.
+
+State is process-local, so a restarted watcher, or a handoff candidate,
+re-announces every active alert. The raises from each signal's first Sustain
+complete runs, within the start window, which is where such alerts first pass
+the gate, are folded into one `[ACTIVE AT START] N incident(s)` digest, pages
+first. A digest posts two minutes after its first raise, at once when it gains
+a page (a page raise or the escalation of an incident it holds), and at exit.
+Failed runs do not use up a signal's start window, but the window closes 30
+minutes after start, or after three cadence floors when that is longer (45
+minutes with `-min-probe-cadence=15m`): a signal that fails for hours posts
+its first complete run's raises one by one. A clear of a digest incident
+posts the digest first. An at-start raise carries its incident's latest
+state, so a transition of that incident still held for the summary is
+dropped rather than posted after the digest. Later raises post one by one.
+With the 15-minute floor, expect a digest for each startup wave that has
+incidents: one a few minutes in for the standing logs, then one about two
+minutes after each Sustain round of the active probes. The PG query
+sample's configured-off state (no sample flag) is never posted.
+
+Messages are capped at 10 per sliding minute. Transitions over the cap, or
+refused by a full queue, are held for one summary that names them, incidents
+with a page first, 20 lines and a count of the rest. Posts never block the
+handler: a bounded queue feeds one sender that spaces posts by a second. A
+summary or digest the full queue refuses keeps its content for the next try.
+A post that Slack refuses with a 429 or a 503 is retried once after Slack's
+Retry-After (1 s without one, at most 30 s); only the sender waits. A timeout
+or another 5xx is not retried, because Slack may have taken the post. A
+message that fails is undelivered: once a post succeeds again, one
+`[UNDELIVERED] N message(s) queued between T1 and T2 failed to post` message
+lists them, though some may have reached the channel. Without a new message,
+the sender tries that report itself at most once a minute, and once more at
+exit. At exit the CLI first restores default signal handling, so a second
+Ctrl-C or SIGTERM ends the process at once, then drains the notifier for up
+to 15 s; one stderr line counts what the deadline abandoned, and another the
+undelivered messages never reported. Message text gets the same address
+scrubbing as stdout and stderr. Two overlapping watchers both post; there is
+no poster lease.
+
+An empty webhook disables the notifier with one stderr line at startup;
+`-slack-alerts=false` disables it for a watcher that must not post. `-once`
+never posts. The webhook is a credential: it is never logged or put in a
+message, and post failures are logged as a fixed class (net/http errors embed
+the URL), once per run of failures. A changed webhook makes a running posting
+watcher's settings stale (§1.6 settings freshness). A watcher that never posts
+leaves the webhook out of its compared settings, so a rotation does not make
+it stale.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
@@ -409,7 +497,8 @@ Escalation batteries pull incident windows non-interactively with
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
-- `RunLoopWithOptions` accepts a per-watcher `MinimumProbeCadence`; the CLI
+- `RunLoopWithOptions` and `RunExecutionLoop` accept a per-watcher
+  `MinimumProbeCadence`; the CLI
   exposes `-min-probe-cadence=15m` for an explicitly requested 15-minute active
   observation floor. Zero/default preserves immediate active startup and native
   cadences. A positive floor delays the **first active probe** by that floor,
@@ -434,12 +523,12 @@ Escalation batteries pull incident windows non-interactively with
 
 | cadence | probes (SIGNALS.md ref) |
 |---|---|
-| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
+| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12; MinIO drive free space vs its write floor, offline drives, bucket usage vs hard quota, S3 5xx/4xx rates 11.6a |
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; authoritative/recursive DNS aliases 18.3; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
 | 30m | Google Play crash issue/version advances plus explicit vitals freshness 20.1 |
-| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica topology 3.6; zombie-tx 1.3 |
+| 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica/node-inventory topology 3.6; zombie-tx 1.3 |
 | 6h | Apple App Crashes daily instances, privacy visibility, and replacement corrections 20.2 |
 | 24h | stats-landmine check (pg_stats n_distinct on transfer_contract.open + open-partial reltuples) §7; keyspace family histogram on fullest node 3.3; dmesg OOM scan 3.4 |
 
@@ -500,12 +589,13 @@ hosts:                # only monitor-specific facts; lan ips come
     overlay_ip: 172.28.208.182
     roles: [pg-primary]
   - name: by-us-fmt-5-edge-5
-    disabled: true             # known offline; excluded from all probes
+    # disabled: true           # known offline; excluded from all probes
     overlay_ip: 172.28.208.176
-    roles: [services]
+    roles: [minio, redis-cluster]       # minio arms SIGNALS.md §11.6a
+    redis: {node_ports: [6412, 6427]}   # nodes only; edge-6 is the entry
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
-    roles: [redis-cluster, minio]
+    roles: [redis-cluster]
     redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
   - name: snow
     overlay_ip: 172.28.208.185
@@ -533,6 +623,45 @@ dns_aliases:          # optional; explicit desired state, never learned from DNS
   expected_a: [192.0.2.10, 198.51.100.20]
   expected_aaaa: [2001:db8::10, 2001:db8:1::20]
 ```
+
+The `minio` role needs no other monitor.yml key. SIGNALS.md §11.6a joins
+Fluent Bit's `host` label (the xops inventory name, which must equal the host's
+`name`) to the host and reads MinIO's v3 series through any `services` host's
+loopback Mimir gateway; MinIO's own drive count is the expected denominator. No
+MinIO bearer token, `mc` credentials or drive list belongs here. With no
+enabled `minio` host the probe stays dark.
+
+A Redis cluster may span several `redis-cluster` hosts. Each host lists its
+own `node_ports` (a two-element list is an inclusive range), node ports are
+unique across hosts, and exactly one host sets `entry_port`; settings
+validation rejects any other layout. Cluster-wide observations (CLUSTER
+INFO/NODES and `-c` reads) go through the entry host, per-node observations
+run on every host over its own ports, and a node finding targets the
+`host:port` that runs it. `expected_replicas` is cluster-wide and is read from
+the entry host.
+
+One unreadable host does not blank a Redis signal. A sweep reports the host
+it cannot read as `cannot-observe` on `<host>/<observation>` (for example
+`by-us-fmt-5-edge-5/key-events`) and keeps judging the other hosts' nodes, so
+edge-6's pages still fire while edge-5 is unreachable. A cluster-wide verdict
+judged without the host is marked partial (`unobserved_hosts=` in its observed
+values, `(partial: …)` in its symptom), a cluster-wide healthy verdict waits
+until every host is read again, and partial data is never recorded as a
+baseline. The signal fails as a whole only when no host can be read, as a
+single host always has.
+
+Validation checks the inventory only against itself, so `redis-topology`
+(SIGNALS.md §3.6) also checks it against the cluster. Every addressed CLUSTER
+NODES member must announce the LAN address of the redis-cluster host whose
+`node_ports` lists its port, and every listed port must be such a member. Any
+mismatch is a `node-inventory-mismatch` warning naming the host and ports. Two
+layouts that validate are caught this way. A missing `redis:` block would drop
+that host's nodes from every per-node probe. A range covering ports that
+edge-6's nginx bridges to edge-5 would read edge-5's nodes as edge-6's and
+judge their memory against edge-6's RAM. A host's LAN address is its
+`config/<env>/settings.yml` route that most hosts' `routes` blocks agree on.
+A host outside the LAN (sille) overrides the Redis hosts to their overlay
+addresses, so no single block can be trusted.
 
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
 IdentityFile per host. Everything else shared is read from its source of
@@ -667,7 +796,8 @@ legacy ticket/console behavior is not the current CLI wiring described in §3.
    current CLI (identity/dedupe/hysteresis/auto-resolve; legacy JSON event line
    on stderr). Additional alerting channels
    (webhook, github pr, persistence/spool) deliberately DEFERRED — console
-   only for now (user decision 2026-07-17).
+   only for now (user decision 2026-07-17). The 2026-10-14 owner decision
+   added one: Slack transition messages from the continuous CLI (§3.6).
 3. **Baselines — DONE (2026-07-17).** Local history store (baseline.go:
    append-only per-metric files under ~/.urnetwork-monitor/<env>/baseline,
    14d retention, compaction); trailing-hour median brownout band live on
@@ -740,8 +870,9 @@ Decided (2026-07-17):
 
 - **Historical ticket sink**: the 2026-07-17 decision used a console emitter
   with stdout rendering and lifecycle JSON on stderr. Current CLI output is
-  the selected active-Alert format on stdout (§3.6); webhook and github-PR
-  emitters remain deferred.
+  the selected active-Alert format on stdout (§3.6), plus the optional Slack
+  transition notifier (2026-10-14); webhook and github-PR emitters for the
+  diagnosing system remain deferred.
 - **Control-plane events** (§6.4): read from the source of truth on the
   edges — the warp logs via journalctl and docker container status
   (`docker ps` state/created-at, `docker events` window) over ssh. A
@@ -752,9 +883,10 @@ Decided (2026-07-17):
   *fixer/debugger* working a ticket, not detection. Explicit exceptions are
   bounded application-counter rates whose lossless rate cannot be reconstructed
   after required log sampling, §2.12's fresh process-originated Go heap
-  metrics, and §11.20's raw always-emitted control used to test Mimir
-  continuity. All retain concrete series identity and static bands; none uses
-  a dashboard-derived judgment as the signal.
+  metrics, §11.6a's fresh MinIO-originated storage and request series, and
+  §11.20's raw always-emitted control used to test Mimir continuity. All
+  retain concrete series identity and static bands; none uses a
+  dashboard-derived judgment as the signal.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN
   deployment as a warp service comes after the probe set stabilizes.

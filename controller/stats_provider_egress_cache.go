@@ -40,6 +40,12 @@ type statsProviderEgressSnapshot struct {
 
 type statsProviderEgressCacheKeys struct{ value, fill string }
 
+// The count rules a snapshot was filled under, including the ARIN serving
+// epoch its Quality counts follow.
+func statsProviderEgressPolicyKey(ctx context.Context) string {
+	return model.ProviderEgressCountsPolicyKey(model.ArindbServingEpoch(ctx))
+}
+
 // Both keys share a slot; policy text and ownership tokens never become labels.
 func statsProviderEgressKeys(policyKey string) statsProviderEgressCacheKeys {
 	sum := sha256.Sum256([]byte(policyKey))
@@ -116,10 +122,14 @@ func (redisStatsProviderEgressCacheStore) release(ctx context.Context, key, toke
 
 // Fixed map keys retain every legitimate zero and historical smallint index.
 // The wire cap admits the entire three-bucket smallint domain, without truncation.
+// The modern provider gate's shadow arrived with schema 3 of
+// model.ProviderEgressCountsPolicyKey, so a snapshot without it lives under
+// an older policy key and is never read here.
 type statsProviderEgressWireCounts struct {
-	Buckets  map[string]map[string]int64 `json:"b"`
-	Reasons  map[string]int64            `json:"r"`
-	MaxIndex *int                        `json:"m"`
+	Buckets          map[string]map[string]int64 `json:"b"`
+	Reasons          map[string]int64            `json:"r"`
+	MaxIndex         *int                        `json:"m"`
+	ModernGateShadow map[string]map[string]int64 `json:"g"`
 }
 
 type statsProviderEgressWire struct {
@@ -129,8 +139,13 @@ type statsProviderEgressWire struct {
 	Counts    *statsProviderEgressWireCounts `json:"n"`
 }
 
+// Every bucket and exactly every reason the rules report, with the modern
+// provider gate's shadow. The reason and outcome sets follow
+// model.ProviderExcludedReasons and model.ProviderModernOutcomes; a change to
+// either bumps the schema of model.ProviderEgressCountsPolicyKey, so a
+// snapshot of another set lives under another key.
 func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
-	if counts == nil || counts.MaxIndex < 0 || counts.MaxIndex > statsProviderEgressMaxIndex || len(counts.BucketIndexCounts) != 3 || len(counts.ReasonCounts) != 8 {
+	if counts == nil || counts.MaxIndex < 0 || counts.MaxIndex > statsProviderEgressMaxIndex || len(counts.BucketIndexCounts) != 3 || len(counts.ReasonCounts) != len(model.ProviderExcludedReasons) {
 		return false
 	}
 	for _, bucket := range []string{model.RankModeQuality, model.RankModeSpeed, model.ProviderEgressBucketOnline} {
@@ -150,9 +165,24 @@ func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
 			}
 		}
 	}
-	for _, reason := range []string{model.ProviderExcludedBlackhole, model.ProviderExcludedTls, model.ProviderExcludedCountry, model.ProviderExcludedHealth, model.ProviderExcludedUnprobed, model.ProviderExcludedArinRisk, model.ProviderExcludedArinNonQuality, model.ProviderExcludedReliability} {
+	for _, reason := range model.ProviderExcludedReasons {
 		if count, ok := counts.ReasonCounts[reason]; !ok || count < 0 {
 			return false
+		}
+	}
+	// exactly the gate's buckets, each with exactly every outcome
+	if len(counts.ModernGateShadowCounts) != len(model.ProviderModernGateBuckets) {
+		return false
+	}
+	for _, bucket := range model.ProviderModernGateBuckets {
+		outcomes, ok := counts.ModernGateShadowCounts[bucket]
+		if !ok || len(outcomes) != len(model.ProviderModernOutcomes) {
+			return false
+		}
+		for _, outcome := range model.ProviderModernOutcomes {
+			if count, ok := outcomes[outcome]; !ok || count < 0 {
+				return false
+			}
 		}
 	}
 	return true
@@ -170,7 +200,12 @@ func encodeStatsProviderEgressSnapshot(snapshot *statsProviderEgressSnapshot, no
 	if fresh, err := statsProviderEgressSnapshotFresh(snapshot, now); err != nil || !fresh {
 		return "", errStatsProviderEgressInvalid
 	}
-	encoded, err := json.Marshal(statsProviderEgressWire{1, snapshot.StartedAt.UnixMilli(), snapshot.CompletedAt.UnixMilli(), &statsProviderEgressWireCounts{snapshot.Counts.BucketIndexCounts, snapshot.Counts.ReasonCounts, &snapshot.Counts.MaxIndex}})
+	encoded, err := json.Marshal(statsProviderEgressWire{1, snapshot.StartedAt.UnixMilli(), snapshot.CompletedAt.UnixMilli(), &statsProviderEgressWireCounts{
+		Buckets:          snapshot.Counts.BucketIndexCounts,
+		Reasons:          snapshot.Counts.ReasonCounts,
+		MaxIndex:         &snapshot.Counts.MaxIndex,
+		ModernGateShadow: snapshot.Counts.ModernGateShadowCounts,
+	}})
 	if err != nil || len(encoded) > statsProviderEgressWireBytes {
 		return "", errStatsProviderEgressInvalid
 	}
@@ -190,7 +225,7 @@ func decodeStatsProviderEgressSnapshot(value string, now time.Time) (*statsProvi
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, false, errStatsProviderEgressInvalid
 	}
-	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{BucketIndexCounts: wire.Counts.Buckets, ReasonCounts: wire.Counts.Reasons, MaxIndex: *wire.Counts.MaxIndex}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
+	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{BucketIndexCounts: wire.Counts.Buckets, ReasonCounts: wire.Counts.Reasons, MaxIndex: *wire.Counts.MaxIndex, ModernGateShadowCounts: wire.Counts.ModernGateShadow}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
 	fresh, err := statsProviderEgressSnapshotFresh(snapshot, now)
 	return snapshot, fresh, err
 }
@@ -308,21 +343,21 @@ func getStatsProviderEgressSnapshot(ctx context.Context, policyKey string) (snap
 		store: redisStatsProviderEgressCacheStore{}, now: time.Now,
 		newToken: func() string { return server.NewId().String() },
 		fill: func(ctx context.Context) (*model.ProviderEgressCounts, error) {
-			if model.ProviderEgressCountsPolicyKey() != policyKey {
+			if statsProviderEgressPolicyKey(ctx) != policyKey {
 				return nil, errStatsProviderEgressUnavailable
 			}
 			counts := model.CountProviderEgress(ctx)
-			if model.ProviderEgressCountsPolicyKey() != policyKey {
+			if statsProviderEgressPolicyKey(ctx) != policyKey {
 				return nil, errStatsProviderEgressUnavailable
 			}
 			return counts, nil
 		},
 	}
-	if model.ProviderEgressCountsPolicyKey() != policyKey {
+	if statsProviderEgressPolicyKey(ctx) != policyKey {
 		return nil, errStatsProviderEgressUnavailable
 	}
 	snapshot, err = cache.get(ctx, policyKey)
-	if err == nil && model.ProviderEgressCountsPolicyKey() != policyKey {
+	if err == nil && statsProviderEgressPolicyKey(ctx) != policyKey {
 		return nil, errStatsProviderEgressUnavailable
 	}
 	return

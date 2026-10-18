@@ -59,13 +59,19 @@ func providerUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery
 // Canceled recovery additionally requires the complete original sweep byte
 // census. Query failures never become evidence that the old debt is invalid.
 func inspectProviderUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery, paymentId server.Id, policy *server.ProviderPayoutTransition, allowCanceled bool) (latestClose, subsidyEnd *time.Time, returnErr error) {
+	return inspectProviderUsdcPaymentAttributionWithReview(ctx, query, paymentId, policy, allowCanceled, false)
+}
+
+// Only the locked replacement release may ignore its own review hold. It still
+// requires the exact same contract, amount, bonus and subsidy provenance.
+func inspectProviderUsdcPaymentAttributionWithReview(ctx context.Context, query server.PgCanQuery, paymentId server.Id, policy *server.ProviderPayoutTransition, allowCanceled, allowReviewHeld bool) (latestClose, subsidyEnd *time.Time, returnErr error) {
 	var cutoff *time.Time
 	if policy != nil {
 		cutoff = &policy.Cutoff
 	}
 	var allowed bool
 	result, err := query.Query(ctx, `SELECT
-			NOT p.completed AND (NOT p.canceled OR $3) AND NOT p.attribution_review_required AND p.payout_nano_cents >= 0
+			NOT p.completed AND (NOT p.canceled OR $3) AND (NOT p.attribution_review_required OR $4) AND p.payout_nano_cents >= 0
 			AND p.subsidy_payout_nano_cents >= 0 AND p.reliability_subsidy_nano_cents >= 0
 			AND EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
 			AND (NOT $3 OR p.payout_byte_count=(SELECT COALESCE(SUM(s.payout_byte_count),0) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id))
@@ -86,7 +92,7 @@ func inspectProviderUsdcPaymentAttribution(ctx context.Context, query server.PgC
 				AND sp.start_time < sp.end_time AND ($2::timestamp IS NULL OR sp.end_time <= $2))),
 			(SELECT MAX(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=p.payment_id),
 			(SELECT MAX(sp.end_time) FROM subsidy_payment sp WHERE sp.payment_plan_id=p.payment_plan_id AND (p.subsidy_payout_nano_cents>0 OR p.reliability_subsidy_nano_cents>0))
-			FROM account_payment p WHERE p.payment_id=$1`, paymentId, cutoff, allowCanceled)
+			FROM account_payment p WHERE p.payment_id=$1`, paymentId, cutoff, allowCanceled, allowReviewHeld)
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider USDC earning authority unavailable: %w", err)
 	}

@@ -12,6 +12,8 @@ package work
 //     contract clock stays authoritative; every deadline decision is
 //     re-checked in blocks inside the controller flows.
 //   - StEpochClose(e): compute + store the payout leaves/root; mark closed.
+//     Past its commit window an epoch closes without leaves and finalizes
+//     as a missed root.
 //   - StCommitRoot(e): idempotent commitOperator within the +commitWindow
 //     deadline; bounded retries via task reschedule; T-2h alert (D-11).
 //   - StDeposit(e): previous-epoch signed usage (bytes and users) priced at
@@ -28,6 +30,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -56,6 +59,13 @@ const (
 	stCommitRootRetryDelay   = 5 * time.Minute
 	stDepositRetryDelay      = 15 * time.Minute
 	stFinalizePokeRetryDelay = 5 * time.Minute
+
+	// The close reads every contract closed in the epoch in one census
+	// statement. On Main the 24-hour epoch 0 closed 9.2M contracts, read in
+	// 195-419 s (mean 249 s); the 7-day epoch 1 projects to 64-71M, 30-55
+	// minutes at those rates. Three hours stays inside the 4-hour root commit
+	// window and leaves an hour to commit.
+	stEpochCloseMaxTime = 3 * time.Hour
 )
 
 // StSyncChain (periodic)
@@ -109,7 +119,7 @@ func StSyncChain(
 
 	// closed-but-still-open rows -> compute leaves + root
 	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusOpen) {
-		if stEpoch.Epoch < state.Epoch {
+		if stEpoch.Epoch < state.Epoch && stV1Epoch(ctx, stEpoch.Epoch) {
 			scheduleStEpochClose(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
 	}
@@ -118,7 +128,7 @@ func StSyncChain(
 	// finalize block either way (a missed commit still finalizes — the
 	// pool total carries, D-11)
 	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusClosed) {
-		if state.HeadBlock <= stEpoch.CommitDeadlineBlock {
+		if state.HeadBlock <= stEpoch.CommitDeadlineBlock && stV1Epoch(ctx, stEpoch.Epoch) {
 			scheduleStCommitRoot(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
 		scheduleStFinalizePoke(clientSession, deploymentKey, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
@@ -131,6 +141,8 @@ func StSyncChain(
 	if !stHasPublishKind(ctx, deploymentKey, state.Epoch, model.StPublishKindDeposit) {
 		scheduleStDeposit(clientSession, deploymentKey, state.Epoch, 0, server.NowUtc())
 	}
+
+	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
 
 	return &StSyncChainResult{}, nil
 }
@@ -206,7 +218,7 @@ func scheduleStEpochClose(clientSession *session.ClientSession, deploymentKey mo
 		clientSession,
 		task.RunOnce("st_epoch_close", deploymentKey, epoch),
 		task.RunAt(runAt),
-		task.MaxTime(1*time.Hour),
+		task.MaxTime(stEpochCloseMaxTime),
 	)
 }
 
@@ -221,6 +233,13 @@ func StEpochClose(
 	ctx := clientSession.Ctx
 
 	root, leafCount, err := controller.StComputeEpochPayout(ctx, stEpochClose.Epoch)
+	if errors.Is(err, controller.ErrStCommitWindowClosed) {
+		// Closed without leaves, the sync finalizes it like any missed commit
+		// so the funded pool total carries (D-11). Retrying cannot commit.
+		model.SetStEpochStatus(ctx, deploymentKey, stEpochClose.Epoch, model.StEpochStatusClosed)
+		glog.Errorf("[st]epoch %d closed without a payout: %s\n", stEpochClose.Epoch, err)
+		return &StEpochCloseResult{}, nil
+	}
 	if err != nil {
 		glog.Infof("[st]epoch %d close failed (attempt %d): %s\n", stEpochClose.Epoch, stEpochClose.Attempt, err)
 		return &StEpochCloseResult{Retry: true}, nil
@@ -248,7 +267,7 @@ func StEpochClosePost(
 				clientSession,
 				task.RunOnce("st_epoch_close", stEpochClose.DeploymentKey, stEpochClose.Epoch),
 				task.RunAt(server.NowUtc().Add(stEpochCloseRetryDelay)),
-				task.MaxTime(1*time.Hour),
+				task.MaxTime(stEpochCloseMaxTime),
 			)
 		}
 		return nil

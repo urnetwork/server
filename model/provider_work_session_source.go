@@ -21,6 +21,10 @@ const ProviderWorkSessionSourceSchema = "urnetwork-provider-work-session-source-
 type ProviderWorkSessionSource struct {
 	authority protocol.ProviderWorkSourceAuthority
 	key       ed25519.PrivateKey
+	// loaded from the deployed provider_work_session.json rather than handed
+	// over by an explicit owner. Only a deployed source must find the
+	// transaction lookup index that migration 824 dropped before it signs.
+	vaultLoaded bool
 }
 
 type providerWorkSessionSourceContextKey struct{}
@@ -66,18 +70,48 @@ func providerWorkSessionSourceFromContext(ctx context.Context) *ProviderWorkSess
 	return source
 }
 
+// A decoded source, or its decoding failure, for one vault resource version.
+type providerWorkSessionSourceLoad struct {
+	source *ProviderWorkSessionSource
+	err    error
+}
+
+// Contract operations pin a source each, so decoding and key validation run
+// once per vault version rather than once per operation. An absent resource
+// is a cached resolution in the resolver and never reaches this cache.
+var providerWorkSessionSourceCache server.ResourceValueCache[server.ResourceVersion, providerWorkSessionSourceLoad]
+
 // This dedicated vault resource is intentionally independent of st.yml and the
 // ordinary artifact key. Strict finite decoding refuses accidental key reuse.
+// Each call returns an independent owner, even while the vault is unchanged.
 func loadProviderWorkSessionSource() (*ProviderWorkSessionSource, error) {
 	resource, err := server.Vault.SimpleResource("provider_work_session.json")
 	if err != nil {
 		return nil, err
 	}
-	raw, err := resource.BytesE()
-	if err != nil {
-		return nil, err
+	load := providerWorkSessionSourceCache.Get(resource.Version(), nil, func() (providerWorkSessionSourceLoad, bool) {
+		raw, err := resource.BytesE()
+		if err != nil {
+			// a failed read is retried by the next operation
+			return providerWorkSessionSourceLoad{err: err}, false
+		}
+		source, err := providerWorkSessionSourceFromBytes(raw)
+		if source != nil {
+			source.vaultLoaded = true
+		}
+		return providerWorkSessionSourceLoad{source: source, err: err}, true
+	})
+	if load.err != nil {
+		return nil, load.err
 	}
-	return providerWorkSessionSourceFromBytes(raw)
+	return load.source.clone(), nil
+}
+
+// An independent owner of the same validated authority and key.
+func (self *ProviderWorkSessionSource) clone() *ProviderWorkSessionSource {
+	authority := self.authority
+	authority.DirectoryPublicKeys = append([][32]byte(nil), self.authority.DirectoryPublicKeys...)
+	return &ProviderWorkSessionSource{authority: authority, key: bytes.Clone(self.key), vaultLoaded: self.vaultLoaded}
 }
 
 // Return only public source identity after the same finite parsing and signer

@@ -61,9 +61,6 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 	var joinOnce sync.Once
 	latencyTestId := server.NewId()
 	const speedTestId uint32 = 19
-	var warmupByteCount ByteCount
-	configured := make(chan struct{})
-	configuredClosed := false
 
 	deliveries := make(chan connectH1MeasurementDeliveryForTest, 4)
 	var retainedMessages [][]byte
@@ -73,9 +70,6 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 		// Every failure path frees the transaction before joining the real
 		// handler and exchange, then reconciles each borrowed payload share.
 		releaseWrite()
-		if !configuredClosed {
-			close(configured)
-		}
 		cancel()
 		if ws != nil {
 			ws.Close()
@@ -110,7 +104,6 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 		settings.ConnectionAnnounceSettings.SyncConnectionTimeout = time.Hour
 		settings.ConnectionAnnounceSettings.PassiveSpeedWindowDuration = time.Hour
 		settings.ConnectionAnnounceSettings.connectionRegisteredForTest = func(announce *ConnectionAnnounce) {
-			<-configured
 			announce.beforeMeasurementWriteForTest = func() {
 				writeOnce.Do(func() {
 					close(writeEntered)
@@ -128,7 +121,7 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 				if speed {
 					announce.speedTest = &SpeedTest{
 						TestId:         speedTestId,
-						TotalByteCount: warmupByteCount,
+						TotalByteCount: speedTestProbeByteCount,
 					}
 					announce.speedTestSendTime = time.Now().Add(-time.Second)
 				} else {
@@ -196,9 +189,6 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 	}
 	warmupWire, warmupMessage := encode(0, "synthetic H1 reader warmup")
 	followingWire, followingMessage := encode(1, "synthetic H1 payload after held measurement")
-	warmupByteCount = ByteCount(len(warmupWire))
-	close(configured)
-	configuredClosed = true
 
 	requestHeaders := http.Header{}
 	requestHeaders.Set("Authorization", "Bearer "+token)
@@ -253,6 +243,10 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 		start := []byte{clientconnect.TransportControlSpeedStart, 0, 0, 0, 0}
 		binary.BigEndian.PutUint32(start[1:], speedTestId)
 		write(start)
+		// the test's one probe; the warmup frame that follows is user traffic
+		probe := make([]byte, speedTestProbeByteCount)
+		setSpeedTestProbeHeader(probe, speedTestId)
+		write(probe)
 	}
 	write(warmupWire)
 	waitDelivery(warmupMessage)
@@ -286,8 +280,8 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 	wantMessages := uint64(3)
 	wantBytes := ByteCount(len(warmupWire) + 16 + len(followingWire))
 	if speed {
-		wantMessages = 4
-		wantBytes = ByteCount(5 + len(warmupWire) + 5 + len(followingWire))
+		wantMessages = 5
+		wantBytes = ByteCount(5 + speedTestProbeByteCount + len(warmupWire) + 5 + len(followingWire))
 	}
 	if receiveMessageCount != wantMessages || receiveByteCount != wantBytes {
 		t.Fatalf("H1 packet accounting while transaction held = (%d, %d), want (%d, %d)", receiveMessageCount, receiveByteCount, wantMessages, wantBytes)
@@ -310,4 +304,236 @@ func testConnectH1MeasurementDoesNotBlockReader(t testing.TB, speed bool) {
 	case <-ctx.Done():
 		t.Fatal("announcement did not finish after its measurement publisher was released")
 	}
+}
+
+// A current client echoes every frame over 16 bytes while a speed test runs,
+// so the user frames the platform interleaves with the probes come back too,
+// and it keeps sending its own traffic. The reader counted all of it, so the
+// exact count failed whenever there was user traffic and a provider was never
+// measured. Here the client is a real WebSocket peer that echoes like a
+// current client, around the real handler, writer, and reader: the test must
+// be accepted, and the client's own frames must still reach the resident.
+func TestConnectH1SpeedTestCountsOnlyEchoedProbes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		registered := make(chan *ConnectionAnnounce, 1)
+		deliveries := make(chan connectH1MeasurementDeliveryForTest, 8)
+		var retainedMessages [][]byte
+		var env *peerDiscoveryEnv
+		var ws *websocket.Conn
+		defer func() {
+			// join the real handler and exchange, then reconcile each borrowed
+			// payload share
+			cancel()
+			if ws != nil {
+				ws.Close()
+			}
+			if env != nil {
+				env.Close()
+			}
+			for {
+				select {
+				case delivery := <-deliveries:
+					retainedMessages = append(retainedMessages, delivery.messageBytes)
+				default:
+					for _, message := range retainedMessages {
+						if !clientconnect.MessagePoolReturn(message) {
+							t.Error("H1 delivery retained another pooled owner after handler and resident teardown")
+						}
+					}
+					return
+				}
+			}
+		}()
+
+		speedTotalByteCount := 512 * model.Kib
+		env = testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, func(settings *ExchangeSettings) {
+			settings.EnableNetworkPeers = false
+		}, func(settings *ConnectHandlerSettings) {
+			settings.EnableH1Plus = false
+			settings.ConnectionAnnounceTimeout = 0
+			// only the test below starts a speed test
+			settings.ConnectionTestConfig = &TestConfig{
+				MaxSpeedCount:       1,
+				SpeedTotalByteCount: speedTotalByteCount,
+			}
+			settings.ConnectionAnnounceSettings.EnableNetworkPeers = false
+			settings.ConnectionAnnounceSettings.LocationRetryTimeout = 0
+			settings.ConnectionAnnounceSettings.SyncConnectionTimeout = time.Hour
+			settings.ConnectionAnnounceSettings.PassiveSpeedWindowDuration = time.Hour
+			settings.ConnectionAnnounceSettings.connectionRegisteredForTest = func(announce *ConnectionAnnounce) {
+				select {
+				case registered <- announce:
+				case <-ctx.Done():
+				}
+			}
+		})
+		clientId, token := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "synthetic H1 speed test client",
+			DeviceSpec:  "synthetic",
+		})
+		env.exchange.beforeResidentProfileForTest = func(resident *Resident) {
+			resident.client.AddReceiveCallback(func(source clientconnect.TransferPath, frames []*protocol.Frame, _ clientconnect.Peer) {
+				for _, frame := range frames {
+					if frame.MessageType != protocol.MessageType_TestSimpleMessage {
+						continue
+					}
+					pooled, _ := clientconnect.MessagePoolCheck(frame.MessageBytes)
+					delivery := connectH1MeasurementDeliveryForTest{
+						source:       source,
+						messageBytes: clientconnect.MessagePoolShareReadOnly(frame.MessageBytes),
+						pooled:       pooled,
+					}
+					select {
+					case deliveries <- delivery:
+					default:
+						clientconnect.MessagePoolReturn(delivery.messageBytes)
+					}
+				}
+			})
+		}
+
+		encode := func(path clientconnect.TransferPath, sequenceId clientconnect.Id, sequenceNumber uint64, content string) (wireBytes []byte, messageBytes []byte) {
+			t.Helper()
+			messageBytes, err := proto.Marshal(&protocol.SimpleMessage{Content: content})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wireBytes, err = proto.Marshal(&protocol.TransferFrame{
+				TransferPath: path.ToProtobuf(),
+				Pack: &protocol.Pack{
+					MessageId:      clientconnect.NewId().Bytes(),
+					SequenceId:     sequenceId.Bytes(),
+					SequenceNumber: sequenceNumber,
+					Head:           true,
+					Frames: []*protocol.Frame{{
+						MessageType:  protocol.MessageType_TestSimpleMessage,
+						MessageBytes: messageBytes,
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wireBytes, messageBytes
+		}
+		// the client's own traffic during the test, then a frame after it
+		clientPath := clientconnect.NewTransferPath(clientconnect.Id(clientId), clientconnect.ControlId, clientconnect.Id{})
+		clientSequenceId := clientconnect.NewId()
+		firstWire, firstMessage := encode(clientPath, clientSequenceId, 0, "synthetic client frame during the speed test")
+		secondWire, secondMessage := encode(clientPath, clientSequenceId, 1, "synthetic client frame before the speed stop echo")
+		afterWire, afterMessage := encode(clientPath, clientSequenceId, 2, "synthetic client frame after the speed test")
+		// what the client echoes for a platform user frame written between
+		// probes: a frame from another client to this one
+		platformPath := clientconnect.NewTransferPath(clientconnect.NewId(), clientconnect.Id(clientId), clientconnect.Id{})
+		platformWire, _ := encode(platformPath, clientconnect.NewId(), 0, "synthetic platform frame between probes")
+
+		requestHeaders := http.Header{}
+		requestHeaders.Set("Authorization", "Bearer "+token)
+		requestHeaders.Set("X-UR-InstanceId", server.NewId().String())
+		requestHeaders.Set("X-UR-TransportVersion", "2")
+		dialer := &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+		var err error
+		ws, _, err = dialer.DialContext(ctx, fmt.Sprintf("ws://127.0.0.1:%d/", env.port), requestHeaders)
+		if err != nil {
+			t.Fatalf("production H1 WebSocket admission: %v", err)
+		}
+		var announce *ConnectionAnnounce
+		select {
+		case announce = <-registered:
+		case <-ctx.Done():
+			t.Fatal("production H1 announcement did not finish registration")
+		}
+
+		deadline, _ := ctx.Deadline()
+		write := func(message []byte) {
+			t.Helper()
+			if err := ws.SetWriteDeadline(deadline); err != nil {
+				t.Fatal(err)
+			}
+			if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
+				t.Fatalf("write real H1 frame: %v", err)
+			}
+		}
+		read := func() []byte {
+			t.Helper()
+			if err := ws.SetReadDeadline(deadline); err != nil {
+				t.Fatal(err)
+			}
+			messageType, message, err := ws.ReadMessage()
+			if err != nil {
+				t.Fatalf("read real H1 frame: %v", err)
+			}
+			if messageType != websocket.BinaryMessage {
+				return nil
+			}
+			return message
+		}
+		isControl := func(message []byte, control clientconnect.TransportControl) bool {
+			return len(message) == 5 && message[0] == control
+		}
+
+		announce.nextSpeed()
+
+		// the start control comes back, then the client's own traffic and the
+		// echo of a platform user frame mix with the echoed probes
+		var testId uint32
+		for {
+			message := read()
+			if isControl(message, clientconnect.TransportControlSpeedStart) {
+				testId = binary.BigEndian.Uint32(message[1:5])
+				write(message)
+				break
+			}
+		}
+		write(firstWire)
+		write(platformWire)
+		probeByteCount := 0
+		for {
+			message := read()
+			if isControl(message, clientconnect.TransportControlSpeedStop) {
+				write(secondWire)
+				write(message)
+				break
+			}
+			if 16 < len(message) {
+				// every frame over 16 bytes, probe or not
+				write(message)
+				if isSpeedTestProbe(message, testId) {
+					probeByteCount += len(message)
+				}
+			}
+		}
+		// the reader applies each frame in order, so once this later frame
+		// reaches the resident, the stop echo has been applied
+		write(afterWire)
+		for _, want := range [][]byte{firstMessage, secondMessage, afterMessage} {
+			select {
+			case delivery := <-deliveries:
+				retainedMessages = append(retainedMessages, delivery.messageBytes)
+				if delivery.source.SourceId != clientconnect.Id(clientId) || !bytes.Equal(delivery.messageBytes, want) {
+					t.Fatal("production resident received the wrong source or client frame")
+				}
+			case <-ctx.Done():
+				t.Fatal("a client frame sent during the speed test did not reach the resident")
+			}
+		}
+
+		speedCount, pendingSpeedTest, maxBytesPerSecond := func() (int, *SpeedTest, ByteCount) {
+			announce.stateLock.Lock()
+			defer announce.stateLock.Unlock()
+			return announce.speedCount, announce.speedTest, announce.maxBytesPerSecond
+		}()
+		if speedCount != 1 || pendingSpeedTest != nil || maxBytesPerSecond <= 0 {
+			t.Fatalf(
+				"speed test with user frames among its probes: count = %d, pending = %v, rate = %d, want one accepted sample",
+				speedCount, pendingSpeedTest, maxBytesPerSecond,
+			)
+		}
+		if probeByteCount != int(speedTotalByteCount) {
+			t.Fatalf("the platform wrote %d bytes of probes of test %d, want %d", probeByteCount, testId, speedTotalByteCount)
+		}
+	})
 }

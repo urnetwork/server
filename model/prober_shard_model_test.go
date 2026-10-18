@@ -342,11 +342,22 @@ func TestProberShardLateMintAndRefillAreRejected(t *testing.T) {
 		if err = DrainProberShard(ctx, owner.Key); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = AuthNetworkClient(&AuthNetworkClientArgs{SourceClientId: &owner.ClientId}, s); !errors.Is(err, ErrProberShardRetired) {
-			t.Fatal("late derived client escaped drain", err)
-		}
-		if _, err = AuthNetworkClient(&AuthNetworkClientArgs{ClientId: &owner.ClientId}, s); !errors.Is(err, ErrProberShardRetired) {
-			t.Fatal("late refresh escaped drain", err)
+		// drain deactivates the shard's client, so the auth transaction's
+		// session check refuses its token before the shard fence
+		for _, late := range []struct {
+			name string
+			args *AuthNetworkClientArgs
+		}{
+			{name: "late derived client", args: &AuthNetworkClientArgs{SourceClientId: &owner.ClientId}},
+			{name: "late refresh", args: &AuthNetworkClientArgs{ClientId: &owner.ClientId}},
+		} {
+			refusal := server.HandleError(func() {
+				_, err := AuthNetworkClient(late.args, s)
+				t.Errorf("%s was not refused: %v", late.name, err)
+			})
+			if refusalErr, ok := refusal.(error); !ok || !errors.Is(refusalErr, session.ErrByJwtInactive) {
+				t.Fatal(late.name+" escaped drain", refusal)
+			}
 		}
 		if _, err = BeginProberShard(ctx, owner.Key, 128*1024, time.Hour); !errors.Is(err, ErrProberShardRetired) {
 			t.Fatal("retired epoch was replenished", err)

@@ -51,7 +51,11 @@ go build -o /tmp/arindbctl ./arindbctl
 
 `geoipupdate` must be installed. The protected `vault/mm-geoip.yml` document
 contains `account_id`, `license_key`, and an `edition_ids` list that includes
-`GeoLite2-City`. The downloader converts it into an owner-only temporary native
+`GeoLite2-City`. When the list also names `GeoLite2-ASN`, `mmdb/` gains
+`geolite2-asn.mmdb`, which the server answers as my-ip-info's `asn`
+(lag.dev/PLAN.md A3); it must validate like the City file or nothing is
+published, and without the edition the bundle is unchanged. The downloader
+converts the document into an owner-only temporary native
 `GeoIP.conf`, passes only its filename to `geoipupdate`, and removes it on
 success, failure, or cancellation before publishing the database bundle. It
 never stores the secret in the bundle or prints parser/updater diagnostics.

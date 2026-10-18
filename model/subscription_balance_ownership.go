@@ -4,13 +4,14 @@ package model
 
 import (
 	"context"
-	"errors"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/task"
 )
 
-var errTransferBalanceOwnershipBusy = errors.New("transfer balance ownership is busy")
+// Another writer holds a grant. A contention refusal: the work is left to the
+// holder or a later attempt, and a recovery counts it without a stack report.
+var errTransferBalanceOwnershipBusy = server.NewContentionError("transfer balance ownership is busy")
 
 func transferBalanceOwnershipKeys(balanceIds []server.Id) []server.PgOwnershipKey {
 	keys := make([]server.PgOwnershipKey, len(balanceIds))
@@ -18,6 +19,22 @@ func transferBalanceOwnershipKeys(balanceIds []server.Id) []server.PgOwnershipKe
 		keys[index] = server.NewPgOwnershipKey("transfer_balance", id)
 	}
 	return keys
+}
+
+// For cleanups that read balance ids from table data, where the schema allows
+// the zero id. No grant has it (NewId never mints it), and its ownership key
+// panics, so no financial writer can ever own it: a cleanup admits the other
+// ids and keeps its row locks on every row. Without this, one zero id would
+// fail the same cleanup page on every pass and stop all work behind it.
+// Financial writers do not use this and keep failing closed on a zero id.
+func ownableTransferBalanceIds(balanceIds []server.Id) []server.Id {
+	ownable := make([]server.Id, 0, len(balanceIds))
+	for _, balanceId := range balanceIds {
+		if balanceId != (server.Id{}) {
+			ownable = append(ownable, balanceId)
+		}
+	}
+	return ownable
 }
 
 // An empty reservation has no shared balance resource. Otherwise refusal

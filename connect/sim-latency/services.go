@@ -130,9 +130,8 @@ func newSimulationExchangeSettings(servicesConfig *ServicesConfig) *connectserve
 	// run the real per-connection latency + speed tests so scores reflect
 	// the simulated conditions
 	settings.ConnectionTestConfig = connectserver.DefaultTestConfig()
-	// warm-up tuning: the score gate needs a completed speed test (a
-	// provider missing it scores at the cutoff and is excluded), so fire the
-	// synthetic speed test quickly and register/test the connection promptly.
+	// Warm-up tuning makes measured performance available promptly. Missing
+	// speed evidence penalizes ranking, not otherwise eligible membership.
 	settings.ConnectionAnnounceTimeout = servicesConfig.AnnounceTimeout
 	settings.ConnectionAnnounceSettings.SyntheticSpeedTimeout = servicesConfig.SpeedTestTimeout
 	settings.ConnectionAnnounceSettings.PassiveSpeedWindowDuration = servicesConfig.SpeedTestTimeout

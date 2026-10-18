@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -93,6 +94,12 @@ type monitorYaml struct {
 	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
 	// the former to noop and the latter to fail closed as invalid desired state.
 	DNSAliases yaml.Node `yaml:"dns_aliases"`
+	// Outbound notification. An empty webhook disables the Slack notifier.
+	// bringyourctl reads the same key for Grafana's default contact point
+	// (grafana.AlertRoutingSettingsFromMonitorVault).
+	Alerts struct {
+		SlackWebhookUrl string `yaml:"slack_webhook_url"`
+	} `yaml:"alerts"`
 }
 
 type dnsAliasesYaml struct {
@@ -203,8 +210,12 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, fmt.Errorf("monitor.yml: %w", err)
 	}
-	var y monitorYaml
-	if err := monitorResource.UnmarshalYamlE(&y); err != nil {
+	monitorData, err := monitorResource.BytesE()
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("monitor.yml: %w", err)
+	}
+	y, err := decodeMonitorYaml(monitorData)
+	if err != nil {
 		return SignalSettings{}, err
 	}
 
@@ -309,6 +320,9 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		GooglePlay:      loadGooglePlayReportingSettings(),
 		AppleReporting:  loadAppleReportingSettings(),
 		Credentials:     loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
+		AlertNotifications: AlertNotificationSettings{
+			SlackWebhookUrl: strings.TrimSpace(y.Alerts.SlackWebhookUrl),
+		},
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -405,6 +419,21 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// decodeMonitorYaml is the non-strict decode of vault monitor.yml. Its errors
+// name only line numbers: YAML errors can quote document values, and the
+// document holds the Slack webhook credential.
+func decodeMonitorYaml(data []byte) (monitorYaml, error) {
+	var y monitorYaml
+	if err := yaml.Unmarshal(data, &y); err != nil {
+		lines := regexp.MustCompile(`line \d+`).FindAllString(err.Error(), 8)
+		if len(lines) == 0 {
+			return monitorYaml{}, errors.New("monitor.yml: invalid YAML")
+		}
+		return monitorYaml{}, fmt.Errorf("monitor.yml: invalid YAML (%s)", strings.Join(lines, ", "))
+	}
+	return y, nil
 }
 
 // The existing narrow LB projection omits router intent. Compare complete
@@ -1350,17 +1379,32 @@ func loadConfig() *monitorConfig {
 }
 
 // lanRoutes reads config/<env>/settings.yml and returns host name -> lan ip.
-// The routes map is per-host but identical across hosts (yaml anchor), so any
-// host's routes block is authoritative. Best-effort: returns empty on any
-// shape mismatch, which only matters in lan mode.
+// Best-effort: returns empty on any shape mismatch, which only matters in lan
+// mode.
 func lanRoutes() map[string]string {
-	routeIps := map[string]string{}
 	resource, err := server.Config.SimpleResource("settings.yml")
 	if err != nil {
-		return routeIps
+		return map[string]string{}
 	}
-	for _, v := range resource.Parse() {
-		hostSettings, ok := v.(map[string]any)
+	return lanRoutesFromSettings(resource.Parse())
+}
+
+// lanRoutesFromSettings picks each host's lan ip from the per-host routes
+// blocks. The LAN hosts share one block (a yaml anchor), but a host outside
+// the LAN overrides the routes it cannot use (sille reaches the Redis hosts
+// at their overlay addresses), so no single host's block is authoritative and
+// the settings map has no order. Each host's lan ip is the route most blocks
+// agree on; a tie goes to the first block in host-name order.
+func lanRoutesFromSettings(settings map[string]any) map[string]string {
+	settingsHosts := make([]string, 0, len(settings))
+	for settingsHost := range settings {
+		settingsHosts = append(settingsHosts, settingsHost)
+	}
+	sort.Strings(settingsHosts)
+	votes := map[string]map[string]int{}
+	candidates := map[string][]string{}
+	for _, settingsHost := range settingsHosts {
+		hostSettings, ok := settings[settingsHost].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -1368,12 +1412,29 @@ func lanRoutes() map[string]string {
 		if !ok {
 			continue
 		}
-		for name, ip := range routes {
-			routeIps[name] = yamlString(ip)
+		for name, value := range routes {
+			ip := yamlString(value)
+			if ip == "" {
+				continue
+			}
+			if votes[name] == nil {
+				votes[name] = map[string]int{}
+			}
+			if votes[name][ip] == 0 {
+				candidates[name] = append(candidates[name], ip)
+			}
+			votes[name][ip]++
 		}
-		if len(routeIps) > 0 {
-			break
+	}
+	routeIps := map[string]string{}
+	for name, ips := range candidates {
+		chosen := ips[0]
+		for _, ip := range ips[1:] {
+			if votes[name][chosen] < votes[name][ip] {
+				chosen = ip
+			}
 		}
+		routeIps[name] = chosen
 	}
 	return routeIps
 }

@@ -2,20 +2,20 @@ package controller
 
 import (
 	"context"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
-// This private diagnostic binds the unmodified native ControlSync retry to
-// the actual resident frame dispatcher and PostgreSQL close accumulator. It
-// does not assign the mechanism to any existing Main report.
+// Withhold the first native ACK until the same serialized report reaches the
+// real controller twice. Legacy lower bounds and exact identities must both
+// settle; only legacy independent equal work accepts conservative undercounting.
 func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -42,6 +42,7 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 				if escrow == nil || escrow.TransferByteCount != 200 {
 					t.Fatal("fixture did not receive its exact funded grant")
 				}
+				metricBefore := testutil.ToFloat64(transferByteCounter)
 
 				settings := connect.DefaultClientSettings()
 				settings.EncryptionSettings.Mode = connect.EncryptionModeOff
@@ -129,8 +130,8 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 				}
 				sendCheckpoint()
 				if !loseAck {
-					// Equal payloads are two legitimate operations here. A
-					// future fix must not dedupe by amount or payload hash.
+					// Only identities can prove these equal payloads are two
+					// operations. Legacy compatibility deliberately undercounts.
 					sendCheckpoint()
 				}
 				if committed.Load() != 2 {
@@ -154,17 +155,17 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 				server.Raise(closeParty(provider, final, providerReport))
 				server.Raise(closeParty(provider, final, providerReport)) // Same final report must not add twice.
 				err = closeParty(source, 200, sourceReport)
-				refuse := loseAck && !identity
-				if refuse {
-					if err == nil || !strings.Contains(err.Error(), "Escrow does not have enough value to pay out the full amount.") {
-						t.Fatal("native duplicated checkpoint did not reach the owning accounting refusal")
-					}
-				} else {
-					server.Raise(err)
-					flushed, err := model.FlushTransferDebits(ctx, int(balance[15])%model.TransferDebitShardCount, nil, 1)
-					if err != nil || flushed.Applied != 1 || flushed.Released != 1 {
-						t.Fatal("healthy distinct checkpoints did not settle exactly once")
-					}
+				server.Raise(err)
+				flushed, err := model.FlushTransferDebits(ctx, int(balance[15])%model.TransferDebitShardCount, nil, 1)
+				if err != nil || flushed.Applied != 1 || flushed.Released != 1 {
+					t.Fatal("native checkpoint accounting did not settle exactly once")
+				}
+				wantDestination, wantCredit, wantPayout := int64(200), int64(800), int64(200)
+				if !identity && !loseAck {
+					wantDestination, wantCredit, wantPayout = 100, 850, 150
+				}
+				if delta := testutil.ToFloat64(transferByteCounter) - metricBefore; delta != float64(200+wantDestination) {
+					t.Fatal("native checkpoint or final retries changed committed transfer metrics", delta)
 				}
 				server.Db(ctx, func(conn server.PgConn) {
 					var usedSource, usedDestination, issued, reserved, credit, payout int64
@@ -179,11 +180,7 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
  (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
  COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$1),0)
  FROM transfer_contract WHERE contract_id=$1`, escrow.ContractId, balance).Scan(&issued, &terminal, &usedSource, &usedDestination, &checkpointCount, &reserved, &settled, &credit, &payout))
-					wantDestination, wantCredit, wantPayout := int64(200), int64(800), int64(200)
-					if refuse {
-						wantDestination, wantCredit, wantPayout = 300, 1000, 0
-					}
-					if issued != 200 || reserved != 200 || usedSource != 200 || usedDestination != wantDestination || checkpointCount != 0 || terminal != !refuse || settled != !refuse || credit != wantCredit || payout != wantPayout {
+					if issued != 200 || reserved != 200 || usedSource != 200 || usedDestination != wantDestination || checkpointCount != 0 || !terminal || !settled || credit != wantCredit || payout != wantPayout {
 						t.Fatal("native/controller/model close evidence or financial conservation changed")
 					}
 				})

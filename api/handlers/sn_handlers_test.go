@@ -47,14 +47,52 @@ func configureSnEvidenceHandler(t *testing.T) (*controller.StConfig, *ecdsa.Priv
 	}
 	controller.SetStConfig(config)
 	t.Cleanup(func() { controller.SetStConfig(nil) })
-	root := t.TempDir()
-	popBlobConfig := server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf(
-		"authority: local\npath: %s\nprefix: blob\nmax_bytes: %d\n",
-		root,
-		16*1024*1024,
-	)))
-	t.Cleanup(popBlobConfig)
+	useImplicitLocalBlobStore(t)
 	return config, artifactKey
+}
+
+// Selects the implicit local blob store under a private site home, which
+// LoadBlobStore picks in WARP_ENV=local when the vault has no minio.yml, and
+// returns its root. An explicit local minio.yml would select the durable
+// volume backend, whose custody a test cannot satisfy, and an inherited one
+// could name a real endpoint, so a visible minio.yml fails the fixture.
+func useImplicitLocalBlobStore(t testing.TB) string {
+	t.Helper()
+	if env, err := server.Env(); err != nil || env != "local" {
+		t.Fatal("the blob fixture requires the local test environment", err)
+	}
+	siteRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARP_SITE_HOME", siteRoot)
+	if _, err := server.Vault.SimpleResource("minio.yml"); !errors.Is(err, server.ErrResourceNotFound) {
+		t.Fatal("the blob fixture inherited a blob configuration", err)
+	}
+	return filepath.Join(siteRoot, "blob")
+}
+
+// The evidence fixture's blob store loads and keeps its objects under the
+// fixture's private site home. The explicit local minio.yml the fixture wrote
+// before selected the durable volume backend, which refuses without a custody
+// declaration, so every evidence test failed before reaching its handler.
+func TestSnEvidenceFixtureStoresInAPrivateLocalBlobStore(t *testing.T) {
+	configureSnEvidenceHandler(t)
+	store, ok := server.LoadBlobStore()
+	if !ok {
+		t.Fatal("the evidence fixture has no blob store")
+	}
+	source := filepath.Join(t.TempDir(), "object")
+	if err := os.WriteFile(source, []byte("synthetic evidence object"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := store.Prefix() + "/fixture/object"
+	if err := store.Put(t.Context(), key, source, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("WARP_SITE_HOME"), "blob", filepath.FromSlash(key))); err != nil {
+		t.Fatalf("the object is not under the fixture's private site home: %v", err)
+	}
 }
 
 func signedSnEvidence(t *testing.T, config *controller.StConfig, artifactKey *ecdsa.PrivateKey) *startifact.EvidenceEnvelope {

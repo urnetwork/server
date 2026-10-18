@@ -31,14 +31,14 @@ type ProviderPaymentRequest struct {
 // Circle. The stable key also identifies its immutable audit row; a retry must
 // match that row byte-for-byte. No external operation runs in this transaction.
 func RetainProviderPaymentRequest(ctx context.Context, basis *ProviderPaymentBasis, amount float64, network string) (returnErr error) {
-	if basis == nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
+	if basis == nil || basis.PaymentId == (server.Id{}) || basis.WalletAddress == "" || basis.Blockchain == "" || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
 		return ErrProviderPaymentBasisChanged
 	}
 	details, err := json.Marshal(ProviderPaymentRequest{Basis: *basis, Amount: amount, Network: network})
 	if err != nil {
 		return err
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(basis.PaymentId, basis.Blockchain, basis.WalletAddress, ""), func(tx server.PgTx) {
 		returnErr = retainProviderPaymentRequestInTx(ctx, tx, basis, details)
 	}, server.TxReadCommitted)
 	return
@@ -105,10 +105,11 @@ func retainProviderAttemptInTx(ctx context.Context, tx server.PgTx, expected *Ac
 // basis. A lost acknowledgement may safely repeat the same key and record; an
 // old response cannot overwrite a different attempt or processor record.
 func SetProviderPaymentRecord(ctx context.Context, basis *ProviderPaymentBasis, amount float64, record string) (returnErr error) {
-	if basis == nil || record == "" || len(record) > 4096 || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
+	if basis == nil || basis.PaymentId == (server.Id{}) || record == "" || len(record) > 4096 || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return ErrProviderPaymentAttemptChanged
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(basis.PaymentId, basis.Blockchain, basis.WalletAddress, record), func(tx server.PgTx) {
+		returnErr = nil
 		if !lockProviderPaymentBasis(ctx, tx, basis, false) {
 			// The accepted response still matters even after another worker
 			// advanced the attempt. Retain it without overwriting current markers.
@@ -133,6 +134,18 @@ func SetProviderPaymentRecord(ctx context.Context, basis *ProviderPaymentBasis, 
 		}
 		current, err := dbGetPayment(ctx, tx, basis.PaymentId)
 		server.Raise(err)
+		if providerPaymentRecordClaimedInTx(ctx, tx, record, current) {
+			if current != nil {
+				conflict, err := json.Marshal(struct {
+					Record string `json:"record"`
+				}{Record: record})
+				server.Raise(err)
+				retainProviderAttemptInTx(ctx, tx, current, "RECORD_OWNERSHIP_CONFLICT", string(conflict))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET attribution_review_required=true WHERE payment_id=$1`, basis.PaymentId))
+			}
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
 		if current == nil || (current.PaymentRecord != nil && (*current.PaymentRecord != record || current.TokenAmount == nil || *current.TokenAmount != amount)) {
 			if current != nil {
 				conflict, err := json.Marshal(struct {
@@ -186,7 +199,7 @@ func ResetProviderPaymentSubmission(ctx context.Context, basis *ProviderPaymentB
 // A completed but unexplained historical gross is reported for review; only its
 // observed processor transfer is complete, with no inferred paid-gross credit.
 func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, status, receipt, txHash string, reviewRequired bool) (complete, canceled bool, returnErr error) {
-	if expected == nil || expected.PaymentRecord == nil || len(receipt) > providerPaymentReceiptLimit || len(txHash) > 4096 {
+	if expected == nil || expected.PaymentId == (server.Id{}) || expected.PaymentRecord == nil || len(receipt) > providerPaymentReceiptLimit || len(txHash) > 4096 {
 		return false, false, ErrProviderPaymentAttemptChanged
 	}
 	status = strings.ToUpper(status)
@@ -205,6 +218,12 @@ func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, 
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET attribution_review_required=true WHERE payment_id=$1 AND
 					(circle_idempotency_key IS DISTINCT FROM $2::uuid OR payment_record IS DISTINCT FROM $3::text)`, expected.PaymentId, expected.CircleIdempotencyKey, expected.PaymentRecord))
 			}
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if providerPaymentRecordClaimedInTx(ctx, tx, *expected.PaymentRecord, expected) {
+			retainProviderAttemptInTx(ctx, tx, expected, "RECORD_OWNERSHIP_CONFLICT", receipt)
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET attribution_review_required=true WHERE payment_id=$1`, expected.PaymentId))
 			returnErr = ErrProviderPaymentAttemptChanged
 			return
 		}
@@ -244,16 +263,15 @@ func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, 
 			returnErr = fmt.Errorf("processor status %q is not an admitted outcome; attempt retained", status)
 		}
 	}
+	keys := providerPaymentAttributionKeys(expected.PaymentId, "", "", *expected.PaymentRecord)
 	if status == "COMPLETE" {
 		if expected.NetworkId == (server.Id{}) {
 			return false, false, ErrProviderPaymentAttemptChanged
 		}
 		// The locked attempt predicate includes this exact network identity.
 		// Stale attempts still retain their audit event inside the same body.
-		keys := append(accountBalanceOwnershipKeys([]server.Id{expected.NetworkId}), server.NewPgOwnershipKey("account_payment", expected.PaymentId))
-		server.OwnedTx(ctx, keys, apply, server.TxReadCommitted)
-	} else {
-		server.Tx(ctx, apply, server.TxReadCommitted)
+		keys = append(keys, accountBalanceOwnershipKeys([]server.Id{expected.NetworkId})...)
 	}
+	server.OwnedTx(ctx, keys, apply, server.TxReadCommitted)
 	return
 }

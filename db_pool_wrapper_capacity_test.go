@@ -69,10 +69,12 @@ func TestPgPoolWrapperLifecycleFullCancellation(t *testing.T) {
 			})
 			run := func(ctx context.Context, borrowed func(*pgconn.PgConn)) {
 				if transaction {
+					// A zero stop bound interrupts the held statement at the
+					// caller's stop, the cleanup whose capacity this measures.
 					txWithPool(ctx, pool, func(tx PgTx) {
 						borrowed(tx.Conn().PgConn())
 						RaisePgResult(tx.Exec(ctx, query))
-					}, OptNoRetry())
+					}, OptNoRetry(), txStatementStopTimeout(0))
 				} else {
 					dbWithPool(ctx, pool, func(conn PgConn) {
 						borrowed(conn.Conn().PgConn())

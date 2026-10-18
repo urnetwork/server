@@ -70,6 +70,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /privacy.txt":                              routeAccessPublic,
 	"GET /terms.txt":                                routeAccessPublic,
 	"GET /vdp.txt":                                  routeAccessPublic,
+	"GET /robots.txt":                               routeAccessPublic, // keeps crawlers out of /lag/ (lag.dev/PLAN.md amendment 11)
 	"GET /status":                                   routeAccessPublic,
 	"GET /clock":                                    routeAccessPublic,
 	"GET /competition/healthz":                      routeAccessPublic,
@@ -82,6 +83,18 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /competition/generate-round":              routeAccessPublic,
 	"POST /competition/score":                       routeAccessPublic,
 	"GET /competition/score/([^/]+)":                routeAccessPublic,
+	"POST /competition/v2/score":                    routeAccessPublic,
+	"POST /competition/v2/score/preflight":          routeAccessPublic,
+	"GET /competition/v2/score/([^/]+)":             routeAccessPublic,
+	"GET /competition/v2/rounds/([^/]+)/result":     routeAccessPublic,
+	"GET /competition/v2/rounds/([^/]+)/decisions":  routeAccessPublic,
+	"POST /competition/v2/rounds/([^/]+)/seal":      routeAccessPublic,
+	"POST /competition/v2/rounds/([^/]+)/reviews":   routeAccessPublic,
+	"GET /competition/v2/events":                    routeAccessPublic,
+	"POST /competition/v2/receipts":                 routeAccessPublic,
+	"POST /competition/v2/source/([^/]+)/readiness": routeAccessPublic,
+	"POST /competition/v2/holds":                    routeAccessPublic,
+	"POST /competition/v2/rounds/([^/]+)/incidents": routeAccessPublic,
 	"GET /stats/last-90":                            routeAccessPublic,
 	"GET /stats/providers-map":                      routeAccessPublic,
 	"GET /stats/providers":                          routeAccessNetwork, // the network's provider earnings (account read)
@@ -124,6 +137,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/extender-release":                routeAccessClient,
 	"POST /network/extender-block-report":           routeAccessClient,
 	"POST /network/ping-report":                     routeAccessClient,
+	"GET /network/extender-measurement-cert":        routeAccessClient, // the caller's own extender's certificate (lag.dev/PLAN.md A8)
 	"POST /network/provider-egress-location":        routeAccessPublic,
 	"GET /network/provider-egress-due":              routeAccessPublic,
 	"GET /network/provider-blackhole-due":           routeAccessPublic,
@@ -245,6 +259,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
 	"GET /sn/artifact":                              routeAccessPublic,
+	"GET /sn/ledger/object":                         routeAccessPublic,
+	"GET /sn/ledger/account":                        routeAccessPublic,
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
 	"GET /sn/artifacts":                             routeAccessPublic,
@@ -278,6 +294,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /connect":                                 routeAccessPublic,
 	"POST /apple/notification":                      routeAccessPublic,
 	"GET /my-ip-info":                               routeAccessPublic,
+	"POST /lag/session":                             routeAccessPublic, // creates a lag.dev guest network and its one client (lag.dev/PLAN.md A1)
+	"GET /lag/extenders":                            routeAccessClient,
+	"POST /lag/track":                               routeAccessClient,
+	"POST /network/extender-lag-report":             routeAccessClient,
 	"POST /updates/brevo":                           routeAccessPublic,
 	"POST /log/([^/]+)/upload":                      routeAccessClient,
 	"GET /\\.well-known/oauth-authorization-server": routeAccessPublic,
@@ -289,6 +309,16 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /oauth/userinfo":                           routeAccessPublic,
 	"POST /oauth/authorize":                         routeAccessNetwork, // grants a third-party OAuth client access to the account
 	"POST /oauth/consent":                           routeAccessNetwork, // OAuth consent screen data
+}
+
+// The only routes a lag.dev guest's client token is accepted on
+// (lag.dev/PLAN.md A1): the two the browser calls with it. Every other route
+// refuses it with 403 before its handler runs, whatever its class, and the
+// connect transport refuses it too, so a guest never administers, buys or
+// connects (session/AUTH.md §1).
+var lagGuestRoutes = map[string]bool{
+	"GET /lag/extenders": true,
+	"POST /lag/track":    true,
 }
 
 func routeAccessKey(route *router.Route) string {
@@ -311,15 +341,27 @@ func refuseClientAdmin(ctx context.Context, byJwt *session.ByJwt) bool {
 }
 
 // applyRouteAccess puts the client token gate in front of every admin route and
-// every own client payout route.
+// every own client payout route, the lag.dev guest gate in front of every route
+// but the guest's own, and the intended network gate in front of every route
+// that takes a URnetwork credential: every class but public, whose routes do
+// not act for the bearer's network (AUTHZ1.md §10). The intended network gate
+// runs first, so a request meant for another network is refused before any
+// other gate or the handler looks at it.
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
-		switch routeAccessFor(route) {
+		access := routeAccessFor(route)
+		switch access {
 		case routeAccessNetwork:
 			route = router.RefuseClientCredentials(route, router.RefuseEveryClientCredential)
 		case routeAccessAppAdmin, routeAccessOwnClientPayout:
 			route = router.RefuseClientCredentials(route, refuseClientAdmin)
+		}
+		if !lagGuestRoutes[routeAccessKey(route)] {
+			route = router.RefuseLagGuestCredentials(route)
+		}
+		if access != routeAccessPublic {
+			route = router.RefuseIntendedNetworkMismatch(route)
 		}
 		applied = append(applied, route)
 	}

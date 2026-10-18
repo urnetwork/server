@@ -26,12 +26,36 @@
 # not guess which resolver result is safe or rewrite operator-owned aliases: an
 # unmanaged alias, legacy managed block, or existing launcher lock stops startup
 # before host/network/Docker mutation. LOCAL_HOST_IP is a distinct dedicated
-# address; the worst case when the stack is down is "connection refused".
+# address.
 #
-# Run it in its own terminal, then run the tests from another, e.g.:
+# Once this launcher exits and restores /etc/hosts, a client that resolves the
+# names again reaches whatever answers next. Public DNS answered 127.0.0.1 (the
+# records were deleted on 2026-10-14), and a cached answer, a hosts edit or a
+# localhost default can still do the same; with the production data tunnel up
+# (xops/bin/by-patch-main-data forwards 5432, 6432 and 6379-6427), loopback is
+# production. So every WARP_ENV=local process, not only tests, dials PostgreSQL
+# and Redis only at the endpoints attested against this launcher
+# (WARP_TEST_ENV_ATTESTED_ADDRS, enforced by test_env_dial_guard.go) for its
+# whole run, and never follows the names to loopback. test-env.sh exports them
+# for tests, and local/local-env.sh for the cli/*/run-local.sh services,
+# bringyourctl/run-local.sh and connect/sim-latency/run-local.sh, after checking
+# this launcher's lock, live owner, readiness record and hosts block and that
+# each name resolves only to LOCAL_HOST_IP. A local process without the
+# attestation refuses every dial and names this script, and sim-latency's reset
+# (TRUNCATE ... CASCADE and FLUSHALL) also refuses any unattested or loopback
+# endpoint before it sends anything. With the stack down an attested process
+# still dials LOCAL_HOST_IP, which without this launcher's alias leaves the
+# machine by the default route and normally times out rather than being
+# refused. Processes in any other WARP_ENV, production included, are
+# unaffected. See local/README.md.
+#
+# Run it in its own terminal, then run the tests or a local process from
+# another, e.g.:
 #   ./test.sh -run TestFoo
-# (test.sh already exports WARP_ENV=local and the BRINGYOUR_*_HOSTNAME vars that
-# match the /etc/hosts aliases below.)
+#   (cd cli/api && ./run-local.sh)
+# (test.sh and the run-local.sh scripts export WARP_ENV=local and the
+# BRINGYOUR_*_HOSTNAME vars that match the /etc/hosts aliases below, then
+# attest this launcher.)
 #
 # Editing /etc/hosts and the loopback interface needs root. On Linux the script
 # also runs Docker through `sudo` because access to the daemon socket is commonly

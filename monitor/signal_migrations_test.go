@@ -500,6 +500,12 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	if byVersion[677][0].removedVersion != 678 {
 		t.Fatalf("raw-only review ordering lifetime is not pinned: %+v", byVersion[677][0])
 	}
+	// The 824-827 index drops retire every artifact that pinned a dropped index.
+	for version, removedVersion := range map[int]int{735: 826, 736: 827, 767: 825, 768: 825, 769: 825, 776: 824} {
+		if byVersion[version][0].removedVersion != removedVersion {
+			t.Fatalf("dropped index artifact lifetime is not pinned: v%d=%+v, want removed at %d", version, byVersion[version][0], removedVersion)
+		}
+	}
 	// The appended IPv6 artifacts must interrogate their actual relation,
 	// type, nullability and legacy default; catalog labels alone are not proof.
 	head := server.MigrationCount()
@@ -1251,10 +1257,23 @@ func syntheticMigrationPartialIndexGuard(t *testing.T, query string, contract sy
 	t.Helper()
 	normalized := strings.Join(strings.Fields(query), " ")
 	marker := "WHERE table_name = '" + contract.table + "' AND index_name = '" + contract.name + "'"
-	if strings.Count(normalized, marker) != 1 {
+	// A removal guard (migrationIndexRemoved) names the same relation and index
+	// and ends right after the name; only the definition guard is extracted.
+	start, count := -1, 0
+	for offset := 0; ; {
+		found := strings.Index(normalized[offset:], marker)
+		if found < 0 {
+			break
+		}
+		position := offset + found
+		if !strings.HasPrefix(normalized[position+len(marker):], ")") {
+			start, count = position, count+1
+		}
+		offset = position + len(marker)
+	}
+	if count != 1 {
 		t.Fatalf("index %s lacks one exact relation-scoped guard", contract.name)
 	}
-	start := strings.Index(normalized, marker)
 	depth := 0
 	quoted := false
 	for position := start; position < len(normalized); position++ {
@@ -1314,7 +1333,7 @@ func TestMigrationsSignalPartialIndexContractsExecuteExactGuards(t *testing.T) {
 	if os.Getenv("WARP_ENV") != "local" {
 		t.Fatal("partial-index query fixtures require the attested local test environment")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := snMainnetMigrationFixtureContext(t)
 	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
 		type partialIndexCase struct {

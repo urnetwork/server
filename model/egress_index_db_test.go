@@ -124,7 +124,19 @@ func egressTestConnect(
 
 // Records explicit individual policy-one outcomes. The aggregate latest row is
 // retained only as a legacy diagnostic; it cannot satisfy the URL-policy gate.
+// The provider is modern as well, as an upgraded provider is: the capability
+// probe measured both capabilities just now, so the modern provider gate
+// keeps it in Quality and Speed whichever side of the gate's start a test
+// runs on. egressTestForgetModernEvidence takes that away.
 func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.Time, total int, failed int) {
+	server.Raise(RecordProviderModernEvidence(ctx, clientId, ProviderModernEvidence{
+		E2eNegotiated:             true,
+		KeyExchange:               "X25519MLKEM768",
+		PostQuantum:               true,
+		WindowAdvertised:          true,
+		MaxReceiveWindowByteCount: 4 * 1024 * 1024,
+		ObservedAt:                server.NowUtc(),
+	}))
 	SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 		ClientId:   clientId,
 		MeasuredAt: measuredAt,
@@ -136,6 +148,8 @@ func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.T
 	})
 	server.Tx(ctx, func(tx server.PgTx) {
 		for index := range total {
+			// each run at its own time, the failures earliest (egressTestRunAt)
+			measuredAt := egressTestRunAt(measuredAt, index, total)
 			ok := 0
 			if index >= failed {
 				ok = 1
@@ -148,6 +162,15 @@ func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.T
 				(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe_evidence,url_probe_policy_version)
 				VALUES($1,$2,$3,$4,1,'{}',false,$5::jsonb,$6)`, server.NewId(), clientId, measuredAt.UTC(), ok, string(encoded), evidence.PolicyVersion))
 		}
+	})
+}
+
+// Removes the capability probe's evidence of the providers, which
+// egressTestHealth records for every provider it probes, so the modern
+// provider gate sees them as never measured.
+func egressTestForgetModernEvidence(ctx context.Context, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_modern_evidence WHERE client_id = ANY($1)`, clientIds))
 	})
 }
 
@@ -519,9 +542,10 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 	})
 }
 
-// ARIN non-quality excludes native and explicitly requested Quality. Eligible
-// native Speed still supplies lower-priority Quality discovery fallback, while
-// the common risk gate excludes a provider from every selection path.
+// ARIN non-quality excludes native and forced Quality, but not a live provider
+// named by client id. Eligible native Speed still supplies lower-priority
+// Quality discovery fallback, while the common risk gate excludes a provider
+// from every selection path.
 func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -571,20 +595,22 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 		connect.AssertEqual(t, providers[0].Tier, 0)
 		connect.AssertEqual(t, providers[1].Tier, egressTestBackfillOffset())
 
-		// Forced minimum and named providers retain the requested Quality
-		// policy; neither can use the lower bucket to bypass it or common risk.
+		// Forced minimum retains the requested Quality policy. A named provider
+		// needs a live connection but not ARIN quality. Neither path can use
+		// the lower bucket to bypass common risk.
 		named := []*ProviderSpec{{ClientId: &healthy.clientId}, {ClientId: &nonQuality.clientId}, {ClientId: &risky.clientId}}
 		for _, request := range []struct {
 			specs        []*ProviderSpec
 			forceMinimum bool
+			want         []server.Id
 		}{
-			{egressTestLocationSpec(city), true},
-			{named, false},
-			{named, true},
+			{egressTestLocationSpec(city), true, []server.Id{healthy.clientId}},
+			{named, false, []server.Id{healthy.clientId, nonQuality.clientId}},
+			{named, true, []server.Id{healthy.clientId, nonQuality.clientId}},
 		} {
 			providers := egressTestFind(ctx, t, request.specs, RankModeQuality, 10, request.forceMinimum, server.NewId())
-			if !slices.Equal(egressTestIds(providers), []server.Id{healthy.clientId}) || providers[0].Tier != 0 {
-				t.Fatal("explicit Quality admitted non-quality or risky access")
+			if !slices.Equal(egressTestIds(providers), request.want) || providers[0].Tier != 0 {
+				t.Fatal("explicit Quality admitted risky access, or forced Quality admitted non-quality access")
 			}
 		}
 	})

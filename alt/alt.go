@@ -303,9 +303,8 @@ func (self *Alt) listenQuic(
 	}
 	defer transformed.Close()
 
-	quicTransport := &quic.Transport{
-		Conn: transformed,
-	}
+	// the connect handler's count bounds the handshakes of unvalidated sources
+	quicTransport := self.connectHandler.NewQuicTransport(transformed)
 	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(
 		&tls.Config{
@@ -422,7 +421,15 @@ func (self *Alt) serverName(conn *quic.Conn) string {
 // hands it to the connect handler, which applies the exchange's own
 // connection rate limit. An over-cap connection is refused before any stream
 // is served.
+//
+// The cap is charged to the source's address only once the handshake proves
+// the source receives packets there: a spoofed source never completes one, so
+// it cannot take a victim's slots.
 func (self *Alt) handleConnectQuicConn(conn *quic.Conn) {
+	if err := connectserver.AwaitQuicHandshake(self.ctx, conn); err != nil {
+		conn.CloseWithError(0, "")
+		return
+	}
 	addrPort, err := server.ParseClientAddress(conn.RemoteAddr().String())
 	if err != nil {
 		glog.Infof("[alt]connect address err = %s\n", err)
@@ -446,10 +453,17 @@ func (self *Alt) handleConnectQuicConn(conn *quic.Conn) {
 // Serves one connection as http3. The per-address request bucket and
 // concurrent request cap are applied per request by the wrapped handler,
 // which is where nginx applies them for the lb-fronted api.
+//
+// A request sent in 0-RTT can arrive before the handshake proves the source's
+// address, so the connection is served only after it completes: a spoofed
+// source's request never spends a victim's bucket.
 func (self *Alt) handleApiQuicConn(conn *quic.Conn) {
 	// the http3 server leaves the connection open when its own loop exits,
 	// so this front closes what it accepted, as the connect front does
 	defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+	if err := connectserver.AwaitQuicHandshake(self.ctx, conn); err != nil {
+		return
+	}
 	if err := self.apiServer.ServeQUICConn(conn); err != nil {
 		if glog.V(1) {
 			glog.Infof("[alt]api connection exited %s err = %s\n", conn.RemoteAddr(), err)

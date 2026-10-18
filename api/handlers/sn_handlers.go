@@ -90,6 +90,19 @@ func SnArtifact(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// SnLedgerObject backs `GET /sn/ledger/object?hash=sha256:<hex>`: an
+// immutable settlement v2 ledger object (VERSION2-FINAL.md §8.3). Public.
+func SnLedgerObject(w http.ResponseWriter, r *http.Request) {
+	controller.SnLedgerObject(w, r)
+}
+
+// SnLedgerAccount backs `GET /sn/ledger/account?coldkey=<ss58|0x hex>`: the
+// coldkey's settlement v2 account in every pool, with its claim proof
+// (VERSION2-FINAL.md §8.3). Public.
+func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
+	controller.SnLedgerAccount(w, r)
+}
+
 // SnArtifactHistory lists immutable artifact keys under a deployment/netuid
 // prefix. It intentionally returns public object identifiers, never signer or
 // vault material.

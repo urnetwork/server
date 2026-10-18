@@ -88,16 +88,18 @@ func (self *providerEgressControl) ConnectControl(ctx context.Context, token str
 // The pass owns one publisher independently of cancellation. run must join all
 // tunnel/OOB owners, including bounded late cleanup, before returning. This
 // boundary then stops and joins the publisher; it never detaches a background
-// owner beyond the pass invocation.
-func runWithProviderEgressControl(ctx context.Context, credentials *providerEgressCredentials,
-	run func(connect.NetworkClientControl) (*ProviderEgressProbeResult, error),
-) (*ProviderEgressProbeResult, error) {
+// owner beyond the pass invocation. The URL probe and the capability probe
+// each run their passes in one.
+func runWithProviderEgressControl[R any](ctx context.Context, credentials *providerEgressCredentials,
+	run func(connect.NetworkClientControl) (R, error),
+) (R, error) {
 	notificationCtx, cancelNotifications := context.WithCancel(context.WithoutCancel(ctx))
 	notifications := model.NewContractOriginNotifications(notificationCtx, model.DefaultContractOriginNotificationSettings())
 	defer func() { cancelNotifications(); notifications.Close() }()
 	control, err := newProviderEgressControl(credentials, notifications)
 	if err != nil {
-		return nil, err
+		var unrun R
+		return unrun, err
 	}
 	return run(control)
 }

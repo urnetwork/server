@@ -39,6 +39,33 @@ type ContractDeadlineReconciliation struct {
 	Adjustments   []string        `json:"adjustments,omitempty"`
 }
 
+// A contract has one escrow row per funding grant. Production statistics can
+// estimate tens of thousands of rows for one contract id, which made the planner
+// add parallel workers and JIT to a few index probes while the grant owner was
+// held. A bounded per-contract scan keeps the estimate small; a larger set fails
+// closed instead of being truncated.
+const deadlineEscrowRowLimit = 1024
+
+var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
+	COALESCE(b.net_revenue_nano_cents,0),b.network_id,
+	GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
+	FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND NOT j.applied),0))::bigint,
+	e.settled,e.payout_byte_count,e.redis_reserved,
+	(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
+	FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
+	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
+		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
+	LEFT JOIN transfer_balance b USING(balance_id)
+	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
+
+// The planner still costs the read at the row limit, and each estimated row
+// pays for two debit journal probes. Once dead journal tuples left that small
+// table a few hundred pages, the cost passed the JIT inline and optimize
+// thresholds and every close compiled the read before running it, about 200 ms
+// of CPU while the grant owner was held. Index probes gain nothing from JIT,
+// so the close turns it off for the rest of its transaction.
+const deadlineEscrowRowsJitSql = `SELECT set_config('jit', 'off', true)`
+
 // Grant values are read after sorted grant locks. Missing grants remain visible
 // so every reservation can be retired, including orphaned legacy escrows.
 type contractDeadlineEscrow struct {
@@ -190,15 +217,12 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		}
 	})
 	positive, redisReservations := lockSettlementReservations(ctx, tx, contractId, balanceIds)
+	// Read under the grant and reservation locks, as settlement does, so the
+	// cached snapshots can follow this close's two revision advances.
+	reservationSnapshots := readDeadlineNetEscrowSnapshots(ctx, tx, positive)
 	escrows := []contractDeadlineEscrow{}
-	rows, err = tx.Query(ctx, `SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
-				COALESCE(b.net_revenue_nano_cents,0),b.network_id,
-				GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
-				FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND NOT j.applied),0))::bigint,
-				e.settled,e.payout_byte_count,e.redis_reserved,
-				(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
-				FROM transfer_escrow e LEFT JOIN transfer_balance b USING(balance_id)
-				WHERE e.contract_id=$1 ORDER BY b.end_time NULLS LAST,e.balance_id`, contractId)
+	server.RaisePgResult(tx.Exec(ctx, deadlineEscrowRowsJitSql))
+	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var escrow contractDeadlineEscrow
@@ -207,6 +231,9 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 			escrows = append(escrows, escrow)
 		}
 	})
+	if deadlineEscrowRowLimit < len(escrows) {
+		server.Raise(fmt.Errorf("deadline escrow rows exceed their bound"))
+	}
 	fundedUsage := result.Requested
 	if len(escrows) == 0 && owner.participants.payerNetworkId == nil {
 		fundedUsage = 0
@@ -220,14 +247,16 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	usage := deadlineUsageSnapshot(owner, usageParticipants, &result.Adjustments)
 	// Accepted adjudication survives. Retirement clears the dispute only
 	// with its best funded settlement. The intent guard remains intact.
+	// Retirement (dispute, usage_unverified, expiration_time) is written by
+	// the outcome claim itself, so the close writes one contract row version.
 	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId))
-	server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=false,usage_unverified=true,
-				expiration_time=LEAST(COALESCE(expiration_time,$2),$2) WHERE contract_id=$1`, contractId, deadline))
-	claimed, err := claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, result.Outcome, usage, true)
+	claimed, err := claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, result.Outcome, usage, true, &deadline)
 	server.Raise(err)
 	if !claimed {
 		server.Raise(fmt.Errorf("deadline reconciliation did not close locked contract"))
 	}
+	// The outcome released each positive reservation and advanced its revision.
+	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positive, true)
 	redisDebits := make(map[server.Id]bool, len(escrows))
 	for _, escrow := range escrows {
 		redisDebits[escrow.balanceId] = escrow.redisReserved
@@ -237,19 +266,23 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		if !exists {
 			continue
 		}
-		if payout.payoutByteCount > 0 {
-			if redisDebits[balanceId] {
+		if redisDebits[balanceId] {
+			if payout.payoutByteCount > 0 || payout.escrowBalanceByteCount > 0 {
 				// Preserve the existing native reservation until the batched
 				// debit commits. The unique journal and terminal outcome share
 				// this commit; losing any post cannot lose or repeat the charge.
+				// A zero charge on a held reservation is journaled too: as for
+				// a zero-use ordinary settlement, the debit worker's release of
+				// its row frees the reservation if the post is lost.
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
 					(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 					contractId, balanceId, payout.payoutByteCount, transferDebitShard(balanceId)))
-			} else {
-				// Legacy admission subtracts live escrow, not pending journals.
-				// Keep its existing atomic debit before releasing that escrow.
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
+				result.Charged += payout.payoutByteCount
 			}
+		} else if payout.payoutByteCount > 0 {
+			// Legacy admission subtracts live escrow, not pending journals.
+			// Keep its existing atomic debit before releasing that escrow.
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
 			result.Charged += payout.payoutByteCount
 		}
 	}
@@ -260,17 +293,19 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 				payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
 		}
 	})
+	// The settled flag advanced each positive reservation with a payout again.
+	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, deadlineMetadataReservations(positive, payouts), false)
 	if len(accountPayouts) > 0 {
 		// Exact earnings and the immutable projection owner are mandatory
 		// writes in the terminal commit. Only display totals wait for their
 		// existing provider batch; a held account cannot reject this close.
 		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
 	}
-	// Outcome/metadata triggers invalidate the cache revision. A bad
-	// optional snapshot must not block financial reconciliation.
+	// The refresh publishes the mirror from a carried snapshot. A missing or
+	// dropped one leaves its balance to the refresh census; a bad optional
+	// snapshot must not block financial reconciliation.
 	if len(positive) > 0 {
-		ids := settlementReservationIds(positive)
-		posts = append(posts, func() any { refreshNetEscrow(ctx, ids); return nil })
+		posts = append(posts, deadlineNetEscrowRefreshPost(ctx, settlementReservationIds(positive)))
 	}
 	if len(redisReservations) > 0 {
 		posts = append(posts, func() any { ReconcileRedisContractReservation(ctx, contractId); return nil })

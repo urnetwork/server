@@ -115,12 +115,28 @@ type ExtenderActivateArgs struct {
 	DnsPorts []int    `json:"dns_ports"`
 	DnsTld   string   `json:"dns_tld"`
 	Carriers []string `json:"carriers"`
+	// standard base64 of the DER certificate request for the extender's
+	// lag.dev measurement name (lag.dev/PLAN.md C4, A10). Most activations
+	// carry none, which leaves a stored request as it is. One that is carried
+	// is stored as the extender's request on a successful activation, and its
+	// outcome is read from GET /network/extender-measurement-cert (A8), never
+	// from this answer.
+	MeasurementCsr string `json:"measurement_csr,omitempty"`
+	// set on every activation while the extender's owner has opted out of
+	// lag.dev measurement (lag.dev/PLAN.md C4, C9, decision 18): the operator
+	// withdraws its measurement name, and a request carried beside it is not
+	// stored. Unset, the default, changes nothing on its own.
+	MeasurementDisabled bool `json:"measurement_disabled,omitempty"`
 }
 
 type ExtenderActivateResult struct {
-	Activated bool   `json:"activated"`
-	Ip        string `json:"ip,omitempty"`
-	IpVersion int    `json:"ip_version,omitempty"`
+	Activated bool `json:"activated"`
+	// the operator's id of the extender, one per identity key and the same at
+	// every activation. The extender's lag.dev measurement name is this id
+	// under the measurement zone (lag.dev/PLAN.md N1, N4, A10).
+	ExtenderId *server.Id `json:"extender_id,omitempty"`
+	Ip         string     `json:"ip,omitempty"`
+	IpVersion  int        `json:"ip_version,omitempty"`
 	// the carriers that passed their probe, which is what the stored address
 	// and the signed record list
 	Carriers []string `json:"carriers,omitempty"`
@@ -221,6 +237,9 @@ func SignExtenderRecord(
 		// holds a gated record never serves it on an open channel
 		DirectoryTier: uint32(directoryTier),
 		CanaryChannel: extender.CanaryChannel,
+		// the extender's id while it serves the lag.dev measurement api, from
+		// which a reader computes its measurement name (lag.dev/PLAN.md C10)
+		MeasurementId: extenderMeasurementId(config, extender, addresses, issueTime),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -539,6 +558,13 @@ func ExtenderActivate(
 		clientAddressHash = hash[:]
 	}
 
+	// an owner who opted out of lag.dev measurement is withdrawn now, with the
+	// key proven by the probes, and before this activation signs its record,
+	// so the record already carries no measurement id (lag.dev/PLAN.md C9)
+	if args.MeasurementDisabled {
+		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
+	}
+
 	var record *protocol.ExtenderRecord
 	var expireTime time.Time
 	activated := model.ActivateNetworkExtender(
@@ -586,6 +612,19 @@ func ExtenderActivate(
 		return refuse("the activation could not be stored")
 	}
 
+	// the lag.dev measurement certificate request rides the activation
+	// (lag.dev/PLAN.md A10); what becomes of it never changes this answer.
+	// While the owner opts out the request is not stored: the flag wins
+	if args.MeasurementCsr != "" && !args.MeasurementDisabled {
+		storeExtenderMeasurementRequest(
+			clientSession.Ctx,
+			config,
+			activated.Extender.ExtenderId,
+			args.MeasurementCsr,
+			server.NowUtc(),
+		)
+	}
+
 	recordBase64, err := encodeExtenderRecord(record)
 	if err != nil {
 		return refuse("the activation record could not be encoded")
@@ -617,8 +656,10 @@ func ExtenderActivate(
 		bootstrap = append(bootstrap, otherRecordBase64)
 	}
 
+	extenderId := activated.Extender.ExtenderId
 	return &ExtenderActivateResult{
 		Activated:    true,
+		ExtenderId:   &extenderId,
 		Ip:           clientIp.String(),
 		IpVersion:    ipVersion,
 		Carriers:     carriers,

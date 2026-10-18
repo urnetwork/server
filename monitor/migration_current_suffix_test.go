@@ -25,7 +25,8 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for head := 793; head <= 812; head++ {
+		last := migrationCurrentSuffixContracts[len(migrationCurrentSuffixContracts)-1].artifact.requiredVersion
+		for head := 793; head <= last; head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -102,6 +103,107 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"grant receipt allows duplicate run", 811, `ALTER TABLE transfer_balance_grant_run DROP CONSTRAINT transfer_balance_grant_run_pkey`},
 		{"grant receipt kind has wrong width", 811, `ALTER TABLE transfer_balance_grant_run ALTER COLUMN grant_kind TYPE varchar(33)`},
 		{"deadline guard reverted to predecessor", 812, `CREATE OR REPLACE FUNCTION transfer_contract_usage_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ContractUsageGuardOriginalFunctionBodySql + `$guard$`},
+		{"missing legacy checkpoint bound", 813, `ALTER TABLE contract_close DROP COLUMN legacy_checkpoint_byte_count`},
+		{"legacy checkpoint bound truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count TYPE integer`},
+		{"invented legacy checkpoint bound", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
+		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
+		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing payout plan sweep staging", 814, `DROP TABLE payment_plan_sweep`},
+		{"payout plan allows two pending plans", 814, `DROP INDEX payment_plan_assignment_pending`},
+		{"missing sweep owner guard", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep`},
+		{"sweep owner guard fires on every update", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep; CREATE TRIGGER payment_plan_sweep_owner_guard BEFORE UPDATE ON transfer_escrow_sweep FOR EACH ROW EXECUTE FUNCTION payment_plan_sweep_owner_guard()`},
+		{"missing reliability window", 815, `DROP TABLE payment_plan_reliability_window CASCADE`},
+		{"missing reliability partials", 815, `DROP TABLE payment_plan_reliability_partial`},
+		{"dropped sweep destination index rebuilt", 816, `CREATE INDEX transfer_escrow_sweep_destination_id_sweep_time ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents)`},
+		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
+		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
+		{"dropped reschedule error index rebuilt", 819, `CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)`},
+		{"missing open connection handler index", 820, `DROP INDEX network_client_connection_connected_handler_id`},
+		{"open connection handler index includes closed rows", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(handler_id)`},
+		{"open connection handler index leads with client", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(client_id,handler_id) WHERE connected`},
+		{"missing ledger epoch rows", 821, `DROP TABLE st_ledger_v2_epoch_rows`},
+		{"epoch rows with both chunks and a declaration", 821, `ALTER TABLE st_ledger_v2_epoch_rows DROP CONSTRAINT st_ledger_v2_epoch_rows_check`},
+		{"epoch rows without rebuild requests", 821, `ALTER TABLE st_ledger_v2_epoch_rows DROP COLUMN rebuild_requested_by`},
+		{"account coldkeys not unique per pool", 821, `ALTER TABLE st_ledger_v2_account DROP CONSTRAINT st_ledger_v2_account_deployment_key_no_id_coldkey_key`},
+		{"missing account coldkey lookup", 821, `DROP INDEX st_ledger_v2_account_coldkey`},
+		{"funding truncates rao", 821, `ALTER TABLE st_ledger_v2_funding ALTER COLUMN funded_through TYPE numeric(38,0)`},
+		{"root status not closed", 821, `ALTER TABLE st_ledger_v2_root DROP CONSTRAINT st_ledger_v2_root_status_check`},
+		{"open demand lookup includes answered demands", 821, `DROP INDEX st_ledger_v2_demand_open; CREATE INDEX st_ledger_v2_demand_open ON st_ledger_v2_demand(deployment_key,no_id,seq)`},
+		{"demands not keyed by their finalized root", 821, `ALTER TABLE st_ledger_v2_demand DROP CONSTRAINT st_ledger_v2_demand_pkey; ALTER TABLE st_ledger_v2_demand ADD PRIMARY KEY (deployment_key,no_id,seq,account_index)`},
+		{"amounts allow zero", 821, `ALTER TABLE st_ledger_v2_amount DROP CONSTRAINT st_ledger_v2_amount_amount_check`},
+		{"missing verified consent chains", 822, `DROP TABLE st_verified_wallet_consent`},
+		{"verified consent generations not unique", 822, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_pkey`},
+		{"verified consent kinds not closed", 822, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_kind_check`},
+		{"verified consent epochs truncate", 822, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN from_epoch TYPE integer`},
+		{"nullable verified consent signer", 822, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN prospective_signer DROP NOT NULL`},
+		{"missing FleetBound scan checkpoint", 822, `DROP TABLE st_fleet_bound_sync`},
+		{"FleetBound checkpoints not unique", 822, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
+		{"nullable FleetBound checkpoint", 822, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
+		{"missing App Store transaction price", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN price_milliunits`},
+		{"App Store transaction price truncates milliunits", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
+		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
+		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
+		{"dropped provider session transaction index rebuilt", 824, `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", 824, snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"dropped close evidence contract index rebuilt", 825, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
+		{"close evidence accepted time nullable", 825, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
+		{"close evidence census index missing", 825, `DROP INDEX contract_close_original_census`},
+		{"dropped completed waiting probe index rebuilt", 826, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"dropped slot completed waiting probe index rebuilt", 827, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"connection table truncates on vacuum", 828, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
+		{"handler table truncates on vacuum", 828, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
+		{"missing device network index", 829, `DROP INDEX device_network_id`},
+		{"device network index leads with device", 829, `DROP INDEX device_network_id; CREATE INDEX device_network_id ON device(device_id,network_id)`},
+		{"missing device-leading audit index", 830, `DROP INDEX audit_device_event_device_id_event_time`},
+		{"device-leading audit index lacks the covered event type", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id)`},
+		{"device-leading audit index leads with time", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(event_time,device_id,event_id) INCLUDE (event_type)`},
+		{"device-leading audit index is partial", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id) INCLUDE (event_type) WHERE event_type = 'device_added'`},
+		{"dropped time-leading device stats index rebuilt", 831, `CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)`},
+		{"missing v2 activation record", 832, `DROP TABLE st_ledger_v2_activation`},
+		{"v2 activations not one per deployment", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_pkey`},
+		{"v2 activation without a first epoch", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_first_epoch_check`},
+		{"nullable v2 activation vault", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN vault_v2_address DROP NOT NULL`},
+		{"v2 activation settlement truncates", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN settlement_v2_address TYPE varchar(41)`},
+		{"missing guest expiry record", 833, `DROP TABLE lag_guest`},
+		{"guest expiry sweep leads with network", 833, `DROP INDEX lag_guest_expires_at; CREATE INDEX lag_guest_expires_at ON lag_guest(network_id,expires_at)`},
+		{"invented track reissue count", 833, `ALTER TABLE lag_track ALTER COLUMN reissue_count SET DEFAULT 1`},
+		{"track source loses its web default", 833, `ALTER TABLE lag_track ALTER COLUMN source DROP DEFAULT`},
+		{"ticket position widened", 833, `ALTER TABLE lag_ticket ALTER COLUMN position TYPE integer`},
+		{"results not one per ticket", 833, `ALTER TABLE lag_result DROP CONSTRAINT lag_result_ticket_id`},
+		{"result ping times widened", 833, `ALTER TABLE lag_result ALTER COLUMN ping_micros TYPE bigint[]`},
+		{"missing result retention lookup", 833, `DROP INDEX lag_result_created_at`},
+		{"measurement exposure unguarded", 834, `ALTER TABLE network_extender DROP CONSTRAINT network_extender_measurement_exposure`},
+		{"measurement exposure accepted by default", 834, `ALTER TABLE network_extender ALTER COLUMN measurement_exposure_accepted SET DEFAULT true`},
+		{"missing measurement requests", 834, `DROP TABLE network_extender_measurement`},
+		{"pending request lookup includes settled requests", 834, `DROP INDEX network_extender_measurement_pending_time; CREATE INDEX network_extender_measurement_pending_time ON network_extender_measurement(pending_time,extender_id)`},
+		{"measurement certificates not unique", 834, `ALTER TABLE network_extender_measurement_cert DROP CONSTRAINT network_extender_measurement_cert_pkey`},
+		{"nullable measurement certificate expiry", 834, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN not_after DROP NOT NULL`},
+		{"live certificate lookup includes withdrawn", 834, `DROP INDEX network_extender_measurement_cert_live_not_after; CREATE INDEX network_extender_measurement_cert_live_not_after ON network_extender_measurement_cert(not_after)`},
+		{"revocation lookup includes revoked", 834, `DROP INDEX network_extender_measurement_cert_withdrawn_unrevoked; CREATE INDEX network_extender_measurement_cert_withdrawn_unrevoked ON network_extender_measurement_cert(withdraw_time) WHERE withdraw_time IS NOT NULL`},
+		{"missing measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert DROP COLUMN publish_time`},
+		{"required measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET NOT NULL`},
+		{"invented measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET DEFAULT now()`},
+		{"missing modern provider evidence", 836, `DROP TABLE provider_modern_evidence`},
+		{"modern provider evidence not one row per provider", 836, `ALTER TABLE provider_modern_evidence DROP CONSTRAINT provider_modern_evidence_pkey`},
+		{"nullable modern provider observation time", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN measured_at DROP NOT NULL`},
+		{"modern provider key exchange widened", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN key_exchange TYPE varchar(65)`},
+		{"modern provider receive window narrowed", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN max_receive_window_byte_count TYPE integer`},
+		{"invented modern provider run count", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN run_count SET DEFAULT 0`},
+		{"old slot verified by default", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_verified SET DEFAULT true`},
+		{"missing old slot epoch", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DROP COLUMN arin_old_database_build_epoch`},
+		{"defaulted old slot token", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_write_token SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
+		{"missing rollup old epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability DROP COLUMN arin_old_epoch`},
+		{"nullable rollup latest epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability ALTER COLUMN arin_epoch DROP NOT NULL`},
+		{"disabled old slot guard", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DISABLE TRIGGER network_client_location_arin_old_quality_guard`},
+		{"narrowed old slot guard", arindbCanaryLocationMigrationVersion, `DROP TRIGGER network_client_location_arin_old_quality_guard ON network_client_location;
+			CREATE TRIGGER network_client_location_arin_old_quality_guard BEFORE INSERT OR UPDATE OF arin_old_quality_verified
+			ON network_client_location FOR EACH ROW EXECUTE FUNCTION network_client_location_arin_old_quality_guard()`},
+		{"replaced old slot guard", arindbCanaryLocationMigrationVersion, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
+			LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{"missing measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert DROP COLUMN deliver_time`},
+		{"required measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET NOT NULL`},
+		{"invented measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET DEFAULT now()`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -151,6 +253,9 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{808, "auth_code", "auth_code_origin_session"},
 				{809, "pending_task", "pending_task_function_poll_order"},
 				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
+				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
+				{829, "device", "device_network_id"},
+				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 			} {
 				var definition string
 				var predicate *string
@@ -168,6 +273,40 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 						index.table, index.name, definition, predicate, state.valid, state.ready).Scan(&matched))
 					if matched != state.want {
 						t.Fatalf("version %d index valid=%t ready=%t matched=%t", index.version, state.valid, state.ready, matched)
+					}
+				}
+			}
+			// An interrupted DROP INDEX CONCURRENTLY leaves the index invalid, and
+			// later not ready, until the drop is rerun. Only absence is removal.
+			for _, index := range []struct {
+				version     int
+				table, name string
+			}{
+				{816, "transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time"},
+				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
+				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
+				{819, "pending_task", "pending_task_has_reschedule_error"},
+				{824, "provider_work_session_event", "provider_work_session_event_transaction"},
+				{825, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
+				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
+				{831, "audit_device_event", "audit_device_event_stats_device_id"},
+			} {
+				guard := migrationCurrentSuffixTestContract(t, index.version).query
+				var absent bool
+				server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT NULL::text AS table_name, NULL::text AS index_name WHERE false) SELECT `+guard).Scan(&absent))
+				if !absent {
+					t.Fatalf("version %d removed index is not recognized as absent", index.version)
+				}
+				for _, state := range []struct{ valid, ready bool }{{true, true}, {false, true}, {false, false}} {
+					var removed bool
+					server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT $1::text AS table_name, $2::text AS index_name,
+ $3::boolean AS indisvalid, $4::boolean AS indisready) SELECT `+guard,
+						index.table, index.name, state.valid, state.ready).Scan(&removed))
+					if removed {
+						t.Fatalf("version %d leftover index valid=%t ready=%t reported as removed", index.version, state.valid, state.ready)
 					}
 				}
 			}

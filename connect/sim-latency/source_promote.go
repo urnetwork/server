@@ -323,6 +323,7 @@ func sourceRepositoriesFromCommits(repositoryCommits map[string]string) sourceRe
 		Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
 		OperatorProxy: sourceRepository{Commit: repositoryCommits["operator-proxy"]},
 		Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
+		Gvisor:        sourceRepository{Commit: repositoryCommits["gvisor"]},
 	}
 }
 
@@ -508,6 +509,9 @@ func runPromote(opts docopt.Opts) {
 	manifest, err := loadSourceManifest(sourceConfig)
 	if err != nil {
 		fatalf("promotion source config: %s", err)
+	}
+	if manifest.Schema != 1 {
+		fatalf("legacy promote is unavailable for a v2 source ledger; use the authorized source reconciler")
 	}
 	if len(manifest.EvaluationSource.Epochs) != epochNumber {
 		fatalf("epoch %d is not the next unconfigured epoch; ledger currently contains epochs 0..%d", epochNumber, len(manifest.EvaluationSource.Epochs)-1)

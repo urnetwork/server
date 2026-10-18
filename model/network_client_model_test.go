@@ -2148,13 +2148,25 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(tlsCertificatePem), 0)
 
-		// the reaped client's provide keys and redis mirrors are gone
+		// the reaped client's provide keys and redis mirrors are gone. Read the
+		// mirror before any lookup: a lookup that misses refills it from
+		// postgres, which mirrors the reaped client as providing nothing, the
+		// empty list. A client is never reactivated and its id is never reused,
+		// so that list stays correct until it expires.
+		server.Redis(ctx, func(r server.RedisClient) {
+			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()
+			connect.AssertEqual(t, pm, "")
+			sk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
+			connect.AssertEqual(t, sk, "")
+		})
 		provideModes, err := GetProvideModes(ctx, clientId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(provideModes), 0)
 		server.Redis(ctx, func(r server.RedisClient) {
 			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()
-			connect.AssertEqual(t, pm, "")
+			connect.AssertEqual(t, pm, "[]")
+			sk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
+			connect.AssertEqual(t, sk, "")
 		})
 
 		// the proxy config chain is gone

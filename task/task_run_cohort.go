@@ -19,6 +19,11 @@ type TaskRunCohortTarget interface {
 	TaskRunCohort(argsJson string) (id server.Id, limit int)
 }
 
+// Candidates a cohort lane claim reads past its free slots. Rows of a hot group
+// interleave with other groups' rows, so the ordinary n+64 window rarely holds
+// a full cohort; this window does when the group has a quarter of the rows.
+const taskRunCohortLaneCandidateLimit = 256
+
 type taskRunCohortKey struct {
 	functionName string
 	id           server.Id

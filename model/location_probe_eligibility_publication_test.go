@@ -37,6 +37,7 @@ func TestLocationProbeEligibilityPrecomputePreservesConcurrentProvide(t *testing
 		defer cancel()
 		_, admitted, _ := locationProbeConnectedFixture(t, ctx, 85)
 		_, rejected, _ := locationProbeConnectedFixture(t, ctx, 86)
+		testingInsertProviderReliabilityWitness(ctx, admitted, rejected)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		SetProvide(ctx, admitted, map[ProvideMode][]byte{})
@@ -92,7 +93,11 @@ func TestLocationProbeEligibilityPrecomputePreservesConcurrentProvide(t *testing
 // Use actual connection aggregation, the generated validity column and the
 // unchanged fleet reconciler as the result oracle. Existing cycle identity,
 // future pacing, progress and claims must survive reactivation/rejection.
+// Every fixture but the unscored one has passing history, so each other
+// rejection has exactly one cause.
 func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing.T) {
+	useSyntheticIpDb(t)
+
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -103,9 +108,12 @@ func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing
 			city    *Location
 		}
 		clients := map[string]fixture{}
-		for index, name := range []string{"good", "new", "inactive", "child", "no_public", "risk", "failed", "grace", "ipv6", "duplicate", "disconnected", "missing_country"} {
+		for index, name := range []string{"good", "new", "inactive", "child", "no_public", "risk", "failed", "grace", "ipv6", "duplicate", "disconnected", "missing_country", "unscored"} {
 			network, client, city := locationProbeConnectedFixture(t, ctx, 60+index)
 			clients[name] = fixture{network: network, client: client, city: city}
+			if name != "unscored" {
+				testingInsertProviderReliabilityWitness(ctx, client)
+			}
 		}
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
@@ -120,9 +128,8 @@ func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing
 		})
 		for _, name := range []string{"failed", "grace"} {
 			x := clients[name]
-			testingInsertProviderConnectionScore(ctx, x.client, x.city)
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE client_connection_reliability_score SET lookback_index=1,independent_reliability_weight=0.1 WHERE client_id=$1`, x.client))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE client_connection_reliability_score SET independent_reliability_weight=0.1 WHERE client_id=$1 AND lookback_index=1`, x.client))
 			})
 		}
 		for _, extra := range []struct {
@@ -163,16 +170,27 @@ func TestLocationProbeEligibilityPrecomputeMatchesAuthoritativeRollup(t *testing
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now.Add(time.Minute))
 		for name, x := range clients {
 			server.Db(ctx, func(conn server.PgConn) {
-				var eligible bool
-				var state string
-				server.Raise(conn.QueryRow(ctx, `SELECT eligible,(to_jsonb(cycle)-'eligible'-'completed_priority_ready')::text
-					FROM provider_egress_probe_cycle AS cycle WHERE client_id=$1`, x.client).Scan(&eligible, &state))
-				if want := name == "good" || name == "new" || name == "grace"; eligible != want {
-					t.Errorf("%s prospective admission differs from its authoritative inputs: eligible=%t", name, eligible)
-				}
-				if prior, present := states[x.client]; present && state != prior {
-					t.Errorf("%s changed existing cycle identity, progress, claim or pacing", name)
-				}
+				rows, err := conn.Query(ctx, `SELECT eligible,(to_jsonb(cycle)-'eligible'-'completed_priority_ready')::text
+					FROM provider_egress_probe_cycle AS cycle WHERE client_id=$1`, x.client)
+				server.WithPgResult(rows, err, func() {
+					exists := rows.Next()
+					// Without history no pass opens a cycle.
+					if exists != (name != "unscored") {
+						t.Errorf("%s prospective cycle differs from its authoritative inputs: exists=%t", name, exists)
+					}
+					if !exists {
+						return
+					}
+					var eligible bool
+					var state string
+					server.Raise(rows.Scan(&eligible, &state))
+					if want := name == "good" || name == "new" || name == "grace"; eligible != want {
+						t.Errorf("%s prospective admission differs from its authoritative inputs: eligible=%t", name, eligible)
+					}
+					if prior, present := states[x.client]; present && state != prior {
+						t.Errorf("%s changed existing cycle identity, progress, claim or pacing", name)
+					}
+				})
 			})
 		}
 		before := locationProbeCycleSnapshot(ctx)
@@ -197,9 +215,11 @@ func TestLocationProbeEligibilityPrecomputeKeepsAtomicRollback(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		_, client, _ := locationProbeConnectedFixture(t, ctx, 81)
+		testingInsertProviderReliabilityWitness(ctx, client)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		_, newClient, _ := locationProbeConnectedFixture(t, ctx, 82)
+		testingInsertProviderReliabilityWitness(ctx, newClient)
 		before := locationProbeCycleSnapshot(ctx)
 		var originalLocation string
 		server.Tx(ctx, func(tx server.PgTx) {

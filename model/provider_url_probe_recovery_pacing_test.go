@@ -60,7 +60,7 @@ func TestUrlProbeMatureMeasuredDeficitUsesRecoveryPace(t *testing.T) {
 				server.Raise(c.QueryRow(ctx, `SELECT next_attempt_at FROM provider_egress_probe_cycle WHERE client_id=$1`, clientId).Scan(&next))
 			})
 			if tc.prior == 9 {
-				renewalAt := now.Add(ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom - time.Duration(tc.prior)*time.Minute)
+				renewalAt := testingSpreadNewRule(now.Add(-time.Duration(tc.prior)*time.Minute), now)
 				if !next.Equal(renewalAt) {
 					t.Fatalf("%s: quota-full oldest-measurement renewal pacing: got %s, want %s", tc.name, next, renewalAt)
 				}

@@ -56,6 +56,7 @@ func TestRedisAdmissionCreatesAfterEnabledColumnRemoval(t *testing.T) {
 		}
 		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, companion.ContractId)...)
 		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, origin.ContractId)...)
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 2, 2)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 0 {
 			t.Fatal("post-drop settlement retained debt", got)
 		}

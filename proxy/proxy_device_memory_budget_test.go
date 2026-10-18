@@ -17,7 +17,7 @@ func budgetTestManager(t *testing.T, ctx context.Context) *ProxyDeviceManager {
 	t.Helper()
 	settings := DefaultProxyDeviceManagerSettings()
 	settings.NetworkSpace = &sdk.NetworkSpace{}
-	settings.DeviceMemoryTargetByteCount = 24 * model.Mib
+	settings.DeviceMemoryTargetByteCount = 32 * model.Mib
 	return NewProxyDeviceManager(ctx, settings)
 }
 
@@ -83,9 +83,11 @@ func TestProxyDeviceMemoryBudgetFixtureFollowsManagerLifetime(t *testing.T) {
 }
 
 func TestProxyDeviceMemoryBudgetIsPerDevice(t *testing.T) {
+	popConfig := server.Config.PushSimpleResource("proxy.yml", []byte("{}\n"))
+	defer popConfig()
 	settings := DefaultProxyDeviceManagerSettings()
-	if settings.DeviceMemoryTargetByteCount != 24*model.Mib {
-		t.Fatalf("per-device target = %d, want 24 MiB", settings.DeviceMemoryTargetByteCount)
+	if settings.DeviceMemoryTargetByteCount != 32*model.Mib {
+		t.Fatalf("per-device target = %d, want 32 MiB", settings.DeviceMemoryTargetByteCount)
 	}
 	first, closeFirst := newProxyDeviceTransportTestDevice(t)
 	defer closeFirst()
@@ -93,8 +95,8 @@ func TestProxyDeviceMemoryBudgetIsPerDevice(t *testing.T) {
 	defer closeSecond()
 	for i, device := range []*sdk.DeviceLocal{first, second} {
 		usage := device.MemoryUsed()
-		if usage.TargetByteCount != sdk.ByteCount(24*model.Mib) {
-			t.Fatalf("device %d target = %d, want 24 MiB", i, usage.TargetByteCount)
+		if usage.TargetByteCount != sdk.ByteCount(32*model.Mib) {
+			t.Fatalf("device %d target = %d, want 32 MiB", i, usage.TargetByteCount)
 		}
 		if usage.PlatformTransportBudgetByteCount <= 0 || usage.PlatformTransportBudgetByteCount >= usage.TargetByteCount {
 			t.Fatalf("device %d carrier budget = %d, target = %d", i, usage.PlatformTransportBudgetByteCount, usage.TargetByteCount)
@@ -108,7 +110,7 @@ func TestProxyDeviceMemoryBudgetDoesNotRejectAnotherDevice(t *testing.T) {
 	// Under the former manager gate this synthetic one-device process ceiling
 	// rejected the second open before its private DeviceLocal was constructed.
 	popConfig := server.Config.PushSimpleResource("proxy.yml", []byte(
-		"device_memory_budget: 24MiB\nprocess_device_memory_budget: 24MiB\n",
+		"device_memory_budget: 32MiB\nprocess_device_memory_budget: 32MiB\n",
 	))
 	defer popConfig()
 	ctx, cancel := context.WithCancel(context.Background())

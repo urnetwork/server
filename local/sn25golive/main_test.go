@@ -319,9 +319,16 @@ mainnet:
   readiness_sha256: "%s"
 `
 
-// The go-live st.yml values pass the server's validation, the signed policy
-// verifies against its authority and the reviewed sn.yml identity matches.
-func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
+// The readiness digest goLiveStCheck writes into st.yml.
+var goLiveReadiness = strings.Repeat("7e", 32)
+
+// goLiveStCheck writes the go-live st.yml with fresh role keys, the top-level
+// lines stExtra and an operator gas policy signed for those keys. It returns a
+// run of st-check, with any further arguments, against an sn.yml with a
+// readiness digest and the mainnet lines snExtra, and the deposit key's hex,
+// which must never be printed.
+func goLiveStCheck(t *testing.T, stExtra string, snExtra string) (func(readiness string, args ...string) (string, error), string) {
+	t.Helper()
 	isolateHomes(t)
 	dir := t.TempDir()
 	depositKey, deposit := goLiveTestKey(t)
@@ -342,24 +349,30 @@ func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readiness := strings.Repeat("7e", 32)
 	keyHex := func(key *ecdsa.PrivateKey) string { return hex.EncodeToString(crypto.FromECDSA(key)) }
 	stPath, snPath := filepath.Join(dir, "st.yml"), filepath.Join(dir, "sn.yml")
-	stYml := []byte(fmt.Sprintf(goLiveStYml, readiness, keyHex(depositKey), keyHex(rootKey), keyHex(artifactKey)))
+	stYml := []byte(fmt.Sprintf(goLiveStYml, goLiveReadiness, keyHex(depositKey), keyHex(rootKey), keyHex(artifactKey)) + stExtra)
 	if err := os.WriteFile(stPath, append(stYml, fragment...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	check := func(sn string) (string, error) {
+	check := func(readiness string, args ...string) (string, error) {
 		os.Remove(snPath)
-		if err := os.WriteFile(snPath, []byte(fmt.Sprintf(goLiveSnYml, sn)), 0o644); err != nil {
+		if err := os.WriteFile(snPath, []byte(fmt.Sprintf(goLiveSnYml, readiness)+snExtra), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		err := runStCheck([]string{"--st", stPath, "--authority", authorityPath, "--sn", snPath, "--now", goLiveNow.Format(time.RFC3339)}, &out)
+		err := runStCheck(append([]string{"--st", stPath, "--authority", authorityPath, "--sn", snPath, "--now", goLiveNow.Format(time.RFC3339)}, args...), &out)
 		return out.String(), err
 	}
-	out, err := check(readiness)
-	if err != nil || !strings.HasSuffix(out, "result: ok\n") || strings.Contains(out, keyHex(depositKey)) {
+	return check, keyHex(depositKey)
+}
+
+// The go-live st.yml values pass the server's validation, the signed policy
+// verifies against its authority and the reviewed sn.yml identity matches.
+func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
+	check, depositKey := goLiveStCheck(t, "", "")
+	out, err := check(goLiveReadiness)
+	if err != nil || !strings.HasSuffix(out, "result: ok\n") || strings.Contains(out, depositKey) {
 		t.Fatalf("go-live values were refused: %v\n%s", err, out)
 	}
 	for _, want := range []string{"enabled is false in the file", "signature and digest match the authority", "sn.yml reviewed identity and readiness digest equal"} {
@@ -369,5 +382,77 @@ func TestStCheckAcceptsTheGoLiveValues(t *testing.T) {
 	}
 	if out, err := check(strings.Repeat("7f", 32)); err == nil || !strings.Contains(out, "FAIL: sn.yml payout admission") {
 		t.Fatalf("a different sn.yml readiness digest was accepted: %v\n%s", err, out)
+	}
+}
+
+// st-check prints the v2 pair st.yml declares as one identity line, in the
+// lowercase form st.yml and sn.yml declare, and no v2 line without it.
+func TestStCheckPrintsTheV2Addresses(t *testing.T) {
+	const settlement, vault = "0x00000000000000000000000000000000000000a1", "0x00000000000000000000000000000000000000a2"
+	check, _ := goLiveStCheck(t,
+		fmt.Sprintf("settlement_v2_address: %q\nvault_v2_address: %q\n", settlement, vault),
+		fmt.Sprintf("  settlement_v2_address: %q\n  vault_v2_address: %q\n", settlement, vault))
+	out, err := check(goLiveReadiness)
+	if err != nil || !strings.HasSuffix(out, "result: ok\n") || !strings.Contains(out, "\nidentity: settlement_v2_address "+settlement+", vault_v2_address "+vault+"\n") {
+		t.Fatalf("the v2 pair was not printed: %v\n%s", err, out)
+	}
+	check, _ = goLiveStCheck(t, "", "")
+	if out, err := check(goLiveReadiness); err != nil || strings.Contains(out, "v2_address") {
+		t.Fatalf("a v2 line without the v2 pair: %v\n%s", err, out)
+	}
+}
+
+// st-check shows the server's activation latch from its `bringyourctl st
+// v2-activation` output and checks the candidate st.yml against it (SV-9): an
+// armed latch passes an st.yml naming its recorded pair and fails any other
+// with the refusal the server would give; a latch that is not armed is noted;
+// without the output, or with one of another deployment or of another shape,
+// nothing is taken as checked.
+func TestStCheckChecksTheV2Activation(t *testing.T) {
+	const settlement, vault = "0x00000000000000000000000000000000000000a1", "0x00000000000000000000000000000000000000a2"
+	const deployment = "964:0xc18925925e2b7bb9059b7d696b8c92762ae86406"
+	dir := t.TempDir()
+	status := func(name string, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	armed := status("armed.json", fmt.Sprintf(`{"deployment_key":%q,"armed":true,"no_id":1,"first_epoch":7,"vault_v2_address":%q,"settlement_v2_address":%q,"recorded_at":"2026-10-13T20:00:00Z"}`+"\n", deployment, vault, settlement))
+	unarmed := status("unarmed.json", fmt.Sprintf(`{"deployment_key":%q,"armed":false}`+"\n", deployment))
+	other := status("other.json", `{"deployment_key":"945:0x2000000000000000000000000000000000000002","armed":false}`)
+	shaped := status("shaped.json", `{"ledger_v2_activation":{"armed":false}}`)
+	const refusal = "FAIL: v2 activation: st: settlement v2 is active from epoch 7 (pool 1), but st.yml is missing the recorded settlement_v2_address " +
+		settlement + " and vault_v2_address " + vault + " (st subsystem disabled)\n"
+
+	withPair, _ := goLiveStCheck(t,
+		fmt.Sprintf("settlement_v2_address: %q\nvault_v2_address: %q\n", settlement, vault),
+		fmt.Sprintf("  settlement_v2_address: %q\n  vault_v2_address: %q\n", settlement, vault))
+	if out, err := withPair(goLiveReadiness, "--v2-activation", armed); err != nil || !strings.HasSuffix(out, "result: ok\n") ||
+		!strings.Contains(out, "\nok: v2 activation: the latch is armed (pool 1 from epoch 7) and st.yml names its recorded v2 pair\n") {
+		t.Fatalf("the recorded pair against an armed latch: %v\n%s", err, out)
+	}
+
+	withoutPair, _ := goLiveStCheck(t, "", "")
+	if out, err := withoutPair(goLiveReadiness, "--v2-activation", armed); err == nil || err.Error() != "1 check(s) failed" || !strings.Contains(out, "\n"+refusal) {
+		t.Fatalf("no pair against an armed latch: %v\n%s", err, out)
+	}
+	if out, err := withoutPair(goLiveReadiness, "--v2-activation", unarmed); err != nil || !strings.HasSuffix(out, "result: ok\n") ||
+		!strings.Contains(out, "\nnote: v2 activation: the latch is not armed: the server has recorded no activation and would not refuse an st.yml without the v2 pair\n") {
+		t.Fatalf("no pair against a latch that is not armed: %v\n%s", err, out)
+	}
+	if out, err := withoutPair(goLiveReadiness); err != nil || !strings.HasSuffix(out, "result: ok\n") ||
+		!strings.Contains(out, "\nnote: no --v2-activation given: st.yml was not checked against the server's recorded settlement v2 activation\n") {
+		t.Fatalf("without the server's output: %v\n%s", err, out)
+	}
+	for name, test := range map[string]struct{ path, want string }{
+		"another deployment": {other, `FAIL: v2 activation: st: the activation status is of deployment "945:0x2000000000000000000000000000000000000002", not st.yml's "` + deployment + `"` + "\n"},
+		"another shape":      {shaped, "FAIL: v2 activation: not the output of bringyourctl st v2-activation: "},
+		"a missing file":     {filepath.Join(dir, "missing.json"), "FAIL: v2 activation: open "},
+	} {
+		if out, err := withoutPair(goLiveReadiness, "--v2-activation", test.path); err == nil || !strings.Contains(out, "\n"+test.want) {
+			t.Fatalf("%s: %v\n%s", name, err, out)
+		}
 	}
 }

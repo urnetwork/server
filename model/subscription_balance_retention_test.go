@@ -76,7 +76,8 @@ func TestCompletedTransferBalanceRetentionPreservesDebtAndLegacy(t *testing.T) {
 		// The debit worker owns both escrow metadata and the original reservation
 		// release. A 300-byte debit must still retain the entire 600-byte token.
 		if beforeDebit.initial != 1000 || beforeDebit.credit != 1000 || beforeDebit.pending != 1 || beforeDebit.pendingBytes != 300 || beforeDebit.applied != 0 ||
-			beforeDebit.escrows != 1 || beforeDebit.settledEscrows != 0 || beforeDebit.settled != 0 || beforeDebit.anchors != 0 || beforeDebit.invalid != 1 ||
+			beforeDebit.escrows != 1 || beforeDebit.settledEscrows != 0 || beforeDebit.settled != 0 || beforeDebit.anchors != 0 || beforeDebit.invalid != 0 ||
+			beforeDebit.unmaterializedEscrows != 1 || beforeDebit.unmaterialized != 300 || beforeDebit.pendingReserved != 600 || beforeDebit.invalidReservations != 0 ||
 			beforeDebit.legacy != 0 || beforeDebit.reserved != 600 || beforeDebit.inWindow {
 			t.Fatal("retention fixture lacks the exact pre-worker debit and full original reservation")
 		}

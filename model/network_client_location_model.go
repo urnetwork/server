@@ -56,7 +56,8 @@ const (
 	// The score writer only visits targets present in its current SQL result.
 	// Persist the last complete target set so a location that loses its final
 	// eligible provider receives an explicit empty payload instead of leaving
-	// its prior providers selectable for the cache TTL.
+	// its prior providers selectable for the cache TTL
+	// (network_client_score_target_manifest.go).
 	clientScoreTargetManifestKey = "client_score_target_manifest_v1"
 	// Published only after a complete score export whose SQL excludes derived
 	// window clients and inactive top-level clients. Monitoring uses this
@@ -78,16 +79,6 @@ type clientScoreRedisSet struct {
 	key   string
 	value []byte
 	flush bool
-}
-
-type clientScoreTargetManifestDocument struct {
-	LocationIds      []string `json:"location_ids"`
-	LocationGroupIds []string `json:"location_group_ids"`
-}
-
-type clientScoreTargetManifest struct {
-	locationIds      map[server.Id]bool
-	locationGroupIds map[server.Id]bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -549,7 +540,20 @@ func runClientScoreExportBatches(
 	)
 }
 
+// Refuse a command that expired while queued before touching a newer value.
+// Redis SET PXAT alone deletes that value when its deadline is already past.
+const clientScoreExportSetScript = `
+local expiresAt = tonumber(ARGV[2])
+local now = redis.call('TIME')
+if not expiresAt or expiresAt <= tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) then
+  return redis.error_reply('client score export expired')
+end
+return redis.call('SET', KEYS[1], ARGV[1], 'PXAT', expiresAt)
+`
+
+// Publishes each value and its deadline atomically, rejecting expired exports.
 func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl time.Duration, produce clientScoreExportProduce) error {
+	expiresAt := clientScoreExportExpiresAt(ctx)
 	return runClientScoreExportStream(
 		ctx,
 		clientScoreExportBatchSize,
@@ -557,13 +561,20 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 		clientScoreExportMaxAttempts,
 		produce,
 		func(batch []clientScoreRedisSet) error {
+			if !expiresAt.IsZero() && !server.NowUtc().Before(expiresAt) {
+				return fmt.Errorf("client score export expired")
+			}
 			span := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseCacheWrite)
 			defer span.finish()
 			pipe := r.Pipeline()
 			batchBytes := 0
 			for _, set := range batch {
 				batchBytes += len(set.key) + len(set.value)
-				pipe.Set(ctx, set.key, set.value, ttl)
+				if expiresAt.IsZero() {
+					pipe.Set(ctx, set.key, set.value, ttl)
+				} else {
+					pipe.Eval(ctx, clientScoreExportSetScript, []string{set.key}, set.value, expiresAt.UnixMilli())
+				}
 			}
 			updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseCacheWrite, len(batch), batchBytes)
 			_, err := pipe.Exec(ctx)
@@ -3489,10 +3500,18 @@ type ConnectionLocationScores struct {
 	ArinQualityVerified    bool
 	ArinLookupAt           *time.Time
 	ArinDatabaseBuildEpoch int64
-	NetTypeHosting         int
-	NetTypePrivacy         int
-	NetTypeVirtual         int
-	NetTypeForeign         int
+	// The same facts from the old database beside the latest (arindbctl/ARINDB.md,
+	// "Connection and rollup facts"). Epoch 0 when the process loaded no old
+	// database or its lookup failed: the score export uses a slot only when its
+	// epoch is the published serving epoch, and 0 never is.
+	ArinOldRisk               bool
+	ArinOldNonQuality         bool
+	ArinOldQualityVerified    bool
+	ArinOldDatabaseBuildEpoch int64
+	NetTypeHosting            int
+	NetTypePrivacy            int
+	NetTypeVirtual            int
+	NetTypeForeign            int
 	// the lookup's accuracy radius in km, the genesis confidence of
 	// connect/GEOMAP.md §5.1; nil (NULL) for a location with none, such as an
 	// egress-probed one. It describes the genesis location below when one is
@@ -3511,6 +3530,8 @@ type ConnectionLocationScores struct {
 
 // Persist location and classification together. A fresh token on every write
 // lets the database revoke positive facts when an older writer updates the row.
+// Each ARIN slot has its own token, so a writer that predates the old slot
+// cannot leave an earlier old-slot positive or epoch in place.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -3623,9 +3644,14 @@ func SetConnectionLocation(
 		            arin_lookup_at,
 		            arin_database_build_epoch,
 		            arin_quality_verified,
-		            arin_quality_write_token
+		            arin_quality_write_token,
+		            arin_old_risk,
+		            arin_old_non_quality,
+		            arin_old_quality_verified,
+		            arin_old_database_build_epoch,
+		            arin_old_quality_write_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3644,7 +3670,12 @@ func SetConnectionLocation(
                     arin_lookup_at = $15,
                     arin_database_build_epoch = $16,
                     arin_quality_verified = $17,
-                    arin_quality_write_token = $18
+                    arin_quality_write_token = $18,
+                    arin_old_risk = $19,
+                    arin_old_non_quality = $20,
+                    arin_old_quality_verified = $21,
+                    arin_old_database_build_epoch = $22,
+                    arin_old_quality_write_token = $23
             `,
 			connectionId,
 			clientId,
@@ -3663,6 +3694,11 @@ func SetConnectionLocation(
 			connectionLocationScores.ArinLookupAt,
 			connectionLocationScores.ArinDatabaseBuildEpoch,
 			connectionLocationScores.ArinQualityVerified,
+			server.NewId(),
+			connectionLocationScores.ArinOldRisk,
+			connectionLocationScores.ArinOldNonQuality,
+			connectionLocationScores.ArinOldQualityVerified,
+			connectionLocationScores.ArinOldDatabaseBuildEpoch,
 			server.NewId(),
 		))
 	})
@@ -3872,6 +3908,13 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 	if err != nil || resource == nil {
 		return false
 	}
+	// Bool parses with Parse, which panics on a file that is not yaml or that
+	// gives a key twice, and every pass that applies the egress rules reads
+	// this flag. ParseE reports that instead, and once it has succeeded, Bool
+	// reads its result.
+	if _, err := resource.ParseE(); err != nil {
+		return false
+	}
 	enabled := resource.Bool("enable_egress_test")
 	return len(enabled) == 1 && enabled[0]
 }
@@ -3890,6 +3933,17 @@ type providerCountFilter struct {
 	blackholed map[server.Id]bool
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
+	// The URL-success rule's country guard with the kill switch and floor it
+	// was decided under, set by each consumer after the filter loads: a fleet
+	// pass counts its own population under its own settings, a scoped reader
+	// reads the score export's. Nil applies the rule nowhere.
+	onlineSuccessBaseline *providerOnlineSuccessBaseline
+	// The modern provider gate's evidence rows; a provider without one has
+	// no evidence.
+	modernEvidence map[server.Id]*ProviderModernEvidenceRecord
+	// The ARIN serving epoch arinNonQuality follows (arindb_canary_model.go):
+	// 0 is each row's latest slot. Risk always follows the latest slot.
+	arindbServingEpoch int64
 }
 
 // Complete means disconnected history too. The partial covering index supplies
@@ -3941,6 +3995,7 @@ func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) provid
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
 		countryCodes:            GetAllProviderEgressCountryCodes(ctx),
+		modernEvidence:          getProviderModernEvidenceRecords(ctx, nil),
 	}
 	f.healthCounts, f.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	server.Db(ctx, func(conn server.PgConn) {
@@ -4124,10 +4179,14 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", err)
 	}
+	// the URL-success rule's country guard over this same population, its
+	// margin held against the export's last published guard
+	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the location counts"))
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		// Count the same common-gate passes exposed as online supply.
+		// Count the providers exposed as online supply: the common-gate
+		// passes the URL-success rule keeps.
 		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
@@ -4136,7 +4195,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 					continue
 				}
 
-				// Ordinary URL errors and missing probes still count online.
+				// Ordinary URL errors and missing probes still count online;
+				// a provider the URL-success rule excludes does not.
 				{
 					decision := decideProviderEgress(
 						countFilter.egressFacts(
@@ -4880,8 +4940,9 @@ type RankMode = string
 const (
 	RankModeQuality RankMode = "quality"
 	RankModeSpeed   RankMode = "speed"
-	// Every online provider: each provider that passed the common gates at
-	// export, native Quality and Speed members included (ClientScore.Online).
+	// Every online provider: each provider that passed the common gates and
+	// the URL-success rule at export, native Quality and Speed members
+	// included (ClientScore.Online).
 	// It has no minimums, no subscriber validation and no borrowing, and
 	// draws its members uniformly: the ip_family filter still decides which
 	// families are eligible, but no family is preferred over another. It
@@ -4898,7 +4959,9 @@ type FindProviders2Args struct {
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
 	// "quality" (the default when empty), "speed" or "online". force_minimum
 	// is accepted with "online" and changes nothing: the online bucket has
-	// no minimums to force.
+	// no minimums to force. Unlike a forced quality or speed answer, which
+	// keeps only the common gates, a forced online answer therefore leaves out
+	// the providers the URL-success rule excludes.
 	RankMode     RankMode `json:"rank_mode"`
 	ForceMinimum bool     `json:"force_minimum"`
 	// IpFamily filters providers by proven address family, in the connect
@@ -4949,8 +5012,12 @@ type ProviderLocation struct {
 }
 
 type ClientScore struct {
-	// A cached passing ratio is valid only until its first contributing result
-	// leaves the eight-hour window. A later export recalculates the ratio.
+	// A cached URL verdict, and the native membership it gives, is valid only
+	// until the earlier of its newest contributing result leaving the
+	// eight-hour window and a bounded staleness past the export's read of the
+	// window (clientScoreEgressValidUntil). A later export recalculates it
+	// before then; a stalled export's natives fall back to Online. Nil without
+	// accepted URL outcomes.
 	EgressValidUntil             *time.Time
 	UrlProbeSuccessWeight        float64
 	ClientId                     server.Id
@@ -4986,8 +5053,9 @@ type ClientScore struct {
 	// NetworkOnly: an entry written before this field existed must keep
 	// today's behavior. See IpFamily and network_client_ip_family.go.
 	IpFamilies uint8
-	// Every common-gate pass belongs to online, including native quality/speed
-	// members. PassesMinimums distinguishes each mode's native membership.
+	// Every common-gate pass the URL-success rule keeps belongs to online,
+	// including native quality/speed members. PassesMinimums distinguishes
+	// each mode's native membership.
 	Online bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
@@ -5158,6 +5226,9 @@ func clientScoreLocationGroupFacetSampleKey(forceMinimum bool, rankMode RankMode
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
+	if ttl < time.Millisecond {
+		return fmt.Errorf("client score export requires positive ttl")
+	}
 	nativeSourceStartedAt := server.NowUtc()
 	aliasesReady, err := clientScoreAliasReady(ctx)
 	if err != nil {
@@ -5172,36 +5243,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	sourceLoadSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseSourceLoad)
 	defer sourceLoadSpan.finish()
 	sourceRows := 0
-
-	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
-		clientScore, ok := m[lookbackClientScore.ClientId]
-		if !ok {
-			clientScore = &ClientScore{
-				ClientId:              lookbackClientScore.ClientId,
-				NetworkId:             lookbackClientScore.NetworkId,
-				NetworkOnly:           lookbackClientScore.NetworkOnly,
-				ReputationFailedNames: reputationFailedNames,
-				IpFamilies:            lookbackClientScore.IpFamilies,
-				LookbackClientScores:  map[int]*ClientScore{},
-			}
-			m[lookbackClientScore.ClientId] = clientScore
-		}
-		clientScore.LookbackClientScores[lookbackClientScore.LookbackIndex] = lookbackClientScore
-		return clientScore
-	}
-
-	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
-	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
-
-	// What the rules of connect/GEOMAP.md §10.3 read about a provider from its
-	// rollup row, the same in both pool queries.
-	type clientScoreEgress struct {
-		egressIndex   *int
-		egressQuality *bool
-		// the country of the rollup's location, which the country gate
-		// compares with a fresh probe's
-		publishedCountryCode *string
-	}
 
 	loadClientScore := func(result server.PgResult, targetIds [3]any) (lookbackClientScore *ClientScore, reputationFailedNames string, egress *clientScoreEgress) {
 		var clientId server.Id
@@ -5276,19 +5317,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// A client added between the two queries must receive evidence as well.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
-	type pendingClientScore struct {
-		score                       *ClientScore
-		cityId, regionId, countryId *server.Id
-		reputationFailedNames       string
-		egress                      *clientScoreEgress
-		locationGroup               bool
-		locationGroupIds            []server.Id
-	}
-	pendingScores := []pendingClientScore{}
+	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
-	clientIdEgresses := map[server.Id]*clientScoreEgress{}
-	hardExcludedClientIds := map[server.Id]bool{}
-	shadowScoreCapture := beginArinShadowScoreCapture()
+	knownLocationGroupIds := []server.Id{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -5392,7 +5423,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				sourceRows++
 				var cityLocationId, regionLocationId, countryLocationId *server.Id
 				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityLocationId, &regionLocationId, &countryLocationId})
-				pendingScores = append(pendingScores, pendingClientScore{
+				pendingScores = append(pendingScores, clientScoreSourceRow{
 					score: lookbackClientScore, cityId: cityLocationId, regionId: regionLocationId,
 					countryId: countryLocationId, reputationFailedNames: reputationFailedNames, egress: egress,
 				})
@@ -5412,11 +5443,29 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				sourceRows++
 				var cityGroups, regionGroups, countryGroups []server.Id
 				lookbackClientScore, reputationFailedNames, egress := loadClientScore(result, [3]any{&cityGroups, &regionGroups, &countryGroups})
-				pendingScores = append(pendingScores, pendingClientScore{
+				pendingScores = append(pendingScores, clientScoreSourceRow{
 					score: lookbackClientScore, reputationFailedNames: reputationFailedNames, egress: egress,
 					locationGroup: true, locationGroupIds: clientScoreDistinctGroupIds(cityGroups, regionGroups, countryGroups),
 				})
 				cohort[lookbackClientScore.ClientId] = true
+			}
+		})
+
+		// Every group is an export target, including one whose members have no
+		// supply, so FindProviders2 can tell it from a group never written.
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT location_group_id
+			FROM location_group
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				sourceRows++
+				var locationGroupId server.Id
+				server.Raise(result.Scan(&locationGroupId))
+				knownLocationGroupIds = append(knownLocationGroupIds, locationGroupId)
 			}
 		})
 	})
@@ -5426,62 +5475,20 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// health map, including providers outside this serving cohort. Keep that
 	// diagnostic population and its exact evidence window unchanged.
 	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
-	for i, row := range pendingScores {
-		// Release staging references as each row is moved into its target maps.
-		pendingScores[i] = pendingClientScore{}
-		lookbackClientScore, reputationFailedNames, egress := row.score, row.reputationFailedNames, row.egress
-		if shadowScoreCapture != nil {
-			shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
-		}
-		if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
-			hardExcludedClientIds[lookbackClientScore.ClientId] = true
-			continue
-		}
-		clientIdEgresses[lookbackClientScore.ClientId] = egress
-		if !row.locationGroup {
-			cityLocationId, regionLocationId, countryLocationId := row.cityId, row.regionId, row.countryId
-
-			// top-level only; the lookback copies stay nil (see `ClientScore`)
-			setLocationIds := func(clientScore *ClientScore) {
-				clientScore.CityLocationId = cityLocationId
-				clientScore.RegionLocationId = regionLocationId
-				clientScore.CountryLocationId = countryLocationId
-			}
-
-			// once per distinct location id: a country-only client stores
-			// its country id in all three columns (see
-			// SetConnectionLocation), and a client belongs in a location's
-			// pool once. The per-location map is keyed by client id so a
-			// repeat is already absorbed, but going through the set makes
-			// the intent explicit and keeps this loop in step with the
-			// counting loop in UpdateClientLocations.
-			for _, locationId := range distinctIds(
-				cityLocationId,
-				regionLocationId,
-				countryLocationId,
-			) {
-				clientScores, ok := locationClientScores[locationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[locationId] = clientScores
-				}
-				setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
-			}
-		} else {
-			// One provider/lookback row carries every distinct group at
-			// its three location levels, including country-only clients.
-			for _, locationGroupId := range row.locationGroupIds {
-				clientScores, ok := locationGroupClientScores[locationGroupId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationGroupClientScores[locationGroupId] = clientScores
-				}
-				addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
+	// The URL-success rule's country guard over the public cohort, the
+	// population of the location counts and the dashboard, from the evidence
+	// just loaded, its margin held against the guard the last export
+	// published, whichever process ran it.
+	onlineSuccessBaseline := func() *providerOnlineSuccessBaseline {
+		clientIdCountryCodes := map[server.Id]string{}
+		for _, row := range pendingScores {
+			if !row.score.NetworkOnly {
+				clientIdCountryCodes[row.score.ClientId] = normalizeCountryCode(row.egress.publishedCountryCode)
 			}
 		}
-	}
-	pendingScores = nil
-	cohort = nil
+		return newProviderOnlineSuccessBaseline(countFilter, clientIdCountryCodes, egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the score export"))
+	}()
+	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
@@ -5493,12 +5500,44 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// `client_reliability_valid` only forgives ONE per block.
 	minIndependentReliabilityWeights := providerReliabilityMinimums()
 
+	// The ARIN canary chooses this publication's serving database before any
+	// provider is decided, and publishes the choice before the export so the
+	// request-time readers apply it while targets are rewritten
+	// (arindb_canary_model.go). Without a readable decision the readers would
+	// fall back to each row's latest slot, so a failed write stops the export,
+	// and the choice follows the previous one, so a failed read of it does too.
+	arindbDecision, err := decideArindbCanaryForPublication(
+		ctx,
+		nativeSourceStartedAt,
+		pendingScores,
+		&countFilter,
+		egressSettings,
+		egressTestEnabled,
+		minIndependentReliabilityWeights,
+	)
+	if err != nil {
+		return err
+	}
+	if err := writeArindbCanaryDecision(ctx, arindbDecision, ttl); err != nil {
+		return fmt.Errorf("publish arindb canary decision: %w", err)
+	}
+
+	targetMaps := newClientScoreTargetMaps(pendingScores, knownLocationGroupIds, countFilter.hasHardEgressFailure)
+	locationClientScores := targetMaps.locationClientScores
+	locationGroupClientScores := targetMaps.locationGroupClientScores
+	clientIdEgresses := targetMaps.clientIdEgresses
+	hardExcludedClientIds := targetMaps.hardExcludedClientIds
+	pendingScores = nil
+	cohort = nil
+
 	// The rules of connect/GEOMAP.md §10.3 for every provider of the pool, once
 	// each: a client sits in several location and group maps, each with its
 	// own ClientScore, and must be decided the same way in all of them.
 	clientIdEgressDecisions := map[server.Id]providerEgressDecision{}
 	reasonCounts := map[string]int{}
 	onlineCount := 0
+	// the modern provider gate's shadow over the pool this export decides
+	modernGateShadowCounts := newProviderModernGateShadowCounts()
 	for clientId, egress := range clientIdEgresses {
 		decision := decideProviderEgress(
 			countFilter.egressFacts(
@@ -5517,14 +5556,18 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if decision.online {
 			onlineCount += 1
 		}
+		countProviderModernGateShadow(modernGateShadowCounts, decision)
 	}
 	glog.Infof(
-		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d unprobed for the online bucket\n",
+		"[nclm]egress rules: %d providers decided, %d hard excluded from the pool, out of a bucket by reason %v, %d in the online bucket\n",
 		len(clientIdEgressDecisions),
 		len(hardExcludedClientIds),
 		reasonCounts,
 		onlineCount,
 	)
+	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
+	// at the filter's instant, the one the decisions above were made at
+	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings, countFilter.now))
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
@@ -5548,103 +5591,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
-	// splitClientScoreSamples shuffles and buckets one list of scores into
-	// ClientScoreSampleCount-sized samples. Encode on demand so 48 parallel
-	// caller-location exporters retain at most one sample each, rather than
-	// every encoded sample for their current provider location. The returned
-	// bytes move directly into the 512-item/8MiB streaming writer and are
-	// cleared after the synchronous Exec.
-	splitClientScoreSamples := func(clientScores []*ClientScore) (countsBytes []byte, counts []int, encodeSample func(int) []byte) {
-		mathrand.Shuffle(len(clientScores), func(i int, j int) {
-			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
-		})
-
-		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
-
-		counts = make([]int, n)
-		clientsPerSample := 0
-		if 0 < n {
-			clientsPerSample = (len(clientScores) + n - 1) / n
-			for i := range n {
-				i0 := i * clientsPerSample
-				i1 := min((i+1)*clientsPerSample, len(clientScores))
-				counts[i] = i1 - i0
-			}
-		}
-		encodeSample = func(i int) []byte {
-			i0 := i * clientsPerSample
-			i1 := min((i+1)*clientsPerSample, len(clientScores))
-			return encodeClientScoreGobValue(updateClientScoresPhaseMetrics, clientScores[i0:i1])
-		}
-
-		countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
-		return
-	}
-
-	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) clientScoreExportPayload {
-		mapSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseTargetMap)
-		defer mapSpan.finish()
-		clientScores := []*ClientScore{}
-		facetClientScores := map[ipFamilyFacet][]*ClientScore{}
-		nativeFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
-		publicCount := 0
-		publicNetReliabilityWeight := float64(0)
-		for _, clientScore := range s {
-			if !forceMinimum && clientScore.PassesMinimums[rankMode] {
-				facet := clientScore.ipFamilyFacet()
-				nativeFacetClientScores[facet] = append(nativeFacetClientScores[facet], clientScore)
-			}
-			// an online provider sits in both modes' samples, native to
-			// neither: FindProviders2 borrows from it last
-			if clientScore.PassesMinimums[rankMode] || clientScore.Online || forceMinimum {
-				clientScores = append(clientScores, clientScore)
-				facet := clientScore.ipFamilyFacet()
-				facetClientScores[facet] = append(facetClientScores[facet], clientScore)
-				if !clientScore.NetworkOnly {
-					publicCount += 1
-					publicNetReliabilityWeight += clientScore.ReliabilityWeight
-				}
-			}
-		}
-
-		// the samples above carry Network-only providers too -- FindProviders2
-		// filters them per request against the caller's network -- but the
-		// ClientFilter does not. It is read only by loadLocationStables, which
-		// decides the `Stable` flag GetProviderLocations publishes to every
-		// user. That is a public surface, so like the provider count in
-		// UpdateClientLocations it counts only providers a stranger can reach:
-		// a location whose only supply is network-only is not stable, and with
-		// zero public providers it reports no providers at all.
-		filter := &ClientFilter{
-			Count:                publicCount,
-			NetReliabilityWeight: publicNetReliabilityWeight,
-		}
-
-		payload := clientScoreExportPayload{
-			facets: map[ipFamilyFacet]clientScoreFacetPayload{},
-		}
-		updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
-		mapSpan.finish()
-		payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
-		if !forceMinimum {
-			payload.nativeFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
-			for _, facet := range ipFamilyFacets {
-				nativePayload := clientScoreFacetPayload{}
-				nativePayload.countsBytes, nativePayload.counts, nativePayload.encodeSample = splitClientScoreSamples(nativeFacetClientScores[facet])
-				payload.nativeFacets[facet] = nativePayload
-			}
-		}
-		// every facet, an empty one included: see the key layout comment
-		for _, facet := range ipFamilyFacets {
-			facetPayload := clientScoreFacetPayload{}
-			facetPayload.countsBytes, facetPayload.counts, facetPayload.encodeSample = splitClientScoreSamples(facetClientScores[facet])
-			payload.facets[facet] = facetPayload
-		}
-
-		payload.filterBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)
-
-		return payload
-	}
+	nativeCensus.Arindb = arindbDecision.nativeSummary()
 
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
@@ -5683,21 +5630,31 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}
 	clientLocationIds = append(clientLocationIds, slices.Collect(maps.Values(countryCodeLocationIds()))...)
 
-	type clientScoreTarget struct {
-		id            server.Id
-		locationGroup bool
-		clientScores  map[server.Id]*ClientScore
+	targets := targetMaps.targets()
+	// published with encoded-empty payloads: every row hard-excluded, or a
+	// known group without rows
+	emptyTargetCount := 0
+	for _, target := range targets {
+		if len(target.clientScores) == 0 {
+			emptyTargetCount += 1
+		}
 	}
-	targets := make([]clientScoreTarget, 0, len(locationClientScores)+len(locationGroupClientScores))
-	for locationId, clientScores := range locationClientScores {
-		targets = append(targets, clientScoreTarget{id: locationId, clientScores: clientScores})
+	// Also published empty: each target the previous export wrote from rows
+	// that no row names now, so the providers that left it stop being served
+	// before the cache ttl. The manifest of every target this export may leave
+	// readable is published before any document.
+	previousTargetManifest, err := readClientScoreTargetManifest(ctx)
+	if err != nil {
+		return fmt.Errorf("read client score target manifest: %w", err)
 	}
-	for locationGroupId, clientScores := range locationGroupClientScores {
-		targets = append(targets, clientScoreTarget{
-			id:            locationGroupId,
-			locationGroup: true,
-			clientScores:  clientScores,
-		})
+	manifestTime := server.NowUtc()
+	// All payload generations from this export expire with its write-ahead
+	// record, even when a batch runs late or the final publication fails.
+	ctx = context.WithValue(ctx, clientScoreExportExpiryContextKey{}, manifestTime.Add(ttl))
+	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, manifestTime, ttl)
+	targets = append(targets, departedTargets...)
+	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
+		return fmt.Errorf("publish client score target manifest: %w", err)
 	}
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
 	sourceLoadSpan.finish()
@@ -5731,51 +5688,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 								for _, target := range blockTargets {
 									exportIndex := exportCount.Add(1)
 									kind := "location"
-									keys := clientScoreTargetKeys{}
 									if target.locationGroup {
 										kind = "location_group"
-										keys = clientScoreTargetKeys{
-											counts: func(callerId server.Id) string {
-												return clientScoreLocationGroupCountsKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											filter: func(callerId server.Id) string {
-												return clientScoreLocationGroupFilterKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											sample: func(callerId server.Id, sampleIndex int) string {
-												return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-											},
-											alias: func(callerId server.Id) string {
-												return clientScoreLocationGroupAliasKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
-												return clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, target.id, callerId, facet)
-											},
-											facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
-												return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
-											},
-										}
-									} else {
-										keys = clientScoreTargetKeys{
-											counts: func(callerId server.Id) string {
-												return clientScoreLocationCountsKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											filter: func(callerId server.Id) string {
-												return clientScoreLocationFilterKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											sample: func(callerId server.Id, sampleIndex int) string {
-												return clientScoreLocationSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-											},
-											alias: func(callerId server.Id) string {
-												return clientScoreLocationAliasKey(forceMinimum, rankMode, target.id, callerId)
-											},
-											facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
-												return clientScoreLocationFacetCountsKey(forceMinimum, rankMode, target.id, callerId, facet)
-											},
-											facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
-												return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
-											},
-										}
 									}
+									keys := newClientScoreTargetKeys(forceMinimum, rankMode, target)
 									// Target-oriented export has thousands more progress units than
 									// the old caller-oriented loop. Keep production progress useful
 									// without turning the root CPU fix into a log-volume regression.
@@ -5846,6 +5762,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	returnErr = finishClientScoreExport(ctx, returnErrs)
 
 	if returnErr == nil {
+		// Merge completion without forgetting an older overlapping export's
+		// live targets. Their deadlines, not completion order, bound retention.
+		if err := writeClientScoreTargetManifest(ctx, targetMaps.targetManifest(server.NowUtc()), ttl); err != nil {
+			// the manifest published before the documents still names the
+			// departed targets, so the next export clears them again
+			glog.Errorf("[nclm]publish client score target manifest: %s\n", err)
+		}
 		if writeLegacyUnchanged {
 			if err := markClientScoreAliasReady(ctx); err != nil {
 				return fmt.Errorf("publish client score alias migration state: %w", err)
@@ -5865,12 +5788,20 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
 			return fmt.Errorf("publish native client score census: %w", err)
 		}
-		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
+		// The guard this export decided Online by, with its kill switch and
+		// floor, for provider status, inspection and the exempt-country
+		// gauge. A reader without it exempts every country, so a failure here
+		// leaves the export standing.
+		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
+			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
+		}
 		glog.Infof(
-			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
+			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
 			len(locationClientScores),
 			len(locationGroupClientScores),
+			emptyTargetCount,
+			len(departedTargets),
 		)
 	} else {
 		glog.Infof("[nclm]update err = %s\n", returnErr)
@@ -5959,170 +5890,37 @@ func loadClientScoresInFacetOrder(
 		observation = observations[0]
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		type countsRead struct {
-			caller   *redis.StringCmd
-			baseline *redis.StringCmd
-		}
-		type targetRead struct {
-			alias    *redis.StringCmd
-			unfacted countsRead
-			facets   map[ipFamilyFacet]countsRead
-		}
-		locationReads := map[server.Id]targetRead{}
-		locationGroupReads := map[server.Id]targetRead{}
-
 		// plain pipeline instead of tx: independent gets across cluster slots
 		pipe := r.Pipeline()
-		for locationId, _ := range locationIds {
-			read := targetRead{
-				unfacted: countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId)),
-				},
-				facets: map[ipFamilyFacet]countsRead{},
-			}
-			if clientLocationId != (server.Id{}) {
-				read.alias = pipe.Get(ctx, clientScoreLocationAliasKey(forceMinimum, rankMode, locationId, clientLocationId))
-				read.unfacted.baseline = pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, server.Id{}))
-			}
-			for _, facet := range facets {
-				facetRead := countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationFacetCountsKey(forceMinimum, rankMode, locationId, clientLocationId, facet)),
-				}
-				if clientLocationId != (server.Id{}) {
-					facetRead.baseline = pipe.Get(ctx, clientScoreLocationFacetCountsKey(forceMinimum, rankMode, locationId, server.Id{}, facet))
-				}
-				read.facets[facet] = facetRead
-			}
-			locationReads[locationId] = read
-		}
-		for locationGroupId, _ := range locationGroupIds {
-			read := targetRead{
-				unfacted: countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId)),
-				},
-				facets: map[ipFamilyFacet]countsRead{},
-			}
-			if clientLocationId != (server.Id{}) {
-				read.alias = pipe.Get(ctx, clientScoreLocationGroupAliasKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
-				read.unfacted.baseline = pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, server.Id{}))
-			}
-			for _, facet := range facets {
-				facetRead := countsRead{
-					caller: pipe.Get(ctx, clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId, facet)),
-				}
-				if clientLocationId != (server.Id{}) {
-					facetRead.baseline = pipe.Get(ctx, clientScoreLocationGroupFacetCountsKey(forceMinimum, rankMode, locationGroupId, server.Id{}, facet))
-				}
-				read.facets[facet] = facetRead
-			}
-			locationGroupReads[locationGroupId] = read
-		}
+		locationReads, locationGroupReads := newClientScoreTargetReads(
+			forceMinimum,
+			rankMode,
+			locationIds,
+			locationGroupIds,
+			clientLocationId,
+			facets,
+			func(key string) *redis.StringCmd {
+				return pipe.Get(ctx, key)
+			},
+		)
 		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
 			clientScoreReadMetrics.counts.Inc()
 			returnErr = fmt.Errorf("read client score counts: %w", err)
 			return
 		}
 
-		// sample keys grouped by draw order: one group per requested facet,
-		// then the un-faceted fallback group
-		groupCount := len(facets) + 1
-		groupSampleKeyCounts := make([]map[string]int, groupCount)
-		sourceIncomplete := false
-		for i := range groupSampleKeyCounts {
-			groupSampleKeyCounts[i] = map[string]int{}
-		}
-
-		decodeCounts := func(alias *redis.StringCmd, read countsRead) (effectiveClientLocationId server.Id, counts []int, ok bool) {
-			effectiveClientLocationId, countsBytes := selectClientScorePayload(
-				clientLocationId,
-				clientScoreCommandBytes(alias),
-				clientScoreCommandBytes(read.caller),
-				clientScoreCommandBytes(read.baseline),
-			)
-			if len(countsBytes) == 0 {
-				return
-			}
-			b := bytes.NewBuffer(countsBytes)
-			e := gob.NewDecoder(b)
-			if err := e.Decode(&counts); err != nil {
-				returnErr = err
-				return
-			}
-			ok = true
+		groupSampleKeyCounts, sourceIncomplete, err := clientScoreTargetPageCounts(
+			forceMinimum,
+			rankMode,
+			clientLocationId,
+			facets,
+			locationReads,
+			locationGroupReads,
+			observation,
+		)
+		if err != nil {
+			returnErr = err
 			return
-		}
-
-		addTarget := func(
-			read targetRead,
-			groupId *server.Id,
-			facetSampleKey func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string,
-			sampleKey func(effectiveClientLocationId server.Id, index int) string,
-		) {
-			faceted := false
-			facetCount := 0
-			for facetIndex, facet := range facets {
-				effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.facets[facet])
-				if returnErr != nil {
-					return
-				}
-				if !ok {
-					continue
-				}
-				faceted = true
-				facetCount++
-				for i, count := range counts {
-					groupSampleKeyCounts[facetIndex][facetSampleKey(effectiveClientLocationId, facet, i)] = count
-				}
-			}
-			if faceted {
-				if facetCount != len(facets) {
-					sourceIncomplete = true
-				}
-				return
-			}
-			// written before the facets existed: fall back to the un-faceted buckets
-			effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.unfacted)
-			if returnErr != nil || !ok {
-				sourceIncomplete = true
-				if returnErr == nil && observation != nil {
-					observation.missingTarget(groupId, clientLocationId, rankMode)
-				}
-				return
-			}
-			for i, count := range counts {
-				groupSampleKeyCounts[groupCount-1][sampleKey(effectiveClientLocationId, i)] = count
-			}
-		}
-
-		for locationId, read := range locationReads {
-			addTarget(
-				read,
-				nil,
-				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
-					return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, facet, index)
-				},
-				func(effectiveClientLocationId server.Id, index int) string {
-					return clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, index)
-				},
-			)
-			if returnErr != nil {
-				return
-			}
-		}
-		for locationGroupId, read := range locationGroupReads {
-			addTarget(
-				read,
-				&locationGroupId,
-				func(effectiveClientLocationId server.Id, facet ipFamilyFacet, index int) string {
-					return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, facet, index)
-				},
-				func(effectiveClientLocationId server.Id, index int) string {
-					return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, index)
-				},
-			)
-			if returnErr != nil {
-				return
-			}
 		}
 
 		if !facetPriority {
@@ -6419,49 +6217,30 @@ func FindProviders2(
 		}
 		hardExcludedClientIds := map[server.Id]bool{}
 		qualityExcludedClientIds := map[server.Id]bool{}
+		// The candidates this request's live read (readQuality) found
+		// without a live connection, and those with no current liveness
+		// lease (provider_liveness_lease.go). Each leaves every draw of this
+		// request, native, borrowed and Online fallback. A named provider is
+		// never read for a lease, and one the live read finds offline later
+		// stays where its spec put it. Nothing outside the request keeps the
+		// verdict.
+		offlineClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
 		var clientIds, borrowedClientIds []server.Id
+		// The one instant filterPool judges every pool's URL evidence at, and
+		// with it what the draws below know of each candidate: nil while
+		// rank_measured_first is off or for force_minimum
+		// (network_client_selection_evidence.go). The evidence rank and the
+		// neutral URL weight cannot disagree about an expiry.
+		filterTime := server.NowUtc()
+		evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 		// Draws up to n of the candidates by their weight in `mode` and bands
-		// the draw by their tier in `mode`. Weighted selection and tier banding
-		// run within each facet, and the preferred facet fills n first: a
-		// v4-capable request takes every dualstack provider it can before any
-		// v4-only one, so the single-family category only ever tops up a
-		// shortfall.
+		// the draw by their tier in `mode`, each facet in the request's
+		// preference order (selectClientScoresByWeight).
 		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
-			clientIds := []server.Id{}
-			for _, facet := range facets {
-				remainingCount := n - len(clientIds)
-				if remainingCount <= 0 {
-					break
-				}
-				facetClientIds := []server.Id{}
-				for clientId, clientScore := range candidateClientScores {
-					if clientScore.ipFamilyFacet() == facet {
-						facetClientIds = append(facetClientIds, clientId)
-					}
-				}
-				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-				})
-
-				connect.WeightedSelectFunc(facetClientIds, remainingCount, func(clientId server.Id) float32 {
-					clientScore := candidateClientScores[clientId]
-					return clientScore.ScaledWeights[mode]
-				})
-				facetClientIds = facetClientIds[:min(remainingCount, len(facetClientIds))]
-
-				// band by tier
-				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-					clientScoreA := candidateClientScores[a]
-					clientScoreB := candidateClientScores[b]
-
-					return clientScoreA.Tiers[mode] - clientScoreB.Tiers[mode]
-				})
-				clientIds = append(clientIds, facetClientIds...)
-			}
-			return clientIds
+			return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
 		}
 
 		validation := &providerQualityValidation{parent: session.Ctx}
@@ -6469,8 +6248,13 @@ func FindProviders2(
 		pruneSelected := func() {
 			// A later bucket can expose common risk for an earlier selection.
 			// Revoke it before quota/refill counts or final answers use it.
+			// A drawn provider found offline since is revoked the same way;
+			// a named one is not drawn, and stays.
+			offlineSelections := map[server.Id]bool{}
 			rejectedSelection := func(clientId server.Id) bool {
-				if !hardExcludedClientIds[clientId] {
+				if offlineClientIds[clientId] {
+					offlineSelections[clientId] = true
+				} else if !hardExcludedClientIds[clientId] {
 					return false
 				}
 				delete(clientScores, clientId)
@@ -6479,7 +6263,9 @@ func FindProviders2(
 			}
 			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
 			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
-			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool { return hardExcludedClientIds[provider.ClientId] })
+			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool {
+				return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId]
+			})
 			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
 		}
 		readQuality := func(ids []server.Id, strict bool) error {
@@ -6487,7 +6273,7 @@ func FindProviders2(
 				return nil
 			}
 			observation.enter("hard_exclusions")
-			excluded, risky, err := validation.read(ids)
+			excluded, risky, offline, err := validation.read(ids)
 			if err != nil {
 				if session.Ctx.Err() != nil || strict {
 					return err
@@ -6496,6 +6282,8 @@ func FindProviders2(
 				return nil
 			}
 			maps.Copy(qualityExcludedClientIds, excluded)
+			maps.Copy(qualityExcludedClientIds, offline)
+			maps.Copy(offlineClientIds, offline)
 			maps.Copy(hardExcludedClientIds, risky)
 			for _, id := range ids {
 				qualityReadClientIds[id] = true
@@ -6505,7 +6293,9 @@ func FindProviders2(
 		}
 
 		// Common refusals apply to every bucket. Subscriber refusals apply only
-		// to native Quality, including Quality borrowed by a Speed request.
+		// to native Quality, including Quality borrowed by a Speed request,
+		// except that a candidate read without a live connection leaves every
+		// draw of the request (offlineClientIds).
 		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
 			observation.enter("hard_exclusions")
 			candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
@@ -6519,6 +6309,28 @@ func FindProviders2(
 				return err
 			}
 			maps.Copy(hardExcludedClientIds, excluded)
+			// A candidate without a current liveness lease leaves every draw
+			// of the request like one the live read finds offline. The lease
+			// read fails open (provider_liveness_lease_read.go), and judges
+			// at its own instant, which needs nothing of the request's. A
+			// named provider keeps its place whatever its lease: a redial
+			// that names its exit gets one try, and a wrong offline verdict
+			// there changes the user's IP.
+			namedClientIdSet := map[server.Id]bool{}
+			for _, clientId := range namedClientIds {
+				namedClientIdSet[clientId] = true
+			}
+			leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
+			for _, clientId := range candidateClientIds {
+				if !hardExcludedClientIds[clientId] && !namedClientIdSet[clientId] {
+					leaseClientIds = append(leaseClientIds, clientId)
+				}
+			}
+			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
+			if err != nil {
+				return err
+			}
+			maps.Copy(offlineClientIds, offline)
 			for _, clientId := range candidateClientIds {
 				exclusionReadClientIds[clientId] = true
 			}
@@ -6537,12 +6349,13 @@ func FindProviders2(
 			// Speed selection. Check that overlap before filterPool removes it.
 			if mode == RankModeQuality && native {
 				prior := []server.Id{}
-				now := server.NowUtc()
+				// the request's one instant, as filterPool reads it
+				now := filterTime
 				for _, provider := range providers {
 					id := provider.ClientId
 					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
 						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
-						score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil) {
+						score.urlEvidenceCurrent(now) {
 						prior = append(prior, id)
 					}
 				}
@@ -6588,9 +6401,11 @@ func FindProviders2(
 		// provider passes exactly what a native one does.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
 			observation.enter("filter")
-			now := server.NowUtc()
+			now := filterTime
 			for _, clientScore := range clientScores {
-				if clientScore.EgressValidUntil == nil || !now.Before(*clientScore.EgressValidUntil) {
+				// the evidence rank reads the same expiry at the same instant
+				// (clientScoreEvidence)
+				if !clientScore.urlEvidenceCurrent(now) {
 					// Older native cache records may not also set Online. Their
 					// prior native admission also admitted online fallback. Expiry
 					// removes only native evidence; request filters still run below.
@@ -6622,6 +6437,10 @@ func FindProviders2(
 			}
 			before := len(clientScores)
 			for clientId := range hardExcludedClientIds {
+				delete(clientScores, clientId)
+			}
+			// read without a live connection: out of every pool of this request
+			for clientId := range offlineClientIds {
 				delete(clientScores, clientId)
 			}
 			for clientId := range qualityExcludedClientIds {
@@ -6679,7 +6498,7 @@ func FindProviders2(
 				validated := 0
 				for id, score := range scores {
 					if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
-						if hardExcludedClientIds[id] || findProviders2.ForceMinimum {
+						if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
 							delete(scores, id)
 						} else {
 							score.Online = true
@@ -6814,52 +6633,13 @@ func FindProviders2(
 		observation.enter("select")
 
 		// Takes up to n of the online bucket in its order
-		// (connect/GEOMAP.md §10.3): reliability weight, highest first, then
-		// the speed-mode performance adjustment -- the client-measured latency
-		// and throughput, past the speed cutoffs last. Missing measurements
-		// retain their ranking penalties without changing online admission.
-		// Each facet keeps the request's existing preference order.
+		// (connect/GEOMAP.md §10.3): reliability weight times URL weight,
+		// highest first, then the speed-mode performance adjustment, each
+		// facet in the request's preference order; with rank_measured_first,
+		// a draw weighted by that key within each evidence rank
+		// (selectOnlineClientScores).
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			clientIds := []server.Id{}
-			for _, facet := range facets {
-				remainingCount := n - len(clientIds)
-				if remainingCount <= 0 {
-					break
-				}
-				facetClientIds := []server.Id{}
-				for clientId, clientScore := range candidateClientScores {
-					if clientScore.ipFamilyFacet() == facet {
-						facetClientIds = append(facetClientIds, clientId)
-					}
-				}
-				// full ties in no particular order
-				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-				})
-				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-					clientScoreA := candidateClientScores[a]
-					clientScoreB := candidateClientScores[b]
-					weightA, weightB := clientScoreA.UrlProbeSuccessWeight, clientScoreB.UrlProbeSuccessWeight
-					if weightA == 0 {
-						weightA = 1
-					}
-					if weightB == 0 {
-						weightB = 1
-					}
-					switch {
-					case clientScoreB.ReliabilityWeight*weightB < clientScoreA.ReliabilityWeight*weightA:
-						return -1
-					case clientScoreA.ReliabilityWeight*weightA < clientScoreB.ReliabilityWeight*weightB:
-						return 1
-					}
-					if d := clientScoreA.Tiers[RankModeSpeed] - clientScoreB.Tiers[RankModeSpeed]; d != 0 {
-						return d
-					}
-					return clientScoreA.Scores[RankModeSpeed] - clientScoreB.Scores[RankModeSpeed]
-				})
-				clientIds = append(clientIds, facetClientIds[:min(remainingCount, len(facetClientIds))]...)
-			}
-			return clientIds
+			return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
 		}
 
 		// Draws up to n members of the online bucket, every one equally likely
@@ -6959,14 +6739,23 @@ func FindProviders2(
 				observation.backfillClientScores = otherClientScores
 				observation.enter("select")
 
-				// 1. the other bucket's natives
+				// 1. the other bucket's natives. Quality borrows only the Speed
+				// natives within its own latency and throughput cutoffs, their
+				// Quality tier below ClientScoreCutoffTier. Those past the
+				// cutoffs are online members, as every native is, and wait for
+				// the Online fallback.
 				borrowableClientScores := map[server.Id]*ClientScore{}
+				pastCutoffClientScores := map[server.Id]*ClientScore{}
 				for clientId, clientScore := range otherClientScores {
 					if !clientScore.PassesMinimums[otherRankMode] ||
 						(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
 						continue
 					}
 					if _, native := nativeClientScores[clientId]; native {
+						continue
+					}
+					if rankMode == RankModeQuality && ClientScoreCutoffTier <= clientScore.Tiers[RankModeQuality] {
+						pastCutoffClientScores[clientId] = clientScore
 						continue
 					}
 					borrowableClientScores[clientId] = clientScore
@@ -7026,13 +6815,22 @@ func FindProviders2(
 							return nil, err
 						}
 						for clientId, clientScore := range pool {
-							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil {
+							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
 								onlineClientScores[clientId] = clientScore
 							}
 						}
 					}
+					// The Speed natives held back past Quality's cutoffs stay
+					// candidates even where the pages read above lack them.
+					for clientId, clientScore := range pastCutoffClientScores {
+						if answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
+							onlineClientScores[clientId] = clientScore
+						}
+					}
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
-						borrow(onlineClientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
+						clientScore := onlineClientScores[clientId]
+						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
+						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset)
 					}
 				}
 			}

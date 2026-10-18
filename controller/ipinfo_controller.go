@@ -3,9 +3,17 @@ package controller
 import (
 	"fmt"
 	"math"
+	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	mmdb "github.com/oschwald/maxminddb-golang/v2"
+
+	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -30,6 +38,9 @@ func GetMyIpInfo(session *session.ClientSession) (*MyIpInfoResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if addr, err := netip.ParseAddr(clientIp); err == nil {
+		myInfo.Asn = GetIpAsn(addr)
+	}
 
 	return &MyIpInfoResult{
 		Info:               myInfo,
@@ -44,6 +55,17 @@ func GetMyIpInfo(session *session.ClientSession) (*MyIpInfoResult, error) {
 type MyInfo struct {
 	IP       string      `json:"ip"`
 	Location *IpLocation `json:"location,omitempty"`
+	// the network the ip is announced by, from GeoLite2 ASN; left out when
+	// the database is not deployed or has no record for the ip
+	// (lag.dev/PLAN.md A3)
+	Asn *IpAsn `json:"asn,omitempty"`
+}
+
+// An autonomous system (lag.dev/PLAN.md A3), as GeoLite2 ASN names it. Both
+// fields are always written, so a reader never tests for a missing name.
+type IpAsn struct {
+	Number       uint32 `json:"number"`
+	Organization string `json:"organization"`
 }
 
 type IpLocation struct {
@@ -140,4 +162,89 @@ func (c Coordinates) CalculateDistanceInLightSecondsOnEarthSurface(other Coordin
 
 func degreesToRadians(degrees float64) float64 {
 	return degrees * (math.Pi / 180.0)
+}
+
+// GeoLite2 ASN (lag.dev/PLAN.md A3): the autonomous system an address is
+// announced by, which lag.dev shows as the visitor's network. It is a config
+// mmdb deployed beside GeoLite2 City (`mmdb/geolite2.mmdb`), and optional: a
+// deployment without it answers my-ip-info without `asn`.
+//
+// This product includes GeoLite2 data created by MaxMind, available from
+// https://www.maxmind.com.
+
+// The resource the database is deployed as, resolved like the City database.
+const geoLite2AsnResourcePath = "mmdb/geolite2-asn.mmdb"
+
+// The one database type the reader decodes. The record shape below is this
+// type's, and the struct decoder would read another type's records as empty
+// rather than fail, so another type is refused when the file is opened.
+const geoLite2AsnDatabaseType = "GeoLite2-ASN"
+
+// The part of a GeoLite2 ASN record the answer keeps.
+type geoLite2AsnRecord struct {
+	AutonomousSystemNumber       uint32 `maxminddb:"autonomous_system_number"`
+	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
+}
+
+// The deployed database, opened once per process, or nil when there is none.
+var ipAsnDb = sync.OnceValue(loadIpAsnDb)
+
+// Opens the deployed GeoLite2 ASN file. An absent or unusable file is logged
+// and leaves the answer without `asn`, rather than failing the process: the
+// City database is what my-ip-info cannot do without.
+func loadIpAsnDb() *mmdb.Reader {
+	path, err := server.Config.ResourcePath(geoLite2AsnResourcePath)
+	if err != nil {
+		glog.Infof("[ip]no GeoLite2 ASN database (%s); my-ip-info answers without asn\n", err)
+		return nil
+	}
+	db, err := openIpAsnDb(path)
+	if err != nil {
+		glog.Errorf("[ip]GeoLite2 ASN database not used: %s\n", err)
+		return nil
+	}
+	glog.Infof(
+		"[ip]ip asn database type: %s (build %s)\n",
+		db.Metadata.DatabaseType,
+		db.Metadata.BuildTime().UTC().Format(time.DateOnly),
+	)
+	return db
+}
+
+// Opens the database at path and refuses any type but GeoLite2 ASN.
+func openIpAsnDb(path string) (*mmdb.Reader, error) {
+	db, err := mmdb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if databaseType := db.Metadata.DatabaseType; databaseType != geoLite2AsnDatabaseType {
+		db.Close()
+		return nil, fmt.Errorf("ip asn database %s has type %q; only %q is supported", path, databaseType, geoLite2AsnDatabaseType)
+	}
+	return db, nil
+}
+
+// The autonomous system of addr in db, or nil when db is nil, the address has
+// no record, or the record has no number.
+func lookupIpAsn(db *mmdb.Reader, addr netip.Addr) *IpAsn {
+	if db == nil || !addr.IsValid() {
+		return nil
+	}
+	var record geoLite2AsnRecord
+	if err := db.Lookup(addr.Unmap().WithZone("")).Decode(&record); err != nil {
+		return nil
+	}
+	if record.AutonomousSystemNumber == 0 {
+		return nil
+	}
+	return &IpAsn{
+		Number:       record.AutonomousSystemNumber,
+		Organization: record.AutonomousSystemOrganization,
+	}
+}
+
+// The autonomous system of an address, or nil when it is unknown
+// (lag.dev/PLAN.md A3, A7).
+func GetIpAsn(addr netip.Addr) *IpAsn {
+	return lookupIpAsn(ipAsnDb(), addr)
 }

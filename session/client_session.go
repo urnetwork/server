@@ -19,6 +19,10 @@ import (
 // https://www.rfc-editor.org/rfc/rfc6750
 const authBearerPrefix = "Bearer "
 
+// An API key (apikey) is sent as the bearer: "urn_" and 52 more characters.
+const apiKeyTokenPrefix = "urn_"
+const apiKeyTokenLength = 56
+
 // The Warp ingress overwrites this with the address accepted from the client.
 const urForwardedForHeader = "X-UR-Forwarded-For"
 
@@ -52,8 +56,11 @@ type ClientSession struct {
 	UnsignedIdentity bool
 }
 
-// Resolves the ingress-owned client address before exposing request state.
+// Drops the request's cookie headers (cookies.go) and resolves the
+// ingress-owned client address before exposing request state.
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
+	DropCookies(req)
+
 	cancelCtx, cancel := context.WithCancel(req.Context())
 
 	clientAddress, err := ResolveClientAddress(req)
@@ -185,27 +192,37 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 	}
 }
 
-// Sets authentication claims or returns an authentication error.
-func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) error {
+// Replies to a client credential's request before its client state query.
+// It runs with the credential's verified client id after the signature, the
+// claims, the session horizon, the session revocation marker and this
+// process's remembered state refusals, and returns whether it replied. A
+// reply must grant nothing: it may only report again a refusal this process
+// recorded for that same client. No result of the state query is assumed.
+type BeforeStateAnswer func(ctx context.Context, clientId server.Id) bool
+
+// Sets authentication claims or returns an authentication error. A non-nil
+// answer may reply to a client credential instead (see BeforeStateAnswer);
+// the request is then not authenticated and ByJwt stays nil.
+func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, answer BeforeStateAnswer) (answered bool, returnErr error) {
 	// only a resolved API key sets it, below
 	self.ApiKeyAuthenticated = false
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
 
-			if strings.HasPrefix(authStr, "urn_") {
+			if strings.HasPrefix(authStr, apiKeyTokenPrefix) {
 				// handle API KEY authentication
 
 				// The network_client_proxy_model uses a sha1 hash with a local secret to avoid a db lookup on fake api keys.
 				// Could use a cryptographic hash like jwt/ncpm could be a done here to mitigate possible abuse.
 
-				if len(authStr) != 56 {
-					return errors.New("Invalid API key.")
+				if len(authStr) != apiKeyTokenLength {
+					return false, errors.New("Invalid API key.")
 				}
 
 				network := apikey.GetNetworkByApiKey(authStr, ctx)
 				if network == nil {
-					return errors.New("Invalid API key.")
+					return false, errors.New("Invalid API key.")
 				}
 				self.ByJwt = NewByJwt(
 					network.NetworkId,
@@ -218,7 +235,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 				if glog.V(2) {
 					glog.Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
 				}
-				return nil
+				return false, nil
 
 			} else {
 				// handle JWT authentication
@@ -227,21 +244,34 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) 
 
 				byJwt, err := ParseByJwtForAudience(ctx, authStr, ByJwtAudienceApi)
 				if err != nil {
-					return err
+					return false, err
 				}
-				if err := ValidateByJwtState(WithStateQuerySource(ctx, sessionStateQuerySource(req)), byJwt, false); err != nil {
-					return err
+				stateCtx := WithStateQuerySource(ctx, sessionStateQuerySource(req))
+				if answer != nil && byJwt.ClientId != nil {
+					// the checks ValidateByJwtState makes before its query,
+					// then the answer, then only the query
+					if err := validateByJwtStateBeforeQuery(stateCtx, byJwt, false); err != nil {
+						return false, err
+					}
+					if answer(stateCtx, *byJwt.ClientId) {
+						return true, nil
+					}
+					if err := validateByJwtStateRemembered(stateCtx, byJwt, nil); err != nil {
+						return false, err
+					}
+				} else if err := ValidateByJwtState(stateCtx, byJwt, false); err != nil {
+					return false, err
 				}
 				if glog.V(2) {
 					glog.Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
 				}
 				self.ByJwt = byJwt
 				self.ObserveAuthenticatedUse()
-				return nil
+				return false, nil
 			}
 		}
 	}
-	return errors.New("Invalid auth.")
+	return false, errors.New("Invalid auth.")
 }
 
 // Splits the normalized client address.

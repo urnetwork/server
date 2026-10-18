@@ -15,7 +15,7 @@ import (
 // Allocate only a fresh attempt and retain its request in the same commit.
 // A racing reservation must be reloaded, never rebuilt from current settings.
 func ReserveProviderPaymentRequest(ctx context.Context, payment *AccountPayment, wallet *AccountWallet, amount float64, network string) (request *ProviderPaymentRequest, returnErr error) {
-	if payment == nil || wallet == nil || payment.WalletId == nil || *payment.WalletId != wallet.WalletId || payment.NetworkId != wallet.NetworkId ||
+	if payment == nil || payment.PaymentId == (server.Id{}) || wallet == nil || payment.WalletId == nil || *payment.WalletId != wallet.WalletId || payment.NetworkId != wallet.NetworkId ||
 		payment.CircleIdempotencyKey != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
 		return nil, ErrProviderPaymentBasisChanged
 	}
@@ -31,7 +31,7 @@ func ReserveProviderPaymentRequest(ctx context.Context, payment *AccountPayment,
 			}
 		}
 	}()
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(payment.PaymentId, wallet.Blockchain, wallet.WalletAddress, ""), func(tx server.PgTx) {
 		request, returnErr = nil, nil
 		basis := reserveProviderPaymentBasisInTx(ctx, tx, payment, wallet, false)
 		if basis == nil {

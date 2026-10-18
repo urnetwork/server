@@ -480,16 +480,88 @@ func ReserveStTransactionGasAttempt(ctx context.Context, policy *server.StOperat
 	if err := policy.Verify(authority, server.NowUtc()); err != nil {
 		return nil, err
 	}
-	liability, err := ValidateStTransactionGasEnvelope(policy, unsigned)
+	liability, raw, err := stGasUnsignedEnvelope(policy, unsigned)
 	if err != nil {
 		return nil, err
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		result = reserveStTransactionGasAttempt(ctx, tx, policy, stGasAdmitPolicy(ctx, tx, policy, authority), intentId, expectedAttempt, kind, unsigned, raw, liability)
+	})
+	return result, nil
+}
+
+// ErrStTransactionIntentNew reports that reserving a logical operation's
+// intent would take a new nonce, which under an operator gas policy needs the
+// first attempt that nonce is for.
+var ErrStTransactionIntentNew = errors.New("st transaction intent would take a new nonce")
+
+// ReserveStTransactionIntentGas reserves an intent as ReserveStTransactionIntent
+// does, under an operator gas policy. An intent it creates takes its nonce only
+// together with its first attempt's gas reservation, which unsigned builds at
+// that nonce, in one transaction: the policy refuses that attempt (its
+// maximum_gas and fee caps, the operation's signatures and liability, the
+// lifetime caps) before any nonce is taken, so a refused attempt leaves no
+// intent to hold the account's later sends. An existing intent is returned
+// without a reservation. With unsigned nil, it creates none and refuses with
+// ErrStTransactionIntentNew instead.
+func ReserveStTransactionIntentGas(
+	ctx context.Context,
+	policy *server.StOperatorGasPolicy,
+	authority *server.StOperatorGasAuthority,
+	logicalKey string,
+	profile string,
+	deploymentId string,
+	deploymentKey StDeploymentKey,
+	chainId uint64,
+	genesisHash string,
+	fromAddress string,
+	toAddress string,
+	calldataHash string,
+	calldata []byte,
+	pendingNonce uint64,
+	unsigned func(nonce uint64) *types.Transaction,
+) (intent *StTransactionIntent, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			intent = nil
+		}
+	}()
+	defer recoverStGasError(&resultErr)
+	if err := policy.Verify(authority, server.NowUtc()); err != nil {
+		return nil, err
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		digest := stGasAdmitPolicy(ctx, tx, policy, authority)
+		var created bool
+		intent, created = reserveStTransactionIntent(ctx, tx, logicalKey, profile, deploymentId, deploymentKey, chainId, genesisHash, fromAddress, toAddress, calldataHash, calldata, pendingNonce)
+		if !created {
+			return
+		}
+		if unsigned == nil {
+			panic(ErrStTransactionIntentNew)
+		}
+		first := unsigned(intent.Nonce)
+		liability, raw, err := stGasUnsignedEnvelope(policy, first)
+		server.Raise(err)
+		reserveStTransactionGasAttempt(ctx, tx, policy, digest, intent.IntentId, 1, StTxAttemptExecution, first, raw, liability)
+	})
+	return intent, nil
+}
+
+// stGasUnsignedEnvelope checks an unsigned attempt's envelope against the
+// policy and the retained byte bounds before any lock, and returns its maximum
+// liability and its bytes.
+func stGasUnsignedEnvelope(policy *server.StOperatorGasPolicy, unsigned *types.Transaction) (*big.Int, []byte, error) {
+	liability, err := ValidateStTransactionGasEnvelope(policy, unsigned)
+	if err != nil {
+		return nil, nil, err
 	}
 	raw, err := unsigned.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(raw) > stGasMaximumTransactionBytes {
-		return nil, errors.New("operator gas unsigned envelope exceeds retained original byte bound")
+		return nil, nil, errors.New("operator gas unsigned envelope exceeds retained original byte bound")
 	}
 	// Project the largest signature encoding before signing. The signature is
 	// deliberately synthetic and is used only for byte length, never authority.
@@ -500,60 +572,86 @@ func ReserveStTransactionGasAttempt(ctx context.Context, policy *server.StOperat
 	widestSignature[64] = 1
 	projected, err := unsigned.WithSignature(types.LatestSignerForChainID(new(big.Int).SetUint64(policy.ChainId)), widestSignature[:])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	projectedRaw, err := projected.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(projectedRaw) > stGasMaximumTransactionBytes {
-		return nil, errors.New("operator gas signed envelope would exceed retained original byte bound")
+		return nil, nil, errors.New("operator gas signed envelope would exceed retained original byte bound")
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
-		digest := stGasAdmitPolicy(ctx, tx, policy, authority)
-		intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE`, intentId))
-		stGasRequireUnsettled(ctx, tx, intentId)
-		allowed := false
-		for _, account := range policy.Accounts {
-			allowed = allowed || account.Address == intent.FromAddress
+	return liability, raw, nil
+}
+
+// reserveStTransactionGasAttempt is ReserveStTransactionGasAttempt inside tx,
+// after the policy's admission as digest.
+func reserveStTransactionGasAttempt(ctx context.Context, tx server.PgTx, policy *server.StOperatorGasPolicy, digest string, intentId server.Id, expectedAttempt int, kind string, unsigned *types.Transaction, raw []byte, liability *big.Int) *StTransactionGasReservation {
+	intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE`, intentId))
+	stGasRequireUnsettled(ctx, tx, intentId)
+	allowed := false
+	for _, account := range policy.Accounts {
+		allowed = allowed || account.Address == intent.FromAddress
+	}
+	if !allowed || intent.ChainId != policy.ChainId || intent.GenesisHash != policy.GenesisHash || intent.Nonce != unsigned.Nonce() || stTransactionIntentTerminal(intent.Status) || intent.Status == StTxMined || expectedAttempt <= 0 || expectedAttempt > intent.AttemptCount+1 {
+		panic(ErrStOperatorGasAllowance)
+	}
+	if expectedAttempt <= intent.AttemptCount {
+		result, err := scanStGasReservation(tx.QueryRow(ctx, `SELECT `+stGasReservationColumns+` FROM st_operator_gas_reservation WHERE intent_id=$1 AND attempt=$2`, intentId, intent.AttemptCount))
+		server.Raise(err)
+		result.Reused = true
+		return result
+	}
+	if intent.AttemptCount >= 3 {
+		panic(ErrStOperatorGasAllowance)
+	}
+	if kind == StTxAttemptCancellation {
+		if *unsigned.To() != common.HexToAddress(intent.FromAddress) || len(unsigned.Data()) != 0 || unsigned.Gas() != 21_000 {
+			panic(errors.New("operator gas cancellation differs from original account"))
 		}
-		if !allowed || intent.ChainId != policy.ChainId || intent.GenesisHash != policy.GenesisHash || intent.Nonce != unsigned.Nonce() || stTransactionIntentTerminal(intent.Status) || intent.Status == StTxMined || expectedAttempt <= 0 || expectedAttempt > intent.AttemptCount+1 {
-			panic(ErrStOperatorGasAllowance)
-		}
-		if expectedAttempt <= intent.AttemptCount {
-			var err error
-			result, err = scanStGasReservation(tx.QueryRow(ctx, `SELECT `+stGasReservationColumns+` FROM st_operator_gas_reservation WHERE intent_id=$1 AND attempt=$2`, intentId, intent.AttemptCount))
-			server.Raise(err)
-			result.Reused = true
-			return
-		}
-		if intent.AttemptCount >= 3 {
-			panic(ErrStOperatorGasAllowance)
-		}
-		if kind == StTxAttemptCancellation {
-			if *unsigned.To() != common.HexToAddress(intent.FromAddress) || len(unsigned.Data()) != 0 || unsigned.Gas() != 21_000 {
-				panic(errors.New("operator gas cancellation differs from original account"))
-			}
-		} else if kind != StTxAttemptExecution || !strings.EqualFold(unsigned.To().Hex(), intent.ToAddress) || !bytes.Equal(unsigned.Data(), intent.Calldata) {
-			panic(errors.New("operator gas unsigned payload differs from original intent"))
-		}
-		var err error
-		result, err = scanStGasReservation(tx.QueryRow(ctx, `SELECT `+stGasReservationColumns+` FROM st_operator_gas_reservation WHERE intent_id=$1 AND attempt=$2`, intentId, intent.AttemptCount+1))
-		if err == nil {
-			result.Reused = true
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			server.Raise(err)
-		}
-		stGasEnsureLogical(ctx, tx, policy, digest, intent.LogicalKey)
-		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(intent.ChainId))
-		hash := strings.ToLower(signer.Hash(unsigned).Hex())
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO st_operator_gas_reservation(intent_id,attempt,scope_key,logical_key,policy_sha256,kind,unsigned_transaction,signing_hash,maximum_liability_wei,historical,create_time) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10)`, intentId, intent.AttemptCount+1, policy.Scope(), intent.LogicalKey, digest, kind, raw, hash, liability.String(), server.NowUtc()))
-		stGasCheckTotals(ctx, tx, policy)
-		result = &StTransactionGasReservation{IntentId: intentId, Attempt: intent.AttemptCount + 1, ScopeKey: policy.Scope(), LogicalKey: intent.LogicalKey, PolicySha256: digest, Kind: kind, UnsignedTransaction: bytes.Clone(raw), SigningHash: hash, MaximumLiabilityWei: liability.String()}
+	} else if kind != StTxAttemptExecution || !strings.EqualFold(unsigned.To().Hex(), intent.ToAddress) || !bytes.Equal(unsigned.Data(), intent.Calldata) {
+		panic(errors.New("operator gas unsigned payload differs from original intent"))
+	}
+	result, err := scanStGasReservation(tx.QueryRow(ctx, `SELECT `+stGasReservationColumns+` FROM st_operator_gas_reservation WHERE intent_id=$1 AND attempt=$2`, intentId, intent.AttemptCount+1))
+	if err == nil {
+		result.Reused = true
+		return result
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		server.Raise(err)
+	}
+	stGasEnsureLogical(ctx, tx, policy, digest, intent.LogicalKey)
+	signer := types.LatestSignerForChainID(new(big.Int).SetUint64(intent.ChainId))
+	hash := strings.ToLower(signer.Hash(unsigned).Hex())
+	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO st_operator_gas_reservation(intent_id,attempt,scope_key,logical_key,policy_sha256,kind,unsigned_transaction,signing_hash,maximum_liability_wei,historical,create_time) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10)`, intentId, intent.AttemptCount+1, policy.Scope(), intent.LogicalKey, digest, kind, raw, hash, liability.String(), server.NowUtc()))
+	stGasCheckTotals(ctx, tx, policy)
+	return &StTransactionGasReservation{IntentId: intentId, Attempt: intent.AttemptCount + 1, ScopeKey: policy.Scope(), LogicalKey: intent.LogicalKey, PolicySha256: digest, Kind: kind, UnsignedTransaction: bytes.Clone(raw), SigningHash: hash, MaximumLiabilityWei: liability.String()}
+}
+
+// StOperatorGasRemainingLiability is the liability the policy still accepts
+// for one more attempt of an operation's nonce. operation is the lower of the
+// per-intent cap its first reservation recorded and the policy's, less the
+// charges of the operation's other nonces. lifetime is the policy's lifetime
+// cap less the charges of every other nonce in its scope. Neither is below
+// zero. intentId is the nonce's intent, or the zero id for a nonce not yet
+// reserved: a nonce's charge is the largest of its attempts', so an attempt
+// within both amounts passes stGasCheckTotals unless another reservation
+// lands first.
+func StOperatorGasRemainingLiability(ctx context.Context, policy *server.StOperatorGasPolicy, logicalKey string, intentId server.Id) (operation *big.Int, lifetime *big.Int, resultErr error) {
+	defer recoverStGasError(&resultErr)
+	var operationWei, lifetimeWei string
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT
+ GREATEST(LEAST($4::numeric,COALESCE((SELECT maximum_liability_wei FROM st_operator_gas_intent WHERE logical_key=$2 AND scope_key=$1),$4::numeric))-COALESCE(SUM(charge) FILTER (WHERE logical_key=$2),0),0)::text,
+ GREATEST($5::numeric-COALESCE(SUM(charge),0),0)::text
+ FROM (`+stGasNonceChargesSql+`) nonces WHERE intent_id<>$3`, policy.Scope(), logicalKey, intentId, policy.MaximumIntentLiabilityWei, policy.MaximumLifetimeLiabilityWei).Scan(&operationWei, &lifetimeWei))
 	})
-	return result, nil
+	operation, operationOk := new(big.Int).SetString(operationWei, 10)
+	lifetime, lifetimeOk := new(big.Int).SetString(lifetimeWei, 10)
+	if !operationOk || !lifetimeOk {
+		return nil, nil, errors.New("operator gas remaining liability is invalid")
+	}
+	return operation, lifetime, nil
 }
 
 // Called inside AddStTransactionAttempt after its account and intent locks.

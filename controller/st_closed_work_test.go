@@ -50,7 +50,7 @@ func TestStClosedWorkPublishedArtifactKeepsExactOriginalRowsAndRetry(t *testing.
 		if !bytes.Equal(original, artifact.ClosedWork.Records[0].Original) || artifact.ClosedWork.WindowStart != f.epoch.StartTime.UTC().Format(time.RFC3339Nano) || artifact.ClosedWork.WindowEnd != f.epoch.EndTime.UTC().Format(time.RFC3339Nano) || artifact.ClosedWork.Start != artifact.Start || artifact.ClosedWork.End != artifact.End || artifact.ClosedWork.PolicyHash != artifact.PolicyHash {
 			t.Fatal("issuance reconstructed database bytes or guessed epoch/policy")
 		}
-		approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
+		approved, _, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
 		if err != nil || approved == nil {
 			t.Fatal("published original authority is unavailable", err)
 		}

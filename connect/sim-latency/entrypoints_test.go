@@ -149,15 +149,15 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	runbook := strings.Join(strings.Fields(string(seasonRunbook)), " ")
 	for _, required := range []string{
 		"Mandatory candidate review",
-		"Use Terra (`gpt-5.6-terra`) with medium reasoning for all test execution",
+		"Use Sol (`gpt-6-sol`) with medium reasoning for all test execution",
 		"failure or suspected flake must be handed to Astra (`gpt-6-astra`) with max reasoning to diagnose the root cause, implement the correction, and add a deterministic regression test",
-		"Terra medium then reruns the affected test and required suite",
+		"Sol medium then reruns the affected test and required suite",
 		"do not accept an Astra-run test as the independent completion result",
 		"Astra with max reasoning owns code evaluation, each winning-submission honesty and safety code review, the approve/reject decision",
 		"every winner promotion, and all source or config merge/push operations",
-		"Terra must not approve candidates, merge branches, or push source/config refs",
-		"Astra max owns the source pull/merge and release review; Terra medium owns independent regression and image validation",
-		"Before qualifying the repaired evaluator, Terra medium must independently exercise the deterministic regressions",
+		"Sol must not approve candidates, merge branches, or push source/config refs",
+		"Astra max owns the source pull/merge and release review; Sol medium owns independent regression and image validation",
+		"Before qualifying the repaired evaluator, Sol medium must independently exercise the deterministic regressions",
 		"fabricated measurements",
 		"status 20",
 		"mode-0700 temporary directory",
@@ -170,6 +170,10 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	for _, stale := range []string{
 		"Terra max",
 		"Use Terra (`gpt-5.6-terra`) with max reasoning",
+		// The runbook moved test execution from Terra medium to Sol medium.
+		"Use Terra (`gpt-5.6-terra`) with medium reasoning",
+		"Terra medium",
+		"Terra must not",
 	} {
 		if strings.Contains(runbook, stale) {
 			t.Errorf("RUN-MAIN.md retains superseded agent handoff contract %q", stale)
@@ -182,8 +186,11 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	// Keep current release instructions aligned without rewriting historical
 	// model identities in the incident's captured validation evidence.
 	incident := strings.Join(strings.Fields(string(incidentRunbook)), " ")
-	if !strings.Contains(incident, "Have Terra medium verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Astra max reviews the repair and merges") {
+	if !strings.Contains(incident, "Have Sol medium verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Astra max reviews the repair and merges") {
 		t.Error("STAGING-4-G5-INCIDENT.md is missing the current release-review model roles")
+	}
+	if strings.Contains(incident, "Have Terra medium verify") {
+		t.Error("STAGING-4-G5-INCIDENT.md retains the superseded Terra medium release-review role")
 	}
 }
 

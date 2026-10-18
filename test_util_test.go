@@ -1062,7 +1062,9 @@ func TestTestEnvironmentServiceProbeUsesInjectedNetwork(t *testing.T) {
 		postgresUser:      "test",
 		postgresPassword:  "not-a-secret",
 		postgresDatabase:  "test",
-		redisAuthority:    "redis-resolver.test:6379",
+		// an address literal: go-redis resolves a host name when it builds a
+		// client, outside the injected network
+		redisAuthority: "192.0.2.1:6379",
 	}
 	tests := []struct {
 		serviceName       string
@@ -1077,7 +1079,7 @@ func TestTestEnvironmentServiceProbeUsesInjectedNetwork(t *testing.T) {
 		{
 			serviceName:       "redis",
 			expectedHost:      "",
-			expectedAuthority: "redis-resolver.test:6379",
+			expectedAuthority: "192.0.2.1:6379",
 		},
 	}
 	for _, test := range tests {
@@ -1453,11 +1455,14 @@ func TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse(t *testing.
 
 	token := testRedisLeaseToken()
 
-	client := redis.NewClient(&redis.Options{
+	// Logical db 0 sends no SELECT; only the guard keeps a redial local.
+	options := &redis.Options{
 		Addr:     authority,
 		Password: password,
 		DB:       testRedisLeaseCoordinatorDb,
-	})
+	}
+	configureTestEnvRedisDial(currentTestEnvDialGuard(), options, NewDialer(5*time.Second).DialContext)
+	client := redis.NewClient(options)
 	defer client.Close()
 
 	config, err := client.ConfigGet(ctx, "databases").Result()
@@ -1529,11 +1534,13 @@ func TestRedisDatabaseLeaseReleaseDetectsForeignOwner(t *testing.T) {
 		r := recover()
 		// release closes lease.client before panicking; clean the stomped
 		// key with a fresh client so the db frees up for concurrent runs
-		cleanup := redis.NewClient(&redis.Options{
+		cleanupOptions := &redis.Options{
 			Addr:     authority,
 			Password: password,
 			DB:       testRedisLeaseCoordinatorDb,
-		})
+		}
+		configureTestEnvRedisDial(currentTestEnvDialGuard(), cleanupOptions, NewDialer(5*time.Second).DialContext)
+		cleanup := redis.NewClient(cleanupOptions)
 		cleanup.Del(context.Background(), lease.key)
 		cleanup.Close()
 		if r == nil {
@@ -1748,5 +1755,26 @@ func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
 				t.Fatalf("allocator returned wildcard-occupied port %d", occupiedPort)
 			}
 		})
+	}
+}
+
+// A fixture sizes its budget from the run's -timeout, so an attempt's wrapper
+// reports the deadline of the test it wraps, which testing.TB leaves out.
+func TestRunPassesTheTestDeadlineThrough(t *testing.T) {
+	wantDeadline, wantOk := t.Deadline()
+	var deadline time.Time
+	var ok, exposed bool
+	runRetryTestEnv(t, retryTestEnv(0), func(tb testing.TB) {
+		var test interface{ Deadline() (time.Time, bool) }
+		if test, exposed = tb.(interface{ Deadline() (time.Time, bool) }); exposed {
+			deadline, ok = test.Deadline()
+		}
+	})
+	if !exposed || ok != wantOk || !deadline.Equal(wantDeadline) {
+		t.Fatalf("attempt deadline = %s, %t (exposed %t); the test's is %s, %t", deadline, ok, exposed, wantDeadline, wantOk)
+	}
+	// a wrapped value with no deadline of its own reports none
+	if deadline, ok := (&retryTB{TB: struct{ testing.TB }{t}}).Deadline(); ok || !deadline.IsZero() {
+		t.Fatalf("a wrapper without a deadline reported %s, %t", deadline, ok)
 	}
 }

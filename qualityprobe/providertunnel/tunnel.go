@@ -31,6 +31,10 @@ type Config struct {
 	// the caller's DNS and URL traffic owns evaluation, without provider IpPing.
 	// The default retains the ordinary initial/continuous ping behavior.
 	DataOnlyProbe bool
+	// Keeps each generated client's identity key local when nothing reads it
+	// (skipUnreadClientKeyPublication). Only the taskworker's URL probe sets
+	// it; every other caller's clients publish as before.
+	KeepClientKeysLocal bool
 
 	ApiUrl      string
 	PlatformUrl string
@@ -86,6 +90,18 @@ type Config struct {
 	// Bounds how long the packet pump waits for the multi-client to take one
 	// packet from the tun. Zero or negative means 15s.
 	PacketSendTimeout time.Duration
+	// How long the provider must send nothing before Close retires the
+	// derived client (see providerReturnDrain). Zero or negative means 1s.
+	ReturnQuietInterval time.Duration
+	// Bounds that whole wait, for a provider that never goes quiet. It sits
+	// inside CloseTimeout. Zero or negative means 5s.
+	ReturnDrainTimeout time.Duration
+	// Optional, for a capability measurement in a tunnel of its own
+	// (server/capprobe). Nil, what the URL probe and every other probe
+	// tunnel use, leaves the clients the tunnel generates exactly as they
+	// were: end-to-end sessions off, nothing observed, and no wait for key
+	// registration.
+	CapabilityObservation *CapabilityObservation
 }
 
 // Returns CloseTimeout, or its default when unset.
@@ -104,16 +120,113 @@ func (self Config) packetSendTimeout() time.Duration {
 	return 15 * time.Second
 }
 
+// Returns ReturnQuietInterval, or its default when unset.
+func (self Config) returnQuietInterval() time.Duration {
+	if 0 < self.ReturnQuietInterval {
+		return self.ReturnQuietInterval
+	}
+	return time.Second
+}
+
+// Returns ReturnDrainTimeout, or its default when unset.
+func (self Config) returnDrainTimeout() time.Duration {
+	if 0 < self.ReturnDrainTimeout {
+		return self.ReturnDrainTimeout
+	}
+	return 5 * time.Second
+}
+
+// Provider returns that are still arriving when a probe ends.
+//
+// A provider on SDK v2026.8.31 or later keeps every TCP return it read from an
+// origin until the derived client acknowledges it, and keeps retransmitting
+// it otherwise; the provider's own TCP flow also replays unacknowledged origin
+// bytes until this tunnel's netstack answers. A probe that stops reading early
+// or leaves a pooled connection open therefore must not revoke its derived
+// client while the provider is still sending: each return arriving at a
+// revoked client is bandwidth the provider spends forever.
+//
+// The receive callback records every provider return. Close waits, with the
+// tun, the packet pump and the multi-client all still live, until a whole
+// quiet interval passes with no return. Until then each return is
+// acknowledged by the derived client, and the live netstack answers it with
+// the ACK or RST that ends the provider's flow. The wait is bounded by
+// timeout and by Close's own deadline, so a provider that never goes quiet
+// only delays teardown.
+//
+// Safe for concurrent use: observe runs on receive callbacks while one Close
+// waits.
+type providerReturnDrain struct {
+	returnCount   atomic.Uint64
+	quietInterval time.Duration
+	timeout       time.Duration
+	// time.After in production. Tests release each wait at an explicit barrier.
+	after func(time.Duration) <-chan time.Time
+}
+
+// A drain with nothing recorded yet.
+func newProviderReturnDrain(quietInterval time.Duration, timeout time.Duration) *providerReturnDrain {
+	return &providerReturnDrain{
+		quietInterval: quietInterval,
+		timeout:       timeout,
+		after:         time.After,
+	}
+}
+
+// Records one provider return. It is on the receive path, so it does no more
+// than one atomic increment.
+func (self *providerReturnDrain) observe() {
+	self.returnCount.Add(1)
+}
+
+// Returns true once a whole quiet interval, counted from this call, passes
+// with no provider return; false when the timeout or ctx ends the wait first,
+// or when dataDone closes: a data path the caller already canceled has no live
+// destination left to drain for. A return during an interval starts another.
+func (self *providerReturnDrain) wait(ctx context.Context, dataDone <-chan struct{}) bool {
+	timeout := self.after(self.timeout)
+	lastCount := self.returnCount.Load()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-dataDone:
+			return false
+		case <-timeout:
+			return false
+		case <-self.after(self.quietInterval):
+		}
+		count := self.returnCount.Load()
+		if count == lastCount {
+			return true
+		}
+		lastCount = count
+	}
+}
+
+// Delivers each provider return to the tun, recording it for the drain first.
+func providerReturnReceiver(write func([]byte) (int, error), returns *providerReturnDrain) connect.ReceivePacketFunction {
+	return func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
+		returns.observe()
+		_, _ = write(packet)
+	}
+}
+
 // The cause (context.Cause) of Tunnel.Lost when the
 // tunnel's path to its provider went away while the tunnel was open: the
-// pinned provider left the multi-client with nothing added in its place, or
-// the packet pump's read from the tun failed. A measurement in flight when it
+// pinned provider left the multi-client with nothing added in its place, the
+// packet pump's read from the tun failed, or a capability measurement
+// tunnel's window client was replaced. A measurement in flight when it
 // happens is not a measurement of the provider, and the prober reports it as
 // aborted rather than as the failures a dead tunnel produces.
 var ErrTunnelLost = errors.New("providertunnel: the tunnel's path to the provider is gone")
 
 // Lost's cause once the tunnel has been closed on purpose.
 var ErrTunnelClosed = errors.New("providertunnel: the tunnel was closed")
+
+// Joined to ErrTunnelLost in Lost's cause when a capability measurement
+// tunnel's window client was replaced (watchCapabilityWindowClient).
+var ErrTunnelClientReplaced = errors.New("providertunnel: the window's client was replaced")
 
 // Negative reservation targets are malformed, not a request for defaults.
 var ErrContractReservation = errors.New("providertunnel: contract reservation byte count must not be negative")
@@ -165,8 +278,19 @@ func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClient
 	settings := connect.DefaultMultiClientSettings()
 	settings.ProviderProbe = false
 	settings.DataOnlyProviderProbe = cfg.DataOnlyProbe
+	// A probe tunnel lives for one bounded measurement, so its re-dial of
+	// the probed provider keeps the measured cadence instead of the paced
+	// re-dial a long-lived fixed window uses. A capability measurement paces
+	// it at about its own timeout instead.
+	settings.FixedDestinationRetryMin = 0
+	cfg.CapabilityObservation.paceRedial(settings)
 	return settings
 }
+
+// newProviderTunnelClientSettings builds the settings of each client the
+// tunnel generates. It is a variable so a test can keep WebRTC candidate
+// gathering on this machine; production never replaces it.
+var newProviderTunnelClientSettings = providerTunnelClientSettings
 
 // Each generated client owns fresh settings. Full and bandwidth probes leave
 // the reservation target unset and retain the shared contract ramp.
@@ -179,6 +303,37 @@ func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *conne
 		contracts.StandardContractTransferByteCount = min(contracts.StandardContractTransferByteCount, reservationByteCount)
 	}
 	return settings
+}
+
+// Keeps a generated client's identity key local when nothing reads it, for a
+// tunnel whose Config opts in with KeepClientKeysLocal.
+//
+// Every URL probe mints a derived client with a fresh key, and each key the
+// client published became a permanent signed registration: one
+// st_client_key_history row plus its evidence blobs, the largest share of the
+// table's growth on 2026-10-14. A URL tunnel's client never uses its key.
+// Encryption is off, so it signs no certificate or identity proof for a
+// provider to verify. It has no close-report domain, so it signs no original
+// close report. It does not wait for registration. Contract creation, the
+// provider's admission (an HMAC under the provide secret) and settlement
+// (acked byte counts) do not read client keys.
+//
+// A client that can use its key keeps publishing: any session mode, a
+// required registration (a capability measurement's opportunistic clients)
+// or a close-report domain. So this runs after every other change to the
+// generated settings. A reader that appears later, such as a post-quantum
+// profile raising the sessions, makes connect log an error and publish anyway.
+func skipUnreadClientKeyPublication(settings *connect.ClientSettings) {
+	if settings.ClientKeyRegistrationRequired {
+		return
+	}
+	if settings.EncryptionSettings != nil && settings.EncryptionSettings.Mode != connect.EncryptionModeOff {
+		return
+	}
+	if settings.ContractManagerSettings != nil && settings.ContractManagerSettings.CloseReportDomainHash != ([32]byte{}) {
+		return
+	}
+	settings.SkipClientKeyPublication = true
 }
 
 // A read failure while the tunnel is live makes the data path silently stop,
@@ -231,8 +386,10 @@ func inTunnelOnlyDnsResolverSettings() *connect.DnsResolverSettings {
 // dialed through it egresses from that provider.
 type Tunnel struct {
 	cancelData      context.CancelFunc
+	dataDone        <-chan struct{}
 	cancelLifecycle context.CancelFunc
 	tun             *connect.Tun
+	returns         *providerReturnDrain
 	multiClient     *connect.RemoteUserNatMultiClient
 	generator       *connect.ApiMultiClientGenerator
 	clientStrategy  *connect.ClientStrategy
@@ -267,6 +424,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if cfg.ContractReservationByteCount < 0 {
 		return nil, ErrContractReservation
 	}
+	if err := cfg.CapabilityObservation.validate(); err != nil {
+		return nil, err
+	}
 	resolver, err := providerDnsResolverSettings(cfg)
 	if err != nil {
 		return nil, err
@@ -292,6 +452,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	generatorSettings.ClientCredentials = cfg.ClientCredentials
 	generatorSettings.ClientControl = cfg.ClientControl
 	generatorSettings.ControlTelemetryProbe = true
+	// Each probe identity is retired with its exact residency at teardown,
+	// never parked for a later attempt.
+	generatorSettings.ReuseFixedDestinationIdentities = false
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.PlatformTransportBudget = transportBudget
@@ -314,7 +477,14 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cfg.Version,
 		&cfg.ClientId,
 		func() *connect.ClientSettings {
-			return providerTunnelClientSettings(cfg.ContractReservationByteCount)
+			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
+			// nil for every tunnel but a capability measurement's
+			cfg.CapabilityObservation.apply(settings)
+			// last, after every other change to the settings
+			if cfg.KeepClientKeysLocal {
+				skipUnreadClientKeyPublication(settings)
+			}
+			return settings
 		},
 		generatorSettings,
 	)
@@ -343,12 +513,11 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
 	multiClientSettings := providerTunnelMultiClientSettingsForConfig(cfg)
 	multiClientSettings.InitialPingObservations = cfg.InitialPingObservations
+	returns := newProviderReturnDrain(cfg.returnQuietInterval(), cfg.returnDrainTimeout())
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
 		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration, setup: setup},
-		func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
-			_, _ = tun.Write(packet)
-		},
+		providerReturnReceiver(tun.Write, returns),
 		protocol.ProvideMode_Network,
 		multiClientSettings,
 	)
@@ -357,7 +526,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// read failure to say why, and it is ended by Close, not by the caller's
 	// ctx -- the caller ending is its own signal, not the tunnel's loss.
 	lost, lose := context.WithCancelCause(context.Background())
-	unwatch := watchProviderPath(multiClient.Monitor(), lose)
+	unwatch := watchTunnelPath(multiClient.Monitor(), lose, cfg.CapabilityObservation != nil)
 	unwatchSetup := setup.watch(multiClient.Monitor())
 
 	// pump tun -> provider
@@ -396,8 +565,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 	return &Tunnel{
 		cancelData:      cancelData,
+		dataDone:        dataCtx.Done(),
 		cancelLifecycle: cancelLifecycle,
 		tun:             tun,
+		returns:         returns,
 		multiClient:     multiClient,
 		generator:       generator,
 		clientStrategy:  clientStrategy,
@@ -417,7 +588,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 // Returns a context that is done once the tunnel's path to its provider is
 // gone for good while the tunnel is open -- context.Cause says why, wrapping
-// ErrTunnelLost -- and once the tunnel is closed, with ErrTunnelClosed. A probe's egresshealth.Path
+// ErrTunnelLost, and ErrTunnelClientReplaced too when a capability
+// measurement tunnel's window client was replaced -- and once the tunnel is
+// closed, with ErrTunnelClosed. A probe's egresshealth.Path
 // reports it as the current client's loss signal, so a run or check whose
 // tunnel dies part-way re-creates it for the loads it had not finished,
 // instead of failing them: a provider that disconnected mid-run did not refuse
@@ -463,6 +636,67 @@ func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCa
 		}
 		if wasAdded.Load() {
 			lose(fmt.Errorf("%w: the provider left the multi-client and nothing was added in its place", ErrTunnelLost))
+		}
+	})
+}
+
+// Ends lost when the tunnel's path to its provider goes away
+// (watchProviderPath) and, for a capability measurement tunnel, also when
+// its window client is replaced (watchCapabilityWindowClient). Returns the
+// unsubscribe of every watcher it added.
+func watchTunnelPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc, capabilityObservation bool) func() {
+	unwatchPath := watchProviderPath(monitor, lose)
+	if !capabilityObservation {
+		return unwatchPath
+	}
+	unwatchClient := watchCapabilityWindowClient(monitor, lose)
+	return func() {
+		unwatchPath()
+		unwatchClient()
+	}
+}
+
+// Ends lost, with ErrTunnelClientReplaced, when a second client takes a
+// capability measurement tunnel's window: a replacement added before the
+// first client leaves, or after it. Returns the unsubscribe.
+//
+// The pinned provider's window holds one client at a time, and the
+// measurement's recorder merges what every client recorded. After a
+// replacement, the first attempt and the first acknowledgement it reads
+// belong to a client that is leaving or gone, and the new client's
+// ClientHello would be read against an establishment window that began
+// before it was sent: the provider could be read as having no responder
+// while the new ClientHello is still within its own window. So the
+// measurement ends there, with what it has. A candidate that never got into
+// the window is no replacement. The first client leaving with nothing in its
+// place is watchProviderPath's loss.
+func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
+	var stateLock sync.Mutex
+	var windowClientId *connect.Id
+	replaced := false
+	return monitor.AddMonitorEventCallback(func(_ *connect.WindowExpandEvent, events map[connect.Id]*connect.ProviderEvent, _ bool) {
+		replacedNow := func() bool {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if replaced {
+				return false
+			}
+			for clientId, event := range events {
+				// Removed is emitted only for a client that was in the
+				// window, so a coalesced Added still counts
+				if event == nil || !(event.State.IsActive() || event.State == connect.ProviderStateRemoved) {
+					continue
+				}
+				if windowClientId == nil {
+					windowClientId = &clientId
+				} else if *windowClientId != clientId {
+					replaced = true
+				}
+			}
+			return replaced
+		}()
+		if replacedNow {
+			lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
 		}
 	})
 }
@@ -554,6 +788,8 @@ func (self *Tunnel) Close() error {
 		defer cancel()
 		self.closeErr = closeTunnelParts(
 			ctx,
+			self.tun.DohCache().Close,
+			func(ctx context.Context) { self.returns.wait(ctx, self.dataDone) },
 			self.cancelData,
 			self.tun.Close,
 			self.pumpDone,
@@ -572,11 +808,21 @@ func (self *Tunnel) Close() error {
 // OOB transports remain owned by ApiMultiClientGenerator; closing only the
 // former leaves asynchronous retirement tails behind each short-lived probe.
 //
+// The provider's flows end first, while the whole data path is still live.
+// closeResolver retires the tunnel's private DoH cache, whose pooled TLS
+// connections would otherwise close only inside a netstack that can no longer
+// send, and drainReturns holds teardown until the provider has gone quiet (see
+// providerReturnDrain). Only then does packet admission stop and the derived
+// client get revoked; a provider return that reached a revoked client would be
+// retransmitted to it forever.
+//
 // Every close is attempted even after an earlier one reports an error. This is
 // teardown: an error is useful to the caller, but it is not permission to leak
 // the remaining owners.
 func closeTunnelParts(
 	ctx context.Context,
+	closeResolver func(),
+	drainReturns func(context.Context),
 	cancelData context.CancelFunc,
 	closeTun func() error,
 	pumpDone <-chan struct{},
@@ -585,7 +831,9 @@ func closeTunnelParts(
 	closeClientStrategy func(),
 	cancelLifecycle context.CancelFunc,
 ) error {
-	// Stop packet admission first. The lifecycle context deliberately remains
+	closeResolver()
+	drainReturns(ctx)
+	// Stop packet admission next. The lifecycle context deliberately remains
 	// live through generator retirement so its final authenticated
 	// remove-client request can complete.
 	cancelData()

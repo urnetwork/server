@@ -618,8 +618,11 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			connect.AssertEqual(t, nil, CloseContract(ctx, transferEscrow.ContractId, destinationId, granted, contractCount%4&2 != 0))
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false))
 			connect.AssertEqual(t, nil, CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false))
+			// A sender checkpoint leaves the contract to the final sweep. A
+			// sender final settles inline with the receiver's final, or with
+			// its covering checkpoint reported after it (owner decision B).
 			wantDebits := 2
-			if contractCount%4 != 0 {
+			if contractCount%4&1 != 0 {
 				wantDebits = 1
 			}
 			drainCompleted(wantDebits)
@@ -791,7 +794,9 @@ func TestFindNetworksWithoutTransferBalance(t *testing.T) {
 }
 
 func TestClosePartialContract(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -911,15 +916,21 @@ func TestClosePartialContract(t *testing.T) {
 			}
 		}
 
-		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
-		connect.AssertEqual(t, endingTransferBalanceA, initialTransferBalance-2*512*1024)
-		connect.AssertEqual(t, endingTransferBalanceB, initialTransferBalance-2*512*1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			balances := GetActiveTransferBalances(ctx, networkId)
+			connect.AssertEqual(t, len(balances), 1)
+			// Normal closure commits the exact debit, whose independent owner
+			// releases the original reservation and refunds its unused portion.
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 2*512*1024)
+			connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, networkId), initialTransferBalance-2*512*1024)
+		}
 	})
 }
 
 func TestClosePartialContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1018,17 +1029,21 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseAllOpenContractIds(ctx, time.Now())
+		server.Raise(ForceCloseAllOpenContractIds(ctx, time.Now()))
 
-		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
-		connect.AssertEqual(t, endingTransferBalanceA, initialTransferBalance-2*512*1024)
-		connect.AssertEqual(t, endingTransferBalanceB, initialTransferBalance-2*512*1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			balances := GetActiveTransferBalances(ctx, networkId)
+			connect.AssertEqual(t, len(balances), 1)
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 2*512*1024)
+			connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, networkId), initialTransferBalance-2*512*1024)
+		}
 	})
 }
 
 func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1146,15 +1161,19 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 				)
 				connect.AssertEqual(t, err, nil)
 
-				// non-checkpoint + checkpoint does NOT settle inline: the
-				// checkpoint side may still resume, so the contract stays open
-				// and is finalized below by ForceCloseAllOpenContractIds.
+				// A receiver checkpoint after the sender's final that covers it
+				// settles in that report (owner decision B). A sender checkpoint
+				// after the receiver's final may still resume, so that contract
+				// stays open and is finalized below by ForceCloseAllOpenContractIds.
 				_, closed = GetContractClose(ctx, contractId)
-				connect.AssertEqual(t, closed, false)
+				connect.AssertEqual(t, closed, j == 0)
 			}
 		}
 
-		ForceCloseAllOpenContractIds(ctx, time.Now())
+		server.Raise(ForceCloseAllOpenContractIds(ctx, time.Now()))
+		balances := GetActiveTransferBalances(ctx, networkIdA)
+		connect.AssertEqual(t, len(balances), 1)
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balances[0].BalanceId, initialTransferBalance, 4*512*1024)
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
@@ -1566,10 +1585,12 @@ func TestGetActiveSubscriptionRenewalMarkets(t *testing.T) {
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
 
 // TestSettleContractCheckpointPlusClose verifies the asymmetric path: one party
-// non-checkpoint, the other checkpoint only. This does NOT settle inline — the
-// checkpoint side may still resume, so the contract stays open on the hot path
-// and is finalized only off-path by the expiry task (ForceCloseOpenContractIds),
-// which converts the checkpoint to a non-checkpoint close before settling.
+// non-checkpoint, the other checkpoint only. A receiver (destination)
+// checkpoint after the sender's final that covers it settles inline (owner
+// decision B). A sender checkpoint may still resume, so that contract stays
+// open on the hot path and is finalized only off-path by the expiry task
+// (ForceCloseOpenContractIds), which converts the checkpoint to a
+// non-checkpoint close before settling.
 func TestSettleContractCheckpointPlusClose(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1600,8 +1621,8 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 			)
 		}
 
-		// Case 1: source non-checkpoint, destination checkpoint.
-		// Stays open inline — the destination may resume.
+		// Case 1: source non-checkpoint, then a covering destination checkpoint.
+		// The sender sends nothing more, so the checkpoint settles.
 		contractId, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1616,7 +1637,7 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
 		connect.AssertEqual(t, nil, err)
 		_, closed = GetContractClose(ctx, contractId)
-		connect.AssertEqual(t, false, closed) // one-sided checkpoint does not settle inline
+		connect.AssertEqual(t, true, closed) // covering receiver checkpoint after the sender final settles
 
 		// Case 2: source checkpoint, destination non-checkpoint. Also stays open.
 		contractId2, _, err := CreateContract(
@@ -1635,7 +1656,7 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 		_, closed = GetContractClose(ctx, contractId2)
 		connect.AssertEqual(t, false, closed)
 
-		// The expiry task finalizes both: it converts the lingering checkpoint
+		// The expiry task finalizes case 2: it converts the lingering checkpoint
 		// row to a non-checkpoint close, then settles.
 		ForceCloseAllOpenContractIds(ctx, time.Now())
 
@@ -1885,6 +1906,7 @@ func TestForceCloseOneSidedCheckpointFinalizesBothOrientations(t *testing.T) {
 		})
 
 		const initialTransferBalance = ByteCount(30 * 1024 * 1024 * 1024)
+		const contractTransferByteCount = ByteCount(1024 * 1024)
 		const usedTransferByteCount = ByteCount(512 * 1024)
 		AddBasicTransferBalance(
 			ctx,
@@ -1903,7 +1925,7 @@ func TestForceCloseOneSidedCheckpointFinalizesBothOrientations(t *testing.T) {
 				clientIdA,
 				networkIdB,
 				clientIdB,
-				ByteCount(1024*1024),
+				contractTransferByteCount,
 			)
 			connect.AssertEqual(t, nil, err)
 			connect.AssertEqual(t, nil, CloseContract(ctx, contractId, checkpointClientId, usedTransferByteCount, true))
@@ -1922,15 +1944,34 @@ func TestForceCloseOneSidedCheckpointFinalizesBothOrientations(t *testing.T) {
 			connect.AssertEqual(t, false, streamFound)
 		}
 
-		transferBalances := GetActiveTransferBalances(ctx, networkIdA)
-		remainingTransferBalance := ByteCount(0)
-		for _, transferBalance := range transferBalances {
-			remainingTransferBalance += transferBalance.BalanceByteCount
+		// Since 7c7c55a4 each close journals its consumption and its debit
+		// worker keeps the whole reservation until it applies that journal.
+		// Until then the payer's available balance still excludes both
+		// reservations; after the worker it is charged only the usage.
+		remainingTransferBalance := func() (remaining ByteCount, balanceIds []server.Id) {
+			for _, transferBalance := range GetActiveTransferBalances(ctx, networkIdA) {
+				remaining += transferBalance.BalanceByteCount
+				balanceIds = append(balanceIds, transferBalance.BalanceId)
+			}
+			return
 		}
+		remaining, balanceIds := remainingTransferBalance()
+		connect.AssertEqual(
+			t,
+			initialTransferBalance-ByteCount(len(contractIds))*contractTransferByteCount,
+			remaining,
+		)
+		connect.AssertEqual(t, 1, len(balanceIds))
+		applied, released, busy, err := flushTransferDebitBalance(ctx, balanceIds[0])
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, false, busy)
+		connect.AssertEqual(t, len(contractIds), applied)
+		connect.AssertEqual(t, len(contractIds), released)
+		remaining, _ = remainingTransferBalance()
 		connect.AssertEqual(
 			t,
 			initialTransferBalance-ByteCount(len(contractIds))*usedTransferByteCount,
-			remainingTransferBalance,
+			remaining,
 		)
 	})
 }
@@ -1968,9 +2009,10 @@ func TestForceCloseDisputedContract(t *testing.T) {
 			server.NowUtc().Add(30*24*time.Hour),
 		)
 
+		const contractTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		contractId, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
-			ByteCount(1024*1024*1024),
+			contractTransferByteCount,
 		)
 		connect.AssertEqual(t, nil, err)
 		AddToStream(ctx, contractId, clientIdA, clientIdB, nil)
@@ -1999,15 +2041,28 @@ func TestForceCloseDisputedContract(t *testing.T) {
 		_, _, streamFound = GetStream(ctx, contractId)
 		connect.AssertEqual(t, false, streamFound)
 
-		// the escrow is settled with the average of the two sides,
-		// and the rest is returned to the payer's balance
+		// the escrow is settled with the average of the two sides, and the
+		// rest is returned to the payer's balance. Since 7c7c55a4 the close
+		// journals that consumption and the debit worker keeps the whole
+		// reservation until it applies the journal.
 		settledByteCount := (sourceUsed + destinationUsed) / 2
-		transferBalances := GetActiveTransferBalances(ctx, networkIdA)
-		netBalanceByteCount := ByteCount(0)
-		for _, transferBalance := range transferBalances {
-			netBalanceByteCount += transferBalance.BalanceByteCount
+		netBalanceByteCount := func() (net ByteCount, balanceIds []server.Id) {
+			for _, transferBalance := range GetActiveTransferBalances(ctx, networkIdA) {
+				net += transferBalance.BalanceByteCount
+				balanceIds = append(balanceIds, transferBalance.BalanceId)
+			}
+			return
 		}
-		connect.AssertEqual(t, initialTransferBalance-settledByteCount, netBalanceByteCount)
+		net, balanceIds := netBalanceByteCount()
+		connect.AssertEqual(t, initialTransferBalance-contractTransferByteCount, net)
+		connect.AssertEqual(t, 1, len(balanceIds))
+		applied, released, busy, err := flushTransferDebitBalance(ctx, balanceIds[0])
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, false, busy)
+		connect.AssertEqual(t, 1, applied)
+		connect.AssertEqual(t, 1, released)
+		net, _ = netBalanceByteCount()
+		connect.AssertEqual(t, initialTransferBalance-settledByteCount, net)
 
 		// a second pass finds nothing left to close
 		ForceCloseAllOpenContractIds(ctx, time.Now())

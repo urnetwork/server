@@ -73,7 +73,7 @@ func TestProviderEgressTallyBatchMatchesDirectWriter(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_site_tally; DELETE FROM provider_egress_place_tally`))
 		})
 		for _, page := range [][]ProviderEgressTallyRecord{records[:3], records[3:]} {
-			batch, err := PrepareProviderEgressTallyBatch(page)
+			batch, err := prepareProviderEgressTallyBatch(page)
 			if err != nil {
 				t.Fatal(err)
 			}

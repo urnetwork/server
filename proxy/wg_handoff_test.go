@@ -28,7 +28,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWgHandoffFastReconnect\n")
-		h := setupProxyTest(t)
+		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
 		// the handoff store is keyed by (host, block)
@@ -45,7 +45,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		defer closeWgClient()
 
 		// establish the session and confirm traffic
-		requireProxyGet(t, "wg-handoff-before", transport)
+		requireProxyGet(t, h, "wg-handoff-before", transport)
 
 		// The replacement advertises its generation before warp redirects and
 		// starts the old drain.
@@ -153,7 +153,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		}
 
 		// and the tunnel carries traffic again
-		requireProxyGet(t, "wg-handoff-after", transport)
+		requireProxyGet(t, h, "wg-handoff-after", transport)
 	})
 }
 

@@ -306,3 +306,46 @@ func TestContractFreeSettlementTerminalReplayAfterEscrowRetention(t *testing.T) 
 		}
 	})
 }
+
+// A payer's contract that reserved no bytes had nothing to escrow: the
+// no-payout close accepts it under its payer, as prober shard cleanup needs
+// for an unanchored zero-byte contract. A funded payer contract without
+// escrow stays refused, and a source-owned free contract is accepted.
+func TestContractFreeSettlementOwnerAcceptsAPayersZeroByteContract(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		sourceNetworkId, sourceId := server.NewId(), server.NewId()
+		destinationNetworkId, destinationId := server.NewId(), server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
+		for _, c := range []struct {
+			name              string
+			payer             bool
+			transferByteCount ByteCount
+			refused           bool
+		}{
+			{name: "payer zero-byte", payer: true, transferByteCount: 0, refused: false},
+			{name: "payer funded", payer: true, transferByteCount: 100, refused: true},
+			{name: "source free", payer: false, transferByteCount: 100, refused: false},
+		} {
+			contractId := server.NewId()
+			var payerNetworkId *server.Id
+			if c.payer {
+				payerNetworkId = &sourceNetworkId
+			}
+			var err error
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+					(contract_id, source_network_id, source_id, destination_network_id, destination_id, transfer_byte_count, payer_network_id)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+					contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, c.transferByteCount, payerNetworkId))
+				err = validateContractFreeSettlementOwnerInTx(ctx, tx, contractId)
+			})
+			if c.refused && !errors.Is(err, errContractFreeSettlementOwner) || !c.refused && err != nil {
+				t.Errorf("%s: free settlement owner error = %v", c.name, err)
+			}
+		}
+	})
+}

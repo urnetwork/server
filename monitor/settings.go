@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -150,6 +151,16 @@ type PostgreSQLSettings struct {
 // in memory; it is never included in an alert, command line, or query body.
 type GrafanaSettings struct {
 	AdminPassword string
+}
+
+// AlertNotificationSettings configures the continuous watcher's optional
+// outbound notifier (alert_slack.go), from vault monitor.yml alerts. It is not
+// a probe input, but it is compared with the rest of the settings so a changed
+// webhook makes a running watcher that posts stale; cli/monitor drops it for a
+// watcher that never posts. SlackWebhookUrl is a credential: it is never
+// rendered into an alert, log line, or message.
+type AlertNotificationSettings struct {
+	SlackWebhookUrl string
 }
 
 // GooglePlayReportingSettings carries the dedicated, read-only service-account
@@ -408,6 +419,8 @@ type SignalSettings struct {
 	SourceAttribution SourceAttributionSettings
 	DNSAliases        DNSAliasSettings
 	MimirPublishers   MimirPublisherSettings
+	// AlertNotifications is read by cli/monitor only; signals ignore it.
+	AlertNotifications AlertNotificationSettings
 	// APIReleaseProof is an explicit, finite local release expectation. Nil
 	// leaves the optional release diagnostic off without remote contact.
 	APIReleaseProof *APIReleaseProofSettings
@@ -584,6 +597,9 @@ func (s SignalSettings) validate() error {
 	if err := validateRouterSettings(s); err != nil {
 		return err
 	}
+	if err := validateRedisClusterInventory(s.Hosts); err != nil {
+		return err
+	}
 	if s.Source != nil {
 		return nil
 	}
@@ -592,6 +608,49 @@ func (s SignalSettings) validate() error {
 	}
 	if len(s.Hosts) == 0 && len(s.Routers) == 0 {
 		return fmt.Errorf("monitor: at least one host is required")
+	}
+	return nil
+}
+
+// validateRedisClusterInventory keeps a cluster that spans redis-cluster hosts
+// addressable: node ports are globally unique, so a port names one node on
+// one host, and exactly one host serves the entry port that cluster-wide
+// observations use. A single redis-cluster host, or hosts that carry the role
+// without Redis inventory, keep their previous meaning.
+func validateRedisClusterInventory(hosts []HostSettings) error {
+	redisHosts := 0
+	entryHosts := []string{}
+	nodePortHosts := map[int]string{}
+	for _, h := range hosts {
+		if !slices.Contains(h.Roles, "redis-cluster") {
+			continue
+		}
+		redisHosts++
+		if h.RedisEntryPort != 0 {
+			entryHosts = append(entryHosts, h.Name)
+		}
+		for _, port := range h.RedisNodePorts {
+			if port <= 0 || 65535 < port {
+				return fmt.Errorf("monitor: redis-cluster host %s has invalid node port %d", h.Name, port)
+			}
+			if owner, ok := nodePortHosts[port]; ok {
+				return fmt.Errorf("monitor: redis node port %d is configured on both %s and %s; node ports must be unique across redis-cluster hosts", port, owner, h.Name)
+			}
+			nodePortHosts[port] = h.Name
+		}
+	}
+	for _, h := range hosts {
+		if slices.Contains(h.Roles, "redis-cluster") && h.RedisEntryPort != 0 {
+			if owner, ok := nodePortHosts[h.RedisEntryPort]; ok {
+				return fmt.Errorf("monitor: redis entry port %d on %s is also a node port on %s", h.RedisEntryPort, h.Name, owner)
+			}
+		}
+	}
+	if 1 < len(entryHosts) {
+		return fmt.Errorf("monitor: exactly one redis-cluster host may set redis.entry_port; found %d (%s)", len(entryHosts), strings.Join(entryHosts, ", "))
+	}
+	if 1 < redisHosts && 0 < len(nodePortHosts) && len(entryHosts) != 1 {
+		return fmt.Errorf("monitor: a Redis cluster spanning %d redis-cluster hosts needs exactly one host with redis.entry_port; found %d", redisHosts, len(entryHosts))
 	}
 	return nil
 }

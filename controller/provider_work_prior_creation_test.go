@@ -290,7 +290,7 @@ func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
+	approved, _, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestProviderWorkInheritedStreamReopensRetiredCreationThroughPublicConsumer(
 		if err != nil {
 			t.Fatal(err)
 		}
-		approved, err := stLoadProviderWorkAuthority(f.ctx, f.f.cfg, f.f.epoch)
+		approved, _, err := stLoadProviderWorkAuthority(f.ctx, f.f.cfg, f.f.epoch)
 		if err != nil {
 			t.Fatal(err)
 		}

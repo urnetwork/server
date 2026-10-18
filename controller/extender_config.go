@@ -44,6 +44,18 @@ import (
 //	  aws_region: <region>
 //	  aws_access_key_id: <key id>
 //	  aws_secret_access_key: <secret>
+//	measurement:
+//	  enabled: false
+//	  zone_name: extender.ur.example
+//	  hosted_zone_id: <zone>
+//	  acme_directory_url: https://acme.example/directory
+//	  acme_account_key: <pem, ecdsa p-256>
+//	  acme_contact: mailto:<address>
+//	  dns_ttl: 60
+//	  issue_cap_per_week: 30
+//	  aws_region: <region>
+//	  aws_access_key_id: <key id>
+//	  aws_secret_access_key: <secret>
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
@@ -54,7 +66,9 @@ import (
 // (C6): the service runs under it and hello publishes the peer id derived from
 // it, so it must outlive a redeploy or every member loses the operator it was
 // told to dial. The dns block is read by the Route 53 publisher (C5), and is
-// carried here so operations configure one resource rather than two.
+// carried here so operations configure one resource rather than two. The
+// measurement block is the lag.dev measurement certificates and their zone
+// (lag.dev/PLAN.md C), read by the issuance and dns tasks and the activation.
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -78,6 +92,36 @@ type ExtenderConfig struct {
 	Dns                  ExtenderDnsConfig `yaml:"dns"`
 	// the tiers of the directory (connect/EXTENDER.md R1)
 	Directory ExtenderDirectoryConfig `yaml:"directory"`
+	// the lag.dev measurement certificates and names (lag.dev/PLAN.md C)
+	Measurement ExtenderMeasurementConfig `yaml:"measurement"`
+}
+
+// The lag.dev measurement certificates (lag.dev/PLAN.md C5-C10). Disabled, the
+// default, issues nothing and leaves the zone alone; activation still stores
+// a certificate request, which waits until the block is enabled.
+//
+// The zone is its own Route 53 hosted zone (C1), named like the dns block's:
+// by zone_name, with hosted_zone_id as the override. The aws keys are the dns
+// block's rule too: static credentials only when both halves are set, else
+// the default chain. Unset values take the defaults of
+// extender_measurement_config.go.
+type ExtenderMeasurementConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ZoneName     string `yaml:"zone_name"`
+	HostedZoneId string `yaml:"hosted_zone_id"`
+	// the ACME directory of the CA (C5)
+	AcmeDirectoryUrl string `yaml:"acme_directory_url"`
+	// the ACME account key, PEM, ECDSA P-256 (X3)
+	AcmeAccountKey string `yaml:"acme_account_key"`
+	// a mailto: contact for the account
+	AcmeContact string `yaml:"acme_contact"`
+	// seconds a measurement name's A and AAAA records may be cached (C1)
+	DnsTtl int `yaml:"dns_ttl"`
+	// new certificates per seven days (C7)
+	IssueCapPerWeek    int    `yaml:"issue_cap_per_week"`
+	AwsRegion          string `yaml:"aws_region"`
+	AwsAccessKeyId     string `yaml:"aws_access_key_id"`
+	AwsSecretAccessKey string `yaml:"aws_secret_access_key"`
 }
 
 // The directory tiers (connect/EXTENDER.md R1). An extender activated by a

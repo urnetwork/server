@@ -10,6 +10,7 @@ sim_latency_binary=${SIM_LATENCY_BINARY:-}
 api_url=${SIM_LATENCY_API_URL:-https://api.bringyour.com}
 state_dir=${SIM_LATENCY_STATE_DIR:-$workspace_root/.sim-latency-state}
 operator_token_file=${SIM_LATENCY_OPERATOR_TOKEN_FILE:-}
+reviewer_token_file=${SIM_LATENCY_REVIEWER_TOKEN_FILE:-}
 reviewer_id=${SIM_LATENCY_REVIEWER_ID:-}
 first_opens_at=${SIM_LATENCY_FIRST_OPENS_AT:-}
 preparation_seconds=${SIM_LATENCY_PREPARATION_SECONDS:-57600}
@@ -22,13 +23,18 @@ Usage:
   run-main.sh advance-staging
   run-main.sh staging-worker
   run-main.sh run
+  run-main.sh supervise [--once]
+  run-main.sh review-v2 --round-id ID --evidence FILE
   run-main.sh status [--epoch N]
   run-main.sh candidate --epoch N
   run-main.sh approve --epoch N --job-id ID --evidence FILE --reason TEXT
   run-main.sh reject --epoch N --job-id ID --evidence FILE --reason TEXT
 
-Required environment for authenticated commands:
+Required environment for legacy authenticated commands:
   SIM_LATENCY_OPERATOR_TOKEN_FILE  private file containing the operator token
+
+Required environment for review-v2 (no operator token required):
+  SIM_LATENCY_REVIEWER_TOKEN_FILE  private, environment/competition/season-scoped reviewer token
 
 Also required for staging-worker and run:
   WARP_IMAGE_DIGEST                exact deployed worker sha256 image identity
@@ -46,8 +52,18 @@ Optional environment:
   SIM_LATENCY_PREPARATION_SECONDS  delay before later epochs open; default 57600
   SIM_LATENCY_STAGING_WINDOW_SECONDS
                                     staging admission window; default 172800
+  SIM_LATENCY_AUTOMATION_ENABLED   must be exactly true for v2 supervise
+  SIM_LATENCY_SUPERVISOR_ID        stable fenced environment/season owner
+  SIM_LATENCY_WORKER_COMMAND       absolute prebuilt trusted worker launcher
+  SIM_LATENCY_WORKER_SHA256        pinned worker launcher digest
+  SIM_LATENCY_PREPARE_COMMAND      absolute trusted runtime propagation adapter
+  SIM_LATENCY_PREPARE_SHA256       pinned propagation/qualification adapter digest
 
-Exit 20 means a production candidate is waiting for the mandatory honesty and
+V2 supervise uses a durable database lease and checkpoint, independently of
+review. Missing runtime propagation/readiness leaves preparation_blocked. It
+never calls legacy promote --no-winner for a provisional reward winner.
+
+Exit 20 means a legacy production candidate is waiting for the mandatory honesty and
 safety review documented in RUN-MAIN.md. Staging automatically names the best
 placeable winner (or no winner) after close and drain, with no takeover margin
 or statistical-significance requirement. Its named winner needs a separate
@@ -124,7 +140,7 @@ verify_staging_source() {
     local record
     record=$("$(sim_binary)" staging-source-check --epoch=0 \
         --source-config="$source_config" --repos-root="$workspace_root")
-    jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' '
+    jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' '
         . as $record |
         .schema == 1 and .epoch == 0 and .branch == "sim-latency-staging" and
         (.repositories | type == "object") and
@@ -146,15 +162,14 @@ latest_source_epoch() {
     ' "$source_config" || fail "cannot read the latest source epoch from $source_config"
 }
 
-api_request() {
-    local method=$1
-    local path=$2
-    local body=${3:-}
+# Credentials are selected by the command's authority, never by a caller body.
+authenticated_api_request() {
+    local token_file=$1 role=$2 method=$3 path=$4 body=${5:-}
     local token
-    private_regular_file "$operator_token_file" ||
-        fail "operator token must be a nonempty regular file with mode 0600 or stricter"
-    token=$(tr -d '\r\n' < "$operator_token_file")
-    [[ -n $token ]] || fail "operator token file is empty"
+    private_regular_file "$token_file" ||
+        fail "$role token must be a nonempty regular file with mode 0600 or stricter"
+    token=$(tr -d '\r\n' < "$token_file")
+    [[ -n $token ]] || fail "$role token file is empty"
     if [[ -n $body ]]; then
         printf 'header = "Authorization: Bearer %s"\n' "$token" |
             curl --silent --show-error --fail-with-body --config - \
@@ -165,6 +180,10 @@ api_request() {
             curl --silent --show-error --fail-with-body --config - \
                 --request "$method" "$api_url$path"
     fi
+}
+
+api_request() {
+    authenticated_api_request "$operator_token_file" operator "$@"
 }
 
 write_evidence() {
@@ -415,6 +434,48 @@ run_season() {
     done
 }
 
+# The v2 process is built/resolved once and reconciles database state. It never
+# rebuilds binaries or waits for a reviewer between epochs.
+run_supervisor() {
+    [[ ${SIM_LATENCY_AUTOMATION_ENABLED:-false} == true ]] ||
+        fail "v2 automation is disabled; prospectively approved policy and explicit enablement are required"
+    [[ -n ${SIM_LATENCY_SUPERVISOR_ID:-} && -n ${SIM_LATENCY_WORKER_COMMAND:-} &&
+       -n ${SIM_LATENCY_WORKER_SHA256:-} && -n ${SIM_LATENCY_PREPARE_COMMAND:-} &&
+       -n ${SIM_LATENCY_PREPARE_SHA256:-} ]] ||
+        fail "v2 requires a supervisor owner and pinned worker/preparation integrations"
+    local arguments=()
+    if [[ ${1:-} == --once ]]; then
+        arguments+=(--once)
+        shift
+    fi
+    [[ $# == 0 ]] || fail "supervise accepts only --once"
+    exec "$(sim_binary)" supervise --enable-automation \
+        --owner-id="$SIM_LATENCY_SUPERVISOR_ID" --state-dir="$state_dir" \
+        --worker-command="$SIM_LATENCY_WORKER_COMMAND" --worker-sha256="$SIM_LATENCY_WORKER_SHA256" \
+        --prepare-command="$SIM_LATENCY_PREPARE_COMMAND" --prepare-sha256="$SIM_LATENCY_PREPARE_SHA256" \
+        --source-config="$source_config" --repos-root="$workspace_root" "${arguments[@]}"
+}
+
+# The authenticated reviewer principal supplies identity; the structured body
+# contains exact evidence, disposition and expected revision, never a picked replacement.
+review_v2() {
+    local round_id= evidence=
+    while (( $# )); do
+        case $1 in
+            --round-id) round_id=${2:-}; shift 2 ;;
+            --evidence) evidence=${2:-}; shift 2 ;;
+            *) fail "review-v2 accepts only --round-id and --evidence" ;;
+        esac
+    done
+    [[ $round_id =~ ^[0-9a-f-]{36}$ ]] || fail "review-v2 requires an exact round id"
+    private_regular_file "$evidence" || fail "review-v2 evidence must be a private nonempty regular file"
+    local body
+    body=$(jq -ce 'type == "object" and .expected_revision >= 1 and (.findings | length == 6)' "$evidence") ||
+        fail "review-v2 requires the complete structured review request"
+    body=$(jq -c . "$evidence")
+    authenticated_api_request "$reviewer_token_file" reviewer POST "/competition/v2/rounds/$round_id/reviews" "$body"
+}
+
 parse_review_arguments() {
     epoch=
     job_id=
@@ -510,17 +571,20 @@ esac
 umask 077
 mkdir -p "$state_dir"
 chmod 0700 "$state_dir"
-state_lock_path=$state_dir/RUN-MAIN.lock
-[[ ! -L $state_lock_path && ( ! -e $state_lock_path || -f $state_lock_path ) ]] ||
-    fail "state lock path must be a regular file: $state_lock_path"
-# The enclosing suite gate reserves fd9. Keep this narrower lock on fd8 for
-# the shell and inheriting children; never unlink or truncate its stable inode.
-exec 8>>"$state_lock_path"
-"${state_lock_command[@]}" || fail "another RUN-MAIN process holds $state_lock_path"
-main_environment
-
 command=${1:-}
 shift || true
+if [[ $command != supervise && $command != review-v2 ]]; then
+    state_lock_path=$state_dir/RUN-MAIN.lock
+    [[ ! -L $state_lock_path && ( ! -e $state_lock_path || -f $state_lock_path ) ]] ||
+        fail "state lock path must be a regular file: $state_lock_path"
+    # Keep the legacy lifetime lock on fd8; the enclosing suite owns fd9.
+    # V2 scheduling uses a fenced database lease and review uses API revision
+    # guards. Neither may hold or wait on this season-long legacy shell lock.
+    exec 8>>"$state_lock_path"
+    "${state_lock_command[@]}" || fail "another RUN-MAIN process holds $state_lock_path"
+fi
+main_environment
+
 case $command in
     staging)
         replace_current=false
@@ -544,6 +608,12 @@ case $command in
         [[ $# == 0 ]] || fail "run takes no arguments"
         [[ -n $reviewer_id ]] || fail "SIM_LATENCY_REVIEWER_ID is required"
         run_season
+        ;;
+    supervise)
+        run_supervisor "$@"
+        ;;
+    review-v2)
+        review_v2 "$@"
         ;;
     status)
         epoch=

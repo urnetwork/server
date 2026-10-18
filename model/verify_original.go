@@ -25,6 +25,9 @@ const VerifyOriginalDomain = "urnetwork-verify-original-transition-v1\x00"
 type VerifyOriginalTransition struct {
 	Body      []byte `json:"body"`
 	Signature []byte `json:"signature"`
+	// Internal recovery metadata shares this immutable row, never its public
+	// envelope or signed bytes. Empty identifies a historical unknown window.
+	HeadWindow string `json:"-"`
 }
 
 // Full next state retains pending exposure and each original request/response.
@@ -101,15 +104,17 @@ func retainVerifyOriginalInTx(ctx context.Context, tx server.PgTx, original *Ver
 		return retained
 	}
 	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_original_transition
-   (trail_id,previous_depth,observed_time,original_body,original_signature) VALUES ($1,$2,$3,$4,$5)
+   (trail_id,previous_depth,observed_time,original_body,original_signature,head_window) VALUES ($1,$2,$3,$4,$5,NULLIF($6,''))
    ON CONFLICT (trail_id,previous_depth) DO NOTHING`, body.Trail.TrailId, body.PreviousDepth,
-		time.UnixMilli(int64(body.Trail.ActivityMs)).UTC(), original.Body, original.Signature))
-	rows, err := tx.Query(ctx, `SELECT original_body,original_signature FROM verify_original_transition WHERE trail_id=$1 AND previous_depth=$2`, body.Trail.TrailId, body.PreviousDepth)
+		time.UnixMilli(int64(body.Trail.ActivityMs)).UTC(), original.Body, original.Signature, original.HeadWindow))
+	rows, err := tx.Query(ctx, `SELECT t.original_body,t.original_signature,COALESCE(seed.head_window,t.head_window,'')
+ FROM verify_original_transition t LEFT JOIN verify_original_transition seed ON seed.trail_id=t.trail_id AND seed.previous_depth=0
+ WHERE t.trail_id=$1 AND t.previous_depth=$2`, body.Trail.TrailId, body.PreviousDepth)
 	server.WithPgResult(rows, err, func() {
 		if !rows.Next() {
 			panic(errors.New("verification original disappeared"))
 		}
-		server.Raise(rows.Scan(&retained.Body, &retained.Signature))
+		server.Raise(rows.Scan(&retained.Body, &retained.Signature, &retained.HeadWindow))
 	})
 	prior, err := DecodeVerifyOriginal(retained)
 	server.Raise(err)
@@ -143,14 +148,17 @@ func dueVerifyOriginalTrails(ctx context.Context, now time.Time, limit int) (tra
 }
 
 // Return the last committed transition for crash recovery, including one whose
-// Redis publication never happened. A missing row is historical unknown.
+// Redis publication never happened. The seed keeps the window authoritative
+// even if an older writer appended a transition without recovery metadata.
 func GetLatestVerifyOriginal(ctx context.Context, trailId server.Id) (original *VerifyOriginalTransition) {
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT original_body,original_signature FROM verify_original_transition WHERE trail_id=$1 ORDER BY previous_depth DESC LIMIT 1`, trailId)
+		rows, err := conn.Query(ctx, `SELECT t.original_body,t.original_signature,COALESCE(seed.head_window,t.head_window,'')
+ FROM verify_original_transition t LEFT JOIN verify_original_transition seed ON seed.trail_id=t.trail_id AND seed.previous_depth=0
+ WHERE t.trail_id=$1 ORDER BY t.previous_depth DESC LIMIT 1`, trailId)
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
 				original = &VerifyOriginalTransition{}
-				server.Raise(rows.Scan(&original.Body, &original.Signature))
+				server.Raise(rows.Scan(&original.Body, &original.Signature, &original.HeadWindow))
 			}
 		})
 	})
@@ -164,11 +172,13 @@ func ListVerifyOriginals(ctx context.Context, from, to time.Time, limit int) (or
 		panic(errors.New("invalid verification original range"))
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT original_body,original_signature FROM verify_original_transition WHERE observed_time >= $1 AND observed_time < $2 ORDER BY observed_time,trail_id,previous_depth LIMIT $3`, from.UTC(), to.UTC(), limit)
+		rows, err := conn.Query(ctx, `SELECT t.original_body,t.original_signature,COALESCE(seed.head_window,t.head_window,'')
+ FROM verify_original_transition t LEFT JOIN verify_original_transition seed ON seed.trail_id=t.trail_id AND seed.previous_depth=0
+ WHERE t.observed_time >= $1 AND t.observed_time < $2 ORDER BY t.observed_time,t.trail_id,t.previous_depth LIMIT $3`, from.UTC(), to.UTC(), limit)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				original := &VerifyOriginalTransition{}
-				server.Raise(rows.Scan(&original.Body, &original.Signature))
+				server.Raise(rows.Scan(&original.Body, &original.Signature, &original.HeadWindow))
 				originals = append(originals, original)
 			}
 		})
@@ -225,6 +235,9 @@ func PublishVerifyOriginal(ctx context.Context, original *VerifyOriginalTransiti
 				pipe.Set(ctx, verifyTrailPendingKey(trail.TrailId), verifyMarshalHop(trail.Pending), ttl)
 			}
 			pipe.Set(ctx, verifyTrailResponseKey(trail.TrailId), body.ResponseJson, ttl)
+			if original.HeadWindow != "" {
+				pipe.Set(ctx, verifyTrailHeadWindowKey(trail.TrailId), original.HeadWindow, ttl)
+			}
 			return nil
 		})
 		server.Raise(err)
@@ -236,6 +249,20 @@ func PublishVerifyOriginal(ctx context.Context, original *VerifyOriginalTransiti
 		}
 	})
 	return body
+}
+
+// Restore only the immutable window when a replay must not replace a newer
+// trail projection. Missing historical metadata leaves the legacy key/fallback
+// untouched; recovery never fabricates or re-signs a seed window for it.
+func RestoreVerifyOriginalHeadWindow(ctx context.Context, original *VerifyOriginalTransition, settings *VerifySettings) {
+	if original.HeadWindow == "" {
+		return
+	}
+	body, err := DecodeVerifyOriginal(original)
+	server.Raise(err)
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.Set(ctx, verifyTrailHeadWindowKey(body.Trail.TrailId), original.HeadWindow, settings.TrailTtl(body.Trail.M)).Err())
+	})
 }
 
 // Counters are a recoverable convenience projection. A receipt marker shares

@@ -243,9 +243,11 @@ func TestDbLiveWriteTimeoutWithNoRetryRemainsVisible(t *testing.T) {
 
 // Classification must happen before cleanup. Otherwise the panic defer
 // releases the failed connection while connErr is still nil and the retry
-// reacquires the same PostgreSQL session.
+// reacquires the same PostgreSQL session. A server-reported connection
+// exception condemns the session even while pgx still reports it idle, so
+// only the classification can dispose of it here.
 func TestDbDiscardsClassifiedConnectionBeforeRetry(t *testing.T) {
-	writeErr := testCanceledPgprotoWriteError(t)
+	connectionErr := &pgconn.PgError{Code: "08006", Message: "synthetic connection failure"}
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		pool := newSingleConnectionDbTestPool(t)
 		defer pool.close()
@@ -253,7 +255,7 @@ func TestDbDiscardsClassifiedConnectionBeforeRetry(t *testing.T) {
 		dbWithPool(context.Background(), pool, func(conn PgConn) {
 			connectionPids = append(connectionPids, conn.Conn().PgConn().PID())
 			if len(connectionPids) == 1 {
-				WithPgResult(nil, writeErr, func() {})
+				WithPgResult(nil, connectionErr, func() {})
 			}
 		})
 		if len(connectionPids) != 2 {

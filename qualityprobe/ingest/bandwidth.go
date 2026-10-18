@@ -63,7 +63,7 @@ func (c *Client) ReserveBandwidth(ctx context.Context, providerClientId string, 
 		return ErrUnauthorized
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
 	}
 }
 
@@ -123,6 +123,6 @@ func (c *Client) SubmitBandwidth(
 		return ErrUnauthorized
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return RejectedError(resp.StatusCode, string(msg))
 	}
 }

@@ -187,27 +187,52 @@ func (self redisNonexpiringProbe) cadence() time.Duration { return 15 * time.Min
 
 // Preserve exact fleet skew even when detailed attribution is unavailable.
 func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
+	// The fleet census spans every redis-cluster host; the healthy result is
+	// reported on the entry host and an outlier on the host that runs it. A
+	// host whose census fails is reported and the other hosts' masters are
+	// judged against their own median, which is then partial.
+	h := env.cfg.redisEntryHost()
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) < 3 {
+	if len(env.cfg.redisAllNodePorts()) < 3 {
 		return nil, fmt.Errorf("need at least three Redis masters for a fleet skew baseline")
 	}
-	nodes, err := collectRedisKeyspaceNodes(ctx, env, h, ports)
-	if err != nil {
-		return nil, err
+	nodes := []redisKeyspaceNode{}
+	nodeHosts := env.cfg.redisNodeHosts()
+	failures := []redisHostFailure{}
+	for _, nodeHost := range nodeHosts {
+		hostNodes, err := collectRedisKeyspaceNodes(ctx, env, nodeHost, nodeHost.redisNodePorts())
+		if err != nil {
+			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
+			continue
+		}
+		nodes = append(nodes, hostNodes...)
+	}
+	if len(failures) == len(nodeHosts) {
+		return nil, redisHostFailuresError(failures)
+	}
+	if len(nodes) < 3 {
+		return nil, fmt.Errorf("need at least three observed Redis masters for a fleet skew baseline")
+	}
+	visibility := []finding{}
+	for _, failure := range failures {
+		visibility = append(visibility, redisHostCannotObserveFinding(failure, "keyspace-census"))
 	}
 
 	medianDensity, outliers := redisNonexpiringOutliers(nodes)
 	if len(outliers) == 0 {
+		// an unread host's masters may be the outliers
+		if len(failures) > 0 {
+			return visibility, nil
+		}
 		return []finding{healthyFinding("redis/nonexpiring-skew", tierWarn, "nonexpiring-key-skew", h.name)}, nil
 	}
 
 	worst := outliers[0]
 	control := redisNonexpiringControl(nodes, worst.node.port, medianDensity)
-	target := fmt.Sprintf("%s:%d", h.name, worst.node.port)
+	worstHost := env.cfg.redisNodeHostOrEntry(worst.node.port)
+	target := fmt.Sprintf("%s:%d", worstHost.name, worst.node.port)
 	attribution := redisPersistentAttribution{status: "unavailable"}
 	observedParts := []string{
 		fmt.Sprintf("worst_port=%d", worst.node.port),
@@ -222,10 +247,13 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 		fmt.Sprintf("material_outlier_nodes=%d", len(outliers)),
 		fmt.Sprintf("control_port=%d", control.port),
 	}
+	if len(failures) > 0 {
+		// the fleet median covers only the read hosts' masters
+		observedParts = append(observedParts, fmt.Sprintf("observed_masters=%d", len(nodes)), redisUnobservedHosts(failures))
+	}
 
-	visibility := []finding{}
-	candidateSample, candidateErr := sampleRedisPersistentFamilies(ctx, env, h, worst.node.port)
-	controlSample, controlErr := sampleRedisPersistentFamilies(ctx, env, h, control.port)
+	candidateSample, candidateErr := sampleRedisPersistentFamilies(ctx, env, worstHost, worst.node.port)
+	controlSample, controlErr := sampleRedisPersistentFamilies(ctx, env, env.cfg.redisNodeHostOrEntry(control.port), control.port)
 	if candidateErr == nil && controlErr == nil {
 		attribution = classifyRedisPersistentAttribution(candidateSample, controlSample)
 		observedParts = append(observedParts, redisPersistentSampleSummary("candidate", candidateSample)...)
@@ -265,13 +293,18 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 		evidence = "The aggregate INFO keyspace and owned-slot census completed. The bounded candidate/control EVAL_RO detail did not return a complete fixed aggregate; its raw response was discarded and no family count was rendered."
 	}
 
+	symptom := fmt.Sprintf(
+		"Redis port %d retains %s the fleet-median non-expiring keys per slot, with about %d excess keys",
+		worst.node.port, redisNonexpiringRatioText(worst.ratio), worst.estimatedExcess,
+	)
+	if len(failures) > 0 {
+		symptom += redisPartialSymptom(failures)
+		context += " The census omits the masters of an unread host (see its visibility finding), so the fleet median and outlier set are partial."
+	}
 	skewFinding := finding{
 		probeId: "redis/nonexpiring-skew", tier: tierWarn,
 		class: "nonexpiring-key-skew", target: target, sustain: 1,
-		symptom: fmt.Sprintf(
-			"Redis port %d retains %s the fleet-median non-expiring keys per slot, with about %d excess keys",
-			worst.node.port, redisNonexpiringRatioText(worst.ratio), worst.estimatedExcess,
-		),
+		symptom:   symptom,
 		mechanism: mechanism,
 		baseline:  "Every master stays below 1.20x the fleet median after normalizing non-expiring keys by owned slots, or differs by fewer than 100,000 material keys; detailed attribution is complete before prescribing family-specific maintenance.",
 		observed:  strings.Join(observedParts, " "),

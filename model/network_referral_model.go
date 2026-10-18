@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -269,7 +270,13 @@ func AddReferralBonusesToAllNetworks(
 		if !claimTransferGrantRunInTx(ctx, tx, GrantKindReferral, startTime, endTime, runIds) {
 			return
 		}
+		// a lag.dev guest gets no referral data and counts toward no
+		// referrer's bonus (lag.dev/PLAN.md A1)
+		lagGuests := lagGuestNetworkIdsInTx(ctx, tx, referralNetworkIdsOf(referrals))
 		grant := func(networkId server.Id, byteCount ByteCount) {
+			if lagGuests[networkId] {
+				return
+			}
 			if seekerMultiplier != 1.0 && seekers[networkId] {
 				byteCount = ByteCount(float64(byteCount) * seekerMultiplier)
 			}
@@ -281,6 +288,9 @@ func AddReferralBonusesToAllNetworks(
 		}
 
 		for referralNetworkId, referredNetworkIds := range referrals {
+			referredNetworkIds = slices.DeleteFunc(slices.Clone(referredNetworkIds), func(networkId server.Id) bool {
+				return lagGuests[networkId]
+			})
 			// referrer: paid for up to max_referrals of its referrals
 			if 0 < bonusPerReferral {
 				if bonusCount := ReferralBonusCount(len(referredNetworkIds)); 0 < bonusCount {

@@ -40,7 +40,20 @@ import (
 //     must be updated by at most one caller at a time
 //     a serial task is expected to update this
 
+// The longest client_reliability retention. A payout that is behind can extend
+// retention up to this horizon, never past it, so it bounds the table's size.
 const ClientExpiration = 30 * 24 * time.Hour
+
+// Steady-state client_reliability retention. Recurring readers reach at most 7
+// days back (the running network window), and payout reliability windows have
+// reached about 15 days back while payouts were behind, which leaves about a
+// week of margin. A payout further behind reads from the last subsidy epoch
+// end, and retention extends to cover it (clientReliabilityRetentionCutoffBlock).
+const ClientReliabilityRetention = 21 * 24 * time.Hour
+
+// blocks kept before the last subsidy epoch end, so a payout window that starts
+// inside a day never reaches a dropped block
+const clientReliabilityPayoutFrontierMargin = 24 * time.Hour
 
 var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
@@ -690,9 +703,33 @@ func upsertClientReliabilityStatsBlock(
 	}
 }
 
+// Returns the first block number that client_reliability retention keeps at
+// now; earlier blocks may be removed.
+//
+// The cutoff is now-ClientReliabilityRetention, moved back to cover the next
+// payout's reliability window, which starts at the last subsidy epoch end
+// (predictPaymentPlanReliabilityWindow). A block missing from that window is
+// not an error: the score counts it as covered with no valid rows, which
+// silently cuts provider credit. The cutoff never moves back past
+// now-ClientExpiration, so a stalled payout cannot grow the table without
+// bound.
+func clientReliabilityRetentionCutoffBlock(ctx context.Context, now time.Time) int64 {
+	cutoffBlock := reliabilityBlockNumber(now.Add(-ClientReliabilityRetention))
+
+	var lastSubsidyEndTime *time.Time
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT MAX(end_time) FROM subsidy_payment`).Scan(&lastSubsidyEndTime))
+	})
+	if lastSubsidyEndTime != nil {
+		frontierBlock := reliabilityBlockNumber(lastSubsidyEndTime.Add(-clientReliabilityPayoutFrontierMargin))
+		cutoffBlock = min(cutoffBlock, frontierBlock)
+	}
+
+	return max(cutoffBlock, reliabilityBlockNumber(now.Add(-ClientExpiration)))
+}
+
 func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
-	minTime := maxTime.Add(-ClientExpiration)
-	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
+	minBlockNumber := clientReliabilityRetentionCutoffBlock(ctx, maxTime) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
@@ -1191,7 +1228,9 @@ func reliabilityRunningNeedsRecompute(
 // builds block as soon as they enter the progress view: even a new build can reach
 // its old-snapshot wait before the full-window scan finishes. The five-minute
 // floor excludes tiny routine vacuums only; bootstrap and backwards-window
-// repairs bypass this result in reliabilityRunningNeedsRecompute.
+// repairs bypass this result in reliabilityRunningNeedsRecompute. Each signal
+// is scoped to this database, like the backup check: an old-snapshot wait and
+// a vacuum horizon consider only the build's or vacuum's own database.
 func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.PgTx) (allowed bool) {
 	var establishedVacuum bool
 	var indexBuild bool
@@ -1204,11 +1243,13 @@ func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.Pg
 			SELECT 1
 			FROM pg_stat_progress_vacuum p
 			JOIN pg_stat_activity a USING (pid)
-			WHERE a.query_start <= clock_timestamp() - make_interval(secs => $1)
+			WHERE p.datname = current_database()
+				AND a.query_start <= clock_timestamp() - make_interval(secs => $1)
 			),
 			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_create_index p
+			WHERE p.datname = current_database()
 			),
 			(`+postgresLogicalBackupSnapshotActiveSQL+`)
 		`,
@@ -1372,6 +1413,78 @@ const reliabilityRunningObservedAggSql = `
 	) AS observations GROUP BY network_id,client_id
 `
 
+// The work that moves one lookback's applied window to [newMin, newMax): a
+// full recompute or a rolling delta, the aggregate that feeds it and the prune
+// that follows a rolling delta. The single-transaction pass below and the
+// staged checkpoint (network_client_reliability_running_stage.go) share it, so
+// both decide the same way from the same applied window.
+type reliabilityRunningStep struct {
+	recompute bool
+	deferred  bool
+	reliabilityRunningShape
+}
+
+// What a lookback aggregates. Client windows count invalid observations and
+// keep a client until its last observation leaves; the network window counts
+// valid rows and keeps a client until its last valid row leaves.
+type reliabilityRunningShape struct {
+	observed       bool
+	aggregateSql   string
+	prunePredicate string
+}
+
+// The shape is fixed by the lookback index.
+func newReliabilityRunningShape(lb reliabilityRunningLookback) reliabilityRunningShape {
+	if lb.lookbackIndex != networkWindowLookbackIndex {
+		return reliabilityRunningShape{
+			observed:       true,
+			aggregateSql:   reliabilityRunningObservedAggSql,
+			prunePredicate: `observed_row_count = 0`,
+		}
+	}
+	return reliabilityRunningShape{
+		aggregateSql:   `SELECT valid_counts.*,0::bigint AS observed_row_count FROM (` + reliabilityRunningAggSql + `) AS valid_counts`,
+		prunePredicate: `independent_sum < 0.5`,
+	}
+}
+
+// Decides the step from the applied window. Mandatory repairs ignore
+// periodicReanchorAllowed; it only defers the optional periodic re-anchor.
+func newReliabilityRunningStep(
+	prev reliabilityRunningWindow,
+	lb reliabilityRunningLookback,
+	newMin int64,
+	newMax int64,
+	periodicReanchorAllowed bool,
+) (step reliabilityRunningStep) {
+	step.recompute, step.deferred = reliabilityRunningNeedsRecompute(
+		prev,
+		newMin,
+		newMax,
+		periodicReanchorAllowed,
+	)
+	step.reliabilityRunningShape = newReliabilityRunningShape(lb)
+	if step.observed && !reliabilityRunningObservationCurrent(prev) {
+		// A legacy writer may have deleted observed-zero clients. This is
+		// mandatory repair, independent of optional re-anchor deferral.
+		step.recompute, step.deferred = true, false
+	}
+	return
+}
+
+// Score publication revisits windows already committed by the checkpointed
+// path. Their rows and pruning are complete: preserve the trusted marker
+// instead of repeating empty aggregates, a full prune and token writes.
+// Every mandatory/periodic repair is decided before this applies.
+func (self *reliabilityRunningStep) unchanged(prev reliabilityRunningWindow, newMin int64, newMax int64) bool {
+	return !self.recompute && prev.minBlockNumber == newMin && prev.maxBlockNumber == newMax
+}
+
+// Moves the lookback's window in the caller's transaction, aggregating each
+// range in one statement.
+// Score writers use it for the small step left after the checkpointed pass
+// (whose staged form bounds every transaction); it also repairs an invalidated
+// marker in place.
 func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -1381,26 +1494,13 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	periodicReanchorAllowed bool,
 ) {
 	prev := readReliabilityRunningWindow(ctx, tx, lb.lookbackIndex)
-	recompute, deferred := reliabilityRunningNeedsRecompute(
-		prev,
-		newMin,
-		newMax,
-		periodicReanchorAllowed,
-	)
-	aggregateSql := `SELECT valid_counts.*,0::bigint AS observed_row_count FROM (` + reliabilityRunningAggSql + `) AS valid_counts`
-	prunePredicate := `independent_sum < 0.5`
-	if lb.lookbackIndex != networkWindowLookbackIndex {
-		aggregateSql = reliabilityRunningObservedAggSql
-		prunePredicate = `observed_row_count = 0`
-		if !reliabilityRunningObservationCurrent(prev) {
-			// A legacy writer may have deleted observed-zero clients. This is
-			// mandatory repair, independent of optional re-anchor deferral.
-			recompute, deferred = true, false
-		}
-	}
-	if deferred {
+	step := newReliabilityRunningStep(prev, lb, newMin, newMax, periodicReanchorAllowed)
+	recompute := step.recompute
+	aggregateSql := step.aggregateSql
+	prunePredicate := step.prunePredicate
+	if step.deferred {
 		glog.Infof(
-			"[ncr]defer optional running-window re-anchor for lookback %d while VACUUM/index-build/logical-backup work is active; rolling [%d,%d) -> [%d,%d)\n",
+			"[ncr]defer optional running-window re-anchor for lookback %d; rolling [%d,%d) -> [%d,%d)\n",
 			lb.lookbackIndex,
 			prev.minBlockNumber,
 			prev.maxBlockNumber,
@@ -1408,11 +1508,7 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			newMax,
 		)
 	}
-	// Score publication revisits windows already committed by the checkpointed
-	// path. Their rows and pruning are complete: preserve the trusted marker
-	// instead of repeating empty aggregates, a full prune and token writes.
-	// Compute every mandatory/periodic repair above before taking this path.
-	if !recompute && prev.minBlockNumber == newMin && prev.maxBlockNumber == newMax {
+	if step.unchanged(prev, newMin, newMax) {
 		return
 	}
 
@@ -1500,12 +1596,20 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 // lookback) reliability sums to the window ending at maxTime. It is retained
 // for score writers that need the running rows and score rows in one atomic
 // transaction. The recurring task first calls the checkpointed wrapper below;
-// this in-transaction pass is then idempotent for the same maxTime.
+// this in-transaction pass is then idempotent for the same maxTime, or rolls
+// the few blocks the rollup drained in between.
 func UpdateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time) {
 	updateClientReliabilityRunningInTx(tx, ctx, maxTime, reliabilityRunningLookbacks())
 }
 
-// Advance only the inputs consumed by this score writer, preserving its atomic transaction.
+// Advance only the inputs consumed by this score writer, preserving its atomic
+// transaction. The optional periodic re-anchor belongs to the checkpointed
+// pass, which aggregates it in bounded committed chunks. Here it would read the
+// whole window in one statement inside the score transaction and hold that
+// transaction's snapshot and xid throughout (the seven-day network window took
+// 55 minutes on Main). It happened whenever maintenance pressure deferred the
+// checkpointed re-anchor and ended before this pass. Mandatory repairs and the
+// rolling delta remain here.
 func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, lookbacks []reliabilityRunningLookback) {
 	// End every window at the redis-rollup high-water mark (the SAME shift the
 	// score queries use), computed once and applied to all lookbacks so they
@@ -1513,7 +1617,6 @@ func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, max
 	baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 	shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
 	newMax := baseMaxBlockNumber - shift
-	periodicReanchorAllowed := reliabilityRunningPeriodicReanchorAllowed(ctx, tx)
 
 	for _, lb := range lookbacks {
 		newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
@@ -1523,17 +1626,18 @@ func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, max
 			lb,
 			newMin,
 			newMax,
-			periodicReanchorAllowed,
+			false,
 		)
 	}
 }
 
-// updateClientReliabilityRunningCheckpointed advances each lookback in a
-// separate transaction. A task deadline or connection loss during a later
-// lookback therefore preserves every earlier marker and aggregate; the retry
-// rolls those completed windows instead of repeating their full scans.
+// Advances each lookback in its own committed steps
+// (advanceReliabilityRunningLookback): no transaction aggregates more than
+// reliabilityRunningChunkBlockCount blocks. A task deadline or connection loss
+// during a later lookback therefore preserves every earlier marker and
+// aggregate, and an interrupted lookback resumes from its committed chunks.
 // afterCommit is an internal failure-injection seam used by the deterministic
-// transaction-boundary test.
+// transaction-boundary test; it runs once the lookback's window is published.
 func updateClientReliabilityRunningCheckpointed(
 	ctx context.Context,
 	maxTime time.Time,
@@ -1541,21 +1645,7 @@ func updateClientReliabilityRunningCheckpointed(
 	afterCommit func(reliabilityRunningLookback),
 ) {
 	for _, lb := range lookbacks {
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			configureReliabilityRunningCheckpoint(ctx, tx)
-			baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
-			shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
-			newMax := baseMaxBlockNumber - shift
-			newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
-			updateClientReliabilityRunningLookbackAtBoundsInTx(
-				tx,
-				ctx,
-				lb,
-				newMin,
-				newMax,
-				reliabilityRunningPeriodicReanchorAllowed(ctx, tx),
-			)
-		}, server.TxReadCommitted)
+		advanceReliabilityRunningLookback(ctx, maxTime, lb)
 		if afterCommit != nil {
 			afterCommit(lb)
 		}
@@ -1697,7 +1787,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 
 		// Publish scheduling hints with the scores: the preceding location pass
 		// saw the old generation, and unrelated network work may delay the next
-		// pass. Also seed providers whose old scores prevented cycle creation.
+		// pass. Also seed providers whose old scores, or missing current
+		// history, prevented cycle creation; a new cycle starts at this admission.
 		updateProviderUrlProbeEligibility(ctx, tx)
 
 	}, server.TxReadCommitted)
@@ -1777,7 +1868,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	}
 
 	// upsert the fresh scores, then remove rows not refreshed in this round
-	// (identified by a stale max_block_number). This replaces the previous
+	// (identified by either stale window bound). This replaces the previous
 	// delete-all-and-reinsert, which rewrote the entire table every round and
 	// kept it permanently bloated.
 	server.RaisePgResult(tx.Exec(
@@ -1839,8 +1930,9 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		ctx,
 		`
 		DELETE FROM network_connection_reliability_score
-		WHERE max_block_number != $1
+		WHERE min_block_number <> $1 OR max_block_number <> $2
 		`,
+		minBlockNumber,
 		maxBlockNumber,
 	))
 }
@@ -2425,6 +2517,17 @@ type cityRegionCountry struct {
 type clientLocationReliability struct {
 	arinRisk       bool
 	arinNonQuality bool
+	// The old database's facts, folded exactly like the latest's
+	// (arindbctl/ARINDB.md, "Connection and rollup facts").
+	arinOldRisk       bool
+	arinOldNonQuality bool
+	// each slot's epoch when every folded row has the same one, otherwise 0
+	arinEpoch    arinRollupEpoch
+	arinOldEpoch arinRollupEpoch
+	// the rows folded, and per build epoch the rows that carry it in either
+	// slot with their facts under it
+	rowCount       int
+	arinEpochFacts map[int64]*arinEpochFacts
 	networkId      server.Id
 	connected      bool
 	// locations is bucketed by what each connection proved (connect/IPV6.md
@@ -2474,11 +2577,69 @@ func newClientLocationReliability(networkId server.Id, connected bool) *clientLo
 	}
 }
 
+// One database's facts over the rows that carry its epoch in either slot.
+type arinEpochFacts struct {
+	rows       int
+	risk       bool
+	nonQuality bool
+}
+
+// The old slot the rollup stores: the rows' common old epoch with its facts.
+// When the old slots differ, as while Connect restarts onto a new release and
+// a provider's connections span restarted and waiting hosts, it is the newest
+// epoch other than the common latest that every row carries in one slot or the
+// other, with the facts of whichever slot carries it: the restarted rows' old
+// slot and the waiting rows' latest slot both name the release the fleet is
+// leaving. Every row is classified under that epoch, so the facts are exact;
+// without one the slot is unavailable (epoch 0).
+func (self *clientLocationReliability) oldSlot() (epoch int64, risk bool, nonQuality bool) {
+	if !self.arinOldEpoch.mixed {
+		return self.arinOldEpoch.value(), self.arinOldRisk, self.arinOldNonQuality
+	}
+	latestEpoch := self.arinEpoch.value()
+	for candidate, facts := range self.arinEpochFacts {
+		if candidate != latestEpoch && facts.rows == self.rowCount && epoch < candidate {
+			epoch, risk, nonQuality = candidate, facts.risk, facts.nonQuality
+		}
+	}
+	return
+}
+
+// One slot's epoch over a client's rows: the common epoch when every row has
+// the same one, 0 when they differ. A client mixed in its latest slot is
+// unavailable under every serving epoch but the one oldSlot finds rather than
+// taking either row's facts.
+type arinRollupEpoch struct {
+	epoch int64
+	seen  bool
+	mixed bool
+}
+
+func (self *arinRollupEpoch) add(epoch int64) {
+	if !self.seen {
+		self.epoch = epoch
+		self.seen = true
+	} else if self.epoch != epoch {
+		self.mixed = true
+	}
+}
+
+func (self arinRollupEpoch) value() int64 {
+	if self.mixed {
+		return 0
+	}
+	return self.epoch
+}
+
 // clientLocationReliabilityRow is one connection row as both aggregation
 // queries below select it, in column order.
 type clientLocationReliabilityRow struct {
 	arinRisk              bool
 	arinNonQuality        bool
+	arinOldRisk           bool
+	arinOldNonQuality     bool
+	arinEpoch             int64
+	arinOldEpoch          int64
 	clientId              server.Id
 	networkId             server.Id
 	clientAddressHash     [32]byte
@@ -2512,6 +2673,10 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 		&row.hasLatencyTest,
 		&row.arinRisk,
 		&row.arinNonQuality,
+		&row.arinOldRisk,
+		&row.arinOldNonQuality,
+		&row.arinEpoch,
+		&row.arinOldEpoch,
 	))
 	// scanning assigns a fresh slice, so copy into the fixed-size key
 	copy(row.clientAddressHash[:], clientAddressHashSlice)
@@ -2522,6 +2687,33 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
 	self.arinRisk = self.arinRisk || row.arinRisk
 	self.arinNonQuality = self.arinNonQuality || row.arinNonQuality
+	self.arinOldRisk = self.arinOldRisk || row.arinOldRisk
+	self.arinOldNonQuality = self.arinOldNonQuality || row.arinOldNonQuality
+	self.arinEpoch.add(row.arinEpoch)
+	self.arinOldEpoch.add(row.arinOldEpoch)
+	self.rowCount += 1
+	if self.arinEpochFacts == nil {
+		self.arinEpochFacts = map[int64]*arinEpochFacts{}
+	}
+	for _, slot := range []struct {
+		epoch            int64
+		risk, nonQuality bool
+	}{
+		{epoch: row.arinEpoch, risk: row.arinRisk, nonQuality: row.arinNonQuality},
+		{epoch: row.arinOldEpoch, risk: row.arinOldRisk, nonQuality: row.arinOldNonQuality},
+	} {
+		if slot.epoch == 0 {
+			continue
+		}
+		facts, ok := self.arinEpochFacts[slot.epoch]
+		if !ok {
+			facts = &arinEpochFacts{}
+			self.arinEpochFacts[slot.epoch] = facts
+		}
+		facts.rows += 1
+		facts.risk = facts.risk || slot.risk
+		facts.nonQuality = facts.nonQuality || slot.nonQuality
+	}
 	switch ConnectionProvenIpFamily(row.ipVersion, row.ipFamilyIntent) {
 	case 4:
 		self.ipv4Proven = true
@@ -2586,8 +2778,14 @@ func (self *clientLocationReliability) Values() []any {
 	// [15] egress_index
 	// [16] egress_quality
 	// [17] egress_evidence_time
+	// [18] arin_risk
+	// [19] arin_non_quality
+	// [20] arin_old_risk
+	// [21] arin_old_non_quality
+	// [22] arin_epoch
+	// [23] arin_old_epoch
 
-	values := make([]any, 20)
+	values := make([]any, 24)
 
 	values[0] = self.networkId
 
@@ -2634,6 +2832,11 @@ func (self *clientLocationReliability) Values() []any {
 	values[17] = self.egressEvidenceTime
 	values[18] = self.arinRisk
 	values[19] = self.arinNonQuality
+	oldEpoch, oldRisk, oldNonQuality := self.oldSlot()
+	values[20] = oldRisk
+	values[21] = oldNonQuality
+	values[22] = self.arinEpoch.value()
+	values[23] = oldEpoch
 
 	return values
 }
@@ -2709,7 +2912,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			(network_client_location.arin_non_quality OR ($2::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
+			(network_client_location.arin_non_quality OR ($2::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality,
+			network_client_location.arin_old_risk,
+			(network_client_location.arin_old_non_quality OR ($2::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
+			network_client_location.arin_database_build_epoch,
+			network_client_location.arin_old_database_build_epoch
 
 		FROM network_client_connection
 
@@ -2768,7 +2975,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			(network_client_location.arin_non_quality OR ($3::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
+			(network_client_location.arin_non_quality OR ($3::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality,
+			network_client_location.arin_old_risk,
+			(network_client_location.arin_old_non_quality OR ($3::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
+			network_client_location.arin_database_build_epoch,
+			network_client_location.arin_old_database_build_epoch
 
 		FROM network_client_connection
 
@@ -2932,7 +3143,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			    egress_quality bool NULL,
 			    egress_evidence_time timestamp NULL,
 			    arin_risk bool,
-			    arin_non_quality bool
+			    arin_non_quality bool,
+			    arin_old_risk bool,
+			    arin_old_non_quality bool,
+			    arin_epoch bigint,
+			    arin_old_epoch bigint
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -2965,7 +3180,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality,
 	        egress_evidence_time,
 	        arin_risk,
-	        arin_non_quality
+	        arin_non_quality,
+	        arin_old_risk,
+	        arin_old_non_quality,
+	        arin_epoch,
+	        arin_old_epoch
 	    )
 	    SELECT
 	    	client_id,
@@ -2989,7 +3208,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality,
 	        egress_evidence_time,
 	        arin_risk,
-	        arin_non_quality
+	        arin_non_quality,
+	        arin_old_risk,
+	        arin_old_non_quality,
+	        arin_epoch,
+	        arin_old_epoch
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -3014,7 +3237,11 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        egress_quality = EXCLUDED.egress_quality,
 	        egress_evidence_time = EXCLUDED.egress_evidence_time,
 	        arin_risk = EXCLUDED.arin_risk,
-	        arin_non_quality = EXCLUDED.arin_non_quality
+	        arin_non_quality = EXCLUDED.arin_non_quality,
+	        arin_old_risk = EXCLUDED.arin_old_risk,
+	        arin_old_non_quality = EXCLUDED.arin_old_non_quality,
+	        arin_epoch = EXCLUDED.arin_epoch,
+	        arin_old_epoch = EXCLUDED.arin_old_epoch
 	    `,
 		updateBlockNumber,
 	))

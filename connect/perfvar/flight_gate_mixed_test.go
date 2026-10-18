@@ -6,6 +6,7 @@ package perfvar
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -856,36 +857,72 @@ func TestPerfvarFeatureSelection(t *testing.T) {
 	if baselineHash != withoutFeature {
 		t.Fatal("an empty feature selection changed the scenario identity")
 	}
-	// Both polarities reach the endpoint Clients on a tree that has the
-	// settings, whatever their defaults are on that tree. The fields are read
-	// by name because this file also compiles against revisions without them.
-	read := func(settings *clientconnect.ClientSettings) (bool, bool, bool) {
-		defer_, deferOk := perfvarBoolField(
-			settings.SendBufferSettings,
-			"DeferTimeoutResendWhileCumulativeProgress",
-		)
-		sizeAware, sizeOk := perfvarBoolField(
-			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings,
-			"FastPathSizeAwareAdmission",
-		)
-		return defer_, sizeAware, deferOk && sizeOk
-	}
-	if _, _, present := read(fullTunClientSettings(fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0)); !present {
-		t.Skip("this Connect revision predates the settings under measurement")
-	}
-	onDefer, onSize, _ := read(fullTunClientSettingsWithFeatures(
-		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
-		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
-	))
-	if !onDefer || !onSize {
-		t.Fatal("a selected feature did not reach the Client settings")
-	}
-	offDefer, offSize, _ := read(fullTunClientSettingsWithFeatures(
-		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
-		[]string{perfvarFeatureNoDeferTimeoutResend, perfvarFeatureNoFastPathSizeAware},
-	))
-	if offDefer || offSize {
-		t.Fatal("a negative feature did not reach the Client settings")
+	// Check each setting independently: a removed optional feature must not
+	// skip supported settings or the unsupported-feature refusal checks.
+	baselineSettings := fullTunClientSettings(fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0)
+	for _, feature := range []struct {
+		positive string
+		negative string
+		field    string
+		target   func(*clientconnect.ClientSettings) any
+	}{
+		{
+			positive: perfvarFeatureDeferTimeoutResend,
+			negative: perfvarFeatureNoDeferTimeoutResend,
+			field:    "DeferTimeoutResendWhileCumulativeProgress",
+			target: func(settings *clientconnect.ClientSettings) any {
+				return settings.SendBufferSettings
+			},
+		},
+		{
+			positive: perfvarFeatureFastPathSizeAware,
+			negative: perfvarFeatureNoFastPathSizeAware,
+			field:    "FastPathSizeAwareAdmission",
+			target: func(settings *clientconnect.ClientSettings) any {
+				return settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
+			},
+		},
+		{
+			positive: perfvarFeatureLaneRule,
+			negative: perfvarFeatureNoLaneRule,
+			field:    "ReliableLaneProvenRecovery",
+			target: func(settings *clientconnect.ClientSettings) any {
+				return settings.SendBufferSettings
+			},
+		},
+	} {
+		_, present := perfvarBoolField(feature.target(baselineSettings), feature.field)
+		for _, selection := range []struct {
+			name  string
+			value bool
+		}{
+			{name: feature.positive, value: true},
+			{name: feature.negative, value: false},
+		} {
+			if !present {
+				func() {
+					defer func() {
+						got := recover()
+						want := fmt.Sprintf("PERFVAR feature %q: this Connect revision has no %s", selection.name, feature.field)
+						if got != want {
+							t.Errorf("unsupported feature %s: panic=%v; want %q", selection.name, got, want)
+						}
+					}()
+					fullTunClientSettingsWithFeatures(
+						fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0, []string{selection.name},
+					)
+				}()
+				continue
+			}
+			settings := fullTunClientSettingsWithFeatures(
+				fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0, []string{selection.name},
+			)
+			value, exists := perfvarBoolField(feature.target(settings), feature.field)
+			if !exists || value != selection.value {
+				t.Errorf("feature %s: present=%t value=%t; want present=true value=%t",
+					selection.name, exists, value, selection.value)
+			}
+		}
 	}
 	// A revision without the setting must fail the run, not measure the default.
 	type older struct{ Unrelated bool }

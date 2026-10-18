@@ -36,7 +36,7 @@ func TestProxyDeviceTargetSignalSyntheticMissingPrivateTarget(t *testing.T) {
 	now := time.Date(2099, 1, 2, 3, 0, 0, 0, time.UTC)
 	alerts := runProxyDeviceTargetFixture(t, now, proxyDeviceTargetFixture{devices: 2, target: proxyDeviceTargetBytes, used: 1})
 	alert := requireAlertClass(t, alerts, "proxy-device-target-mismatch")
-	if alert.SignalNumber != "14.7d" || !strings.Contains(alert.Markdown(), "24 MiB") {
+	if alert.SignalNumber != "14.7d" || !strings.Contains(alert.Markdown(), "32 MiB") {
 		t.Fatalf("wrong private-target alert: %+v", alert)
 	}
 }
@@ -178,4 +178,24 @@ func runProxyDeviceTargetFixture(t *testing.T, now time.Time, fixture proxyDevic
 		t.Fatal(err)
 	}
 	return alerts
+}
+
+// Pins the canonical default independently of the implementation constant.
+func TestProxyDeviceTargetSignalAcceptsExplicit32MiBTargets(t *testing.T) {
+	now := time.Date(2099, 1, 2, 3, 0, 0, 0, time.UTC)
+	alerts := runProxyDeviceTargetFixture(t, now, proxyDeviceTargetFixture{
+		devices: 2, target: 2 * 32 * 1024 * 1024, used: 12 * 1024 * 1024,
+	})
+	if len(alerts) != 0 {
+		t.Fatalf("two 32 MiB private targets alerted: %+v", alerts)
+	}
+}
+
+// A still-running old target must not silently pass the new canonical policy.
+func TestProxyDeviceTargetSignalRejectsLegacy24MiBTargets(t *testing.T) {
+	now := time.Date(2099, 1, 2, 3, 0, 0, 0, time.UTC)
+	alerts := runProxyDeviceTargetFixture(t, now, proxyDeviceTargetFixture{
+		devices: 2, target: 2 * 24 * 1024 * 1024, used: 12 * 1024 * 1024,
+	})
+	requireAlertClass(t, alerts, "proxy-device-target-mismatch")
 }

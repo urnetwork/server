@@ -138,25 +138,39 @@ func TestRedisStoppedPingRetainsContextCause(t *testing.T) {
 	}
 }
 
-// The original physical failure is retained after a real successful Redis
-// PING, and stopping at that boundary never replays the admitted callback.
+// The original physical failure is retained when the caller stops inside an
+// admitted callback, and stopping at that boundary never replays it. Ordinary
+// pools admit the callback without a preflight PING, since its command reports
+// any connection error through the retry boundary; the non-retrying and
+// deadline pools keep exactly one real preflight PING.
 func TestRedisStoppedCallbackRetainsPhysicalCause(t *testing.T) {
-	peer := newDeadlineRedisPeer(t, "")
-	client := redis.NewClient(deadlineTestRedisOptions(peer))
-	defer client.Close()
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	original := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
-	calls := 0
-	recovered := captureDbErrorPanic(func() {
-		redisWithClient(ctx, &safeRedisClient{client: client}, func(RedisClient) {
-			calls++
-			cancel()
-			panic(original)
-		})
-	})
-	err, _ := recovered.(error)
-	if !errors.Is(err, DbContextDoneError) || !errors.Is(err, context.Canceled) || !errors.Is(err, original) || calls != 1 || peer.count("ping") != 1 {
-		t.Fatal("stopped Redis callback lost physical cause or replayed work", err, calls, peer.count("ping"))
+	for _, preflight := range []bool{false, true} {
+		func() {
+			peer := newDeadlineRedisPeer(t, "")
+			client := redis.NewClient(deadlineTestRedisOptions(peer))
+			defer client.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			original := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+			calls := 0
+			recovered := captureDbErrorPanic(func() {
+				redisWithClient(ctx, &safeRedisClient{client: client, disableCommandRetry: preflight}, func(RedisClient) {
+					calls++
+					cancel()
+					panic(original)
+				})
+			})
+			err, _ := recovered.(error)
+			if !errors.Is(err, DbContextDoneError) || !errors.Is(err, context.Canceled) || !errors.Is(err, original) || calls != 1 {
+				t.Fatal("stopped Redis callback lost physical cause or replayed work", preflight, err, calls)
+			}
+			wantPings := int64(0)
+			if preflight {
+				wantPings = 1
+			}
+			if pings := peer.count("ping"); pings != wantPings {
+				t.Fatal("Redis callback admission sent the wrong number of preflight PINGs", preflight, pings)
+			}
+		}()
 	}
 }

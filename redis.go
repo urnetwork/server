@@ -35,6 +35,75 @@ type safeRedisClient struct {
 	authentication        bool
 }
 
+type redisDialFunc func(ctx context.Context, network string, addr string) (net.Conn, error)
+
+// redisClusterDialer dials every node address the cluster hands the client
+// (CLUSTER SLOTS, MOVED and ASK) at the address this host reaches it by. The
+// cluster spans more than one host, so the entry host alone no longer reaches
+// every node: nodes announce their own lan ips and each node port is unique
+// across the cluster.
+func redisClusterDialer(authority string, nodeRoutes map[string]string, dial redisDialFunc) redisDialFunc {
+	authorityHost, _, _ := net.SplitHostPort(authority)
+	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		return dial(ctx, network, redisNodeDialAddr(authorityHost, nodeRoutes, addr))
+	}
+}
+
+// The dial path of every Redis pool. A test process pins each node dial to its
+// launcher attestation (test_env_dial_guard.go). Every other process has a nil
+// guard, which hands dial back unchanged, so this is redisClusterDialer over
+// dial itself.
+func redisPoolDialer(guard *testEnvDialGuard, authority string, nodeRoutes map[string]string, dial redisDialFunc) redisDialFunc {
+	return redisClusterDialer(authority, nodeRoutes, guard.wrapDial("redis", dial))
+}
+
+// redisNodeDialAddr maps an announced node address to the address to dial:
+//   - a loopback authority is an ssh tunnel (xops/bin/by-patch-main-data)
+//     that forwards every node port to loopback, so every node is dialed there
+//   - a node that announces no host (`:port`, or `?` for an unknown endpoint)
+//     is dialed on the authority host, as before the cluster spanned hosts
+//   - a node whose announced ip is a settings lan_hosts address is dialed at
+//     this host's route to that lan host. Lan hosts route to the lan ip
+//     itself; hosts outside the lan (sille) route over the management vpn.
+//   - any other address is dialed as announced
+func redisNodeDialAddr(authorityHost string, nodeRoutes map[string]string, addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if redisLoopbackHost(authorityHost) {
+		return net.JoinHostPort(authorityHost, port)
+	}
+	if host == "" || host == "?" {
+		return net.JoinHostPort(authorityHost, port)
+	}
+	if route, ok := nodeRoutes[host]; ok {
+		return net.JoinHostPort(route, port)
+	}
+	return addr
+}
+
+// redisNodeRoutes maps each lan host's lan ip (settings lan_hosts) to this
+// host's route to it (settings routes). Lan hosts without a route are dialed
+// at their announced ip.
+func redisNodeRoutes(lanHosts map[string]string, routes map[string]string) map[string]string {
+	nodeRoutes := map[string]string{}
+	for host, lanIp := range lanHosts {
+		if route, ok := routes[host]; ok && route != "" {
+			nodeRoutes[lanIp] = route
+		}
+	}
+	return nodeRoutes
+}
+
+func redisLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (self *safeRedisClient) open() redis.UniversalClient {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -129,16 +198,12 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
-		host, _, _ := net.SplitHostPort(authority)
-		dialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			// always connect to the original host
-			// this is because the cluser is set up with ip endpoints, but the ip is not universally routable
-			// note: this should be the default client behavior when `cluster-preferred-endpoint-type=unknown-endpoint`
-			//       however, go-redis and most other redis clients don't seem to handle the `MOVE :port` commands
-			//       correctly without a host
-			_, portStr, _ := net.SplitHostPort(addr)
-			return dialer.DialContext(ctx, network, net.JoinHostPort(host, portStr))
-		}
+		dialContext := redisPoolDialer(
+			currentTestEnvDialGuard(),
+			authority,
+			redisNodeRoutes(LanHosts(), Routes()),
+			dialer.DialContext,
+		)
 
 		cluster := redisKeys.RequireBool("cluster")
 
@@ -399,15 +464,19 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 	}
 }
 
-// RedisWithDeadline is the non-retrying boundary for optional cleanup with an
-// explicit caller deadline. Its dedicated pool applies that deadline to socket
-// reads and writes for both standalone and cluster clients. The callback must
-// pass the same ctx to every command. RedisReset and pool telemetry own this
-// pool just like the ordinary pools; no per-operation client is leaked.
-// This pool is restricted to PING, GET and same-slot EVAL operations; it bypasses
-// cluster command-policy discovery and must not route multi-shard operations.
-// EVAL callers must keep every declared key in one explicit Redis hash tag.
-func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (returnErr error) {
+// RedisWithDeadline is the non-retrying boundary for work with an explicit
+// caller deadline: optional cleanup, admission, and the provider liveness
+// lease. Its dedicated pool applies that deadline to socket reads and writes for
+// both standalone and cluster clients. The callback must pass the same ctx to
+// every command. RedisReset and pool telemetry own this pool just like the
+// ordinary pools; no per-operation client is leaked.
+// The pool bypasses cluster command-policy discovery, so each command routes by
+// its own first key: PING, GET, same-slot EVAL and other single-key commands,
+// alone or pipelined across slots. It must not route a command whose keys span
+// slots. EVAL callers must keep every declared key in one explicit Redis hash
+// tag. Each call first pings an arbitrary node unless the caller passes
+// OptRedisNoPreflight.
+func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error, options ...any) (returnErr error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")
 	}
@@ -433,17 +502,33 @@ func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (r
 	}()
 	redisWithClient(ctx, safeDeadlineClient, func(client RedisClient) {
 		returnErr = callback(client)
-	}, OptNoRetry())
+	}, append([]any{OptNoRetry()}, options...)...)
 	return
+}
+
+// Whether a call on the non-retrying or deadline-bound pools pings first.
+type RedisPreflightOptions struct {
+	skip bool
+}
+
+// Skips the preflight PING of the non-retrying and deadline-bound pools, for
+// idempotent commands whose results are judged one by one: the PING reaches an
+// arbitrary node, never necessarily the one a command routes to, and costs a
+// round trip per call.
+func OptRedisNoPreflight() RedisPreflightOptions {
+	return RedisPreflightOptions{skip: true}
 }
 
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
 	retryOptions := OptRetryDefault()
+	preflight := true
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
 		case DbRetryOptions:
 			retryOptions = v
+		case RedisPreflightOptions:
+			preflight = !v.skip
 		}
 	}
 
@@ -464,7 +549,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 		// cannot guarantee the next command succeeds. Dedicated non-retrying
 		// and deadline pools retain their existing preflight policy.
 		var connErr error
-		if pool.disableCommandRetry || pool.contextTimeoutEnabled {
+		if preflight && (pool.disableCommandRetry || pool.contextTimeoutEnabled) {
 			connErr = client.Ping(ctx).Err()
 		}
 		if connErr != nil {
@@ -712,18 +797,6 @@ func Testing_SetKeyspaceNotifications(ctx context.Context, classes string) {
 			}
 		}
 	})
-}
-
-// channel messages can be: RedisMessage, RedisSubscription
-func Subscribe(ctx context.Context, channels ...string) (update <-chan any, unsub func()) {
-	Redis(ctx, func(client RedisClient) {
-		pubsub := client.SSubscribe(ctx, channels...)
-		update = pubsub.ChannelWithSubscriptions()
-		unsub = func() {
-			pubsub.Close()
-		}
-	})
-	return
 }
 
 func RedisSetIfEqual(r RedisClient, ctx context.Context, key string, test []byte, value []byte, ttl time.Duration) *redis.Cmd {

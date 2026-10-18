@@ -72,10 +72,12 @@ func TestPaymentPlanSweepAssignmentTemporaryStatistics(t *testing.T) {
 						DROP TABLE temp_payment_network_ids;
 						ALTER TABLE synthetic_network_copy RENAME TO temp_payment_network_ids`))
 					}
+					// pg_stats, not the superuser-only pg_statistic catalog: the
+					// session owns its temporary tables, so the view shows their rows
 					var selectedStats, networkStats int
 					server.Raise(tx.QueryRow(ctx, `SELECT
-						(SELECT COUNT(*) FROM pg_statistic WHERE starelid='temp_account_payment'::regclass),
-						(SELECT COUNT(*) FROM pg_statistic WHERE starelid='temp_payment_network_ids'::regclass)`).Scan(&selectedStats, &networkStats))
+						(SELECT COUNT(*) FROM pg_stats WHERE schemaname = pg_my_temp_schema()::regnamespace::text AND tablename = 'temp_account_payment'),
+						(SELECT COUNT(*) FROM pg_stats WHERE schemaname = pg_my_temp_schema()::regnamespace::text AND tablename = 'temp_payment_network_ids')`).Scan(&selectedStats, &networkStats))
 					if removeStatistics {
 						if selectedStats != 0 || networkStats != 0 {
 							t.Fatal("control retained temporary statistics", selectedStats, networkStats)

@@ -8,11 +8,50 @@ import (
 	"net/http/httptest"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
+
+// A departure is reported only when it is the cause that ended the context
+// the work ran under. The authorization deadline, a server cancel and a live
+// context are not departures, and whichever cause ended a context first wins.
+// No step error enters this verdict: the lease reports a departure as
+// ErrAuthUnavailable (TestConnectH1PlusClientLeavingBeforeLeaseIsClientCanceled).
+func TestConnectRequestCanceledClassifiesByCause(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		end  func(handleCancel context.CancelCauseFunc)
+		// the authorization deadline has passed before end runs
+		expired bool
+		want    bool
+	}{
+		{name: "live", end: func(context.CancelCauseFunc) {}},
+		{name: "departed", end: func(cancel context.CancelCauseFunc) { cancel(errConnectRequestCanceled) }, want: true},
+		{name: "departed_then_server", end: func(cancel context.CancelCauseFunc) {
+			cancel(errConnectRequestCanceled)
+			cancel(nil)
+		}, want: true},
+		{name: "server_canceled", end: func(cancel context.CancelCauseFunc) { cancel(nil) }},
+		{name: "deadline", end: func(context.CancelCauseFunc) {}, expired: true},
+		{name: "deadline_then_departed", end: func(cancel context.CancelCauseFunc) { cancel(errConnectRequestCanceled) }, expired: true},
+	} {
+		handleCtx, handleCancel := context.WithCancelCause(t.Context())
+		deadline := time.Now().Add(time.Hour)
+		if c.expired {
+			deadline = time.Now().Add(-time.Second)
+		}
+		authCtx, authCancel := context.WithDeadline(handleCtx, deadline)
+		c.end(handleCancel)
+		if got := connectRequestCanceled(authCtx); got != c.want {
+			t.Errorf("%s: departure=%t want=%t (cause %v)", c.name, got, c.want, context.Cause(authCtx))
+		}
+		authCancel()
+		handleCancel(nil)
+	}
+}
 
 func TestConnectAuthenticationStatusKnownDependencies(t *testing.T) {
 	for _, cause := range []struct {

@@ -40,8 +40,8 @@ func providerUrlProbeRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 }
 
 func validateProviderUrlProbeArgs(args *ProviderEgressProbeArgs) error {
-	if args.ShardCount < 1 || maxProviderEgressProbeShardCount < args.ShardCount {
-		return fmt.Errorf("URL probe shard_count must be in [1,%d]", maxProviderEgressProbeShardCount)
+	if args.ShardCount < 1 || maxProviderUrlProbeShardCount < args.ShardCount {
+		return fmt.Errorf("URL probe shard_count must be in [1,%d]", maxProviderUrlProbeShardCount)
 	}
 	if args.IdleDelaySeconds < 1 || args.MaxTimeSeconds < 1 {
 		return fmt.Errorf("URL probe idle delay and max time must be positive")

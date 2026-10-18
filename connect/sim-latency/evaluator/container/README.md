@@ -26,7 +26,7 @@ trusted baseline and scorer continue to execute from the pristine base image.
 
 For every evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
-`sn`, `operator-proxy`, and `warp` repositories out of that authenticated base
+`sn`, `operator-proxy`, `warp`, and `gvisor` repositories out of that authenticated base
 image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
 changing any host repository checkout. Baseline and candidate have distinct
@@ -220,6 +220,14 @@ Do not put the one-shot migrator and runner in the same
 `--abort-on-container-exit` invocation: a successful migrator exit would stop
 the measurement runner. The trusted worker treats a migration command failure,
 malformed result, or version mismatch as an infrastructure failure.
+
+The migrator and the runner are `WARP_ENV=local` processes, which dial
+PostgreSQL and Redis only at attested endpoints (server
+`test_env_dial_guard.go`). Before `migrate` and `run` exec, the entrypoint
+reads the `pg.yml` and `redis.yml` authorities, resolves each host once with
+`getent ahosts`, requires exactly one address that is not loopback, and
+exports the endpoints as `WARP_TEST_ENV_ATTESTED_ADDRS`. Any other answer
+stops the job before a process starts.
 
 After capturing container inspect data and cgroup counters, remove only that
 fully resolved project:

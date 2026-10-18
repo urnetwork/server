@@ -324,3 +324,138 @@ func TestStOperatorGasEnvelopeChecksDynamicCapsAndUint256Product(t *testing.T) {
 		t.Fatal("gas product overflow gained wrapped allowance")
 	}
 }
+
+// SV-1 (retries; §8.1 gas policy): under an operator gas policy a new intent
+// takes its nonce only together with its first attempt's gas reservation.
+// Without that attempt none is created. A first attempt the policy refuses,
+// here above its maximum_gas and then above its liability, leaves no intent
+// and takes no nonce: the next intent gets nonce 7. An admitted one leaves the
+// intent and a pending reservation of the exact attempt at its nonce, and an
+// existing intent is returned without a second reservation, with or without
+// an attempt.
+func TestStOperatorGasNewIntentTakesItsNonceOnlyWithItsFirstReservation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		p, a, _, _ := stGasModelApproval(tb)
+		ctx := context.Background()
+		reserve := func(logical string, data []byte, gas uint64) (*StTransactionIntent, error) {
+			var unsigned func(uint64) *types.Transaction
+			if gas != 0 {
+				unsigned = func(nonce uint64) *types.Transaction {
+					return stGasModelTransaction(&StTransactionIntent{Nonce: nonce, ToAddress: p.Coordinator, Calldata: data}, gas, 10)
+				}
+			}
+			return ReserveStTransactionIntentGas(ctx, p, a, logical, p.Profile, "synthetic-gas-operator", StDeploymentKey(fmt.Sprintf("%d:%s", p.ChainId, p.Coordinator)), p.ChainId, p.GenesisHash, p.Accounts[0].Address, p.Coordinator,
+				strings.ToLower(crypto.Keccak256Hash(data).Hex()), data, 7, unsigned)
+		}
+		if intent, err := reserve("synthetic-gas-admitted", []byte{2}, 0); !errors.Is(err, ErrStTransactionIntentNew) || intent != nil || GetStTransactionIntent(ctx, "synthetic-gas-admitted") != nil {
+			tb.Fatalf("a new intent without its first attempt: %+v, %v", intent, err)
+		}
+		for _, refusal := range []struct {
+			name string
+			gas  uint64
+		}{{"maximum_gas", 3_000_001}, {"liability", 60_001}} {
+			if intent, err := reserve("synthetic-gas-refused-"+refusal.name, []byte{1}, refusal.gas); !errors.Is(err, ErrStOperatorGasAllowance) || intent != nil {
+				tb.Fatalf("%s: intent %+v, %v", refusal.name, intent, err)
+			}
+			if GetStTransactionIntent(ctx, "synthetic-gas-refused-"+refusal.name) != nil {
+				tb.Fatalf("%s: the refused attempt left an intent", refusal.name)
+			}
+		}
+		intent, err := reserve("synthetic-gas-admitted", []byte{2}, 60_000)
+		if err != nil || intent == nil || intent.Nonce != 7 || intent.Generation != 0 || intent.Status != StTxPrepared || intent.AttemptCount != 0 {
+			tb.Fatalf("admitted intent %+v, %v", intent, err)
+		}
+		pending, err := GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		want, _ := stGasModelTransaction(intent, 60_000, 10).MarshalBinary()
+		if err != nil || pending == nil || pending.Attempt != 1 || pending.Kind != StTxAttemptExecution || !bytes.Equal(pending.UnsignedTransaction, want) || pending.MaximumLiabilityWei != "600000" {
+			tb.Fatalf("admitted reservation %+v, %v", pending, err)
+		}
+		for _, gas := range []uint64{60_000, 0} {
+			again, err := reserve("synthetic-gas-admitted", []byte{2}, gas)
+			if err != nil || again == nil || again.IntentId != intent.IntentId {
+				tb.Fatalf("existing intent %+v, %v", again, err)
+			}
+		}
+		snapshot, err := GetStOperatorGasBudgetSnapshot(ctx, p.Scope())
+		if err != nil || snapshot == nil || snapshot.Attempts != 1 || snapshot.MaximumLiabilityWei != "600000" {
+			tb.Fatalf("budget %+v, %v", snapshot, err)
+		}
+	})
+}
+
+// SV-1 (§8.1 gas policy): the liability the policy still accepts for one more
+// attempt of an operation's nonce is its per-operation cap, the lower of the
+// one its first reservation recorded and the policy's, less the operation's
+// other nonces' charges, and its lifetime cap less every other nonce's. The
+// attempt's own nonce is left out, since its charge is its largest attempt's.
+func TestStOperatorGasRemainingLiabilityLeavesOutTheAttemptsOwnNonce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		p, a, _, approval := stGasModelApproval(tb)
+		p.MaximumLifetimeLiabilityWei = "1000000"
+		stGasModelSeal(tb, p, a, approval, false)
+		if err := AdmitStOperatorGasPolicy(ctx, p, a); err != nil {
+			tb.Fatal(err)
+		}
+		remaining := func(step string, logical string, intentId server.Id, operation int64, lifetime int64) {
+			tb.Helper()
+			gotOperation, gotLifetime, err := StOperatorGasRemainingLiability(ctx, p, logical, intentId)
+			if err != nil || gotOperation.Int64() != operation || gotLifetime.Int64() != lifetime {
+				tb.Fatalf("%s: %v and %v, %v; want %d and %d", step, gotOperation, gotLifetime, err, operation, lifetime)
+			}
+		}
+		remaining("before any reservation", "synthetic-remaining-a", server.Id{}, 600_000, 1_000_000)
+
+		// a charges 200,000 wei and b 300,000, each at one nonce. a's second
+		// attempt, smaller than its first, leaves its nonce's charge as it is.
+		intents := map[string]*StTransactionIntent{}
+		for _, reservation := range []struct {
+			logical string
+			attempt int
+			gas     uint64
+		}{{"synthetic-remaining-a", 1, 20_000}, {"synthetic-remaining-b", 1, 30_000}, {"synthetic-remaining-a", 2, 10_000}} {
+			intent := intents[reservation.logical]
+			if intent == nil {
+				intent = stGasModelIntent(p, reservation.logical, []byte(reservation.logical))
+				intents[reservation.logical] = intent
+			}
+			unsigned := stGasModelTransaction(intent, reservation.gas, 10)
+			if _, err := ReserveStTransactionGasAttempt(ctx, p, a, intent.IntentId, reservation.attempt, StTxAttemptExecution, unsigned); err != nil {
+				tb.Fatal(err)
+			}
+			key, err := crypto.HexToECDSA(fmt.Sprintf("%064x", 101))
+			if err != nil {
+				tb.Fatal(err)
+			}
+			if stGasModelCommit(tb, intent, reservation.attempt, unsigned, key) == nil {
+				tb.Fatalf("%s attempt %d was not stored", reservation.logical, reservation.attempt)
+			}
+		}
+		own := intents["synthetic-remaining-a"].IntentId
+		remaining("a new nonce of a", "synthetic-remaining-a", server.Id{}, 400_000, 500_000)
+		remaining("a's own nonce", "synthetic-remaining-a", own, 600_000, 700_000)
+		remaining("an operation without a nonce", "synthetic-remaining-c", server.Id{}, 600_000, 500_000)
+
+		// A revision that raises the per-intent cap leaves a the 600,000 its
+		// first reservation recorded. One that lowers it binds, and one that
+		// lowers either cap below the charges leaves nothing.
+		for _, revision := range []struct {
+			name      string
+			operation string
+			lifetime  string
+			remaining [2]int64
+		}{
+			{"a raised per-intent cap", "700000", "1000000", [2]int64{400_000, 500_000}},
+			{"a lowered per-intent cap", "500000", "1000000", [2]int64{300_000, 500_000}},
+			{"a lifetime cap below the charges", "500000", "500000", [2]int64{300_000, 0}},
+		} {
+			p.Revision, p.PreviousPolicySha256 = p.Revision+1, a.PolicySha256
+			p.MaximumIntentLiabilityWei, p.MaximumLifetimeLiabilityWei = revision.operation, revision.lifetime
+			stGasModelSeal(tb, p, a, approval, false)
+			if err := AdmitStOperatorGasPolicy(ctx, p, a); err != nil {
+				tb.Fatalf("%s: %v", revision.name, err)
+			}
+			remaining("a new nonce of a under "+revision.name, "synthetic-remaining-a", server.Id{}, revision.remaining[0], revision.remaining[1])
+		}
+	})
+}

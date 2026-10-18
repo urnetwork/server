@@ -115,5 +115,9 @@ func TestScrubAddrsMatchesBothFamilies(t *testing.T) {
 		if got := string(scrubAddrs([]byte(entry.entry))); got != entry.scrubbed {
 			t.Errorf("scrubbing\n  %s\ngave\n  %s\nwant\n  %s", entry.entry, got, entry.scrubbed)
 		}
+		// the text entry point, used for monitor Slack messages, is the same scrubber
+		if got := ScrubAddrsText(entry.entry); got != entry.scrubbed {
+			t.Errorf("scrubbing text\n  %s\ngave\n  %s\nwant\n  %s", entry.entry, got, entry.scrubbed)
+		}
 	}
 }

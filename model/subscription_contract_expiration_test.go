@@ -115,18 +115,19 @@ func TestContractExpirationCheckpointCannotExtendLegacyEscrow(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, contract.ContractId, cutoff))
 		})
 		count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-		if err != nil || count != 0 {
-			t.Fatalf("legacy financial continuation: count=%d err=%v", count, err)
+		if err != nil || count != 1 {
+			t.Fatalf("legacy deadline did not finish its financial closure: count=%d err=%v", count, err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, false, 1000, 1000)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 700, 0)
+		requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, contract.ContractId, 300)
 		_, proof := readContractExpiryTestSnapshot(t, ctx, contract.ContractId)
 		if proof.Expiry == nil || proof.ByteCount != 300 || len(proof.Expiry.Reports) != 2 ||
 			!proof.Expiry.Reports[ContractPartySource].Checkpoint || !proof.Expiry.Reports[ContractPartyDestination].Checkpoint {
 			t.Fatal("absolute expiry lost the original delivered-work checkpoints")
 		}
 		complete, busy, _, err := flushLegacySettlement(ctx, contract.ContractId)
-		if err != nil || !complete || busy {
-			t.Fatalf("legacy close failed: complete=%t busy=%t err=%v", complete, busy, err)
+		if err != nil || complete || !busy {
+			t.Fatalf("retired intent was not classified as gone: complete=%t busy_or_gone=%t err=%v", complete, busy, err)
 		}
 		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 700, 0)
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 300)

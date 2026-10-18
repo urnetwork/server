@@ -87,10 +87,14 @@ Usage:
   sim-latency staging-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency staging-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
+  sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> --prepare-command=<path> --prepare-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>] [--once]
+  sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
-  sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name>
+  sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name> [--environment=<env> --competition-id=<id> --season-id=<id>]
   sim-latency credentials rotate-seed --vault=<path> --confirm-no-unrevealed-rounds
   sim-latency credentials revoke --vault=<path> --name=<name>
   sim-latency reset
@@ -112,6 +116,18 @@ Options:
   --no-winner            Carry the prior repository commits forward after an epoch with no significant winner.
   --message=<text>       Promotion commit message suffix.
   --dry-run              Validate and stage a promotion without pushing or updating local branches.
+  --enable-automation    Explicitly enable the separately approved v2 supervisor; off by default.
+  --owner-id=<id>         Stable fenced supervisor identity for this environment and season.
+  --state-dir=<dir>       Private durable source staging and recovery directory.
+  --worker-command=<path> Absolute prequalified one-shot worker or trusted launcher executable.
+  --worker-sha256=<digest> Exact SHA-256 of the trusted worker launcher executable.
+  --prepare-command=<path> Absolute trusted runtime propagation and qualification executable.
+  --prepare-sha256=<digest> Exact SHA-256 of the trusted preparation executable.
+  --once                 Reconcile one durable supervisor step and exit.
+  --review-id=<id>        Exact persisted, genuinely approved v2 source review identity.
+  --build-command=<path> Pinned isolated source build/test broker; never a candidate host command.
+  --build-sha256=<digest> SHA-256 of the qualified isolated build/test broker.
+  --manifest-commit=<sha> Exact already-published, prospectively approved baseline config commit.
   --evaluator-image=<digest>  Immutable sha256 evaluator image identity.
   --operator-token-file=<path>  Private file containing the competition operator bearer token.
   --grafana-url=<url>     Main Grafana origin used by launch preflight.
@@ -128,7 +144,10 @@ Options:
   --submitter-name=<name> Stable name for the initial submitter credential.
   --operator-name=<name>  Stable name for the initial operator credential.
   --name=<name>           Stable name of the token to create or revoke.
-  --role=<role>           Token role: submitter or operator.
+  --role=<role>           submitter/operator, or scoped scheduler/reviewer/settlement/source_promoter.
+  --environment=<env>    Exact v2 credential environment scope.
+  --competition-id=<id>  Exact v2 credential competition scope.
+  --season-id=<id>       Exact v2 credential season scope.
   --confirm-no-unrevealed-rounds  Confirm seed rotation cannot invalidate an unrevealed round.
   --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].
@@ -233,6 +252,18 @@ Options:
 	case optBool(opts, "promote"):
 		requireMainEnvironment("promote")
 		runPromote(opts)
+	case optBool(opts, "supervise"):
+		requireMainEnvironment("supervise")
+		runSourceSupervisor(opts)
+	case optBool(opts, "stage-reviewed-source"):
+		requireMainEnvironment("stage-reviewed-source")
+		runStageReviewedSource(opts)
+	case optBool(opts, "bootstrap-source"):
+		requireMainEnvironment("bootstrap-source")
+		runBootstrapSource(opts)
+	case optBool(opts, "source-review-packet"):
+		requireMainEnvironment("source-review-packet")
+		runSourceReviewPacket(opts)
 	case optBool(opts, "launch-preflight"):
 		requireMainEnvironment("launch-preflight")
 		runLaunchPreflight(opts)
@@ -252,7 +283,9 @@ Options:
 func runReset() {
 	ctx, cancel := signalContext()
 	defer cancel()
-	resetLocalState(ctx)
+	if err := resetLocalState(ctx); err != nil {
+		fatalf("%s", err)
+	}
 }
 
 func runInit(opts docopt.Opts) {
@@ -430,7 +463,7 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
-	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials":
+	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials", "supervise", "stage-reviewed-source", "bootstrap-source", "source-review-packet":
 		if env != "main" {
 			return fmt.Errorf(
 				"sim-latency %s is main-only: refusing WARP_ENV=%q",

@@ -19,7 +19,8 @@ import (
 
 // One persistently failing proof is followed by 255 protected rows and a healthy
 // expired tail. The production 256-row boundary must persist on the same failed
-// task, reach the tail next, and revisit the unresolved head on the next pass.
+// task at the scan cadence, not in backoff, reach the tail next, and revisit
+// the unresolved head on the next pass.
 func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -71,7 +72,7 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		server.Tx(ctx, func(tx server.PgTx) { ScheduleCloseExpiredContracts(owner, tx, 0, false) })
-		target := task.NewTaskTargetWithPost(CloseExpiredContracts, CloseExpiredContractsPost)
+		target := NewCloseExpiredContractsTaskTarget()
 		readId := func() (id server.Id) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$1`, target.TargetFunctionName()).Scan(&id))
@@ -133,8 +134,8 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 			t.Fatal("completed operational checkpoint lost its exact observed future deadline")
 		}
 		if errorCount != 17 || !strings.Contains(diagnostic, "synthetic task proof failure") || metadata != originalMetadata ||
-			delay < 30*time.Minute || 90*time.Minute+2*time.Second <= delay || len(task.GetFinishedTasks(ctx, id)) != 0 {
-			t.Fatal("raw progress changed failure visibility, ordinary backoff, identity or success history", errorCount, delay)
+			delay < 2*time.Second || 4*time.Second <= delay || len(task.GetFinishedTasks(ctx, id)) != 0 {
+			t.Fatal("raw progress changed failure visibility, continuation cadence, identity or success history", errorCount, delay)
 		}
 		if _, terminal := model.GetContractClose(ctx, tail); terminal {
 			t.Fatal("first failed raw page crossed its 256-row boundary")

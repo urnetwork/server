@@ -26,7 +26,7 @@ func TestSubscriberGuardQueryPlan(t *testing.T) {
 			// Preserve one fixture timestamp. Each batch commits before the next,
 			// releasing the real session trigger's endpoint fences.
 			connectionTime := server.NowUtc()
-			arinRemoteInsertPopulation(t, ctx, conn, 240000, `INSERT INTO network_client_connection
+			insertPopulationFixture(t, ctx, conn, 240000, `INSERT INTO network_client_connection
 				(client_id,connection_id,connected,connect_time,disconnect_time,connection_host,connection_service,connection_block,handler_id)
 				SELECT md5('subscriber-benchmark-client-'||n)::uuid, md5('subscriber-benchmark-connection-'||n||':'||generation)::uuid,
 					generation<=2, $1::timestamp, CASE WHEN generation>2 THEN $1::timestamp END, 'synthetic','synthetic','synthetic',
@@ -75,7 +75,7 @@ FROM network_client_connection`).Scan(&providers, &connections, &connected, &loc
 				})
 				var encoded []byte
 				server.Raise(conn.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "+providerSubscriberExclusionsSql,
-					ids[:min(256, len(ids))], server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout)).Scan(&encoded))
+					ids[:min(256, len(ids))], server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), int64(0)).Scan(&encoded))
 				var explain []map[string]any
 				server.Raise(json.Unmarshal(encoded, &explain))
 				var nodes []map[string]any
@@ -105,9 +105,10 @@ FROM network_client_connection`).Scan(&providers, &connections, &connected, &loc
 			times := []time.Duration{}
 			for iteration := 0; iteration < 31; iteration++ {
 				start := time.Now()
-				excluded, err := getProviderRequestExclusions(ctx, ids, RankModeQuality)
-				if err != nil || len(excluded) != count/10 {
-					t.Fatalf("subscriber guard benchmark changed classification: error=%v exclusions=%d want=%d", err, len(excluded), count/10)
+				// The native Quality guard; a named request no longer reads it.
+				negative, risky, offline, err := getProviderSubscriberExclusions(ctx, ids)
+				if err != nil || len(negative)+len(risky)+len(offline) != count/10 {
+					t.Fatalf("subscriber guard benchmark changed classification: error=%v exclusions=%d want=%d", err, len(negative)+len(risky)+len(offline), count/10)
 				}
 				if iteration > 0 {
 					times = append(times, time.Since(start))

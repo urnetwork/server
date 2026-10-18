@@ -128,8 +128,8 @@ source commits and percentage carry forward unchanged.
 
 The complete local-module graph that can affect the measured product is frozen
 by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
-`userwireguard`, `sn`, `operator-proxy`, and `warp`, all on branch `sim-latency`.
-The first four are the product roots; the remaining six are required local
+`userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`, all on branch
+`sim-latency`. The first four are the product roots; the remaining seven are required local
 dependencies and evaluator build inputs. The trusted API and worker
 continue on `main`; they record their runtime image digests per evaluation but
 their source commits are not scoring inputs.
@@ -181,7 +181,7 @@ Only after review finalizes the epoch does the external control loop run one of:
 ./run-local-main.sh promote --epoch N --no-winner
 ```
 
-Promotion creates one temporary root and clones all ten locked repositories
+Promotion creates one temporary root and clones all eleven locked repositories
 into it. It checks out each `sim-latency` branch at the prior epoch, applies and
 commits the winner to the evaluated server surface, verifies every dependency
 remains unchanged, pushes changed source branches first, and activates the new
@@ -218,7 +218,7 @@ With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and
 `./run-main.sh advance-staging` closes admission, evaluates every accepted FIFO
 submission through finalization and reveal, then creates the next open epoch.
-Its source preflight requires all ten remote `sim-latency-staging` branches
+Its source preflight requires all eleven remote `sim-latency-staging` branches
 to exactly alias the frozen epoch-zero commits. `staging-worker` remains the
 natural-window variant. `staging --replace-current` is an explicit reset that
 refuses to run while an evaluation is active. Committing production epoch 1
@@ -262,6 +262,20 @@ cd ../connect/sim-latency
 Measured `run`, `fleet`, and fresh `baseline` commands require a configured
 source epoch. Use a clean epoch checkout or an authenticated evaluator source
 lock; do not bypass the identity check for convenience.
+
+For `run`, `fleet`, `reset` and a measuring `baseline`, the wrapper first
+sources `server/local/local-env.sh`, which attests the running launcher's
+endpoints (`WARP_TEST_ENV_ATTESTED_ADDRS`); without the launcher it exits
+before starting the simulator. Every `WARP_ENV=local` process, this one
+included even when only its own defaults set `WARP_ENV=local`, refuses every
+PostgreSQL and Redis dial outside that attestation, so a local service name
+that falls through to `127.0.0.1`, where a production data tunnel can listen,
+fails closed. `reset` and `run --reset` truncate tables with `CASCADE` and run
+`FLUSHALL`, so before either sends anything they also require every pool
+endpoint to be attested and not loopback outside the private portable root
+(`server.RequireAttestedLocalEndpoints`). The evaluator container attests its
+own Compose `postgres` and `redis` services in its entrypoint. See
+`server/local/README.md`.
 
 `run-local-main.sh` is a trusted operator/development wrapper for a local checkout
 using port-forwarded main PostgreSQL and Redis endpoints. It is not the

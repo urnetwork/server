@@ -93,6 +93,9 @@ func TestMigrationUrlCompletionPartialCatalogCannotPass(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "migration-schema-drift")
 	for version := 732; version <= 739; version++ {
+		if migrationArtifactRetiredAtHead(version) {
+			continue
+		}
 		if !strings.Contains(alert.Markdown(), fmt.Sprintf("@v%d", version)) {
 			t.Fatalf("partial catalog silently cleared v%d", version)
 		}
@@ -112,9 +115,14 @@ func TestMigrationUrlCompletionCatalogGuardsOnMigratedDatabase(t *testing.T) {
 				}
 				return matches
 			}
+			// a retired guard still pins its dropped index, so it stays false
 			assertHealthy := func() {
 				for index, matched := range read() {
-					if !matched {
+					if migrationArtifactRetiredAtHead(index + 732) {
+						if matched {
+							t.Fatalf("retired v%d guard matched an index its successor dropped", index+732)
+						}
+					} else if !matched {
 						t.Fatalf("migrated schema failed its v%d guard", index+732)
 					}
 				}
@@ -156,7 +164,7 @@ func TestMigrationUrlCompletionCatalogGuardsOnMigratedDatabase(t *testing.T) {
 				{name: "changed function settings", version: 732, sql: `ALTER FUNCTION provider_url_probe_ready_invalidate() SET search_path=public`},
 			}
 			for _, index := range syntheticMigrationPartialIndexContracts() {
-				if 733 <= index.version && index.version <= 739 {
+				if 733 <= index.version && index.version <= 739 && !migrationArtifactRetiredAtHead(index.version) {
 					faults = append(faults, struct {
 						name, sql string
 						version   int
@@ -210,4 +218,15 @@ func TestMigrationUrlCompletionCatalogGuardsOnMigratedDatabase(t *testing.T) {
 			}
 		})
 	})
+}
+
+// A published artifact retired by a later migration at or before head, such as
+// the waiting-probe indexes (735, 736) that 826 and 827 drop.
+func migrationArtifactRetiredAtHead(version int) bool {
+	for _, artifact := range migrationArtifacts {
+		if artifact.requiredVersion == version {
+			return artifact.removedVersion != 0 && artifact.removedVersion <= server.MigrationCount()
+		}
+	}
+	return false
 }

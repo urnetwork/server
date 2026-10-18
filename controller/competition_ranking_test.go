@@ -131,7 +131,27 @@ func TestCompetitionLegacyFinalizedLeaderboardRetainsNormalizedOrdering(t *testi
 		// Exercise an already-applied 677, not just a fresh latest schema.
 		// TestEnv owns this disposable database; shared local data is untouched.
 		server.ApplyDbMigrationsUpTo(context.Background(), 677)
-		fixture := newCompetitionRankingFixture(t, true)
+		// Materialize the historical writer's columns, not today's v2-aware
+		// round reader, before the additive automation migration is installed.
+		fixture := &competitionRankingFixture{settings: validSettings(), now: server.NowUtc().Truncate(time.Second)}
+		fixture.settings.CompetitionId = "synthetic-legacy-ranking-" + server.NewId().String()
+		fixture.settings.ArtifactRoot = t.TempDir()
+		fixture.settings.SeasonEndsAt = fixture.now.Add(60 * 24 * time.Hour)
+		fixture.settings.RetainUntil = fixture.settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		fixture.store = PostgresStore{now: func() time.Time { return fixture.now }}
+		stagingSettings := *fixture.settings
+		stagingSettings.EvaluationPolicy.TakeoverMargin = 0
+		var prepareErr error
+		fixture.round, prepareErr = fixture.store.prepareRound(context.Background(), &stagingSettings, GenerateRoundArgs{OpensAt: fixture.now, ClosesAt: fixture.now.Add(time.Hour), RevealAt: fixture.now.Add(time.Hour)}, true)
+		if prepareErr != nil {
+			t.Fatal(prepareErr)
+		}
+		fixture.round.Epoch = 1
+		server.Db(context.Background(), func(conn server.PgConn) {
+			round := fixture.round
+			server.RaisePgResult(conn.Exec(context.Background(), `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled)
+			 VALUES($1,$2,1,true,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, round.RoundId, round.CompetitionId, round.WorkloadCommitment, round.SeedNonce, round.SeedCiphertext, round.ProvidersSha256, round.ProvidersPath, string(round.PolicyJson), round.OpensAt, round.ClosesAt, round.RevealAt, round.CreatedAt))
+		}, server.OptReadWrite())
 		fixture.completeJobs(t, false)
 		fixture.now = fixture.round.ClosesAt.Add(time.Second)
 		// Reproduce the old deployed finalizer before installing newer migrations.
@@ -141,6 +161,11 @@ func TestCompetitionLegacyFinalizedLeaderboardRetainsNormalizedOrdering(t *testi
 					admission_closed_at = closes_at WHERE round_id = $1
 			`, fixture.round.RoundId, fixture.now))
 		}, server.OptReadWrite())
+		// The leaderboard reader joins the staging approval table, which
+		// migration 721 publishes, so the first board is read at that oldest
+		// schema the reader supports. The round above was scored and
+		// finalized at 677.
+		server.ApplyDbMigrationsUpTo(context.Background(), 721)
 		var original []byte
 		for iteration := range 2 {
 			if iteration == 1 {
@@ -151,7 +176,29 @@ func TestCompetitionLegacyFinalizedLeaderboardRetainsNormalizedOrdering(t *testi
 					t.Fatalf("historically finalized staging winner changed: %+v, %v", retained, err)
 				}
 			}
-			boards, err := fixture.store.Leaderboards(context.Background(), fixture.settings, true)
+			var boards *SeasonLeaderboardResult
+			var err error
+			if iteration == 0 {
+				// The pre-upgrade reader cannot reference later optional approval tables.
+				board := LeaderboardResult{CompetitionId: fixture.settings.CompetitionId, RoundId: fixture.round.RoundId, Epoch: 1, Staging: true, Status: "finalized", FinalizedAt: fixture.now, Entries: []LeaderboardEntry{}}
+				server.Db(context.Background(), func(conn server.PgConn) {
+					rows, queryErr := conn.Query(context.Background(), `SELECT j.job_id,j.patch_sha256,j.submitted_at,j.score_json,count(p.principal_id)
+					 FROM competition_job j JOIN competition_job_principal p USING(job_id) WHERE j.round_id=$1 AND j.state='succeeded'
+					 GROUP BY j.job_id ORDER BY (j.score_json->>'normalized_score')::numeric DESC,(j.score_json->>'raw_score')::numeric,j.submitted_at,j.job_id`, fixture.round.RoundId)
+					server.WithPgResult(rows, queryErr, func() {
+						for rows.Next() {
+							entry := LeaderboardEntry{Rank: len(board.Entries) + 1, HonestyReview: "not_reviewed"}
+							var scoreJson []byte
+							server.Raise(rows.Scan(&entry.JobId, &entry.PatchSha256, &entry.SubmittedAt, &scoreJson, &entry.SubmitterCount))
+							server.Raise(json.Unmarshal(scoreJson, &entry.Score))
+							board.Entries = append(board.Entries, entry)
+						}
+					})
+				})
+				boards = &SeasonLeaderboardResult{CompetitionId: fixture.settings.CompetitionId, Epochs: []LeaderboardResult{board}}
+			} else {
+				boards, err = fixture.store.Leaderboards(context.Background(), fixture.settings, true)
+			}
 			if err != nil || len(boards.Epochs) != 1 || len(boards.Epochs[0].Entries) != len(fixture.jobs) {
 				t.Fatalf("legacy boards = %+v, error = %v", boards, err)
 			}

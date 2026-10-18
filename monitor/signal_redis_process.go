@@ -19,10 +19,27 @@ func (redisProcessProbe) tier() string           { return tierWarn }
 func (redisProcessProbe) cadence() time.Duration { return 5 * time.Minute }
 
 func (redisProcessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	host := env.cfg.hostByRole("redis-cluster")
-	if host == nil {
+	hosts := env.cfg.redisSweepHosts()
+	if len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
+	// every redis-cluster host runs its own Redis processes and kernel
+	findings := []finding{}
+	for _, host := range hosts {
+		hostFindings, err := redisProcessHostFindings(ctx, env, host)
+		if err != nil {
+			if len(hosts) == 1 {
+				return nil, err
+			}
+			findings = append(findings, cannotObserveFinding(host.name+"/redis-process", err))
+			continue
+		}
+		findings = append(findings, hostFindings...)
+	}
+	return findings, nil
+}
+
+func redisProcessHostFindings(ctx context.Context, env *probeEnv, host *host) ([]finding, error) {
 	out, err := env.runner.shell(ctx, host, `
 ps -eo pid=,pcpu=,vsz=,rss=,comm= | awk '$5 ~ /^redis-server/ {print "redis",$1,$2,$3,$4}'
 dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process.*redis' | tail -1 | sed 's/^/kernel_oom /'

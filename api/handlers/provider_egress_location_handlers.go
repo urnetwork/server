@@ -141,56 +141,18 @@ func ProviderEgressLocationAttempt(w http.ResponseWriter, r *http.Request) {
 const (
 	// defaultProviderEgressDueLimit is the batch size when the caller does not
 	// ask for one.
-	defaultProviderEgressDueLimit = 100
+	defaultProviderEgressDueLimit = controller.DefaultProviderEgressDueLimit
 	// defaultMaxProviderEgressDueLimit bounds the batch size regardless of what
-	// the caller asks for, so one request cannot ask the database for the
-	// entire provider population.
-	//
-	// This is the FALLBACK. The effective value comes from
-	// provider_egress_due.yml -- see maxProviderEgressDueLimit below.
-	defaultMaxProviderEgressDueLimit = 500
+	// the caller asks for. This is the fallback; the effective value comes from
+	// provider_egress_due.yml -- see controller.ProviderEgressDueLimitCeiling.
+	defaultMaxProviderEgressDueLimit = controller.DefaultMaxProviderEgressDueLimit
 )
 
-// maxProviderEgressDueLimit is the ceiling on one due batch, read from
-// provider_egress_due.yml.
-//
-// It is configuration, not a constant, for the same reason the bandwidth budget
-// is (see provider_bandwidth.yml): capacity is a property of the deployment.
-// The 500 fallback is sized for a beta-scale fleet. A deployment holding ~100k
-// providers needs a different regime entirely -- at a 6h re-probe backoff that
-// is ~16,700 probes/hour, and a 500-per-request ceiling caps the whole fleet at
-// 500/hour no matter how much prober capacity exists behind it.
-//
-// OPTIONAL, exactly like provider_bandwidth.yml and pro.yml: a deployment
-// without the file must not fail to boot, it falls back to the conservative
-// default.
-var maxProviderEgressDueLimit = sync.OnceValue(readMaxProviderEgressDueLimit)
-
-// The uncached reader gives synthetic configuration tests the same parsing
-// path that each API process memoizes at startup.
+// The uncached reader of provider_egress_due.yml's max_due_limit; each process
+// memoizes it once in controller.ProviderEgressDueLimitCeiling, which the
+// taskworker's in-process operator shares.
 func readMaxProviderEgressDueLimit() int {
-	resource, err := server.Config.SimpleResource("provider_egress_due.yml")
-	if err != nil {
-		glog.Infof(
-			"[pegl]provider_egress_due.yml not present; using the default due limit of %d\n",
-			defaultMaxProviderEgressDueLimit,
-		)
-		return defaultMaxProviderEgressDueLimit
-	}
-	var y struct {
-		MaxDueLimit int `yaml:"max_due_limit"`
-	}
-	resource.UnmarshalYaml(&y)
-	if y.MaxDueLimit <= 0 {
-		glog.Errorf(
-			"[pegl]provider_egress_due.yml has max_due_limit=%d, which is not usable; using the default %d\n",
-			y.MaxDueLimit,
-			defaultMaxProviderEgressDueLimit,
-		)
-		return defaultMaxProviderEgressDueLimit
-	}
-	glog.Infof("[pegl]max due limit: %d from provider_egress_due.yml\n", y.MaxDueLimit)
-	return y.MaxDueLimit
+	return controller.ReadMaxProviderEgressDueLimit()
 }
 
 // providerEgressDueAge remains the legacy location-refresh cutoff for retained
@@ -198,40 +160,11 @@ func readMaxProviderEgressDueLimit() int {
 // URL quota and pacing are independent of the location's trust lifetime.
 const providerEgressDueAge = model.ProviderEgressLocationMaxAge / 2
 
-// One provider of a due list, with the place it is published under: the prober
-// draws a provider's sample only from the destinations compatible with that
-// place, so a site blocked in a country never counts against that country's
-// exits (connect/GEOMAP.md §11.3). Both place fields are empty for a provider
-// the reliability rollup has not placed, which excludes nothing.
-type ProviderEgressDueProvider struct {
-	ClientId server.Id `json:"client_id"`
-	// CountryCode is lowercase alpha-2.
-	CountryCode string `json:"country_code,omitempty"`
-	Region      string `json:"region,omitempty"`
-}
+// The place-bearing due list shapes live in controller, which the blackhole
+// due route and the in-process operator share.
+type ProviderEgressDueProvider = controller.ProviderEgressDueProvider
 
-// ProviderEgressLocationDueResult is the retained diagnostic due-list shape.
-// The URL due route additionally returns the token, quota deficit and ordinal
-// through model.ProviderUrlProbeDue; this shape can read only its place subset.
-type ProviderEgressLocationDueResult struct {
-	Providers []ProviderEgressDueProvider `json:"providers"`
-}
-
-// Joins a due list, in its order, to the places its providers are published
-// under.
-func providerEgressDueProviders(r *http.Request, clientIds []server.Id) []ProviderEgressDueProvider {
-	places := model.GetProviderEgressPlaces(r.Context(), clientIds)
-	providers := make([]ProviderEgressDueProvider, 0, len(clientIds))
-	for _, clientId := range clientIds {
-		place := places[clientId]
-		providers = append(providers, ProviderEgressDueProvider{
-			ClientId:    clientId,
-			CountryCode: place.CountryCode,
-			Region:      place.Region,
-		})
-	}
-	return providers
-}
+type ProviderEgressLocationDueResult = controller.ProviderEgressLocationDueResult
 
 // ProviderEgressLocationDue retains its operator route while atomically
 // claiming paced URL turns. It returns the durable cycle token, remaining
@@ -241,7 +174,8 @@ func providerEgressDueProviders(r *http.Request, clientIds []server.Id) []Provid
 //
 // Same auth as ProviderEgressLocationSubmit above: operator-to-server, the
 // shared secret header rather than a network jwt, fail-closed when the vault
-// resource is missing.
+// resource is missing. The limit and shard rules are controller's, shared with
+// the taskworker's in-process operator.
 func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 	secret := operatorIngestSecret()
 	provided := r.Header.Get(operatorSecretHeader)
@@ -253,13 +187,15 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 	limit := defaultProviderEgressDueLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
-			// not clamped up to 1: `limit=0` would come back as an empty list,
-			// which the prober cannot distinguish from "nothing is due"
+		if err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		limit = min(parsed, maxProviderEgressDueLimit())
+		limit, err = controller.ProviderUrlProbeDueLimit(parsed)
+		if err != nil {
+			writeProviderEgressIngestError(w, err)
+			return
+		}
 	}
 
 	// shard_index / shard_count partition the queue across independent workers.
@@ -280,15 +216,32 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw := r.URL.Query().Get("shard_index"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		// an out-of-range index would silently return nothing forever, which
-		// looks identical to "the fleet is fully probed" -- reject it instead
-		if err != nil || parsed < 0 || shardCount <= parsed {
+		if err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 		shardIndex = parsed
 	}
+	if err := controller.ValidateProviderUrlProbeDueShard(shardIndex, shardCount); err != nil {
+		writeProviderEgressIngestError(w, err)
+		return
+	}
 
 	respondProviderUrlProbeDue(w, r, limit, shardIndex, shardCount,
 		model.ClaimProviderUrlProbeDueWithObservation, providerUrlProbeDueTiming)
+}
+
+// Writes a controller refusal exactly as the handlers always wrote it: its
+// status and message, and Retry-After for an exhausted bandwidth budget. Any
+// other error is the 400 these routes answer a controller failure with.
+func writeProviderEgressIngestError(w http.ResponseWriter, err error) {
+	if refusal := controller.ProviderEgressIngestRefusalOf(err); refusal != nil {
+		if refusal.Status == http.StatusTooManyRequests {
+			writeProviderBandwidthBudgetExhausted(w, refusal.RetryAfter, refusal.Message)
+			return
+		}
+		http.Error(w, refusal.Message, refusal.Status)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }

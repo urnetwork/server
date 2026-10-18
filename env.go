@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 
 	"maps"
 
@@ -143,6 +146,77 @@ func VaultHomes() []string {
 	return resolveMultiHome(root)
 }
 
+// TestRealVaultEnv opts a test binary in to reading a vault that is not a test
+// fixture, such as the deployment vault $WARP_HOME/vault with its secrets.
+const TestRealVaultEnv = "URNETWORK_TEST_REAL_VAULT"
+
+// The repository's synthetic vault and config, which test-env.sh and
+// local/run-local.sh use in portable mode. Empty in a -trimpath build.
+var syntheticTestResourceRoot = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || !filepath.IsAbs(file) {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(file), "local", "testdata")
+}()
+
+// A test binary reads only a fixture vault unless TestRealVaultEnv is "1": one
+// below the release gate's private fixture root, the repository's synthetic
+// local/testdata, or the temp directory or GOTMPDIR where a test writes its
+// own. Any other vault, such as $WARP_HOME/vault, may hold real secrets and
+// reads as empty, except for the launcher resources that test-env.sh attested
+// (see selectTestVaultScope). Other binaries are unaffected.
+func refuseNonFixtureVault(root string, testBinary bool) error {
+	if !testBinary || os.Getenv(TestRealVaultEnv) == "1" {
+		return nil
+	}
+	// Go's t.TempDir creates its directory below GOTMPDIR when GOTMPDIR is
+	// set, and the release gate's child sets GOTMPDIR apart from TMPDIR.
+	for _, fixtureRoot := range []string{os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT"), syntheticTestResourceRoot, os.TempDir(), os.Getenv("GOTMPDIR")} {
+		if fixtureRoot != "" && pathWithin(root, fixtureRoot) {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: a test reads only a fixture vault, and %s is not one; DB tests read the local launcher's resources "+
+			"through ./test.sh or a sourced ./test-env.sh, and %s=1 reads any vault",
+		ErrResourceNotFound,
+		root,
+		TestRealVaultEnv,
+	)
+}
+
+// Reports whether path is base or below it, after cleaning each and resolving
+// its symlinks. Cleaning comes first because the resolver opens every resource
+// through filepath.Join, which cleans: root/absent/../link opens root/link and
+// whatever link leads to. A path that does not exist resolves through its
+// longest existing ancestor, so a vault not yet written below a linked temp
+// directory, as on Darwin where /var links to /private/var, is still below it,
+// and one below a link that leaves the base is not.
+func pathWithin(path string, base string) bool {
+	resolve := func(entry string) string {
+		entry = filepath.Clean(entry)
+		if resolved, err := filepath.EvalSymlinks(entry); err == nil {
+			return resolved
+		}
+		ancestor := entry
+		remainder := ""
+		for {
+			parent := filepath.Dir(ancestor)
+			if parent == ancestor {
+				return entry
+			}
+			remainder = filepath.Join(filepath.Base(ancestor), remainder)
+			ancestor = parent
+			if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+				return filepath.Join(resolved, remainder)
+			}
+		}
+	}
+	rel, err := filepath.Rel(resolve(base), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func ConfigHomeRoot() string {
 	warpConfigHome := os.Getenv("WARP_CONFIG_HOME")
 	if warpConfigHome != "" {
@@ -189,8 +263,10 @@ type resolverHomeObservation struct {
 
 // Each lookup owns its optional credential-access check; no process identity
 // changes or mutable global hooks are needed to inspect another service owner.
+// A cached lookup also owns an observer of the entries its result depends on.
 type resolverFilesystem struct {
-	access func(operation string, path string) error
+	access   func(operation string, path string) error
+	observer *resolverObserver
 }
 
 // Access refusals retain their cause but can never masquerade as file absence.
@@ -208,7 +284,10 @@ func (self resolverFilesystem) stat(path string) (os.FileInfo, error) {
 	if err := self.checkAccess("stat", path); err != nil {
 		return nil, err
 	}
-	return os.Stat(path)
+	self.observer.observeParent(path)
+	info, err := os.Stat(path)
+	self.observer.observeError(err)
+	return info, err
 }
 
 // A non-following stat has the same ancestor-search access contract.
@@ -216,7 +295,10 @@ func (self resolverFilesystem) lstat(path string) (os.FileInfo, error) {
 	if err := self.checkAccess("stat", path); err != nil {
 		return nil, err
 	}
-	return os.Lstat(path)
+	self.observer.observeParent(path)
+	info, err := os.Lstat(path)
+	self.observer.observeError(err)
+	return info, err
 }
 
 // Directory enumeration additionally requires read and search on the target.
@@ -224,7 +306,12 @@ func (self resolverFilesystem) readDir(path string) ([]os.DirEntry, error) {
 	if err := self.checkAccess("read-dir", path); err != nil {
 		return nil, err
 	}
-	return os.ReadDir(path)
+	self.observer.observeParent(path)
+	// the listing is observed through the directory, before it is read
+	self.observer.observeDirectory(path)
+	entries, err := os.ReadDir(path)
+	self.observer.observeError(err)
+	return entries, err
 }
 
 // Only the underlying filesystem can establish absence. A callback may wrap
@@ -474,6 +561,29 @@ func Routes() map[string]string {
 	return routeStrs
 }
 
+// LanHosts maps each host on the lan routers' bridges to its lan ip. It reads
+// the top-level lan_hosts block of the env's settings.yml, which is not part
+// of the per-host settings that GetSettings merges.
+func LanHosts() map[string]string {
+	lanHostIps := map[string]string{}
+	res, err := Config.SimpleResource("settings.yml")
+	if err != nil {
+		return lanHostIps
+	}
+	lanHosts, ok := res.Parse()["lan_hosts"].(map[string]any)
+	if !ok {
+		return lanHostIps
+	}
+	for host, lanHost := range lanHosts {
+		if lanHostObj, ok := lanHost.(map[string]any); ok {
+			if ip, ok := lanHostObj["ip"].(string); ok && ip != "" {
+				lanHostIps[host] = ip
+			}
+		}
+	}
+	return lanHostIps
+}
+
 func Env() (string, error) {
 	env := os.Getenv("WARP_ENV")
 	if env != "" {
@@ -526,18 +636,39 @@ func RequireConfigVersion() string {
 	return configVersion
 }
 
+// Resolves resources under one mount type. Resolutions are cached per mount
+// root, environment and resource path, and every lookup first re-observes the
+// filesystem entries the cached resolution depended on (see
+// resolverResolution), so a vault or config push, a new version directory, and
+// a file added, replaced or rewritten in place are all seen by the next lookup
+// without probing and logging the whole search again. Safe for concurrent use.
 type Resolver struct {
 	mountType MountType
 
+	// Fixed at construction. Tests that need a controlled clock construct their own resolver.
+	now func() time.Time
+
 	stateLock sync.Mutex
-	// relPath -> id -> value
-	relPathOverrides map[string]map[int][]byte
+	// relPath -> id -> override
+	relPathOverrides map[string]map[int]resolverOverride
+	keyResolutions   map[resolverResolutionKey]*resolverResolution
 }
+
+// A pushed value stands in for a resource. The serial is unique to one push.
+type resolverOverride struct {
+	value  []byte
+	serial uint64
+}
+
+// Distinguishes pushes so a value derived from one is never reused for another.
+var resolverOverrideSerial atomic.Uint64
 
 func NewResolver(mountType MountType) *Resolver {
 	return &Resolver{
 		mountType:        mountType,
-		relPathOverrides: map[string]map[int][]byte{},
+		now:              time.Now,
+		relPathOverrides: map[string]map[int]resolverOverride{},
+		keyResolutions:   map[resolverResolutionKey]*resolverResolution{},
 	}
 }
 
@@ -549,20 +680,38 @@ func (self *Resolver) PushSimpleResource(relPath string, value []byte) func() {
 
 	overrides, ok := self.relPathOverrides[relPath]
 	if !ok {
-		overrides = map[int][]byte{}
+		overrides = map[int]resolverOverride{}
 		self.relPathOverrides[relPath] = overrides
 	}
 	nextId := 0
 	for id, _ := range overrides {
 		nextId = max(nextId, id+1)
 	}
-	overrides[nextId] = value
+	overrides[nextId] = resolverOverride{
+		value:  value,
+		serial: resolverOverrideSerial.Add(1),
+	}
 
 	return func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		delete(overrides, nextId)
 	}
+}
+
+// The latest pushed override for relPath, if any.
+func (self *Resolver) override(relPath string) (resolverOverride, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	overrides, ok := self.relPathOverrides[relPath]
+	if !ok || len(overrides) == 0 {
+		return resolverOverride{}, false
+	}
+	maxId := 0
+	for id, _ := range overrides {
+		maxId = max(maxId, id)
+	}
+	return overrides[maxId], true
 }
 
 func (self *Resolver) ResourcePath(relPath string) (string, error) {
@@ -574,23 +723,112 @@ func (self *Resolver) ResourcePath(relPath string) (string, error) {
 }
 
 func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
+	resolution := self.resolution(relPath)
+	if resolution.err != nil {
+		return nil, resolution.err
+	}
+	// callers own the returned slice; the cached one is shared
+	return slices.Clone(resolution.paths), nil
+}
+
+// Identifies the current resolution and override of relPath, including a
+// stable absence. Equal versions name the same resolution of unchanged
+// filesystem entries and the same pushed override, so a value derived from the
+// resource can be reused while its version is unchanged (see
+// ResourceValueCache). An unavailable or recently changed resolution is never
+// equal to another.
+func (self *Resolver) resourceVersion(relPath string) ResourceVersion {
+	override, _ := self.override(relPath)
+	return ResourceVersion{
+		resolution: self.resolution(relPath).generation,
+		override:   override.serial,
+	}
+}
+
+// The resolution of relPath below the mount's root (see homeResolution). A
+// test binary's vault lookup first selects the homes it may read, or is
+// refused (see selectTestVaultScope).
+func (self *Resolver) resolution(relPath string) *resolverResolution {
 	if filepath.IsAbs(relPath) {
 		panic("Resource path must be relative.")
 	}
 
-	var homes []resolverHomeObservation
+	var root string
+	env, _ := Env()
 	switch self.mountType {
 	case MOUNT_TYPE_VAULT:
-		homes = resolveMultiHomeObserved(VaultHomeRoot())
+		root = VaultHomeRoot()
+		if testing.Testing() {
+			// checked before the cache, so a refusal is never cached, and an
+			// opt-in or a launcher attestation that is withdrawn takes effect at
+			// the next lookup
+			scope, err := selectTestVaultScope(root, env, relPath)
+			if err != nil {
+				return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+			}
+			resolution := self.homeResolution(scope.root, scope.env, relPath)
+			if resolution.err == nil {
+				// what the lookup selected, cached or not, must stay inside its
+				// scope and, from the launcher, name the attestation just read
+				if err := scope.requireSelected(relPath, resolution.paths); err != nil {
+					return &resolverResolution{err: err, generation: resolverGeneration.Add(1)}
+				}
+			}
+			return resolution
+		}
 	case MOUNT_TYPE_CONFIG:
-		homes = resolveMultiHomeObserved(ConfigHomeRoot())
+		root = ConfigHomeRoot()
 	case MOUNT_TYPE_SITE:
-		homes = resolveMultiHomeObserved(SiteHomeRoot())
+		root = SiteHomeRoot()
 	default:
 		panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
 	}
+	return self.homeResolution(root, env, relPath)
+}
 
-	return (resolverFilesystem{}).resolveResourcePaths(homes, relPath, self.mountType)
+// The resolution of relPath below root and env: the cached one when every
+// entry it observed is unchanged, else a new resolution of the current
+// filesystem, which is cached when it is stable. A not-found resolution is
+// cached like a found one, so an absent optional resource stays absent without
+// searching again. An unavailable resolution is never cached and forgets any
+// cached one.
+func (self *Resolver) homeResolution(root string, env string, relPath string) *resolverResolution {
+	key := resolverResolutionKey{root: root, env: env, relPath: relPath}
+
+	cached := func() *resolverResolution {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.keyResolutions[key]
+	}()
+	if cached != nil && cached.current() {
+		return cached
+	}
+
+	// the clock is read before the first observation (see stable)
+	start := self.now()
+	observer := &resolverObserver{cacheable: true}
+	filesystem := resolverFilesystem{observer: observer}
+	paths, err := filesystem.resolveResourcePaths(filesystem.resolveMultiHomeObserved(root, env), relPath, self.mountType)
+	resolution := &resolverResolution{
+		paths:      paths,
+		err:        err,
+		generation: resolverGeneration.Add(1),
+	}
+	resolved := err == nil || errors.Is(err, ErrResourceNotFound) && !errors.Is(err, ErrResourceUnavailable)
+	cacheable := resolved && observer.stable(start)
+	if cacheable {
+		resolution.observations = observer.observations
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !cacheable {
+			delete(self.keyResolutions, key)
+		} else if _, ok := self.keyResolutions[key]; ok || len(self.keyResolutions) < maxResolverResolutions {
+			self.keyResolutions[key] = resolution
+		}
+	}()
+	return resolution
 }
 
 // Resolve a resource beneath an explicit mount root and environment, using the
@@ -671,6 +909,8 @@ func (self resolverFilesystem) resolveResourcePaths(homes []resolverHomeObservat
 func (self resolverFilesystem) regularResourcePath(path string) (bool, error) {
 	if info, err := self.stat(path); err == nil {
 		if info.Mode().IsRegular() {
+			// a selected file is observed itself, so a rewrite in place is seen
+			self.observer.observeFile(path, info)
 			return true, nil
 		}
 		return false, fmt.Errorf("%w: %s is not a regular file", ErrResourceUnavailable, path)
@@ -705,34 +945,26 @@ func (self *Resolver) RequireBytes(relPath string) []byte {
 
 // list indexes are not in the res path; instead, each element is expanded out into the value array
 func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
-	override := func() []byte {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if overrides, ok := self.relPathOverrides[relPath]; ok {
-			if len(overrides) == 0 {
-				return nil
-			}
-			maxId := 0
-			for id, _ := range overrides {
-				maxId = max(maxId, id)
-			}
-			return overrides[maxId]
-		}
-		return nil
-	}()
-	path, err := self.ResourcePath(relPath)
-	if err != nil {
+	override, _ := self.override(relPath)
+	resolution := self.resolution(relPath)
+	path := relPath
+	if resolution.err != nil {
 		// an override does not need a backing file
 		// (`PushSimpleResource` can stand in for a resource that does not
 		// exist in the environment)
-		if override == nil {
-			return nil, err
+		if override.value == nil {
+			return nil, resolution.err
 		}
-		path = relPath
+	} else {
+		path = resolution.paths[0]
 	}
 	return &SimpleResource{
 		path:     path,
-		override: override,
+		override: override.value,
+		version: ResourceVersion{
+			resolution: resolution.generation,
+			override:   override.serial,
+		},
 	}, nil
 }
 
@@ -747,7 +979,14 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 type SimpleResource struct {
 	path      string
 	override  []byte
+	version   ResourceVersion
 	parsedObj map[string]any
+}
+
+// The resolution and override this resource was selected by (see
+// Resolver.resourceVersion). A changed file is a different version.
+func (self *SimpleResource) Version() ResourceVersion {
+	return self.version
 }
 
 func (self *SimpleResource) bytes() ([]byte, error) {
@@ -887,10 +1126,8 @@ func (self *SimpleResource) StringList(path ...string) []string {
 func translateString(value string) string {
 	// simple "j2" format
 	// {{ env:XXX }}
-	re := regexp.MustCompile("{{[^}]*}}")
-	envRe := regexp.MustCompile("^{{\\s*env:([^}\\s]*)\\s*}}$")
-	translatedValue := string(re.ReplaceAllFunc([]byte(value), func(match []byte) []byte {
-		envMatches := envRe.FindStringSubmatch(string(match))
+	translatedValue := string(templateExpression.ReplaceAllFunc([]byte(value), func(match []byte) []byte {
+		envMatches := templateEnvExpression.FindStringSubmatch(string(match))
 		if envMatches == nil {
 			return match
 		}

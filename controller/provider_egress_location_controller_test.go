@@ -3,7 +3,8 @@
 // its own GeoLite2, stores the place and never the address, and refuses the
 // retired vendor-consensus shape. The addresses are the MaxMind test-database
 // ones the suite already places (24.48.0.1 in Montreal, 67.43.156.1
-// country-only in the United States).
+// country-only in the United States), so a test that places one skips without
+// the deployed GeoLite2 build.
 package controller
 
 import (
@@ -116,6 +117,8 @@ func TestProviderEgressExitFromIpInfoCityConfidence(t *testing.T) {
 // The lookup the ingest uses resolves a documented test address, and refuses
 // an address that does not parse or that GeoLite2 places nowhere.
 func TestResolveProviderEgressExitLooksUpGeoLite2(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	exit, err := ResolveProviderEgressExit(testEgressCityExitIp, 25)
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +136,8 @@ func TestResolveProviderEgressExitLooksUpGeoLite2(t *testing.T) {
 // The ingest stores the GeoLite2 place of the exit -- its city row when the
 // radius allows, the country, city_confident -- and never the address.
 func TestSubmitProviderEgressLocationStoresTheGeoLite2PlaceAndNoAddress(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := testEgressProvider(ctx)
@@ -173,6 +178,8 @@ func TestSubmitProviderEgressLocationStoresTheGeoLite2PlaceAndNoAddress(t *testi
 // A radius wider than the configured city radius stores the region, and a
 // country-only record the country.
 func TestSubmitProviderEgressLocationCoarserPlaces(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	// the Montreal record's radius is 5 km, so a 4 km city radius makes it a
 	// region-precise exit
 	pop := server.Config.PushSimpleResource(model.ProviderEgressProbeResourceName, []byte("city_confident_radius_km: 4\n"))
@@ -231,6 +238,8 @@ func TestSubmitProviderEgressLocationRefusesTheConsensusShape(t *testing.T) {
 // The legacy fields are accepted beside an exit address and ignored: the
 // country is GeoLite2's, and no verdict of a vendor's is stored.
 func TestSubmitProviderEgressLocationIgnoresTheRetiredFields(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := testEgressProvider(ctx)
@@ -263,6 +272,8 @@ func TestSubmitProviderEgressLocationIgnoresTheRetiredFields(t *testing.T) {
 // An address that does not parse, or one GeoLite2 places nowhere, is refused
 // and nothing is stored.
 func TestSubmitProviderEgressLocationRefusesAnUnplaceableExit(t *testing.T) {
+	useGeolocationThatPlacesNothing(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		for _, exitIp := range []string{"not-an-address", "192.0.2.1"} {
@@ -301,6 +312,8 @@ func TestSubmitProviderEgressLocationRejectsUnknownClient(t *testing.T) {
 // replay), or far in the future (which would win every later upsert); within
 // the skew they are accepted.
 func TestSubmitProviderEgressLocationObservedAtWindow(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		cases := []struct {
@@ -343,6 +356,8 @@ func TestSubmitProviderEgressLocationVerdictGeoLite2IsConfident(t *testing.T) {
 // A country that flips inside probeverdict's instability window is suspect.
 // The two probes go backwards in time, since a future observed_at is refused.
 func TestSubmitProviderEgressLocationVerdictSuspectOnCountryFlipFlop(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := testEgressProvider(ctx)
@@ -368,6 +383,8 @@ func TestSubmitProviderEgressLocationVerdictSuspectOnCountryFlipFlop(t *testing.
 // one the provider's control address looks up in is the finding, not a fault,
 // and is verified.
 func TestSubmitProviderEgressLocationVerdictLookupDivergenceIsNotSuspect(t *testing.T) {
+	requireGeoLite2Database(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := testEgressProvider(ctx)

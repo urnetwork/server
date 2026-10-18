@@ -4,7 +4,11 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,49 +88,125 @@ type redisNodeUsage struct {
 	maxmemoryBytes int64
 }
 
-func fullestRedisNodeUsage(ctx context.Context, env *probeEnv, h *host) (redisNodeUsage, error) {
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
-		return redisNodeUsage{}, fmt.Errorf("no redis node ports configured")
+// redisHostFailure is a redis-cluster host that a probe could not read. A
+// probe that sweeps every host keeps judging the hosts it could read, reports
+// each failed host on its own target, and fails as a whole only when no host
+// could be read, as the single-host probe always has.
+type redisHostFailure struct {
+	host *host
+	err  error
+}
+
+// redisHostFailuresError is the probe error once no host could be read. One
+// host keeps its own error; several are joined, so a host-scope exclusion of
+// one host cannot stand in for another host's real failure.
+func redisHostFailuresError(failures []redisHostFailure) error {
+	if len(failures) == 1 {
+		return failures[0].err
 	}
-	portNames := make([]string, len(ports))
-	for i, port := range ports {
-		portNames[i] = fmt.Sprint(port)
+	errs := make([]error, 0, len(failures))
+	for _, failure := range failures {
+		errs = append(errs, failure.err)
 	}
-	out, err := env.runner.shell(ctx, h, fmt.Sprintf(`for p in %s; do
+	return errors.Join(errs...)
+}
+
+// redisHostCannotObserveFinding reports one host a sweep could not read. The
+// host/observation target is the one the memory, process, and cluster sweeps
+// use, so host-scope reduction and per-host identity treat it the same way.
+func redisHostCannotObserveFinding(failure redisHostFailure, observation string) finding {
+	unknown := cannotObserveFinding(failure.host.name+"/"+observation, failure.err)
+	unknown.observed += fmt.Sprintf(" unobserved_nodes=%d", len(failure.host.redisNodePorts()))
+	return unknown
+}
+
+// redisUnobservedScope names the hosts a partial verdict was judged without
+// and counts their configured nodes.
+func redisUnobservedScope(failures []redisHostFailure) (string, int) {
+	names := make([]string, 0, len(failures))
+	nodes := 0
+	for _, failure := range failures {
+		names = append(names, failure.host.name)
+		nodes += len(failure.host.redisNodePorts())
+	}
+	return strings.Join(names, ","), nodes
+}
+
+// redisUnobservedHosts marks the observed values of a cluster-wide verdict
+// that was judged without the failed hosts' nodes.
+func redisUnobservedHosts(failures []redisHostFailure) string {
+	hosts, nodes := redisUnobservedScope(failures)
+	return fmt.Sprintf("unobserved_hosts=%s unobserved_nodes=%d", hosts, nodes)
+}
+
+// redisPartialSymptom marks the symptom of such a verdict.
+func redisPartialSymptom(failures []redisHostFailure) string {
+	hosts, nodes := redisUnobservedScope(failures)
+	return fmt.Sprintf(" (partial: %d node(s) on %s not read)", nodes, hosts)
+}
+
+// fullestRedisNodeUsage samples every node on every redis-cluster host and
+// returns the fullest node with the host that runs it. A host that cannot be
+// read is returned as a failure and the fullest node is chosen from the other
+// hosts; with no host readable the sample fails.
+func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNodeUsage, []redisHostFailure, error) {
+	hosts := env.cfg.redisSweepHosts()
+	if len(hosts) == 0 {
+		return nil, redisNodeUsage{}, nil, fmt.Errorf("no redis-cluster host in inventory")
+	}
+	var fullestHost *host
+	fullest := redisNodeUsage{}
+	fullestRatio := -1.0
+	outputs := []string{}
+	failures := []redisHostFailure{}
+	for _, h := range hosts {
+		ports := h.redisNodePorts()
+		if len(ports) == 0 {
+			return nil, redisNodeUsage{}, nil, fmt.Errorf("no redis node ports configured")
+		}
+		portNames := make([]string, len(ports))
+		for i, port := range ports {
+			portNames[i] = fmt.Sprint(port)
+		}
+		out, err := env.runner.shell(ctx, h, fmt.Sprintf(`for p in %s; do
   m=$(timeout 3 redis-cli -p $p INFO memory 2>/dev/null | tr -d '\r')
   [ -z "$m" ] && continue
   echo "$p $(echo "$m" | awk -F: 'BEGIN{u=0;x=0}/^used_memory:/{u=$2}/^maxmemory:/{x=$2}END{print u" "x}')"
 done`, strings.Join(portNames, " ")))
-	if err != nil {
-		return redisNodeUsage{}, err
-	}
+		if err != nil {
+			failures = append(failures, redisHostFailure{host: h, err: err})
+			continue
+		}
+		outputs = append(outputs, strings.TrimSpace(out))
 
-	fullest := redisNodeUsage{}
-	fullestRatio := -1.0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			candidate := redisNodeUsage{
+				port:           atoi(fields[0]),
+				usedBytes:      atoi64(fields[1]),
+				maxmemoryBytes: atoi64(fields[2]),
+			}
+			if candidate.port == 0 || candidate.usedBytes <= 0 || candidate.maxmemoryBytes <= 0 {
+				continue
+			}
+			ratio := float64(candidate.usedBytes) / float64(candidate.maxmemoryBytes)
+			if fullest.port == 0 || fullestRatio < ratio {
+				fullest = candidate
+				fullestRatio = ratio
+				fullestHost = h
+			}
 		}
-		candidate := redisNodeUsage{
-			port:           atoi(fields[0]),
-			usedBytes:      atoi64(fields[1]),
-			maxmemoryBytes: atoi64(fields[2]),
-		}
-		if candidate.port == 0 || candidate.usedBytes <= 0 || candidate.maxmemoryBytes <= 0 {
-			continue
-		}
-		ratio := float64(candidate.usedBytes) / float64(candidate.maxmemoryBytes)
-		if fullest.port == 0 || fullestRatio < ratio {
-			fullest = candidate
-			fullestRatio = ratio
-		}
+	}
+	if len(failures) == len(hosts) {
+		return nil, redisNodeUsage{}, nil, redisHostFailuresError(failures)
 	}
 	if fullest.port == 0 {
-		return redisNodeUsage{}, fmt.Errorf("could not determine fullest Redis node from %q", strings.TrimSpace(out))
+		return nil, redisNodeUsage{}, nil, fmt.Errorf("could not determine fullest Redis node from %q", strings.Join(outputs, "\n"))
 	}
-	return fullest, nil
+	return fullestHost, fullest, failures, nil
 }
 
 type redisConnectionDiagnosis struct {
@@ -311,21 +391,32 @@ func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 }
 
 func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
-	if h == nil {
+	hosts := env.cfg.redisSweepHosts()
+	if len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	ports := h.redisNodePorts()
-	if len(ports) == 0 {
-		return nil, fmt.Errorf("no redis node ports configured")
-	}
-	lo, hi := ports[0], ports[len(ports)-1]
 
-	// one round trip: per node, one compact line. Client-buffer memory is
-	// mem_clients_normal + mem_clients_slaves (the INFO fields this redis
-	// actually exposes — there is no used_memory_clients key; SIGNALS.md 3.2
-	// note). awk defaults keep every field numeric even if a key is absent.
-	script := fmt.Sprintf(`awk '/^MemTotal:/{total=$2*1024}/^MemAvailable:/{available=$2*1024}END{print "host_memory",total,available}' /proc/meminfo 2>/dev/null
+	// Each redis-cluster host reports its own memory and its own nodes. A host
+	// that cannot be read is reported and the rest are still judged; with no
+	// host readable the probe fails as the single-host probe always has.
+	observedHosts := []redisHostMemory{}
+	type failedHost struct {
+		host *host
+		err  error
+	}
+	failedHosts := []failedHost{}
+	for _, h := range hosts {
+		ports := h.redisNodePorts()
+		if len(ports) == 0 {
+			return nil, fmt.Errorf("no redis node ports configured")
+		}
+		lo, hi := ports[0], ports[len(ports)-1]
+
+		// one round trip: per node, one compact line. Client-buffer memory is
+		// mem_clients_normal + mem_clients_slaves (the INFO fields this redis
+		// actually exposes — there is no used_memory_clients key; SIGNALS.md 3.2
+		// note). awk defaults keep every field numeric even if a key is absent.
+		script := fmt.Sprintf(`awk '/^MemTotal:/{total=$2*1024}/^MemAvailable:/{available=$2*1024}END{print "host_memory",total,available}' /proc/meminfo 2>/dev/null
 for p in $(seq %d %d); do
   m=$(timeout 3 redis-cli -p $p INFO 2>/dev/null | tr -d '\r')
   [ -z "$m" ] && { echo "$p unreachable"; continue; }
@@ -341,11 +432,210 @@ for p in $(seq %d %d); do
     /^db0:/{split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=v[2];else if(v[1]=="expires")expires=v[2];else if(v[1]=="avg_ttl")avg=v[2]}}
     END{print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
 done`, lo, hi)
-	out, err := env.runner.shell(ctx, h, script)
-	if err != nil {
-		return nil, err
+		out, err := env.runner.shell(ctx, h, script)
+		if err != nil {
+			failedHosts = append(failedHosts, failedHost{host: h, err: err})
+			continue
+		}
+		observedHosts = append(observedHosts, parseRedisHostMemory(h, out))
+	}
+	if len(observedHosts) == 0 {
+		return nil, failedHosts[0].err
 	}
 
+	nodeMems := []redisNodeMem{}
+	unreachablePorts := []string{}
+	for _, observed := range observedHosts {
+		nodeMems = append(nodeMems, observed.nodes...)
+		unreachablePorts = append(unreachablePorts, observed.unreachable...)
+	}
+	if len(nodeMems) == 0 {
+		return nil, fmt.Errorf("no node INFO parsed (unreachable: %v)", unreachablePorts)
+	}
+
+	// fleet medians for the skew checks, across every host's nodes
+	usedValues := make([]float64, 0, len(nodeMems))
+	connectedValues := make([]float64, 0, len(nodeMems))
+	for _, n := range nodeMems {
+		usedValues = append(usedValues, n.usedBytes)
+		connectedValues = append(connectedValues, n.connectedClients)
+	}
+	sort.Float64s(usedValues)
+	sort.Float64s(connectedValues)
+	medianUsed := usedValues[len(usedValues)/2]
+	medianConnected := connectedValues[len(connectedValues)/2]
+	// a fleet median with a whole host missing is not a baseline sample
+	if env.baseline != nil && len(failedHosts) == 0 {
+		env.baseline.record("redis/used-median", time.Now(), medianUsed)
+		env.baseline.record("redis/clients-median", time.Now(), medianConnected)
+	}
+
+	findings := []finding{}
+	for _, observed := range observedHosts {
+		// a host with no node INFO has no capacity evidence; its unreachable
+		// nodes are reported below
+		if len(observed.nodes) == 0 {
+			continue
+		}
+		findings = append(findings, redisHostCapacityFinding(observed))
+	}
+	for _, failed := range failedHosts {
+		// the memory signal surfaces sweep visibility under redis/node-mem
+		unknown := cannotObserveFinding(failed.host.name+"/node-mem", failed.err)
+		unknown.probeId = "redis/node-mem"
+		findings = append(findings, unknown)
+	}
+	for _, observed := range observedHosts {
+		h := observed.host
+		for _, n := range observed.nodes {
+			target := fmt.Sprintf("%s:%d", h.name, n.port)
+			usedPct := 0.0
+			if n.maxmemoryBytes > 0 {
+				usedPct = 100 * n.usedBytes / n.maxmemoryBytes
+			}
+
+			switch {
+			case usedPct > 92:
+				self.rearmBattery("redis/node-mem-high", "node-mem-high/"+target)
+				mechanism := "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. At the volatile-ttl wall Redis can evict only keys carrying TTLs; if that candidate set cannot keep pace, writes fail while reads can remain healthy."
+				context := "Evicted-key and error counters are cumulative boot totals, so a single sample does not prove a current error rate. current_eviction_exceeded_time distinguishes a node presently unable to stay below maxmemory; task/log signals remain authoritative for a current OOM response."
+				action := "Use the key-family and TTL probes to identify the growing dataset before changing capacity. If writes are currently failing and host RAM permits, a documented temporary maxmemory increase can create drain headroom; otherwise do not raise maxmemory to conceal a live leak."
+				verify := "Used memory returns below 85%, current_eviction_exceeded_time is zero, current OOM/error rates remain zero, and the attributed key family either drains or stays bounded on consecutive samples."
+				playbook := "SIGNALS.md §3.3b and §5.4"
+				if n.averageTTLMillis > float64(redisImpossibleAverageTTL.Milliseconds()) {
+					mechanism = "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. Its impossible average TTL independently proves stale expiry metadata exists, but an average TTL does not measure the residue's bytes and therefore cannot identify it as the capacity root cause."
+					context += " Correlate ttl-leaks for expiry correctness and redis-bytes for memory ownership. A bounded production sample found the known stream residue real but tiny while caller-scoped score blobs owned nearly all sampled bytes; keep those diagnoses separate."
+					action = "Use redis-bytes to remove the measured dominant footprint and restore headroom. Handle an independently attributed stream TTL cleanup only with explicit maintenance authority; do not count it as material capacity relief without MEMORY USAGE evidence, delete keys through shell text, or raise maxmemory to hide either defect."
+					verify = "The measured dominant byte family drains, used memory falls below 85%, eviction pressure decays, and OOM/error rates stay flat; separately, any authorized TTL cleanup clamps only attributed stream keys and returns average TTL below two years."
+					playbook = "SIGNALS.md §3.3a, §3.3b, and §5.4"
+				}
+				nonExpiringKeys := max(0, int(n.keys-n.expiringKeys))
+				findings = append(findings, finding{
+					probeId: "redis/node-mem-critical", tier: tierPage,
+					class: "node-mem-critical", target: target, sustain: 1,
+					symptom:   fmt.Sprintf("redis node %d at %.0f%% of maxmemory (page > 92%%)", n.port, usedPct),
+					mechanism: mechanism,
+					baseline:  "fleet baseline 3–8G used and below 85%; average TTL below two years; no current maxmemory-exceeded interval or OOM replies",
+					observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG connected=%.0f policy=%s keys=%.0f expiring_keys=%.0f non_expiring_keys=%d avg_ttl_days=%.0f evicted_keys_total=%.0f current_eviction_exceeded_time=%.0f total_error_replies=%.0f oom_errors_total=%.0f",
+						gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes), n.connectedClients,
+						n.maxmemoryPolicy, n.keys, n.expiringKeys, nonExpiringKeys, n.averageTTLMillis/float64((24*time.Hour).Milliseconds()), n.evictedKeys, n.currentEvictionExceededTime, n.totalErrorReplies, n.oomErrors),
+					evidence: self.batteryEvidence("redis/node-mem-critical", "node-mem-critical/"+target, func() string {
+						return redisNodeBattery(ctx, env, h, n.port)
+					}),
+					context:  context,
+					action:   action,
+					verify:   verify,
+					playbook: playbook,
+				})
+			case usedPct > 85:
+				self.rearmBattery("redis/node-mem-critical", "node-mem-critical/"+target)
+				findings = append(findings, finding{
+					probeId: "redis/node-mem-high", tier: tierWarn,
+					class: "node-mem-high", target: target, sustain: 2,
+					symptom:  fmt.Sprintf("redis node %d at %.0f%% of maxmemory (warn > 85%%)", n.port, usedPct),
+					baseline: "fleet baseline well under 85%; sustained growth = un-drained pile or missing ttl (3.1/3.3)",
+					observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG", gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes)),
+					evidence: self.batteryEvidence("redis/node-mem-high", "node-mem-high/"+target, func() string {
+						return redisNodeBattery(ctx, env, h, n.port)
+					}),
+					playbook: "SIGNALS.md 5.4",
+				})
+			default:
+				self.rearmBattery("redis/node-mem-high", "node-mem-high/"+target)
+				self.rearmBattery("redis/node-mem-critical", "node-mem-critical/"+target)
+				findings = append(findings, healthyFinding("redis/node-mem-high", tierWarn, "node-mem-high", target))
+				findings = append(findings, healthyFinding("redis/node-mem-critical", tierPage, "node-mem-critical", target))
+			}
+
+			// skew: > 3x fleet median (3.1)
+			if medianUsed > 0 && n.usedBytes > 3*medianUsed {
+				findings = append(findings, finding{
+					probeId: "redis/mem-skew", tier: tierWarn,
+					class: "mem-skew", target: target, sustain: 1,
+					symptom:  fmt.Sprintf("redis node %d used memory %.2fG is %.1fx the fleet median %.2fG", n.port, gb(n.usedBytes), n.usedBytes/medianUsed, gb(medianUsed)),
+					baseline: "all nodes within ~2x of each other; skew = hot key family or un-drained pile (3.1 → 3.3 family histogram)",
+					observed: fmt.Sprintf("used=%.2fG median=%.2fG dataset=%.2fG clients=%.2fG", gb(n.usedBytes), gb(medianUsed), gb(n.datasetBytes), gb(n.clientsBytes)),
+					playbook: "SIGNALS.md 5.4",
+				})
+			} else {
+				findings = append(findings, healthyFinding("redis/mem-skew", tierWarn, "mem-skew", target))
+			}
+
+			// client buffers: > 25% of used or > 2G (3.2 — the pubsub-blowup tell)
+			if n.clientsBytes > 2e9 || (n.usedBytes > 0 && n.clientsBytes > 0.25*n.usedBytes) {
+				findings = append(findings, finding{
+					probeId: "redis/client-buffers", tier: tierWarn,
+					class: "client-buffers", target: target, sustain: 1,
+					symptom:  fmt.Sprintf("redis node %d client buffers %.2fG (%.0f%% of used) — output-buffer accumulation", n.port, gb(n.clientsBytes), 100*n.clientsBytes/n.usedBytes),
+					baseline: "used_memory_clients well under 25% of used_memory and under 2G; growth here = pubsub/slow consumers, not keys (3.2)",
+					observed: fmt.Sprintf("clients=%.2fG used=%.2fG dataset=%.2fG", gb(n.clientsBytes), gb(n.usedBytes), gb(n.datasetBytes)),
+					evidence: self.batteryEvidence("redis/client-buffers", "client-buffers/"+target, func() string {
+						return redisNodeBattery(ctx, env, h, n.port)
+					}),
+					playbook: "SIGNALS.md 5.5",
+				})
+			} else {
+				self.rearmBattery("redis/client-buffers", "client-buffers/"+target)
+				findings = append(findings, healthyFinding("redis/client-buffers", tierWarn, "client-buffers", target))
+			}
+
+			// connected_clients spike vs fleet median (3.5 approximation of the
+			// step-change rule until per-node history is kept)
+			if medianConnected > 0 && n.connectedClients > 3*medianConnected {
+				evidence := self.batteryEvidence("redis/clients-spike", "clients-spike/"+target, func() string {
+					return redisConnectionBattery(ctx, env, h, n.port)
+				})
+				diagnosis := diagnoseRedisConnectionSpike(evidence)
+				findings = append(findings, finding{
+					probeId: "redis/clients-spike", tier: tierWarn,
+					class: "clients-spike", target: target, sustain: 2,
+					symptom:   fmt.Sprintf("redis node %d connected_clients %.0f is %.1fx the fleet median %.0f", n.port, n.connectedClients, n.connectedClients/medianConnected, medianConnected),
+					mechanism: diagnosis.mechanism,
+					baseline:  "baseline ~pool_floor x processes, roughly uniform across nodes; +50% step in 10 min = reconnect storm or pool misconfig (3.5)",
+					observed:  fmt.Sprintf("connected=%.0f median=%.0f ratio=%.1fx", n.connectedClients, medianConnected, n.connectedClients/medianConnected),
+					evidence:  evidence,
+					context:   diagnosis.context,
+					action:    diagnosis.action,
+					verify:    diagnosis.verify,
+					playbook:  "SIGNALS.md 3.5",
+				})
+			} else {
+				self.rearmBattery("redis/clients-spike", "clients-spike/"+target)
+				findings = append(findings, healthyFinding("redis/clients-spike", tierWarn, "clients-spike", target))
+			}
+		}
+
+	}
+
+	for _, observed := range observedHosts {
+		if len(observed.unreachable) == 0 {
+			continue
+		}
+		// per-node ping is the tier-0 probe's page; here just visibility
+		findings = append(findings, finding{
+			probeId: "redis/node-mem", tier: tierWarn,
+			class: "cannot-observe", target: observed.host.name,
+			frame:    strings.Join(observed.unreachable, ","),
+			sustain:  2,
+			symptom:  fmt.Sprintf("INFO unavailable from %d node(s): %s", len(observed.unreachable), strings.Join(observed.unreachable, ",")),
+			observed: fmt.Sprintf("unreachable_ports=%s", strings.Join(observed.unreachable, ",")),
+			playbook: "SIGNALS.md 5.2",
+		})
+	}
+
+	return findings, nil
+}
+
+// redisHostMemory is one redis-cluster host's memory and node observation.
+type redisHostMemory struct {
+	host           *host
+	totalBytes     float64
+	availableBytes float64
+	nodes          []redisNodeMem
+	unreachable    []string
+}
+
+func parseRedisHostMemory(h *host, out string) redisHostMemory {
 	nodeMems := []redisNodeMem{}
 	unreachablePorts := []string{}
 	hostMemoryTotalBytes := 0.0
@@ -387,13 +677,22 @@ done`, lo, hi)
 		}
 		nodeMems = append(nodeMems, node)
 	}
-	if len(nodeMems) == 0 {
-		return nil, fmt.Errorf("no node INFO parsed (unreachable: %v)", unreachablePorts)
+	return redisHostMemory{
+		host:           h,
+		totalBytes:     hostMemoryTotalBytes,
+		availableBytes: hostMemoryAvailableBytes,
+		nodes:          nodeMems,
+		unreachable:    unreachablePorts,
 	}
+}
 
-	// fleet medians for the skew checks
-	usedValues := make([]float64, 0, len(nodeMems))
-	connectedValues := make([]float64, 0, len(nodeMems))
+// redisHostCapacityFinding judges one host's aggregate Redis ceilings against
+// the RAM that host can still supply.
+func redisHostCapacityFinding(observed redisHostMemory) finding {
+	h := observed.host
+	hostMemoryTotalBytes := observed.totalBytes
+	hostMemoryAvailableBytes := observed.availableBytes
+	nodeMems := observed.nodes
 	sumUsedBytes := 0.0
 	sumRSSBytes := 0.0
 	sumMaxmemoryBytes := 0.0
@@ -401,8 +700,6 @@ done`, lo, hi)
 	criticalNodeCount := 0
 	impossibleTTLNodeCount := 0
 	for _, n := range nodeMems {
-		usedValues = append(usedValues, n.usedBytes)
-		connectedValues = append(connectedValues, n.connectedClients)
 		sumUsedBytes += n.usedBytes
 		sumRSSBytes += n.rssBytes
 		sumMaxmemoryBytes += n.maxmemoryBytes
@@ -414,16 +711,6 @@ done`, lo, hi)
 			impossibleTTLNodeCount++
 		}
 	}
-	sort.Float64s(usedValues)
-	sort.Float64s(connectedValues)
-	medianUsed := usedValues[len(usedValues)/2]
-	medianConnected := connectedValues[len(connectedValues)/2]
-	if env.baseline != nil {
-		env.baseline.record("redis/used-median", time.Now(), medianUsed)
-		env.baseline.record("redis/clients-median", time.Now(), medianConnected)
-	}
-
-	findings := []finding{}
 	remainingConfiguredHeadroom := max(0.0, sumMaxmemoryBytes-sumUsedBytes)
 	operationalReserve := max(redisHostCapacityReserveMinimum, redisHostCapacityReserveRatio*hostMemoryTotalBytes)
 	requiredAvailable := remainingConfiguredHeadroom + operationalReserve
@@ -433,7 +720,7 @@ done`, lo, hi)
 		if impossibleTTLNodeCount > 0 {
 			action = "Do not increase maxmemory on this host. Create immediate capacity headroom with additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, preserving reserve for Redis RSS overhead, the kernel, and non-Redis processes. Treat the independently attributed impossible-TTL residue as a separate correctness cleanup: measure its bytes before counting it as capacity relief, and do not assume that clamping a small residue resolves this deficit."
 		}
-		findings = append(findings, finding{
+		return finding{
 			probeId: "redis/host-capacity", tier: tierPage,
 			class: "redis-host-capacity", target: h.name, frame: "aggregate-maxmemory", sustain: 1,
 			symptom:   fmt.Sprintf("Redis can grow %.1fGiB to its configured ceilings and needs %.1fGiB reserve, but %s has only %.1fGiB available", gib(remainingConfiguredHeadroom), gib(operationalReserve), h.name, gib(hostMemoryAvailableBytes)),
@@ -445,145 +732,13 @@ done`, lo, hi)
 			action:   action,
 			verify:   "Aggregate Redis ceilings plus measured overhead fit beneath physical RAM with operational reserve, host swap and memory pressure remain zero, every node returns below 85%, and current OOM/error rates remain zero on consecutive samples.",
 			playbook: "SIGNALS.md §3.1, §3.3a, §3.3b, and §5.4",
-		})
-	} else {
-		findings = append(findings, healthyFinding("redis/host-capacity", tierPage, "redis-host-capacity", h.name))
-	}
-	for _, n := range nodeMems {
-		target := fmt.Sprintf("%s:%d", h.name, n.port)
-		usedPct := 0.0
-		if n.maxmemoryBytes > 0 {
-			usedPct = 100 * n.usedBytes / n.maxmemoryBytes
-		}
-
-		switch {
-		case usedPct > 92:
-			self.rearmBattery("redis/node-mem-high", "node-mem-high/"+target)
-			mechanism := "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. At the volatile-ttl wall Redis can evict only keys carrying TTLs; if that candidate set cannot keep pace, writes fail while reads can remain healthy."
-			context := "Evicted-key and error counters are cumulative boot totals, so a single sample does not prove a current error rate. current_eviction_exceeded_time distinguishes a node presently unable to stay below maxmemory; task/log signals remain authoritative for a current OOM response."
-			action := "Use the key-family and TTL probes to identify the growing dataset before changing capacity. If writes are currently failing and host RAM permits, a documented temporary maxmemory increase can create drain headroom; otherwise do not raise maxmemory to conceal a live leak."
-			verify := "Used memory returns below 85%, current_eviction_exceeded_time is zero, current OOM/error rates remain zero, and the attributed key family either drains or stays bounded on consecutive samples."
-			playbook := "SIGNALS.md §3.3b and §5.4"
-			if n.averageTTLMillis > float64(redisImpossibleAverageTTL.Milliseconds()) {
-				mechanism = "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. Its impossible average TTL independently proves stale expiry metadata exists, but an average TTL does not measure the residue's bytes and therefore cannot identify it as the capacity root cause."
-				context += " Correlate ttl-leaks for expiry correctness and redis-bytes for memory ownership. A bounded production sample found the known stream residue real but tiny while caller-scoped score blobs owned nearly all sampled bytes; keep those diagnoses separate."
-				action = "Use redis-bytes to remove the measured dominant footprint and restore headroom. Handle an independently attributed stream TTL cleanup only with explicit maintenance authority; do not count it as material capacity relief without MEMORY USAGE evidence, delete keys through shell text, or raise maxmemory to hide either defect."
-				verify = "The measured dominant byte family drains, used memory falls below 85%, eviction pressure decays, and OOM/error rates stay flat; separately, any authorized TTL cleanup clamps only attributed stream keys and returns average TTL below two years."
-				playbook = "SIGNALS.md §3.3a, §3.3b, and §5.4"
-			}
-			nonExpiringKeys := max(0, int(n.keys-n.expiringKeys))
-			findings = append(findings, finding{
-				probeId: "redis/node-mem-critical", tier: tierPage,
-				class: "node-mem-critical", target: target, sustain: 1,
-				symptom:   fmt.Sprintf("redis node %d at %.0f%% of maxmemory (page > 92%%)", n.port, usedPct),
-				mechanism: mechanism,
-				baseline:  "fleet baseline 3–8G used and below 85%; average TTL below two years; no current maxmemory-exceeded interval or OOM replies",
-				observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG connected=%.0f policy=%s keys=%.0f expiring_keys=%.0f non_expiring_keys=%d avg_ttl_days=%.0f evicted_keys_total=%.0f current_eviction_exceeded_time=%.0f total_error_replies=%.0f oom_errors_total=%.0f",
-					gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes), n.connectedClients,
-					n.maxmemoryPolicy, n.keys, n.expiringKeys, nonExpiringKeys, n.averageTTLMillis/float64((24*time.Hour).Milliseconds()), n.evictedKeys, n.currentEvictionExceededTime, n.totalErrorReplies, n.oomErrors),
-				evidence: self.batteryEvidence("redis/node-mem-critical", "node-mem-critical/"+target, func() string {
-					return redisNodeBattery(ctx, env, n.port)
-				}),
-				context:  context,
-				action:   action,
-				verify:   verify,
-				playbook: playbook,
-			})
-		case usedPct > 85:
-			self.rearmBattery("redis/node-mem-critical", "node-mem-critical/"+target)
-			findings = append(findings, finding{
-				probeId: "redis/node-mem-high", tier: tierWarn,
-				class: "node-mem-high", target: target, sustain: 2,
-				symptom:  fmt.Sprintf("redis node %d at %.0f%% of maxmemory (warn > 85%%)", n.port, usedPct),
-				baseline: "fleet baseline well under 85%; sustained growth = un-drained pile or missing ttl (3.1/3.3)",
-				observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG", gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes)),
-				evidence: self.batteryEvidence("redis/node-mem-high", "node-mem-high/"+target, func() string {
-					return redisNodeBattery(ctx, env, n.port)
-				}),
-				playbook: "SIGNALS.md 5.4",
-			})
-		default:
-			self.rearmBattery("redis/node-mem-high", "node-mem-high/"+target)
-			self.rearmBattery("redis/node-mem-critical", "node-mem-critical/"+target)
-			findings = append(findings, healthyFinding("redis/node-mem-high", tierWarn, "node-mem-high", target))
-			findings = append(findings, healthyFinding("redis/node-mem-critical", tierPage, "node-mem-critical", target))
-		}
-
-		// skew: > 3x fleet median (3.1)
-		if medianUsed > 0 && n.usedBytes > 3*medianUsed {
-			findings = append(findings, finding{
-				probeId: "redis/mem-skew", tier: tierWarn,
-				class: "mem-skew", target: target, sustain: 1,
-				symptom:  fmt.Sprintf("redis node %d used memory %.2fG is %.1fx the fleet median %.2fG", n.port, gb(n.usedBytes), n.usedBytes/medianUsed, gb(medianUsed)),
-				baseline: "all nodes within ~2x of each other; skew = hot key family or un-drained pile (3.1 → 3.3 family histogram)",
-				observed: fmt.Sprintf("used=%.2fG median=%.2fG dataset=%.2fG clients=%.2fG", gb(n.usedBytes), gb(medianUsed), gb(n.datasetBytes), gb(n.clientsBytes)),
-				playbook: "SIGNALS.md 5.4",
-			})
-		} else {
-			findings = append(findings, healthyFinding("redis/mem-skew", tierWarn, "mem-skew", target))
-		}
-
-		// client buffers: > 25% of used or > 2G (3.2 — the pubsub-blowup tell)
-		if n.clientsBytes > 2e9 || (n.usedBytes > 0 && n.clientsBytes > 0.25*n.usedBytes) {
-			findings = append(findings, finding{
-				probeId: "redis/client-buffers", tier: tierWarn,
-				class: "client-buffers", target: target, sustain: 1,
-				symptom:  fmt.Sprintf("redis node %d client buffers %.2fG (%.0f%% of used) — output-buffer accumulation", n.port, gb(n.clientsBytes), 100*n.clientsBytes/n.usedBytes),
-				baseline: "used_memory_clients well under 25% of used_memory and under 2G; growth here = pubsub/slow consumers, not keys (3.2)",
-				observed: fmt.Sprintf("clients=%.2fG used=%.2fG dataset=%.2fG", gb(n.clientsBytes), gb(n.usedBytes), gb(n.datasetBytes)),
-				evidence: self.batteryEvidence("redis/client-buffers", "client-buffers/"+target, func() string {
-					return redisNodeBattery(ctx, env, n.port)
-				}),
-				playbook: "SIGNALS.md 5.5",
-			})
-		} else {
-			self.rearmBattery("redis/client-buffers", "client-buffers/"+target)
-			findings = append(findings, healthyFinding("redis/client-buffers", tierWarn, "client-buffers", target))
-		}
-
-		// connected_clients spike vs fleet median (3.5 approximation of the
-		// step-change rule until per-node history is kept)
-		if medianConnected > 0 && n.connectedClients > 3*medianConnected {
-			evidence := self.batteryEvidence("redis/clients-spike", "clients-spike/"+target, func() string {
-				return redisConnectionBattery(ctx, env, n.port)
-			})
-			diagnosis := diagnoseRedisConnectionSpike(evidence)
-			findings = append(findings, finding{
-				probeId: "redis/clients-spike", tier: tierWarn,
-				class: "clients-spike", target: target, sustain: 2,
-				symptom:   fmt.Sprintf("redis node %d connected_clients %.0f is %.1fx the fleet median %.0f", n.port, n.connectedClients, n.connectedClients/medianConnected, medianConnected),
-				mechanism: diagnosis.mechanism,
-				baseline:  "baseline ~pool_floor x processes, roughly uniform across nodes; +50% step in 10 min = reconnect storm or pool misconfig (3.5)",
-				observed:  fmt.Sprintf("connected=%.0f median=%.0f ratio=%.1fx", n.connectedClients, medianConnected, n.connectedClients/medianConnected),
-				evidence:  evidence,
-				context:   diagnosis.context,
-				action:    diagnosis.action,
-				verify:    diagnosis.verify,
-				playbook:  "SIGNALS.md 3.5",
-			})
-		} else {
-			self.rearmBattery("redis/clients-spike", "clients-spike/"+target)
-			findings = append(findings, healthyFinding("redis/clients-spike", tierWarn, "clients-spike", target))
 		}
 	}
-
-	if len(unreachablePorts) > 0 {
-		// per-node ping is the tier-0 probe's page; here just visibility
-		findings = append(findings, finding{
-			probeId: "redis/node-mem", tier: tierWarn,
-			class: "cannot-observe", target: h.name,
-			frame:    strings.Join(unreachablePorts, ","),
-			sustain:  2,
-			symptom:  fmt.Sprintf("INFO unavailable from %d node(s): %s", len(unreachablePorts), strings.Join(unreachablePorts, ",")),
-			observed: fmt.Sprintf("unreachable_ports=%s", strings.Join(unreachablePorts, ",")),
-			playbook: "SIGNALS.md 5.2",
-		})
-	}
-
-	return findings, nil
+	return healthyFinding("redis/host-capacity", tierPage, "redis-host-capacity", h.name)
 }
 
-// redisTopologyProbe is SIGNALS.md 3.6: phantom entries and replica count.
+// redisTopologyProbe is SIGNALS.md 3.6: phantom entries, replica count, and
+// the node inventory against the cluster's membership.
 type redisTopologyProbe struct{}
 
 func (self redisTopologyProbe) id() string             { return "redis/topology" }
@@ -591,7 +746,7 @@ func (self redisTopologyProbe) tier() string           { return tierWarn }
 func (self redisTopologyProbe) cadence() time.Duration { return time.Hour }
 
 func (self redisTopologyProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	h := env.cfg.hostByRole("redis-cluster")
+	h := env.cfg.redisEntryHost()
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
@@ -629,9 +784,10 @@ func (self redisTopologyProbe) check(ctx context.Context, env *probeEnv) ([]find
 		findings = append(findings, healthyFinding("redis/phantom-nodes", tierWarn, "phantom-nodes", h.name))
 	}
 
-	// replica-cover is armed by the inventory's explicit expected count. Zero
-	// remains today's documented dark state; once replicas are configured, a
-	// later loss becomes observable without a code change.
+	// replica-cover is armed by the inventory's explicit expected count, a
+	// cluster-wide setting read from the entry host. Zero remains today's
+	// documented dark state; once replicas are configured, a later loss
+	// becomes observable without a code change.
 	if env.baseline != nil {
 		env.baseline.record("redis/replica-count", time.Now(), float64(replicaCount))
 	}
@@ -651,5 +807,257 @@ func (self redisTopologyProbe) check(ctx context.Context, env *probeEnv) ([]find
 		findings = append(findings, healthyFinding("redis/replica-cover", tierWarn, "replica-cover", h.name))
 	}
 
+	findings = append(findings, redisNodeInventoryFindings(env.cfg, h, out)...)
 	return findings, nil
+}
+
+// redisClusterMember is one CLUSTER NODES entry that carries an address: the
+// IP it announces (empty if the node never learned one) and its client port.
+type redisClusterMember struct {
+	address string
+	port    int
+}
+
+// parseRedisClusterMembers reads the addressed members of a CLUSTER NODES
+// reply. Phantom entries (noaddr, or port 0) belong to the phantom check and
+// handshake entries have not joined, so neither is a member. A line without
+// the documented shape fails the whole read: a member it hid would otherwise
+// read as a configured node missing from the cluster.
+func parseRedisClusterMembers(out string) ([]redisClusterMember, error) {
+	members := []redisClusterMember{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent>
+		// <pong-recv> <config-epoch> <link-state> [<slot> ...]
+		if len(fields) < 8 {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES line has %d fields", len(fields))
+		}
+		flags := strings.Split(fields[2], ",")
+		if slices.Contains(flags, "noaddr") || slices.Contains(flags, "handshake") {
+			continue
+		}
+		address, _, _ := strings.Cut(fields[1], "@")
+		separator := strings.LastIndex(address, ":")
+		if separator < 0 {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES address without a port")
+		}
+		port, err := strconv.Atoi(address[separator+1:])
+		if err != nil || port < 0 || 65535 < port {
+			return nil, fmt.Errorf("invalid response: CLUSTER NODES address with an invalid port")
+		}
+		if port == 0 {
+			continue
+		}
+		members = append(members, redisClusterMember{address: redisInventoryAddress(address[:separator]), port: port})
+	}
+	return members, nil
+}
+
+// redisInventoryAddress compares numeric addresses by value.
+func redisInventoryAddress(address string) string {
+	address = strings.Trim(strings.TrimSpace(address), "[]")
+	if parsed, err := netip.ParseAddr(address); err == nil {
+		return parsed.Unmap().String()
+	}
+	return address
+}
+
+// redisPortRanges renders ports as sorted inclusive ranges, e.g. 6380-6411,6428.
+func redisPortRanges(ports []int) string {
+	sorted := slices.Compact(slices.Sorted(slices.Values(ports)))
+	if len(sorted) == 0 {
+		return "none"
+	}
+	ranges := []string{}
+	for start := 0; start < len(sorted); {
+		end := start
+		for end+1 < len(sorted) && sorted[end+1] == sorted[end]+1 {
+			end++
+		}
+		if start == end {
+			ranges = append(ranges, strconv.Itoa(sorted[start]))
+		} else {
+			ranges = append(ranges, fmt.Sprintf("%d-%d", sorted[start], sorted[end]))
+		}
+		start = end + 1
+	}
+	return strings.Join(ranges, ",")
+}
+
+// redisNodeInventoryFindings compares the cluster's membership, read through
+// the entry host, with the monitor.yml node inventory. Settings validation can
+// only check the inventory against itself, and two broken layouts pass it: a
+// host whose redis block is missing silently drops its nodes from every
+// per-node probe, and a node_ports range that covers another host's node
+// ports still answers on a host that bridges them (edge-6's nginx forwards
+// 6412-6427 to edge-5), so the other host's nodes are read as this host's.
+// The cluster is the authority: every member must announce the LAN address
+// (config settings.yml routes) of the redis-cluster host that lists its port,
+// and every listed port must be such a member.
+func redisNodeInventoryFindings(cfg *monitorConfig, entryHost *host, clusterNodes string) []finding {
+	members, err := parseRedisClusterMembers(clusterNodes)
+	if err == nil && len(members) == 0 {
+		err = fmt.Errorf("invalid response: CLUSTER NODES listed no addressed member")
+	}
+	if err != nil {
+		return []finding{cannotObserveFinding(entryHost.name+"/node-inventory", err)}
+	}
+
+	// Members are attributed by address. The redis-cluster hosts own their LAN
+	// addresses before any other inventory host, which only names an address.
+	redisHosts := cfg.hostsWithRole("redis-cluster")
+	addressHosts := map[string]*host{}
+	unknown := []finding{}
+	for _, h := range redisHosts {
+		address := redisInventoryAddress(h.lanIp)
+		if address == "" {
+			if 0 < len(h.redisNodePorts()) {
+				unattributed := cannotObserveFinding(h.name+"/node-inventory", fmt.Errorf("no LAN address"))
+				unattributed.symptom = fmt.Sprintf("The monitor cannot compare %s's Redis node inventory with CLUSTER NODES: the host has no LAN address in config settings.yml routes", h.name)
+				unattributed.action = "Restore the host's route in config/<env>/settings.yml (or its monitor.yml lan_ip), then rerun redis-topology."
+				unknown = append(unknown, unattributed)
+			}
+			continue
+		}
+		if owner, ok := addressHosts[address]; ok {
+			shared := cannotObserveFinding(h.name+"/node-inventory", fmt.Errorf("LAN address shared with %s", owner.name))
+			shared.symptom = fmt.Sprintf("The monitor cannot attribute Redis cluster members to %s: %s resolves to the same LAN address %s", h.name, owner.name, address)
+			shared.action = "Correct the routes in config/<env>/settings.yml (or the monitor.yml lan_ip overrides) so every redis-cluster host has its own LAN address, then rerun redis-topology."
+			unknown = append(unknown, shared)
+			continue
+		}
+		addressHosts[address] = h
+	}
+	if len(unknown) > 0 {
+		return unknown
+	}
+	for _, h := range cfg.hosts {
+		if address := redisInventoryAddress(h.lanIp); address != "" && addressHosts[address] == nil {
+			addressHosts[address] = h
+		}
+	}
+
+	memberPorts := map[string]map[int]bool{}
+	portAddresses := map[int][]string{}
+	addresses := []string{}
+	for _, member := range members {
+		if memberPorts[member.address] == nil {
+			memberPorts[member.address] = map[int]bool{}
+			addresses = append(addresses, member.address)
+		}
+		if !memberPorts[member.address][member.port] {
+			memberPorts[member.address][member.port] = true
+			portAddresses[member.port] = append(portAddresses[member.port], member.address)
+		}
+	}
+	sort.Strings(addresses)
+	addressName := func(address string) string {
+		if address == "" {
+			return "no address"
+		}
+		if owner := addressHosts[address]; owner != nil {
+			return address + " (" + owner.name + ")"
+		}
+		return address
+	}
+
+	findings := []finding{}
+	for _, h := range redisHosts {
+		address := redisInventoryAddress(h.lanIp)
+		if address == "" {
+			// lists no node port (or the comparison stopped above), and owns
+			// no address a member could announce
+			continue
+		}
+		configured := map[int]bool{}
+		for _, port := range h.redisNodePorts() {
+			configured[port] = true
+		}
+		missing := []int{}
+		elsewhere := map[string][]int{}
+		for port := range configured {
+			if memberPorts[address][port] {
+				continue
+			}
+			missing = append(missing, port)
+			for _, other := range portAddresses[port] {
+				elsewhere[other] = append(elsewhere[other], port)
+			}
+		}
+		unlisted := []int{}
+		for port := range memberPorts[address] {
+			if !configured[port] {
+				unlisted = append(unlisted, port)
+			}
+		}
+		if len(missing) == 0 && len(unlisted) == 0 {
+			findings = append(findings, healthyFinding("redis/node-inventory", tierWarn, "node-inventory-mismatch", h.name))
+			continue
+		}
+
+		clauses := []string{}
+		if 0 < len(unlisted) {
+			clauses = append(clauses, fmt.Sprintf("cluster members on port(s) %s announce its LAN address %s but are not in its redis.node_ports", redisPortRanges(unlisted), address))
+		}
+		if 0 < len(missing) {
+			clause := fmt.Sprintf("its redis.node_ports %s are not cluster members at its LAN address %s", redisPortRanges(missing), address)
+			otherAddresses := slices.Sorted(maps.Keys(elsewhere))
+			announced := []string{}
+			for _, other := range otherAddresses {
+				announced = append(announced, fmt.Sprintf("%s at %s", redisPortRanges(elsewhere[other]), addressName(other)))
+			}
+			if 0 < len(announced) {
+				clause += "; the cluster announces " + strings.Join(announced, " and ")
+			}
+			clauses = append(clauses, clause)
+		}
+		observed := fmt.Sprintf("host=%s lan_address=%s configured_node_ports=%s member_ports=%s unlisted_member_ports=%s missing_node_ports=%s",
+			h.name, address, redisPortRanges(h.redisNodePorts()), redisPortRanges(slices.Collect(maps.Keys(memberPorts[address]))), redisPortRanges(unlisted), redisPortRanges(missing))
+		for _, other := range slices.Sorted(maps.Keys(elsewhere)) {
+			observed += fmt.Sprintf(" missing_ports_announced_elsewhere=%s@%s", redisPortRanges(elsewhere[other]), other)
+		}
+		findings = append(findings, redisNodeInventoryMismatch(h.name,
+			fmt.Sprintf("Redis node inventory for %s disagrees with CLUSTER NODES: %s", h.name, strings.Join(clauses, "; ")),
+			observed))
+	}
+
+	// members at an address that no redis-cluster host owns
+	for _, address := range addresses {
+		owner := addressHosts[address]
+		if owner != nil && owner.hasRole("redis-cluster") {
+			continue
+		}
+		ports := slices.Collect(maps.Keys(memberPorts[address]))
+		target := address
+		symptom := fmt.Sprintf("CLUSTER NODES members on port(s) %s announce %s, which is no monitor.yml host's LAN address, so no per-node probe observes them", redisPortRanges(ports), address)
+		if address == "" {
+			target = "unannounced-address"
+			symptom = fmt.Sprintf("CLUSTER NODES members on port(s) %s announce no address, so no monitor.yml host can be matched to them", redisPortRanges(ports))
+		} else if owner != nil {
+			target = owner.name
+			symptom = fmt.Sprintf("CLUSTER NODES members on port(s) %s announce %s, the LAN address of %s, which monitor.yml does not give the redis-cluster role, so no per-node probe observes them", redisPortRanges(ports), address, owner.name)
+		}
+		findings = append(findings, redisNodeInventoryMismatch(target, symptom,
+			fmt.Sprintf("announced_address=%s member_ports=%s", addressName(address), redisPortRanges(ports))))
+	}
+	return findings
+}
+
+// redisNodeInventoryMismatch is one host's, or one unowned address's,
+// disagreement between monitor.yml and the cluster's membership.
+func redisNodeInventoryMismatch(target, symptom, observed string) finding {
+	return finding{
+		probeId: "redis/node-inventory", tier: tierWarn,
+		class: "node-inventory-mismatch", target: target, sustain: 1,
+		symptom:   symptom,
+		mechanism: "Per-node Redis probes sweep each redis-cluster host's monitor.yml node_ports over that host's loopback. A cluster member missing from the inventory is never observed for memory, keyspace, latency, or liveness. A listed port the host does not run either fails each sweep or, on a host that bridges other hosts' node ports, answers with another host's node, whose memory is then judged against this host's RAM and whose findings target this host.",
+		baseline:  "Every addressed CLUSTER NODES member (phantom and handshake entries excluded) announces the LAN address, from config settings.yml routes, of the redis-cluster host whose redis.node_ports lists its port, and every listed node port is such a member.",
+		observed:  observed,
+		action:    "Correct vault/<env>/monitor.yml so each redis-cluster host's redis.node_ports lists exactly the members announced at its LAN address. If the cluster itself is wrong (a node announcing the wrong address, a forgotten node, or an unfinished add-node), repair the cluster instead of widening the inventory.",
+		verify:    "redis-topology reports every member on the host that lists it, with no node-inventory-mismatch, and the per-node Redis signals cover every member on its own host.",
+		playbook:  "SIGNALS.md §3.6",
+	}
 }

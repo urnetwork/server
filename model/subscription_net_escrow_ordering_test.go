@@ -23,6 +23,19 @@ type netEscrowOrderingTestFixture struct {
 // eligibility match the production reservation path.
 func newNetEscrowOrderingTestFixture(t testing.TB, ctx context.Context) netEscrowOrderingTestFixture {
 	t.Helper()
+	f := addNetEscrowOrderingTestParties(ctx)
+	balances := GetActiveTransferBalances(ctx, f.sourceNetworkId)
+	if len(balances) != 1 {
+		t.Fatalf("payer balances = %d, want one", len(balances))
+	}
+	f.balanceId = balances[0].BalanceId
+	return f
+}
+
+// Both clients and the payer's one grant, without reading the grant back. The
+// active-balance reader selects columns that later migrations add, so a test
+// pinned to a historical schema reads the grant's id with SQL valid there.
+func addNetEscrowOrderingTestParties(ctx context.Context) netEscrowOrderingTestFixture {
 	f := netEscrowOrderingTestFixture{
 		sourceNetworkId: server.NewId(), sourceId: server.NewId(),
 		destinationNetworkId: server.NewId(), destinationId: server.NewId(),
@@ -30,11 +43,6 @@ func newNetEscrowOrderingTestFixture(t testing.TB, ctx context.Context) netEscro
 	testingCreatePaymentClient(ctx, f.sourceNetworkId, f.sourceId)
 	testingCreatePaymentClient(ctx, f.destinationNetworkId, f.destinationId)
 	AddBasicTransferBalance(ctx, f.sourceNetworkId, 1000, server.NowUtc(), server.NowUtc().Add(time.Hour))
-	balances := GetActiveTransferBalances(ctx, f.sourceNetworkId)
-	if len(balances) != 1 {
-		t.Fatalf("payer balances = %d, want one", len(balances))
-	}
-	f.balanceId = balances[0].BalanceId
 	return f
 }
 

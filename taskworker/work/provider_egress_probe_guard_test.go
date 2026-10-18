@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -334,6 +335,64 @@ func TestEgressHealthSiteLoadsJudgesEachLoadOnTheOtherSites(t *testing.T) {
 		if load.Healthy {
 			t.Errorf("a load of an unhealthy exit was tallied healthy: %+v", load)
 		}
+	}
+}
+
+// A run that reached no provider is tallied for no site: every URL of an
+// offline exit fails before any destination answers, which says nothing about
+// the sites. A run that reached its provider tallies its load whatever the
+// outcome, and in a longer run a site the reached exit could not resolve is a
+// failure of that site there.
+func TestEgressHealthSiteLoadsTalliesOnlyRunsThatReachedTheirProvider(t *testing.T) {
+	place := model.ProviderEgressPlace{CountryCode: "de"}
+	for _, stage := range egresshealth.NoContactFailureStages() {
+		if loads, runHealthy := egressHealthSiteLoads(testUrlPreResponseFailure(stage), place, nil, 0.9); len(loads) != 0 || runHealthy {
+			t.Errorf("a URL run that failed at %s tallied %+v (healthy %t), want nothing", stage, loads, runHealthy)
+		}
+	}
+	canary := testUrlPreResponseFailure("dial_dns")
+	canary.Checks[0].Canary = true
+	canary.Total, canary.ByClass = 0, nil
+	if loads, _ := egressHealthSiteLoads(canary, place, nil, 0.9); len(loads) != 0 {
+		t.Errorf("a canary that reached no provider was tallied: %+v", loads)
+	}
+	for _, run := range []*egresshealth.Result{
+		testUrlAnsweredFailure(http.StatusForbidden),
+		testUrlTlsAuthenticationFailure(),
+		testUrlPass(),
+	} {
+		check := run.Checks[0]
+		if loads, _ := egressHealthSiteLoads(run, place, nil, 0.9); len(loads) != 1 || loads[0].Name != check.Name || loads[0].Ok != check.Ok {
+			t.Errorf("a URL run that reached its provider (ok %t, stage %q) tallied %+v, want its one load", check.Ok, check.FailureStage, loads)
+		}
+	}
+
+	// the other sites answered, so the exit was reached
+	unresolved := testSiteLoadsRun("site-0")
+	unresolved.Checks[0].FailureStage = "dial_dns"
+	loads, runHealthy := egressHealthSiteLoads(unresolved, place, testHealthScoring(), 0.9)
+	if !runHealthy || len(loads) != 22 || loads[0].Name != "site-0" || loads[0].Ok || !loads[0].Healthy {
+		t.Fatalf("a reached exit tallied %d loads (healthy %t), want all 22 and the site it could not resolve failing on a healthy exit: %+v", len(loads), runHealthy, loads)
+	}
+
+	// every measured load, the canary's included, ended before any answer
+	offline := func(canaryAnswered bool) *egresshealth.Result {
+		run := testSiteLoadsRun()
+		for i := range run.Checks {
+			if !run.Checks[i].NotMeasured {
+				run.Checks[i].Ok, run.Checks[i].FailureStage = false, "dial_dns"
+			}
+			if canaryAnswered && run.Checks[i].Canary {
+				run.Checks[i].Ok, run.Checks[i].FailureStage = true, ""
+			}
+		}
+		return run
+	}
+	if loads, runHealthy := egressHealthSiteLoads(offline(false), place, testHealthScoring(), 0.9); len(loads) != 0 || runHealthy {
+		t.Errorf("an exit no load reached tallied %d loads (healthy %t), want none", len(loads), runHealthy)
+	}
+	if loads, _ := egressHealthSiteLoads(offline(true), place, testHealthScoring(), 0.9); len(loads) != 22 {
+		t.Errorf("an exit its canary reached tallied %d loads, want all 22", len(loads))
 	}
 }
 

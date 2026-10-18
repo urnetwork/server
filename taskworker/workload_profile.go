@@ -38,9 +38,14 @@ func (self WorkloadProfile) Validate() error {
 // InitTasksForProfile arms only the chosen workload. A subnet operator leaves
 // retained retail, external probing, and removed-target rows untouched; its
 // claim filter also covers jobs independently enqueued by API/controller calls.
+// Production then reaps retired rows, as a serving production worker does
+// after admission.
 func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 	if err := initTaskScheduleForProfile(ctx, profile); err != nil {
 		return err
+	}
+	if profile == WorkloadProfileProduction {
+		reapRetiredTasks(ctx)
 	}
 	controller.ApplyBlobRetention(ctx)
 	return nil
@@ -56,9 +61,11 @@ func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) er
 		initTaskSchedule(ctx)
 		return nil
 	}
-	// Match production's per-statement conflict handling for live queue rows;
-	// startup scheduling does not require a shared snapshot across tasks.
+	// Match production's per-statement conflict handling and statement bound
+	// for live queue rows; startup scheduling does not require a shared
+	// snapshot across tasks.
 	server.Tx(ctx, func(tx server.PgTx) {
+		boundStartupStatementsInTx(ctx, tx)
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		debitName := work.NewTransferDebitTaskTarget().TargetFunctionName()
@@ -74,6 +81,8 @@ func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) er
 		}
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
+	// After the commit, in its own bounded transactions.
+	startCloseExpiredContractsFreshPass(ctx)
 	return nil
 }
 
@@ -83,6 +92,8 @@ func InitTaskWorkerForProfile(ctx context.Context, settings *task.TaskWorkerSett
 	if err := profile.Validate(); err != nil {
 		return nil, err
 	}
+	// The settlement v2 driver's steps build ledgers with the server's builder.
+	controller.InstallStLedgerBuilder()
 	return initTaskWorkerWithSettings(ctx, settings, profile), nil
 }
 
@@ -125,10 +136,12 @@ func subnetOperatorTasks() []subnetOperatorTask {
 			work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		}},
 		{target: task.NewTaskTarget(work.RemoveExpiredAuthCodes), schedule: work.ScheduleRemoveExpiredAuthCodes},
-		{target: task.NewTaskTarget(work.MaintainNetworkSessions), schedule: work.ScheduleMaintainNetworkSessions},
+		{target: work.NewMaintainNetworkSessionsTaskTarget(), schedule: work.ScheduleMaintainNetworkSessions},
 		{target: work.NewStartupContractClosureTaskTarget(), schedule: work.ScheduleOpenContractClosuresOnStartup},
 		{target: work.NewScheduledContractClosureTaskTarget()},
-		{target: task.NewTaskTarget(work.CloseExpiredContracts), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
+		{target: work.NewContractDeadlineCloseTaskTarget(), schedule: work.ScheduleCloseContractDeadlines},
+		{target: work.NewScheduledContractCloseReapTaskTarget(), schedule: work.ScheduleReapScheduledContractCloses},
+		{target: work.NewCloseExpiredContractsTaskTarget(), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			for i := range work.DefaultCloseExpiredContractsBlockSize {
 				work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
 			}
@@ -139,6 +152,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		{target: model.NewLegacyNetEscrowMirrorTaskTarget()},
+		// Queued by a contract quarantine in its commit.
+		{target: model.NewQuarantineReservationReleaseTaskTarget()},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		// Drain a previously queued retired refresher; startup never seeds it.
 		{target: task.NewTaskTarget(work.RefreshContractHoles)},
@@ -170,6 +185,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveOldClientReliabilityStats), schedule: work.ScheduleRemoveOldClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientReliabilityStats), schedule: work.ScheduleRollupClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientDataUsage), schedule: work.ScheduleRollupClientDataUsage},
+		// creates contracts too; seeded only while degraded.yml enables it
+		{target: task.NewTaskTarget(work.CheckContractDegradation), schedule: work.ScheduleCheckContractDegradation},
 		{target: task.NewTaskTarget(work.UpdateClientReliabilityScores), schedule: work.ScheduleUpdateClientReliabilityScores},
 		{target: task.NewTaskTarget(work.RemoveOldProvideKeyChanges), schedule: work.ScheduleRemoveOldProvideKeyChanges},
 		{target: task.NewTaskTarget(work.UpdateNetworkReliabilityWindow), schedule: work.ScheduleUpdateNetworkReliabilityWindow},
@@ -191,5 +208,6 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.StCommitRoot)},
 		{target: task.NewTaskTarget(work.StDeposit)},
 		{target: task.NewTaskTarget(work.StFinalizePoke)},
+		{target: task.NewTaskTarget(work.StLedgerV2Step)},
 	}
 }

@@ -22,6 +22,11 @@ if ! "$network_test_gate" --verify-held run-all; then
 fi
 source "$script_dir/test-env.sh" || exit $?
 
+# Dashboard expressions use the official evaluator against synthetic series.
+# An explicit tool path keeps frozen/offline campaigns out of the installer.
+URNETWORK_PROMTOOL="$(bash "$script_dir/grafana/promtool.sh")" || exit $?
+export URNETWORK_PROMTOOL
+
 # Propagates a real output-filter failure before the upstream test status. A
 # filter that closes early otherwise turns the test process into a misleading
 # SIGPIPE exit and hides the component that actually failed.

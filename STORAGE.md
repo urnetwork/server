@@ -270,16 +270,42 @@ Storage tuning is not one-and-done — inflow and schema change. Each cycle:
    thrashing vacuum and raise `autovacuum_work_mem`.
 
 Cadence: snapshot monthly, and any time an alert fires on primary disk. The
-`bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze]`
+`bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze] [--include-large]`
 command drives the periodic REINDEX/ANALYZE rotation (`db_maintenance.go`);
 per-table autovacuum handles the between-maintenance reclamation. The recurring
 rotation must not full-table reindex `contract_close`, `transfer_escrow`,
-`transfer_contract`, `transfer_escrow_sweep`, or the partition-managed
-reliability/connection tables: their size or churn requires the targeted-index,
-partition-turnover, tuned-autovacuum, or one-time `pg_repack` strategies above.
-With cleanup enabled, maintenance removes inactive
-`_ccnew`/`_ccold` indexes (including associated TOAST indexes) before and after
-each rebuild so an interrupted attempt cannot accumulate numbered retry debris.
+`transfer_contract`, `transfer_escrow_sweep`, `network_client`, or the
+partition-managed reliability/connection tables: their size or churn requires
+the targeted-index, partition-turnover, tuned-autovacuum, or one-time
+`pg_repack` strategies above. Any other table above 16 GiB (heap, toast, and
+valid indexes) is cleanup-only unless an operator run passes `--include-large`.
+A rebuild starts only while no transaction in the database is 10 minutes old,
+no other index build is in progress, and fewer than 48 backends are running on
+cpu; otherwise the epoch is deferred to the next slot and continued there, as it
+is five minutes after a drain interrupts it. With cleanup enabled, maintenance
+drops an invalid `_ccnew`/`_ccold` index (including associated TOAST indexes)
+only when it is the copy of a valid index with the same definition, at the start
+of each run and before and after each rebuild (after a failed or canceled one on
+a bounded context detached from the canceled one), so an interrupted attempt
+cannot strand or accumulate numbered retry debris.
+
+The high-churn partial indexes of the skipped `transfer_contract` and
+`transfer_escrow` tables (`priorityReindexIndexes`: open, outcome-less,
+unresolved, reap-pending contracts and unsettled escrows) can be rebuilt one by
+one with `REINDEX INDEX CONCURRENTLY`. Their rows leave the predicate soon after
+insert while a few stay for days, so nearly every leaf page keeps a few live
+entries, vacuum can free none, and the index grows with its churn: on
+2026-10-12 they held about 310 GB beyond 55 GB of live entries. Each run
+measures every one against a compact size estimated from its entry count and
+column widths and logs it. Each rebuild reads its table's whole heap twice, so
+the rebuilds are off until `priority_reindex_enabled: true` is set in
+`db_maintenance.yml`, the maintenance pool's config resource, which the
+scheduled task and `bringyourctl db maintenance` read when a run starts. Once
+enabled, a run rebuilds before the table rotation, smallest first and at most
+three per run, those at least twice that estimate whose reclaimable bytes are
+at least 1% of the heap the rebuild reads twice. A priority rebuild starts
+behind, and waits out, transactions up to an hour old, since the payout and
+reliability transactions that defer the rotation run that long.
 
 ### Watch items carried out of 2026-07 (update as resolved)
 - [ ] `contract_close`, `transfer_contract`, `transfer_escrow`: one-time

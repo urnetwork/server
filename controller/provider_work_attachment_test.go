@@ -440,7 +440,7 @@ func providerWorkActualSdkPublication(t *testing.T, missingSessionOriginal, keep
 		if len(artifact.ClosedWork.WholeInventory.AttributionOriginals) != wantOriginals {
 			t.Fatal("actual publication omitted retained participant originals")
 		}
-		approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
+		approved, _, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
 		if err != nil || approved == nil {
 			t.Fatal(err)
 		}

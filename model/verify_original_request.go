@@ -46,18 +46,22 @@ func (self VerifyOriginalRequest) matches(body *VerifyOriginalBody) bool {
 func readVerifyOriginalRequest(ctx context.Context, conn server.PgCanQuery, request VerifyOriginalRequest) (retained *VerifyOriginalTransition) {
 	hash, err := request.Hash()
 	server.Raise(err)
-	rows, err := conn.Query(ctx, `SELECT t.original_body,t.original_signature FROM verify_original_request r JOIN verify_original_transition t USING(trail_id,previous_depth) WHERE r.request_hash=$1`, hash[:])
+	rows, err := conn.Query(ctx, `SELECT t.original_body,t.original_signature,COALESCE(seed.head_window,t.head_window,'')
+ FROM verify_original_request r JOIN verify_original_transition t USING(trail_id,previous_depth)
+ LEFT JOIN verify_original_transition seed ON seed.trail_id=t.trail_id AND seed.previous_depth=0
+ WHERE r.request_hash=$1`, hash[:])
 	server.WithPgResult(rows, err, func() {
 		if rows.Next() {
 			retained = &VerifyOriginalTransition{}
-			server.Raise(rows.Scan(&retained.Body, &retained.Signature))
+			server.Raise(rows.Scan(&retained.Body, &retained.Signature, &retained.HeadWindow))
 		}
 	})
 	if retained == nil {
 		scope, err := json.Marshal(request.Scope)
 		server.Raise(err)
-		rows, err = conn.Query(ctx, `SELECT t.original_body,t.original_signature FROM verify_original_request_lookup r
+		rows, err = conn.Query(ctx, `SELECT t.original_body,t.original_signature,COALESCE(seed.head_window,t.head_window,'') FROM verify_original_request_lookup r
    JOIN verify_original_transition t USING(trail_id,previous_depth)
+   LEFT JOIN verify_original_transition seed ON seed.trail_id=t.trail_id AND seed.previous_depth=0
    WHERE r.client_id=$1 AND sha256(r.request_message)=sha256($2::bytea) AND sha256(r.request_signature)=sha256($3::bytea)
    AND r.request_message=$2 AND r.request_signature=$3 AND r.scope_json=$4::jsonb
    ORDER BY r.trail_id,r.previous_depth LIMIT 2`, request.ClientId, request.Message, request.Signature, string(scope))
@@ -67,7 +71,7 @@ func readVerifyOriginalRequest(ctx context.Context, conn server.PgCanQuery, requ
 					panic(errors.New("verification original signed request has multiple retained trails"))
 				}
 				retained = &VerifyOriginalTransition{}
-				server.Raise(rows.Scan(&retained.Body, &retained.Signature))
+				server.Raise(rows.Scan(&retained.Body, &retained.Signature, &retained.HeadWindow))
 			}
 		})
 	}

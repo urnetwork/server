@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const reliabilitySQLPhaseCaseFormat = `CASE
@@ -875,7 +877,10 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				dbMaintenanceEvidence.str(12), dbMaintenanceEvidence.str(13), dbMaintenanceEvidence.str(14),
 				dbMaintenanceEvidence.str(15),
 			)
-			if strings.EqualFold(dbMaintenanceEvidence.str(0), "transfer_escrow") {
+			// A bloat-triggered rebuild of one transfer_escrow partial index is
+			// routine; only a rebuild of another index is the whole-table one.
+			if strings.EqualFold(dbMaintenanceEvidence.str(0), "transfer_escrow") &&
+				!server.IsDbMaintenancePriorityIndex(dbMaintenanceEvidence.str(1)) {
 				alert.mechanism = "The daily table rotation selected transfer_escrow for REINDEX TABLE CONCURRENTLY even though this is a very large, high-churn relation whose full rebuild cannot reliably fit the two-hour per-object policy. Extending the replacement relation and generating its WAL can saturate PostgreSQL long enough for Connect logins and unrelated tasks to time out; repeated interrupted attempts can leave numbered _ccnew debris."
 				alert.context += " The live progress row identifies the current bounded operation; reindex-debris independently identifies residue from earlier attempts. PgBouncer timeout symptoms are downstream queueing, not evidence that the pooler initiated the load."
 				alert.action = "Do not cancel or duplicate the protected in-progress rebuild. Deploy the taskworker maintenance revision that excludes transfer_escrow from full-table reindex and cleans incomplete indexes before and after every selected object. After the protected operation finishes, require explicit maintenance authorization before running the supported cleanup-only cycle."

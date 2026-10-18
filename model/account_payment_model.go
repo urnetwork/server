@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// "encoding/json"
@@ -85,8 +86,10 @@ type AccountPayment struct {
 	ReliabilitySubsidy        NanoCents `json:"reliability_subsidy_nano_cents"`
 	BonusPayout               NanoCents `json:"bonus_payout_nano_cents"`
 	AttributionReviewRequired bool      `json:"attribution_review_required"`
-	MinSweepTime              time.Time `json:"min_sweep_time"`
-	CreateTime                time.Time `json:"create_time"`
+	// a corrected replacement: the hidden legacy payment it replaces
+	ReplacesPaymentId *server.Id `json:"replaces_payment_id,omitempty"`
+	MinSweepTime      time.Time  `json:"min_sweep_time"`
+	CreateTime        time.Time  `json:"create_time"`
 
 	PaymentRecord        *string    `json:"payment_record"`
 	CircleIdempotencyKey *server.Id `json:"-"`
@@ -341,12 +344,13 @@ func GetOrCreatePaymentIdempotencyKey(ctx context.Context, paymentId server.Id) 
 		result, err := tx.Query(
 			ctx,
 			`
-	            UPDATE account_payment
+	            UPDATE account_payment p
 	            SET
 	                circle_idempotency_key = COALESCE(circle_idempotency_key, $2)
 	            WHERE
 	                payment_id = $1 AND
-	                NOT completed AND NOT canceled
+	                NOT completed AND NOT canceled AND
+	                NOT `+paymentPlanAssignmentPendingSql+`
 	            RETURNING circle_idempotency_key
 	        `,
 			paymentId,
@@ -382,6 +386,9 @@ type PaymentPlan struct {
 	RestoredLegacyPaymentCount   int
 	UnresolvedLegacyPaymentCount int
 	LegacyRecoveryScanLimit      int
+	// selected sweeps staged for the batched assignment when the plan
+	// committed; its payments become payable after the last batch
+	PendingSweepAssignmentCount int64
 }
 
 type SubsidyPayment struct {
@@ -424,10 +431,11 @@ func PlanPaymentsWithMaxDuration(ctx context.Context, maxDuration time.Duration)
 // maxDuration slices back to back until the payout frontier reaches now, so a
 // single command call catches up instead of requiring one invocation per slice.
 //
-// Each slice is planned and committed independently, so progress is durable: a
-// failure only loses the in-flight slice, and everything already committed stays
-// paid (the next call resumes from the advanced frontier). The shared 30-day
-// reliability inputs are refreshed once on the first slice rather than per slice.
+// Each slice commits in bounded steps (createPaymentPlanWithProgress), so
+// progress is durable: a failure only loses the step in flight, and everything
+// already committed stays (the next call resumes the slice's staged assignment
+// and then the advanced frontier). The shared 30-day reliability inputs are
+// refreshed once on the first slice rather than per slice.
 //
 // The loop stops when either:
 //   - a slice advances the frontier to at/after now — the backlog is fully
@@ -453,10 +461,61 @@ func PlanPaymentsWithMaxDurationLoop(
 	return PlanPaymentsWithMaxDurationLoopInTx(ctx, maxDuration, nil, onSlice)
 }
 
+// PaymentPlanProgressError is a drain error after this call committed durable
+// planning progress: a plan, a staged assignment batch, or a reliability chunk.
+// The next call resumes from that progress, so a caller may retry promptly.
+type PaymentPlanProgressError struct {
+	Err error
+}
+
+func (self *PaymentPlanProgressError) Error() string {
+	return self.Err.Error()
+}
+
+func (self *PaymentPlanProgressError) Unwrap() error {
+	return self.Err
+}
+
+// Committed planning progress, observed through a caller's context. Each
+// planning call with that context records its committed steps (a plan, a
+// staged assignment batch or its completion, or a reliability chunk) before it
+// returns or unwinds, so the caller can attribute them to a failure that
+// replaced the planner's own error, such as a panic or a task runner's
+// max-time wrapping. Safe for concurrent use.
+type PaymentPlanProgress struct {
+	committed atomic.Bool
+}
+
+type paymentPlanProgressKey struct{}
+
+// A child context whose payment planning records committed progress in the
+// returned observer.
+func WithPaymentPlanProgress(ctx context.Context) (context.Context, *PaymentPlanProgress) {
+	progress := &PaymentPlanProgress{}
+	return context.WithValue(ctx, paymentPlanProgressKey{}, progress), progress
+}
+
+// Whether a planning call with the observer's context committed progress.
+func (self *PaymentPlanProgress) Committed() bool {
+	return self != nil && self.committed.Load()
+}
+
+// Marks the observer in ctx, if any; a context without one records nothing.
+func notePaymentPlanProgress(ctx context.Context) {
+	if progress, ok := ctx.Value(paymentPlanProgressKey{}).(*PaymentPlanProgress); ok {
+		progress.committed.Store(true)
+	}
+}
+
 // The bounded drain of PlanPaymentsWithMaxDurationLoop, with writeInTx run in
 // each slice's transaction once the slice's plan is built: what it writes
 // commits with the slice or not at all (the payout run's held missing-wallet
 // notices).
+//
+// Each slice commits in bounded steps (createPaymentPlanWithProgress). A slice
+// whose plan committed is returned and passed to onSlice even when its staged
+// assignment was interrupted; that error is returned as a
+// PaymentPlanProgressError when this call committed any progress.
 func PlanPaymentsWithMaxDurationLoopInTx(
 	ctx context.Context,
 	maxDuration time.Duration,
@@ -471,29 +530,39 @@ func PlanPaymentsWithMaxDurationLoopInTx(
 	if transition != nil {
 		end = server.MinTime(end, transition.Cutoff)
 	}
-	if maxDuration <= 0 {
-		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, 0, true, writeInTx)
-		if err != nil {
-			return nil, err
-		}
-		if onSlice != nil {
-			onSlice(plan)
-		}
-		return []*PaymentPlan{plan}, nil
-	}
 
 	plans := []*PaymentPlan{}
+	committedProgress := false
+	finish := func(err error) ([]*PaymentPlan, error) {
+		if err != nil && committedProgress {
+			return plans, &PaymentPlanProgressError{Err: err}
+		}
+		return plans, err
+	}
+	planSlice := func(sliceDuration time.Duration, refreshReliabilityInputs bool) (*PaymentPlan, error) {
+		plan, progress, err := createPaymentPlanWithProgress(ctx, EnvSubsidyConfig(), false, sliceDuration, refreshReliabilityInputs, writeInTx)
+		committedProgress = committedProgress || progress
+		if plan != nil {
+			plans = append(plans, plan)
+			if onSlice != nil {
+				onSlice(plan)
+			}
+		}
+		return plan, err
+	}
+
+	if maxDuration <= 0 {
+		_, err := planSlice(0, true)
+		return finish(err)
+	}
+
 	var lastFrontier time.Time
 	for i := 0; ; i += 1 {
 		// refresh the shared reliability inputs only on the first slice; the
 		// window is the same for every slice in this drain.
-		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration, i == 0, writeInTx)
+		plan, err := planSlice(maxDuration, i == 0)
 		if err != nil {
-			return plans, err
-		}
-		plans = append(plans, plan)
-		if onSlice != nil {
-			onSlice(plan)
+			return finish(err)
 		}
 
 		// a slice that formed no subsidy epoch cannot advance the frontier, so
@@ -516,7 +585,7 @@ func PlanPaymentsWithMaxDurationLoopInTx(
 			break
 		}
 	}
-	return plans, nil
+	return finish(nil)
 }
 
 // PlanPaymentsDryRun computes a payment plan exactly like PlanPayments but
@@ -587,7 +656,28 @@ func SetPaymentRecord(
 	tokenAmount float64,
 	paymentRecord string,
 ) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	if paymentId == (server.Id{}) || len(paymentRecord) > 4096 {
+		return ErrProviderPaymentAttemptChanged
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(paymentId, "", "", paymentRecord), func(tx server.PgTx) {
+		returnErr = nil
+		current, err := dbGetPayment(ctx, tx, paymentId)
+		server.Raise(err)
+		if current == nil || !lockProviderPaymentAttempt(ctx, tx, current) ||
+			(paymentRecord != "" && providerPaymentRecordClaimedInTx(ctx, tx, paymentRecord, current)) {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if current.PaymentRecord != nil && *current.PaymentRecord != paymentRecord {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		if paymentRecord != "" && current.PaymentRecord == nil {
+			accepted := *current
+			accepted.PaymentRecord = &paymentRecord
+			accepted.TokenType, accepted.TokenAmount = &tokenType, &tokenAmount
+			retainProviderAttemptInTx(ctx, tx, &accepted, "RECORDED", "compatibility record binding")
+		}
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -622,7 +712,21 @@ func RemovePaymentRecord(
 	ctx context.Context,
 	paymentId server.Id,
 ) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	expected, err := GetPayment(ctx, paymentId)
+	if err != nil || expected == nil {
+		return ErrProviderPaymentAttemptChanged
+	}
+	record := ""
+	if expected.PaymentRecord != nil {
+		record = *expected.PaymentRecord
+	}
+	server.OwnedTx(ctx, providerPaymentAttributionKeys(paymentId, "", "", record), func(tx server.PgTx) {
+		returnErr = nil
+		if !lockProviderPaymentAttempt(ctx, tx, expected) || expected.TxHash != nil {
+			returnErr = ErrProviderPaymentAttemptChanged
+			return
+		}
+		retainProviderAttemptInTx(ctx, tx, expected, "REMOVED", "explicit pre-chain record removal")
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -726,6 +830,19 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
 		return fmt.Errorf("Invalid payment.")
 	}
 
+	creditCompletedPaymentAccountBalanceInTx(ctx, tx, paymentId)
+
+	// Contract retention is deliberately not fanned out here. A payment can
+	// own hundreds of thousands of sweeps, and updating every contract in the
+	// same transaction made recording an already-sent payment vulnerable to a
+	// statement timeout. contract_retention_pending is a durable queue bit;
+	// RemoveCompletedContracts advances the cursor in bounded transactions.
+	return nil
+}
+
+// Credits a just-completed payment to its network's paid totals. A payment
+// held for attribution review completes without a credit.
+func creditCompletedPaymentAccountBalanceInTx(ctx context.Context, tx server.PgTx, paymentId server.Id) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -748,13 +865,6 @@ func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.I
             `,
 		paymentId,
 	))
-
-	// Contract retention is deliberately not fanned out here. A payment can
-	// own hundreds of thousands of sweeps, and updating every contract in the
-	// same transaction made recording an already-sent payment vulnerable to a
-	// statement timeout. contract_retention_pending is a durable queue bit;
-	// RemoveCompletedContracts advances the cursor in bounded transactions.
-	return nil
 }
 
 // A planned payment that has never entered the Circle retry state and remains
@@ -767,7 +877,9 @@ const HungPaymentExpiration = 30 * 24 * time.Hour
 // can have happened. `circle_idempotency_key` is created before the external
 // call and `payment_record` is stored after it, so checking both closes the
 // crash/timeout window around that call. tx_hash is a final defensive marker
-// for legacy rows. Retry-state payments remain pending regardless of age.
+// for legacy rows. Retry-state payments remain pending regardless of age, and
+// so do payments of a plan whose staged sweep assignment is pending, whose
+// cancellation would release sweeps the plan still reserves.
 func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
 	minTime := maxTime.Add(-HungPaymentExpiration)
 	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
@@ -777,7 +889,7 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 		result, err := tx.Query(
 			ctx,
 			`
-			UPDATE account_payment
+			UPDATE account_payment p
 			SET
 				canceled = true,
 				cancel_time = $2
@@ -788,7 +900,8 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 				payment_record IS NULL AND
 				tx_hash IS NULL AND
 				(NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0)) AND
-				create_time < $1
+				create_time < $1 AND
+				NOT `+paymentPlanAssignmentPendingSql+`
 			RETURNING payment_id
 			`,
 			minTime,
@@ -808,8 +921,9 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 }
 
 // CancelPayment cancels a payment only while it is still known to be
-// unsubmitted. Retry-state payments must be resolved from Circle's terminal
-// status instead; CancelPaymentAfterProcessorCancellation handles CANCELLED.
+// unsubmitted and its plan's staged sweep assignment is complete. Retry-state
+// payments must be resolved from Circle's terminal status instead;
+// CancelPaymentAfterProcessorCancellation handles CANCELLED.
 func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
 	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
@@ -819,7 +933,7 @@ func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-                UPDATE account_payment
+                UPDATE account_payment p
                 SET
                     canceled = true,
                     cancel_time = $2
@@ -829,14 +943,15 @@ func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
                     circle_idempotency_key IS NULL AND
                     payment_record IS NULL AND
                     tx_hash IS NULL AND
-                    (NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0))
+                    (NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0)) AND
+                    NOT `+paymentPlanAssignmentPendingSql+`
             `,
 			paymentId,
 			server.NowUtc(),
 			policy != nil,
 		))
 		if tag.RowsAffected() != 1 {
-			returnErr = fmt.Errorf("payment retains submission or legacy subsidy/reliability; obligation was not canceled")
+			returnErr = fmt.Errorf("payment retains submission, legacy subsidy/reliability or a pending plan assignment; obligation was not canceled")
 			return
 		}
 	})
@@ -924,7 +1039,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.canceled,
                 account_payment.cancel_time,
 				account_wallet.wallet_address,
-				account_wallet.blockchain
+				account_wallet.blockchain,
+				`+legacyProviderPaymentReplacesSql("account_payment.payment_id")+` AS replaces_payment_id
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -932,6 +1048,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 
             WHERE
                 account_payment.network_id = $1 AND
+                -- a corrected legacy payment shows only as its replacement
+                NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+` AND
                 (
                     NOT account_payment.canceled OR
                     account_payment.payment_record IS NOT NULL OR
@@ -975,6 +1093,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.CancelTime,
 					&payment.WalletAddress,
 					&payment.Blockchain,
+					&payment.ReplacesPaymentId,
 				))
 
 				networkPayments = append(networkPayments, payment)
@@ -1004,7 +1123,10 @@ type TransferStats struct {
 // user's unpaid total stable if retention or repair removes some of the
 // payment's sweep rows. Canceled rows with processor evidence are reconciliation
 // anomalies rather than a second unpaid ledger: counting them after their sweeps
-// were reassigned would double-count the replacement payment.
+// were reassigned would double-count the replacement payment. While a plan's
+// staged sweep assignment is pending, its payments count only the sweeps
+// already assigned to them; the rest are still counted with their previous
+// owners.
 func GetTransferStats(
 	ctx context.Context,
 	networkId server.Id,
@@ -1048,12 +1170,28 @@ func GetTransferStats(
 
 				SELECT
 					0 AS paid_bytes_provided,
-					COALESCE(SUM(account_payment.payout_byte_count), 0) AS unpaid_bytes_provided
-				FROM account_payment
+					COALESCE(SUM(p.payout_byte_count), 0) AS unpaid_bytes_provided
+				FROM account_payment p
 				WHERE
-					account_payment.network_id = $1 AND
-					NOT account_payment.completed AND
-					NOT account_payment.canceled
+					p.network_id = $1 AND
+					NOT p.completed AND
+					NOT p.canceled AND
+					NOT `+paymentPlanAssignmentPendingSql+`
+
+				UNION ALL
+
+				SELECT
+					0 AS paid_bytes_provided,
+					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
+				FROM account_payment p
+				INNER JOIN transfer_escrow_sweep ON
+					transfer_escrow_sweep.network_id = p.network_id AND
+					transfer_escrow_sweep.payment_id = p.payment_id
+				WHERE
+					p.network_id = $1 AND
+					NOT p.completed AND
+					NOT p.canceled AND
+					`+paymentPlanAssignmentPendingSql+`
 
 				UNION ALL
 

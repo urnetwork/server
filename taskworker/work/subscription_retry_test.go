@@ -3,6 +3,7 @@ package work
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -130,6 +131,9 @@ func TestCloseExpiredVerifiedQuarantineKeepsTaskAndIdleCadence(t *testing.T) {
 
 // Both paths drive the real target/evaluator and persisted retry timestamps;
 // no wall-clock waiting or injected retry wrapper supplies the expected result.
+// The retry keeps every durable task field. Its arguments change only by the
+// pass's observed earliest pending deadline, which an accounting end of pass
+// retains (see TestCloseExpiredDeadlineAccountingEofRetainsHintAndFailure).
 func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, quarantineOrigin bool) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -182,7 +186,7 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 		var scheduledMetadata string
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `
-                SELECT task_id, jsonb_build_array(function_name, args_json, run_once_key,
+                SELECT task_id, jsonb_build_array(function_name, args_json::jsonb - 'next_expiration', run_once_key,
                     run_priority, run_max_time_seconds, client_address_hash,
                     client_address_port, client_by_jwt_json)::text
                 FROM pending_task WHERE function_name=$1
@@ -207,6 +211,16 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 				server.RaisePgResult(tx.Exec(ctx, `
                     UPDATE pending_task SET run_at=$2, release_time=$2, reschedule_error_count=$3 WHERE task_id=$1
                 `, taskId, time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC), 16+pass))
+			})
+			// The page observes every unresolved row's future deadline, the
+			// rows it closes in this pass included; derive it from stored state.
+			var observedExpiration *time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `
+                    SELECT min(COALESCE(expiration_time, create_time + interval '60 minutes'))
+                    FROM transfer_contract WHERE outcome IS NULL
+                    AND COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
+                `).Scan(&observedExpiration))
 			})
 			finished, rescheduled, posts, err := worker.EvalTasks(1)
 			if err != nil || len(finished) != 0 || len(posts) != 0 || len(rescheduled) != 1 || rescheduled[0] != taskId {
@@ -233,8 +247,8 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 			}
 			server.Db(ctx, func(conn server.PgConn) {
 				rows, err := conn.Query(ctx, `
-                    SELECT run_at, release_time, reschedule_error_count, reschedule_error,
-                        jsonb_build_array(function_name, args_json, run_once_key,
+                    SELECT run_at, release_time, reschedule_error_count, reschedule_error, args_json,
+                        jsonb_build_array(function_name, args_json::jsonb - 'next_expiration', run_once_key,
                             run_priority, run_max_time_seconds, client_address_hash,
                             client_address_port, client_by_jwt_json)::text
                     FROM pending_task WHERE task_id=$1
@@ -246,10 +260,15 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 					var runAt, releaseAt time.Time
 					var errorCount int
 					var storedError string
-					var currentMetadata string
-					server.Raise(rows.Scan(&runAt, &releaseAt, &errorCount, &storedError, &currentMetadata))
+					var rawArgs, currentMetadata string
+					server.Raise(rows.Scan(&runAt, &releaseAt, &errorCount, &storedError, &rawArgs, &currentMetadata))
 					if currentMetadata != scheduledMetadata {
 						t.Error("retry changed durable task arguments, key, priority, deadline or session metadata")
+					}
+					var args CloseExpiredContractsArgs
+					if json.Unmarshal([]byte(rawArgs), &args) != nil || (args.NextExpiration == nil) != (observedExpiration == nil) ||
+						observedExpiration != nil && !args.NextExpiration.Equal(*observedExpiration) {
+						t.Error("accounting retry did not retain exactly the pass's observed pending deadline", args.NextExpiration, observedExpiration)
 					}
 					if errorCount != 17+pass || !strings.Contains(storedError, "Escrow does not have enough value") || !strings.Contains(storedError, "contract remained non-final") {
 						t.Error("accounting error/count visibility was weakened")

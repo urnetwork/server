@@ -501,6 +501,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
+		ConnectionReconcileSettings: *DefaultConnectionReconcileSettings(),
 		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
 		ProviderIntentCheckSettings: *DefaultProviderIntentCheckSettings(),
 
@@ -509,11 +510,20 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// the sum across connections.
 		H3MaxStreamReceiveWindow:          0,
 		H3MaxTotalConnectionReceiveWindow: 0,
+		// A handshake is in flight for about one round trip, so outside a
+		// flood a client is rarely asked for a Retry.
+		H3MaxUnvalidatedHandshakeCount: 1024,
+
+		RefusalHoldTimeout:           defaultRefusalHoldTimeout,
+		RefusalHoldKeepaliveInterval: defaultRefusalHoldKeepaliveInterval,
+		RefusalHoldMaxCount:          defaultRefusalHoldMaxCount,
 	}
 }
 
 type ConnectHandlerSettings struct {
-	testingBeforeAuthorizationLease func(*session.ByJwt)
+	// Nil outside package tests. The before hook receives the context the
+	// lease runs under, so a test can order a cancellation before the lease.
+	testingBeforeAuthorizationLease func(context.Context, *session.ByJwt)
 	testingAfterAuthorizationLease  func(*session.ByJwt, *session.AuthorizationLease)
 	// Accepts the custom H1+ carrier (connect/H1PLUS.md) in addition to
 	// WebSocket. On by default; false opts out, and clients fall back to
@@ -557,17 +567,41 @@ type ConnectHandlerSettings struct {
 	// the sum of it. Zero grants every increase, which is what quic-go does
 	// with no callback at all.
 	H3MaxTotalConnectionReceiveWindow uint64
-	ConnectionAnnounceTimeout         time.Duration
+	// H3MaxUnvalidatedHandshakeCount bounds the handshakes this handler's QUIC
+	// listeners, its own and an external front's, hold at once for source
+	// addresses not yet validated, the only ones a spoofed source can start.
+	// Past it a new source must first answer a Retry, which costs it one round
+	// trip. Zero leaves them unbounded.
+	H3MaxUnvalidatedHandshakeCount int
+	ConnectionAnnounceTimeout      time.Duration
 	// per-connection latency/speed test schedule.
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
+	// the handler's reconcile of its connected rows with the connections its
+	// process holds (transport_announce_reconcile.go)
+	ConnectionReconcileSettings ConnectionReconcileSettings
 	ConnectionRateLimitSettings
 	// the check of connections that declare provide intent (provider_intent.go)
 	ProviderIntentCheckSettings ProviderIntentCheckSettings
+	// A WebSocket refused for its credential, whose client cannot read the
+	// authorization close, is held open this long before the close
+	// (transport_refusal_hold.go). Zero closes at once.
+	RefusalHoldTimeout time.Duration
+	// The keepalive of a held refusal, inside the 30 second read deadline of
+	// the clients it holds.
+	RefusalHoldKeepaliveInterval time.Duration
+	// The bound of the refusals held at once; past it a refusal closes at once.
+	RefusalHoldMaxCount int
 	// Tests replace only the configuration loader so initialization failure can
 	// be held before any listener goroutine exists.
 	transportTlsLoader func(*server.TransportTlsSettings) (*server.TransportTls, error)
+	// Nil outside package tests. The refusal hold's clock and tick, a call
+	// with each hold's outcome, and a call after each tick is served.
+	refusalHoldNowForTest    func() time.Time
+	refusalHoldTickForTest   <-chan time.Time
+	refusalHoldHeldForTest   func(outcome string)
+	refusalHoldTickedForTest func()
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
@@ -707,6 +741,82 @@ func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
 	return self.total
 }
 
+// connectQuicHandshakeLimit caps the handshakes a handler's QUIC listeners hold
+// at once for source addresses that are not validated.
+//
+// quic-go creates a connection for every Initial and keeps it until the
+// handshake completes or times out, and a spoofed source never completes one.
+// A connection from an unvalidated address is counted from its creation until
+// its handshake completes or it closes. At the maximum every new source must
+// first answer a Retry, which keeps no state here. Only a source that receives
+// packets at its address can return the Retry's token, and a connection with a
+// valid token is validated, so it is not counted. Each listener checks and
+// counts on its own goroutine, so the count can pass the maximum by one for
+// each listener after the first. A nil limit is the inert default: no callback
+// is installed.
+type connectQuicHandshakeLimit struct {
+	maximum int64
+	count   atomic.Int64
+}
+
+// Returns nil when no maximum is configured.
+func newConnectQuicHandshakeLimit(maximum int) *connectQuicHandshakeLimit {
+	if maximum <= 0 {
+		return nil
+	}
+	return &connectQuicHandshakeLimit{maximum: int64(maximum)}
+}
+
+// quic.Transport.VerifySourceAddress: true sends the source a Retry.
+func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
+	return self.maximum <= self.count.Load()
+}
+
+// quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
+// The returned context carries the release AwaitQuicHandshake runs once the
+// handshake completes; the close runs it otherwise, and only the first of the
+// two counts.
+func (self *connectQuicHandshakeLimit) connContext(
+	ctx context.Context,
+	info *quic.ClientInfo,
+) (context.Context, error) {
+	if info.AddrVerified {
+		return ctx, nil
+	}
+	self.count.Add(1)
+	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	release := func() {
+		if stop() {
+			self.count.Add(-1)
+		}
+	}
+	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
+}
+
+type connectQuicHandshakeReleaseKey struct{}
+
+// AwaitQuicHandshake returns once conn's handshake completes, or ctx's error or
+// the connection's close cause when either comes first. A listener accepts a
+// connection once its ClientHello is processed, when its address is only what
+// the Initial claimed, and a spoofed source never receives the server's flight
+// to complete the handshake. Every front calls this before it charges any limit
+// to the source's address. It also ends the connection's count under the
+// unvalidated-handshake limit; a connection the limit did not count carries no
+// release.
+func AwaitQuicHandshake(ctx context.Context, conn *quic.Conn) error {
+	select {
+	case <-conn.HandshakeComplete():
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-conn.Context().Done():
+		return context.Cause(conn.Context())
+	}
+	if release, ok := conn.Context().Value(connectQuicHandshakeReleaseKey{}).(func()); ok {
+		release()
+	}
+	return nil
+}
+
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
 func newConnectQuicConfig(
@@ -761,6 +871,9 @@ type ConnectHandler struct {
 	// One aggregate stands behind every front that terminates QUIC for this
 	// handler, including an external listener using NewQuicConfig.
 	quicWindowBudget *connectQuicWindowBudget
+	// So does one count of unvalidated handshakes, for an external listener
+	// using NewQuicTransport.
+	quicHandshakeLimit *connectQuicHandshakeLimit
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
@@ -772,6 +885,12 @@ type ConnectHandler struct {
 	activeCount int
 	activeZero  chan struct{}
 	closing     bool
+
+	// holds the rows of this handler's live connections and retires the rest
+	connectionReconcile *handlerConnectionReconcile
+
+	// holds the WebSocket refusals of clients that cannot read the close
+	refusalHold *connectRefusalHold
 }
 
 // ConnectHandlerPacketConns contains already-bound packet sockets for the QUIC
@@ -898,10 +1017,9 @@ func newConnectHandlerWithPacketConns(
 	cancelCtx, cancel := context.WithCancel(ctx)
 	packetEndpoints := connectHandlerPacketEndpoints(settings, packetConns)
 	activeZero := make(chan struct{})
-	activeCount := len(packetEndpoints)
-	if activeCount == 0 {
-		close(activeZero)
-	}
+	// The refusal worker owns hijacked sockets after their request returns.
+	// Reserve its lifecycle before launch, including an already-canceled parent.
+	activeCount := len(packetEndpoints) + 1
 	listenerStates := make(map[connectListenerKey]bool, len(packetEndpoints))
 	for _, endpoint := range packetEndpoints {
 		listenerStates[endpoint.key] = false
@@ -964,11 +1082,26 @@ func newConnectHandlerWithPacketConns(
 		quicWindowBudget: newConnectQuicWindowBudget(
 			settings.H3MaxTotalConnectionReceiveWindow,
 		),
+		quicHandshakeLimit: newConnectQuicHandshakeLimit(
+			settings.H3MaxUnvalidatedHandshakeCount,
+		),
 		activeCount: activeCount,
 		activeZero:  activeZero,
+		connectionReconcile: newHandlerConnectionReconcile(
+			cancelCtx,
+			handlerId,
+			&settings.ConnectionReconcileSettings,
+		),
 	}
+	h.refusalHold = newConnectRefusalHold(cancelCtx, exchange.IsDraining, settings)
 
 	go server.HandleError(h.run, cancel)
+	// the hold releases every socket it holds when it stops, so a failure of
+	// its own leaves serving untouched
+	go func() {
+		defer h.endHandle()
+		server.HandleError(h.refusalHold.run)
+	}()
 
 	return h, nil
 }
@@ -1238,7 +1371,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// A client that leaves ends handleCtx with errConnectRequestCanceled, so an
+	// attempt it abandoned is not counted as an outage or a deadline.
+	handleCtx, handleCancelCause := context.WithCancelCause(self.ctx)
+	handleCancel := func() { handleCancelCause(nil) }
 	// One deadline covers the initial frame, JWT/state/membership reads and
 	// upgrade response. Serving work retains handleCtx after successful auth.
 	authCtx, authCancel := context.WithTimeout(handleCtx, self.settings.ReadTimeout)
@@ -1268,6 +1404,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			h1Observation.close(connectH1CloseRequestCanceled)
+			handleCancelCause(errConnectRequestCanceled)
 		case <-handleCtx.Done():
 		}
 	})
@@ -1306,6 +1443,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
 	if authCtx.Err() != nil {
+		if connectRequestCanceled(authCtx) {
+			// the client left during the delay; no one reads an answer
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		h1Observation.result = connectH1ResultAuthDeadline
 		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
 		return
@@ -1439,9 +1581,23 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			authEcho = append([]byte(nil), authFrameBytes...)
 		}
 	}
-	rejectCustomAuth := func(status int) {
+	// A WebSocket refusal follows its 101, so a refusal of the credential
+	// itself closes it in band (transport_credential_refusal.go).
+	rejectAuth := func(status int, err error) {
+		if connectRequestCanceled(authCtx) {
+			// The departure canceled the step in flight, which then reports an
+			// unavailable dependency; from the lease even ErrAuthUnavailable,
+			// so only the cause tells. No one reads a response or completes
+			// the H1+ selection.
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		if authCtx.Err() != nil {
 			status = http.StatusServiceUnavailable
+		}
+		refused := connectCredentialRefused(status)
+		if refused {
+			countConnectCredentialRefusal(h1Observation.carrier, auth.AppVersion)
 		}
 		if custom {
 			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: status != http.StatusServiceUnavailable})
@@ -1450,11 +1606,24 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				message = "Service temporarily unavailable."
 			}
 			http.Error(w, message, status)
+			return
+		}
+		if refused && ws != nil {
+			code := connectCredentialRefusalCloseCode(err)
+			// a header-auth client without stream leases cannot read the close
+			// and redials at once; the hold takes the socket and closes it later
+			// (transport_refusal_hold.go)
+			if len(authEcho) == 0 && auth.StreamLeaseVersion == 0 && self.refusalHold.hold(ws, code) {
+				ws = nil
+				return
+			}
+			writeConnectAuthorizationClose(ws, code)
 		}
 	}
 
 	var byJwt *session.ByJwt
 	var instanceId server.Id
+	var authErr error
 	authStatus := connectH1AuthenticationStatus(authCtx, func() (int, error) {
 		// Auth failures are client-driven and unbounded in rate, so they are
 		// counted in the jwt package rather than logged per occurrence.
@@ -1465,6 +1634,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			if glog.V(1) {
 				glog.Infof("[t]auth jwt err = %s\n", err)
 			}
+			authErr = err
 			return http.StatusUnauthorized, err
 		}
 		if byJwt.ClientId == nil {
@@ -1482,13 +1652,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				glog.Infof("[t]inactive auth jwt: %s\n", err)
 			}
 		}
+		authErr = err
 		return status, err
 	})
 	if authStatus != 0 {
 		if authStatus == http.StatusServiceUnavailable {
 			h1Observation.result = connectH1ResultAuthDependency
 		}
-		rejectCustomAuth(authStatus)
+		rejectAuth(authStatus, authErr)
 		return
 	}
 	clientId := *byJwt.ClientId
@@ -1512,12 +1683,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		_ = session.RetireConnectionAuthority(ctx, clientId, connectionId)
 	}()
 	if self.settings.testingBeforeAuthorizationLease != nil {
-		self.settings.testingBeforeAuthorizationLease(byJwt)
+		self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 	}
-	lease, leaseErr := session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-		authorizationCloseCode.Store(int32(code))
-		handleCancel()
-	})
+	// the lease's final check before admission is one of the handshake's queries
+	lease, leaseErr := session.StartConnectionAuthorizationLease(
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+			authorizationCloseCode.Store(int32(code))
+			handleCancel()
+		})
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -1525,7 +1698,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 			h1Observation.result = connectH1ResultAuthDependency
 		}
-		rejectCustomAuth(status)
+		rejectAuth(status, leaseErr)
 		return
 	}
 	if self.settings.testingAfterAuthorizationLease != nil {
@@ -1542,6 +1715,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	observation.Cancel()
 
 	if custom {
+		if connectRequestCanceled(authCtx) {
+			// a departure after authorization: write no 101 and record no
+			// selection for an upgrade the client left
+			h1Observation.result = connectH1ResultClientCanceled
+			return
+		}
 		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
 		if upgradeErr != nil {
@@ -1566,6 +1745,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	if authCtx.Err() != nil {
 		h1Observation.result = connectH1ResultAuthDeadline
+		if connectRequestCanceled(authCtx) {
+			h1Observation.result = connectH1ResultClientCanceled
+		}
 		return
 	}
 	// Retire the authentication timer before publishing serving ownership.
@@ -1623,7 +1805,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		announce := NewConnectionAnnounceWithIpFamily(
+		announce := newConnectionAnnounceWithReconcile(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
@@ -1632,6 +1814,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			ipFamilyIntent,
 			auth.AppVersion,
 			self.handlerId,
+			self.connectionReconcile,
 			announceTimeout,
 			testConfig,
 			&self.settings.ConnectionAnnounceSettings,
@@ -1741,12 +1924,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.MessagePoolReturn(message)
 						continue
 					}
-					// during a speed test, count all incoming bytes (both
-					// the client's echoed chunks and any user traffic the
-					// client is concurrently sending) toward the throughput
-					// total. user traffic continues to flow rather than being
-					// dropped — speed test runs in parallel.
-					if speedTest != nil {
+					// during a speed test only the test's echoed probes count.
+					// The client also echoes the user frames written between
+					// the probes, and keeps sending its own; every frame still
+					// continues to the resident, so the test runs in parallel.
+					if speedTest != nil && isSpeedTestProbe(message, speedTest.TestId) {
 						speedTest.TotalByteCount += model.ByteCount(len(message))
 					}
 
@@ -1851,7 +2033,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// user packets aren't blocked. mirrors the client-side behavior.
 			var speedTestId uint32
 			speedTestChunksRemaining := 0
-			chunk := make([]byte, 1024)
+			chunk := make([]byte, speedTestProbeByteCount)
 
 			// reusable ping timer (hot-path timer reuse): the slow select arms a
 			// timer each iteration user traffic is briefly idle between bursts.
@@ -1876,6 +2058,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 					mathrand.Read(chunk)
+					setSpeedTestProbeHeader(chunk, speedTestId)
 					chunkCopy := connect.MessagePoolCopy(chunk)
 					if write(chunkCopy, true) != nil {
 						return
@@ -1948,8 +2131,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					// client should echo control values and packets in speed test mode.
 					// after starting, the writer interleaves chunk writes with
 					// user traffic above so user packets aren't blocked. on the
-					// reader side, all bytes received during the test (chunks +
-					// user) count toward the throughput total.
+					// reader side, only the echoed probes of the test count
+					// toward its total.
 
 					if announce.SendSpeed(speedTest) {
 						startMessage := connect.MessagePoolGet(5)
@@ -2098,11 +2281,7 @@ func (self *ConnectHandler) listenQuic(
 		return &connectListenerError{stage: "transform", err: err}
 	}
 	defer packetConn.Close()
-	quicTransport := &quic.Transport{
-		Conn: packetConn,
-		// createdConn: true,
-		// isSingleUse: true,
-	}
+	quicTransport := self.NewQuicTransport(packetConn)
 	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
 	if err != nil {
@@ -2178,6 +2357,18 @@ func (self *ConnectHandler) TransportTls() *server.TransportTls {
 // handler must not build a second, drifting one.
 func (self *ConnectHandler) NewQuicConfig() *quic.Config {
 	return newConnectQuicConfig(self.settings, self.quicWindowBudget)
+}
+
+// NewQuicTransport returns a QUIC transport on conn whose handshakes count
+// against this handler's unvalidated-handshake limit. An external listener for
+// the same handler must not build an unbounded one.
+func (self *ConnectHandler) NewQuicTransport(conn net.PacketConn) *quic.Transport {
+	transport := &quic.Transport{Conn: conn}
+	if limit := self.quicHandshakeLimit; limit != nil {
+		transport.VerifySourceAddress = limit.verifySourceAddress
+		transport.ConnContext = limit.connContext
+	}
+	return transport
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to
@@ -2320,6 +2511,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return fmt.Errorf("Only IPv4 is supported.")
 	}
 
+	// Admission charges the source's counters only after the handshake proves
+	// the source receives packets at its address. Data the client sent in
+	// 0-RTT waits in the connection's receive window until then.
+	if err := AwaitQuicHandshake(authCtx, conn); err != nil {
+		return err
+	}
+
 	rateLimit, err := NewConnectionRateLimit(
 		authCtx,
 		clientAddress,
@@ -2359,6 +2557,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	provideIntent := false
 	useH3Datagrams := false
 	connectionRegistered := false
+	// set only when the credential itself was refused, not a check failed
+	var refusalErr error
+	refusalAppVersion := ""
 	defer func() {
 		if lease != nil {
 			lease.Close()
@@ -2372,6 +2573,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		stream,
 		time.Until(authDeadline),
 		func(auth *protocol.Auth, authFrameBytes []byte) error {
+			refused := func(err error) error {
+				refusalErr = err
+				refusalAppVersion = auth.AppVersion
+				return err
+			}
 			var authErr error
 			byJwt, authErr = session.ParseByJwtForAudience(
 				authCtx,
@@ -2379,14 +2585,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				session.ByJwtAudienceConnect,
 			)
 			if authErr != nil {
-				return authErr
+				return refused(authErr)
 			}
 			if byJwt.ClientId == nil {
-				return fmt.Errorf("Missing client id.")
+				return refused(fmt.Errorf("Missing client id."))
 			}
-			instanceId, _, authErr = connectClientAuthentication(
+			var authStatus int
+			instanceId, authStatus, authErr = connectClientAuthentication(
 				session.WithStateQuerySource(authCtx, session.StateQueryConnectH3), byJwt, auth.InstanceId)
 			if authErr != nil {
+				if connectCredentialRefused(authStatus) {
+					return refused(authErr)
+				}
 				return authErr
 			}
 			clientId = *byJwt.ClientId
@@ -2405,13 +2615,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			connectionRegistered = true
 			var leaseErr error
 			if self.settings.testingBeforeAuthorizationLease != nil {
-				self.settings.testingBeforeAuthorizationLease(byJwt)
+				self.settings.testingBeforeAuthorizationLease(handleCtx, byJwt)
 			}
-			lease, leaseErr = session.StartConnectionAuthorizationLease(handleCtx, byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
-				handleCancel()
-			})
+			// the lease's final check before admission is one of the handshake's queries
+			lease, leaseErr = session.StartConnectionAuthorizationLease(
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
+					_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+					handleCancel()
+				})
 			if leaseErr != nil {
+				if !connectAuthDependencyUnavailable(leaseErr) {
+					return refused(leaseErr)
+				}
 				return leaseErr
 			}
 			connectionState := conn.ConnectionState()
@@ -2440,6 +2655,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		},
 	)
 	if err != nil {
+		// a refusal past the auth deadline is a deadline, as on h1
+		if refusalErr != nil && authCtx.Err() == nil {
+			countConnectCredentialRefusal(connectTransportH3, refusalAppVersion)
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(connectCredentialRefusalCloseCode(refusalErr)), "authorization refused")
+		}
 		return err
 	}
 	if authCtx.Err() != nil {
@@ -2498,7 +2718,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 		}
 
-		announce := NewConnectionAnnounceWithIpFamily(
+		announce := newConnectionAnnounceWithReconcile(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
@@ -2507,6 +2727,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			ipFamilyIntent,
 			appVersion,
 			self.handlerId,
+			self.connectionReconcile,
 			announceTimeout,
 			V0TestConfig(),
 			&self.settings.ConnectionAnnounceSettings,

@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"time"
@@ -225,8 +227,8 @@ func recoverProviderBoundaryObservation(ctx context.Context, returnErr *error) {
 	}
 }
 
-// Called explicitly by db migrate --sn-schedule-sha256. Same-boundary replay is
-// idempotent; INSERT ON CONFLICT never updates an existing earning generation.
+// Prepares only from sn.yml bytes with the expected digest. Same-boundary replay
+// is idempotent; INSERT ON CONFLICT never updates an existing earning generation.
 func PrepareProviderPayoutBoundary(ctx context.Context, expectedConfigSha256 string) (binding *ProviderEarningBoundary, returnErr error) {
 	defer recoverProviderBoundaryObservation(ctx, &returnErr)
 	policy, err := LoadProviderPayoutTransition(ctx)
@@ -270,6 +272,62 @@ func prepareProviderPayoutBoundary(ctx context.Context, policy *ProviderPayoutTr
 		return nil, returnErr
 	}
 	return binding, nil
+}
+
+// Ordinary db migrate runs this after its migrations; no option selects it. An
+// existing boundary is returned unchanged without reading sn.yml, so a later
+// schedule edit never fails a migration: the row keeps its initial digest and
+// workers still compare earning identity on use. A missing boundary is prepared
+// once from the loaded schedule, under the same insert-only conflict refusal;
+// an unreadable or invalid schedule is an error. Without a schedule (local or
+// test environments without sn) nothing is prepared.
+func EnsureProviderPayoutBoundary(ctx context.Context) (binding *ProviderEarningBoundary, prepared bool, returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			binding, prepared = nil, false
+		}
+	}()
+	defer recoverProviderBoundaryObservation(ctx, &returnErr)
+	if ctx == nil {
+		return nil, false, errors.New("provider boundary preparation requires context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	Db(ctx, func(conn PgConn) {
+		// Migrations have run, so the boundary schema must be present.
+		if _, returnErr = requireProviderPayoutBoundarySchema(ctx, conn, true); returnErr == nil {
+			binding, returnErr = readProviderPayoutBoundary(ctx, conn)
+		}
+	})
+	if returnErr != nil || binding != nil {
+		return binding, false, returnErr
+	}
+	policy, err := LoadProviderPayoutTransition(ctx)
+	if err != nil || policy == nil {
+		return nil, false, err
+	}
+	binding, err = prepareProviderPayoutBoundary(ctx, policy, policy.ConfigSha256)
+	if err != nil {
+		return nil, false, err
+	}
+	return binding, true, nil
+}
+
+// The migrate commands' confirmation: one line of public digests, the cutoff and
+// the preparation time. A short write is an error, so a lost line is not success.
+func WriteProviderEarningBoundary(output io.Writer, binding *ProviderEarningBoundary, prepared bool) error {
+	state := "Retained"
+	if prepared {
+		state = "Prepared"
+	}
+	line := fmt.Sprintf("%s provider earning boundary: cutoff_utc=%s identity_sha256=%s initial_config_sha256=%s prepared_at=%s\n",
+		state, binding.CutoffUtc, binding.IdentitySha256, binding.InitialConfigSha256, binding.PreparedAt.UTC().Format(time.RFC3339Nano))
+	written, err := io.WriteString(output, line)
+	if err == nil && written != len(line) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 // No worker path prepares a missing binding. Configuration removal also refuses

@@ -93,7 +93,8 @@ func TestUrlProbeDueHundredThousandProviders(t *testing.T) {
 	})
 }
 
-// Bulk fixture setup is outside every timed claim or census.
+// Bulk fixture setup is outside every timed claim or census. Each provider has
+// a passing witness lookback score, the current history URL admission requires.
 func testingSeedUrlProbeFleet(t testing.TB, now time.Time, count int) {
 	t.Helper()
 	ctx := t.Context()
@@ -107,9 +108,12 @@ func testingSeedUrlProbeFleet(t testing.TB, now time.Time, count int) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location_reliability
 			(client_id,network_id,update_block_number,country_location_id,client_address_hash_count,location_count,connected)
 			SELECT client_id,$1,1,$2,1,1,true FROM network_client`, networkId, city.CountryLocationId))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score
+			(client_id,lookback_index,independent_reliability_score,independent_reliability_weight,reliability_score,reliability_weight)
+			SELECT client_id,$1,1,1,1,1 FROM network_client`, providerReliabilityWitnessLookbackIndex))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at,eligible)
 			SELECT client_id,$1,$1,true FROM network_client`, now))
-		for _, table := range []string{"network_client", "provide_key", "network_client_location_reliability", "provider_egress_probe_cycle"} {
+		for _, table := range []string{"network_client", "provide_key", "network_client_location_reliability", "client_connection_reliability_score", "provider_egress_probe_cycle"} {
 			server.RaisePgResult(tx.Exec(ctx, "ANALYZE "+table))
 		}
 	})

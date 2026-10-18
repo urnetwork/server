@@ -19,7 +19,8 @@ import (
 
 // A 128-row failing prefix exceeds one error graph budget before a healthy
 // expired tail. The production 256-row boundary must persist on the same failed
-// task, reach the tail next, and revisit every unresolved row on the next pass.
+// task at the scan cadence, not in backoff, reach the tail next, and revisit
+// every unresolved row on the next pass.
 func TestCloseExpiredManyOperationalVisitsKeepFailureAndReachNextRawPage(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -80,7 +81,7 @@ func TestCloseExpiredManyOperationalVisitsKeepFailureAndReachNextRawPage(t *test
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		server.Tx(ctx, func(tx server.PgTx) { ScheduleCloseExpiredContracts(owner, tx, 0, false) })
-		target := task.NewTaskTargetWithPost(CloseExpiredContracts, CloseExpiredContractsPost)
+		target := NewCloseExpiredContractsTaskTarget()
 		readId := func() (id server.Id) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$1`, target.TargetFunctionName()).Scan(&id))
@@ -139,8 +140,8 @@ func TestCloseExpiredManyOperationalVisitsKeepFailureAndReachNextRawPage(t *test
 			t.Fatal("real many-row checkpoint suppressed its failure metrics", failed, succeeded, causes)
 		}
 		if errorCount != 17 || !strings.Contains(diagnostic, "synthetic task proof failure") || metadata != originalMetadata ||
-			delay < 30*time.Minute || 90*time.Minute+2*time.Second <= delay || len(task.GetFinishedTasks(ctx, id)) != 0 {
-			t.Fatal("raw progress changed failure visibility, ordinary backoff, identity or success history", errorCount, delay)
+			delay < 2*time.Second || 4*time.Second <= delay || len(task.GetFinishedTasks(ctx, id)) != 0 {
+			t.Fatal("raw progress changed failure visibility, continuation cadence, identity or success history", errorCount, delay)
 		}
 		if _, terminal := model.GetContractClose(ctx, tail); terminal {
 			t.Fatal("first failed raw page crossed its 256-row boundary")

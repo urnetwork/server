@@ -159,6 +159,33 @@ The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
 stall, client-deadline, and PgBouncer replacement chain.
+Updated 2026-10-12 after two MinIO incidents the monitor had no probe for. On
+2026-10-11 edge-6's shared `/mnt/data` reached MinIO's free-space floor and
+every Loki, Mimir and blob write returned 507 `XMinioStorageFull`, leaving the
+Mimir bucket index stale. On 2026-10-12 a 400GiB hard quota applied to a loki
+bucket holding about 673GiB rejected Loki's chunk flushes. §11.6a adds the
+`minio-storage` probe (drive free space against MinIO's floor, offline drives,
+bucket usage against hard quotas, S3 error rates), and §11.6 now records
+MinIO's move to edge-5's four-drive erasure set.
+Updated 2026-10-13 after the 2026-10-12/13 Main outage. Whole-database freezes
+of 2–7 s, WAL fdatasyncs queued behind dm-crypt writeback bursts on edge-2,
+tipped most of its 32 PgBouncer pools into a livelock: with the 120 s default
+`query_wait_timeout`, each new server went to a queued client that had already
+hung up, so the pools kept thousands of waiting clients and no server.
+Instance restarts ended the first episode; runtime PgBouncer timeout cuts ended
+the recurrence. The same day a certificate rollout rotated the JWT signing key
+and a Redis rebalance silently dropped the proxies' sharded subscriptions. New
+entries: §2.2b whole-database freezes, §2.4a canceled autovacuums and
+wraparound progress, §2.4b database disk runway, §2.11a PgBouncer pool
+starvation (exporter and Grafana rules), §3.6a sharded pub/sub subscriber
+loss, §5.12 freeze-to-livelock playbook, §5.13 planned primary restart, §6
+item 9 (operator-side probe false alarms), §8.14b database-host memory, §18.2a
+JWT signing-key rotation and §23.3 H1 session closes by carrier and app
+version. §1.3a, §1.3b, §2.2, §2.7, §2.16, §5.1, §8.14, §9.1, §18.2 and the §7
+tables gained matching qualifiers or cross-references. §2.11 and the §4
+`pgbouncer-query-wait` row now name the handoff livelock as a cause of a
+login-only queue, §12.2 and §13.4 correct the readiness check they describe,
+and §11.20 and §11.21 record the decision to zero Mimir's store horizons.
 
 Historical evidence reviewed 2026-10-16: the
 [October outage postmortem](../../factury/postmortem/2026-10-10.md) and its
@@ -205,8 +232,14 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
+| 2.2b | Coverage gap | A duration-log freeze detector is missing: `wait-events` and `pg-query-sample` sample far more slowly than a 2–7 s stall, and `host-load` reads five-minute I/O wait. |
+| 2.4a | Coverage gap | Detection of canceled autovacuum passes and of anti-wraparound age is missing: `vacuum-health` reports dead tuples, current vacuum progress and the MVCC horizon, not relfrozenxid age or a discarded pass. |
+| 2.4b | Coverage gap | A free-space runway check for the database host's root filesystem is missing: `host-load` reads load, CPU and available memory only, and `vacuum-health` measures neither growth nor temp spill. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
+| 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
+| 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -217,6 +250,8 @@ active missing capability and must not be read as green.
 | 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
 | 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
+| 5.12 | Runbook | `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters and pool starvation come from §2.2b and §2.11a evidence outside the monitor |
+| 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
 | 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
@@ -224,6 +259,7 @@ active missing capability and must not be read as green.
 | 8.4 | Runbook | `provenance`, `rollout-guard`; a deploy annotation is not an alert |
 | 8.5 | Shared contract | `reboot-collision`, `rollout-guard`, `hostpower` |
 | 8.6 | Shared contract | `provenance`, `rollout-guard`, `connection-rate`, `log-errors` |
+| 8.14b | Coverage gap | Per-NUMA-node memory, page-table and huge-page signals are missing: `host-load` reads aggregate MemAvailable only, and `host-pressure` reads CPU pressure. |
 | 10.1 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `key-publication` |
 | 10.2 | Shared contract | `rollout-guard`, `log-errors`, `connection-rate` |
 | 10.3 | Shared contract | `reliability-drift`, `selection-freshness`, `connection-rate` |
@@ -233,12 +269,12 @@ active missing capability and must not be read as green.
 | 11.3 | Runbook | `grafana-node`, `log-errors` |
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
-| 11.6 | Shared contract | `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -270,6 +306,7 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
+| 18.2a | Coverage gap | A JWT signature-rejection alert is missing: `tls-expiry` proves public certificate validity, not which key versions signers and verifiers hold, and `log-errors` never sees rejection detail, which is logged only at verbosity 1. |
 | 22.1 | Coverage gap | `subnet-coverage` reports missing finalized chain, deployment, policy, and governance readers |
 | 22.2 | Coverage gap | `subnet-coverage` reports missing pool, validator, fleet, and commitment readers |
 | 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
@@ -280,6 +317,7 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+| 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -386,6 +424,42 @@ lifecycle event, not loss of production visibility, and must not emit a
 `monitor/visibility` alert. Cadence mode enforces each alert's consecutive-tick
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
+
+An empty gated tick is therefore not evidence of absence. After a one-tick
+dip the gate holds a returning alert for `Sustain - 1` more ticks, and it
+holds a failed run's two-cadence `cannot-observe` alert on its first failure,
+so either tick reaches a consumer with no gated alerts. A consumer that tracks
+incidents across ticks takes the run loop's `SignalExecution`, which also
+carries the held alerts and whether the run failed: a held alert is still
+observed, and a failed run or one with an unobservable alert, gated or held,
+is incomplete. The Slack notifier (MONITOR.md §3.6) clears an incident only
+after two complete ticks in which nothing observed it. Healthy control: one
+dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
+complete ticks without the alert post one clear.
+
+An unknown state is unobservable whatever signal reports it.
+`alert_classes.go` classifies every alert class as visibility, an unknown
+state reported in place of an incident, or incident, and
+`TestEveryAlertClassIsClassified` fails for a class the table leaves out,
+including one a signal computes, which the test lists with every class it can
+take. The classes `cannot-observe` and `*-unobservable` are always
+visibility, and the probe id `monitor/visibility` is reserved for unknown
+states. The classification errs toward visibility: over-marking only delays a
+signal's other clears while the state lasts, but under-marking lets an
+incident clear because its signal could not see it. A class whose findings
+are unknown only in some states stays an incident, and those findings set
+their `unobservable` field, as the host-scope partial finding of a run with
+blocked hosts and the proxy public path without an allocation do. An Alert
+built directly sets the alert's marker exactly when its class is visibility,
+as the provider, crash-report and settings-generation visibility alerts do,
+and the test checks it. Accept filters let unobservable findings through,
+because a probe shared by several signals that loses part of its source has
+lost it for each of them. Deterministic controls: a redis node's PAGE is
+kept, not cleared and raised again, while its INFO times out for two runs; a
+pg-cpu PAGE is kept while its database host does not answer for two runs; and
+a configured host exclusion without blocked hosts, which settings freshness
+reports every run, leaves the run complete.
+
 
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
@@ -1722,6 +1796,17 @@ current-main commits `908a8b2c` and `d8392c83`; pool tuning is not the root
 fix. Those commits have the same stable patch IDs as the former `7676014f`
 and `abfd976b` hashes from before main was rewritten.
 
+The 2026-10-12 pool collapse had the opposite shape. Most PgBouncer pools held
+no server at all (§2.11a), so
+`sum(pg_stat_database_numbackends{job="postgres",datname="bringyour"})`,
+normally 710–770, fell to about 157 within 30 seconds of the 21:10Z recurrence:
+far inside this probe's healthy band. False-negative qualifier: normal-role
+headroom does not clear the pooler path. Backends collapsing while clients
+queue is the livelock page `postgres-application-backends-collapsed` (§2.11a),
+not freed capacity. That postgres-exporter series also holds its last value
+while PostgreSQL is down (it read 721 throughout a full stop), so it cannot
+show that PostgreSQL is serving; use a direct 5432 read.
+
 ### 1.3b PgBouncer idle-backend retention
 Probe: `pool-retention`
 
@@ -1846,6 +1931,17 @@ control rejects the probe's former unconditional “with idle draining disabled�
 diagnosis for a young cohort while retaining the warning as an early reserve-
 pressure detector. The ten-minute §1.3a headroom gate remains the full closure
 criterion.
+
+This probe watches only the retained-reserve side. On 2026-10-12 the reverse
+failure emptied the pools: idle loopback backends fell with the backend total
+(§1.3a) while hundreds to more than a thousand clients waited in each stuck
+pool, and nothing here alerts on that shape; §2.11a does. The incident also
+changed the live PgBouncer settings to read beside `server_idle_timeout`:
+`query_wait_timeout=10`, `server_connect_timeout=5` and `server_login_retry=1`
+(set at runtime on 10-12, persistent in xops `b02d4cf`), and
+`log_connections=0` (xops `29ba747`). Check them in `SHOW CONFIG` on every
+instance; a reload that restores the 120-second default queue wait reopens the
+livelock window.
 
 ### 1.3c PostgreSQL CPU consumption
 Probe: `pg-cpu`
@@ -2573,9 +2669,10 @@ Probe: `redis-rates`
 
 The Redis dashboard and alerts must also respect the collection cadence. Since
 2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
-seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
-to one minute, which contains fewer than two samples and makes counter-derived
-panels look empty even while all gauges and raw exporter counters are healthy.
+seconds, and since 2026-10-12 edge-5 its 16 from 93 to 108 seconds, to avoid a
+remote-write burst. Grafana can resolve `$__rate_interval` to one minute, which
+contains fewer than two samples and makes counter-derived panels look empty
+even while all gauges and raw exporter counters are healthy.
 On 2026-09-07, main returned 32 current series for each of
 `redis_commands_processed_total`, `redis_evicted_keys_total`, and
 `redis_expired_keys_total`, but `count(rate(...[1m]))` returned no value while
@@ -4679,6 +4776,15 @@ max_wal_size — a forced checkpoint every < 5 min melted main earlier this
 month). `IPC:MessageQueueReceive` = counted client backends waiting to receive
 messages. `Client:ClientRead` on active = server waiting on client mid-protocol.
 
+`LWLock:WALInsert`/`LWLock:WALWrite` pile-ups of 100–482 backends that are all
+released in the same millisecond are the whole-database freeze of §2.2b, not
+checkpoint pressure: on 2026-10-12 checkpoint syncs took 0.12–1.03 s while the
+WAL fdatasync queued behind dm-crypt writeback bursts. False-negative
+qualifier: five-minute snapshots with a five-backend count guard and a
+one-minute age guard cannot see a 2–7 s freeze, so the absence of
+`wait-event-cluster` is no evidence against one; use §2.2b's duration-log
+clusters.
+
 For `IPC:MessageQueueReceive`, this probe counts only client backends;
 parallel-worker rows are excluded by its `backend_type='client backend'`
 filter. Parallel workers are a possible dependency, not counted identities.
@@ -5284,6 +5390,135 @@ maintenance alert may classify the structural blocker phase, but it must use
 the sibling target/marker diagnostic to explain why a full anchor exists and
 must never infer the predecessor's phase from a cleanup error.
 
+### 2.2b Whole-database freezes — release clusters in the duration log
+
+A whole-database freeze stalls every writer for seconds and then releases them
+together. PostgreSQL logs each statement of at least 1 s when it ends
+(`log_min_duration_statement` 1 s), so a freeze appears as hundreds of slow
+statements whose end times fall within milliseconds of each other. On edge-2
+the log is `/var/log/postgresql/postgresql-18-main.log`, readable by `by`
+through the `adm` group. Mimir's 15-second samples miss sub-second bursts, so
+freeze detection must come from this log, not from Mimir.
+
+Reduce on the host, read-only. The reduction prints only timestamps and
+durations, never statement text:
+
+```bash
+tail -c 40000000 /var/log/postgresql/postgresql-18-main.log \
+  | awk '{ if (match($0, /LOG:  duration: [0-9.]+ ms/)) print $1, $2, "UTC [0] " substr($0, RSTART, RLENGTH) }'
+```
+
+Cluster the reduced lines off-host: sort by end time, chain lines whose gaps
+are at most 100 ms, keep chains of at least N statements, and report each
+chain's first end time, size and median duration. The incident's reducer was a
+private script (`freeze_report.py`), not a checked-in tool; this rule is its
+whole contract.
+
+- MEASURES: a freeze cluster is N or more statements of 1 s or more whose end
+  times are chained within 100 ms; its length is their median duration.
+  N = 250 is a freeze; N = 100 and N = 50 count smaller events.
+- ALERT (proposed; no probe or rule implements it): any freeze of 3 s or more,
+  or two or more of 2 s or more within 15 minutes.
+- REFERENCE: on 10-12 there were 12–38 freezes an hour, with 3 s or more at
+  13:24, 16:18, 16:34 (7.2 s), 17:40, 19:06, 19:11, 19:28, 19:36 and 21:10Z;
+  the 19:36Z and 21:10Z freezes started the PgBouncer livelocks (§2.11a). With
+  the pools' 10/5/1 timeouts in place but before any storage fix, 21:30Z–00:10Z
+  had 7.5 freezes an hour at N = 250, none of 3 s or more, the longest 2.45 s,
+  and the pools rode out the 22:40Z one without collapsing. After the first
+  two fixes below, freezes of 3 s or more returned on 10-13 at 05:12–05:57Z,
+  including the 05:22Z one below, while four unthrottled vacuums ran and the
+  2 MB vacuum ring forced WAL flushes; the two vacuum settings below followed.
+- HEALTHY: no cluster meets the alert rule. Smaller clusters still occur under
+  heavy vacuum load (10-13 01:28–02:10Z: up to 20 clusters of 100 or more per
+  15 minutes, the longest 1.9 s, no pool collapse) and are not alerts by
+  themselves.
+
+Mechanism, observed live on 10-12:
+
+- Dirty page cache was written back only at the 30 s age; the 10%
+  `dirty_background_ratio` (about 85 GB) was never reached, so writeback came
+  in 1–3 GB bursts.
+- A burst queued 10k–45k requests in dm-crypt's single write queue
+  (`dmcrypt_write`) while the disk itself answered in 1–2 ms. The WAL
+  fdatasync waited behind it.
+- `wal_writer_delay` 10 s and `wal_writer_flush_after` 2 GB left the WAL
+  writer nearly idle; autovacuum workers issued 114–129 WAL fdatasyncs/s.
+- 16 MB of `wal_buffers` is 0.25 s of WAL at 65 MB/s, so the buffers filled.
+  100–482 backends then waited on `LWLock:WALInsert` and `LWLock:WALWrite` and
+  were released in the same millisecond.
+- At 21:10Z Dirty rose from 0.89 to 3.18 GB and then flushed in about 4.9 s;
+  the freeze was 4.4 s.
+- Relation-extension amplification: at 10-13 05:22Z, after a 2.4 s global
+  stall, the extension lock on `transfer_escrow_pkey` was held for up to
+  13.5 s, stretching the freeze to 8.6–14 s.
+
+Host signals on edge-2 (`host="by-us-fmt-5-edge-2"`):
+
+- `node_memory_Dirty_bytes`: capped around 0.5 GB since
+  `vm.dirty_background_bytes`; before it, peaks reached 1.6–5.4 GB.
+- `node_disk_io_now{device="dm-0"}` in-flight, read against `sda`. A burst is
+  a 15 s sample over 10k; sustained (over 10k for 30 s or more) was never seen.
+- dm-0 write latency,
+  `rate(node_disk_write_time_seconds_total{device="dm-0"}[1m]) / rate(node_disk_writes_completed_total{device="dm-0"}[1m])`:
+  10–40 ms normally, 109–111 ms near saturation. Caution: the dm-0 write-time
+  counter wraps (32-bit milliseconds in kernel 5.15 diskstats), so check the
+  raw counter before trusting an outlier interval.
+- `pg_stat_wal.wal_buffers_full` rate: 167/s on the 10-12 evening,
+  3,300–4,700/s in bursts, 0 after the fixes.
+- WAL fdatasyncs by process, sampled from `/proc` I/O counters: WAL writer
+  versus autovacuum versus client backends.
+- A root-only 1 Hz sampler of `/proc/<pid>/stack` for D-state tasks
+  (read-only, through ansible become) caught `dmcrypt_write` in
+  `rq_qos_wait < wbt_wait < blk_mq_submit_bio` in 15% of seconds: sda
+  writeback throttling (`wbt_lat_usec` 75000, rotational=1, mq-deadline), a
+  candidate to disable that was not applied. It also caught jbd2 in D state
+  and the WAL writer waiting on WAL page writeback.
+
+PgBouncer couples to the freeze. It logs synchronously to the same root ext4,
+so during a stall each of the 32 processes freezes at its next log write, and
+all resume within 6 ms of each other. At 10-12 22:40:18.758Z that produced a
+same-millisecond login burst on every instance. PostgreSQL then logs
+`incomplete message from client` (LOG) and
+`expected SASL response, got message type 88` (FATAL): type 88 is Terminate,
+PgBouncer's `server_connect_timeout` cutting logins that stalled. PgBouncer
+`log_connections=0` (xops `29ba747`) removed most of those log writes.
+
+Fixes and their live times on 2026-10-13 (reloads unless noted):
+
+- `vm.dirty_background_bytes` 512 MB: 00:20:45Z.
+- `wal_writer_delay` 200 ms and `wal_writer_flush_after` 1 MB: 01:05:41Z.
+  Autovacuum WAL fdatasyncs fell from 58 to 7/s and `wal_buffers_full` to 0;
+  the crash-loss window for asynchronous commits shrank from about 30 s to
+  about 0.6 s.
+- `wal_buffers` 128 MB: restart, 06:48:49Z.
+- `maintenance_io_concurrency` 1000 → 64: 07:07:52Z.
+- `vacuum_buffer_usage_limit` 2 MB → 256 MB: 07:25:58Z. Autovacuum WAL
+  fdatasyncs went from 25/s to 0: with a 2 MB ring, a dirtied buffer came
+  round before the WAL writer had flushed its WAL, forcing `XLogFlush`.
+- Pending: `backend_flush_after` 256 kB (xops `f6080d4`, held) and huge pages
+  (§8.14b).
+
+Ruled out with evidence: checkpoint sync (0.12–1.03 s), online discard (none),
+large unlinks (PostgreSQL 18 truncates segments at commit, and 50 GB partition
+drops caused no freeze) and lock pile-ups (most stalled statements had no lock
+wait).
+
+False-positive qualifier: slow statements from one heavy query or one lock
+queue can cluster without a freeze. A freeze releases unrelated statements in
+one 100 ms chain, mostly without lock waits; confirm that a cluster spans
+unrelated relations before calling it whole-database. One relation's
+extension-lock queue can stretch a freeze, but it can also queue on its own.
+The healthy control is the 10-12 21:30Z–00:10Z window above. False-negative
+qualifier: statements under 1 s are not logged, so stalls of 0.4–1.2 s that
+still piled 100–266 backends on WAL locks after the first fix leave no cluster
+here. A capped `tail -c` window or log rotation hides older clusters, and a
+missing or unreadable log is unknown, not zero freezes. The five-minute
+wait-event probe and the 15-minute query sampler (§2.2, §2.1a) cannot recover
+a freeze that falls between their frames.
+
+ACTION: follow §5.12. A freeze that starts a pool collapse is a PgBouncer
+incident first: restore the pools, then attribute and tune the storage path.
+
 ### 2.3 Planner-flip detection
 Probe: `planner-flips`
 
@@ -5570,6 +5805,103 @@ retention writer was active, and a full close cohort was still running. The
 remaining close backlog and fresh writer churn therefore did not retroactively
 make the completed vacuum stuck. Keep the bounded writer/close fixes and use
 the new vacuum's consecutive progress samples as the next cleanup check.
+
+### 2.4a Canceled autovacuum and anti-wraparound progress
+
+The Taskworker's daily maintenance rotation (`db_maintenance.go`) runs
+`VACUUM (ANALYZE) pending_task`, a database-wide `ANALYZE` and
+`REINDEX TABLE CONCURRENTLY` on rotated tables. Each queues for its table's
+`ShareUpdateExclusiveLock`. After `deadlock_timeout` (1 s) PostgreSQL cancels a
+non-wraparound autovacuum that holds that lock, and the pass's work is
+discarded. The 2026-10-13 log shows `canceling autovacuum task` at 03:01,
+04:06:59 and 07:11:59–07:12:12Z; at 07:12Z it discarded transfer_contract's
+vacuum at heap block 51.2M of 62.7M.
+
+```sql
+SELECT c.relname, age(c.relfrozenxid) AS xid_age,
+       p.phase, p.heap_blks_scanned, p.heap_blks_total,
+       p.indexes_processed, p.indexes_total
+FROM pg_class c
+LEFT JOIN pg_stat_progress_vacuum p ON p.relid = c.oid
+WHERE c.relkind IN ('r', 't')
+ORDER BY age(c.relfrozenxid) DESC
+LIMIT 10;
+```
+
+- SIGNALS: the PostgreSQL log line `canceling autovacuum task`;
+  `pg_stat_progress_vacuum` phase and `heap_blks_scanned` resetting on the
+  same relation; `last_autovacuum` not advancing on big tables.
+- ANTI-WRAPAROUND PROGRESS: `age(relfrozenxid)` per table against
+  `autovacuum_freeze_max_age` (200M) and the vacuum failsafe (1.6B), and the
+  running pass's `indexes_processed` of `indexes_total`. On 10-12/13
+  transfer_contract reached about 285M. Its anti-wraparound vacuum ran from
+  about 19:35Z to 04:06:45Z (30,712 s, 138 GB of WAL, 57M full-page images).
+- HEALTHY: big-table passes complete and `last_autovacuum` advances; no
+  cancellation outside deliberate maintenance; every table stays under
+  `autovacuum_freeze_max_age`, or its anti-wraparound pass is advancing.
+- ALERT (proposed; no probe implements it): a cancellation that discards a
+  big table's pass in its index or late heap phase, or a table past
+  `autovacuum_freeze_max_age` with no advancing anti-wraparound pass.
+
+False-positive qualifier: canceling an autovacuum is ordinary PostgreSQL
+behavior when a conflicting lock queues, and a cancellation on a small table
+whose next pass completes is not a fault. Anti-wraparound passes are not
+canceled this way; the maintenance statement waits behind them instead.
+False-negative qualifier: `vacuum-health` samples every five minutes and shows
+only the current pass, so a cancellation followed by a fresh pass on the same
+table looks like ordinary progress unless `heap_blks_scanned` is compared
+across samples, and `last_autovacuum` moves only on completion. The log line is
+the authority; an unreadable or rotated log leaves cancellations unknown.
+
+ACTION: a `SKIP_LOCKED` fix for the maintenance statements is in preparation.
+Until it ships, let a progressing anti-wraparound vacuum finish (§2.4) and do
+not start manual `VACUUM`, `ANALYZE` or `REINDEX` on a table whose autovacuum
+is deep into a pass.
+
+### 2.4b Database disk runway — growth, temp spill and WAL
+
+PostgreSQL's data, WAL and temp files share edge-2's root filesystem, so its
+free space is the database's runway:
+`node_filesystem_avail_bytes{host="by-us-fmt-5-edge-2",mountpoint="/"}`.
+
+- MEASURES: hours of runway, the time until free space reaches the 100 GB
+  safety line the incident used, at the net decline rate.
+- ALERT (proposed; no probe implements it): a runway shorter than the lead
+  time to add storage or free space. The two-day runway of 10-12 already
+  needed owner action.
+- 2026-10-12/13 BASELINE: the decline was 10–18 GB/h. Relation growth ran
+  about 11 GB/h by `pg_database_size_bytes`. Hourly dips of 6–14 GB with
+  partial recovery came from the `export_stats` device-series query, which
+  spilled about 7.5 GB of temp per run (pg_stat_statements
+  `temp_blks_written`); server `e1956f13` removes that spill.
+- ATTRIBUTION, read-only: `pg_relation_size` snapshots 20 minutes apart
+  (transfer_contract heap, transfer_debit_journal indexes and
+  transfer_escrow_sweep led the growth); `pg_ls_tmpdir()` for temp files;
+  `pg_ls_waldir()` for WAL (about 50 GB).
+- UNITS TRAP: `df -BG` prints GiB, while Mimir values divided by 1e9 are GB:
+  392 GiB is 421 GB.
+- A long anti-wraparound vacuum delays space reuse on its table (§2.4a), so
+  growth slows after it finishes.
+
+```sql
+SELECT count(*) AS temp_files, coalesce(sum(size), 0) AS temp_bytes
+FROM pg_ls_tmpdir();
+SELECT count(*) AS wal_files, coalesce(sum(size), 0) AS wal_bytes
+FROM pg_ls_waldir();
+```
+
+False-positive qualifier: an hourly dip that recovers within the hour is a
+temp spill, not growth; fit the trend through the recovered points or net out
+`pg_ls_tmpdir()`. A decline measured while a long anti-wraparound vacuum holds
+back space reuse overstates growth. The healthy control: with spills netted
+out, the decline matches relation growth (about 11 GB/h on 10-12/13).
+False-negative qualifier: WAL retained for a lagging consumer such as a
+replication slot grows outside relation size, so read `pg_ls_waldir()` with
+the trend. A missing filesystem series is unknown, not free space, and no
+monitor probe watches this filesystem (§8.14 reads CPU, load and memory).
+
+ACTION: remove avoidable spill and growth at their source (`e1956f13` for the
+export). Storage additions and retention changes are owner decisions.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -6266,6 +6598,40 @@ those controlled distributions, not a universal two-page or elapsed-time bound
 over arbitrary payer counts, missing registrations, held owners or scheduler
 capacity. Schema readiness, current worker adoption and a fresh same-cohort
 outcome/reservation witness remain separate Main gates.
+
+#### Legacy drain: owner registration, payer claims and head revisits
+
+On 2026-10-10 the Main drain was bounded by three separate stages, none of
+them the chronological due head. The shard tasks only dispatch: every sampled
+`FlushLegacySettlements` result had `visited=0`. Settlement runs in one
+`ApplyLegacyPayerSettlements` task per payer, so one dense payer cannot hold
+another payer's turn. Busy outcomes were 8 of 18,946 visits.
+
+1. Owner registration. A TABLESAMPLE of about 40,000 intents found 88% with
+   neither `payer_network_id` nor `source_client_id`; payer and source
+   discovery cannot see those rows until registration classifies them.
+   Resolving a sample of them found two thirds belonging to ordinary payers.
+   Registration ran about 220 rows per second: one page per shard per
+   dispatcher turn, with each shard's turn claimed about every 18 seconds.
+   Read the rate from the sum of `dispatch.registered` over recent
+   `FlushLegacySettlements` results, not from table counters.
+2. Payer task claims. 3,747 payer tasks were due and the median claim delay,
+   `run_start_time - run_at` over recent finished payer tasks, was 2.7 hours.
+   With N registered functions, each got one lane turn per 2N claims, and the
+   older queued close backlog took every global claim.
+3. Head revisits of a dense payer. The head payer's turns each settled one
+   contract while `timings.selection` took about 14 of their 15 seconds. The
+   head revisit bounded its interval only by a row comparison on
+   `(next_attempt_time, contract_id)`, next to plain due-time bounds. PostgreSQL
+   ends the index scan on the plain bound and filters the row comparison, so a
+   revisit with no head left read the payer's whole remaining due range in
+   every shard: 138,153 buffers and 26.5 seconds cold on Main. The revisit now
+   also bounds `next_attempt_time` by its interval's end and read 70 buffers.
+
+Before blaming contention for a slow drain, sample registration state, the
+payer claim delay, and the selection versus financial split in payer
+`timings`. A deadline close of the same contract also deletes its intent in
+its own financial transaction; table delete rates mix both owners.
 
 ### 2.5c Contract progress evidence — selection, commit and projection
 
@@ -7499,6 +7865,58 @@ deterministic later-successor test locks both invariants. This approximately
 process-local load sensitivity; it is not permission to erase the timeout or
 raise its deadline.
 
+### 2.6b Contract degradation valve — zero contract cost
+
+`model/network_degradation_model.go`. While `config/<env>/degraded.yml` sets
+`enabled: true`, the taskworker's run-once `CheckContractDegradation` task
+runs every 15 minutes. It counts contracts created in the last 60 minutes
+(`transfer_contract_create_time`) and contracts that reached a terminal
+outcome in the last 60 minutes (`transfer_contract_closed_usage`). One check
+with `close_count < 0.7 × open_count` publishes `zero_cost=true` in the Redis
+key `network_degradation:zero_contract_cost:v1`. Charging resumes only on the
+second consecutive healthy check (`close_count >= 0.7 × open_count`, or no
+creations). The key has a one hour TTL (four checks), so a stopped or
+disabled task, a missing or malformed key, or a Redis error all close the
+valve.
+
+Active still deducts first. Every public and companion contract, probe
+shards included, escrows against its payer as usual, shrink-to-fit
+included, while the payer has anything left. Only when escrow admission
+finds the payer's balance exhausted (a complete grant census below the
+shrink floor) is that contract created free instead of refused with
+InsufficientBalance: no `transfer_escrow` rows, no payer, no balance
+reserved or debited, and **provider payouts are zero for those
+contracts**. They settle through the no-escrow path with no sweep, debit,
+provider totals or points; only the payment-independent subnet usage
+snapshot is kept, as for network-mode traffic. Per-client data caps and the
+acceptance-test drain still refuse, and free traffic does not advance a
+data cap. The valve never changes an existing contract; it decides only how
+an exhausted payer's new contract is funded.
+
+- `urnetwork_contract_degradation_zero_cost` (taskworker gauge, 1 while the
+  last published state is zero cost) and
+  `urnetwork_contract_degradation_contracts{kind="open"|"close"}`.
+- `urnetwork_contract_degradation_checks_total{outcome}`: `zero_cost`,
+  `resuming` (healthy, zero cost held for one more check) and `charging`; the
+  failures `measurement_failed`, `state_read_failed`, `publish_failed` and
+  `superseded` publish nothing, and the published state ages out within its TTL.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
+  contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers.
+- `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
+  second cache refreshes, read only after an exhausted refusal. Only
+  `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
+  `malformed`, `error` and `disabled` keep the refusal.
+- Log lines `[degradation]contract check <outcome>: open=… close=… ratio=…
+  healthy=… consecutive_healthy=… zero_cost=…`.
+
+Treat an active valve as an incident signal for §2.6: it hides the
+out-of-balance symptom of exhausted payers while providers go unpaid for
+their traffic. A sustained
+`measurement_failed` means the check cannot see the backlog, and the valve
+fails closed to normal charging an hour after its last publication. No probe
+reads the valve yet; the numbered coverage crosswalk records the gap.
+
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
 
@@ -7607,6 +8025,11 @@ GROUP BY 1 ORDER BY 1;
   loop; do not call it a fleet restart or organic account growth. Apply and
   verify the §2.15 root fix, then require destination diversity and two mature
   cohorts to recover. Raw client/network ids never leave PostgreSQL.
+- CARRIER/COHORT VARIANT (2026-10-13): a mass reconnect after a primary
+  restart (§5.13) was followed by bursts of websocket `read_timeout` closes,
+  each confined to one app-version cohort, with h1plus flat; the cohorts
+  partly reconnected at once. This is a client-side pattern, not a new
+  reconnect-storm cause. §23.3 has the metrics and the discriminator.
 
 **Fresh-credential failure hidden by aggregate connections (October 12):**
 the [postmortem, root cause 6](../../factury/postmortem/2026-10-10.md)
@@ -8690,6 +9113,25 @@ the successful control without changing Redis. An absent native-source schema
 metric on the observed API processes remains instrumentation/deployment
 uncertainty, not zero native-source events.
 
+Empty-target publication (2026-10-11 source correction): `UpdateClientScores`
+used to create a target only when one of its source rows was admitted. A
+location or group whose every row was hard-excluded, and a group with no rows,
+were never written, so FindProviders2 reported `cache_missing` for them, the
+same reason a broken writer produces. A target that lost its last admitted
+provider also kept its previous payload until the 5h ttl; request-time hard
+exclusions then emptied it as `filtered_hard`. On Main every group-target
+request for 14 days returned zero as `cache_missing`, and the 2026-10-10 22:41Z
+export admitted only about 1.8k providers (85-94% hard-excluded) before new
+`filtered_hard` zeroes appeared. The writer now creates every target a source
+row names before the hard-exclusion check and seeds every `location_group`
+row, so one complete export from the corrected Taskworker publishes such a
+target as encoded-empty documents and aliases, read as `cache_empty`. That
+reason then describes publication, not why supply is absent; trace hard
+exclusions and group membership separately. A location that no current row
+names (all of its providers disconnected) is still not visited: its old
+payload remains until the ttl and then expires to `cache_missing`. API rollout
+alone changes nothing.
+
 Native-reader activation boundary (2026-09-29 source correction):
 `provider.yml` → `egress_index.native_reader_enabled` defaults to false;
 missing, unreadable or malformed configuration keeps union-cache reads. A
@@ -8890,6 +9332,121 @@ healthy lists, thresholds, partial positive evidence, old/missing/stale/reset
 sources, cancellation and redaction; model regressions exercise the actual
 selector and backward-compatible directory cache.
 
+### 2.9d ARIN database canary — fallback, losses the breaker cannot see, protection and staleness
+Probe: `arindb-canary`
+
+Every score publication compares the latest and the previously selected ARIN
+databases and publishes one decision to `{arindb_canary_decision}` before its
+export (arindbctl/ARINDB.md, "Dual-database canary"). Every Taskworker's stats
+collector exports that document as the `urnetwork_stats_arindb_*` gauges, so
+all hosts report the same values; only the publishing Taskworker exports the
+per-country supply. This signal reads those gauges through Mimir, the
+replica-safe max of each, and the share of every process's decision reads that
+were not ok over ten minutes. They are the series the providers dashboard's
+"ARIN database canary" row and the warp rules in
+`grafana/alerting/arindb-canary.yml` read.
+
+- `arindb-fallback-active` **PAGE**, sustained 10 minutes: the latest database
+  tripped the breaker on Quality (its net loss strictly above
+  `bucket_loss_threshold`, or a country of at least
+  `min_emptied_country_supply` providers left with none), so the export serves
+  the old database's Quality classification. The fallback latches on its pair
+  until `release_passing_runs` consecutive comparisons pass with
+  `release_margin`, or `accept_latest_build_epoch` names the latest. The page
+  names the countries the latest would empty, with the old supply of each, and
+  every bucket's net loss. Risk still comes from the latest database: a
+  fallback restores Quality and never readmits a provider the latest calls
+  risky.
+- `arindb-risk-supply-loss` **PAGE**, sustained 10 minutes: the Speed or Online
+  net loss of latest against old is above 0.10, with at least 20 paired
+  providers of old supply in the bucket. Only risk can cause it, and risk
+  always follows the latest database, so the canary does not fall back for it.
+- `arindb-supply-gain` and `arindb-supply-churn` **WARN**, sustained 30
+  minutes: a bucket's net gain above 0.10, or its gross churn (removals plus
+  additions against old) above 0.20, with the same sample floor. The breaker
+  trips only on net losses, so a flood or a wholesale reshuffle passes it; a
+  deliberate catalog expansion does too, so these warn rather than page.
+- `arindb-warming-tripped` **PAGE**, sustained 10 minutes: the canary is
+  warming and its paired sample of at least `min_paired_sample` providers
+  trips, so the latest is held out before the cohort is covered. While the old
+  database covers at least 1 − `bucket_loss_threshold` of the cohort, warming
+  serves it; below that it serves each provider's latest slot, which applies
+  the blocked latest to every row a restarted process wrote (in a probe where
+  the old covered half the cohort, half the rows took the latest's
+  classification). The page is the protection in that case.
+- `arindb-warming-serves-latest` **WARN**, sustained 30 minutes: warming
+  serves the latest unverified, because its paired sample is below
+  `min_paired_sample` or passes.
+- `arindb-protection-lost` **PAGE**, sustained 10 minutes: the publishing
+  Taskworker could not open its latest database (`latest_unavailable`; it
+  compares the previous decision's epochs while it can, else it is single), or
+  a latched fallback's old database is not served (`fallback_dropped`): warming
+  serves each provider's latest slot while the latch is held, as when Connect
+  restarts onto the next release before the Taskworker; the canary went single
+  after the fallback; or a release compares against the latest the latch held
+  out, which the decision carries as its `dropped_latch`.
+- `arindb-cohort-shrink` **PAGE**, sustained 10 minutes: the public cohort is
+  more than 10% below its largest of the last two hours, from a reference of
+  at least 100, within two hours of a new pair or while more than 1% of latest
+  lookups fail over thirty minutes; a background of failures, such as GeoLite2
+  misses on classifier-v0 records, stays below that.
+  A provider whose latest lookup fails never writes a location, so it leaves
+  the cohort before the comparison can see it; outside those windows a
+  shrinking cohort is a Connect outage or a restart, which page on their own.
+- `arindb-serving-flapping` **PAGE**, sustained 5 minutes: the serving epoch
+  changed more than 4 times in six hours, switching every provider's Quality
+  classification back and forth.
+- `arindb-decision-stalled` **PAGE**: the last decision is more than 90 minutes
+  old. A fallback the export published is still served but no longer
+  re-decided.
+- `arindb-canary-unavailable` **WARN**, state `single` for an hour: the
+  publishing Taskworker has no usable old database (a refused or skipped copy
+  at build, an identical copy, or an invalid one), so a bad release takes
+  effect unchecked.
+- `arindb-canary-warming` **WARN**, state `warming` for two hours: fewer than
+  `min_coverage` of the public cohort carry facts for both databases, such as
+  a stuck host on an older pair or a rollup that has not refreshed.
+- `arindb-decision-stale` **WARN**: the last decision is more than 30 minutes
+  old. Every publication writes one, so this is a stalled score export
+  (§2.8); the decision expires with the publication's 300 minute ttl, after
+  which readers serve each provider's latest slot.
+- `arindb-decision-reads-not-ok` **WARN**, sustained 15 minutes: more than 5%
+  of decision reads over ten minutes were absent, invalid or Redis errors.
+  Absent and invalid reads serve each provider's latest slot; an error keeps a
+  process's last decision for up to 15 minutes.
+- `arindb-canary-unobservable` **WARN**, sustained 15 minutes: no Taskworker
+  exports the state and decision time.
+
+Action on a fallback: judge whether the latest database is a bad release from
+the losses and emptied countries, its catalog audit and its Atlas validation.
+If it is, the next all-release build must not compare against it. With
+`ARIN_CANARY_DECISION_FILE` the release runner pins the database the decision
+protects automatically, and pauses the ARIN refresh when it cannot; without
+it, set `ARIN_PREVIOUS_DATABASE_FILE` to the last good `arin.mmdb` and clear it
+once a good release ships. If the latest is good after all, accept it as
+arindbctl/ARINDB.md describes ("Accepting a release the breaker trips on"):
+the accept names one build epoch, so clear or move the pin with it.
+Do not restart processes or delete `arin-old.mmdb` to clear the page: a
+process reads a new pair only at restart, and without the old file the canary
+is single, which pages as `fallback_dropped`.
+
+False-positive qualifiers: thresholds are net losses over the paired
+providers only, so a small cohort can trip on a few providers; an emptied
+country needs `min_emptied_country_supply` providers, and the Speed, Online,
+gain and churn pages need 20 paired providers of old supply. False-negative
+qualifiers: a release that is wrong but removes little supply passes (the
+reviewed rules, catalog audit and Atlas validation remain the quality gates);
+a refused copy at build ships a release without a canary, which is the
+`arindb-canary-unavailable` warning, or the `fallback_dropped` page right after
+a fallback.
+
+Implementation: `signal_arindb_canary.go` and its synthetic test file,
+registered in `NewSignals`. Controls cover a healthy latest state, a fallback
+with named emptied countries, Speed and Online losses at and above the
+threshold with and without their sample, each page and warning the breaker
+cannot see at and below its threshold, the cohort page's release gate, the
+reads warning, the unavailable, warming and stale warnings and missing gauges.
+
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
 
@@ -9040,9 +9597,9 @@ Diagnosis order:
    per call) and `6264993620546911677` (~3.3s lifetime mean aggregate).
 4. A route-specific cluster warrants attribution of that route's database
    work. A fleet-wide cluster with waiting clients warrants native shard
-   evidence before choosing between busy established servers and backend
-   startup blockage. Raising the socket timeout hides either failure and
-   retains scarce connections longer.
+   evidence before choosing among busy established servers, backend startup
+   blockage and the post-stall handoff livelock (§2.11a). Raising the socket
+   timeout hides each of these failures and retains scarce connections longer.
 
 `FATAL: query_wait_timeout` means that a query did not receive a server before
 its queue deadline. Class `pgbouncer-query-wait` warns at one line/minute and
@@ -9063,10 +9620,14 @@ new automatic administrative probe:
   and paused/disabled state without exporting endpoint or account values.
 - Waiting clients plus busy established servers require PostgreSQL wait and
   owner attribution. Waiting clients with zero established normal and
-  cancellation servers but positive `sv_login` establish backend startup as
-  the blocked phase. They do not distinguish repeated failed attempts from
-  one overdue startup; successive server identities/ages and finite errors
-  are needed. Compare these with the matched authenticated direct control.
+  cancellation servers but positive `sv_login` show that no server survives
+  to serve a client. Correction (2026-10-12): this shape does not by itself
+  establish backend startup as the blocked phase. In the 10-12 livelock each
+  login completed in about 0.1 s and each new server was lost when it was
+  handed to a client that had already hung up (§2.11a). It does not
+  distinguish repeated attempts from one overdue startup either; successive
+  server identities/ages, finite errors and queue-timeout/EPIPE counts are
+  needed. Compare these with the matched authenticated direct control.
 - Missing shards, changed generations, capped rows, unparsed ages or failed
   observations leave the affected causal fields unknown. A fresh startup can
   be transient; one frame alone does not prove an overdue timer or a library
@@ -9194,6 +9755,34 @@ still requires the target package ABI, TLS/authentication and notify-readiness
 checks, then fresh shard response progress and application outcomes. Neither
 counter growth nor a successful restart substitutes for those boundaries.
 
+The 2026-10-12 incident identified the progress failure behind the login-only
+shape, by source reading of PgBouncer 1.26.0 and production evidence. A 2–7 s
+whole-database freeze (§2.2b) expired the services' pgx deadlines: the ping
+and BEGIN budget is 5 s (`PgPingTimeout` and `PgBeginTimeout` in server
+`db.go`), and many calls are shorter. The apps canceled and hung up, and
+PgBouncer closed the in-flight server connections of most pools. PgBouncer
+opens one server at a time per pool (`launch_new_connection`) and hands each
+new server to the oldest queued client (`reuse_on_release`); it never reads a
+queued client's socket (`pause_client`). With `query_wait_timeout` at its
+120 s default, the oldest queued client had always already hung up, so each new
+server was closed at once. Arrivals (about 20/s per pool) outran logins (about
+0.1 s each), so no pool refilled. From 19:36 to 20:08Z 28 of 32 instances were
+stuck, with 373k `query_wait_timeout` and 47k EPIPE errors. The 127.0.0.1
+accept-queue Recv-Q of 24–25 was one queued login per stuck instance, and
+`sv_login=1` was a snapshot of that continuous login stream, not one login
+hung for 300 s: these were the repeated attempts that the identity
+requirement above could not exclude. The 21:10Z recurrence (30 pools) ended
+within a minute of a runtime `SET query_wait_timeout = 10`,
+`server_connect_timeout = 5`, `server_login_retry = 1` on all 32 admin
+consoles, with no restart. Xops `b02d4cf` made those values persistent,
+superseding the `server_connect_timeout=300` and `server_login_retry=15`
+above. A 10 s queue wait is still longer than the clients' 5 s budget, so it
+narrows the window rather than closing it; the 4 s queue wait in xops
+`b50abca` waits until Taskworker startup retries PgBouncer's 08P01 refusals
+(server `9a56fdba`, §12.2). The 10-04 and 10-05 frames above had the same
+aggregate shape; whether they were the same livelock was not established.
+§2.11a has the signals and §5.12 the playbook.
+
 Required detector follow-up (prospective, not implemented by the current
 listener/log probe): collect the bounded native states and paired progress
 fields on the existing inventory-owned route at least once per minute.
@@ -9211,6 +9800,11 @@ No log-rate, high-CPU, completed-query or five-minute process-age minimum may
 suppress the complete zero-backend outage shape. Failed administrative reads
 remain visibility loss. This requirement does not activate a new Main reader
 or imply the current monitor already evaluates it.
+
+Since 2026-10-13 a Grafana rule pages on this shape for each pool from a
+loopback exporter (§2.11a). The monitor still does not read that exporter, so
+this requirement stays open for the monitor, and Grafana coverage does not
+turn monitor silence into a healthy pool reading.
 
 An authorized restart restored backend capacity immediately, but the earlier
 restart did not prevent this recurrence. Keep the incident open until every
@@ -9264,6 +9858,106 @@ missing host telemetry identifies the trigger. For the separate October 13
 16:45–17:30Z recurrence, the [October 15 readiness update](../../factury/postmortem/2026-10-13-secret-rotation.md)
 still recorded no closed cause; do not assign it the October 12 mechanism by
 resemblance.
+
+### 2.11a PgBouncer pool starvation — exporter, Grafana rules and corroboration
+
+The 2026-10-12 livelock (§2.11) left most pools with queued clients and no
+server while PostgreSQL, the 6432 listener and every PgBouncer unit stayed up,
+and nothing alerted. A starved pool is the direct signal: in `SHOW POOLS`,
+`cl_waiting > 0` with `sv_active + sv_idle + sv_used + sv_tested = 0` for more
+than 30 s. A healthy pool is starved only while its first login completes.
+Read one instance's admin console, read-only, as the account PgBouncer runs as
+(`postgres`, as in the exporter unit):
+
+```bash
+sudo -u <pgbouncer owner> psql -h /var/run/pgbouncer/pgbouncer-N -p $((6432+N)) -U pgbouncer pgbouncer -c 'SHOW POOLS'
+```
+
+The pool exporter (xops `9d7bcfc`, merged as `50e9307`, live since 10-13
+04:49Z) reads `SHOW POOLS` from all 32 consoles over their Unix sockets every
+15 s, with a 3 s console timeout, and serves the last reading on
+`127.0.0.1:9127/metrics` (`pgbouncer-pool-exporter.service`). It changes
+nothing. Fluent Bit ships it as
+`{env="main",host="by-us-fmt-5-edge-2",job="pgbouncer"}` with
+`pgbouncer="1"` through `"32"`; pool series add `database="bringyour"`.
+
+| Metric | Meaning | Healthy |
+|---|---|---|
+| `pgbouncer_up` | 1 when the instance's console answered `SHOW POOLS` | 1 on all 32 (sum 32) |
+| `pgbouncer_pool_clients_active` | `cl_active` | follows load |
+| `pgbouncer_pool_clients_waiting` | `cl_waiting` | 0 |
+| `pgbouncer_pool_servers` | `sv_active + sv_idle + sv_used + sv_tested` | 19 or more per pool |
+| `pgbouncer_pool_server_logins` | `sv_login`; PgBouncer opens one at a time per pool | 0, briefly 1 |
+| `pgbouncer_pool_maxwait_seconds` | the oldest queued client's wait | 0 |
+| `pgbouncer_pool_starved` | 1 while clients wait and servers are 0 | 0 |
+| `pgbouncer_pool_starved_seconds` | how long the pool has been starved | 0 |
+
+Healthy is 256 series. The exporter journals
+`pgbouncer@N pool bringyour starved for S s: ...` once a pool has been starved
+for 30 s, and `... has servers again` on recovery. A console that stops
+answering reads `pgbouncer_up` 0 and drops that instance's pool series, which
+is also what a blocked PgBouncer event loop looks like.
+
+Grafana rules (warp `a90bade`, `grafana/alerting/pgbouncer.yml`, deployed as
+Grafana `1070686450` at 10-13 06:01Z, folder `urnetwork alerts`):
+
+| Rule | Group (interval) | Condition | For | Severity | No data |
+|---|---|---|---|---|---|
+| `pgbouncer-pool-starved` | `pgbouncer-fast` (30s) | `max by (env,host,pgbouncer)(pgbouncer_pool_starved_seconds) > 15` | 30s | page | OK |
+| `pgbouncer-pool-exporter-down` | `pgbouncer-fast` (30s) | `min by (env,host)(pgbouncer_up) < 1` | 2m | warn | Alerting |
+| `pgbouncer-pool-queue-wait-high` | `pgbouncer` (1m) | `max by (env,host,pgbouncer)(max_over_time(pgbouncer_pool_maxwait_seconds[1m])) > 3` | 2m | warn | OK |
+| `postgres-application-backends-collapsed` | `pgbouncer` (1m) | `min by (env,host)(pg_stat_database_numbackends{job="postgres",datname="bringyour"}) < 300` | 1m | page | OK |
+
+Grafana has no SMTP configured: an existing email contact point fails with
+`SMTP not configured`. The rules carry only a `severity` label, and contact
+points and notification policies are set in the Grafana UI, so check that page
+routing reaches a working contact point. Until it does, a firing rule can
+notify no one.
+
+Corroborate from both ends:
+
+- Database: `sum(pg_stat_database_numbackends{job="postgres",datname="bringyour"})`
+  is normally 710–770 and falls to about 157 within 30 s of a collapse. The
+  postgres exporter holds its last value while PostgreSQL is down: it read 721
+  throughout a full stop.
+- Connect handshakes,
+  `sum by (result) (rate(urnetwork_connect_h1_handshake_results_total{env="main",service="connect"}[1m]))`:
+  `auth_dependency` is about 30/s at baseline, 80/s in a partial collapse and
+  984–1,859/s in a full database outage; `accepted` is about 90/s and falls to
+  0 in a full outage; `state_refused` about 300/s and `jwt_refused` 0 are
+  baselines.
+- Attribution limit: every client reaches PgBouncer through nginx's stream
+  proxy on 6432, so PgBouncer logs show only 127.0.0.1. Per-client-IP
+  attribution is impossible there; use the application-side counters above and
+  direct `pg_stat_activity` owners (§1.3a).
+
+ACTION for a starved pool: first lower `query_wait_timeout` at runtime with
+`SET` on that instance's admin console, under operator authorization. Restart
+the instance only if that fails, after recording its `SHOW POOLS` and
+`SHOW SERVERS` (§2.11). The persistent value is now 10 s, so a new livelock
+needs a value below the clients' 5 s budget; 4 s is the planned value (xops
+`b50abca`), safe for Taskworker starts only once they run server `9a56fdba`
+(§12.2). Do not restart PostgreSQL. Hold deploys and restarts while any pool is
+starved (§5.12).
+
+False-positive qualifiers: a pool is briefly starved during its first login
+after a reload or restart. `pgbouncer_pool_starved_seconds` returns to 0 when
+the pool gets a server, and the page needs more than 15 s of starved readings
+held for 30 s. `pgbouncer-pool-exporter-down` can be the exporter, Fluent Bit
+or the metrics path while every pool is healthy, so read one console directly.
+`pgbouncer-pool-queue-wait-high` with servers present is busy-server pressure
+(§2.11), not the livelock. A planned PostgreSQL stop starves every pool by
+definition (§5.13). The healthy control is the 10-13 reading: 256 series, 0
+waiting, 0 maximum wait and at least 19 servers per pool.
+
+False-negative qualifiers: these are Grafana rules. The monitor's
+`pgbouncer-stalls` probe does not read the exporter, so monitor silence is not
+pool health. A console that stops answering drops its pool from the starved
+rule, where no data counts as OK, leaving only the two-minute exporter-down
+warning. Starvation shorter than one 15 s reading is invisible. During a full
+PostgreSQL stop the backends rule sees the held last value and stays quiet;
+use `accepted` handshakes and a direct 5432 read. A rule that routes to the
+broken email contact point notifies no one.
 
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
@@ -10270,6 +10964,155 @@ legacy leak and a harmless sub-two-minute cleanup race. Model regressions cover
 orphan sweeping, handler-qualified location reliability, and disconnected
 fallback semantics.
 
+A long database outage reaches the same cleanup from the other side. With the
+Taskworker running, `CloseExpiredNetworkClientHandlers` deletes every live
+handler whose heartbeat is older than 2 × 60 s once the database returns, and
+each Connect process whose handler is gone cancels itself on its next
+heartbeat. An outage longer than about 105–110 s therefore drops every Connect
+process. Stop the Taskworker before a planned primary restart (§5.13).
+
+### 2.16a Live handler connection reconcile — rows a running process no longer holds
+Probe: `connection-reconcile`
+
+§2.16 finds open rows whose handler is gone. A row can also stay open under a
+handler that is alive: each announcement writes its connection row once and
+disconnects it once, and before the handler connection reconcile a final
+disconnect that failed (a database outage, a pooler stall) was dropped. Handler
+expiry never reached the row, because the process kept heartbeating its
+handler, so the row stayed connected until that process restarted, and every
+reader of connected rows counted the provider: the location reliability
+writer, FP2 and URL probe admission and census, location and provider counts.
+
+Each Connect handler now reconciles: it holds the rows of the connections its
+process holds, reads the handler's connected rows every five minutes, and
+retires the unheld rows on their second sighting, at most 256 per pass. A
+failed final disconnect moves the next pass up to 15 s after the last one, and
+passes keep that 15 s interval while rows known to be stale remain: rows of
+failed final disconnects, and stale rows not retired yet. A row unheld for a
+moment during ordinary churn (a registration in flight, a disconnect
+committing) waits for the regular pass; before this, any such row kept the
+15 s interval, so a busy handler read its rows every 15 s. A retire takes the
+transport disconnect's fences with try-locks and defers a row whose endpoint
+is busy; a retire that fails leaves its row for a later pass, tried after the
+others, and three consecutive failures end the pass. It exports, per process:
+
+- `urnetwork_connect_connection_reconcile_unheld`: rows the last pass found
+  connected under the handler but not held;
+- `urnetwork_connect_connection_reconcile_retired_total`: rows it retired;
+- `urnetwork_connect_connection_reconcile_passes_total{result="ok|error"}`;
+- `urnetwork_connect_connection_reconcile_unretired_total{reason="failed|busy"}`:
+  stale rows a pass left, because the retire raised or a fence or the row was
+  busy.
+
+The probe evaluates them per block in one Mimir query:
+
+```promql
+label_replace(max by (host,block) (urnetwork_connect_connection_reconcile_unheld{env="main"}),"monitor_metric","unheld","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_retired_total{env="main"}[15m])),"monitor_metric","retired","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="ok"}[15m])),"monitor_metric","ok_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_passes_total{env="main",result="error"}[15m])),"monitor_metric","error_passes","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="failed"}[15m])),"monitor_metric","failed_retires","__name__",".*")
+or label_replace(sum by (host,block) (increase(urnetwork_connect_connection_reconcile_unretired_total{env="main",reason="busy"}[15m])),"monitor_metric","busy_retires","__name__",".*")
+```
+
+- HEALTHY: every block's unheld count stays below 256, or falls while the
+  reconcile retires rows. After a database outage a block can hold thousands of
+  unheld rows for a few minutes while it drains them.
+- STUCK (`connection-reconcile-stuck`, two probes): a block holds at least 256
+  unheld rows and retired none in 15 minutes. Its retires fail, are deferred
+  behind busy endpoint fences or find nothing, its batch is zero, or a
+  registration it waits for never ends.
+- FAILING (`connection-reconcile-failing`, two probes): in 15 minutes every
+  pass on a block raised, or its retires failed and none succeeded; the
+  database path of that process is down. A failed retire fails only its row
+  and its pass completes, so the pass results alone miss it.
+- UNOBSERVABLE (`connection-reconcile-unobservable`, two probes): no block
+  exports a fresh gauge. Expected until Connect runs an artifact with the
+  reconcile; until then compare a block's connected provider rows with its
+  `urnetwork_connect_provider_connections` gauge.
+
+2026-10-14 production evidence: about 29.6k provider rows were connected under
+live handlers of eight blocks whose processes survived the 2026-10-13 primary
+restarts (06:40Z, 08:10Z) and PgBouncer livelock (16:45-17:30Z). Each block's
+excess over its own provider gauge matched, within 40 rows, its rows of clients
+absent from `client_reliability` plus rows replaced by a newer row of the same
+live client. Connect logged `query_wait_timeout (SQLSTATE 08P01)` and `context
+deadline exceeded` from the final `DisconnectNetworkClient` in those windows.
+About 9.8k providers in the FP2 population were connected only through such
+rows; they took about 12% of URL probe runs and 26% of the no-contact failures.
+
+Do not update connection rows or delete handlers manually. Rows of a process
+that predates the reconcile are retired by restarting that Connect block:
+handler expiry then retires all of its rows, at the cost of its live
+connections reconnecting. The same release keeps a live transport through a
+failed sync read, so an outage no longer disconnects every provider whose sync
+fell in it.
+
+Implementation convention: SIGNALS.md §2.16a (`connection-reconcile`) maps to
+`signal_connection_reconcile.go` and `signal_connection_reconcile_test.go`.
+Synthetic tests cover a healthy fleet, a draining block, a stuck block, a
+failing block, failing retires and an absent gauge. The reconcile itself is tested in
+`connect/transport_announce_reconcile_test.go` and
+`connect/transport_announce_reconcile_db_test.go`.
+
+### 2.16b Live connection announcement failures — reads and writes retried with the transport kept
+Probe: `connection-live-failures`
+
+A live Connect announcement reads its provide key changes every sync round,
+publishes its connection's measurements, and refreshes its verify egress
+lease. Before 2026-10-14 a failed sync read or lease write raised and tore
+the transport down, so a database outage disconnected every provider whose
+sync fell in it, and a failed measurement write ended the publisher for the
+connection's life. Each now keeps the transport and retries with a backoff of
+at most 2 minutes, counting every failure:
+
+- `urnetwork_connect_connection_sync_read_failures_total`;
+- `urnetwork_connect_connection_worker_failures_total{operation="measurement_write|verify_egress_lease"}`.
+
+Each failure is logged at V(1), and the process logs them unconditionally at
+most once a minute, with the failures by operation since its last line and the
+latest error:
+
+```text
+[t]live connection failures retried with the transport kept (in 1m0s): measurement_write=412 sync_read=1803; latest sync_read: <error>
+```
+
+The probe evaluates, per host, block and operation, the failures in the
+fewest-failure 2 minute window of the last 15 minutes and in the whole range:
+
+```promql
+label_replace(label_replace(min_over_time((sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[2m])))[15m:1m]),"operation","sync_read","__name__",".*"),"monitor_metric","window_min","__name__",".*")
+or label_replace(label_replace(sum by (host,block) (increase(urnetwork_connect_connection_sync_read_failures_total{env="main"}[15m])),"operation","sync_read","__name__",".*"),"monitor_metric","total","__name__",".*")
+or label_replace(min_over_time((sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[2m])))[15m:1m]),"monitor_metric","window_min","__name__",".*")
+or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_connection_worker_failures_total{env="main"}[15m])),"monitor_metric","total","__name__",".*")
+```
+
+- HEALTHY: failures are isolated, or only one connection fails. One
+  connection retries at most every 2 minutes, so it fails about 8 times in
+  the range, below the floor of 30.
+- SUSTAINED (`connection-live-failures-sustained`, two probes): a block
+  operation failed in every 2 minute window and at least 30 times in 15
+  minutes. The block's PostgreSQL or Redis path keeps failing: sync_read stops
+  its providers' mode changes and reliability stats, measurement_write stops
+  its measurements reaching the reliability writer, verify_egress_lease lets
+  its leases lapse after their ttl. Read the block's unconditional log line
+  for the latest error, then restore the database path (§2.11, §2.2) or Redis
+  (§3). Do not restart the block for these failures alone: the transports are
+  kept, and a restart reconnects every connection.
+- UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
+  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  same processes export the reconcile gauge, whose unobservable class covers a
+  fleet that does not export them.
+
+Panels 58 (sync reads retried) and 59 (worker writes retried, by operation) of
+the Connect dashboard chart the counters.
+
+Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
+maps to `signal_connection_live_failures.go` and
+`signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
+fleet, one failing connection below the floor, a sustained block and a stale
+sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
+
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
 
@@ -10702,8 +11545,13 @@ The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
 Unlike §2.17, this is not an inferred role or fallback: the contract boundary
 itself found the requested destination missing or inactive and refused to
-create the route. Query both initialized original-companion partitions and the
-traffic-created joint diagnostic family over five minutes:
+create the route. A repeat of a refused route is counted again with the
+recorded labels when the owner's route rejection registry answers it: an
+inactive destination row for up to an hour, a missing row for 60 seconds. On
+`/connect/control` that answer can come before the client state query
+(`urnetwork_connect_control_refusal_replays_total`), so the rate counts
+retries, not lifecycle reads. Query both initialized original-companion
+partitions and the traffic-created joint diagnostic family over five minutes:
 
 ```promql
 label_replace((sum by (companion) (rate(
@@ -13241,7 +14089,8 @@ probe task, which holds every load of a run, therefore records each one in
 marks the loads whose exit was **healthy** — it passed at least nine in ten of
 the *other* scored sites of the same run, after their retries. A site's
 failure share is its failed healthy loads over its healthy loads in the
-window (`SiteWindow`, three days), per class:
+window (`SiteWindow`, three days, from no day before the first reached-only
+tally day below), per class:
 
 ```sql
 SELECT d.name, d.class,
@@ -13250,12 +14099,21 @@ SELECT d.name, d.class,
 FROM provider_egress_destination d
 JOIN provider_egress_site_tally t ON t.name = d.name
 WHERE d.active
-  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+  AND GREATEST(date_trunc('day', now() at time zone 'utc' - interval '3 days')::date,
+               DATE '2026-10-14') <= t.tally_day
 GROUP BY d.name, d.class;
 ```
 
 When fewer than `SiteMinSamples` (200) healthy loads exist for a site, the
-refresh judges it on all of its loads and says so in its log line. The
+refresh judges it on all of its loads and says so in its log line. Either way
+only runs that reached their provider are tallied: a URL that failed before
+any destination answered (`dial_dns`, `dial_tcp` and their timeout and
+combined stages, with no status, response byte, redirect or TLS verdict) is an
+offline or unreachable exit, which says nothing about the site. Tally days
+before 2026-10-14 (`model.ProviderEgressSiteTallyContactedSince`) still count
+those runs as site failures, so neither the refresh nor this signal reads a
+day before it; the refresh's `[egresssites]` log line says when that cuts the
+window short. The
 refresh records its judgement on the row (`failure_share`, `sample_count`,
 `judged_time`, and `above_retire_since` while the share stands above the
 retire line with enough samples), and the signal reads that record together
@@ -13394,7 +14252,11 @@ loaded there anyway, unscored — and is unmarked after `SiteRegionCooldown`
 Action: a sustained backfill is a degradation with a cause, and the alert
 is closed by finding it, never by the answers looking full. Read the
 exclusion-reason and index panels beside the backfill metric: a wave of
-"unprobed" is the prober or its capacity (§2.19, §2.19a); a wave over the
+"unprobed" that holds is the prober or its capacity (§2.19, §2.19a), while
+one that drains within the hour is new providers warming up, whose URL
+checks pass on too few runs yet for the native minimums (Quality: 3 runs
+spanning 30 minutes; Speed: 2; model/egress_native_min_runs.go), which a
+new provider's paced runs meet about 40 minutes after its first; a wave over the
 one-in-ten line with the pool healthy is the exits — new evidence is needed
 before ranking them again, whether more sites, a longer window, or a source
 of quality this design does not yet read; a wave in one place is the
@@ -13406,8 +14268,13 @@ for that class and place in `egress-sites.yml` (a site retired for good
 returns by raising its entry's `revision`); if the fleet-wide share is high,
 check the prober's request profile and capacity before touching the pool,
 because retiring sites during a prober fault empties the pool for nothing —
-the refresh skips its run while the share is above the prober-fault line for
-that reason. Verify: the site's failure share on healthy exits falls under
+the refresh skips its run while the failure share of the loads that reached
+their provider is above the prober-fault line for that reason (a run that
+never reached its provider is no evidence of a prober fault, and is counted
+apart in the refresh's `[egresssites]` log line), and while fewer than
+`SiteProberFaultReachedShare` (20 %) of the recent loads reached their
+provider at all, the shape of a fault that ends runs before any destination
+answers. Verify: the site's failure share on healthy exits falls under
 the retire line within one refresh cadence after the swap, and the
 quality-bucket count of §2.9a stops falling.
 
@@ -13777,12 +14644,34 @@ The opt-in API instrumentation adds only fixed cells:
   `urnetwork_connect_control_http_phase_seconds_{sum,count}{phase}` measure
   `prepare` (session/body/JSON), `authenticate` (normal session auth),
   `controller` (pack decode, frame handlers and pack encode), and `response`
-  (HTTP result formatting/writing). The matching
+  (HTTP result formatting/writing). For a request answered from recorded
+  route refusals (below), `authenticate` covers the signature, claims,
+  session horizon, session revocation marker and remembered state refusals
+  but no client state query, and `controller` the replay of those refusals. The matching
   `urnetwork_connect_control_http_phase_completions_total{phase,outcome}` has
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
   phase; all gauges release during normal return or panic unwind.
+- `urnetwork_connect_control_refusal_replays_total{cause}` counts API
+  `/connect/control` requests answered from route refusals that the
+  router's origin notification owner recorded for the credential's own
+  client, after the signature, claims, session horizon, session revocation
+  marker and remembered state refusals and without the client state query.
+  Every frame of such a request is a CreateContract whose exact route
+  (verified client, destination, companion flag) has a recorded refusal:
+  terminal inactive-destination refusals for up to an hour, ring refusals
+  for up to 60 seconds or until an origin edge. `cause` is
+  `inactive_destination`, `missing_companion_origin` or `mixed`; the three
+  children exist at zero. Each answered request runs no
+  `urnetwork_jwt_state_queries_total` query and records no
+  `urnetwork_session_auth_attempts_total` attempt, while its frames count
+  exactly as route rejection cache hits in the frame, rejection, failure,
+  detail and creation families. A request with any other frame, or any
+  route without a recorded refusal, authenticates normally. Until a request
+  of its own reaches the state query, a removed or rotated client is told
+  only the refusals recorded for it; a revoked session marker or a
+  remembered state refusal still answers 401 first.
 - `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
   cells: `http|internal`, eight fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
@@ -13836,7 +14725,11 @@ or deadline only when that attempt's context supplies the corresponding error;
 other query failures remain `query_error`.
 
 The multiplicity control is per authenticated operation, not per frame or
-unique credential. A hosted child control pack makes one combined durable
+unique credential. An API `/connect/control` request answered from recorded
+route refusals is not authenticated by the state query and makes none; such
+requests are counted by `urnetwork_connect_control_refusal_replays_total`, so
+`api/control` queries plus those replays, plus refusals and failures before
+the query, account for the route's requests. A hosted child control pack makes one combined durable
 parent-ownership and JWT-state query, even when it contains 16 frames; its frames use
 the existing `http` wrapper label. Direct prober control makes one JWT-state
 query per pack and uses `internal` frames. Verified resident in-band control
@@ -14432,6 +15325,31 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+First admission waits for current reliability history: URL admission needs a
+one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
+intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
+12 hours) and a lookback's row is deleted once its window holds no
+observation, so a provider back after more than an hour offline has only its
+12 hour row and waits for the score pass to write its hour. The first cycle
+opens at the first admission that sees passing history, usually the score pass
+that writes it; a later location pass or public-mode change (`SetProvide`) can
+open it too. Before the rule the location pass, which commits before the score
+pass, admitted a connection with no scores as neutral, and later a returning
+provider on its 12 hour row alone. The census counted it and the scheduler
+claimed it until the score pass wrote its failing scores 20 to 130 seconds
+later. A new connection's cycle also made its real admission about eight hours
+later count as mature with no runs. Cycles opened that way before the rule
+shipped are not reset, so each such provider still adds one mature deficit
+when it is first really admitted.
+
+During a reliability rollup stall the location pass still runs, but
+`UpdateReliabilities` skips the score pass until `ClientReliabilityRollupSynced`
+holds, so no score row is written or deleted. New providers, and providers
+whose hour row was deleted before the stall, serve as neutral but are not
+URL-probed until the rollup recovers and the score pass writes their hour. A
+provider that leaves during the stall keeps its frozen rows and is readmitted
+on them when it returns. Accepted by the owner 2026-10-14.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,
@@ -14810,6 +15728,30 @@ success uses the existing short retry pace to replenish its deficit. Warmup
 success pacing and quota-full oldest-run expiry remain separate. Accepted
 measured failures count toward the same quota; setup-only completions do not.
 
+Local failures back off per provider. A completed turn that measured nothing
+(`tunnel_failed`, `run_not_measured`, `health_not_run`, `submit_failed`) first
+retries after `url_failure_interval_seconds`, and each consecutive earlier
+local failure claimed in the trailing four hours doubles that wait, up to 30
+minutes, times a factor in [0.9, 1.1] that is fixed per issued claim. A
+measured completion, success or measured failure, ends the streak; an
+abandoned lease neither ends nor extends it. A readiness-vetoed or unstarted
+turn still only shortens its issued fifteen-minute lease. A provider that keeps
+failing locally therefore holds a future `next_attempt_at` up to about 33
+minutes out and is claimed about twice an hour, where the flat interval
+re-claimed it about a minute after every failure. No quota credit, measured
+cadence, security recheck or eligibility rule changes, and any measured turn
+resets the streak, so the backoff paces only providers whose recent turns all
+failed locally. Such a provider's future deadline is retry pacing, not scheduler
+failure or quota expiry.
+
+Each URL turn's tunnel teardown keeps the derived client, packet pump and
+netstack live until the provider has returned nothing for one second (at most
+five, inside the close timeout), after first closing the tunnel's pooled DoH
+connections. Late provider returns are acknowledged and answered with the ACK or
+RST that ends the provider's flow instead of reaching a revoked client, which a
+provider on SDK v2026.8.31 or later otherwise retransmits to indefinitely. Turn
+and close timings include this drain; it is not provider latency.
+
 Bounded diagnosis must name its indexed raw cohort before applying current
 eligibility or history projections. The admission head filters the stored
 `provider_egress_probe_cycle.eligible` hint; the census reconstructs current
@@ -15063,6 +16005,196 @@ or Main policy activation. Missing observation coverage can hide either losses
 or gains. Publishing candidate MMDB bytes is itself a serving change on current
 binaries, independently of the subscriber request-guard switch; keep shadow
 resources separate until every activation gate is reviewed.
+
+### 2.19g Modern provider evidence — the capability probe must keep measuring
+Probe: `capability-probe`
+
+WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
+`provider_modern_evidence`, and only the capability probe writes it: the
+recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
+at a time fleet-wide, each provider measured in a short tunnel of its own
+whose clients attempt opportunistic end-to-end sessions. The URL probe writes
+no evidence. While the gate's switch is off a stopped probe only freezes the
+shadow; once it is on, a stopped probe ages every provider's evidence toward
+`stale_evidence` and the gate takes Quality and Speed away from providers
+that are modern. Every series below is per taskworker process
+(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
+row); sum across the env's taskworkers and remember a process restart resets
+counters.
+
+The probe ships switched off (sn-55) and then schedules nothing: no task
+row, no prober shard, no pass, so every series stays at zero. It is
+switched on by `enabled: true` in `capability_probe.yml` and a restart of
+the taskworkers, whose containers keep the config they started with
+(capprobe/README.md, "Switching it on"). Until then nothing below applies,
+and silence is not a finding.
+
+Healthy shape:
+
+- `passes_total{result="measured"}` advances after every pass of a sweep
+  under way, a few seconds apart when nothing is due and a few minutes apart
+  while providers are measured; between sweeps, which start
+  `min_sweep_interval_minutes` (360) after the last one started,
+  `result="waiting"` advances every ten minutes, reading nothing. So
+  `last_pass_timestamp_seconds` is never older than a pass's
+  `max_time_seconds` (900) plus a few seconds.
+- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
+  time.
+- `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
+  dominates while most providers run the custom lineage.
+- `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
+  responder takes the whole establishment window after its first
+  acknowledgement) and never above `measure_timeout_seconds` (120); modern
+  providers read in seconds.
+- `selection_total` in steady state: `scanned` far above `due`; during the
+  first sweep after deployment, about two days, `due` and `eligible` are
+  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
+  finding then.
+- `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
+  whose few providers all lack the responder; `downgrades_total` low, a
+  `held` now and then that the next sweep mostly answers with a modern
+  reading rather than a `confirmed` one; `readiness_failures_total` and
+  `shard_cleanup_errors_total` flat.
+- `chain_restarts_total` flat. Each count is a taskworker with the probe
+  switched on that found the chain without its task row, ended by a pass on
+  a taskworker with an older config or by maintenance, and scheduled a pass
+  due at once, which starts a new sweep. A count right after maintenance is
+  expected; counts while `capability-probe-disabled-pass` holds are its
+  stale taskworker ending the chain again.
+
+Signals:
+
+- `capability-probe-stalled` — WARN when no taskworker has finished a
+  measured or waiting pass for 30 minutes while `capability_probe.yml`
+  enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
+  PAGE after six hours with the gate on: on any running taskworker as their
+  stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
+  which is what is deployed; while no taskworker publishes it, by the desired
+  provider.yml, `quality_speed_requires_modern_provider: true` or that switch
+  absent and the gate's start (2026-10-21 00:00 UTC by default,
+  `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
+  model's own provider.yml decoder reads them, so the automatic switch-on
+  arms the page. The finding names its `gate_source`. Evidence stays fresh
+  for seven days after its measurement, so a shorter stall, planned
+  database maintenance included, takes no provider out and only warns. The newest pass is read
+  over six hours (`max_over_time`), so a pass of a process that exited
+  since counts; a fleet whose taskworkers all started after it, as the
+  switch-on restart starts them, is given the 30 minutes from its oldest
+  process's start (`process_start_time_seconds`), since the first pass can
+  take its whole `max_time_seconds`. Running taskworkers that export no
+  probe series (`taskworkers_exporting=0`) run an image without the probe.
+  Read
+  `passes_total{result="failed"}` and the taskworker log's `[capprobe]` and
+  task error lines: unreadable or invalid settings, the URL probe's
+  included, whose `shard_count` past 255 would reach the capability probe's
+  prober shard slot 255; shard allocation, identity or funding readiness
+  (`readiness_failures_total{step}`, the capability probe's own, never the
+  URL probe's pass errors); a page read; or an evidence write. A failed pass
+  retries the same sweep page after a minute, so a persistent failure
+  repeats once a minute. A `passes_total{result="disabled"}` pass is the last
+  of a chain that `enabled: false` ended, deliberately or not; nothing runs
+  after it until a taskworker with the probe switched on schedules the
+  chain again, at its start or within ten minutes after
+  (`chain_restarts_total`), so check the deployed `capability_probe.yml`
+  before reading the silence as a stall.
+- `capability-probe-disabled-pass` — WARN on any disabled pass while
+  `capability_probe.yml` enables the probe: an increase of
+  `passes_total{result="disabled"}` over 30 minutes, or a running
+  taskworker whose total is above zero, which also shows a pass it ran
+  before its first scrape. A taskworker container keeps the config it
+  started with, so one that started before the switch-on, or before its
+  host published the new config, reads the probe as off and ends the chain
+  at each pass it claims; the taskworkers that read it as on schedule the
+  chain again within ten minutes, and its sweep starts over. Find the
+  taskworkers whose disabled total is above zero, confirm their hosts
+  publish the current config (`WARP_CONFIG_VERSION`) and restart them.
+- `capability-probe-no-evidence` — WARN when measurements finish for an hour
+  and none records (`providers_total` rising with every `recorded_*` flat).
+  The outcome says where: `tunnel_failed` is the probe's own setup (shard
+  credentials, local control, control plane); `no_ack` everywhere is the
+  probe's tunnels reaching no provider, so compare §2.19's URL probe health
+  before suspecting the fleet; `e2e_not_attempted` means the send path
+  accepted no ClientHello of the probe's while the provider acknowledged its
+  pings, so the probe client's sessions are off, a code or settings
+  regression in which every reading would be wrong, never something to
+  record around; `e2e_pending` means setup ate the measurement's margin over
+  the 60 s window; `tunnel_lost` means the tunnel's path went away, or its
+  window client was replaced, before the reading concluded, so a provider
+  that drops its connection shows it, and a share rising fleet-wide points at
+  the probe's windows or the platform rather than at providers;
+  `negative_withheld` everywhere is `capability-probe-breaker`;
+  `record_failed` is the database write, and fails the pass.
+- `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
+  passes for an hour, PAGE after two hours with the gate on (as for
+  `capability-probe-stalled`): the
+  probe negotiates no end-to-end session with any provider, so its negative
+  readings are all withheld (`providers_total{outcome="negative_withheld"}`)
+  and its evidence ages toward `stale_evidence`. That is a fault on the
+  probe's side, the probe client's sessions or key registration, a connect or
+  settings change, or its tunnels reaching the wrong peers; the fleet cannot
+  lose its responders at once. `readings_total{capability="e2e"}` then shows
+  only `no_responder`, `pending` and `not_tested`. Fix the probe; never
+  record around the breaker. A trip on the odd small tail pass of a sweep is
+  not a finding.
+- `capability-probe-downgrades` — INFO for the shadow review, WARN when
+  `downgrades_total{result="confirmed"}` over a day exceeds 5% of the
+  `recorded_modern` measurements: a negative reading of a provider whose
+  modern evidence was fresh is held for a later sweep (`held`), and only a
+  second negative reading there records the downgrade (`confirmed`). Held
+  ones that the next sweep answers with a modern reading were transient.
+  Confirmed ones in bulk mean modern providers turned legacy, a downgrading
+  release, or a probe fault the breaker does not see, such as windows read
+  as missing; compare `readings_total{capability="window"}` before
+  attributing it to the fleet.
+- `capability-probe-unsealed-share` — INFO for the shadow review, WARN above
+  10% over a day: of the negotiated post-quantum readings
+  (`readings_total{capability="e2e",reading=~"post_quantum_.*"}`), the share
+  `post_quantum_unsealed`. Those providers negotiated the hybrid group but
+  the probe could not verify their identity proof within the seal grace (no
+  published provider key, or the probe's key read failing). The model counts
+  them post-quantum, so understand the share before the switch goes on.
+- `capability-probe-staleness-risk` — WARN when
+  `last_sweep_seconds` exceeds the seven-day staleness window less
+  `modern_refresh_hours` and the sweep interval (about 3.75 days at the
+  defaults), or when the shadow's
+  `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
+  rises for a day: the probe no longer refreshes evidence before the gate
+  reads it as stale. Raise `concurrency` or find what fails first; never
+  lengthen the staleness window to hide it.
+- `capability-probe-teardown-errors` — WARN while
+  `close_errors_total` rises for an hour: capability tunnels fail to retire
+  their derived clients, which the prober reaper then owns. Cross-check
+  §2.25's derived-client retirement before attributing it. The capability
+  probe mints and retires its derived clients through the URL probe's
+  in-process credential owner, so
+  `urnetwork_egress_probe_internal_credentials_total` counts both probes;
+  this counter is the capability probe's own. `shard_cleanup_errors_total`
+  rising is a pass's prober shard whose drain or reap failed afterwards: the
+  pass stands, and the prober reaper retries the cleanup, so read the
+  reaper's progress on slot 255 before anything else.
+
+Not signals: a large `no_evidence` share in the first two days after the
+first deployment; `not_post_quantum` dominating the shadow; a provider that
+gives no evidence being measured again only by the next sweep (that is the
+probe's retry spacing, by design); `waiting` passes between sweeps; a
+modern provider's downgrade showing a sweep after its first negative
+reading (the hold, by design).
+
+Do not backfill evidence rows by hand, route evidence through URL probe
+runs, or switch the gate on while the first sweep is incomplete or
+`capability-probe-stalled` or `capability-probe-breaker` holds. A
+measurement records only when both capabilities read conclusively; a
+capability that was not tested is never recorded as a negative, and neither
+is a negative reading a pass withheld or a sweep holds, so "missing
+negatives" are not a defect to repair.
+
+Implementation convention: `signal_capability_probe.go` (probe
+`taskworker/capability-probe`) implements `capability-probe-stalled` and
+`capability-probe-disabled-pass` from fleet aggregates in Mimir, read
+against the desired `capability_probe.yml` and `provider.yml`; while the
+config switches the probe off, both are healthy. The other classes are
+dashboard reads of the series above, and a probe for them belongs in the
+same file with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -16546,6 +17678,166 @@ that cannot create unintended seedphrase accounts or consume either limiter,
 and corrected exhausted requests retaining 429/Retry-After. Fixed input-shape
 messages omit tokens, identities, provider input, and internal classification.
 
+### 2.29 Modern provider gate readiness — the automatic flip must not empty Quality or Speed
+Probe: `modern-gate-readiness`
+
+The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
+takes every provider the capability probe has not shown to be modern out of
+Quality and Speed under the `not_modern` reason, keeping it Online. Owner
+decision 2026-10-15: it turns on by itself at 2026-10-21 00:00 UTC, the
+code's default start, while `quality_speed_requires_modern_provider` is
+absent from provider.yml; every pass and request decides at its own instant.
+Its evidence comes from the capability probe (server/capprobe), which ships
+switched off and must be switched on and have swept the eligible providers
+before the start. Without
+that evidence a provider reads `no_evidence`, and the flip would empty or
+gut both native buckets. This signal gives the owner warning while turning
+the gate on can still be postponed.
+
+HOW: one Mimir instant query every five minutes, at the monitor's clock,
+through a services gateway, reads thirteen labelled parts from the
+configured environment. Over job `taskworker`: the `count` of
+`urnetwork_stats_provider_modern_gate_on` and of
+`process_start_time_seconds`, and the `max` of
+`urnetwork_stats_provider_modern_gate_start_seconds`, over every process;
+and over the settled processes, those whose `process_start_time_seconds` is
+older than five minutes (`< time() - 300`), the `count` of those processes
+and the `count`, `min` and `max` of the gate and of the start, matched to
+them by `and on(instance)`. Then
+`max(urnetwork_stats_provider_egress_source_started_seconds)`,
+`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
+`sum by (bucket) (max by (bucket, index)
+(urnetwork_stats_provider_egress_index))` for quality and speed. Each
+taskworker's stats collector publishes the gate and its start from its own
+provider.yml at every refresh: whether the gate holds Quality and Speed now,
+and, only while the switch is absent, the start. Read per settled process
+against the settled processes, they show a fleet that does not agree: a
+taskworker on code without the automatic start publishes neither, one on an
+older config decides the gate the other way, which the `min` catches where
+the `max` would hide it, and one that missed a moved start schedules
+another. Only settled processes are compared because each push carries a
+random per-process `instance`: a new process registers the gate at its
+stats collector's first refresh, a minute or two after it starts, and a
+drained process's series stay readable for Mimir's five-minute lookback, so
+over every process a restart alone would read as a taskworker without the
+gate. The latest start over every process places the shadow's windows and
+the watch after it. The shadow counts, for the connected valid public
+providers the other rules admit to each bucket, what the gate decides for
+them, whether or not it is on: every outcome but `modern` is what it takes
+out.
+
+- `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
+  the published start, more than half of a bucket's admitted providers are
+  not `modern` in the shadow (exactly half does not fire). WARN from 72 hours
+  before, PAGE from 24 hours before, under the same identity so the warning
+  escalates. The shadow is judged only on dashboard counts whose source read
+  started within 30 minutes and that carry every bucket and outcome;
+  otherwise the run is `cannot-observe`.
+- `modern-gate-flip-drop` (frame the bucket, sustain 1, PAGE): after the
+  start, until 18:00 UTC on the start's day (and at least an hour after the
+  start), while the kill switch can still be released, a bucket holds less
+  than half the providers it had in the last sample a second before the
+  start. It clears when the bucket recovers or the gate is off on every
+  taskworker. Counts read before the start, or published before every
+  taskworker flipped, are no verdict yet; a missing sample before the start
+  is `cannot-observe`.
+- `modern-gate-fleet-disagrees` (sustain 2), judged on the settled
+  processes: they decide the gate differently (`min` below `max`); fewer
+  publish the gate than run, inside the windows, where one without the gate
+  will not flip with the rest, or anywhere while the gate is on somewhere,
+  since one without it decides it off; or, inside the windows while a start
+  is ahead, fewer schedule a start than publish the gate or their starts
+  differ. Outside the windows a taskworker without the gate beside a gate
+  off everywhere agrees for now, as in a rollout from code before the gate
+  ahead of the start. Inside the windows WARN from 72 hours before
+  the earliest start, since some will not flip with the rest, and PAGE from
+  it until the watch after the latest start ends: Quality and Speed then
+  follow whichever taskworker ran the last score export. Outside them, and
+  while provider.yml sets the switch on every taskworker so that none
+  publishes a start, a gate decided differently WARNs: a taskworker that
+  comes back on an older config after 18:00 UTC on the start's day is seen.
+  With no taskworker process series in Mimir inside the windows the run is
+  `cannot-observe`.
+- `modern-gate-schedule-unreadable` (frame `provider.yml`, sustain 1, WARN,
+  an unknown state): the deployment's desired provider.yml, as the
+  monitor's own copy of the decoder reads it
+  (`model.GetModernProviderGateFailure`), holds the gate off by a failure: a
+  switch that cannot be read or has no value, or, while the switch is
+  absent, a start that is neither an RFC 3339 instant nor a date, is given
+  twice or has no value, or a provider.yml that cannot be read. Each reads
+  as the kill switch and publishes no start, which silences everything
+  above, though it is most likely a postponement that failed; the finding
+  names the failure as a fixed text, never the value given. It is read
+  apart from Mimir, beside `cannot-observe` when Mimir cannot be read.
+
+Outside 72 hours before the earliest start to the end of the watch after the
+latest the signal is otherwise quiet, whatever the gauges say. A part the
+verdict cannot read is `cannot-observe`, beside the findings the rest of it
+gives. No start series means the switch is set, true, false or unreadable,
+so no flip is scheduled and only the fleet's agreement is judged: the
+owner's postponement silences the rest, and a moved start moves its windows.
+When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
+inside the windows of the code's default start, the taskworkers do not run
+the code that flips the gate, or their stats collector is down: the run is
+`cannot-observe`, never quiet. Outside those windows a failed read stays
+quiet.
+
+ACTION: decide before the start. To postpone, set
+`quality_speed_requires_modern_provider: false` in provider.yml: the kill
+switch, after which the next score export restores the buckets. To move the
+flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
+as `2026-10-28T00:00:00Z`, or a date such as `2026-10-28`, its 00:00 UTC.
+Either is a config release through the config-updater and a restart of every
+taskworker and API block, since a running container keeps the config version
+it was created with (the same procedure as server/capprobe/README.md,
+"Switching it on"), and it postpones the flip only when the restarts finish
+before the start. A switch given without a value, or a start that cannot be
+read, keeps the gate off and is logged, as a postponement that failed, and
+publishes no start, which would silence this signal: the monitor's own
+decode of the desired provider.yml WARNs `modern-gate-schedule-unreadable`
+for it. Confirm the moved start on
+`urnetwork_stats_provider_modern_gate_start_seconds` or with
+`bringyourctl provider inspect` after the restart. To let it flip, first
+switch the capability probe on and let it sweep the eligible providers until
+`no_evidence` is small. After the start, a `modern-gate-flip-drop` page
+whose drop the shadow explains is answered with the same kill switch; a drop
+the shadow does not explain has another cause (§2.19, §2.23) and the gate is
+not the thing to turn off. Operational rule for the start's day: from the
+start until 18:00 UTC no taskworker restarts except to release the kill
+switch, since every rollout makes the fleet disagree while it runs.
+
+False positive: a URL probe outage or other bucket loss in the watch after
+the start pages `modern-gate-flip-drop` though the gate took little; read
+the shadow beside it. A restart alone does not fire, since a process is
+compared only once settled, but a config release that sets the switch or
+moves the start makes the fleet disagree until its last taskworker has
+restarted and the drained processes' series have gone stale, up to five
+minutes after each drain: the kill switch's own rollout after the start can
+page `modern-gate-fleet-disagrees` until it completes. A process that
+disagrees is seen only once settled, five minutes after its start. False
+negative: the dashboard counts cover connected valid public providers, the
+score export's Online population. API processes decide the gate for their
+own readers but publish no gauge, so an API block on an older config is not
+seen.
+
+Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
+`signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
+registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
+values cover quiet outside the windows, the warning from 72 hours, the page
+from 24 hours, the page after the flip and its exact-half boundaries, the
+watch to 18:00 UTC on the start's day and its clears, a fleet that
+disagrees on the gate or the schedule before and after the start, a moved
+start a taskworker missed, the WARN outside the windows and with the switch
+set everywhere, a rollout from code before the gate that stays quiet until
+the windows, findings kept beside what cannot be read, counts read
+before the flip, a set switch, a moved start, an unpublished schedule, and
+stale or incomplete counts; synthetic Mimir answers, built from taskworker
+processes as the query reads them, drive the signal's own queries for the
+page before the start, the page after it, a disagreeing fleet, a restart
+that is not judged until its process has settled, and a failed
+postponement in the desired provider.yml, beside a Mimir that answers and
+one that cannot be read.
+
 ---
 
 ## 3. redis signal catalog
@@ -16917,7 +18209,7 @@ Probe: `redis-connections`
 
 - connected_clients per node: baseline ~pool_floor × processes; step change
   +50% in 10 min = reconnect storm or pool misconfig (min_connections is PER
-  NODE ×32 — a config of 64 = 2k idle conns per process).
+  NODE ×48 — a config of 64 = ~3k idle conns per process).
 - Temporal coverage findings use `cannot-observe`, with probe id
   `redis/clients-spike` and stable frame `clients-history`. A failed shared
   transport, invalid response, or response with no configured-node series is
@@ -17076,6 +18368,19 @@ Probe: `redis-topology`
 - Replica count: `CLUSTER NODES | grep -c slave` — 0 means no failover
   exists and any single wedge is a partial outage until manual restart.
 - known_nodes drift vs expected = membership event worth a warn.
+- Node inventory (`node-inventory-mismatch`): every addressed `CLUSTER NODES`
+  member (phantom and handshake entries excluded) must announce the LAN
+  address, from config settings.yml `routes`, of the monitor.yml
+  redis-cluster host whose `redis.node_ports` lists its port, and every listed
+  port must be such a member. One warning per host, or per announced address
+  no redis-cluster host owns, names the ports on each side. Settings
+  validation cannot catch either broken layout: a host whose `redis:` block
+  is missing validates and its nodes silently leave every per-node probe, and
+  a range covering another host's ports validates once that host's block is
+  gone, while edge-6's nginx node-port bridge still answers on 6412-6427 with
+  edge-5's nodes, so their memory is judged against edge-6's RAM. A host
+  without a LAN address leaves the comparison unobservable rather than
+  mismatched.
 - 2026-07-17 purge: 5 `slave,noaddr` phantoms (dead old replicas) removed with
   a per-node loop — each node FORGETs the IDs in ITS OWN noaddr list (views
   differ; every FORGET returned OK, "Unknown node" is tolerable). All 32 views
@@ -17097,6 +18402,51 @@ Missing ownership or an incomplete inventory remains unknown; one subscriber
 proves presence, not that the consumer handles events. Recovery requires both
 subscription coverage and working window setups. This requirement is not
 implemented by `redis-topology` or §9's separate keyspace-pattern checks.
+
+### 3.6a Sharded pub/sub subscribers lost on slot migration
+
+When a slot moves, Redis drops every `SSUBSCRIBE` for that slot's channels and
+sends each subscriber `sunsubscribe`. go-redis v9.22 keeps the dead
+subscription in its own set and re-SSUBSCRIBEs only after a socket error, while
+its health pings to the old node keep succeeding. After the 2026-10-12
+17:45–18:01Z rebalance onto edge-5, 16 of the 40 proxy change channels
+(`proxy_client_<host>_<block>`) had 0 subscribers, while cluster state,
+topology and process health stayed green.
+
+Read-only census, with `REDISCLI_AUTH` set, for every `proxy_client_*`
+channel: find its slot, the slot's current owner, and the shard subscriber
+count at that owner. Print only channel, slot, owner and count.
+
+```bash
+redis-cli -h <entry-host> -p <entry-port> CLUSTER KEYSLOT "$channel"
+# owner: the master whose CLUSTER SLOTS (or CLUSTER NODES) range holds that slot
+redis-cli -h <owner-host> -p <owner-port> PUBSUB SHARDNUMSUB "$channel"
+```
+
+- HEALTHY: every active proxy block's channel has at least one subscriber at
+  its slot owner.
+- BROKEN: 0 at the owner means the subscription is lost. The proxy falls back
+  to a 5 s database poll, so a lost wake delays new proxy clients rather than
+  breaking them.
+- NEW METRIC (server `466a006d`, not yet deployed):
+  `urnetwork_redis_shard_subscriptions_total{event}`, events `subscribed`,
+  `resubscribed`, `reasserted`, `lost` and `failed`. A `lost` not followed by
+  `resubscribed` is the alert signal. The new subscriber owns its socket,
+  replaces it on `sunsubscribe`, on an error reply such as MOVED, on an
+  SSUBSCRIBE not acknowledged within 2 s or on 2 s without incoming evidence,
+  reasserts every 30 s, and reloads the slot map before reopening.
+- UNTIL every proxy runs `466a006d`: no Redis slot moves. After any move, run
+  the census for every channel and restart the affected proxy blocks one at a
+  time, gated on PgBouncer health (§2.11a).
+
+False-positive qualifier: `SHARDNUMSUB` asked of a node that does not own the
+slot reads 0 for every channel, and a proxy block that is not running has no
+subscriber by design; ask the owner and compare with the active proxy
+inventory. False-negative qualifier: a census holds only for the slot map it
+read, and a later move invalidates it. Healthy pings, `redis-topology` and the
+cluster state cannot see this loss. Until `466a006d` runs, the counter is
+absent, which is not zero losses; after that it is per process and restarts
+with it.
 
 ### 3.7 Reliability/scores pipeline load — busy vs degraded
 Probe: `reliability-pipeline`
@@ -17288,7 +18638,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
-| `FATAL: query_wait_timeout` (`pgbouncer-query-wait`) | A queued query did not receive a server connection before its deadline. Busy established servers and backend-startup blockage can both cause this; the line alone leaves the cause unknown. WARN at one diagnostic line/minute, PAGE at five; fixed sample and precedence over generic panic. | Run §2.11: bind native states/ages/config across all active shards and require a bounded authenticated direct control matching backend endpoint, role, database and TLS mode. Split established-server waits from login-only nonprogress; low direct-PG load or an open listener does not clear the pool path. |
+| `FATAL: query_wait_timeout` (`pgbouncer-query-wait`) | A queued query did not receive a server connection before its deadline. Busy established servers, backend-startup blockage and the post-stall handoff livelock (§2.11a: each new server goes to a queued client that has already hung up) can all cause this; the line alone leaves the cause unknown. WARN at one diagnostic line/minute, PAGE at five; fixed sample and precedence over generic panic. | Run §2.11: bind native states/ages/config across all active shards and require a bounded authenticated direct control matching backend endpoint, role, database and TLS mode. Split established-server waits from login-only nonprogress; low direct-PG load or an open listener does not clear the pool path. |
 | `server login has been failing, cached error: sorry, too many clients already (server_login_retry)` (`pg-client-capacity`) | PostgreSQL refused a PgBouncer server login at its connection ceiling and PgBouncer cached the result. A timed-out transaction can leave its old backend unwinding while PgBouncer opens a replacement. A single failed request can also be rendered as `Unexpected error`, route recovery, and goroutine-shaped JSON, so the class takes precedence over generic panic and raw log volume is not unique-failure count. The 2026-09-01 control tied the burst to legacy reindex WAL/storage stalls and 60–66-second `COMMIT`s, not idle retention. | Run direct §1.3a immediately; split active, young idle-in-transaction, idle, and starting owners and correlate PostgreSQL waits/commit latency with PgBouncer connection logs or `SHOW POOLS` where permitted. For the matching legacy-reindex chain, wait for index progress to empty and deploy current-main Taskworker fixes `908a8b2c` and `d8392c83`. Do not first tune pools, raise `max_connections`, restart the database/pools, or mass-terminate sessions; preserve the deployed `work_mem` memory-risk context. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing current-main commits `908a8b2c` plus `d8392c83`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |
@@ -17324,7 +18674,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
-| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
@@ -17397,10 +18747,10 @@ report rate; sample one full line.
    task canaries (1.2), recent deploys; new panic frame in logs → the stack
    names the broken path.
    Low PostgreSQL CPU/activity does not end this branch: check native
-   PgBouncer established/login/wait states (§2.11), API authentication and
-   constructing-pool occupancy (§2.19e), and Connect handlers before resident
-   admission (§8.15), even while process readiness and unauthenticated routes
-   remain healthy.
+   PgBouncer established/login/wait states (§2.11, §2.11a, §5.12), API
+   authentication and constructing-pool occupancy (§2.19e), and Connect
+   handlers before resident admission (§8.15), even while process readiness
+   and unauthenticated routes remain healthy.
 
 ### 5.2 Node wedge (PING hangs locally)
 This is a Redis-specific diagnosis, not a classification of every outgoing
@@ -17975,6 +19325,26 @@ limit:
   the canonical verification feature state in `SignalSettings`: in a disabled
   environment it reports the stale ungated RunOnce chain and startup reap,
   while an enabled environment retains the generic deadline diagnosis.
+- `RefreshVerifyProxyEgress`, `Timeout` / `Interrupted: Done` at exactly
+  900s while `st.yml enabled:true` (76 consecutive on 2026-10-12): this was
+  enabled work too large for one run, not disabled work and not a Redis
+  incident. The refresh read every `proxy_client` allocation with an address
+  (823,287) and fed them one at a time, about seven dependent Redis round trips
+  each plus, for a client without provide keys, two `provide_key` reads and a
+  mirror refill; none of 60,000 sampled proxy clients had keys. While the
+  21:44:55Z run fed such clients the `provide_key` fallback statement rose from
+  about 110/s to about 530/s and fell back when the run was cancelled at
+  21:59:55Z. A cancelled run dropped its Post, the generic backoff put the
+  retry 62 minutes later, and every retry started again at the first client,
+  so later allocations were never fed and every proxy lease lapsed after its
+  10 minute ttl. The refresh now walks allocations in client order in chunks of
+  1024, feeds a chunk in a few pipelined waves with its provide keys read by
+  the chunk's own statement, stops starting chunks after a 60s budget, re-arms
+  at once from the last client fed, and retries a failed or cancelled run
+  within one minute. Expect `[verify]proxy egress refresh fed=<n>
+  complete=<bool>` about once per refresh interval with `fed` near the
+  allocation count. A `Timeout` on this row now means one chunk stalled on
+  Redis or PostgreSQL; do not raise the deadline or pull the row forward.
 - `ExportStats`, `Interrupted: context canceled` at **120.1–120.3s** followed
   by a successful 60–80s retry: this is the generic two-minute task deadline,
   not a deploy drain. Confirm in taskworker logs that `eval error` lands at the
@@ -17996,6 +19366,19 @@ limit:
   confirms the task is not deterministically slow, but does not erase the
   observed load-sensitive 120-second cancellation; retain the task-specific
   ceiling and verify it after rollout across multiple hourly cycles.
+- `ExportStats`, `Timeout` at its **600s** `MaxTime` (2026-10-12): the
+  devices series, not the deadline. One statement read every retained
+  `audit_device_event` row (87.6M since 2026-08-10), grouped it by device and
+  day, wrote 7.5 GB of temp files per run on the primary and streamed 37M rows
+  into a Go replay: 427s on average over 93 runs (221-526s), with the other
+  passes about a minute. The series is now span counts computed in SQL a chunk
+  of devices at a time over the device-leading index (migration 830), four
+  chains at once, each statement on its own connection, bounded to 250,000
+  events and sorted in memory, with the same days, counts and summary. Its
+  cost still grows with the retained events (about 1.4M a day), so
+  `audit_device_event` retention sets the export's steady-state runtime. A new
+  `Timeout` here means a chunk statement stalled; compare its statement time
+  with the chunk bound before changing `MaxTime`.
 - `RemoveDisconnectedNetworkClients`, completed in **6,530.6s** (108.8m)
   versus a 7-day
   p95 of 2,754s (four-hour task ceiling): distinguish PostgreSQL backlog from
@@ -19304,6 +20687,75 @@ require schema and rollout coordination, so it needs explicit architecture and
 data-owner authorization before implementation; it is not authorized by a
 monitor alert, incident diagnosis, or catalog amendment.
 
+### 5.12 Whole-database freeze → PgBouncer livelock (the 2026-10-12 outage)
+Signature: Connect `accepted` handshakes fall while `auth_dependency` rises
+(§2.11a); services report `pg: timeout`; many PgBouncer pools hold queued
+clients and no server while direct 5432 connects work; PostgreSQL backends fall
+from 710–770 toward 157; PgBouncer logs fill with `query_wait_timeout` and
+broken-pipe (EPIPE) errors. The trigger, a 2–7 s whole-database freeze
+(§2.2b), is usually over by the time anyone looks.
+
+Decision tree:
+
+- Are pools starved (`cl_waiting > 0`, servers 0, for more than 30 s; §2.11a)?
+  - No, servers are present but the maximum wait is high → busy servers:
+    §2.11's diagnosis order, then §5.8 or §1.3c.
+  - All 32 consoles stop answering at once (`pgbouncer_up` 0) → PgBouncer is
+    frozen on its log writes by a storage stall (§2.2b); re-read before
+    acting.
+  - Yes → livelock: steps 1–5 below.
+- Then find the trigger: is there a freeze cluster in the duration log at the
+  onset (§2.2b)?
+  - Yes → the writeback/WAL path: Dirty, dm-0 in-flight and write latency,
+    `wal_buffers_full`, D-state stacks.
+  - No → a lock pile-up or CPU wall (§2.2, §5.8, §1.3c).
+
+1. Stop the amplifiers: deploys, restarts, Redis slot moves, REINDEX and
+   exports. Connect and API check readiness once (§12.2, §13.4), so a start
+   during saturation latches not ready, then reverts or loops, and each
+   attempt opens more connections. On 10-12 the Connect and proxy restarts
+   for the JWT and Redis regressions ran into the livelock.
+2. Break the livelock with the queue timeout, not a restart (§2.11a ACTION):
+   the 21:10Z recurrence ended within a minute of the runtime `SET`.
+3. Restart a stuck instance only if step 2 fails, after recording its
+   `SHOW POOLS` and `SHOW SERVERS` (§2.11).
+4. Only then attribute the trigger (§2.2b). Do not tune storage in the middle
+   of a pool outage.
+5. Verify: every pool holds servers with 0 waiting; `accepted` is back near
+   90/s and `auth_dependency` near 30/s; backends are back at 710–770;
+   providers are back at their pre-event level (§1.1, §2.7); then hold §2.11's
+   ten-minute complete-window rule.
+
+### 5.13 Planned primary restart — stop the Taskworker first
+Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
+huge-pages attempt.
+
+1. Stop the Taskworker before the outage; its drain needs the database.
+   `CloseExpiredNetworkClientHandlers` deletes handlers whose heartbeat is
+   older than 2 × 60 s (`taskworker/work/network_client_work.go:28,36`), and
+   a Connect process whose handler is deleted cancels itself on its next
+   heartbeat (`connect/connect_router.go:92-108`). With the Taskworker
+   running, an outage longer than about 105–110 s drops every Connect process
+   (§2.16).
+2. Read the handlers before the stop and again before starting the
+   Taskworker:
+   ```sql
+   SELECT count(*), max(now() - heartbeat_time) FROM network_client_handler;
+   ```
+   Healthy on 10-13: 17 handlers, the oldest heartbeat under 10 s.
+3. Expect a slow stop without huge pages: 139 s on 10-13 (§8.14b).
+4. Expect, with the 10/5/1 PgBouncer timeouts: up to about 12k waiting clients
+   right after the start, drained in about a minute, and no Connect container
+   exit. Every pool meets the starved condition while PostgreSQL is down, so
+   expect `pgbouncer-pool-starved` to page during the outage (§2.11a).
+   Providers went from 71.3k to about 1.9k and back to 68k within 6 minutes,
+   and to 69k by 07:37Z.
+5. Afterwards, expect app-version-confined websocket `read_timeout` bursts
+   (§23.3) and page-table regrowth (§8.14b); neither is a new fault by itself.
+
+Pause deploys and database-heavy work for the window: a container that starts
+during the outage fails its one-shot readiness check (§12.2).
+
 ## 6. How we decided what was REAL (methodology)
 
 1. **One discriminating measurement before any action.** Every hypothesis got
@@ -19340,6 +20792,13 @@ monitor alert, incident diagnosis, or catalog amendment.
    explicit success signal (error count resets to 0, completions resume,
    rate returns to trailing median) and auto-retry of parked work. "Deployed"
    is not "recovered".
+9. **Cross-check operator-side probes before acting.** At 05:52Z on
+   2026-10-13 a local new-connection probe through an SSH tunnel, with a 3 s
+   timeout, "tripped" while production was healthy; the operator Mac was at
+   load 175–265. The observer's own load or tunnel can fail a probe. Before
+   acting, cross-check a local failure with server-side evidence from the same
+   minute, such as the PgBouncer pool exporter (§2.11a), and run local probes
+   with a 10 s timeout.
 
 ## 6b. Issue → actionable item template
 
@@ -19383,6 +20842,7 @@ Tier-0 (page):
 | journal-buffer-retention-rotation | host | §8.5b source-audited affected package plus enabled retention, or exact bounded journald reason | known unsafe combination or any exact retention-triggered rotation in five minutes; immediate | fixed build/state enums and count; capped evidence also retains visibility loss; never infer hash pressure or reader loss |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
 | log-shipper-journal-read-loss | host | §11.14 bounded Fluent Bit unit journal | any exact `sd_journal_next()` loss event in ten minutes; immediate | privacy-reduced total and errno-74 counts only; live unit state cannot clear it |
+| minio-drive-capacity / minio-drive-offline / minio-bucket-quota / minio-write-errors | Mimir MinIO v3 metrics | §11.6a fresh per-drive free/total/health, erasure-set write tolerance, bucket usage against the hard quota and its five-minute minimum, five-minute write-API 5xx | set free space minus 1 GiB at or under 1% of the set total, immediate; worst drive under 5% free for 2 probes (warn under 15%); any offline drive for 2 probes, immediate once write tolerance is negative (healing warns); usage at or over the quota or its five-minute minimum, immediate (warn at 90%); write 5xx at least 5% and 10 per five minutes for 2 probes (warn at 1%) | per-drive free/total, set floor, offline/healing drives, bucket usage/quota/quota minimum and usage snapshot age, request and error counts |
 | host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | connect-resident-ingress-capability-unobservable | Mimir process metrics | §8.15 executable-owned lazy resident-forward-ingress gauge joined to each newest fresh Connect process | any configured newest Connect generation is absent/unselectable, lacks the gauge, or reports a value other than exactly one; immediate | fleet counts only; provenance remains independent |
@@ -19391,12 +20851,21 @@ Tier-0 (page):
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
 | dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
+| pgbouncer-pool-starved | Grafana rule on the PgBouncer pool exporter | §2.11a `max by (env,host,pgbouncer)(pgbouncer_pool_starved_seconds)` | > 15 for 30s; no data is OK because exporter-down covers it | host and instance; waiting clients, servers, logins, maximum wait |
+| postgres-application-backends-collapsed | Grafana rule on postgres_exporter | §2.11a `min by (env,host)(pg_stat_database_numbackends{job="postgres",datname="bringyour"})` | < 300 for 1m | normal 710–770; the series holds its last value through a full PostgreSQL stop |
+| arindb-fallback-active | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_fallback_active)` | > 0 for 10m | emptied countries and per-bucket net losses; serving epoch |
+| arindb-risk-supply-loss | Grafana rule on the published canary decision; monitor §2.9d | `max by (bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed\|online"})` with at least 20 paired providers of old supply | > 0.10 for 10m | emptied countries; no fallback repairs a risk loss |
+| arindb-warming-tripped / arindb-protection-lost | Grafana rules on the published canary decision; monitor §2.9d | `max by (flag) (urnetwork_stats_arindb_decision_flags)` for warming_tripped, latest_unavailable and fallback_dropped | > 0 for 10m | the flag; losses and emptied countries |
+| arindb-cohort-shrink | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_cohort_loss_ratio)` with a reference of at least 100, within 2h of `urnetwork_stats_arindb_pair_since_seconds` or with more than 1% of latest lookups failing (`urnetwork_arin_lookup_errors_total` over `urnetwork_arin_lookups_total`) | > 0.10 for 10m | cohort and its two-hour reference; pair age; latest lookup error share |
+| arindb-serving-flapping | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_serving_changes)` | > 4 for 5m | serving changes in six hours |
+| arindb-decision-stalled | Grafana rule on the published canary decision; monitor §2.9d | `time() - max(urnetwork_stats_arindb_decision_seconds)` | > 5400 s | decision time |
 
 Tier-1 (warn):
 | id | source | check | threshold |
 |---|---|---|---|
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
+| minio-read-errors / minio-write-rejected / minio-metrics-unobservable | Mimir MinIO v3 metrics + `minio` inventory | §11.6a non-write 5xx, write-API 4xx, complete <=180s drive family and bucket usage snapshot | read 5xx at least 5% and 10 per five minutes for 2 probes, page at 25%; write 4xx at least 10% and 20 per five minutes for 2 probes; drive family missing/stale/incomplete for 2 probes, page after 3; no bucket usage snapshot for 2 probes |
 | service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
 | egress-probe-config-drift / egress-probe-config-unobservable | active monitor Config resource + PostgreSQL durable task arguments | §2.19 complete desired execution settings compared in memory with one coherent shard snapshot | explicit mismatch, or a present desired resource that cannot be compared, for 2 probes; endpoints and raw configuration never leave the process |
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
@@ -19420,6 +20889,7 @@ Tier-1 (warn):
 | zombie-tx | pg | idle-in-tx xact age | > 30 min |
 | dead-tuples | pg | n_dead_tup hot tables | > 10M |
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
+| node-inventory-mismatch | redis + monitor.yml | §3.6 CLUSTER NODES members vs each redis-cluster host's `redis.node_ports` at its LAN address | any member or listed port without its counterpart; immediate at the 1h cadence |
 | open-set-size | pg | 2.6 exact open-contract count below scan cap; explicit lower bounds at cap | exact > 150k high/rising, or capped >= 250001 with unknown trend; 3 ticks / 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
@@ -19459,6 +20929,8 @@ Tier-1 (warn):
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by the transactional-email layout through the public website URL and pinned to each enabled edge under the same Host | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
+| pgbouncer-pool-exporter-down | Grafana rule on the PgBouncer pool exporter | §2.11a `min by (env,host)(pgbouncer_up)` | < 1 for 2m; no data alerts |
+| pgbouncer-pool-queue-wait-high | Grafana rule on the PgBouncer pool exporter | §2.11a per-pool `max_over_time(pgbouncer_pool_maxwait_seconds[1m])` | > 3 for 2m |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; score phase enrichment requires the complete source-fresh fixed family, independently of the global alias marker | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
 | worker-scheduler-capacity / worker-scheduler-unobservable | loopback Mimir | §2.12b exact Taskworker instance's source-fresh five-minute process CPU, GOMAXPROCS, and goroutines | CPU >= 90% of own GOMAXPROCS with >= 10,000 goroutines for 2 probes; missing/stale/mixed tuple is visibility WARN, not spare capacity |
@@ -19493,6 +20965,10 @@ Tier-1 (warn):
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
+| arindb-canary-unavailable / arindb-canary-warming / arindb-decision-stale | Grafana rules on the published canary decision; monitor §2.9d | state single, state warming, and `time() - max(urnetwork_stats_arindb_decision_seconds)` | single for 1h; warming for 2h; > 1800 s |
+| arindb-decision-reads-not-ok | Grafana rule on every process's decision reads; monitor §2.9d | `sum(rate(urnetwork_arindb_decision_reads_total{outcome!="ok"}[10m])) / sum(rate(urnetwork_arindb_decision_reads_total[10m]))` | > 0.05 for 15m |
+| arindb-supply-gain / arindb-supply-churn | Grafana rules on the published canary decision; monitor §2.9d | `max by (bucket)` of `urnetwork_stats_arindb_gain_ratio` and `urnetwork_stats_arindb_churn_ratio`, with at least 20 paired providers of old supply | > 0.10 gain or > 0.20 churn for 30m |
+| arindb-warming-serves-latest | Grafana rule on the published canary decision; monitor §2.9d | `max(urnetwork_stats_arindb_decision_flags{flag="warming_serves_latest"})` | > 0 for 30m |
 
 ### Fixed emitted-class crosswalk
 
@@ -19533,7 +21009,14 @@ legacy ticket manager's five-healthy-tick resolution events. The current CLI
 does not emit an all-probes heartbeat. Silence is not recovery. Require direct
 healthy observations held for the applicable verification window, including
 the five-minute healthy-band check where specified, and record recovery
-confirmation in the run ledger (6.8).
+confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
+(MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
+incident on (probe, class, target) per the identity discipline below, and its
+`[CLEARED]` means only that two complete runs no longer reported the incident.
+Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
+which can repeat earlier announcements; it does not date the incidents. A
+state the configuration chose, such as the PG query sample without its flag,
+is never posted.
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:
@@ -22414,6 +23897,14 @@ mutation. Do not reboot a saturated host to erase the owner. Hard termination
 is permitted only for an old generation proven stuck after its replacement is
 ready, one block at a time, with service health verified between blocks.
 
+False-negative qualifier (edge-2, 2026-10-12/13): five-minute I/O wait and
+aggregate MemAvailable did not describe the database host's failures.
+Writeback bursts that froze PostgreSQL for 2–7 s (§2.2b) are far shorter than
+these rate windows, and one NUMA node sat at its low watermark with its kswapd
+at about 100% of a core (§8.14b). Silence from `host-io-saturation` or
+`host-memory-pressure` is no evidence against either. This probe also reads no
+filesystem free space (§2.4b).
+
 Implementation convention: SIGNALS.md §8.14 (`host-load`) maps to
 `signal_host_load.go` and `signal_host_load_test.go`. Synthetic tests reproduce
 CPU saturation, I/O saturation, low available memory, stale/missing and
@@ -22471,6 +23962,52 @@ Implementation convention: SIGNALS.md §8.14a (`host-pressure`) maps to
 cover the high-PSI/under-90%-execution discriminator, healthy host control,
 missing and malformed evidence, wrong-host identity, disabled-host exclusion,
 and Markdown detail.
+
+### 8.14b Database-host memory: page tables, NUMA nodes and huge pages
+
+Edge-2 runs PostgreSQL's 256 GB `shared_buffers` on 4 kB pages:
+`huge_pages = try` fell back silently, and only `SHOW huge_pages_status`
+(`off`) shows it.
+
+- `node_memory_PageTables_bytes{host="by-us-fmt-5-edge-2"}`: 225–344 GB with
+  4 kB pages. A backend that has touched all of `shared_buffers` holds about
+  523 MiB of page tables, and there are about 780 backends. After a restart
+  they regrow at about 7 GB/min, to about 210 GB within an hour.
+- NUMA: node 1's free memory pinned at its low watermark (about 3.6 GB),
+  kswapd1 at about 100% of a core, 6.4 GB of swap in use and memory PSI
+  `full` about 2%. Mimir has no per-NUMA-node series for edge-2 (the node
+  exporter ships meminfo only), so read
+  `/sys/devices/system/node/node*/meminfo` over SSH, read-only.
+- Huge pages: `node_memory_HugePages_Total`, `node_memory_HugePages_Free` and
+  `SHOW huge_pages_status`. The pool must cover
+  `shared_memory_size_in_huge_pages`: 133,795 pages, or 133,851 with 128 MB
+  `wal_buffers`.
+- Restart cost without huge pages (10-13 06:45:44Z): the stop took 139 s.
+  About 31 s for about 770 backends to exit, with system CPU at 90% or more on
+  96 CPUs; 15 s of shutdown checkpoint; about 37 s of io-worker page-table
+  teardown; about 53 s for the postmaster to release the 256 GB of 4 kB shared
+  memory at about 4.6 GB/s.
+- Runtime reservation with PostgreSQL stopped came up short from
+  fragmentation: 43,660 of 133,851 pages (node 1 gave 1,778), so the restart
+  rolled back to `try`. A boot-time
+  `/etc/sysctl.d/60-postgresql-huge-pages.conf` (`vm.nr_hugepages=134400`) is
+  in place for the next boot.
+
+HEALTHY after a boot that reserves the pool: `huge_pages_status` is `on`,
+`HugePages_Total` is the configured 134,400, and page tables stay far below the
+4 kB level as the pools refill. ALERT (proposed; no probe implements it):
+`huge_pages_status` other than `on` on the primary, or one NUMA node pinned at
+its low watermark with its kswapd saturated.
+
+False-positive qualifier: page-table regrowth after a restart is expected with
+4 kB pages and is not a leak, and a brief kswapd burst during a large
+allocation is not sustained pressure. False-negative qualifier: aggregate
+MemAvailable (§8.14) cannot show one node at its low watermark, and
+`huge_pages = try` hides a fallback that only `huge_pages_status` reveals. A
+failed per-node read is unknown, not healthy.
+
+ACTION: reserve the pool at boot, then confirm `huge_pages_status` and the page
+tables. Plan any primary restart with §5.13.
 
 ### 8.15 Per-service runtime runaway
 
@@ -23071,6 +24608,10 @@ staleness with healthy config → subscriber presence; healthy both with
 climbing resets → delivery drops. Do not raise the corrective poll interval
 while any of these is unexplained.
 
+Sharded pub/sub (`SSUBSCRIBE`, such as the proxies' `proxy_client_*` change
+channels) is a separate transport from these keyspace patterns: a slot move
+silently drops its subscribers while every check above stays healthy (§3.6a).
+
 ## 10. Connect drain (deploy / rebalance)
 
 Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
@@ -23156,13 +24697,15 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
 ### 10.4 Access recipe (this env)
 `ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.
 Docker (root): `echo by-pass | sudo -S docker ps`. Redis registry lives on
-edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.
+edge-6 and edge-5; from edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no
+auth). Readonly only.
 
 ## 11. Grafana / loki / mimir observability stack (the 2026-07-19 outage)
 
 The observability PLANE itself: grafana + loki + mimir behind a Go front
-(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on 6-of-7
-lb/host_services hosts (edge-0/1/3/4, crisp, fireside; **edge-5 offline**). The
+(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on all 6
+lb/host_services hosts (edge-0/1/3/4, crisp, fireside; edge-5 left them on
+2026-10-12 and runs MinIO and Redis nodes). The
 front is PID1 and supervises the children via `warp.Child` (restart-on-exit,
 plus restart-on-unready for loki and mimir since 2026-08-18, 11.13).
 **alloy is NOT a container child** — host-managed fluent-bit replaced it, and
@@ -23173,7 +24716,7 @@ Access: `by-pass <secmd-key> by` → per-host sudo pw, then
 `echo "$PW" | ssh by@<ip> 'sudo -S -p "" bash -s' <<'EOS' … EOS` — the `by` user
 is NOT in the docker group, so docker needs sudo. Log driver is now `local`, so
 `sudo docker logs <c>` WORKS (was awslogs → cloudwatch). IPs: edge-0=.173,
-edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (OFFLINE), crisp=.58,
+edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (MinIO, no bundle), crisp=.58,
 fireside=.3 (all 172.28.208.x mgmt). Route-net (eno1) IPs live in
 `config/main/settings.yml` routes.
 
@@ -23272,21 +24815,28 @@ have no local logs). Discriminator: `conn <peer> 6490` OK vs `conn <peer> 14609`
 timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` +
 `query_scheduler.scheduler_ring.instance_port`=6490; mimir `.../ring.instance_port`=6491).
 
-### 11.6 minio object-store persistence (edge-6)
-loki chunks + mimir blocks land in minio (`192.168.51.193:23900`, data
-**`/mnt/data/minio`**, on edge-6 172.28.208.177). Read the data dir from the
-host, never from memory — it is `MINIO_VOLUMES` in `/etc/default/minio`
+### 11.6 minio object-store persistence (edge-5)
+loki chunks + mimir blocks land in minio (`192.168.51.179:23900`, on edge-5
+172.28.208.176 since the 2026-10-12 move from edge-6, xops
+`main/ansible/MINIO-MIGRATION.md`). Its data is one erasure set (EC:2) over four
+drives, **`/mnt/blob1/minio`** to **`/mnt/blob4/minio`**. Read the drives from the
+host, never from memory — they are `MINIO_VOLUMES` in `/etc/default/minio-storage`
 (`systemctl cat minio` shows `ExecStart=... $MINIO_VOLUMES`). This doc said
 `/data/minio` until 2026-08-18; that path does not exist, so every recipe below
 returned empty at it and read as "storage is empty" — the exact false alarm
 this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
-is the tell that you have the wrong path, not an empty bucket.
+is the tell that you have the wrong path, not an empty bucket. Every drive holds
+a share of every object, so the file recipes read the first drive; at EC:2 its
+`du` is about half the logical size that `mc du` reports. The drive directories
+are `minio:minio` 0750, so the file recipes need root: without it they print
+nothing, the same false "empty" as a wrong path.
 ```
-minio_data=$(grep ^MINIO_VOLUMES= /etc/default/minio | cut -d= -f2)     # do not hardcode
-du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
-find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
-ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
-find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+minio_data=$(sed -n 's/^MINIO_VOLUMES="\([^ "]*\).*/\1/p' /etc/default/minio-storage)  # first drive; do not hardcode
+sudo /usr/local/sbin/mc du warpminio/loki warpminio/mimir              # logical size
+sudo du -sh $minio_data/loki $minio_data/mimir                         # growth = writing
+sudo find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+sudo ls $minio_data/loki/fake | wc -l                                  # loki CHUNK dirs (fake=anon tenant)
+sudo find $minio_data/mimir -name meta.json | wc -l                    # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
 TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
@@ -23303,25 +24853,171 @@ repair this by sharing one TSDB mount between overlapping containers. See §11.2
 An empty/stale Loki bucket while Loki is crash-looping = writes stopped
 (11.2/11.4), not a storage bug.
 
-The S3 API must be reachable on both edge-6 addresses: LAN
-`192.168.51.193:23900` and management overlay `172.28.208.177:23900`. Do not
+The S3 API must be reachable on both edge-5 addresses: LAN
+`192.168.51.179:23900` and management overlay `172.28.208.176:23900`. Do not
 infer this from `minio.service=active`; an address-specific bind can leave one
 path healthy and refuse the other. Check the configured bind, listening socket,
 and both HTTP health paths together:
 ```
 systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
-grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio
+sudo grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio /etc/default/minio-storage   # /etc/default/minio is root-only
 ss -lntp | grep ':23900'
-curl -fsS --max-time 5 http://192.168.51.193:23900/minio/health/live
-curl -fsS --max-time 5 http://172.28.208.177:23900/minio/health/live
+curl -fsS --max-time 5 http://192.168.51.179:23900/minio/health/live
+curl -fsS --max-time 5 http://172.28.208.176:23900/minio/health/live
 ```
 Desired `MINIO_OPTS` binds the S3 API as `--address :23900` and keeps the
 administrative console loopback-only. The Ansible deployment must fail unless
-both health requests return 200. On 2026-08-20 the process was healthy but used
-`--address 192.168.51.193:23900`; LAN health returned 200 while the overlay
-connection was refused. That is a bind/config split, not a route, firewall, or
-data-store failure. Re-run `xops/main/ansible/run-minio.sh` after changing the
-vault environment; a source-only vault change does not restart the service.
+both health requests return 200. On 2026-08-20 the process (then on edge-6) was
+healthy but used `--address 192.168.51.193:23900`; LAN health returned 200 while
+the overlay connection was refused. That is a bind/config split, not a route,
+firewall, or data-store failure. Re-run `xops/main/ansible/run-minio-clusters.sh`
+after changing the vault environment; a source-only vault change does not
+restart the service.
+
+### 11.6a MinIO capacity, quota and write-path health
+
+Probe: `minio-storage`
+
+Every minute, for each enabled monitor-inventory host with the `minio` role,
+read MinIO's own v3 metrics from Mimir through one bounded loopback gateway
+(`curl ... 127.0.0.1:3100/prometheus/api/v1/query` on the first reachable
+`services` host). Fluent Bit scrapes the authenticated `/minio/metrics/v3`
+endpoint every 15 seconds and remote-writes it with `job="minio"` and
+`host=<xops inventory name>` (xops `files/fluent-bit/minio.conf`). The monitor
+therefore never holds the metrics bearer token (generated by
+playbook-minio-clusters.yml into the root-only Fluent Bit environment file) or
+the root `mc` alias; neither belongs in monitor.yml. The series are MinIO's own
+statfs, usage, quota and request state — the same inputs its free-space floor
+and quota enforcement use — not a dashboard aggregate.
+
+One query returns fixed `monitor_check` partitions. Every source selector must
+have a raw sample no older than 180 seconds; the evaluation timestamp of an
+instant query or `increase` is not source freshness:
+
+- per drive: `minio_system_drive_free_bytes`, `minio_system_drive_total_bytes`,
+  `minio_system_drive_health` (0 offline, 1 healthy, 2 healing), plus the
+  node's `minio_system_drive_count` and `minio_system_drive_offline_count`;
+- the weakest erasure set's `minio_cluster_erasure_set_write_tolerance`;
+- per bucket: `minio_cluster_usage_buckets_total_bytes`,
+  `minio_cluster_usage_buckets_quota_total_bytes`, and that quota's
+  five-minute `min_over_time`; plus the usage snapshot age from
+  `minio_cluster_usage_objects_since_last_update_seconds`;
+- five-minute `increase` of `minio_api_requests_total` and its
+  `_5xx_errors_total`/`_4xx_errors_total`, summed by host over the write APIs
+  (`PutObject`, `PutObjectPart`, `CopyObject`, `CopyObjectPart`,
+  `NewMultipartUpload`, `CompleteMultipartUpload`, `PostPolicyBucket`,
+  `PutObjectExtract`) and, for 5xx, over every other API.
+
+Series from hosts outside the `minio` inventory, such as a retired store whose
+Fluent Bit still ships, are discarded. An unknown partition, a non-success or
+non-vector response, or an unparsable sample fails the whole observation.
+
+Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
+
+- `minio-drive-capacity`. MinIO RELEASE.2025-10-15T17-29-55Z (`hasSpaceFor`)
+  refuses a new object with 507 `XMinioStorageFull` once the erasure set's free
+  space after the write would be at most 1% of the set's total
+  (`diskFillFraction` 0.99), or one drive cannot hold its share; an upload of
+  unknown size, and any object of 512 MiB or more, needs 1 GiB above that
+  floor. `band=floor` (set free space minus 1 GiB at or under 1% of the set's
+  total) pages immediately; the worst online drive under 5% free pages after two
+  observations; under 15% (MinIO's own `diskReserveFraction`) warns after two.
+  The observation lists every online drive's free/total and the set floor.
+- `minio-drive-offline`. One erasure set at EC:2 over four drives needs three
+  drives to write and two to read. Any drive with health 0, or a node offline
+  count above zero, pages after two observations (a restart brings drives back
+  within about a minute); a negative erasure-set write tolerance means writes
+  are already failing and pages immediately. A healing drive warns after two.
+- `minio-bucket-quota`. MinIO rejects every PUT once the scanner's usage figure
+  plus the object reaches the hard quota, with 400
+  `XMinioAdminBucketQuotaExceeded`, which raises no 5xx. Usage at or over the
+  quota pages immediately. So does usage at or over the quota's five-minute
+  minimum: a quota below usage that was raised again between two one-minute
+  observations still rejected writes. Usage at 90% of the quota warns after
+  two, the headroom xops `minio-set-quota` requires before it sets a quota.
+  Buckets without a quota never alert here; they are bounded by drive capacity.
+- `minio-write-errors`. Write-API 5xx: at least 10 in five minutes and 1% of
+  write requests warns, 5% pages, each after two observations. MinIO counts 5xx
+  per API without the status: 507 is one, write-quorum loss, 503 `SlowDown`
+  from a full request queue and internal errors are the others.
+  `minio-drive-capacity` at `band=floor` identifies 507.
+- `minio-read-errors`. Non-write 5xx: at least 10 in five minutes and 5% warns,
+  25% pages, each after two. Missing objects are 4xx and are not counted.
+- `minio-write-rejected`. Write-API 4xx: at least 20 in five minutes and 10% of
+  write requests warns after two. This is the symptom-side control for
+  `minio-bucket-quota`; it cannot name the bucket because the per-bucket API
+  counters (`/minio/metrics/v3/bucket/api`) need `?buckets=` and are not
+  scraped.
+- `minio-metrics-unobservable`. Frame `drives`: no complete fresh drive family
+  (missing, stale, a drive series count unequal to `minio_system_drive_count`,
+  a missing health gauge, an online drive without coherent free/total, or a
+  duplicate or invalid series) warns after two and pages after three; capacity,
+  quota and error state are then unknown and none of those classes is
+  evaluated. Frame `bucket-usage`: the drive family is complete but MinIO
+  exports no bucket usage snapshot (or a quota without its usage); warns after
+  two.
+
+Root-cause fixtures. On 2026-10-11 edge-6's shared `/mnt/data` filled; MinIO
+reached its floor, every Loki, Mimir and blob write returned 507, and the Mimir
+bucket index went stale behind them (§11.18 detected only that downstream
+symptom). The synthetic replay pages `minio-drive-capacity` at `band=floor`
+and `minio-write-errors`. On 2026-10-12 from 15:35:06Z a 400GiB hard quota sat
+on a loki bucket holding about 673GiB and MinIO rejected Loki's chunk flushes
+until it was raised back to 1TiB. The replay pages `minio-bucket-quota`, both
+while the quota is in force and within five minutes after it is raised.
+
+Source facts, verified in the pinned MinIO and mc sources rather than assumed:
+the quota gauge is emitted only for buckets in the usage snapshot and only when
+the stored config's `quota` field is positive. Enforcement reads `size` first
+and then `quota`; the pinned mc's `mc quota set --size` writes `quota` only,
+so the gauge equals the enforced limit. The buckets-path gauge
+`minio_cluster_usage_buckets_since_last_update_seconds` is written in
+nanoseconds by this release; the probe reads the objects-path gauge of the same
+name, which is in seconds. The data-usage, drive and erasure-set figures sit
+behind one-minute MinIO caches.
+
+- **False-positive qualifier:** drive gauges are filesystem statfs, so they
+  count non-MinIO data on the same filesystem; a filling drive with flat bucket
+  usage is foreign data (edge-6's shared `/mnt/data`), not bucket growth.
+  Offline drives export zero free/total and are excluded from capacity. Usage
+  is the scanner's snapshot and stays high after retention deletes until the
+  next cycle, but MinIO enforces against the same figure, so a quota page then
+  still describes rejected writes. The five-minute quota minimum keeps a page up
+  to five minutes after a quota is raised: compare `quota_bytes` with
+  `quota_min_5m_bytes`. A MinIO restart can briefly show drives offline (hence
+  two observations) and can extrapolate a counter increase. Write 4xx include
+  403 credential/policy failures and malformed or conditional requests. The
+  healthy control is a four-drive store at about 60% free with no quota near
+  usage, while a retired host's failing series are ignored.
+- **False-negative qualifier:** a stopped MinIO, Fluent Bit, bearer token or
+  Mimir ingestion path is `minio-metrics-unobservable`, never green; correlate
+  §11.14 `log-shipper` and check `/minio/health/live` on the host. A bucket the
+  scanner has not counted yet, and a quota written only in the `size` field by
+  another client, are enforced but export no quota gauge; `minio-write-rejected`
+  remains the symptom-side control, and `mc quota info --json` as root is the
+  direct check. Growth between scanner cycles is invisible to both MinIO's
+  enforcement and this probe (`usage_snapshot_age_s` is reported). A quota or
+  error episode that ends more than five minutes before the next observation,
+  as can happen under `-min-probe-cadence=15m`, is outside both windows. An
+  inventory without an enabled `minio` host (role removed or host
+  `disabled: true`) leaves this probe dark without a visibility alert. The
+  thresholds are initial static bands from MinIO's own floor and the incident
+  shapes, not a learned production baseline; record the healthy 4xx/5xx
+  background from the first live passes.
+
+Configuration: `vault/<env>/monitor.yml` needs only `roles: [minio]` on the
+MinIO host, whose `name` must equal Fluent Bit's `host` label (the xops
+inventory name), plus at least one `services` host for the loopback Mimir
+gateway. There are no other keys, no credentials and no drive list: MinIO's own
+`minio_system_drive_count` is the expected drive denominator.
+
+Implementation convention: SIGNALS.md §11.6a (`minio-storage`) maps to
+`signal_minio_storage.go` and `signal_minio_storage_test.go`. Synthetic tests
+replay both incidents and cover capacity bands, offline/healing drives and
+lost write quorum, quota bands including a quota raised within the window,
+request-error bands, missing/stale/incomplete drive and usage layers,
+malformed Mimir responses, foreign-host series, a dark inventory, and the
+query's freshness bounds.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -23464,7 +25160,7 @@ the exact live DNAT rule.
 12. a whole dashboard is blank (not just some panels), or `count by (host)` on
     any metric is short a host → that host's fluent-bit is dead (11.14).
     Check `systemctl is-active fluent-bit` on the hosts with NO grafana bundle
-    too (edge-6, edge-2) — they appear in no §11.1 reading.
+    too (edge-6, edge-5, edge-2) — they appear in no §11.1 reading.
 13. Grafana UI/health and Mimir are green, the datasource row exists, but
     `/api/ds/query` and every scheduler rule fail with
     `[plugin.notRegistered]` → the datasource implementation is absent from
@@ -23476,6 +25172,12 @@ the exact live DNAT rule.
     correlate gap endpoints with Mimir starts. Do not zero-fill, span-null, or
     rewrite the throughput query: those treatments turn missing observations
     into false traffic measurements.
+15. Loki flushes or Mimir block uploads fail while Grafana, Loki and Mimir are
+    all up, and Mimir's bucket index goes stale → MinIO refuses the writes
+    (11.6a): 507 `XMinioStorageFull` when its drives reach the free-space
+    floor, 400 `XMinioAdminBucketQuotaExceeded` when a bucket's hard quota is at
+    or under its usage. Read `minio-storage` before restarting anything in the
+    Grafana bundle.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -23716,10 +25418,10 @@ systemctl restart warp-main-grafana-<block>
 Probe: `log-shipper`
 
 alloy is gone; **host-managed fluent-bit ships every log line and every metric**,
-on every warp host — including edge-6 (redis + minio) and edge-2 (postgres),
-which run no grafana bundle at all and so appear in NO §11.1 reading. §11 had no
-signal for it until 2026-08-18, which is why edge-6 shipped nothing for 2d13h
-without anything noticing.
+on every warp host — including edge-6 (redis), edge-5 (minio + redis) and
+edge-2 (postgres), which run no grafana bundle at all and so appear in NO §11.1
+reading. §11 had no signal for it until 2026-08-18, which is why edge-6 shipped
+nothing for 2d13h without anything noticing.
 ```
 systemctl is-active fluent-bit                                   # per host, ALL warp hosts
 systemctl show fluent-bit -p NRestarts -p ActiveEnterTimestamp -p Result
@@ -24663,17 +26365,42 @@ still requires a complete comparable two-hour window with zero discard
 increments, fresh independent application reads, and enough measured local
 and global headroom for another complete generation overlap.
 
-Pair every branch with §11.21. Do not zero `query_store_after` or
-`ignore_blocks_within` merely to fill the graph: Mimir 3.1.1 warns that querying
-replicated non-compacted blocks is inefficient and can expose duplicate sample
-overlaps, and its store-gateway does not deduplicate chunks. A long read-only
-old-generation handoff follows Mimir's classic downscale order, but changes
-memory, ring/query fan-out, deploy serialization, rollback, and failure
-behavior. A dedicated persistent Mimir tier is a larger topology change. The
-monitor therefore requests an explicit operator architecture decision rather
-than prescribing either design. Never shared-mount one WAL/TSDB directory into
-overlapping generations, zero-fill or span-null the dashboard, or reinterpret
-a missing observation as zero throughput.
+The 2026-10-12/13 redeploys repeated the visibility branch. After each Grafana
+bundle redeploy (10-12 about 14:46Z and 19:46Z, and 10-13 06:01Z), range
+queries on every endpoint returned nothing from before the restart for about
+12 hours. The ingester TSDB lives in the container, so every ingester restarts
+with an empty head. The old ingesters flush to MinIO on stop
+(`flush_blocks_on_shutdown`), but `querier.query_store_after` (12h default)
+and `blocks_storage.bucket_store.ignore_blocks_within` (10h default) hid those
+young blocks. Warp `fb0198f` (merged as `e373022`) sets both to `0s` and the
+compactor's `cleanup_interval` to `5m`. Confirm what each child runs through
+§11.21's reducer or the child's `/config` (port 14819 on edge-0 on 10-13; ports
+vary by generation), never by printing the whole configuration. Real loss
+happens only when MinIO refuses writes during the restart: the bucket gaps
+10-11 00:00–16:12Z and 10-11 22:00Z–10-12 13:00Z were lost during the
+MinIO-full and cutover period (§11.6a). Loki kept its history through the same
+redeploys because its queriers always read the store.
+
+False-positive qualifier: a hole in Mimir alone after a redeploy, with Loki
+history intact and no MinIO write refusals, is the read-path horizon, not loss.
+False-negative qualifier: `mimir-continuity` still classifies
+`mimir-ingestion-gap` against the 12h default horizon. With zero horizons, a
+gap that stays fixed after the next compactor cleanup and store sync is already
+probable loss, yet it stays unclassified until 12h plus two steps; check MinIO
+write errors (§11.6a) rather than wait.
+
+Pair every branch with §11.21. Zero horizons have a cost: Mimir 3.1.1 warns
+that querying replicated non-compacted blocks is inefficient and can expose
+duplicate sample overlaps, and its store-gateway does not deduplicate chunks. A
+long read-only old-generation handoff follows Mimir's classic downscale order,
+but changes memory, ring/query fan-out, deploy serialization, rollback, and
+failure behavior. A dedicated persistent Mimir tier is a larger topology
+change. The monitor asked for an explicit operator architecture decision among
+these rather than prescribing one; on 2026-10-13 the zero-horizon design was
+chosen (warp `fb0198f`, merged as `e373022`), so read duplicate-sample or slow
+range-query symptoms against that choice. Never shared-mount one WAL/TSDB
+directory into overlapping generations, zero-fill or span-null the dashboard,
+or reinterpret a missing observation as zero throughput.
 
 ### 11.20a Mimir series and sample-rate admission
 
@@ -25293,6 +27020,19 @@ and only then signal/remove it. A proposal in source does not prove that the
 currently draining old parent implements that order; the first transition needs
 an explicit operator plan. A dedicated stable Mimir tier remains the alternative
 when a 12-hour per-release overlap is unacceptable.
+
+On 2026-10-13 that decision chose zero horizons: warp `fb0198f` (merged as
+`e373022`) sets `query_store_after` and `ignore_blocks_within` to `0s` and the
+compactor's `cleanup_interval` to `5m` (§11.20). Once a Grafana image carrying
+it is deployed, every child reports those values, and this probe's existing
+rule emits `mimir-noncompacted-query-risk` (WARN) on every cadence. From then
+on that WARN records the chosen design and its duplicate-sample and query-cost
+risk, not new drift; its emitted action, which says not to set the horizons to
+zero, predates the decision. After that deploy, a child that still reports a
+positive horizon (`mimir-replacement-continuity-unverified`) is running an
+older generation, and that is the drift signal. `flush_blocks_on_shutdown=true`
+stays mandatory: with zero horizons, the flushed blocks are the only durable
+copy of a replaced head.
 
 Verification has three layers: exact privacy-reduced config values plus a
 separate exact lifecycle proof on every active process; a capacity-gated
@@ -26393,8 +28133,13 @@ The drain logs one start line and exactly one outcome line per SIGTERM:
   exits, so the log lines are the durable record).
 
 ### 12.2 Readiness gate (deploy-time)
-`/status` latches at startup: one-shot pg SELECT 1 + redis PING before any
-task is claimed. Status `error not ready: ...` → the warpctl poll fails
+`/status` latches at startup: the shared readiness check
+(`router.CheckStartupReadiness`: the database's successful migration head must
+cover the binary, then Redis must answer PING) passes before any task is
+claimed. Correction (2026-10-13): on Taskworker this is not a one-shot
+`SELECT 1`; its startup owner retries retryable dependency errors every 2 s,
+reporting not ready meanwhile, and stops on a non-retryable error. Status
+`error not ready: ...` → the warpctl poll fails
 (`^(?i)error(\s|:)`) for the full 120s → deploy reverts, old containers keep
 the plane running. Status `draining` after SIGTERM is informational (NOT an
 error — deliberate, so fleet status sampling doesn't count drains).
@@ -26402,6 +28147,20 @@ error — deliberate, so fleet status sampling doesn't count drains).
   build cannot reach a dependency — fix the build/config, do NOT force.
 - GOTCHA: readiness is start-time-latched by design. A runtime redis outage
   does not flip /status; that is 1.2's job (task canaries).
+
+PgBouncer refuses with SQLSTATE 08P01 for `query_wait_timeout`, a failing
+server login and `max_client_conn`. Before server `9a56fdba`, Taskworker's
+startup readiness (`router.RetryableStartupReadinessError`) retried 08000–08007
+but not 08P01, so a Taskworker started while the pools were saturated latched
+the refusal as a rejected deployment and stopped reading. `9a56fdba` retries
+08P01; a refusal joined with an independent hard cause still stays hard. While
+the queue wait (10 s) exceeds the 5 s ping budget, the client's own deadline
+fires first and is already retried; the planned 4 s queue wait (xops
+`b50abca`) makes PgBouncer answer first, so it must not be applied before every
+Taskworker runs `9a56fdba`. Connect and API check readiness once with no retry
+(§13.4): a deploy started during pool saturation latches
+`not ready: pg: timeout` and reverts or loops, adding connections. Hold deploys
+while any §2.11a pool is starved.
 
 The 2026-10-10 bounded fleet capture found all eight `a1b91a4d` Taskworkers
 ready while each emitted task-finalization timeouts. The retained recovery
@@ -26587,8 +28346,10 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   that impossible — one block per host drains at a time).
 
 ### 13.4 Readiness latch (P0)
-- `urnetwork_api_ready` 1 after the startup latch passed (one-shot pg
-  `SELECT 1` + redis `PING`, `api/readiness.go`), 0 on a failed check and
+- `urnetwork_api_ready` 1 after the startup latch passed (one-shot shared
+  check: the successful migration head, then redis `PING`;
+  `api/readiness.go` delegates to `router.CheckStartupReadiness`, not
+  `SELECT 1`), 0 on a failed check and
   from drain start. A failed check latches /status to
   `error not ready: <check>: ...` — the deploy poll reads it, times out,
   and reverts to the old container. The not-ready container does NOT exit
@@ -27944,10 +29705,11 @@ same sustained campaign passed outside the maintenance boundary.
 Use all three clocks; a log error that appears after the request deadline can
 still name a restart which began before the request:
 ```bash
-# Redis host: simultaneous stop is the decisive full-cluster-outage signal.
+# Each Redis host (edge-6 runs nodes 1-32, edge-5 nodes 33-48): simultaneous
+# stop is the decisive full-cluster-outage signal.
 journalctl --utc --since '<request-start - 15s>' --until '<request-end + 30s>' \
   -u 'redis-cluster@*.service'
-for i in $(seq 1 32); do
+for i in $(seq 1 32); do   # on edge-5: seq 33 48
   systemctl show "redis-cluster@$i.service" \
     -p Id -p ExecMainStartTimestamp -p ActiveEnterTimestamp -p NRestarts
 done
@@ -28717,13 +30479,14 @@ standalone DeviceLocal worked because it did not arrive behind that saturated
 process queue. `WindowStatus.Failed` remained a presentation latch; it did not
 stop enumeration or retry.
 
-Current proxy builds give each hosted DeviceLocal one private carrier budget
-derived from `config/main/proxy.yml: device_memory_budget` (24 MiB in main).
+Current proxy builds explicitly select the shared SDK low-memory profile for
+each hosted DeviceLocal, including on Linux. Its private budgets derive from
+`config/main/proxy.yml: device_memory_budget` (32 MiB by default in main).
 Devices share one manager-lifetime NetworkSpace for immutable metadata and
 discovery, but each owns its mutable JWT/refresh session, control client
 strategy (including DoH concurrency and dial pacing), and memory admission.
 The private strategy's idle sockets and DoH cache are not a hard-RSS component
-of the 24 MiB DeviceLocal target; compare host reserve and per-device RSS trend
+of the 32 MiB DeviceLocal target; compare host reserve and per-device RSS trend
 after deployment before claiming spare physical capacity.
 
 **Private-control lifecycle qualifier:** the strategy is device-owned, but its
@@ -28742,7 +30505,7 @@ generation before assigning an incident to this mechanism.
 Use these aggregate, identity-free metrics:
 
 - `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
-  `urnetwork_proxy_devices_live * 24 MiB` in main.
+  `urnetwork_proxy_devices_live * 32 MiB` in main's canonical configuration.
 - `urnetwork_proxy_platform_transports_max`: should scale as
   `urnetwork_proxy_devices_live * 16`; a flat 16 with multiple live devices is
   a pre-fix/shared-budget deployment.
@@ -28815,7 +30578,8 @@ For a reported proxy failure, correlate pending H1 with these owner-window
 aggregates and bounded available retry controls. If pending remains zero while the window repeatedly enumerates and
 evaluates candidates, investigate provider reachability/auth. If pending is
 sustained, compare `transports_used` with `transports_max` and verify both the
-24 MiB config and the per-device SDK build before blaming the provider fleet.
+32 MiB canonical config (or its deliberate override) and the per-device SDK
+build before blaming the provider fleet.
 
 The `proxy-transport` probe performs that identity-free aggregate check on the
 newest actual-scrape-fresh process generation. Its authoritative denominator is
@@ -29866,12 +31630,23 @@ pressure, and newest-generation selection during rollout.
 ### 14.7d Proxy private device memory targets
 Probe: `proxy-device-target`
 
-Every hosted Proxy `DeviceLocal` owns its own 24 MiB steady-state memory target
+Every hosted Proxy `DeviceLocal` defaults to its own 32 MiB steady-state target
 and private transport admission budget. No manager-wide sum of targets may
-reject an otherwise valid device open. This is **not** a 24 MiB hard cap on
+reject an otherwise valid device open. This is **not** a 32 MiB hard cap on
 each device's RSS, and removing the old process-wide gate does not create
 physical RAM. Device count and host reserve must be considered together; more
 hardware or rebalancing is required when the active-client load cannot fit.
+
+The proxy selects the SDK low profile explicitly instead of inferring it from
+the host OS. A positive `device_memory_budget` override changes per-device
+sizing while keeping that profile; zero, negative, and malformed values remain
+invalid. Metrics report the actual installed targets, including overrides.
+The monitor below checks the canonical main target: a deliberate different
+target produces a policy-mismatch warning, not a runtime admission refusal.
+Reconcile an approved override before treating the warning as an old build.
+This per-owner choice does not change the process Go memory limit, global
+message pools, or normal Server/Connect settings. The separate proxy TUN and
+other process allocations remain outside the SDK tracked-use sum.
 
 Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
@@ -29879,7 +31654,7 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
 Use the active services.yml Proxy host/block topology as denominator, select
 the newest fresh generation per slot, and require fresh source timestamps.
-For each process, the aggregate target must equal live devices × 24 MiB. The
+For canonical main, the aggregate target must equal live devices × 32 MiB. The
 aggregate is observation only; it is not an admission budget.
 Also query the former `urnetwork_proxy_device_memory_budget_bytes` metric as
 optional rollout evidence. A fresh positive value on the newest process
@@ -32808,7 +34583,62 @@ and controller but does not regenerate an already-built image's Nginx config.
 Let the controlled LB drain finish and inspect the replacement's selected path
 before declaring recovery. Do not bypass client verification, change DNS,
 restart unrelated services, or turn certificate validation into a new
-build-admission architecture.
+build-admission architecture. A new bringyour.com key also signs JWTs: plan
+the verifier restarts in §18.2a before that Vault sync reaches the hosts.
+
+### 18.2a Certificate rotation also rotates the JWT signing key
+
+jwt.yml `tls_key_paths[0]` is the bringyour.com TLS key, so a bringyour.com
+certificate rotation is also a JWT signing-key rotation, and §18.2 stays green
+throughout. In the build deployed on 2026-10-12, each process loaded every key
+version once (a `sync.OnceValue` in `session/by_jwt.go`) and signed with the
+newest; verifiers never reloaded. The run-edges Vault sync merges `tls.pending`
+into `tls` on the hosts, so a signer started afterwards uses the new key while
+verifiers started earlier reject it.
+
+On 10-12 the rollout synced a new key version to the hosts at 17:20Z, and the
+17:45Z API deploy signed with it. Connect and Alt processes started earlier
+rejected every new or refreshed token, about 400/s, until they were restarted
+at 19:44–20:17Z. Server `aea76d70` adds a keyring that rereads the Vault on an
+unknown `kid` and signs only with keys at least 2 h old; it is pushed, and in
+the 2026-10-13 batch, but not deployed.
+
+```promql
+sum by (service, host, block) (rate(urnetwork_auth_jwt_rejections_total{env="main",cause="signature"}[5m]))
+```
+
+- SIGNALS: `urnetwork_auth_jwt_rejections_total{cause="signature"}` by
+  service, host and block; Connect's
+  `urnetwork_connect_h1_handshake_results_total{result="jwt_refused"}`
+  (baseline 0); `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, which
+  counts credentials accepted only because an auth.yml migration gate is off.
+- THRESHOLDS used during the incident (no probe or rule implements them): a
+  total over 10/s; any Connect, Alt or Proxy instance over 1/s; or 3 or more
+  hosts over 0.5/s with a step of 3/s or more.
+- DISCRIMINATOR: a constant rate of about 2/s on API blocks only, which moves
+  wholesale from one host's API to another's (at 05:24Z on 10-13, from edge-4
+  to edge-0), is one client looping on a bad token over a kept-alive
+  connection, not a key problem. A key mismatch shows on verifiers (Connect,
+  Alt, Proxy) and steps with deploys.
+- OTHER API CAUSES: `no_active_row` at about 93/s in total is background, and
+  `credential_rotated` runs at about 0.2/s.
+- ACTION until `aea76d70` runs on every signer and verifier: before a
+  bringyour.com certificate or key change reaches the hosts, plan to restart
+  every JWT verifier (Connect, Alt, Proxy and anything else that verifies
+  tokens) before or together with the first signer (API), serially and gated
+  on PgBouncer health (§2.11a). After the fact, restart the old verifiers on
+  their current versions so that each process loads both key versions.
+
+False-positive qualifier: the single looping client above and the
+`no_active_row` and `credential_rotated` causes are not key mismatches. The
+healthy control is about 0 signature rejections on verifiers once every
+process holds both key versions (from 20:13Z on 10-12). False-negative
+qualifier: the counter is per process and restarts with it, so a verifier
+restarted after the sync shows no rejections while older processes still
+reject; cover every running generation. Rejection detail is logged only at
+verbosity 1, so log classes do not count it, and `jwt_refused` counts Connect
+handshakes, not tokens. A valid public certificate (§18.2) says nothing about
+which key versions processes hold.
 
 ### 18.3 Authoritative DNS aliases and recursive address families
 
@@ -34163,6 +35993,50 @@ customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
 
+### 23.3 Connect H1 session closes by carrier, and provider cohorts by app version
+
+`urnetwork_connect_h1_sessions_closed_total{carrier,reason}` counts
+authenticated H1 transports by their first observed terminal event, for
+carriers `websocket` and `h1plus`, with reasons including `peer_close`,
+`read_error`, `read_timeout`, `write_error`, `request_canceled` and
+`resident_ended`. `urnetwork_connect_provider_connections{app_version}` is each
+process's connections from publicly providing clients by app release:
+`year.month.day` for releases from the last 62 days, `year.month` for older
+ones, plus `unknown` and `other`. Connect's transport read timeout is 30 s
+(`DefaultConnectHandlerSettings` in `connect/transport.go`: `ReadTimeout` 30 s,
+pings 1–15 s), so a `read_timeout` close means the client sent nothing for
+30 s.
+
+```promql
+sum by (carrier, reason) (increase(urnetwork_connect_h1_sessions_closed_total{env="main",service="connect"}[1m]))
+sum by (app_version) (urnetwork_connect_provider_connections{env="main",service="connect"})
+```
+
+- BASELINE (10-13): about 350 websocket `read_timeout` closes a minute.
+- PATTERN after a mass reconnect (the 10-13 restart, about 06:50Z): bursts of
+  websocket `read_timeout` closes, each confined to one app-version cohort,
+  while h1plus stayed flat. 07:12Z: 3,564 in one minute, from the `other`
+  bucket plus 76% of 2026.9.9; 07:42Z: 1,642, from 2026.3; 07:47Z: 1,430,
+  from 2026.7. The cohorts partly reconnected right after. No LB reload,
+  network dip, Taskworker pass or database stall lined up. The likely cause is
+  a client-side per-version timer firing in lockstep after everyone
+  reconnected together; a client-code check was pending.
+- RESTART EFFECT: providers went from 71.3k to about 1.9k and back to 68k
+  within 6 minutes, and to 69k by 07:37Z. Edge NIC receive is the network
+  discriminator.
+
+Attribute a close burst to a cohort by the matching drop in
+`provider_connections` for one `app_version` in the same minute; the close
+counter has no version label. False-positive qualifier: a cohort-confined
+burst with h1plus flat and steady NIC receive is this client pattern, not a
+server or network fault; the healthy control is the h1plus carrier in the same
+minute. False-negative qualifier: the cohort join is by time; the gauge is per
+process and restarts with it; `other` mixes unrecognized versions, so one
+bucket can hide several cohorts. A burst spread across carriers and cohorts is
+not this pattern: check the LB, network and Connect path (§2.7, §8.6). No
+server action is indicated for the client pattern; do not restart Connect for
+it.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress
@@ -34222,6 +36096,10 @@ startup cleanup is confined to deliberately absent targets; it does not cover
 live settlement functions. Finished retention admits at most 64 exact finished
 keys before its row locks, rechecks the existing age predicate, and skips busy
 groups or rows for a later sweep. Age alone does not exclude a live Post retry.
+Each cleanup run seeks from a keyset position carried in its arguments, stops
+starting groups after a 30 s budget inside its 2 min max time, and re-arms at
+once from that position; a completed sweep starts again at the oldest row after
+10 minutes, and a failed or timed-out run retries within one minute.
 
 The 2026-10-08 bounded private R44 readiness capture reported taskworker
 initialization failure `invalid database ownership maintenance resource`.

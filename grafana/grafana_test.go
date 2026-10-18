@@ -2,10 +2,14 @@ package grafana
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -47,6 +51,11 @@ type testPanel struct {
 					Value *float64 `json:"value"`
 				} `json:"steps"`
 			} `json:"thresholds"`
+			Custom struct {
+				ThresholdsStyle struct {
+					Mode string `json:"mode"`
+				} `json:"thresholdsStyle"`
+			} `json:"custom"`
 		} `json:"defaults"`
 		Overrides []struct {
 			Matcher struct {
@@ -611,10 +620,39 @@ func TestRedisClusterCounterRatesCoverStaggeredScrapes(t *testing.T) {
 			}
 		}
 		if strings.Contains(joined, "$__rate_interval") {
-			t.Errorf("Redis panel %d uses $__rate_interval, which can be shorter than the 61–92 second staggered scrape interval: %s", panelID, joined)
+			t.Errorf("Redis panel %d uses $__rate_interval, which can be shorter than the 61–108 second staggered scrape interval: %s", panelID, joined)
 		}
 		if strings.Count(joined, "[5m]") != len(metrics) {
 			t.Errorf("Redis panel %d must use one five-minute range per counter, got: %s", panelID, joined)
+		}
+	}
+}
+
+// The cluster spans edge-6 (6380-6411 behind the 6379 entry) and edge-5
+// (6412-6427), so the Redis panels must stay label-driven: no query may pin a
+// host, an address or a node port, and the host and node pickers must default
+// to every value instead of the first host.
+func TestRedisClusterDashboardSpansEveryHost(t *testing.T) {
+	dashboard := readTestDashboard(t, "redis-cluster.json")
+	pinned := regexp.MustCompile(`\b(host|node|instance)\s*=\s*"|\b6[34]\d\d\b|by-us-fmt-5-edge-\d|192\.168\.|172\.28\.`)
+	for _, expr := range dashboardExpressions(dashboard) {
+		if pinned.MatchString(expr) {
+			t.Errorf("Redis panel query pins a host, address or node: %s", expr)
+		}
+	}
+	for _, name := range []string{"host", "node"} {
+		var found map[string]any
+		for _, raw := range dashboard.Templating.List {
+			if variable, ok := raw.(map[string]any); ok && variable["name"] == name {
+				found = variable
+			}
+		}
+		if found == nil {
+			t.Errorf("Redis dashboard is missing the %s variable", name)
+			continue
+		}
+		if found["multi"] != true || found["includeAll"] != true {
+			t.Errorf("Redis %s variable must be multi-select with All so every host shows by default: %v", name, found)
 		}
 	}
 }
@@ -1330,12 +1368,12 @@ func TestServiceLogsLinksToLogsDrilldown(t *testing.T) {
 func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 	tests := []struct {
 		name           string
-		diskMountpoint string
+		diskMatcher    string
 		serviceMetrics []string
 	}{
 		{
-			name:           "minio.json",
-			diskMountpoint: "/mnt/data",
+			name:        "minio.json",
+			diskMatcher: `mountpoint=~"` + minioDriveMountpoints + `"`,
 			serviceMetrics: []string{
 				"minio_cluster_health_nodes_online_count",
 				"minio_cluster_health_drives_offline_count",
@@ -1345,8 +1383,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 			},
 		},
 		{
-			name:           "subtensor.json",
-			diskMountpoint: "/",
+			name:        "subtensor.json",
+			diskMatcher: `mountpoint="/"`,
 			serviceMetrics: []string{
 				"substrate_block_height",
 				"substrate_sub_libp2p_peers_count",
@@ -1356,8 +1394,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 			},
 		},
 		{
-			name:           "postgres.json",
-			diskMountpoint: "/",
+			name:        "postgres.json",
+			diskMatcher: `mountpoint="/"`,
 			serviceMetrics: []string{
 				"pg_up",
 				"pg_stat_activity_count",
@@ -1384,8 +1422,8 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 				t.Error("dashboard must include host CPU and memory context")
 			}
 			if !strings.Contains(queries, "node_filesystem_avail_bytes") ||
-				!strings.Contains(queries, `mountpoint="`+test.diskMountpoint+`"`) {
-				t.Errorf("dashboard must include host disk context for %s", test.diskMountpoint)
+				!strings.Contains(queries, test.diskMatcher) {
+				t.Errorf("dashboard must include host disk context for %s", test.diskMatcher)
 			}
 			if !strings.Contains(queries, `{env="$env"`) ||
 				!strings.Contains(queries, `host=~"$host"`) {
@@ -1462,27 +1500,56 @@ func TestSubtensorDashboardDistinguishesRealLagFromStaleExport(t *testing.T) {
 // show every one of them
 var networkMeasurementMetrics = []string{
 	"urnetwork_stats_total_networks",
-	"urnetwork_stats_block_users",
+	"urnetwork_stats_epoch_users",
 	"urnetwork_stats_countries",
 	"urnetwork_stats_staked_alpha",
-	"urnetwork_stats_block_demand_deposits_alpha",
-	"urnetwork_stats_block_miner_emissions_alpha",
+	"urnetwork_stats_epoch_demand_deposits_alpha",
+	"urnetwork_stats_epoch_miner_emissions_alpha",
 	"urnetwork_stats_alpha_usd",
-	"urnetwork_stats_prev_block_users",
-	"urnetwork_stats_prev_block_demand_deposits_alpha",
-	"urnetwork_stats_prev_block_miner_emissions_alpha",
+	"urnetwork_stats_prev_epoch_users",
+	"urnetwork_stats_prev_epoch_demand_deposits_alpha",
+	"urnetwork_stats_prev_epoch_miner_emissions_alpha",
 	"urnetwork_stats_users_24h",
 	"urnetwork_stats_online_providers",
 	"urnetwork_stats_provider_regions",
 	"urnetwork_stats_provider_cities",
+	"urnetwork_stats_epoch_number",
+	"urnetwork_stats_epoch_start_seconds",
+	"urnetwork_stats_epoch_end_seconds",
+	"urnetwork_stats_epoch_miner_claims_alpha",
+	"urnetwork_stats_epoch_miners_claimed",
+	"urnetwork_stats_prev_epoch_miner_claims_alpha",
+	"urnetwork_stats_prev_epoch_miners_claimed",
+	"urnetwork_stats_online_extenders",
+}
+
+// the settlement epoch clock's block gauges and its previous start, which
+// the public feed (warp repo, grafana/stats.go) reads and the internal
+// signals dashboard shows; the public dashboard needs none of them
+var internalEpochClockMetrics = []string{
+	"urnetwork_stats_epoch_start_block",
+	"urnetwork_stats_epoch_end_block",
+	"urnetwork_stats_prev_epoch_start_seconds",
+}
+
+// the names the epoch gauges had as Sunday block gauges, still published with
+// the epoch values for stats feeds deployed before the epoch clock
+// (controller/stats_collector.go). they stay off the public dashboards and on
+// the internal one only until they are retired
+var deprecatedBlockAliasMetrics = []string{
 	"urnetwork_stats_block_number",
 	"urnetwork_stats_block_start_seconds",
 	"urnetwork_stats_block_end_seconds",
+	"urnetwork_stats_block_users",
+	"urnetwork_stats_prev_block_users",
+	"urnetwork_stats_block_demand_deposits_alpha",
+	"urnetwork_stats_prev_block_demand_deposits_alpha",
+	"urnetwork_stats_block_miner_emissions_alpha",
+	"urnetwork_stats_prev_block_miner_emissions_alpha",
 	"urnetwork_stats_block_miner_claims_alpha",
-	"urnetwork_stats_block_miners_claimed",
 	"urnetwork_stats_prev_block_miner_claims_alpha",
+	"urnetwork_stats_block_miners_claimed",
 	"urnetwork_stats_prev_block_miners_claimed",
-	"urnetwork_stats_online_extenders",
 }
 
 // the labeled operator network measurements, read with max by (labels)
@@ -1840,10 +1907,12 @@ func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
 	// with a brace, so `{env="$env"` still pins the env as the first matcher.
 	// The FindProviders2 answer metrics are the exception: each api process
 	// observes its own answers, so they are summed as rates across them, and
-	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead
+	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead. So
+	// are the ARIN canary's decision reads, each process's own counter, which
+	// TestProvidersDashboardShowsTheArindbCanaryRow pins
 	for _, expression := range expressions {
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-			if providersPerProcessMetric(metric) {
+			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric {
 				continue
 			}
 			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)
@@ -2036,6 +2105,22 @@ func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
 // test failure instead of a silent observability gap.
 func registeredApplicationMetrics(t *testing.T) []string {
 	t.Helper()
+	metrics, err := inventoryApplicationMetrics("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return metrics
+}
+
+// Sorted urnetwork_ metric names registered by the module's own Go sources
+// under root, as git sees them: tracked files plus untracked ones that are not
+// ignored, so a new file is inventoried before it is added. Ignored scratch
+// (temp/*) and nested repositories or linked worktrees (an agent worktree under
+// .claude/worktrees) are not this module's source; a walk of the directory read
+// them, so the inventory depended on whatever was lying in the checkout. The
+// user's global and system git configuration are not read either. The excluded
+// paths share RUN-ALL's source ownership boundary.
+func inventoryApplicationMetrics(root string) ([]string, error) {
 	metrics := map[string]bool{}
 	stringLiteral := func(expression ast.Expr) (string, bool) {
 		literal, ok := expression.(*ast.BasicLit)
@@ -2046,36 +2131,27 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		return value, err == nil
 	}
 
-	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, walkErr error) error {
-		// The local metric inventory shares RUN-ALL's source ownership boundary.
-		if slices.Contains([]string{"../proxy/acceptance", "../proxy/cmd/acceptance-main"}, filepath.ToSlash(path)) {
-			return filepath.SkipDir
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.go")
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("the metric inventory reads the module's git file list: %w", err)
+	}
+	for _, name := range strings.Split(string(output), "\x00") {
+		if name == "" || strings.HasSuffix(name, "_test.go") ||
+			strings.HasPrefix(name, "proxy/acceptance/") || strings.HasPrefix(name, "proxy/cmd/acceptance-main/") ||
+			strings.HasPrefix(name, "connect/sim-latency/eval-") ||
+			strings.HasPrefix(name, "vendor/") || strings.Contains(name, "/vendor/") {
+			continue
 		}
-		if walkErr != nil {
-			if strings.HasPrefix(
-				filepath.ToSlash(path),
-				"../connect/sim-latency/eval-",
-			) {
-				return filepath.SkipDir
-			}
-			return walkErr
+		path := filepath.Join(root, filepath.FromSlash(name))
+		// a tracked file deleted in the working tree is no longer source
+		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "vendor" || strings.HasPrefix(
-				filepath.ToSlash(path),
-				"../connect/sim-latency/eval-",
-			) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
@@ -2128,10 +2204,6 @@ func registeredApplicationMetrics(t *testing.T) []string {
 			}
 			return true
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	names := make([]string, 0, len(metrics))
@@ -2139,7 +2211,7 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		names = append(names, metric)
 	}
 	slices.Sort(names)
-	return names
+	return names, nil
 }
 
 // Keeps custom collector descriptors in the same inventory as direct gauges.
@@ -2446,6 +2518,28 @@ func TestInternalNetworkMeasurementsAreScopedAndReplicaSafe(t *testing.T) {
 		}
 		for _, expression := range expressions {
 			assertReplicaSafeReads(t, "internal network measurements", expression, metric, `{env="$env"}`)
+		}
+	}
+}
+
+// The epoch clock's internal gauges and the deprecated block aliases are on
+// the internal signals dashboard, read replica-safe, and the public dashboard
+// reads the epoch gauges rather than the aliases.
+func TestEpochClockMeasurementsAndBlockAliases(t *testing.T) {
+	expressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
+	joined := strings.Join(expressions, "\n")
+	for _, metric := range append(slices.Clone(internalEpochClockMetrics), deprecatedBlockAliasMetrics...) {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("internal network measurements is missing %s", metric)
+		}
+		for _, expression := range expressions {
+			assertReplicaSafeReads(t, "internal network measurements", expression, metric, `{env="$env"}`)
+		}
+	}
+	public := strings.Join(dashboardExpressions(readTestDashboard(t, "public-traffic.json")), "\n")
+	for _, metric := range deprecatedBlockAliasMetrics {
+		if len(metricOccurrences(public, metric)) != 0 {
+			t.Errorf("public network stats reads the deprecated alias %s", metric)
 		}
 	}
 }

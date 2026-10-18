@@ -7,7 +7,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -22,7 +21,7 @@ CREATE TRIGGER synthetic_native_fee_write BEFORE INSERT ON st_operator_native_fe
 
 func TestMigrationsNativeFeeSettlementCatalogAcrossPublication(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		ctx, cancel := snMainnetMigrationFixtureContext(t)
 		defer cancel()
 		contract := snMainnetMigrationTestContract(t, 780)
 		for _, version := range []int{779, 780} {
@@ -97,7 +96,7 @@ func TestMigrationsNativeFeeSettlementSchemaFaultsReachSignal(t *testing.T) {
 func TestMigrationsNativeFeeSettlementForeignKeyCustody(t *testing.T) {
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		ctx, cancel := snMainnetMigrationFixtureContext(t)
 		defer cancel()
 		for _, foreignKey := range []struct {
 			child, parent, definition string

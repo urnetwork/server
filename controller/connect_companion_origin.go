@@ -41,6 +41,28 @@ func init() {
 	prometheus.MustRegister(companionOriginLookupCounter, companionOriginWakeCounter, companionOriginLookupHistogram)
 }
 
+// Marks a request whose companion settlement is a fallback for a
+// non-companion request; see `withCompanionOriginSingleLookup`.
+type companionOriginSingleLookupKey struct{}
+
+// A non-companion request falls back to a Stream companion only when the
+// destination does not advertise the relationship mode. That companion can
+// only ride an origin that already carries traffic in the reverse direction,
+// such as an older client's return traffic, so it is not the session-setup
+// race the origin wait exists for. A destination that is simply not
+// providing has no such origin, and polling for one turned every such request
+// into several read-write transactions held for the full wait. These
+// requests read once: the existing result, or one shared recent miss.
+func withCompanionOriginSingleLookup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, companionOriginSingleLookupKey{}, true)
+}
+
+// Whether `withCompanionOriginSingleLookup` marked this request.
+func companionOriginSingleLookup(ctx context.Context) bool {
+	single, _ := ctx.Value(companionOriginSingleLookupKey{}).(bool)
+	return single
+}
+
 // A watch shares only missing reads; the controller still owns each creation
 // and forces an independent authoritative read at its own final deadline.
 type companionOriginLookup interface {
@@ -49,6 +71,7 @@ type companionOriginLookup interface {
 
 // Only an absent origin is retryable. A successful creation is returned exactly
 // once, even if the caller's context expires during its committed transaction.
+// A request marked by `withCompanionOriginSingleLookup` never retries.
 func waitForCompanionOrigin(
 	ctx context.Context,
 	shared companionOriginLookup,
@@ -59,6 +82,7 @@ func waitForCompanionOrigin(
 	attempts := 0
 	lookups := 0
 	defer func() { companionOriginLookupHistogram.Observe(float64(lookups)) }()
+	single := companionOriginSingleLookup(ctx)
 	var lastLookup time.Time
 	source := "initial"
 	for {
@@ -112,7 +136,7 @@ func waitForCompanionOrigin(
 		if !errors.Is(err, model.ErrMissingCompanionOrigin) {
 			return escrow, err
 		}
-		if !time.Now().Before(deadline) {
+		if single || !time.Now().Before(deadline) {
 			return nil, err
 		}
 		fallback := companionOriginFallbackTimeout

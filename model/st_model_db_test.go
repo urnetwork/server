@@ -588,8 +588,8 @@ func TestSumStDepositedRao(t *testing.T) {
 }
 
 // SumStMinerClaimedInBlockRange windows MinerClaimed events by chain block
-// (the public stats collector maps the subnet block clock to a chain block
-// range) and dedupes the claiming coldkeys. Guards the half-open block
+// (the public stats collector windows by a settlement epoch's chain blocks)
+// and dedupes the claiming coldkeys. Guards the half-open block
 // range, the kind filter, the coldkey dedupe, and malformed-row skipping.
 func TestSumStMinerClaimedInBlockRange(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -630,6 +630,39 @@ func TestSumStMinerClaimedInBlockRange(t *testing.T) {
 		amount, miners = SumStMinerClaimedInBlockRange(ctx, testStDeploymentKey, 1000, 2000)
 		if amount.Sign() != 0 || miners != 0 {
 			t.Fatalf("SumStMinerClaimedInBlockRange(1000, 2000) = %s, %d, want 0, 0", amount.String(), miners)
+		}
+	})
+}
+
+// The public stats sums read settlement v2's vault2 events beside the
+// release-1.0 vault's: V2EmissionCaptured beside PoolSwept, by its captured
+// amount, and V2Claimed beside MinerClaimed, with a coldkey that claims from
+// both vaults counted once. Guards the kind filters and the half-open ranges.
+func TestStatsMirrorSumsReadSettlementV2(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		UpsertStEvents(ctx, testStDeploymentKey, []*StChainEvent{
+			// epoch 2's capture on v1 and epoch 3's on v2
+			{BlockNumber: 100, LogIndex: 0, TxHash: "0x1", Kind: "PoolSwept", DataJson: `{"e":"2","no_id":"1","pool_hotkey":"0x01","measured":"700","swept":"700","move_ok":true}`},
+			{BlockNumber: 150, LogIndex: 0, TxHash: "0x2", Kind: "V2EmissionCaptured", DataJson: `{"e":"3","no_id":"1","observed":"900","amount":"800","funded_through":"3"}`},
+			// a deferral captures nothing
+			{BlockNumber: 160, LogIndex: 0, TxHash: "0x3", Kind: "V2EmissionDeferred", DataJson: `{"e":"4","no_id":"1","funded_through":"3"}`},
+			// outside the range
+			{BlockNumber: 200, LogIndex: 0, TxHash: "0x4", Kind: "V2EmissionCaptured", DataJson: `{"e":"4","no_id":"1","observed":"5","amount":"5","funded_through":"4"}`},
+			// one coldkey claims from both vaults, another from v2 only
+			{BlockNumber: 110, LogIndex: 0, TxHash: "0x5", Kind: "MinerClaimed", DataJson: `{"e":"2","no_id":"1","coldkey":"0xaa","share_bps":"5000","amount":"100","caller":"0x0"}`},
+			{BlockNumber: 170, LogIndex: 0, TxHash: "0x6", Kind: "V2Claimed", DataJson: `{"no_id":"1","root_index":"0","index":"0","coldkey":"0xaa","cumulative":"40","amount":"40","caller":"0x0"}`},
+			{BlockNumber: 180, LogIndex: 0, TxHash: "0x7", Kind: "V2Claimed", DataJson: `{"no_id":"1","root_index":"0","index":"1","coldkey":"0xbb","cumulative":"60","amount":"60","caller":"0x0"}`},
+			{BlockNumber: 200, LogIndex: 1, TxHash: "0x8", Kind: "V2Claimed", DataJson: `{"no_id":"1","root_index":"0","index":"2","coldkey":"0xcc","cumulative":"9","amount":"9","caller":"0x0"}`},
+		})
+
+		if captured := SumStEmissionCapturedInBlockRangeRao(ctx, testStDeploymentKey, 100, 200); captured.Cmp(big.NewInt(1500)) != 0 {
+			t.Fatalf("SumStEmissionCapturedInBlockRangeRao(100, 200) = %s, want 1500", captured.String())
+		}
+		amount, miners := SumStMinerClaimedInBlockRange(ctx, testStDeploymentKey, 100, 200)
+		if amount.Cmp(big.NewInt(200)) != 0 || miners != 2 {
+			t.Fatalf("SumStMinerClaimedInBlockRange(100, 200) = %s, %d, want 200, 2", amount.String(), miners)
 		}
 	})
 }

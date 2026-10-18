@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -598,6 +599,28 @@ func ScheduleTaskIfAbsent[T any, R any](
 	return
 }
 
+// Raises the maximum run time of the task pending under runOnce to at least
+// maxTime, the same merge a RunOnce reschedule applies. Schedules nothing when
+// no task is pending under the key, and never shortens a longer time. A claimed
+// attempt keeps the deadline it was claimed with; the next claim uses the
+// raised time. Reports whether a pending task was raised.
+func RaiseRunOnceMaxTimeInTx(ctx context.Context, tx server.PgTx, runOnce *RunOnceOption, maxTime time.Duration) bool {
+	if runOnce == nil {
+		panic("RaiseRunOnceMaxTimeInTx requires a non-nil runOnce key")
+	}
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE pending_task
+			SET run_max_time_seconds = $2
+			WHERE run_once_key = $1 AND run_max_time_seconds < $2
+		`,
+		runOnce.String(),
+		int(maxTime/time.Second),
+	))
+	return 0 < tag.RowsAffected()
+}
+
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 	return getTasks(ctx, false, taskIds...)
 }
@@ -834,6 +857,8 @@ func ListPendingTasks(ctx context.Context) []server.Id {
 }
 
 // the task struct has the latest error attached to it
+// Migration 819 dropped pending_task_has_reschedule_error, which no production
+// path read, so this scans pending_task. Keep it off hot or periodic paths.
 func ListRescheduledTasks(ctx context.Context) []server.Id {
 	taskIds := []server.Id{}
 
@@ -860,6 +885,11 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
+// Bounds the read of CountAvailableByFunctionName, which HTTP requests
+// reach. The index read takes milliseconds; a read that cannot finish in
+// this bound fails rather than holding the request and its connection.
+var countAvailableByFunctionNameStatementTimeout = 2 * time.Second
+
 // CountAvailableByFunctionName reports how many pending_task rows targeting
 // the given task function are currently available to run (run_at has
 // passed), across all run_once keys -- this excludes rows scheduled for a
@@ -870,7 +900,14 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 // run_once key. Counting future-scheduled rows here would make a large
 // backlog of merely-queued work block admission of brand new requests, even
 // though nothing is actually running yet.
-func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+//
+// No index covers the bare function name, and the queue holds tens of
+// millions of rows, so a bare `function_name = $1` filter scans the whole
+// table. The read leads with the function poll index's canonical-name
+// expression, then filters the exact name and run_at, in a read-only
+// transaction whose statement is bounded. A failed or timed-out read returns
+// its error, so an admission caller can refuse and release its reservation.
+func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) (count int, returnErr error) {
 	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
 	// computed in Go, not `now()` in SQL: run_at is a naive `timestamp`
 	// column holding UTC values, and comparing it against `now()`
@@ -879,20 +916,36 @@ func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunctio
 	// model/account_action_rate_limit.go and avoided in
 	// model.ReserveBulkClientRemovalSlot.
 	asOf := server.NowUtc()
-	count := 0
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND run_at <= $2`,
-			functionName, asOf,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			count = 0
+			if err, ok := recovered.(error); ok {
+				returnErr = err
+			} else {
+				returnErr = fmt.Errorf("count available %s: %v", functionName, recovered)
 			}
-		})
-	})
-	return count
+		}
+	}()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT set_config('statement_timeout', $1, true)`,
+			strconv.FormatInt(countAvailableByFunctionNameStatementTimeout.Milliseconds(), 10),
+		))
+		server.Raise(tx.QueryRow(
+			ctx,
+			`
+				SELECT COUNT(*) FROM pending_task
+				WHERE
+					regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+					function_name = $1 AND
+					run_at <= $2
+			`,
+			functionName,
+			asOf,
+		).Scan(&count))
+	}, server.TxReadCommitted, pgx.ReadOnly)
+	return
 }
 
 func ListClaimedTasks(ctx context.Context) []server.Id {
@@ -967,18 +1020,25 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 // function that has been removed from the codebase. Such rows can never run
 // again: the runner fails them with ErrTargetNotFound and reschedules on the
 // clamped skew backoff forever, because at claim time deploy version skew is
-// indistinguishable from permanent removal. Call this from the startup
-// seeding (taskworker InitTasks) for each deliberately removed target. The
+// indistinguishable from permanent removal. Call this from the startup reap
+// (taskworker reapRetiredTasks) for each deliberately removed target. The
 // delete ignores claims on purpose — a row for a removed target is claimed
 // and re-errored every few seconds, so a claim filter would race with that
 // cycle. A rollback to a build that still schedules the function re-seeds
 // it, and the next roll-forward cleans it again.
+//
+// No index covers the bare function name, so `function_name = $1` alone scans
+// the whole queue, which in production is tens of millions of rows and takes
+// minutes. The canonical-name expression leads the function poll index; the
+// exact name then filters only that function's rows.
 func RemovePendingTasksForFunctionInTx(ctx context.Context, tx server.PgTx, functionName string) (removedCount int64) {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			DELETE FROM pending_task
-			WHERE function_name = $1
+			WHERE
+				regexp_replace(function_name, '/v[0-9]+', '', 'g') = regexp_replace($1::text, '/v[0-9]+', '', 'g') AND
+				function_name = $1
 		`,
 		functionName,
 	))
@@ -1040,57 +1100,6 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 		kickedCount = tag.RowsAffected()
 	}, server.TxReadCommitted, server.OptNoRetry())
 	return
-}
-
-// Remove aged finished owners in bounded, independently admitted groups. An
-// old failed Post can still run, so age never substitutes for its finished-key
-// owner. Busy groups/rows remain for a later sweep without blocking other groups.
-func RemoveFinishedTasks(ctx context.Context, minTime time.Time, postErrorMinTime time.Time) (removeCount int64) {
-	var afterTime *time.Time
-	var afterId server.Id
-	for {
-		server.Raise(ctx.Err())
-		ids := make([]server.Id, 0, taskCompletionBatchLimit)
-		var removed int64
-		server.Tx(ctx, func(tx server.PgTx) {
-			rows, err := tx.Query(ctx, `SELECT task_id,run_end_time FROM finished_task
-                WHERE run_end_time < GREATEST($1::timestamp,$2::timestamp)
-                  AND ((run_end_time < $1 AND (post_error IS NULL OR post_completed)) OR run_end_time < $2)
-                  AND ($3::timestamp IS NULL OR (run_end_time,task_id) > ($3,$4::uuid))
-                ORDER BY run_end_time,task_id LIMIT $5`, minTime, postErrorMinTime, afterTime, afterId, taskCompletionBatchLimit)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var id server.Id
-					var endTime time.Time
-					server.Raise(rows.Scan(&id, &endTime))
-					ids = append(ids, id)
-					afterTime, afterId = &endTime, id
-				}
-			})
-			if len(ids) == 0 {
-				return
-			}
-			keys := make([]server.PgOwnershipKey, len(ids))
-			for index, id := range ids {
-				keys[index] = taskFinishedOwnershipKey(id)
-			}
-			admitted, err := server.TryTxOwnership(ctx, tx, keys)
-			server.Raise(err)
-			if !admitted {
-				return
-			}
-			tag := server.RaisePgResult(tx.Exec(ctx, `WITH removable AS (
-                SELECT task_id FROM finished_task WHERE task_id=ANY($1::uuid[])
-                  AND ((run_end_time < $2 AND (post_error IS NULL OR post_completed)) OR run_end_time < $3)
-                ORDER BY task_id FOR UPDATE SKIP LOCKED
-                ) DELETE FROM finished_task USING removable WHERE finished_task.task_id=removable.task_id`, ids, minTime, postErrorMinTime))
-			removed = tag.RowsAffected()
-		}, server.TxReadCommitted, server.OptNoRetry())
-		removeCount += removed
-		if len(ids) < taskCompletionBatchLimit {
-			return
-		}
-	}
 }
 
 type Task struct {
@@ -1501,6 +1510,14 @@ type TaskWorkerSettings struct {
 	// Aliases share their target's limit; RunPost wrappers do not borrow it.
 	// Nil leaves every target unlimited. Construction snapshots this map.
 	TargetClaimLimits map[string]int
+	// Opt-in minimum lane shares, keyed by canonical target function name.
+	// The value k gives the target's indexed lane one of every k turns that
+	// would otherwise claim from the ordinary queue (a quarter of all claims
+	// for k=2); rotation turns are unchanged. An empty, busy or saturated
+	// share lane falls back to the ordinary queue as any lane does. Shares
+	// together take at most half of the ordinary turns. Nil adds no share.
+	// Construction snapshots this map.
+	TargetClaimShares map[string]int
 	// how long `Drain` waits for in-flight tasks to finish naturally before
 	// canceling their contexts
 	DrainFinishTimeout time.Duration
@@ -1558,6 +1575,11 @@ type TaskWorker struct {
 	claimFunctionNames   []string
 	claimCheckpointNames []string
 	claimFunctionTurn    uint64
+	// Registered share lanes in lane name order, the ordinary turns each has
+	// earned toward its next turn, and where its claims start reading it.
+	claimShares       []taskClaimShare
+	claimShareCredits map[string]int
+	claimShareFloors  map[string]*taskClaimShareFloor
 
 	inflightCount      atomic.Int64
 	drainCanceledCount atomic.Int64
@@ -1590,6 +1612,8 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
 		claimTargetCounts:          map[string]int{},
+		claimShareCredits:          map[string]int{},
+		claimShareFloors:           map[string]*taskClaimShareFloor{},
 	}
 
 	taskWorker.AddTargets(
@@ -1799,6 +1823,19 @@ func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 		self.claimFunctionNames = append(self.claimFunctionNames, name)
 	}
 	slices.Sort(self.claimFunctionNames)
+	// A share names a registered canonical target; its lane is that name's.
+	self.claimShares = self.claimShares[:0]
+	for name, period := range self.settings.TargetClaimShares {
+		if target := self.targets[name]; target != nil && target.TargetFunctionName() == name {
+			self.claimShares = append(self.claimShares, taskClaimShare{laneName: updateFunctionName(name), targetName: name, period: period})
+		}
+	}
+	slices.SortFunc(self.claimShares, func(a, b taskClaimShare) int { return strings.Compare(a.laneName, b.laneName) })
+	for _, share := range self.claimShares {
+		if self.claimShareFloors[share.laneName] == nil {
+			self.claimShareFloors[share.laneName] = &taskClaimShareFloor{}
+		}
+	}
 	self.claimCheckpointNames = self.claimCheckpointNames[:0]
 	for name, target := range self.targets {
 		if _, ok := target.(TaskClaimCheckpointTarget); ok {
@@ -1979,15 +2016,16 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 		}
 	}()
 
-	tx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
+	rawTx, err := guard.conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: server.TxReadCommitted})
 	if err != nil {
 		return nil, guard, false, err
 	}
 	defer func() {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), DefaultTaskFinalizeTimeout)
-		_ = tx.Rollback(rollbackCtx)
+		_ = rawTx.Rollback(rollbackCtx)
 		rollbackCancel()
 	}()
+	tx := newClaimBudgetTx(ctx, rawTx)
 	if err := server.ValidatePgTaskClaimTransaction(ctx, guard.conn, tx); err != nil {
 		return nil, guard, false, err
 	}
@@ -2022,13 +2060,24 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	candidateLimit := n + 64
 	includeGroupArgs := self.hasTaskClaimGroups()
 	claimFunction := self.nextClaimFunction(options)
+	// A Run cohort lane reads a wider window and passes rows of groups it has
+	// no slot for, so each slot's cohort can fill from rows of its group that
+	// other groups' rows interleave. Passed rows stay unowned for later claims.
+	_, cohortLane := self.targets[claimFunction].(TaskRunCohortTarget)
+	cohortLane = cohortLane && options.runCohorts && claimFunction != ""
+	if cohortLane {
+		candidateLimit = n + taskRunCohortLaneCandidateLimit
+	}
+	shareFloor, floorBlock, floorReset := self.claimShareFloor(claimFunction, now)
 	openCursor := func() error {
 		bound := throughBlock
+		floor := int64(0)
 		if claimFunction != "" {
 			// Only ordinary discovery supplies a future eligibility alarm.
 			bound = nowBlock
+			floor = floorBlock
 		}
-		query, queryArgs := self.taskFunctionCandidatesQuery(bound, candidateLimit, true, claimFunction, includeGroupArgs)
+		query, queryArgs := self.taskLaneCandidatesQuery(bound, floor, candidateLimit, true, claimFunction, includeGroupArgs)
 		_, err := tx.Exec(ctx, `DECLARE pending_task_claim_candidates NO SCROLL CURSOR FOR `+query, queryArgs...)
 		return err
 	}
@@ -2040,6 +2089,9 @@ func (self *TaskWorker) takeTasksWithGuard(ctx context.Context, n int, guard *ta
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
 	passGroupKeys := map[taskClaimGroupKey]bool{}
+	// Groups this pass was refused. Their later rows are passed without a
+	// statement; another owner or a full batch holds them.
+	refusedGroupKeys := map[taskClaimGroupKey]bool{}
 	cohorts := map[taskRunCohortKey]*taskRunCohort{}
 	taskCohorts := map[server.Id]*taskRunCohort{}
 	claimedSlots := 0
@@ -2094,6 +2146,14 @@ claimCandidates:
 		if candidateCount == 0 && self.claimCandidatesReady != nil {
 			self.claimCandidatesReady()
 		}
+		if shareFloor && claimFunction != "" && candidateCount == 0 {
+			// The first due row of the lane at or past its floor, if any.
+			var firstBlock *int64
+			if 0 < len(candidates) {
+				firstBlock = &candidates[0].availableBlock
+			}
+			self.observeClaimShareFloor(claimFunction, firstBlock, nowBlock, floorReset)
+		}
 		candidateCount += len(candidates)
 		for _, candidate := range candidates {
 			// The same bounded cursor can retain an eligibility wake hint.
@@ -2107,6 +2167,11 @@ claimCandidates:
 			// Session advisory locks are reentrant: a reset timestamp must not
 			// let this same Run start a second execution of its live task.
 			if guard.taskIds[candidate.taskId] {
+				continue
+			}
+			// An invalid group still fails the claim at reservation below.
+			if groupKeys, _, err := self.taskClaimGroupKeys(candidate.functionName, candidate.argsJson); err == nil &&
+				slices.ContainsFunc(groupKeys, func(key taskClaimGroupKey) bool { return refusedGroupKeys[key] }) {
 				continue
 			}
 			var cohort *taskRunCohort
@@ -2126,6 +2191,10 @@ claimCandidates:
 				}
 			}
 			if claimedSlots >= n && (cohort == nil || cohort.count == 0) {
+				if cohortLane && cohort != nil {
+					// Within its own lane a cohort passes another group's row.
+					continue
+				}
 				// Never skip an earlier ordinary candidate to expand a later
 				// cohort, and never take an owner for an unneeded new slot.
 				break claimCandidates
@@ -2158,7 +2227,7 @@ claimCandidates:
 				}
 				continue
 			}
-			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys)
+			grouped, err := self.reserveTaskClaimGroups(ctx, tx, guard, candidate.taskId, candidate.functionName, candidate.argsJson, passGroupKeys, refusedGroupKeys)
 			if err != nil {
 				return nil, guard, false, err
 			}
@@ -2229,6 +2298,8 @@ claimCandidates:
 					return nil, guard, false, err
 				}
 				claimFunction = ""
+				candidateLimit = n + 64
+				cohortLane = false
 				candidateCount = 0
 				if err := openCursor(); err != nil {
 					return nil, guard, false, err
@@ -2785,43 +2856,4 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 func (self *TaskWorker) Close() {
 	self.cancel()
-}
-
-// PERIODIC CLEANUP
-
-type TaskCleanupArgs struct {
-}
-
-type TaskCleanupResult struct {
-}
-
-func ScheduleTaskCleanup(clientSession *session.ClientSession, tx server.PgTx) {
-	ScheduleTaskInTx(
-		tx,
-		TaskCleanup,
-		&TaskCleanupArgs{},
-		clientSession,
-		RunOnce("task_cleanup"),
-		RunAt(time.Now().Add(1*time.Hour)),
-	)
-}
-
-func TaskCleanup(
-	taskCleanup *TaskCleanupArgs,
-	clientSession *session.ClientSession,
-) (*TaskCleanupResult, error) {
-	minTime := time.Now().Add(-24 * time.Hour)
-	postErrorMinTime := time.Now().Add(-7 * 24 * time.Hour)
-	RemoveFinishedTasks(clientSession.Ctx, minTime, postErrorMinTime)
-	return &TaskCleanupResult{}, nil
-}
-
-func TaskCleanupPost(
-	taskCleanup *TaskCleanupArgs,
-	taskCleanupResult *TaskCleanupResult,
-	clientSession *session.ClientSession,
-	tx server.PgTx,
-) error {
-	ScheduleTaskCleanup(clientSession, tx)
-	return nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -35,6 +34,7 @@ type retentionOwnerTrace struct {
 	invalidTransaction, censusAfterCommit, censusUncancelled          bool
 	overlapped, discoveryOpen, discoveryReleased, deleteBeforeRelease bool
 	cancelAfterDiscovery, cancelAfterCommit                           bool
+	spools                                                            []*os.File
 }
 
 func (o *retentionOwnerTrace) TraceAcquireStart(ctx context.Context, pool *pgxpool.Pool, _ pgxpool.TraceAcquireStartData) context.Context {
@@ -192,7 +192,12 @@ func retentionOwnerFixture(t *testing.T, retained, deletable int, observer *rete
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		fixtureCtx := t.Context()
+		fixtureCtx := context.WithValue(t.Context(), completedTransferBalanceSpoolObserverKey{}, func(spool *os.File) {
+			observer.mu.Lock()
+			defer observer.mu.Unlock()
+			observer.spools = append(observer.spools, spool)
+			t.Cleanup(func() { _ = spool.Close() })
+		})
 		network := server.NewId()
 		server.Tx(fixtureCtx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(fixtureCtx, `INSERT INTO transfer_balance
@@ -240,6 +245,7 @@ func requireRetentionOwnerTraceClosed(t testing.TB, observer *retentionOwnerTrac
 	open, early := observer.discoveryOpen, observer.deleteBeforeRelease
 	transactions, invalid := len(observer.transactions), observer.invalidTransaction
 	unknownCommits := observer.unknownCommits
+	spools := slices.Clone(observer.spools)
 	observer.mu.Unlock()
 	if capacity != 1 || held != 0 || acquires != releases || open || early || transactions != 0 || invalid || unknownCommits != 0 {
 		t.Fatalf("retention resource lifecycle differs: capacity=%d held=%d acquire=%d release=%d discovery_open=%t early_delete=%t transactions=%d invalid_transaction=%t unknown_commits=%d", capacity, held, acquires, releases, open, early, transactions, invalid, unknownCommits)
@@ -249,23 +255,15 @@ func requireRetentionOwnerTraceClosed(t testing.TB, observer *retentionOwnerTrac
 	if len(entries) != 0 {
 		t.Fatalf("retention left %d named spool files", len(entries))
 	}
-	// The native fixture is Linux. An unlinked but unclosed file still
-	// consumes its descriptor and storage, so directory emptiness is not enough.
-	fdEntries, err := os.ReadDir("/proc/self/fd")
-	server.Raise(err)
-	openSpools := 0
-	for _, entry := range fdEntries {
-		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		server.Raise(err)
-		if strings.HasPrefix(target, filepath.Join(spoolDir, "urnetwork-balance-retention-")) {
-			openSpools++
-		}
+	// Keep the file alive so GC cannot hide a missing Close. Directory
+	// emptiness alone cannot detect a leaked, already-unlinked descriptor.
+	if len(spools) == 0 {
+		t.Fatal("retention spool lifecycle was not observed")
 	}
-	if openSpools != 0 {
-		t.Fatalf("retention kept %d anonymous spool descriptors open", openSpools)
+	for _, spool := range spools {
+		if _, err := spool.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("retention kept an anonymous spool descriptor open: %v", err)
+		}
 	}
 }
 

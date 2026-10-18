@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
@@ -57,8 +58,8 @@ func selfSignedTLSServer(t testing.TB) (addr string, stop func()) {
 	return u.Host, ts.Close
 }
 
-// requireRealSourceReachable skips when this machine has no outbound path to a
-// real source host. The tests that use it are the only ones that can
+// requireRealSourceReachable skips unless URNETWORK_LIVE_THIRD_PARTY_TESTS=1
+// and this machine has an outbound path to a real source host. The tests that use it are the only ones that can
 // demonstrate a SUCCESSFUL observation: a success requires a chain that
 // validates against the system roots, and manufacturing one hermetically would
 // mean injecting a root pool -- which is exactly what this design forbids. So
@@ -70,6 +71,11 @@ func selfSignedTLSServer(t testing.TB) (addr string, stop func()) {
 // the vacuous-coverage trap: no network skips, broken observation fails.
 func requireRealSourceReachable(t testing.TB, host string) (addr string) {
 	t.Helper()
+	// TestRefreshGeolocationSourcePinsAgainstLocalRoots covers the same cases
+	// against a local chain
+	if os.Getenv("URNETWORK_LIVE_THIRD_PARTY_TESTS") != "1" {
+		t.Skipf("observes the live %s certificate; set URNETWORK_LIVE_THIRD_PARTY_TESTS=1 to run", host)
+	}
 	addr = net.JoinHostPort(host, "443")
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {

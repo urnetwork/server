@@ -69,22 +69,24 @@ func WalletCircleInit(
 		return nil, err
 	}
 
-	return server.HttpPostRequireStatusOk(
+	client := circleUserClientOf(clientSession.Ctx)
+	blockchain := client.defaultChain
+	if blockchain == "" {
+		blockchain = circleConfig()["blockchain"].(string)
+	}
+	return circleUserPost(
 		clientSession.Ctx,
+		&client.core,
 		"https://api.circle.com/v1/w3s/user/initialize",
 		map[string]any{
 			"idempotencyKey": server.NewId(),
 			"accountType":    "SCA",
 			"blockchains": []string{
-				circleConfig()["blockchain"].(string),
+				blockchain,
 			},
 		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-			header.Add("X-User-Token", circleUserToken.UserToken)
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*WalletCircleInitResult, error) {
+		circleUserToken.UserToken,
+		server.HttpResponseRequireStatusOk(func(response *http.Response, responseBodyBytes []byte) (*WalletCircleInitResult, error) {
 			challengeId, err := parseCircleChallengeId(responseBodyBytes)
 
 			if err == nil {
@@ -99,7 +101,7 @@ func WalletCircleInit(
 					},
 				}, nil
 			}
-		},
+		}),
 	)
 }
 
@@ -192,11 +194,7 @@ func WalletCircleTransferOut(
 	if clientSession == nil || clientSession.Ctx == nil {
 		return nil, fmt.Errorf("customer transfer requires a caller context")
 	}
-	client, _ := clientSession.Ctx.Value(circleTransferClientKey{}).(*circleTransferClient)
-	if client == nil {
-		client = &circleTransferClient{}
-	}
-	return client.transfer(walletCircleTransferOut, clientSession)
+	return circleUserClientOf(clientSession.Ctx).transfer(walletCircleTransferOut, clientSession)
 }
 
 type GetPublicKeyResult struct {
@@ -246,18 +244,14 @@ func createCircleUser(clientSession *session.ClientSession) (
 		clientSession.ByJwt.UserId,
 	)
 
-	circleApiToken := circleConfig()["api_token"]
-
-	_, resultErr = server.HttpPost(
+	_, resultErr = circleUserPost(
 		clientSession.Ctx,
+		&circleUserClientOf(clientSession.Ctx).core,
 		"https://api.circle.com/v1/w3s/users",
 		map[string]any{
 			"userId": circleUserId,
 		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
-		},
+		"",
 		func(response *http.Response, responseBodyBytes []byte) (any, error) {
 			if 200 <= response.StatusCode && response.StatusCode < 300 {
 				// all ok
@@ -303,19 +297,15 @@ func createCircleUserToken(
 		clientSession.ByJwt.UserId,
 	)
 
-	circleApiToken := circleConfig()["api_token"]
-
-	return server.HttpPostRequireStatusOk(
+	return circleUserPost(
 		clientSession.Ctx,
+		&circleUserClientOf(clientSession.Ctx).core,
 		"https://api.circle.com/v1/w3s/users/token",
 		map[string]any{
 			"userId": circleUserId,
 		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*CircleUserToken, error) {
+		"",
+		server.HttpResponseRequireStatusOk(func(response *http.Response, responseBodyBytes []byte) (*CircleUserToken, error) {
 			_, data, err := parseCircleResponseData(responseBodyBytes)
 			if err != nil {
 				return nil, err
@@ -345,8 +335,45 @@ func createCircleUserToken(
 				return circleUserToken, nil
 			}
 			return nil, fmt.Errorf("Bad user token.")
-		},
+		}),
 	)
+}
+
+// User-wallet POSTs use the session client's transport and API token, as its
+// GETs do. Production sends with the default HTTP client, as server.HttpPost.
+func circleUserPost[R any](
+	ctx context.Context,
+	client *CoreCircleApiClient,
+	uri string,
+	body map[string]any,
+	userToken string,
+	decode server.ResponseCallback[R],
+) (R, error) {
+	var empty R
+	requestBodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return empty, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(requestBodyBytes))
+	if err != nil {
+		return empty, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	client.readHeaders(userToken)(request.Header)
+	do := client.readHooks.do
+	if do == nil {
+		do = server.DefaultHttpClient().Do
+	}
+	response, err := do(request)
+	if err != nil {
+		return empty, err
+	}
+	defer response.Body.Close()
+	responseBodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return empty, err
+	}
+	return decode(response, responseBodyBytes)
 }
 
 func parseCircleResponseData(responseBodyBytes []byte) (
@@ -651,8 +678,9 @@ func findCircleWallets(clientSession *session.ClientSession) ([]*CircleWalletInf
 	if err := clientSession.Ctx.Err(); err != nil {
 		return nil, err
 	}
-	return (&CoreCircleApiClient{}).findCircleWallets(clientSession, createCircleUserToken,
-		fmt.Sprint(circleConfig()["blockchain_name"]), fmt.Sprint(circleConfig()["blockchain"]))
+	client := circleUserClientOf(clientSession.Ctx)
+	name, chain := client.blockchain()
+	return client.core.findCircleWallets(clientSession, createCircleUserToken, name, chain)
 }
 
 type PopulateAccountWalletsArgs struct {
