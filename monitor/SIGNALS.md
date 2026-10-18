@@ -9553,6 +9553,21 @@ terminal outcome with the same process/source clocks before asking for more
 logs. A canceled caller can reflect client abandonment or a dependency delay;
 an absent log or a coincident aggregate count does not distinguish them.
 
+Client source controls provide possible intended cancellation paths: the shared
+SDK's location controller cancels the previous request when a filter replaces
+it, and controller/API closure cancels owned requests. Native GET route races
+cancel losing attempts, but the preferred-route hedge stops once `WroteRequest`
+reports a successful write; a slow response after that write does not itself
+start the early hedge. JS/Wasm uses one browser fetch per strategy evaluation,
+without native route racing. These source behaviors do not identify an
+installed Main client or explain a particular canceled request. A client
+deadline can also appear only as cancellation at the server. Require the
+owning client attempt's terminal reason and elapsed time, with its API artifact
+and ingress/dependency evidence, to distinguish replacement/closure or a
+successful sibling from giveup after downstream wait. Keep error counts and
+thresholds unchanged; cancellation is neither dependency-failure proof nor a
+health result.
+
 Picker latency is a distinct boundary from empty results. The owning model
 also exposes `urnetwork_provider_picker_phase_seconds` (sum/count) and
 `urnetwork_provider_picker_phase_inflight`, with fixed `initial`, `search`,
