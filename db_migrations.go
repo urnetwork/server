@@ -10483,6 +10483,17 @@ var migrations = []any{
 	// UNIQUE (wallet_address, blockchain) are unchanged, and no table
 	// references this key. Swapping it takes an exclusive lock on a small
 	// table (one row per wallet user) while its index is rebuilt.
+	//
+	// Deploy ordering: it must be applied in the same cutover that replaces
+	// every api server. A server built before it upserts with
+	// ON CONFLICT (user_id), which no constraint matches once it applies
+	// (SQLSTATE 42P10), so every wallet link and wallet network-create on
+	// such a server fails; stop them all before it applies. A server built
+	// with it needs it too: on the old key a second chain's wallet fails the
+	// insert. Rolling back to a server built before it is unsafe once any
+	// account holds two wallet rows: that server's RemoveAuth deletes every
+	// wallet row of the user, so removing one chain's wallet removes both
+	// and can leave a wallet-only account with no sign-in method.
 	newSqlMigration(`
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE network_user_auth_wallet

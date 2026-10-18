@@ -19,7 +19,7 @@ type NetworkUser struct {
 	Verified        bool                        `json:"verified"`
 	AuthType        string                      `json:"auth_type"`
 	NetworkName     string                      `json:"network_name"`
-	WalletAddress   *string                     `json:"wallet_address,omitempty"` // the first wallet bound; WalletAuths lists one per chain
+	WalletAddress   *string                     `json:"wallet_address,omitempty"` // one bound wallet, or empty; WalletAuths lists all, at most one per chain
 	UserAuths       []NetworkUserUserAuth       `json:"user_auths,omitempty"`
 	SsoAuths        []NetworkUserSsoAuth        `json:"sso_auths,omitempty"`
 	WalletAuths     []NetworkUserWalletAuth     `json:"wallet_auths,omitempty"`
@@ -957,17 +957,30 @@ func addWalletAuthInTx(
 	}
 
 	// Mirror onto network_user's top-level wallet columns. They hold one
-	// wallet, and the first wallet bound keeps them: they are written only
-	// while empty, so adding the second chain's wallet leaves them alone.
-	// RemoveAuth points them at the remaining wallet when it removes the one
-	// they name. Without this, a remove-then-re-add cycle leaves
-	// wallet_address/wallet_blockchain nil even though
-	// network_user_auth_wallet has the wallet bound.
+	// wallet, and a bound wallet keeps them: they take this wallet only while
+	// they name none of this user's wallets -- empty, or a stale legacy value
+	// with no row here (this wallet's row, inserted above, counts) -- so
+	// adding the second chain's wallet leaves them alone, and a stale value
+	// is released from the global unique index as it was before. RemoveAuth
+	// points them at the remaining wallet when it removes the one they name.
+	//
+	// The row is written even when the columns keep their value: a
+	// concurrent RemoveAuth holds it FOR UPDATE on a snapshot that cannot see
+	// this wallet, and only a write makes that removal fail to serialize and
+	// rerun, instead of clearing the columns while this wallet is bound.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`UPDATE network_user
-			 SET wallet_address = $2, wallet_blockchain = $3
-			 WHERE user_id = $1 AND wallet_address IS NULL`,
+			 SET
+				wallet_address = CASE WHEN NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				) THEN $2 ELSE wallet_address END,
+				wallet_blockchain = CASE WHEN NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				) THEN $3 ELSE wallet_blockchain END
+			 WHERE user_id = $1`,
 		addWalletAuth.UserId,
 		walletAuth.PublicKey,
 		walletAuth.Blockchain,
@@ -1716,12 +1729,14 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 WHERE user_id = $1 AND wallet_address = $2`,
 				userId, removed.address,
 			))
-			// If network_user's wallet fields name the removed wallet, point
-			// them at the remaining wallet, or clear them, so the removed
-			// wallet can be reused to create a fresh account. They have a
-			// global unique index: a remaining wallet that another account
-			// still holds there (a legacy shape) clears them instead of
-			// failing the removal.
+			// If network_user's wallet fields name no wallet this account
+			// still has -- the removed one, a stale legacy value, or nothing
+			// -- point them at the remaining wallet, or clear them, so the
+			// removed wallet can be reused to create a fresh account. Fields
+			// naming the remaining wallet are left alone. They have a global
+			// unique index: a remaining wallet that another account still
+			// holds there (a legacy shape) clears them instead of failing the
+			// removal.
 			var slotAddress, slotBlockchain *string
 			if 0 < len(remaining) {
 				var heldElsewhere bool
@@ -1734,16 +1749,23 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 					remaining[0].address, userId,
 				).Scan(&heldElsewhere))
 				if !heldElsewhere {
+					// canonical, as the add path writes it, even when the
+					// remaining row carries a legacy label
+					blockchain := migratedWalletBlockchain(&remaining[0].blockchain)
 					slotAddress = &remaining[0].address
-					slotBlockchain = &remaining[0].blockchain
+					slotBlockchain = &blockchain
 				}
 			}
+			// runs after the DELETE, so the removed wallet no longer has a row
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`UPDATE network_user
-				 SET wallet_address = $3, wallet_blockchain = $4
-				 WHERE user_id = $1 AND wallet_address = $2`,
-				userId, removed.address, slotAddress, slotBlockchain,
+				 SET wallet_address = $2, wallet_blockchain = $3
+				 WHERE user_id = $1 AND NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				 )`,
+				userId, slotAddress, slotBlockchain,
 			))
 			wallets = remaining
 		case "seedphrase":
@@ -1817,8 +1839,10 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 // a SOL row and any assertion about Bittensor reporting passes for the wrong
 // reason.
 //
-// A second call with the same blockchain label replaces that chain's wallet;
-// another label adds a second row, as an account may hold one wallet per chain.
+// A second call with the byte-identical blockchain label replaces that row's
+// wallet; any other label, including another spelling of the same chain
+// ('solana' and 'SOL'), adds a second row. Production code never holds two
+// rows of one chain, so build legacy-label shapes with care.
 func Testing_AddWalletAuth(
 	ctx context.Context,
 	userId server.Id,
