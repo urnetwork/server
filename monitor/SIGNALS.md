@@ -5179,6 +5179,35 @@ and query-text truncation counts accompany it. Local/loopback clients and
 application labels cannot resolve API, Taskworker, Proxy or payer ownership
 through PgBouncer.
 
+Each existing activity SELECT also emits seven fixed `state_totals` counts
+from its complete grouping before either rank cap: active, idle, idle in
+transaction, idle in transaction (aborted), fastpath function call, disabled,
+and unknown. The same materialized `pg_stat_activity` rowset supplies both
+these counts and `total`: every database and backend type is included, and
+only the observer PID is excluded. Background workers with NULL state count
+as unknown; unrecognized states do too. This is an all-backend denominator,
+not normal-role capacity, client-only occupancy or current-database load.
+
+The receipt's `backend_state_totals` entries contain those named counts and
+align with `sample_clocks` and `backend_totals`. Each present vector must have
+seven nonnegative integers summing to that snapshot's total, and each selected
+state population must fit within its corresponding whole-snapshot count.
+Absent/null vectors in older or missing source frames produce null entries;
+an absent field in an old receipt also means unavailable. Do not convert either
+absence to zero or to the observed unknown-state bucket. Malformed totals
+invalidate the observation, and an incomplete frame sequence publishes no
+whole-state projection. A completed catalog sequence may still have null
+state entries when decoded from an older source.
+
+These counts preserve a large idle population even when all selected groups
+are active. They describe the same captured rowset, not continuous state or
+unique connections, requests, calls, execution time or CPU share. Summing
+snapshots counts repeated backend occupancies. The final blocker observation
+remains separate and cannot establish absence throughout the sample interval.
+The addition makes no extra query or connection, changes no rank/cadence/time
+limit, and preserves the 4 MiB wire and 256 KiB combined receipt budgets. Its
+fixed metadata shares the existing receipt budget with private SQL retention.
+
 The same activity SELECT also retains one representative SQL prefix for the
 union of its first eight load-ranked and first eight age-ranked groups, at most
 16 group-samples per snapshot. The representative is the smallest backend PID
