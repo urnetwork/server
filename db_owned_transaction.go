@@ -528,7 +528,10 @@ func (self *pgOwnedConnection) run(ctx context.Context, callback func(PgConn), r
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if err, ok := recovered.(error); ok && isConnectionError(err) {
-				self.discard = true
+				// A drained statement can report the caller's deadline after a
+				// successful rollback. Preserve that failure without destroying
+				// its healthy session; release still validates and unlocks it.
+				self.discard = self.discard || pgConnectionErrorDiscards(err, self.conn.Conn().PgConn())
 				if isDoneContextConnectionError(ctx, err) {
 					panic(dbContextDoneCause(ctx, err))
 				}
