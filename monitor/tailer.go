@@ -2835,10 +2835,11 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	findings := []finding{}
 	routeEvents := map[string]*tailTransportRouteAggregate{}
-	now := time.Now()
+	clock := time.Now
 	if env != nil && env.now != nil {
-		now = env.now()
+		clock = env.now
 	}
+	now := clock()
 	for i, tailer := range self.tailers {
 		findings = append(findings, tailer.drainWindow()...)
 		for _, event := range tailer.drainTransportRouteEvents() {
@@ -2875,7 +2876,7 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	findings = append(findings, tailTransportRouteFindings(env, routeEvents, monitorEvidence)...)
 	if ctx.Err() == nil {
-		self.writeReconcileReceipt(now)
+		self.writeReconcileReceipt(clock)
 	}
 	return findings, nil
 }

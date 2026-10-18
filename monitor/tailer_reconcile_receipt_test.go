@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+// A fixed projection time for existing source-window fixtures.
+func fixedReconcileReceiptClock(now time.Time) func() time.Time {
+	return func() time.Time { return now }
+}
+
 func syntheticReceiptTailer(now *time.Time, service string) *logTailer {
 	tailer := newLogTailer(service, &probeEnv{now: func() time.Time { return *now }})
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
@@ -124,7 +129,7 @@ func TestReconcileReceiptFailureCancellationAndIncompleteQueryResetPair(t *testi
 			tailer.reconcileOnce(context.Background())
 			now = now.Add(logReconcileInterval)
 			tailer.reconcileOnce(context.Background())
-			if probe.reconcileReceipt(now).ConsecutiveTwo != 1 {
+			if probe.reconcileReceipt(fixedReconcileReceiptClock(now)).ConsecutiveTwo != 1 {
 				t.Fatal("fixture did not establish two successful windows")
 			}
 			now = now.Add(logReconcileInterval)
@@ -168,7 +173,7 @@ func TestReconcileReceiptFailureCancellationAndIncompleteQueryResetPair(t *testi
 			cancel()
 			var diagnostics strings.Builder
 			probe.reconcileDiagnostics = &diagnostics
-			probe.writeReconcileReceipt(now)
+			probe.writeReconcileReceipt(fixedReconcileReceiptClock(now))
 			receipt := parseSyntheticReconcileReceipt(t, diagnostics.String())
 			if receipt.Fresh != 0 || receipt.ConsecutiveTwo != 0 || receipt.LatestCompletedAt.Oldest != nil {
 				t.Fatal("failed, incomplete, or canceled query retained a consecutive-success claim")
@@ -181,7 +186,7 @@ func TestReconcileReceiptFailureCancellationAndIncompleteQueryResetPair(t *testi
 				if attempt == 2 {
 					want = 1
 				}
-				if got := probe.reconcileReceipt(now); got.ConsecutiveTwo != want || got.Fresh != 1 {
+				if got := probe.reconcileReceipt(fixedReconcileReceiptClock(now)); got.ConsecutiveTwo != want || got.Fresh != 1 {
 					t.Fatal("recovery did not require two new successful windows after the break")
 				}
 			}
@@ -199,7 +204,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 				tailer.reconcileOnce(context.Background())
 				now = now.Add(logReconcileInterval)
 				tailer.reconcileOnce(context.Background())
-				if probe.reconcileReceipt(now).ConsecutiveTwo != 1 {
+				if probe.reconcileReceipt(fixedReconcileReceiptClock(now)).ConsecutiveTwo != 1 {
 					t.Fatal("fixture did not establish the prior two-success receipt")
 				}
 				now = now.Add(logReconcileInterval)
@@ -269,7 +274,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 					if attempt == 2 {
 						want = 1
 					}
-					if got := probe.reconcileReceipt(now); got.Fresh != 1 || got.ConsecutiveTwo != want {
+					if got := probe.reconcileReceipt(fixedReconcileReceiptClock(now)); got.Fresh != 1 || got.ConsecutiveTwo != want {
 						t.Fatal("loss recovery did not require two new complete advancing queries")
 					}
 				}
@@ -295,7 +300,7 @@ func TestReconcileReceiptSuccessfulRetryAndFramedWarningAreNotProducerLoss(t *te
 		tailer.reconcileOnce(context.Background())
 		now = now.Add(logReconcileInterval)
 		tailer.reconcileOnce(context.Background())
-		if receipt := probe.reconcileReceipt(now); receipt.Fresh != 1 || receipt.ConsecutiveTwo != 1 {
+		if receipt := probe.reconcileReceipt(fixedReconcileReceiptClock(now)); receipt.Fresh != 1 || receipt.ConsecutiveTwo != 1 {
 			t.Fatal("empty success, retry diagnostics, a framed remote message, or a warning lookalike became producer-declared loss")
 		}
 	}
@@ -329,7 +334,7 @@ func TestReconcileReceiptRejectsRepeatedNonadvancingAndStaleEvidence(t *testing.
 			} else if boundary == "future" {
 				now = now.Add(-time.Second)
 			}
-			receipt := probe.reconcileReceipt(now)
+			receipt := probe.reconcileReceipt(fixedReconcileReceiptClock(now))
 			if receipt.ConsecutiveTwo != 0 {
 				t.Fatal("repeated, nonadvancing, stale, or future evidence certified two windows")
 			}
@@ -347,7 +352,7 @@ func TestReconcileReceiptEmptyDisabledAndNewGenerationRemainUnproved(t *testing.
 	disabled.reconcile = nil
 	for _, tailers := range [][]*logTailer{nil, {disabled}, {freshGeneration}, {disabled, freshGeneration}} {
 		probe := &logTailProbe{tailers: tailers}
-		receipt := probe.reconcileReceipt(now)
+		receipt := probe.reconcileReceipt(fixedReconcileReceiptClock(now))
 		if receipt.Collectors != len(tailers) || receipt.Fresh != 0 || receipt.ConsecutiveTwo != 0 || receipt.LatestWindowStart.Newest != nil {
 			t.Fatal("empty, disabled, or new-generation collector manufactured completion evidence")
 		}
@@ -399,7 +404,7 @@ func TestRunLoopArmsReconciliationReceiptsOnlyOnDiagnostics(t *testing.T) {
 	if !ok || probe.reconcileDiagnostics != os.Stderr {
 		t.Fatal("production standing collector omitted its retained diagnostic receipt sink")
 	}
-	if probe.reconcileReceipt(settings.Now()).ConsecutiveTwo != 0 {
+	if probe.reconcileReceipt(settings.Now).ConsecutiveTwo != 0 {
 		t.Fatal("new watcher generation inherited a prior success streak")
 	}
 }
@@ -472,7 +477,7 @@ func TestReconcileReceiptScopeProjectionIdentifiesEqualAggregateDeficits(t *test
 				tailer.recordReconcile(now.Add(-logReconcileLookback), errors.New("private-error private-token"))
 			}
 		}
-		encoded, err := json.Marshal((&logTailProbe{tailers: tailers}).reconcileReceipt(now))
+		encoded, err := json.Marshal((&logTailProbe{tailers: tailers}).reconcileReceipt(fixedReconcileReceiptClock(now)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +539,7 @@ func TestReconcileReceiptScopeKeysDuplicatesAndPrivacy(t *testing.T) {
 	tailers := []*logTailer{web, syntheticScopePair(now, "api"), syntheticScopePair(now, "private-service"),
 		syntheticScopePair(now, "api"), syntheticScopePair(now, "api"), syntheticScopePair(now, "private-token-192.0.2.91")}
 	tailers[1].lastReconcileError = "private-error private-block aaaaaaaa-aaaa"
-	receipt := (&logTailProbe{tailers: tailers}).reconcileReceipt(now)
+	receipt := (&logTailProbe{tailers: tailers}).reconcileReceipt(fixedReconcileReceiptClock(now))
 	if receipt.ScopeProjectionComplete || receipt.UnsupportedCollectors != 2 || receipt.DuplicateServiceKeys != 1 ||
 		len(receipt.CollectorScopes) != 2 || receipt.CollectorScopes[0].ServiceKey != "api" || receipt.CollectorScopes[1].ServiceKey != "web" {
 		t.Fatal("unsupported/duplicate scopes did not remain explicit, bounded and ordered")
@@ -545,7 +550,7 @@ func TestReconcileReceiptScopeKeysDuplicatesAndPrivacy(t *testing.T) {
 		t.Fatal("duplicate service selected one collector's clocks or health")
 	}
 	for _, incomplete := range [][]*logTailer{nil, {syntheticScopePair(now, "private-service")}} {
-		projection := (&logTailProbe{tailers: incomplete}).reconcileReceipt(now)
+		projection := (&logTailProbe{tailers: incomplete}).reconcileReceipt(fixedReconcileReceiptClock(now))
 		if projection.ScopeProjectionComplete || len(projection.CollectorScopes) != 0 || projection.UnsupportedCollectors != len(incomplete) {
 			t.Fatal("empty or unsupported-only inventory acquired a complete scope map")
 		}
@@ -591,7 +596,7 @@ func TestReconcileReceiptScopeClockBoundaries(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			tailer := syntheticScopePair(now, "api")
 			testCase.change(tailer)
-			receipt := (&logTailProbe{tailers: []*logTailer{tailer}}).reconcileReceipt(now)
+			receipt := (&logTailProbe{tailers: []*logTailer{tailer}}).reconcileReceipt(fixedReconcileReceiptClock(now))
 			scope := requireCollectorScope(t, receipt, "api")
 			if scope.CoverageState != testCase.state || scope.Fresh == nil || *scope.Fresh != testCase.fresh ||
 				scope.ConsecutiveTwo == nil || *scope.ConsecutiveTwo != testCase.two {
@@ -618,7 +623,7 @@ func TestReconcileReceiptScopeEncodingBoundAndAggregateParity(t *testing.T) {
 	for _, key := range logReconcileServiceKeys {
 		tailers = append(tailers, syntheticScopePair(now, key))
 	}
-	receipt := (&logTailProbe{tailers: tailers}).reconcileReceipt(now)
+	receipt := (&logTailProbe{tailers: tailers}).reconcileReceipt(fixedReconcileReceiptClock(now))
 	if len(receipt.CollectorScopes) != 10 || !receipt.ScopeProjectionComplete || receipt.Fresh != 10 || receipt.ConsecutiveTwo != 10 {
 		t.Fatal("ten-service projection changed aggregate authority")
 	}
@@ -663,7 +668,7 @@ func TestReconcileReceiptScopeFailureCancellationAndIncompleteRemainUnattributed
 				cancel()
 			}
 			tailer.reconcileOnce(ctx)
-			receipt := (&logTailProbe{tailers: []*logTailer{tailer}}).reconcileReceipt(now)
+			receipt := (&logTailProbe{tailers: []*logTailer{tailer}}).reconcileReceipt(fixedReconcileReceiptClock(now))
 			scope := requireCollectorScope(t, receipt, "api")
 			if scope.CoverageState != "no-valid-window" || scope.LatestCompletedAt != nil ||
 				scope.PreviousCompletedAt != nil || scope.Fresh == nil || *scope.Fresh || *scope.ConsecutiveTwo ||
@@ -704,7 +709,7 @@ func TestReconcileReceiptScopeSingleWriteAndEncodingFailureAreNonmutating(t *tes
 	writer := &reconcileScopeWriteCounter{}
 	probe := &logTailProbe{tailers: []*logTailer{tailer}, reconcileDiagnostics: writer}
 	before := tailer.reconcileSuccesses
-	probe.writeReconcileReceipt(now)
+	probe.writeReconcileReceipt(fixedReconcileReceiptClock(now))
 	if writer.writes != 1 || calls != 0 || tailer.reconcileSuccesses != before {
 		t.Fatal("scope diagnostic changed write cadence or collection")
 	}
@@ -712,7 +717,7 @@ func TestReconcileReceiptScopeSingleWriteAndEncodingFailureAreNonmutating(t *tes
 	// A non-JSON year exercises the same diagnostic-only refusal path as the
 	// explicit byte bound. No collector callback or reducer runs in the codec.
 	tailer.startedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
-	probe.writeReconcileReceipt(now)
+	probe.writeReconcileReceipt(fixedReconcileReceiptClock(now))
 	if writer.writes != 1 || calls != 0 || tailer.reconcileSuccesses != before {
 		t.Fatal("encoding refusal mutated collection or emitted another write")
 	}

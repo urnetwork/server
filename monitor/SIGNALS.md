@@ -3732,6 +3732,27 @@ inventory, not healthy coverage. Unsupported/duplicate scope leaves the map
 incomplete without changing aggregates. A receipt is a sequence of per-collector
 locked snapshots, not an atomic fleet instant or an in-flight request census.
 
+The receipt now copies every collector's fields under its existing lock before
+sampling one `observed_at` clock, then projects only those immutable copies.
+The earlier q13 producer sampled the check clock before copying collector state;
+a completion published between those operations could therefore appear future
+dated and become `invalid-time`. The retained 2026-10-18 09:19:55Z API receipt
+has a latest completion 1.643374 ms after its aggregate clock, populated windows,
+and no failure marker. This is consistent with that assembly ordering, not proof
+of the exact interleaving, host clock skew, a query failure, or service health.
+The corrected ordering retains the per-collector, non-atomic fleet qualifier.
+Publication after a collector's copy is excluded until a later receipt, even
+when it precedes `observed_at`; the receipt is not a live-state guarantee.
+
+VERIFY the ordering with a barrier that publishes a successful completion after
+the old check clock but before the collector copy, and another that publishes
+after all copies but before the receipt clock returns. The first belongs in the
+current receipt; the second belongs only in the next receipt. A one-nanosecond
+future timestamp and an injected backward observation clock retain `invalid-time`
+under the existing time comparisons. There is no tolerance, timestamp clamp,
+coverage-warning suppression, or change to freshness thresholds. A later quiet
+receipt cannot recover missing records or clear a separate Loki visibility loss.
+
 Rows are capped at ten and the entire diagnostic write, including framing, at
 8 KiB. Serialization failure, overflow, or sink failure drops diagnostic
 evidence only and cannot change collection, findings or cadence. It contains no

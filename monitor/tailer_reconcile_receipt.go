@@ -141,16 +141,39 @@ type logReconcileReceipt struct {
 	LatestCompletedAt       logReconcileTimeRange        `json:"latest_completed_at"`
 }
 
-func (self *logTailProbe) reconcileReceipt(now time.Time) logReconcileReceipt {
-	receipt := logReconcileReceipt{Schema: 2, ObservedAt: now.UTC(), Collectors: len(self.tailers),
-		CollectorScopes: make([]logReconcileCollectorScope, 0, len(logReconcileServiceKeys))}
-	var scopes [len(logReconcileServiceKeys)]logReconcileCollectorScope
+// Values copied under one collector's lock; no mutable collector state escapes.
+type logReconcileCollectorSnapshot struct {
+	service     string
+	enabled     bool
+	started     time.Time
+	lastSuccess time.Time
+	failed      bool
+	previous    logReconcileSuccess
+	latest      logReconcileSuccess
+}
+
+// Sample the observation clock after every copy. This orders the receipt after
+// its inputs without making the per-collector snapshots an atomic fleet view.
+func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileReceipt {
+	snapshots := make([]logReconcileCollectorSnapshot, 0, len(self.tailers))
 	for _, tailer := range self.tailers {
 		tailer.stateLock.Lock()
-		enabled, started := tailer.reconcile != nil, tailer.startedAt
-		service, lastSuccess, failed := tailer.service, tailer.lastReconcileTime, tailer.lastReconcileError != ""
-		previous, latest := tailer.reconcileSuccesses[0], tailer.reconcileSuccesses[1]
+		snapshot := logReconcileCollectorSnapshot{
+			service: tailer.service, enabled: tailer.reconcile != nil, started: tailer.startedAt,
+			lastSuccess: tailer.lastReconcileTime, failed: tailer.lastReconcileError != "",
+			previous: tailer.reconcileSuccesses[0], latest: tailer.reconcileSuccesses[1],
+		}
 		tailer.stateLock.Unlock()
+		snapshots = append(snapshots, snapshot)
+	}
+	now := clock()
+	receipt := logReconcileReceipt{Schema: 2, ObservedAt: now.UTC(), Collectors: len(snapshots),
+		CollectorScopes: make([]logReconcileCollectorScope, 0, len(logReconcileServiceKeys))}
+	var scopes [len(logReconcileServiceKeys)]logReconcileCollectorScope
+	for _, snapshot := range snapshots {
+		enabled, started := snapshot.enabled, snapshot.started
+		service, lastSuccess, failed := snapshot.service, snapshot.lastSuccess, snapshot.failed
+		previous, latest := snapshot.previous, snapshot.latest
 		index := logReconcileServiceIndex(service)
 		if index < 0 {
 			receipt.UnsupportedCollectors++
@@ -205,11 +228,11 @@ func encodeLogReconcileReceipt(receipt logReconcileReceipt) []byte {
 }
 
 // One existing diagnostic write per cadence, with no collection or I/O changes.
-func (self *logTailProbe) writeReconcileReceipt(now time.Time) {
+func (self *logTailProbe) writeReconcileReceipt(clock func() time.Time) {
 	if self.reconcileDiagnostics == nil {
 		return
 	}
-	encoded := encodeLogReconcileReceipt(self.reconcileReceipt(now))
+	encoded := encodeLogReconcileReceipt(self.reconcileReceipt(clock))
 	if encoded == nil {
 		return
 	}
