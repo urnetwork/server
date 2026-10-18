@@ -1256,9 +1256,11 @@ type syntheticMigrationPartialIndexObservation struct {
 func syntheticMigrationPartialIndexGuard(t *testing.T, query string, contract syntheticMigrationPartialIndexContract) string {
 	t.Helper()
 	normalized := strings.Join(strings.Fields(query), " ")
-	marker := "WHERE table_name = '" + contract.table + "' AND index_name = '" + contract.name + "'"
-	// A removal guard (migrationIndexRemoved) names the same relation and index
-	// and ends right after the name; only the definition guard is extracted.
+	// Published replacements can reuse the relation and index name. Select the
+	// descriptor's full definition, retaining exactly one operative guard.
+	definition := strings.Join(strings.Fields(contract.definition()), " ")
+	marker := "WHERE table_name = '" + contract.table + "' AND index_name = '" + contract.name +
+		"' AND definition = " + snMainnetMigrationLiteral(definition) + " AND "
 	start, count := -1, 0
 	for offset := 0; ; {
 		found := strings.Index(normalized[offset:], marker)
@@ -1266,9 +1268,7 @@ func syntheticMigrationPartialIndexGuard(t *testing.T, query string, contract sy
 			break
 		}
 		position := offset + found
-		if !strings.HasPrefix(normalized[position+len(marker):], ")") {
-			start, count = position, count+1
-		}
+		start, count = position, count+1
 		offset = position + len(marker)
 	}
 	if count != 1 {
