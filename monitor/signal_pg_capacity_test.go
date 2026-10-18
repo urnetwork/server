@@ -91,6 +91,64 @@ func TestPgCapacitySignalWarnsWithBoundedOwnerEvidence(t *testing.T) {
 	}
 }
 
+// Idle occupancy can preserve capacity pressure after every transaction ends;
+// young transaction state on an old backend does not establish a leak.
+func TestPgCapacityIdleOccupancyKeepsWarningWithoutIdleTransactions(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		total    string
+		active   string
+		idle     string
+		idleInTx string
+		warning  bool
+	}{
+		{name: "young transactions", total: "880", active: "20", idle: "820", idleInTx: "40", warning: true},
+		{name: "all idle transactions released", total: "840", active: "20", idle: "820", idleInTx: "0", warning: true},
+		{name: "idle clients alone", total: "820", active: "0", idle: "820", idleInTx: "0", warning: true},
+		{name: "headroom with same lifetime shape", total: "700", active: "20", idle: "640", idleInTx: "40"},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			rows := []Row{
+				{"summary", "1003", "3", "0", "1000", test.total, test.active, test.idle, test.idleInTx, "4MB", "128MB"},
+				{"owner", "synthetic-pool", "synthetic-role", "192.0.2.90", "idle", test.idle, "Client:ClientRead", "60", "7200", "", ""},
+			}
+			if test.active != "0" {
+				rows = append(rows, Row{"owner", "synthetic-pool", "synthetic-role", "192.0.2.90", "active", test.active, "-:-", "0", "7200", "", ""})
+			}
+			if test.idleInTx != "0" {
+				rows = append(rows, Row{"owner", "synthetic-pool", "synthetic-role", "192.0.2.90", "idle in transaction", test.idleInTx, "Client:ClientRead", "0", "7200", "", ""})
+			}
+			return rows, nil
+		}}
+		alerts, err := NewPgCapacitySignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if !test.warning {
+			if len(alerts) != 0 {
+				t.Fatalf("%s: lifetime shape replaced healthy capacity with %d alerts", test.name, len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("%s: capacity alerts = %d, want one", test.name, len(alerts))
+		}
+		alert := alerts[0]
+		if alert.Class != "pg-client-capacity" || alert.Severity != SeverityWarn || alert.Sustain != 2 {
+			t.Fatalf("%s: class/severity/sustain = %s/%s/%d, want pg-client-capacity/WARN/2",
+				test.name, alert.Class, alert.Severity, alert.Sustain)
+		}
+		if !strings.Contains(alert.Observed, "total_client_backends="+test.total+" ") ||
+			!strings.Contains(alert.Observed, "idle_in_tx="+test.idleInTx+" ") {
+			t.Fatalf("%s: capacity evidence omitted the independently observed states", test.name)
+		}
+		if !strings.Contains(alert.Context, "Capacity is not query load") ||
+			!strings.Contains(alert.Context, "did not establish retention") {
+			t.Fatalf("%s: capacity guidance lost the transaction-lifetime qualifier", test.name)
+		}
+	}
+}
+
 func TestPgCapacityOwnerEvidenceReducesUnexpectedRawAddresses(t *testing.T) {
 	rows := []pgRow{
 		{"summary", "1024", "3", "0", "1021", "800", "230", "540", "7", "239674kB", "256GB"},

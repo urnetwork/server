@@ -62,7 +62,9 @@ func TestRedisMemorySignalSeparatesImpossibleTTLFromCapacityRoot(t *testing.T) {
 		return "", nil
 	}}
 
-	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts[1].RedisNodePorts = []int{6406}
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +100,9 @@ func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
 		return "", nil
 	}}
 
-	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts[1].RedisNodePorts = []int{6380, 6381}
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +138,9 @@ func TestRedisMemorySignalKeepsHostCapacityAlertAtNodeCeilingWithoutReserve(t *t
 		return "", nil
 	}}
 
-	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts[1].RedisNodePorts = []int{6380}
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}

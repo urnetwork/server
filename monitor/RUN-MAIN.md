@@ -220,9 +220,9 @@ test -d "$WARP_HOME/vault"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
@@ -408,12 +408,13 @@ rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
 shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
 monitor_warpctl_dir=$(dirname "$monitor_warpctl")
 PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
-  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m \
+  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m -slack-alerts=false \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
 
-The watcher's stderr carries one notifier line at startup:
+The command above disables external notifications explicitly. For a watcher
+started with notifications enabled, stderr carries one notifier line at startup:
 `monitor: Slack alert notifications enabled: ...` when
 `vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
 `monitor: Slack alert notifications disabled: ...` when it is empty or not an
@@ -650,7 +651,7 @@ For a temporary exact-edge pause, preserve all other coverage:
 
 ```sh
 PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-edge-ipv6-host HOSTNAME
 ```
 
@@ -662,7 +663,7 @@ For a whole-host pause, use repeatable exact inventory names:
 
 ```sh
 PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-host HOSTNAME
 ```
 
@@ -922,7 +923,7 @@ Use the existing SSH and Warpctl transports and the commands documented in
 host while trying to improve denominator coverage.
 
 For a two-reconciliation closure gate, retain the exact `monitor-log-reconcile `
-prefix plus schema-1 JSON from the current watcher generation's stderr artifact.
+prefix plus supported versioned JSON from the current watcher generation's stderr artifact.
 Require `collectors=enabled=fresh=consecutive_two > 0`, matching the intended
 collector inventory. Check `collector_started_at`, `previous_window_start`,
 `latest_window_start`, `previous_completed_at`, and `latest_completed_at`:
@@ -934,7 +935,20 @@ source-record timestamps or live-stream liveness; retain those independent
 controls and the required no-loss window. Missing, malformed, stale, or
 partial-scope receipts leave completion unknown; alert absence alone is
 insufficient. This diagnostic does not change alert-only JSONL or invent
-healthy Alerts. See `SIGNALS.md` §1.5 and `MONITOR.md` §3.7 for the fixed schema.
+healthy Alerts. Schema 1 is aggregate-only; it cannot identify deficient
+collectors. Schema 2 uses `collector_scopes` with fixed public service keys
+alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+`scope_projection_complete`; this is identity completeness, not healthy
+coverage. Unsupported or duplicate services leave the scope map incomplete.
+Null, partial and future timestamps retain their authority qualifiers.
+`last_failure_present` does not identify HTTP429 or a cause. The `fresh` and
+`consecutive_two` booleans retain the original latest/pair predicates:
+`invalid-time` can coexist with `fresh=true` when another stored clock is
+future-dated. Such a row does not qualify a fully coherent time window; do not
+silently rewrite aggregate booleans. An older retained scope Alert is not a
+same-receipt row. Update version-aware readers before promotion; never
+reconstruct predecessor scope rows from aggregate ranges. See `SIGNALS.md`
+§1.5 and `MONITOR.md` §3.7 for the fixed schema.
 
 ## Daily three-way improvement research
 
@@ -1030,7 +1044,7 @@ an expected test name with `action=fail`, or native exit 1 alone, is insufficien
 Separately classify preflight, missing synthetic fixtures, compile failures,
 retry-wrapped setup panics and outer timeouts, and preserve those failed attempts
 without calling them reproductions. Pin the complete local-only resource profile
-and expose the first failure with the existing fail-fast gate setting; never use
+and expose the first failure with `WARP_TEST_ENV_FAIL_FAST=1`; never use
 production resources to make a fixture pass. Any derived metric in an evidence
 receipt must carry its unit and expression so rates per second and per minute
 cannot be silently exchanged.
@@ -1230,14 +1244,33 @@ Run the narrow test first, then the package and race suite:
 
 ```sh
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor -run "TestRelevantName" -count=1'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -run "TestRelevantName" -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 git diff --check
 ```
+
+Set `WARP_TEST_ENV_FAIL_FAST=1` after successful `test-env.sh` sourcing for
+every narrow, package, and race gate. `TestEnv.Run` otherwise permits a failed
+fixture attempt to pass on retry; the release setting limits it to one attempt,
+including explicit positive `RerunCount` values. Ordinary `testing.T` tests do
+not use that retry wrapper. Go's `-failfast` flag stops later tests and does not
+disable fixture retries. Keep `-count=1` so qualification runs the native tests.
+
+Retain each gate's exact launcher and argv, toolchain, source/config hashes,
+and relevant environment fingerprint. For the full and race gates, bind the
+actual native test child's `WARP_TEST_ENV_FAIL_FAST == "1"` observation to its
+PID, start identity, executable, and output receipts. A launcher-side assertion
+or printed Boolean alone proves only intended inheritance. A separate native
+inheritance control plus the existing hermetic release-fail-fast fixture proves
+the launcher boundary without provisioning databases. A short plain-`testing.T`
+narrow test can finish before an external environment read; preserve that limit
+and its actual result without inventing a native-child receipt. An older PASS
+without the required environment evidence remains an actual PASS, with
+first-attempt qualification unproved for retry-wrapped fixtures.
 
 `WARP_ENV=main` selects the production probe target; it is not a Go-test
 environment. Run the monitor package and race gates sequentially in separate
@@ -1251,6 +1284,22 @@ the watcher, and let each subshell leave that parent state unchanged on exit.
 Do not overlap the package and race gates: although no fixed-path collision is
 established, they share local PostgreSQL, proxy, CPU, and process capacity, so
 overlap can create load-dependent failures and is not formal gate evidence.
+
+Signal, timeout, and native-child experiments must not share an active native
+database fixture, even when they issue no SQL. Use an independently owned
+disposable fixture. Reuse of an idle fixture requires proof of exact PID, PPID,
+PGID and SID ownership and database noninterference through child termination;
+a terminal status and joined local launcher do not establish that proof. The
+primary agent owns that reuse admission after the fixture's prior consumers
+have terminated.
+
+The 2026-10-17 local qualification retains its first failed attempt: PostgreSQL
+logged SIGKILL at 07:20:57.408Z, followed by one connection loss and 32 setup
+refusals during recovery. The primary agent had authorized a separate timeout
+control that overlapped that window. Filesystem receipt clocks, status 137 and
+local join did not identify the signal sender. Preserve the original failure,
+authorization and clock provenance when separately admitting a fresh run after
+readiness succeeds; neither temporal overlap nor a later PASS resolves causality.
 
 Run the owning repository's full release-relevant tests for product fixes. A
 focused test is not sufficient when the change affects generated service

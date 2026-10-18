@@ -451,6 +451,75 @@ func TestOpenContractsCappedCountsStayUnknownAndWarn(t *testing.T) {
 	}
 }
 
+// Creation-age observations cannot establish whether the closer's independent
+// quiet cutoff or maximum lifetime has made these contracts due.
+func TestOpenContractsGuidanceSeparatesObservationAgesFromExpiry(t *testing.T) {
+	for _, counts := range [][]string{{"160000", "160000", "160000"}, {"250001", "250001", "250001"}} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return []Row{counts}, nil
+		}}
+		alerts, err := NewOpenContractsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "open-set-size")
+		if alert.Severity != SeverityWarn || alert.Sustain != 3 || alert.Target != "pg-1" {
+			t.Fatal("expiry guidance changed open-set detection")
+		}
+		for _, want := range []string{"12-minute quiet cutoff", "60-minute maximum lifetime", "creation-age buckets", "not expiry status"} {
+			if !strings.Contains(alert.Mechanism, want) {
+				t.Errorf("expiry guidance omitted %q", want)
+			}
+		}
+		if strings.Contains(alert.Mechanism, "selects contracts older than five minutes") {
+			t.Error("expiry guidance retained the obsolete five-minute selection claim")
+		}
+		if !strings.Contains(alert.Context, "executing Taskworker artifact") {
+			t.Error("expiry guidance treated reviewed source as runtime authority")
+		}
+		for _, want := range []string{"older_5m", "older_30m"} {
+			if !strings.Contains(alert.Observed, want) {
+				t.Errorf("expiry guidance changed the observed age bucket %q", want)
+			}
+		}
+		if counts[0] == "250001" && (!strings.Contains(alert.Observed, "exact=false trend=unknown") || strings.Contains(alert.Symptom, "rising")) {
+			t.Error("expiry guidance inferred overdue growth from a capped cohort")
+		}
+	}
+}
+
+// The current policy must distinguish cooperative admission budgets from a
+// hard task deadline without rewriting historical incident descriptions.
+func TestOpenContractsCatalogKeepsCurrentExpiryAdmissionPolicy(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 2.6 Open-contract set size")
+	if start < 0 {
+		t.Fatal("open-set catalog section is missing")
+	}
+	section := catalog[start:]
+	end := strings.Index(section, "2026-10-06 retained-epoch discriminator:")
+	if end < 0 {
+		t.Fatal("open-set current-policy boundary is missing")
+	}
+	section = strings.Join(strings.Fields(section[:end]), " ")
+	for _, want := range []string{
+		"12-minute quiet cutoff", "60-minute maximum lifetime", "creation-age buckets", "not expiry status",
+		"90-second elapsed budget", "120-second dispatch limit", "Already started rows finish",
+		"executing Taskworker artifact",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("current expiry policy omitted %q", want)
+		}
+	}
+	if strings.Contains(section, "15-second elapsed budget") {
+		t.Error("current expiry policy retained the obsolete fifteen-second budget")
+	}
+}
+
 // Exact high observations below the cap keep the original adjacent trend.
 func TestOpenContractsExactNearCapKeepsTrend(t *testing.T) {
 	counts := []int{249999, 250000}

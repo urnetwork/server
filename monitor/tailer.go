@@ -768,17 +768,16 @@ var logClasses = []logClass{
 		action:    "Build and deploy Connect from an intentional server checkout containing the RecordConnectDay explicit UUID, varchar, and timestamp casts. Do not restart Taskworker, replay raw connection requests, or fabricate historical analytics rows; any historical repair is a separate product/data-policy decision.",
 		verify:    "A deterministic PostgreSQL test executes the real RecordConnectDay statement, records exactly one connect.day event per network and UTC day, and preserves retry after write failure; every Connect block runs the corrected artifact; and zero onboarding-connect-day-write or matching novel lines occur for ten minutes after log-ingestion delay while connections continue.",
 	},
-	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
-	// match that canonical first line rather than its paired body-write line so
-	// the alert rate remains one logical recovery boundary per occurrence.
+	// Count the canonical header diagnostic, excluding a paired body-write
+	// diagnostic. The immediate writer frame does not identify its caller.
 	{name: "http-hijack-write", re: regexp.MustCompile(`http: response\.WriteHeader on hijacked connection`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
 		sample:    httpHijackWriteLogSample,
-		meaning:   "router recovery attempted to synthesize an HTTP response after a handler transferred ownership of the H1 connection through Hijack",
-		mechanism: "Connect's GET / route hands its socket to Gorilla. The router correctly recognized a later Done panic as expected cancellation and suppressed its error accounting, but then fell through to http.Error. net/http rejected both the 500 header and body because it no longer owned the connection. A two-hour production control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors, isolating the expected-Done fallthrough rather than an application panic.",
-		context:   "The rejected 500 does not itself prove a failed handshake or active transport; it is recovery-path log amplification during connection teardown. A warning paired with [h]unhandled error from route is a different case: preserve and fix that underlying panic rather than hiding all net/http diagnostics.",
-		action:    "Deploy the router recovery fix that returns immediately for server.IsDoneError before http.Error. Do not suppress net/http's error logger globally. If any post-fix occurrence has a paired [h]unhandled route error, diagnose that route panic and its hijack ownership boundary independently.",
-		verify:    "Every Connect block runs the fixed router; normal H1 connection teardown produces zero http-hijack-write lines for 10 minutes, while deterministic recovery tests prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path.",
+		meaning:   "net/http rejected a response header after a handler transferred ownership of the H1 connection through Hijack; the responsible caller and cause remain unknown",
+		mechanism: "The canonical WriteHeader warning proves a response write after Hijack, not the responsible recovery branch. The historical 2026-08-31 Connect control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors: the expected-Done branch fell through to http.Error after Gorilla owned the socket. Server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170 corrected that branch. This log line alone does not establish that historical cause in the current emitter.",
+		context:   "A requestMetricsWriter.WriteHeader frame identifies a forwarding wrapper, not its caller. A retained sample does not establish source event time, paired route errors, or running-artifact ancestry. Samples remain bounded; a missing or truncated frame does not prove caller absence. The warning does not itself prove a failed handshake or active transport. Count only the canonical header line, not a paired body-write diagnostic; the rate is diagnostic volume, not unique incidents.",
+		action:    "Bind the original warning and source event time to the emitting process and immutable artifact; compare its source ancestry with server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170. Deploy the Done recovery fix only when proved missing. If the artifact already contains it, use same-event [h]unhandled error from route evidence and a bounded caller stack to distinguish an unexpected route panic from another post-Hijack writer. Missing, stale, partial, or ambiguous evidence leaves cause unknown; absence of a paired error is useful only with complete same-event source coverage. Do not suppress net/http's error logger globally or patch away the warning before identifying its cause.",
+		verify:    "After the last implicated emitter converges on the proven correction, require zero http-hijack-write lines for 10 minutes of comparable H1 teardown, fresh standing tails, and two advancing complete reconciliations from the same watcher generation. Keep independent successful H1 handshake and delivery controls. Deterministic recovery tests must prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path. Missing source coverage is unknown, not recovery.",
 	},
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
 		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
@@ -847,7 +846,7 @@ var logClasses = []logClass{
 		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
 		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
 		context:   "Only normalized function ownership, an allowlisted Go error type, and a PostgreSQL SQLSTATE may enter the sample. Unknown, malformed, oversized, or excess-cardinality stacks remain in the aggregate; an absent owner is not a healthy result.",
-		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
+		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. An ownership-admission wrapper alone leaves the business caller and cause unknown; inspect one bounded original structured stack and its error discriminator. A changed owner after parser correction is not recovery. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
 		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
 	},
 	// Contract errors are emitted here only as rate-limited exemplars. Their
@@ -916,14 +915,15 @@ var logClasses = []logClass{
 	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
 		canonical: &logCanonical{
-			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
-			name:    "invalid_destination_events",
+			eventRe:           regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:              "invalid_destination_events",
+			unknownWhenAbsent: true,
 		},
-		meaning:   "Circle definitively rejected a payout destination before creating a transfer because the configured wallet address is invalid for its declared chain",
-		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt when its guarded reset succeeds. After that successful reset, an unchanged account wallet causes the next retry to select the same invalid payout_wallet configuration.",
-		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
-		action:    "Confirm the guarded reset succeeded and inspect the current wallet selection before correcting a proven chain mismatch through the supported account API. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
-		verify:    "After the payout wallet is corrected, the next natural retry selects it with a fresh key released only by the prior definitive rejection, completes without a duplicate transfer, invalid_destination_events remains zero, and the durable processor-invalid-destination count converges to zero within 90 minutes plus log-ingestion delay.",
+		meaning:   "The log reports an HTTP 400 invalid-destination response; text matching alone does not prove typed rejection, current chain compatibility, or guarded-reset outcome",
+		mechanism: "A Circle-client diagnostic precedes the controller's typed-error check and any guarded reset. In the inspected source, a reset is eligible only after a typed HTTP 400 with parsed code 155219 or the exact normalized invalid-address message; it safely releases only that pre-chain submit attempt when its guarded reset succeeds. Historical chain-blind validation admitted cross-chain wallet shapes. Only a current request/wallet join can establish whether an unchanged incompatible selection will select the same invalid payout_wallet configuration on retry.",
+		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Without an evaluator line, the logical event count is unknown. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
+		action:    "Establish the typed rejection, emitting artifact, guarded-reset outcome, and current wallet selection before correcting a proven chain mismatch through the supported account API after a confirmed safe reset. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
+		verify:    "After a confirmed safe reset and authorized wallet correction, the next natural retry selects the corrected wallet with a fresh key released only by the prior definitive rejection and completes without a duplicate transfer. Require complete current evaluator and durable-state observations, zero invalid_destination_events, and the durable processor-invalid-destination count converging to zero within 90 minutes plus log-ingestion delay; missing evaluator evidence remains unknown.",
 		redactIDs: true},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
@@ -1177,15 +1177,16 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner     string
-	errorType string
-	sqlstate  string
+	owner      string
+	errorType  string
+	sqlstate   string
+	errorClass string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
 // Unknown stack symbols do not borrow a later caller's apparent ownership.
 func parsePanicLogObservation(line string) panicLogObservation {
-	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown"}
+	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown", errorClass: "unknown"}
 	if len(line) > panicLogMaxBytes {
 		return unknown
 	}
@@ -1242,6 +1243,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		return unknown
 	}
 	observation := unknown
+	observation.errorClass = panicProviderEgressErrorClass(line, errorText, stack)
 	errorType, _, _ := strings.Cut(errorText, "=")
 	switch errorType {
 	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
@@ -1278,8 +1280,11 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		switch wrapperOwner {
 		case "server.HandleError", "server.HandleError1", "server.HandleError2", "server.HandleErrorWithReturn",
 			"server.Raise", "server.RaisePgResult", "server.WithPgResult",
-			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
-			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
+			"server.Db", "server.DbInConn", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
+			"server.Tx", "server.TxInConn", "server.MaintenanceTx", "server.txWithPool", "server.txWithConnection",
+			"server.OwnedTx", "server.TryOwnedTx", "server.ownedTxWithResource", "server.ownedTxWithResourcePolicy",
+			"server.PgOwnedSession.Tx", "server.PgOwnedSession.txWithResource", "server.pgOwnedConnection.run",
+			"server.Redis", "server.RedisDoOnce", "server.redisWithClient",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
 			// The next record is this wrapper's already-validated source line.
 			// A trimpath build can prefix it with the application module too.
@@ -1306,7 +1311,11 @@ func panicLogSample(line string) string {
 	if owner == "" {
 		owner = "unknown"
 	}
-	return fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	sample := fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	if observation.errorClass != "unknown" {
+		sample += " error_class=" + observation.errorClass
+	}
+	return sample
 }
 
 // One negative mirror is an integrity defect. A hundred mutation exposures in
@@ -1443,11 +1452,9 @@ func netEscrowNegativeLogSample(line string) string {
 	return truncateLinePreservingSuffix(line, marker)
 }
 
-// httpHijackWriteLogSample retains the complete net/http source frame. The
-// warp identity and its duplicate timestamps consume most of the generic
-// 200-byte prefix, while the final ServeHTTP frame is the discriminator that
-// separates the known router recovery fallthrough from another post-hijack
-// writer with a different root cause.
+// Prioritize the immediate net/http source frame within the existing 200-byte
+// sample bound. A forwarding wrapper can hide the actual caller, so this frame
+// guides source collection without proving a recovery branch or cause.
 func httpHijackWriteLogSample(line string) string {
 	const marker = "http: response.WriteHeader on hijacked connection"
 	markerIndex := strings.Index(line, marker)
@@ -3221,9 +3228,9 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 		),
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
-		context:   "A fixed bounded-query error_class describes Warpctl's terminal local diagnostic, not a panic in the observed service. HTTP 429/502/503/504 does not identify which gateway or backend returned it; a config/schema panic can originate in local configuration or an invalid upstream response. Unknown, truncated, or unrecognized diagnostics remain failed visibility. Successful retry diagnostics do not make a completed query fail.",
+		context:   "A fixed bounded-query error_class describes Warpctl's terminal local diagnostic, not a panic in the observed service. For HTTP 429, response_shape describes only an exact source-qualified response format: loki-outstanding-requests, nginx-default-429, or unknown. Neither the status nor this hint proves the physical responder, limiting policy, or ingestion cause. A config/schema panic can originate in local configuration or an invalid upstream response. Unknown, truncated, or unrecognized diagnostics remain failed visibility. Successful retry diagnostics do not make a completed query fail.",
 		action:    "Restore bounded warpctl/Loki query visibility. Retain active services.yml block partitioning and inclusive boundary continuation. If one boundary cannot advance or a partition consumes the eight-page budget, diagnose and remove the high-cardinality log producer before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
-		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile schema=1 diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
+		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile versioned diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
 		playbook:  "SIGNALS.md 1.5",
 	}
 }

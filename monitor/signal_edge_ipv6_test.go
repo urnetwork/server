@@ -176,8 +176,8 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 	var admissionCalls atomic.Int32
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
-			if name == "/sbin/route" {
-				return "route to: 2001:db8:ffff::1\ninterface: synthetic0\n", nil
+			if ipv6ObserverRouteTestCommand(name, args) {
+				return ipv6ObserverRouteTestResult("route to: 2001:db8:ffff::1\ninterface: synthetic0\n")
 			}
 			if name != "curl" {
 				return "", errors.New("unexpected synthetic local command")
@@ -342,14 +342,9 @@ func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T
 	routeCalls := 0
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
-			if name == "/sbin/route" {
+			if ipv6ObserverRouteTestCommand(name, args) {
 				routeCalls++
-				if strings.Join(args, " ") != "-n get -inet6 "+ipv6ObserverRouteProbeAddress {
-					t.Fatalf("route arguments = %q", strings.Join(args, " "))
-				}
-				// macOS route can report an absent route in its output while
-				// still exiting zero. The diagnostic text remains authoritative.
-				return "route: writing to routing socket: not in table\n", nil
+				return ipv6ObserverRouteTestResult("route: writing to routing socket: not in table\n")
 			}
 			if name != "curl" {
 				return "", errors.New("unexpected local command")
@@ -437,9 +432,9 @@ func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T
 func TestEdgeIPv6SignalSyntheticObserverRoutePreservesRealReset(t *testing.T) {
 	address := "2001:db8:3::30"
 	source := &syntheticSource{
-		localFn: func(name string, _ ...string) (string, error) {
-			if name == "/sbin/route" {
-				return "route to: 2001:db8:ffff::1\ninterface: synthetic0\n", nil
+		localFn: func(name string, args ...string) (string, error) {
+			if ipv6ObserverRouteTestCommand(name, args) {
+				return ipv6ObserverRouteTestResult("route to: 2001:db8:ffff::1\ninterface: synthetic0\n")
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
 				edgeHTTPFixture("000", "7", "", "0.000072"), edgeCommandExitError(7)
@@ -614,10 +609,10 @@ func edgeObserverTlsSettings(routes []string) (SignalSettings, *int) {
 	routeCalls := new(int)
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
-			if name == "/sbin/route" {
+			if ipv6ObserverRouteTestCommand(name, args) {
 				index := min(*routeCalls, len(routes)-1)
 				*routeCalls++
-				return routes[index], nil
+				return ipv6ObserverRouteTestResult(routes[index])
 			}
 			for index := 1; index <= 3; index++ {
 				address := fmt.Sprintf("2001:db8:50::%d", index)
@@ -694,8 +689,8 @@ func TestEdgeIpv6MalformedIdentityCannotLeakIntoCompanionPathAlert(t *testing.T)
 func TestEdgeIPv6SignalSyntheticUnobservableRouteStaysPerTargetUnknown(t *testing.T) {
 	addresses := []string{"2001:db8:4::40", "2001:db8:4::41"}
 	source := &syntheticSource{
-		localFn: func(name string, _ ...string) (string, error) {
-			if name == "/sbin/route" {
+		localFn: func(name string, args ...string) (string, error) {
+			if ipv6ObserverRouteTestCommand(name, args) {
 				return "synthetic private route diagnostic", errors.New("synthetic route command failure")
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
@@ -1057,9 +1052,9 @@ func TestEdgeIPv6SignalInFlightCancellationCannotFabricateFindings(t *testing.T)
 	release := make(chan struct{})
 	var hostCalls atomic.Int32
 	source := &syntheticSource{
-		localFn: func(name string, _ ...string) (string, error) {
-			if name == "/sbin/route" {
-				return "interface: synthetic0\n", nil
+		localFn: func(name string, args ...string) (string, error) {
+			if ipv6ObserverRouteTestCommand(name, args) {
+				return ipv6ObserverRouteTestResult("interface: synthetic0\n")
 			}
 			close(started)
 			<-release
@@ -1104,9 +1099,9 @@ func TestEdgeIPv6SignalChildDeadlinePreservesIndependentIdentity(t *testing.T) {
 // results while retaining the normal Signal adapter and public observation.
 func edgeObservationSettings(output string, commandErr error, identity string, identityErr error) SignalSettings {
 	source := &syntheticSource{
-		localFn: func(name string, _ ...string) (string, error) {
-			if name == "/sbin/route" {
-				return "interface: synthetic0\n", nil
+		localFn: func(name string, args ...string) (string, error) {
+			if ipv6ObserverRouteTestCommand(name, args) {
+				return ipv6ObserverRouteTestResult("interface: synthetic0\n")
 			}
 			return output, commandErr
 		},

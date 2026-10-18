@@ -104,10 +104,15 @@ func NewDefaultAnalyticsConfig() *AnalyticsConfig {
 	return config
 }
 
+// Missing optional configuration disables collection; failed lookup, decoding,
+// or validation must remain distinguishable from that no-op.
 func LoadAnalyticsConfig() (*AnalyticsConfig, error) {
 	resource, err := server.Config.SimpleResource("analytics.yml")
 	if err != nil {
-		return &AnalyticsConfig{}, nil
+		if errors.Is(err, server.ErrResourceNotFound) && !errors.Is(err, server.ErrResourceUnavailable) {
+			return &AnalyticsConfig{}, nil
+		}
+		return nil, err
 	}
 	var config AnalyticsConfig
 	if err := resource.UnmarshalYamlE(&config); err != nil {

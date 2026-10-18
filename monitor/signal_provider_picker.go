@@ -145,23 +145,18 @@ func (p providerPickerProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	if len(scope.slots) == 0 || len(scope.slots) > providerPickerMaxSlots || len(scope.hosts) == 0 || len(scope.blocks) == 0 {
 		return unavailable("inventory-unavailable-or-over-bound")
 	}
-	gateways := []*host{}
-	for _, h := range env.cfg.hostsWithRole("services") {
-		if !h.disabled && !scope.excluded[h.name] {
-			gateways = append(gateways, h)
-		}
-	}
-	if len(gateways) == 0 {
-		return unavailable("gateway-unavailable")
-	}
 	now := env.now()
-	command := "curl -fsS --max-time 15 --max-filesize " + strconv.Itoa(providerPickerMaxBytes) + " --data-urlencode " + shellSingleQuote("query="+providerPickerQuery(env.cfg.env, scope)) + " --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) + " 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	out, err := readProviderMimirQuery(ctx, env, providerPickerQuery(env.cfg.env, scope), now, providerPickerMaxBytes)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	if err != nil {
-		return unavailable("bounded-source-unavailable")
+		findings, resultErr := unavailable("bounded-source-unavailable")
+		errorClass := classifyObservationError(err)
+		findings[0].observed += " " + observationFailureDetails(err, errorClass)
+		findings[0].observed += mimirQueryFailureDetails(err)
+		findings[0].action = observationFailureAction(err, errorClass, findings[0].action)
+		return findings, resultErr
 	}
 	evidence := parseProviderPicker(out, env.cfg.env, now, scope)
 	return providerPickerFindings(evidence), nil

@@ -1265,7 +1265,7 @@ func TestLogErrorsSignalSeparatesPostgresClientExhaustionFromPanic(t *testing.T)
 }
 
 func TestLogErrorsSignalExplainsHTTPHijackWrite(t *testing.T) {
-	line := `[edge-3][connect][g4][cid:test][2026-08-31T22:23:26.584101Z]2026/08/31 22:23:26 http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)`
+	line := `[fixture-node.example][connect][fixture-block][cid:fixture][2031-07-08T09:10:00Z]2031/07/08 09:10:00 http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:73)`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-connect", nil
@@ -1279,16 +1279,16 @@ func TestLogErrorsSignalExplainsHTTPHijackWrite(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "http-hijack-write").Markdown()
 	for _, detail := range []string{
 		"transferred ownership of the H1 connection through Hijack",
-		"Connect's GET / route hands its socket to Gorilla",
+		"historical 2026-08-31 Connect control",
 		"fell through to http.Error",
 		"131 canonical WriteHeader warnings",
 		"zero paired [h]unhandled route errors",
 		"does not itself prove a failed handshake or active transport",
-		"returns immediately for server.IsDoneError",
+		"Deploy the Done recovery fix only when proved missing",
 		"Do not suppress net/http's error logger globally",
 		"zero http-hijack-write lines for 10 minutes",
 		"Done panic performs no write after Hijack",
-		"router.(*Router).ServeHTTP.func1.1 (router.go:104)",
+		"router.(*Router).ServeHTTP.func1.1 (router.go:73)",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("HTTP hijack-write alert missing %q:\n%s", detail, markdown)
@@ -1583,7 +1583,8 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "payout-invalid-destination").Markdown()
 	for _, detail := range []string{
-		"invalid for its declared chain",
+		"does not prove typed rejection, current chain compatibility, or guarded-reset outcome",
+		"HTTP 400 with parsed code 155219 or the exact normalized invalid-address message",
 		"safely releases only that pre-chain submit attempt",
 		"when its guarded reset succeeds",
 		"select the same invalid payout_wallet configuration",

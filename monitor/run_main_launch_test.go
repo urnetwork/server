@@ -82,7 +82,7 @@ test "$MONITOR_LAUNCH_FIXTURE" != metadata-command-error || exit 2
 `)
 	writeExecutable(filepath.Join(runDirectory, "monitor"), `#!/bin/sh
 test "$WARP_ENV" = main && test "$WARP_HOME" = "$BRINGYOUR_HOME" || exit 99
-test "$*" = '-mode overlay -min-probe-cadence=15m' || exit 99
+test "$*" = '-mode overlay -min-probe-cadence=15m -slack-alerts=false' || exit 99
 case "$(command -v warpctl)" in
   "$MONITOR_NATIVE_EXE") printf 'native\n' >"$MONITOR_LAUNCH_RECEIPT" ;;
   "$MONITOR_AMBIENT_EXE") printf 'ambient\n' >"$MONITOR_LAUNCH_RECEIPT" ;;

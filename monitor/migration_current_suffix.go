@@ -553,6 +553,14 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(839, "lag.dev measurement certificate deliver time",
 		snMainnetMigrationColumns("network_extender_measurement_cert",
 			snMainnetMigrationColumn{name: "deliver_time", kind: "timestamp without time zone"})),
+	migrationCurrentSuffix(840, "retained original registration session authority",
+		snMainnetMigrationColumns("network_client_registration",
+			snMainnetMigrationColumn{name: "session_id", kind: "uuid"},
+			snMainnetMigrationColumn{name: "session_create_time", kind: "timestamp without time zone"},
+			snMainnetMigrationColumn{name: "session_accept_until", kind: "timestamp without time zone"})),
+	migrationCurrentSuffix(841, "retained original verification seed window",
+		snMainnetMigrationColumns("verify_original_transition",
+			snMainnetMigrationColumn{name: "head_window", kind: "character varying(32)"})),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
