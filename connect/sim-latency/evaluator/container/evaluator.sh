@@ -262,12 +262,21 @@ jq -e \
     --argjson patch_policy_keys "$patch_policy_keys" \
     --argjson evaluation_policy_keys "$evaluation_policy_keys" \
     'type == "object" and (.schema == 1) and
-     ((keys | sort) == $request_keys) and
+     ((keys - ["staging"] | sort) == $request_keys) and
+     ((has("staging") | not) or (.staging | type == "boolean")) and
+     (if .staging == true then .evaluation_policy.takeover_margin == 0 else true end) and
      (.patch_policy | type == "object" and ((keys | sort) == $patch_policy_keys)) and
      (.evaluation_policy | type == "object" and ((keys | sort) == $evaluation_policy_keys))' \
     "$request_path" >/dev/null || die "request schema or fields are invalid"
 
 job_id="$(jq -er '.job_id' "$request_path")"
+staging="$(jq -r '.staging // false' "$request_path")"
+source_branch=sim-latency
+source_mode_args=()
+if [ "$staging" = true ]; then
+    source_branch=sim-latency-staging
+    source_mode_args=(--staging)
+fi
 round_id="$(jq -er '.round_id' "$request_path")"
 source_epoch="$(jq -er '.source_epoch' "$request_path")"
 attempt="$(jq -er '.attempt' "$request_path")"
@@ -484,18 +493,19 @@ active_source_root="$(mktemp -d "$work_dir/evaluation-sources.XXXXXXXX")"
 baseline_source_root="$active_source_root/baseline"
 candidate_source_root="$active_source_root/candidate"
 baseline_source_identity="$($PREPARE_EVALUATION_SOURCE \
-    --base-image "$base_image_id" --destination "$baseline_source_root")" ||
+    "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$baseline_source_root")" ||
     die "could not prepare the temporary baseline source checkout"
 candidate_source_identity="$($PREPARE_EVALUATION_SOURCE \
-    --base-image "$base_image_id" --destination "$candidate_source_root")" ||
+    "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$candidate_source_root")" ||
     die "could not prepare the temporary candidate source checkout"
 for prepared_identity in "$baseline_source_identity" "$candidate_source_identity"; do
     jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
         --argjson source_epoch "$source_epoch" \
+        --argjson staging "$staging" --arg branch "$source_branch" \
         '.schema == 1 and .kind == "sim-latency-evaluation-source" and
          .temporary == true and .base_image_id == $base_image_id and
          .base_sha == $base_sha and .source_epoch == $source_epoch and
-         .branch == "sim-latency" and .candidate_patch_sha256 == null' \
+         .branch == $branch and ((.staging // false) == $staging) and .candidate_patch_sha256 == null' \
         <<<"$prepared_identity" >/dev/null || die "temporary evaluation source identity is invalid"
 done
 source_evidence_path="$work_dir/evaluation-sources.json"
@@ -708,7 +718,7 @@ seal_evaluation_source() {
             die "could not read temporary $repository source commit"
         source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
             die "could not inspect temporary $repository source worktree"
-        [ "$actual_branch" = sim-latency ] && [ "$actual_commit" = "$expected_commit" ] &&
+        [ "$actual_branch" = "$source_branch" ] && [ "$actual_commit" = "$expected_commit" ] &&
             [ -z "$source_status" ] ||
             die "temporary $repository source checkout is not clean and identity-bound"
     done
@@ -1452,7 +1462,7 @@ active_build_log_pid=$!
 active_build_log_pipe="$candidate_build_pipe"
 trap - ERR
 set +e
-$BUILD_SUBMISSION --allow-local-base --base-image "$base_build_ref" \
+$BUILD_SUBMISSION "${source_mode_args[@]}" --allow-local-base --base-image "$base_build_ref" \
     --source-root "$candidate_source_root" \
     --patch "$patch_path" --policy "$policy_path" \
     > "$candidate_build_json" 2> "$candidate_build_pipe"

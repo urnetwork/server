@@ -24,7 +24,8 @@ import (
 // Checks against prospectively approved source/image policy, not a fabricated
 // review. A bootstrap may not add a promotion or target a later round.
 func validateBootstrapSource(manifest *sourceManifest, settings *controller.Settings) error {
-	if manifest.Schema != 2 || !settings.AutomationPolicy.Enabled || !validSha256(settings.AutomationPolicy.PolicyApprovalSha256) ||
+	if manifest == nil || settings == nil || manifest.Schema != 2 || manifest.Staging != settings.AutomationPolicy.Staging ||
+		!settings.AutomationPolicy.Enabled || !validSha256(settings.AutomationPolicy.PolicyApprovalSha256) ||
 		len(manifest.EvaluationSource.Generations) != 1 || len(manifest.EvaluationSource.Rounds) != 1 {
 		return errors.New("bootstrap requires an approved v2 baseline-only manifest")
 	}
@@ -123,7 +124,7 @@ func runBootstrapSource(opts docopt.Opts) {
 		}
 	}
 	if intent == nil {
-		sourceConfig, repositoriesRoot, lock, err := configuredSourcePaths(opts)
+		sourceConfig, repositoriesRoot, lock, err := configuredSourcePathsForMode(opts, settings.AutomationPolicy.Staging)
 		if err != nil || lock != "" {
 			fatalf("bootstrap requires host source paths: %v", err)
 		}
@@ -131,7 +132,7 @@ func runBootstrapSource(opts docopt.Opts) {
 		if err != nil {
 			fatalf("baseline config: %s", err)
 		}
-		manifestBytes, err := sourceGitBlobAtCommit(ctx, configRoot, manifestCommit, "main/sim-latency.yml", maximumSourceConfigBytes)
+		manifestBytes, err := sourceGitBlobAtCommit(ctx, configRoot, manifestCommit, sourceManifestRepositoryPath(settings.AutomationPolicy.Staging), maximumSourceConfigBytes)
 		if err != nil {
 			fatalf("baseline exact config: %s", err)
 		}
@@ -154,16 +155,17 @@ func runBootstrapSource(opts docopt.Opts) {
 		generation, round := manifest.EvaluationSource.Generations[0], manifest.EvaluationSource.Rounds[0]
 		digest := sha256.Sum256(manifestBytes)
 		intent = &model.CompetitionSourceActivation{Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
+			Staging: settings.AutomationPolicy.Staging, StagingRoundWindowSeconds: settings.AutomationPolicy.StagingRoundWindowSeconds, StagingPreparationSeconds: settings.AutomationPolicy.StagingPreparationSeconds,
 			Generation: 1, ExpectedGeneration: 0, SourceGeneration: 0, TargetEpoch: 1, Kind: "baseline", Reason: "policy_approved_baseline", SourceDecisionDigest: round.SourceDecisionDigest,
 			TargetRoundId:    server.NewId(),
 			SourceLockSha256: generation.SourceLockSha256, Commits: generation.Repositories.commits(), GitRefs: map[string]model.CompetitionSourceGitRef{}, Manifest: manifestBytes,
 			ManifestCommit: manifestCommit, ManifestSha256: hex.EncodeToString(digest[:]), ConfigExpectedCommit: manifestCommit,
 			Threshold: settings.EvaluationPolicy.TakeoverMargin, ThresholdEvidenceSha256: generation.ThresholdEvidenceSha256,
 			EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256, PreparedAt: time.Now().UTC()}
-		publication := &sourcePublicationIntent{Schema: 2, ActivationGeneration: 1, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, Bootstrap: true}
+		publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: 1, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, Bootstrap: true}
 		for _, repository := range append(sourceRepositoryNames(), "config") {
 			localRoot := filepath.Join(repositoriesRoot, repository)
-			commit, branch := intent.Commits[repository], "sim-latency"
+			commit, branch := intent.Commits[repository], sourceBranch(intent.Staging)
 			if repository == "config" {
 				localRoot, commit, branch = configRoot, manifestCommit, "main"
 			}
@@ -233,6 +235,9 @@ func runBootstrapSource(opts docopt.Opts) {
 	}
 	if intent.Kind != "baseline" || intent.Generation != 1 || intent.ManifestCommit != manifestCommit {
 		fatalf("baseline recovery conflicts with the explicitly requested config commit")
+	}
+	if err := validateSourceActivationMode(intent, settings); err != nil {
+		fatalf("baseline recovery mode: %s", err)
 	}
 	intent, err = store.RecordSourceIntent(ctx, settings, *lease, *intent)
 	if err != nil {

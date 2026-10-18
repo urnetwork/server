@@ -22,6 +22,47 @@ job id. One immutable nine-run control belongs to the round. Replacements use
 the same sealed ranking; they do not receive a new baseline or evaluation.
 Staging retains its documented fee-free, zero-margin best-placeable behavior.
 
+## Explicit v2 staging
+
+Automated staging is a separate, prospectively configured v2 season. It is not
+created by changing an existing legacy staging round or by naming a production
+environment "staging". Set `automation_policy.staging: true`,
+`settlement_mode: shadow`, an explicit `staging_round_window_seconds` (60 through
+604800), and `staging_preparation_seconds` (0 through 57600). The frozen season
+policy must match those two durations, use six epochs and a zero submission fee;
+the evaluator takeover margin must be exactly zero. Production's schedule,
+significance rule and positive margin remain unchanged.
+
+Each staging seal, reward decision, source intent, runtime acknowledgment and
+adapter inbox binds this mode. Staging-only Git publication uses
+`sim-latency-staging`, and its source ledger lives separately at
+`config/main/sim-latency-staging.yml`. Do not replace the historical production
+ledger, add pins retroactively, or use production refs to bypass staging checks.
+The frozen graph includes all eleven required repositories, including `gvisor`.
+
+Staging retains the per-round nine-run control, nine candidate runs, FIFO,
+containment and every G1–G6 gate. It names the best placeable candidate without
+requiring statistical significance or an improvement over the control. A short
+preparation delay does not waive exact runtime readiness, artifact integrity,
+or reserved-round identity. All admitted work drains after the window closes;
+scores and the provisional winner stay embargoed until seal and reveal.
+
+Use the advertised `/competition/v2` admission, polling, result and event
+contracts, including the explicit staging flag. The legacy staging creation and
+advance commands cannot bypass the v2 source activation gate. The durable
+supervisor creates the next staging round without waiting for honesty review,
+normally carrying the same approved source, and stops after six rounds. Naming
+a staging winner neither approves its code nor promotes it. A genuinely reviewed
+source change still needs its independent build/readiness proof and can affect
+only future staging rounds. The reference shadow inbox acknowledges receipt;
+it does not perform payment, emission, burn or clawback operations.
+
+Code support is not a deployment or qualification record. Before opening a test
+round, apply the additive staging migration after the original v2 migrations,
+deploy compatible API/worker code, configure the scoped credentials and qualified
+preparation adapter, and bootstrap a real eleven-repository staging checkpoint.
+Do not report the final Macrocosmos test as ready without its live round identity.
+
 An authenticated retrospective disqualification appends a new reward revision
 and selects the next eligible, non-disqualified entry. Exhausting the ranking
 records no winner. Approval of the current recipient records the review but

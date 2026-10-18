@@ -96,6 +96,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	if current == nil {
 		return nil, errors.New("initial reviewed source activation must be explicitly provisioned before automation")
 	}
+	if err := validateSourceActivationMode(current, self.settings); err != nil {
+		return nil, err
+	}
 	if transition.TargetEpoch == 1 {
 		if current.TargetEpoch != 1 || current.State != "active" {
 			return nil, errors.New("initial source pointer is not active for epoch one")
@@ -106,6 +109,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	// same intent. It does not select current remote heads or restage commits.
 	existing, err := self.store.SourceActivationForTarget(ctx, self.settings, transition.TargetEpoch)
 	if err == nil && existing != nil {
+		if err := validateSourceActivationMode(existing, self.settings); err != nil {
+			return nil, err
+		}
 		if existing.TargetEpoch != transition.TargetEpoch || existing.ExpectedGeneration != current.Generation {
 			return nil, errors.New("pending source intent conflicts with the current successor")
 		}
@@ -127,6 +133,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		}
 		if intent.Generation != generation || intent.TargetEpoch != transition.TargetEpoch || intent.ExpectedGeneration != current.Generation {
 			return nil, errors.New("staged activation has a conflicting identity")
+		}
+		if err := validateSourceActivationMode(&intent, self.settings); err != nil {
+			return nil, err
 		}
 		return &intent, nil
 	} else if !errors.Is(readErr, os.ErrNotExist) {
@@ -155,7 +164,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	if err := validateSourceManifest(manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Schema != 2 {
+	if manifest.Schema != 2 || manifest.Staging != current.Staging {
 		return nil, errors.New("v2 supervisor requires an explicitly provisioned v2 baseline manifest")
 	}
 	lockedGeneration, err := manifest.generation(current.SourceGeneration)
@@ -180,6 +189,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	preparedAt := time.Now().UTC()
 	intent := &model.CompetitionSourceActivation{
 		Environment: current.Environment, CompetitionId: current.CompetitionId, SeasonId: current.SeasonId,
+		Staging: current.Staging, StagingRoundWindowSeconds: current.StagingRoundWindowSeconds, StagingPreparationSeconds: current.StagingPreparationSeconds,
 		Generation: generation, ExpectedGeneration: current.Generation, SourceGeneration: current.SourceGeneration, TargetEpoch: transition.TargetEpoch,
 		TargetRoundId: server.NewId(),
 		Kind:          "reviewed_source_carry_forward", Reason: reason, BaseSourceLockSha256: current.SourceLockSha256, SourceLockSha256: current.SourceLockSha256,
@@ -206,7 +216,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		intent.EvaluatedImageDigest = proposal.EvaluatedImageDigest
 		intent.EvaluatorImageDigest, intent.HostQualificationSha256 = proposal.BuildReceipt.EvaluatorImageDigest, proposal.BuildReceipt.HostQualificationSha256
 		intent.BuildReadyAt = proposal.ReadyAt
-		selectedMargin = proposal.Significance.RecommendedNextEpochTakeoverMarginPercent
+		if !intent.Staging {
+			selectedMargin = proposal.Significance.RecommendedNextEpochTakeoverMarginPercent
+		}
 		intent.Threshold, intent.ThresholdEvidenceSha256 = selectedMargin/100, proposal.Significance.ScoreSha256
 		manifest.EvaluationSource.Generations = append(manifest.EvaluationSource.Generations, reviewedSourceGeneration{
 			Generation: intent.SourceGeneration, Kind: intent.Kind, SourceLockSha256: intent.SourceLockSha256,
@@ -219,13 +231,14 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		}
 	}
 	intent.SourceDecisionDigest, err = model.CompetitionAutomationDigest(struct {
+		Staging              bool      `json:"staging,omitempty"`
 		Generation           int64     `json:"generation"`
 		TargetEpoch          int       `json:"target_epoch"`
 		SourceLockSha256     string    `json:"source_lock_sha256"`
 		RewardDecisionDigest string    `json:"reward_decision_digest"`
 		Kind                 string    `json:"kind"`
 		TargetRoundId        server.Id `json:"target_round_id"`
-	}{Generation: generation, TargetEpoch: intent.TargetEpoch, SourceLockSha256: intent.SourceLockSha256, RewardDecisionDigest: rewardDigest, Kind: intent.Kind, TargetRoundId: intent.TargetRoundId})
+	}{Staging: intent.Staging, Generation: generation, TargetEpoch: intent.TargetEpoch, SourceLockSha256: intent.SourceLockSha256, RewardDecisionDigest: rewardDigest, Kind: intent.Kind, TargetRoundId: intent.TargetRoundId})
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +256,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	}
 	manifestDigest := sha256.Sum256(manifestBytes)
 	intent.Manifest, intent.ManifestSha256 = manifestBytes, hex.EncodeToString(manifestDigest[:])
-	publication := &sourcePublicationIntent{Schema: 2, ActivationGeneration: generation, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256}
+	publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: generation, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256}
 	if proposal != nil {
 		publication.ApprovedPatchSha256, publication.ApprovedPatchPath = proposal.PatchSha256, filepath.Join(finalRoot, "canonical.patch")
 	}
@@ -272,7 +285,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		if _, err := sourceGitText(ctx, stagedRoot, "checkout", "--quiet", "--detach", intent.Commits[repository]); err != nil {
 			return nil, err
 		}
-		ref := model.CompetitionSourceGitRef{Branch: "sim-latency", ExpectedCommit: current.Commits[repository], Commit: intent.Commits[repository]}
+		ref := model.CompetitionSourceGitRef{Branch: sourceBranch(intent.Staging), ExpectedCommit: current.Commits[repository], Commit: intent.Commits[repository]}
 		intent.GitRefs[repository] = ref
 		publication.Refs = append(publication.Refs, sourcePublicationRef{Repository: repository, Branch: ref.Branch, ExpectedCommit: ref.ExpectedCommit, Commit: ref.Commit, StagedRoot: filepath.Join(finalRoot, repository)})
 	}
@@ -340,6 +353,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 // Replays exact refs and records durable local receipts. The database rechecks
 // source approval each time, including after remote pushes but before activation.
 func (self *sourceSupervisorRuntime) publishSource(ctx context.Context, lease model.CompetitionSupervisorLease, intent *model.CompetitionSourceActivation) error {
+	if err := validateSourceActivationMode(intent, self.settings); err != nil {
+		return err
+	}
 	if intent.State == "abandoned" {
 		return errors.New("source publication intent was durably abandoned")
 	}
@@ -348,7 +364,7 @@ func (self *sourceSupervisorRuntime) publishSource(ctx context.Context, lease mo
 	if err != nil {
 		return err
 	}
-	if publication.SourceDecisionDigest != intent.SourceDecisionDigest || publication.ManifestSha256 != intent.ManifestSha256 || publication.ApprovedPatchSha256 != intent.ApprovedPatchSha256 {
+	if publication.Staging != intent.Staging || publication.ActivationGeneration != intent.Generation || publication.SourceDecisionDigest != intent.SourceDecisionDigest || publication.ManifestSha256 != intent.ManifestSha256 || publication.ApprovedPatchSha256 != intent.ApprovedPatchSha256 {
 		return errors.New("publication journal is not the authenticated source intent")
 	}
 	if publication.Bootstrap != (intent.Kind == "baseline") {
@@ -393,6 +409,9 @@ func (self *sourceSupervisorRuntime) publishSource(ctx context.Context, lease mo
 // retained before the fenced database operation; any advanced ref leaves the
 // original intent blocked/retryable and can never trigger a remote rewind.
 func (self *sourceSupervisorRuntime) fallbackSource(ctx context.Context, lease model.CompetitionSupervisorLease, intent *model.CompetitionSourceActivation, reason string) (bool, error) {
+	if err := validateSourceActivationMode(intent, self.settings); err != nil {
+		return false, err
+	}
 	if intent.Kind != "reviewed_source_promotion" {
 		return false, nil
 	}
@@ -404,7 +423,7 @@ func (self *sourceSupervisorRuntime) fallbackSource(ctx context.Context, lease m
 	if err != nil {
 		return false, err
 	}
-	if publication.ActivationGeneration != intent.Generation || publication.SourceDecisionDigest != intent.SourceDecisionDigest || publication.ManifestSha256 != intent.ManifestSha256 || publication.Bootstrap {
+	if publication.Staging != intent.Staging || publication.ActivationGeneration != intent.Generation || publication.SourceDecisionDigest != intent.SourceDecisionDigest || publication.ManifestSha256 != intent.ManifestSha256 || publication.Bootstrap {
 		return false, errors.New("fallback journal differs from authenticated source intent")
 	}
 	for _, ref := range publication.Refs {
@@ -447,6 +466,9 @@ func (self *sourceSupervisorRuntime) fallbackSource(ctx context.Context, lease m
 // acknowledgment, and independently qualify the worker. Missing integration
 // leaves a durable preparation_blocked checkpoint instead of opening a round.
 func (self *sourceSupervisorRuntime) prepareSource(ctx context.Context, lease model.CompetitionSupervisorLease, intent *model.CompetitionSourceActivation) error {
+	if err := validateSourceActivationMode(intent, self.settings); err != nil {
+		return err
+	}
 	if _, err := self.store.RenewAutomationLease(ctx, self.settings, lease, time.Minute); err != nil {
 		return err
 	}
@@ -481,7 +503,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		fatalf("supervisor state directory must be private")
 	}
-	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePaths(opts)
+	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePathsForMode(opts, settings.AutomationPolicy.Staging)
 	if err != nil || sourceLock != "" {
 		fatalf("supervisor requires host-only source paths: %v", err)
 	}

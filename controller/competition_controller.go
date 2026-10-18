@@ -731,7 +731,11 @@ func (self *Settings) Validate() error {
 	}
 	p := self.EvaluationPolicy
 	season := self.SeasonPolicy
-	if season.EpochCount != 6 || season.SubmissionWindowSeconds != 7*24*60*60 ||
+	if self.AutomationPolicy.Enabled && self.AutomationPolicy.Staging {
+		if season.EpochCount != 6 || season.SubmissionWindowSeconds != self.AutomationPolicy.StagingRoundWindowSeconds || season.PreparationWindowSeconds != self.AutomationPolicy.StagingPreparationSeconds || season.SubmissionFeeUsd != 0 || p.TakeoverMargin != 0 || p.Replicates != 9 {
+			return errors.New("staging automation must freeze six fee-free zero-margin nine-replicate epochs and its exact staging timing")
+		}
+	} else if season.EpochCount != 6 || season.SubmissionWindowSeconds != 7*24*60*60 ||
 		season.PreparationWindowSeconds < 0 || 7*24*60*60 < season.PreparationWindowSeconds ||
 		season.SubmissionFeeUsd != 20 {
 		return errors.New("season_policy must freeze six seven-day submission epochs, a $20 USD submission fee, and a preparation window of at most seven days")
@@ -765,7 +769,7 @@ func (self *Settings) Validate() error {
 	if p.Replicates <= 0 || 9 < p.Replicates || p.Replicates%2 == 0 {
 		return errors.New("evaluation_policy.replicates must be an odd number in 1..9")
 	}
-	if math.IsNaN(p.TakeoverMargin) || math.IsInf(p.TakeoverMargin, 0) || p.TakeoverMargin <= 0 || .5 < p.TakeoverMargin {
+	if math.IsNaN(p.TakeoverMargin) || math.IsInf(p.TakeoverMargin, 0) || p.TakeoverMargin < 0 || .5 < p.TakeoverMargin || (p.TakeoverMargin == 0 && !(self.AutomationPolicy.Enabled && self.AutomationPolicy.Staging)) {
 		return errors.New("evaluation_policy.takeover_margin must be finite and in (0, 0.5]")
 	}
 	if p.QueueLimit != 0 || p.ScoreTimeoutSeconds != submissionEvaluationTimeoutSeconds {
@@ -1033,6 +1037,7 @@ type Evaluator interface {
 type CommandEvaluator struct{}
 
 type evaluatorRequest struct {
+	Staging              bool             `json:"staging,omitempty"`
 	Schema               int              `json:"schema"`
 	JobId                string           `json:"job_id"`
 	RoundId              string           `json:"round_id"`
@@ -1416,7 +1421,8 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		roundBaselineSha256 = job.RoundBaseline.Sha256
 	}
 	return evaluatorRequest{
-		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
+		Staging: job.Round.Staging && settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging,
+		Schema:  1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		SourceEpoch: evaluationSourceEpoch(&job.Round),
 		Attempt:     job.AttemptCount, CompetitionId: settings.CompetitionId,
 		BaseSha: settings.BaseSha, EvaluatorImageDigest: job.EvaluatorImageDigest,
@@ -1525,11 +1531,11 @@ func validateRoundBaselineRecord(settings *Settings, round *roundRecord, baselin
 // their staging-era sequence number. Production epoch N evaluates the source
 // promoted from epoch N-1.
 func evaluationSourceEpoch(round *roundRecord) int {
-	if round.Staging {
-		return 0
-	}
 	if policy, err := decodeRoundPolicySnapshot(round.PolicyJson); err == nil && policy.AutomationPolicy != nil && policy.AutomationPolicy.Enabled {
 		return policy.AutomationPolicy.SourceGeneration
+	}
+	if round.Staging {
+		return 0
 	}
 	return round.Epoch - 1
 }
@@ -1626,10 +1632,14 @@ func settingsWithFrozenRoundMargin(settings *Settings, round *roundRecord) (*Set
 	}
 	copy := *settings
 	if round.Staging {
-		copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
 		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 		if err != nil {
 			return nil, err
+		}
+		if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
+			copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
+		} else if !policy.AutomationPolicy.Staging || !settings.AutomationPolicy.Staging {
+			return nil, ErrConflict
 		}
 		if policy.EvaluationPolicy.TakeoverMargin == 0 {
 			copy.EvaluationPolicy.TakeoverMargin = 0
@@ -3303,14 +3313,14 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		evalError.Readiness = &result
 		return result, evalError
 	}
-	round, err := self.store.CurrentRound(ctx, settings)
+	round, err := competitionConfiguredCurrentRound(ctx, settings, self.store)
 	if err != nil {
 		result.Checks["database"] = false
 		evalError := infrastructureError("readiness_failed", "competition round identity is unavailable")
 		evalError.Readiness = &result
 		return result, evalError
 	}
-	if competitionRoundUsesV2(round) && !round.Staging {
+	if competitionRoundUsesV2(round) {
 		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
 		if err != nil {
 			result.Checks["frozen_source_activation"] = false
@@ -3431,6 +3441,23 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
 	result := settings.PublicInfo()
+	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
+		round, loadErr := competitionConfiguredCurrentRound(ctx, settings, self.store)
+		if loadErr != nil {
+			return nil, infrastructureError("storage_unavailable", "the configured automated staging season is unavailable")
+		}
+		if round != nil {
+			view, revealErr := self.roundView(round)
+			if revealErr != nil {
+				return nil, revealErr
+			}
+			result.StagingRound = view
+			if err := applyFrozenRoundPublicPolicy(&result, round); err != nil {
+				return nil, infrastructureError("round_policy_mismatch", "staging round policy could not be authenticated")
+			}
+		}
+		return &result, nil
+	}
 	round, err := self.store.CurrentRound(ctx, settings)
 	if err != nil {
 		return nil, infrastructureError("storage_unavailable", "competition round storage is unavailable")
@@ -3473,6 +3500,7 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
 	result.PatchPolicy = policy.PatchPolicy
 	result.EvaluationPolicy = policy.EvaluationPolicy
+	result.SeasonPolicy = policy.SeasonPolicy
 	applyCompetitionDecisionDiscovery(result, round)
 	return nil
 }
@@ -3693,22 +3721,15 @@ func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreA
 			}
 			return nil, status, patchErr
 		}
-		if !round.Staging {
-			settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
-			if err != nil {
-				return nil, http.StatusServiceUnavailable, infrastructureError("round_source_not_ready", "the exact activated source for this frozen round is not ready")
-			}
-		} else {
-			// Durable staging creation always retains legacy mode and has no source activation.
-			frozenAdmission := *settings
-			frozenAdmission.PatchPolicy = policy.PatchPolicy
-			settings = &frozenAdmission
+		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		if err != nil {
+			return nil, http.StatusServiceUnavailable, infrastructureError("round_source_not_ready", "the exact activated source for this frozen round is not ready")
 		}
 	}
 	if principal == nil || principal.Role != "submitter" && (v2 || principal.Role != "operator") {
 		return nil, http.StatusForbidden, competitionScopeDenied()
 	}
-	if !round.Staging {
+	if v2 || !round.Staging {
 		if readyErr := self.requireSecureEvaluator(ctx, settings); readyErr != nil {
 			return nil, 503, readyErr
 		}
@@ -4150,7 +4171,10 @@ func (self PostgresStore) prepareRound(
 	staging bool,
 ) (*roundRecord, error) {
 	roundId := server.NewId()
-	if settings.AutomationPolicy.Enabled && !staging {
+	if settings.AutomationPolicy.Enabled {
+		if settings.AutomationPolicy.Staging != staging {
+			return nil, ErrConflict
+		}
 		// Qualification runs before admission and binds this prospectively reserved identity.
 		// Choose it before encrypting the seed or generating any round-specific artifact.
 		if settings.automationTargetRoundId == (server.Id{}) {
@@ -4240,6 +4264,14 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
+			var activeAutomationStaging bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_round
+			 WHERE competition_id=$1 AND staging AND NOT canceled AND automation_sealed_at IS NULL
+			 AND COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false))`, settings.CompetitionId).Scan(&activeAutomationStaging))
+			if activeAutomationStaging {
+				stateErr = ErrPreviousEpochOpen
+				return
+			}
 			var previousEpoch int
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT COALESCE(max(epoch_number), 0)
@@ -4293,6 +4325,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 					JOIN competition_round AS staging_round ON staging_round.round_id = job.round_id
 					WHERE staging_round.competition_id = $1
 					  AND staging_round.staging = true
+					  AND NOT COALESCE((staging_round.policy_json->'automation_policy'->>'enabled')::boolean,false)
 					  AND staging_round.canceled = false
 					  AND job.state = 'running'
 				)
@@ -4310,6 +4343,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 					JOIN competition_round AS staging_round ON staging_round.round_id = job.round_id
 					WHERE staging_round.competition_id = $1
 					  AND staging_round.staging = true
+					  AND NOT COALESCE((staging_round.policy_json->'automation_policy'->>'enabled')::boolean,false)
 					  AND staging_round.canceled = false
 					  AND job.state = 'queued'
 				)
@@ -4323,6 +4357,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				WHERE job.round_id = staging_round.round_id
 				  AND staging_round.competition_id = $1
 				  AND staging_round.staging = true
+				  AND NOT COALESCE((staging_round.policy_json->'automation_policy'->>'enabled')::boolean,false)
 				  AND staging_round.canceled = false
 				  AND job.state = 'queued'
 				RETURNING job.job_id
@@ -4342,6 +4377,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_round SET canceled = true
 				WHERE competition_id = $1 AND staging = true AND canceled = false
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				  AND finalized_at IS NULL
 			`, settings.CompetitionId))
 			server.RaisePgResult(tx.Exec(ctx, `
@@ -4384,6 +4420,9 @@ func (self PostgresStore) CreateStagingRound(
 	args GenerateRoundArgs,
 	replaceCurrent bool,
 ) (*roundRecord, error) {
+	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
+		return nil, ErrUnsupportedDecisionMode
+	}
 	now := self.nowUtc()
 	if !now.Before(settings.SeasonEndsAt) {
 		return nil, ErrSeasonComplete
@@ -4426,6 +4465,7 @@ func (self PostgresStore) CreateStagingRound(
 				SELECT COALESCE(max(epoch_number), -1)
 				FROM competition_round
 				WHERE competition_id = $1 AND staging = true
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 			`, settings.CompetitionId).Scan(&latestEpoch))
 			round.Epoch = latestEpoch + 1
 
@@ -4435,6 +4475,7 @@ func (self PostgresStore) CreateStagingRound(
 				SELECT round_id, finalized_at
 				FROM competition_round
 				WHERE competition_id = $1 AND staging = true AND canceled = false
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				ORDER BY epoch_number DESC
 				LIMIT 1 FOR UPDATE
 			`, settings.CompetitionId).Scan(&currentRoundId, &currentFinalizedAt)
@@ -4545,6 +4586,9 @@ func (self PostgresStore) CurrentRound(ctx context.Context, settings *Settings) 
 // staging era. Historical staging evidence stays addressable by round id after
 // production begins but no longer appears as current state.
 func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Settings) (round *roundRecord, err error) {
+	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
+		return self.CurrentAutomationRound(ctx, settings)
+	}
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			round, err = scanRound(conn.QueryRow(ctx, `
@@ -4554,6 +4598,7 @@ func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Set
 			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND canceled = false AND staging = true
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				  AND NOT EXISTS (
 				      SELECT 1 FROM competition_round AS production
 				      WHERE production.competition_id = $1 AND production.staging = false
@@ -4581,6 +4626,9 @@ func (self PostgresStore) CloseStagingRound(
 	ctx context.Context,
 	settings *Settings,
 ) (round *roundRecord, err error) {
+	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
+		return nil, ErrUnsupportedDecisionMode
+	}
 	now := self.nowUtc()
 	closed := false
 	var stateErr error
@@ -4597,6 +4645,7 @@ func (self PostgresStore) CloseStagingRound(
 			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at, automation_sealed_at, automation_publication_at
 				FROM competition_round
 				WHERE competition_id = $1 AND staging = true AND canceled = false
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				  AND NOT EXISTS (
 				      SELECT 1 FROM competition_round AS production
 				      WHERE production.competition_id = $1 AND production.staging = false
@@ -4645,6 +4694,9 @@ func (self PostgresStore) FinalizeStagingRound(
 	settings *Settings,
 	epoch int,
 ) (round *roundRecord, err error) {
+	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
+		return nil, ErrUnsupportedDecisionMode
+	}
 	now := self.nowUtc()
 	finalized := false
 	var stateErr error
@@ -4662,6 +4714,7 @@ func (self PostgresStore) FinalizeStagingRound(
 				FROM competition_round
 				WHERE competition_id = $1 AND epoch_number = $2
 				  AND canceled = false AND staging = true
+				  AND NOT COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
 				FOR UPDATE
 			`, settings.CompetitionId, epoch))
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -5470,7 +5523,7 @@ func (self PostgresStore) Enqueue(
 					frozenArchive := *settings
 					frozenArchive.PatchPolicy = policy.PatchPolicy
 					archiveSettings = &frozenArchive
-					if policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment || policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId {
+					if policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment || policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId || policy.AutomationPolicy.Staging != round.Staging || round.Staging != settings.AutomationPolicy.Staging {
 						stateErr = ErrConflict
 						return
 					}
@@ -5818,11 +5871,12 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				  AND (NOT COALESCE((r.policy_json->'automation_policy'->>'enabled')::boolean,false) OR (
 				       r.competition_id=$3 AND r.policy_json->'automation_policy'->>'environment'=$4
 				       AND r.policy_json->'automation_policy'->>'season_id'=$5
+				       AND r.staging=$8 AND COALESCE((r.policy_json->'automation_policy'->>'staging')::boolean,false)=$8
 				       AND r.policy_json->'automation_policy'->>'required_api_capability'=$6))
 				  AND ($7::uuid IS NULL OR r.round_id=$7)
 				ORDER BY j.submitted_at, j.job_id
 				LIMIT 1 FOR UPDATE OF j SKIP LOCKED
-			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, model.CompetitionAutomationCapability, optionalAutomationRoundId(settings))
+			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, model.CompetitionAutomationCapability, optionalAutomationRoundId(settings), settings.AutomationPolicy.Staging)
 			var scanErr error
 			job, scanErr = scanJob(row, true, self.nowUtc())
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -6549,8 +6603,8 @@ func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 // promotion.
 func (self *Worker) selfCheck(ctx context.Context) (HostSelfCheck, error) {
 	hostCheck, checkErr := self.evaluator.SelfCheck(ctx, self.settings)
-	if checkErr == nil {
-		return hostCheck, nil
+	if checkErr == nil || self.settings.AutomationPolicy.Enabled {
+		return hostCheck, checkErr
 	}
 	productionRound, err := self.store.CurrentRound(ctx, self.settings)
 	if err != nil {
@@ -6596,7 +6650,7 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 	if latest.FinalizedAt != nil {
 		return true, nil
 	}
-	if latest.Staging {
+	if latest.Staging && !roundUsesAutomation(latest) {
 		latest, err = self.store.FinalizeStagingRound(ctx, self.settings, latest.Epoch)
 		if err != nil {
 			return false, err
@@ -6666,7 +6720,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		competitionEvaluationSeconds.Observe(time.Since(startedAt).Seconds())
 		competitionEvaluations.WithLabelValues(metricOutcome).Inc()
 	}()
-	if !job.Staging && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
+	if (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
 		metricOutcome = "rebaseline_mismatch"
 		_ = self.handBack(job.JobId, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)

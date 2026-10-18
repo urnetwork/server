@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -128,10 +129,19 @@ git() {
 // the selected Git failure is synthetic; no Docker command is in this section.
 func runSourceGitBuilderFixture(t *testing.T, mode string, protectedPatch bool) ([]byte, error) {
 	t.Helper()
+	return runSourceGitBuilderFixtureForMode(t, mode, protectedPatch, false)
+}
+
+// The real candidate path must keep the temporary stage ref after patching.
+func runSourceGitBuilderFixtureForMode(t *testing.T, mode string, protectedPatch, staging bool) ([]byte, error) {
+	t.Helper()
 	root := t.TempDir()
 	repositoryCommits := map[string]string{}
 	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, root, repository)
+		if staging {
+			sourceTestGit(t, filepath.Join(root, repository), "branch", "-m", stagingEvaluationSourceBranch)
+		}
 	}
 	serverRoot := filepath.Join(root, "server")
 	patchRelative := "source.txt"
@@ -154,7 +164,7 @@ func runSourceGitBuilderFixture(t *testing.T, mode string, protectedPatch bool) 
 	identityBytes, err := json.Marshal(map[string]any{
 		"schema": 1, "kind": "sim-latency-evaluation-source", "temporary": true,
 		"base_image_id": "sha256:" + strings.Repeat("b", 64), "base_sha": repositoryCommits["server"],
-		"branch": "sim-latency", "source_lock_sha256": strings.Repeat("c", 64),
+		"staging": staging, "branch": sourceBranch(staging), "source_lock_sha256": strings.Repeat("c", 64),
 		"repositories": repositoryCommits, "candidate_patch_sha256": nil,
 	})
 	if err != nil {
@@ -169,6 +179,8 @@ func runSourceGitBuilderFixture(t *testing.T, mode string, protectedPatch bool) 
 	}
 	const prelude = `set -Eeuo pipefail
 source_root="$SOURCE_TEST_ROOT"
+staging="$SOURCE_TEST_STAGING"
+source_branch="$SOURCE_TEST_BRANCH"
 build_context="$SOURCE_TEST_ROOT"
 base_image_id="sha256:$(printf 'b%.0s' {1..64})"
 base_sha="$SOURCE_TEST_BASE"
@@ -201,6 +213,7 @@ git() {
 	buildSection := sourceGitScriptSection(t, "build-submission.sh", "source_identity=", "\nchmod 0600 \"$source_identity\"")
 	command := exec.Command("bash", "-c", prelude+errorFunction+buildSection+"\nprintf 'candidate source authenticated\\n'\n")
 	command.Env = append(os.Environ(), "SOURCE_TEST_ROOT="+root, "SOURCE_TEST_GIT="+gitPath,
+		"SOURCE_TEST_STAGING="+strconv.FormatBool(staging), "SOURCE_TEST_BRANCH="+sourceBranch(staging),
 		"SOURCE_TEST_BASE="+repositoryCommits["server"], "SOURCE_TEST_MODE="+mode)
 	return command.CombinedOutput()
 }
@@ -210,6 +223,20 @@ func TestSubmissionBuilderAuthenticatesUnchangedProtectedSource(t *testing.T) {
 	output, err := runSourceGitBuilderFixture(t, "", false)
 	if err != nil || string(output) != "candidate source authenticated\n" {
 		t.Fatalf("valid candidate source: %v: %s", err, output)
+	}
+}
+
+// A staging candidate is built on the staging-only temporary branch while
+// retaining exactly the same patch/protected-source enforcement as production.
+func TestStagingSubmissionBuilderRetainsStageBranchAndProtectedSource(t *testing.T) {
+	output, err := runSourceGitBuilderFixtureForMode(t, "", false, true)
+	if err != nil || string(output) != "candidate source authenticated\n" {
+		t.Fatalf("valid staging candidate source: %v: %s", err, output)
+	}
+	output, err = runSourceGitBuilderFixtureForMode(t, "", true, true)
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 1 || !strings.Contains(string(output), "submission attempted to modify the protected sim-latency source tree") {
+		t.Fatalf("staging lost protected-source enforcement: %v: %s", err, output)
 	}
 }
 
@@ -251,6 +278,7 @@ replicates=1
 base_build_ref=synthetic-base
 base_image_id=synthetic-base
 candidate_source_root=/synthetic/candidate
+source_mode_args=()
 patch_path=/synthetic/canonical.patch
 policy_path=/synthetic/policy.json
 write_evaluation_progress() { :; }

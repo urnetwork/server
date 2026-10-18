@@ -63,6 +63,7 @@ func CompetitionV2SourceReadinessHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	receipt := model.CompetitionSourceReadiness{
+		Staging:     intent.Staging,
 		Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId,
 		Generation: generation, TargetRoundId: intent.TargetRoundId, Role: "api", ActorId: principal.Id, ManifestCommit: intent.ManifestCommit,
 		ManifestSha256: intent.ManifestSha256, SourceLockSha256: intent.SourceLockSha256,

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // Retains a published manifest while later commits independently advance main.
@@ -26,6 +27,12 @@ type sourceConfigFixture struct {
 // A different remote default branch makes main an explicit fetch requirement.
 func newSourceConfigFixture(t *testing.T) *sourceConfigFixture {
 	t.Helper()
+	return newSourceConfigFixtureForMode(t, false)
+}
+
+// Separate paths exercise staging without reinterpreting production history.
+func newSourceConfigFixtureForMode(t *testing.T, staging bool) *sourceConfigFixture {
+	t.Helper()
 	root := t.TempDir()
 	sourceTestRepository(t, root, "config")
 	repositoryRoot := filepath.Join(root, "config")
@@ -33,9 +40,14 @@ func newSourceConfigFixture(t *testing.T) *sourceConfigFixture {
 	if err := os.Mkdir(filepath.Join(repositoryRoot, "main"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manifest := []byte("schema: 2\n\n")
-	if err := os.WriteFile(filepath.Join(repositoryRoot, "main", "sim-latency.yml"), manifest, 0o600); err != nil {
+	manifest := sourceConfigTestManifestBytes(t, staging, false)
+	if err := os.WriteFile(filepath.Join(repositoryRoot, filepath.FromSlash(sourceManifestRepositoryPath(staging))), manifest, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if staging {
+		if err := os.WriteFile(filepath.Join(repositoryRoot, "main", "sim-latency.yml"), []byte("synthetic_historical_production: unchanged\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(repositoryRoot, "main", "unrelated.yml"), []byte("synthetic: previous\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -52,10 +64,32 @@ func newSourceConfigFixture(t *testing.T) *sourceConfigFixture {
 	return &sourceConfigFixture{
 		root: root, repositoryRoot: repositoryRoot, remoteRoot: remoteRoot,
 		current: &model.CompetitionSourceActivation{
+			Staging:        staging,
 			ManifestCommit: manifestCommit, ManifestSha256: hex.EncodeToString(digest[:]), Manifest: manifest,
 			Commits: map[string]string{"server": strings.Repeat("a", 40)},
 		},
 	}
+}
+
+// Keeps synthetic config-byte regressions valid under the full ledger parser.
+func sourceConfigTestManifestBytes(t *testing.T, staging, successor bool) []byte {
+	t.Helper()
+	manifest := reviewedSourceTestManifest(t)
+	manifest.EvaluationSource.Epochs = nil
+	if staging {
+		manifest = stagingSourceTestManifest(t)
+	}
+	if successor {
+		round := manifest.EvaluationSource.Rounds[0]
+		round.Epoch, round.ActivationGeneration = 2, 2
+		round.Reason = "synthetic_carry_forward"
+		manifest.EvaluationSource.Rounds = append(manifest.EvaluationSource.Rounds, round)
+	}
+	content, err := yaml.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
 }
 
 // Only the fixture's private bare remote receives this synthetic main commit.
@@ -77,7 +111,7 @@ func TestFreshSourceConfigPreservesUnrelatedMainAdvance(t *testing.T) {
 	unrelated := []byte("synthetic: updated\n\n")
 	remoteHead := fixture.advance(t, "main/unrelated.yml", unrelated)
 	stagedRoot := filepath.Join(fixture.root, "staged")
-	nextManifest := []byte("schema: 2\nsynthetic_successor: true\n")
+	nextManifest := sourceConfigTestManifestBytes(t, false, true)
 	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, stagedRoot, fixture.current, nextManifest, "synthetic successor")
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +146,7 @@ func TestFreshSourceConfigRejectsManifestByteDrift(t *testing.T) {
 	fixture := newSourceConfigFixture(t)
 	drifted := append(append([]byte(nil), fixture.current.Manifest...), '\n')
 	remoteHead := fixture.advance(t, "main/sim-latency.yml", drifted)
-	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, []byte("schema: 2\nnext: true\n"), "synthetic successor")
+	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, sourceConfigTestManifestBytes(t, false, true), "synthetic successor")
 	if err == nil || !strings.Contains(err.Error(), "differs from the active immutable manifest") || parent != "" || commit != "" {
 		t.Fatalf("changed manifest was not refused: %s %s %v", parent, commit, err)
 	}
@@ -135,7 +169,7 @@ func TestFreshSourceConfigRejectsManifestSymlink(t *testing.T) {
 	sourceTestGit(t, fixture.repositoryRoot, "add", "--", "main/sim-latency.yml")
 	sourceTestGit(t, fixture.repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic substituted manifest path")
 	sourceTestGit(t, fixture.repositoryRoot, "push", "--quiet", "origin", "main")
-	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, []byte("schema: 2\nnext: true\n"), "synthetic successor")
+	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, sourceConfigTestManifestBytes(t, false, true), "synthetic successor")
 	if err == nil || !strings.Contains(err.Error(), "must remain a regular file") || parent != "" || commit != "" {
 		t.Fatalf("manifest symlink was not refused: %s %s %v", parent, commit, err)
 	}
@@ -155,7 +189,7 @@ func TestFreshSourceConfigRejectsNonancestorMain(t *testing.T) {
 	if err != nil || !bytes.Equal(content, fixture.current.Manifest) {
 		t.Fatalf("nonancestor fixture must retain exact manifest bytes: %q %v", content, err)
 	}
-	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, []byte("schema: 2\nnext: true\n"), "synthetic successor")
+	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, filepath.Join(fixture.root, "staged"), fixture.current, sourceConfigTestManifestBytes(t, false, true), "synthetic successor")
 	if err == nil || !strings.Contains(err.Error(), "no longer descends") || parent != "" || commit != "" {
 		t.Fatalf("unrelated history was not refused: %s %s %v", parent, commit, err)
 	}
@@ -166,7 +200,7 @@ func TestFreshSourceConfigRejectsNonancestorMain(t *testing.T) {
 func TestFreshSourceConfigCannotRebaseExistingStaging(t *testing.T) {
 	fixture := newSourceConfigFixture(t)
 	stagedRoot := filepath.Join(fixture.root, "staged")
-	nextManifest := []byte("schema: 2\nnext: true\n")
+	nextManifest := sourceConfigTestManifestBytes(t, false, true)
 	parent, commit, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, stagedRoot, fixture.current, nextManifest, "synthetic successor")
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +223,7 @@ func TestFreshSourceConfigRejectsCorruptManifestEvidence(t *testing.T) {
 	fixture := newSourceConfigFixture(t)
 	fixture.current.ManifestSha256 = strings.Repeat("0", 64)
 	stagedRoot := filepath.Join(fixture.root, "staged")
-	if _, _, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, stagedRoot, fixture.current, []byte("schema: 2\nnext: true\n"), "synthetic successor"); err == nil {
+	if _, _, err := stageFreshSourceConfig(context.Background(), fixture.remoteRoot, stagedRoot, fixture.current, sourceConfigTestManifestBytes(t, false, true), "synthetic successor"); err == nil {
 		t.Fatal("corrupt active manifest evidence accepted")
 	}
 	if _, err := os.Lstat(stagedRoot); !os.IsNotExist(err) {

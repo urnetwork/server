@@ -49,7 +49,7 @@ func requireRoundDecisionContract(round *roundRecord, v2 bool) (int, *Competitio
 	}
 	if v2 {
 		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
-		if err != nil || policy.AutomationPolicy == nil || model.ValidateCompetitionAutomationPolicy(*policy.AutomationPolicy) != nil {
+		if err != nil || policy.AutomationPolicy == nil || model.ValidateCompetitionAutomationPolicy(*policy.AutomationPolicy) != nil || policy.AutomationPolicy.Staging != round.Staging {
 			return http.StatusServiceUnavailable, infrastructureError("round_policy_mismatch", "round automation policy could not be authenticated")
 		}
 	}

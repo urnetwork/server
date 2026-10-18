@@ -26,6 +26,7 @@ import (
 
 // Every persisted identity and request belongs to exactly one explicitly enabled competition.
 type ApexRewardScope struct {
+	Staging       bool   `json:"staging,omitempty"`
 	Environment   string `json:"environment"`
 	CompetitionId string `json:"competition_id"`
 	SeasonId      string `json:"season_id"`
@@ -165,6 +166,7 @@ func (self *ApexRewardFileStore) withState(write bool, operation func(*apexRewar
 func validateApexRewardEvent(event model.CompetitionRewardEvent, scope ApexRewardScope, now time.Time) error {
 	decision := event.Decision
 	if event.Cursor <= 0 || event.EventId == (server.Id{}) || event.PublicationAt.IsZero() || now.Before(event.PublicationAt) ||
+		decision.Staging != scope.Staging || (decision.Staging && decision.SettlementMode != "shadow") ||
 		decision.Environment != scope.Environment || decision.CompetitionId != scope.CompetitionId || decision.SeasonId != scope.SeasonId ||
 		decision.RoundId == (server.Id{}) || decision.Revision < 1 || decision.DecidedAt.IsZero() ||
 		!sha256Pattern.MatchString(decision.SealSha256) || !sha256Pattern.MatchString(decision.DecisionSha256) ||
@@ -212,7 +214,7 @@ func validateApexRewardEvent(event model.CompetitionRewardEvent, scope ApexRewar
 // An invalidated evaluation is terminal, and its economic scope cannot change in a later revision.
 func validateApexRewardSuccessor(previous, next model.CompetitionRewardDecision) error {
 	if previous.Action == "invalidated" || next.Revision != previous.Revision+1 || next.PreviousDecisionSha256 != previous.DecisionSha256 || next.SealSha256 != previous.SealSha256 ||
-		next.SettlementMode != previous.SettlementMode || next.SettlementPolicyVersion != previous.SettlementPolicyVersion || next.BurnPolicyVersion != previous.BurnPolicyVersion ||
+		next.Staging != previous.Staging || next.SettlementMode != previous.SettlementMode || next.SettlementPolicyVersion != previous.SettlementPolicyVersion || next.BurnPolicyVersion != previous.BurnPolicyVersion ||
 		(next.SupersededJobId == nil) != (previous.SelectedJobId == nil) || next.SupersededJobId != nil && *next.SupersededJobId != *previous.SelectedJobId {
 		return errors.New("reward history contains a revision gap, changed predecessor, or a decision after invalidation")
 	}
@@ -616,6 +618,7 @@ func applyApexRewardReview(review model.CompetitionIntegrityReviewResult, disqua
 // Integrity findings can change the current reward revision, never the sealed measurements.
 func ValidateApexV2RoundResult(result model.CompetitionV2RoundResult, scope ApexRewardScope, now time.Time) error {
 	if result.DecisionMode != model.CompetitionDecisionModeV2 || result.RequiredApiCapability != model.CompetitionAutomationCapability ||
+		result.Staging != scope.Staging || result.Seal.Staging != scope.Staging ||
 		result.Seal.Environment != scope.Environment || result.Seal.CompetitionId != scope.CompetitionId || result.Seal.SeasonId != scope.SeasonId ||
 		result.Seal.PublicationAt.IsZero() || now.Before(result.Seal.PublicationAt) || len(result.Decisions) == 0 || result.RewardRevision != len(result.Decisions) {
 		return errors.New("invalid or unpublished v2 round result")
@@ -653,7 +656,7 @@ func ValidateApexV2RoundResult(result model.CompetitionV2RoundResult, scope Apex
 			excludedPatchKVs[entry.PatchSha256] = true
 		}
 	}
-	ranked, err := model.RankCompetitionSealedEntries(seal.Entries, baselineRaw, margin, excludedPatchKVs)
+	ranked, err := model.RankCompetitionSealedEntriesForMode(seal.Entries, baselineRaw, margin, excludedPatchKVs, seal.Staging)
 	if err != nil {
 		return err
 	}

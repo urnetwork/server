@@ -6,7 +6,8 @@ v2 competitions use `supervise` below; never mix these progression paths.
 It drives the continuously deployed main API and one-shot worker while keeping
 the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
 `glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`—isolated
-in temporary clones. Every repository is pinned per epoch on its `sim-latency` branch.
+in temporary clones. Production source is pinned on `sim-latency`; explicit v2
+staging uses only `sim-latency-staging` and its separate source manifest.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
@@ -26,10 +27,11 @@ materialized patch and score evidence before invoking this harness. Sol must
 not approve candidates, merge branches, or push source/config refs. These roles
 apply to all six epochs and must survive an agent handoff.
 
-Candidate honesty review and source promotion apply only to production.
-Staging automatically names the highest-ranked placeable candidate passing
+Legacy v1 candidate honesty review and source promotion apply only to production.
+Legacy staging automatically names the highest-ranked placeable candidate passing
 every gate after close and drain, without a significance or takeover-margin
 requirement, human-review pause, or source promotion.
+This legacy staging path is not the v2 staging supervisor described below.
 
 ## V2 durable supervision — disabled until qualified
 
@@ -42,7 +44,7 @@ After close and full authoritative drain, the v2 worker seals/elects. At the
 frozen source-choice deadline (zero extra review wait by default), a ready,
 separately authorized exact-source intent may be selected. Otherwise the
 supervisor stages `reviewed_source_carry_forward`, including when a provisional
-reward winner exists. It retains the approved source generation, ten commits,
+reward winner exists. It retains the approved source generation, eleven commits,
 and threshold. It never calls `promote --no-winner` for an unshipped reward
 winner, fabricates approval, or uses that winner's variance recommendation.
 
@@ -93,6 +95,86 @@ Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
 
+### Isolated v2 staging
+
+Use a new, separately approved competition/season and an explicit frozen
+`automation_policy.staging: true`; an environment name, zero margin, or the
+legacy `run-main.sh staging` command does not select v2 staging. The policy also
+requires `settlement_mode: shadow`, `staging_round_window_seconds` in
+60..604800, and `staging_preparation_seconds` in 0..57600. Staging evaluation and
+source margins are exactly zero, with no actual admission fee or live payout.
+Production remains a positive-margin seven-day round with its full 16-hour
+preparation gate and no staging timing fields. Stage timing and mode are bound
+into the activation and runtime envelope; changing them cannot resume old state.
+
+Prepare a NEW eleven-repository schema-2 baseline at
+`config/main/sim-latency-staging.yml` with top-level `staging: true`, branch
+`sim-latency-staging`, generation 0, an epoch-one mapping, and zero margins.
+It must not contain relabeled legacy `epochs`. Prospectively review the exact
+pins, policy, image, and qualification identities. Publish only authorized
+normal fast-forwards to the eleven staging refs; never update production
+`sim-latency` refs, force a ref, or rewrite the historical ten-repository
+checkpoint in `main/sim-latency.yml`. The old checkpoint/image is historical
+evidence, not qualification for a new eleven-repository staging activation.
+
+After those distinct review/publication steps, these commands verify the frozen
+record and build its new evaluator. `source-record` verifies existing refs; it
+does not freeze, publish, or approve them. The new builder pins Go 1.27.2 and
+marks the image explicitly as staging. Sol medium executes all build/test and
+qualification steps; a successful image build alone is not runtime readiness.
+
+```sh
+sim-latency source-record --staging --epoch=0 \
+  --source-config=/workspace/config/main/sim-latency-staging.yml \
+  --repos-root=/workspace
+./evaluator/container/build-base.sh --staging --epoch 0 \
+  --source-config /workspace/config/main/sim-latency-staging.yml \
+  --tag urnetwork/sim-latency-evaluator-base:REPLACE_WITH_REVIEWED_STAGE_TAG
+```
+
+Publish and independently qualify that exact new image on the real contained
+worker. Preserve the actual registry/image digests and qualification receipts;
+do not copy old digests or substitute self-asserted proof. Stage requests require
+a staging image and temporary `sim-latency-staging` source checkouts. Production
+requests reject staging images. An explicit stage image cannot be produced from
+`--include-worktree` or an unmarked legacy `staging-source-check` alias record.
+The existing image smoke and build-isolation entrypoints accept explicit mode:
+
+```sh
+./evaluator/container/smoke-test.sh REPLACE_WITH_STAGE_IMAGE --staging
+./evaluator/container/test-build-isolation.sh --staging \
+  --base-image REPLACE_WITH_STAGE_REGISTRY_DIGEST \
+  --policy /secure/automation/approved-patch-policy.json
+```
+
+Once the isolated policy, migration route, real deployment/preparation adapter,
+and independently qualified binaries are installed, use the ordinary v2
+bootstrap/readiness/preparation/round path, not legacy generate-staging routes:
+
+```sh
+export SIM_LATENCY_SOURCE_CONFIG=/workspace/config/main/sim-latency-staging.yml
+export SIM_LATENCY_STATE_DIR=/secure/automation/synthetic-v2-stage
+export SIM_LATENCY_SUPERVISOR_ID=synthetic-v2-stage-supervisor
+sim-latency bootstrap-source --enable-automation \
+  --owner-id="$SIM_LATENCY_SUPERVISOR_ID" --state-dir="$SIM_LATENCY_STATE_DIR" \
+  --source-config="$SIM_LATENCY_SOURCE_CONFIG" \
+  --manifest-commit=REPLACE_WITH_APPROVED_STAGE_CONFIG_COMMIT
+# Configure the pinned worker/preparation executables as above, then:
+export SIM_LATENCY_AUTOMATION_ENABLED=true
+./run-main.sh supervise --once
+./run-main.sh supervise
+```
+
+All six v2 staging rounds retain real readiness, drain, seal, revision, and
+review obligations. A stage reward winner never automatically changes source.
+Only a genuine separately reviewed, still-applicable patch with independent
+isolated staging build proof may promote; its authenticated significance data
+is preserved, but its positive statistical recommendation never changes the
+staging threshold from zero. Otherwise the next round carries the approved
+source unchanged. Dedicated staging config publication preserves production
+manifest bytes, including unrelated production config advances. Mode, ref, or
+config-path mismatches fail closed on recovery before any push or adapter call.
+
 Publication uses private durable clones of all eleven repositories. It freezes
 expected/new refs and exact manifest bytes, records intent before any push,
 publishes source first and config last, and requires runtime readiness. Ordinary
@@ -105,7 +187,8 @@ audit material; completed recovery directories are installed atomically.
 
 For a **fresh** intent only, config staging fetches `origin/main` and preserves
 unrelated config updates made since the active manifest was published. The
-active manifest commit must remain an ancestor, and `main/sim-latency.yml` must
+active manifest commit must remain an ancestor, and the mode's manifest
+(`main/sim-latency.yml` or `main/sim-latency-staging.yml`) must
 still match the active manifest's exact bytes and digest, including whitespace.
 The fetched head becomes the immutable expected config parent; only the source
 manifest changes in its successor. This does not advance any evaluation source
@@ -152,7 +235,8 @@ their exact SHA-256 is verified before execution without shell interpolation.
 The pinned `competitionworker --supervisor-request` receives strict stdin JSON
 with `operation: run_one_epoch`, round, and lease. It authenticates the current
 round, installed runtime manifest, and live supervisor fence, then starts/resumes
-the existing one-shot worker. It cannot switch into another round or staging.
+the existing one-shot worker. It cannot switch into another round or mode;
+explicit v2 staging is authenticated from the same frozen policy and envelope.
 Claims and evaluation heartbeats retain the singleton slot and check the bound
 round/fence; a read-only lease monitor stops an orphaned launcher without renewing
 its dead parent. Cancellation signals cleanup before a bounded process stop.

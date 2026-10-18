@@ -106,7 +106,9 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 	// Database triggers independently fence stale and legacy source writers.
 	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
 	 set_config('urnetwork.competition_v2_bootstrap_lock',$3,true),set_config('urnetwork.competition_v2_bootstrap_base',$4,true),
-	 set_config('urnetwork.competition_v2_bootstrap_margin',$5,true),set_config('urnetwork.competition_v2_policy_approval',$6,true)`, lease.OwnerId, strconv.FormatInt(lease.FencingToken, 10), settings.AutomationPolicy.SourceLockSha256, settings.BaseSha, strconv.FormatFloat(settings.EvaluationPolicy.TakeoverMargin, 'g', -1, 64), settings.AutomationPolicy.PolicyApprovalSha256)
+	 set_config('urnetwork.competition_v2_bootstrap_margin',$5,true),set_config('urnetwork.competition_v2_policy_approval',$6,true),
+	 set_config('urnetwork.competition_v2_staging',$7,true),set_config('urnetwork.competition_v2_staging_window',$8,true),set_config('urnetwork.competition_v2_staging_preparation',$9,true)`, lease.OwnerId, strconv.FormatInt(lease.FencingToken, 10), settings.AutomationPolicy.SourceLockSha256, settings.BaseSha, strconv.FormatFloat(settings.EvaluationPolicy.TakeoverMargin, 'g', -1, 64), settings.AutomationPolicy.PolicyApprovalSha256,
+		strconv.FormatBool(settings.AutomationPolicy.Staging), strconv.Itoa(settings.AutomationPolicy.StagingRoundWindowSeconds), strconv.Itoa(settings.AutomationPolicy.StagingPreparationSeconds))
 	return err
 }
 
@@ -124,6 +126,9 @@ func sourceActivationInTx(ctx context.Context, tx server.PgTx, settings *Setting
 	intent := &model.CompetitionSourceActivation{}
 	if err = json.Unmarshal(content, intent); err != nil {
 		return nil, err
+	}
+	if !sourceModeMatches(settings, intent) {
+		return nil, ErrConflict
 	}
 	intent.ActivatedAt = activatedAt
 	intent.AbandonedAt = abandonedAt
@@ -150,6 +155,9 @@ func currentSourceActivationInTx(ctx context.Context, tx server.PgTx, settings *
 
 // Rechecks source authorization against the current review and exact incumbent at activation time.
 func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settings *Settings, intent *model.CompetitionSourceActivation, current *model.CompetitionSourceActivation) error {
+	if !sourceModeMatches(settings, intent) || (current != nil && !sourceModeMatches(settings, current)) {
+		return ErrConflict
+	}
 	if current == nil {
 		if intent.Kind != "baseline" || intent.ExpectedGeneration != 0 || intent.TargetEpoch != 1 || intent.SourceGeneration != 0 || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || !sha256Pattern.MatchString(settings.AutomationPolicy.PolicyApprovalSha256) {
 			return ErrConflict
@@ -160,9 +168,9 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		return ErrConflict
 	}
 	var predecessorId server.Id
-	if err := tx.QueryRow(ctx, `SELECT round_id FROM competition_round WHERE competition_id=$1 AND epoch_number=$2 AND NOT staging
+	if err := tx.QueryRow(ctx, `SELECT round_id FROM competition_round WHERE competition_id=$1 AND epoch_number=$2 AND staging=$5
 	 AND policy_json->'automation_policy'->>'environment'=$3 AND policy_json->'automation_policy'->>'season_id'=$4`,
-		settings.CompetitionId, intent.TargetEpoch-1, intent.Environment, intent.SeasonId).Scan(&predecessorId); err != nil {
+		settings.CompetitionId, intent.TargetEpoch-1, intent.Environment, intent.SeasonId, intent.Staging).Scan(&predecessorId); err != nil {
 		return err
 	}
 	if err := ensureAutomationRoundValidInTx(ctx, tx, predecessorId); err != nil {
@@ -237,7 +245,7 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		if err != nil {
 			return err
 		}
-		if policy.AutomationPolicy == nil || policy.AutomationPolicy.Environment != intent.Environment || policy.AutomationPolicy.SeasonId != intent.SeasonId || policy.EvaluatorImageDigest != intent.EvaluatedImageDigest {
+		if policy.AutomationPolicy == nil || policy.AutomationPolicy.Staging != intent.Staging || policy.AutomationPolicy.Environment != intent.Environment || policy.AutomationPolicy.SeasonId != intent.SeasonId || policy.EvaluatorImageDigest != intent.EvaluatedImageDigest {
 			return ErrConflict
 		}
 		var score ScoreResult
@@ -247,12 +255,12 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		if err = validateScore(&score); err != nil {
 			return err
 		}
-		if !score.Significance.RecommendedNextEpochTakeoverMarginSupported || score.Significance.RecommendedNextEpochTakeoverMarginPercent == nil {
-			return ErrConflict
-		}
-		threshold := *score.Significance.RecommendedNextEpochTakeoverMarginPercent / 100
-		if threshold < current.Threshold {
-			threshold = current.Threshold
+		threshold := 0.0
+		if !intent.Staging {
+			if !score.Significance.RecommendedNextEpochTakeoverMarginSupported || score.Significance.RecommendedNextEpochTakeoverMarginPercent == nil {
+				return ErrConflict
+			}
+			threshold = max(current.Threshold, *score.Significance.RecommendedNextEpochTakeoverMarginPercent/100)
 		}
 		if intent.Threshold != threshold || intent.ThresholdEvidenceSha256 != review.Request.ScoreSha256 {
 			return errors.New("source threshold must follow the exact promoted implementation")
@@ -270,7 +278,7 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 
 // Persists a complete recovery intent before any source refs are published.
 func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Settings, lease model.CompetitionSupervisorLease, intent model.CompetitionSourceActivation) (result *model.CompetitionSourceActivation, err error) {
-	if intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.Generation < 1 || intent.TargetEpoch < 1 || intent.TargetEpoch > 6 || intent.TargetRoundId == (server.Id{}) || intent.PreparedAt.IsZero() || (!intent.OpensAt.IsZero() && intent.OpensAt.Before(intent.PreparedAt.Add(16*time.Hour))) || !gitShaPattern.MatchString(intent.ManifestCommit) || !sha256Pattern.MatchString(intent.ManifestSha256) || !sha256Pattern.MatchString(intent.ThresholdEvidenceSha256) || !imageDigestPattern.MatchString(intent.EvaluatorImageDigest) || !sha256Pattern.MatchString(intent.HostQualificationSha256) {
+	if !sourceModeMatches(settings, &intent) || intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.Generation < 1 || intent.TargetEpoch < 1 || intent.TargetEpoch > 6 || intent.TargetRoundId == (server.Id{}) || intent.PreparedAt.IsZero() || (!intent.OpensAt.IsZero() && intent.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(&intent)))) || !gitShaPattern.MatchString(intent.ManifestCommit) || !sha256Pattern.MatchString(intent.ManifestSha256) || !sha256Pattern.MatchString(intent.ThresholdEvidenceSha256) || !imageDigestPattern.MatchString(intent.EvaluatorImageDigest) || !sha256Pattern.MatchString(intent.HostQualificationSha256) {
 		return nil, ErrConflict
 	}
 	digest, err := model.CompetitionSourceLockDigest(intent.Commits)
@@ -293,6 +301,11 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 	configRef, ok := intent.GitRefs["config"]
 	if !ok || configRef.ExpectedCommit != intent.ConfigExpectedCommit || configRef.Commit != intent.ManifestCommit || configRef.Branch == "" {
 		return nil, errors.New("config publication ref does not match manifest commit")
+	}
+	for repository, ref := range intent.GitRefs {
+		if (intent.Staging && ((repository == "config" && ref.Branch != "main") || (repository != "config" && ref.Branch != "sim-latency-staging"))) || (!intent.Staging && ref.Branch == "sim-latency-staging") {
+			return nil, errors.New("source publication branch does not match its explicit staging mode")
+		}
 	}
 	intent.ActivatedAt = nil
 	intent.AbandonedAt = nil
@@ -349,7 +362,8 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 				var sourceChoiceAt time.Time
 				var rewardDigest string
 				server.Raise(tx.QueryRow(ctx, `SELECT (s.seal_json->>'source_choice_at')::timestamptz,d.decision_sha256 FROM competition_evaluation_seal s JOIN competition_round r USING(round_id)
-		 JOIN competition_reward_decision d USING(round_id) WHERE r.competition_id=$1 AND r.epoch_number=$2 AND r.staging=false ORDER BY d.revision DESC LIMIT 1`, settings.CompetitionId, intent.TargetEpoch-1).Scan(&sourceChoiceAt, &rewardDigest))
+		 JOIN competition_reward_decision d USING(round_id) WHERE r.competition_id=$1 AND r.epoch_number=$2 AND r.staging=$3
+		 AND r.policy_json->'automation_policy'->>'environment'=$4 AND r.policy_json->'automation_policy'->>'season_id'=$5 ORDER BY d.revision DESC LIMIT 1`, settings.CompetitionId, intent.TargetEpoch-1, intent.Staging, intent.Environment, intent.SeasonId).Scan(&sourceChoiceAt, &rewardDigest))
 				if self.nowUtc().Before(sourceChoiceAt) || intent.PreparedAt.Before(sourceChoiceAt) || intent.RewardDecisionDigest != rewardDigest {
 					panic(ErrConflict)
 				}
@@ -373,7 +387,7 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 
 // Independent components acknowledge exact content only after their own qualified readiness checks.
 func (self PostgresStore) RecordSourceReadiness(ctx context.Context, settings *Settings, receipt model.CompetitionSourceReadiness) error {
-	if receipt.Environment != settings.AutomationPolicy.Environment || receipt.CompetitionId != settings.CompetitionId || receipt.SeasonId != settings.AutomationPolicy.SeasonId || receipt.TargetRoundId == (server.Id{}) || !tokenNamePattern.MatchString(receipt.ActorId) || !imageDigestPattern.MatchString(receipt.RuntimeImageDigest) || !receipt.Ready || (receipt.Role != "api" && receipt.Role != "worker") {
+	if receipt.Staging != settings.AutomationPolicy.Staging || receipt.Environment != settings.AutomationPolicy.Environment || receipt.CompetitionId != settings.CompetitionId || receipt.SeasonId != settings.AutomationPolicy.SeasonId || receipt.TargetRoundId == (server.Id{}) || !tokenNamePattern.MatchString(receipt.ActorId) || !imageDigestPattern.MatchString(receipt.RuntimeImageDigest) || !receipt.Ready || (receipt.Role != "api" && receipt.Role != "worker") {
 		return ErrConflict
 	}
 	return captureDatabaseError(func() {

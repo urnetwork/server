@@ -195,7 +195,7 @@ func TestSourcePublicationConfigDigestBindsExactGitBlob(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(clone, "main"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := []byte("schema: 2\n\n")
+	content := append(sourceConfigTestManifestBytes(t, false, false), '\n')
 	if err := os.WriteFile(filepath.Join(clone, "main", "sim-latency.yml"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestSourcePublicationConfigDigestBindsExactGitBlob(t *testing.T) {
 	if err := backend.Verify(context.Background(), ref, intent); err != nil {
 		t.Fatal(err)
 	}
-	trimmed := sha256.Sum256([]byte("schema: 2\n"))
+	trimmed := sha256.Sum256(content[:len(content)-1])
 	intent.ManifestSha256 = hex.EncodeToString(trimmed[:])
 	if err := backend.Verify(context.Background(), ref, intent); err == nil {
 		t.Fatal("normalized blob digest concealed changed trailing bytes")

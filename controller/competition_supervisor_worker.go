@@ -37,7 +37,7 @@ func DecodeCompetitionSupervisorWorkerRequest(reader io.Reader) (*CompetitionSup
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, errors.New("supervisor worker request has trailing JSON")
 	}
-	if request.Operation != "run_one_epoch" || request.Round.RoundId == (server.Id{}) || request.Round.Staging || request.Round.Epoch < 1 || request.Round.Epoch > 6 ||
+	if request.Operation != "run_one_epoch" || request.Round.RoundId == (server.Id{}) || request.Round.Epoch < 1 || request.Round.Epoch > 6 ||
 		request.Round.DecisionMode != model.CompetitionDecisionModeV2 || request.Lease.OwnerId == "" || request.Lease.FencingToken <= 0 || request.Lease.Environment == "" || request.Lease.CompetitionId == "" || request.Lease.SeasonId == "" {
 		return nil, errors.New("supervisor worker request identity is invalid")
 	}
@@ -53,7 +53,7 @@ type competitionSupervisorWorkerStore struct {
 
 // Frozen claims also carry this exact round id into the transaction boundary.
 func (self competitionSupervisorWorkerStore) CurrentRound(ctx context.Context, settings *Settings) (*roundRecord, error) {
-	round, err := self.PostgresStore.CurrentRound(ctx, settings)
+	round, err := self.PostgresStore.CurrentAutomationRound(ctx, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -79,18 +79,18 @@ func checkCompetitionSupervisorWorkerFence(ctx context.Context, store PostgresSt
 // its existing containment cleanup. Periodic fence checks stop an orphaned
 // launcher, while claims and evaluation heartbeats recheck the fence in SQL.
 func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, request CompetitionSupervisorWorkerRequest, workerId string) error {
-	if settings == nil || !settings.AutomationPolicy.Enabled || request.Operation != "run_one_epoch" || request.Lease.Environment != settings.AutomationPolicy.Environment || request.Lease.CompetitionId != settings.CompetitionId || request.Lease.SeasonId != settings.AutomationPolicy.SeasonId {
+	if settings == nil || !settings.AutomationPolicy.Enabled || request.Round.Staging != settings.AutomationPolicy.Staging || request.Operation != "run_one_epoch" || request.Lease.Environment != settings.AutomationPolicy.Environment || request.Lease.CompetitionId != settings.CompetitionId || request.Lease.SeasonId != settings.AutomationPolicy.SeasonId {
 		return ErrAutomationDisabled
 	}
 	store := PostgresStore{}
 	if err := checkCompetitionSupervisorWorkerFence(ctx, store, settings, request.Lease); err != nil {
 		return err
 	}
-	round, err := store.CurrentRound(ctx, settings)
+	round, err := store.CurrentAutomationRound(ctx, settings)
 	if err != nil {
 		return err
 	}
-	if round == nil || !roundUsesAutomation(round) || round.RoundId != request.Round.RoundId || round.Epoch != request.Round.Epoch ||
+	if round == nil || !roundUsesAutomation(round) || round.Staging != request.Round.Staging || round.RoundId != request.Round.RoundId || round.Epoch != request.Round.Epoch ||
 		!round.OpensAt.Equal(request.Round.OpensAt) || !round.ClosesAt.Equal(request.Round.ClosesAt) || round.ProvidersSha256 != request.Round.ProvidersSha256 || round.WorkloadCommitment != request.Round.WorkloadCommitment {
 		return ErrConflict
 	}

@@ -12,17 +12,22 @@ export LANG=C LC_ALL=C
 readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
 
 base_image=""
+staging=false
 destination=""
 source_container=""
 source_lock_path=""
 
 usage() {
     printf '%s\n' \
-        'usage: prepare-evaluation-source.sh --base-image IMAGE --destination ABSOLUTE_DIRECTORY'
+        'usage: prepare-evaluation-source.sh --base-image IMAGE --destination ABSOLUTE_DIRECTORY [--staging]'
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --staging)
+            staging=true
+            shift
+            ;;
         --base-image|--destination)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
             case "$1" in
@@ -84,6 +89,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
+image_staging="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
+source_branch=sim-latency
+if [ "$staging" = true ]; then
+    [ "$image_staging" = true ] || { printf 'staging source requires an explicitly staging evaluator image\n' >&2; exit 1; }
+    source_branch=sim-latency-staging
+else
+    case "$image_staging" in
+        false|''|'<no value>') ;;
+        *) printf 'production source cannot use a staging evaluator image\n' >&2; exit 1 ;;
+    esac
+fi
 image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image_id")"
 base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image_id")"
 source_epoch="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-epoch"}}' "$base_image_id")"
@@ -140,11 +156,11 @@ for repository in "${REPOSITORIES[@]}"; do
         printf 'evaluation repository is not clean: %s\n' "$repository" >&2
         exit 1
     }
-    git -C "$repository_root" checkout --quiet -B sim-latency "$expected_commit"
+    git -C "$repository_root" checkout --quiet -B "$source_branch" "$expected_commit"
     actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
     actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
     source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
-    [ "$actual_branch" = sim-latency ]
+    [ "$actual_branch" = "$source_branch" ]
     [ "$actual_commit" = "$expected_commit" ]
     [ -z "$source_status" ]
 done
@@ -157,11 +173,12 @@ jq -nS \
     --arg base_image_id "$base_image_id" \
     --arg base_sha "$base_sha" \
     --argjson source_epoch "$source_epoch" \
+    --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --argjson repositories "$source_repositories" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
-      branch:"sim-latency",source_lock_sha256:$source_lock_sha256,
+      staging:$staging,branch:$branch,source_lock_sha256:$source_lock_sha256,
       repositories:$repositories,
       candidate_patch_sha256:null}' > "$identity_path"
 chmod 0400 "$identity_path"

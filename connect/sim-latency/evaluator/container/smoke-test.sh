@@ -15,7 +15,21 @@ readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 readonly POSTGRES_IMAGE='postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941'
 readonly REDIS_IMAGE='redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78'
 
-base_image="${1:-urnetwork/sim-latency-evaluator-base:dev}"
+original_args=("$@")
+base_image=""
+source_mode_args=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --staging) source_mode_args=(--staging) ;;
+        -*) printf 'usage: smoke-test.sh [IMAGE] [--staging]\n' >&2; exit 2 ;;
+        *)
+            [ -z "$base_image" ] || { printf 'usage: smoke-test.sh [IMAGE] [--staging]\n' >&2; exit 2; }
+            base_image="$1"
+            ;;
+    esac
+    shift
+done
+base_image="${base_image:-urnetwork/sim-latency-evaluator-base:dev}"
 for command in awk date git install jq mktemp realpath sha256sum stat sudo sync taskset; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
@@ -30,7 +44,7 @@ expected_management_affinity="$(taskset -c "$management_cpuset" awk -F: \
     '$1 == "Cpus_allowed_list" {gsub(/[[:space:]]/, "", $2); print $2}' /proc/self/status)"
 if [ "${COMPETITION_MANAGEMENT_CPUSET_APPLIED:-}" != "$management_cpuset" ]; then
     exec env COMPETITION_MANAGEMENT_CPUSET_APPLIED="$management_cpuset" \
-        taskset -c "$management_cpuset" "$(realpath -e "$0")" "$@"
+        taskset -c "$management_cpuset" "$(realpath -e "$0")" "${original_args[@]}"
 fi
 actual_management_affinity="$(awk -F: \
     '$1 == "Cpus_allowed_list" {gsub(/[[:space:]]/, "", $2); print $2}' /proc/self/status)"
@@ -202,8 +216,8 @@ verify_local_sources_unchanged() {
 verify_local_sources_unchanged
 candidate_source_root="$smoke_root/evaluation-source"
 cache_source_root="$smoke_root/cache-evaluation-source"
-$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" --destination "$candidate_source_root" >/dev/null
-$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" --destination "$cache_source_root" >/dev/null
+$PREPARE_EVALUATION_SOURCE "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$candidate_source_root" >/dev/null
+$PREPARE_EVALUATION_SOURCE "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$cache_source_root" >/dev/null
 
 printf '\n// competitionContainerSmoke verifies deterministic per-patch image derivation.\n' \
     >> "$candidate_source_root/server/connect/resident_contract_manager.go"
@@ -214,6 +228,7 @@ git -C "$candidate_source_root/server" checkout -- connect/resident_contract_man
 install -m 0400 "$SCRIPT_DIR/policy.example.json" "$smoke_root/policy.json"
 
 candidate_json="$($SCRIPT_DIR/build-submission.sh \
+    "${source_mode_args[@]}" \
     --allow-local-base \
     --base-image "$base_image" \
     --source-root "$candidate_source_root" \
@@ -225,6 +240,7 @@ candidate_sha="$(jq -er '.candidate_sha' <<<"$candidate_json")"
 candidate_patch_sha256="$(jq -er '.patch_sha256' <<<"$candidate_json")"
 
 cached_candidate_json="$($SCRIPT_DIR/build-submission.sh \
+    "${source_mode_args[@]}" \
     --allow-local-base \
     --base-image "$base_image" \
     --source-root "$cache_source_root" \

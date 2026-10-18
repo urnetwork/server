@@ -41,10 +41,11 @@ func probeUnpublishedSource(ctx context.Context, intent *sourcePublicationIntent
 		refs = append(refs, observedRef{Repository: ref.Repository, Branch: ref.Branch, ExpectedCommit: ref.ExpectedCommit, ObservedCommit: head})
 	}
 	return json.Marshal(struct {
+		Staging              bool          `json:"staging,omitempty"`
 		Generation           int64         `json:"generation"`
 		SourceDecisionDigest string        `json:"source_decision_digest"`
 		Refs                 []observedRef `json:"refs"`
-	}{Generation: intent.ActivationGeneration, SourceDecisionDigest: intent.SourceDecisionDigest, Refs: refs})
+	}{Staging: intent.Staging, Generation: intent.ActivationGeneration, SourceDecisionDigest: intent.SourceDecisionDigest, Refs: refs})
 }
 
 // Stores one exact expected-ref transition. A changed ref must be precisely
@@ -62,6 +63,7 @@ type sourcePublicationRef struct {
 // intent digest must match; this file is recovery material, not authorization.
 type sourcePublicationIntent struct {
 	Schema               int                    `json:"schema"`
+	Staging              bool                   `json:"staging,omitempty"`
 	ActivationGeneration int64                  `json:"activation_generation"`
 	SourceDecisionDigest string                 `json:"source_decision_digest"`
 	ManifestSha256       string                 `json:"manifest_sha256"`
@@ -91,7 +93,7 @@ func validateSourcePublicationIntent(intent *sourcePublicationIntent) error {
 	}
 	for index, repository := range append(sourceRepositoryNames(), "config") {
 		ref := intent.Refs[index]
-		branch := "sim-latency"
+		branch := sourceBranch(intent.Staging)
 		if repository == "config" {
 			branch = "main"
 		}
@@ -194,6 +196,10 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if intent == nil || (ref.Repository != "config" && ref.Branch != sourceBranch(intent.Staging)) ||
+		(ref.Repository == "config" && ref.Branch != "main") {
+		return errors.New("publication ref does not match its explicit source mode")
+	}
 	info, err := os.Lstat(ref.StagedRoot)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return errors.New("private staging clone is missing or unsafe")
@@ -262,17 +268,22 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 		}
 	}
 	if ref.Repository == "config" {
+		manifestPath := sourceManifestRepositoryPath(intent.Staging)
 		changed, err := sourceGitText(ctx, ref.StagedRoot, "diff", "--name-only", ref.ExpectedCommit, ref.Commit)
-		if err != nil || (changed != "main/sim-latency.yml" && !(intent.Bootstrap && changed == "" && ref.Commit == ref.ExpectedCommit)) {
+		if err != nil || (changed != manifestPath && !(intent.Bootstrap && changed == "" && ref.Commit == ref.ExpectedCommit)) {
 			return errors.New("source config publication must change only the source manifest")
 		}
-		manifestBytes, err := sourceGitBytes(ctx, ref.StagedRoot, maximumSourceConfigBytes, "show", ref.Commit+":main/sim-latency.yml")
+		manifestBytes, err := sourceGitBytes(ctx, ref.StagedRoot, maximumSourceConfigBytes, "show", ref.Commit+":"+manifestPath)
 		if err != nil {
 			return err
 		}
 		digest := sha256.Sum256(manifestBytes)
 		if hex.EncodeToString(digest[:]) != intent.ManifestSha256 {
 			return errors.New("published source manifest does not match the durable activation digest")
+		}
+		manifest, err := decodeSourceManifest(manifestBytes)
+		if err != nil || manifest.Schema != 2 || manifest.Staging != intent.Staging {
+			return errors.New("published source manifest does not match the explicit v2 mode")
 		}
 	}
 	return nil

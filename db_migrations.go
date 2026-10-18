@@ -10452,4 +10452,7 @@ var migrations = []any{
 
 	// 846: bind pre-admission source qualification to its reserved round identity.
 	newSqlMigration(competitionAutomationTargetMigration),
+
+	// 847: isolate explicit fee-free shadow staging automation without rewriting historical rounds.
+	newSqlMigration(competitionAutomationStagingMigration),
 }

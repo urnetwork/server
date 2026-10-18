@@ -12,14 +12,19 @@ readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 base_image=""
 policy_path=""
 allow_local_base=false
+staging=false
 
 usage() {
     printf '%s\n' \
-        'usage: test-build-isolation.sh [--allow-local-base] --base-image IMAGE --policy FILE'
+        'usage: test-build-isolation.sh [--allow-local-base] [--staging] --base-image IMAGE --policy FILE'
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --staging)
+            staging=true
+            shift
+            ;;
         --base-image|--policy)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
             if [ "$1" = --base-image ]; then base_image="$2"; else policy_path="$2"; fi
@@ -64,7 +69,12 @@ if [ "$allow_local_base" != true ]; then
     }
 fi
 build_args=()
+source_mode_args=()
 if [ "$allow_local_base" = true ]; then build_args+=(--allow-local-base); fi
+if [ "$staging" = true ]; then
+    build_args+=(--staging)
+    source_mode_args=(--staging)
+fi
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-build-isolation.XXXXXXXX")"
 test_image=""
@@ -84,7 +94,7 @@ trap cleanup EXIT INT TERM
 
 base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
 evaluation_source_root="$test_root/evaluation-source"
-$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" \
+$PREPARE_EVALUATION_SOURCE "${source_mode_args[@]}" --base-image "$base_image_id" \
     --destination "$evaluation_source_root" >/dev/null
 source_status="$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
 test -z "$source_status"
