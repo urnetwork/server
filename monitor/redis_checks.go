@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/netip"
 	"slices"
 	"sort"
@@ -146,9 +147,9 @@ func redisPartialSymptom(failures []redisHostFailure) string {
 }
 
 // fullestRedisNodeUsage samples every node on every redis-cluster host and
-// returns the fullest node with the host that runs it. A host that cannot be
-// read is returned as a failure and the fullest node is chosen from the other
-// hosts; with no host readable the sample fails.
+// returns the fullest observed bounded node with its owning host. Missing,
+// ambiguous, or unbounded nodes leave fleet selection unknown; valid siblings
+// remain useful for qualified samples. With no selectable node the sample fails.
 func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNodeUsage, []redisHostFailure, error) {
 	hosts := env.cfg.redisSweepHosts()
 	if len(hosts) == 0 {
@@ -157,7 +158,6 @@ func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNode
 	var fullestHost *host
 	fullest := redisNodeUsage{}
 	fullestRatio := -1.0
-	outputs := []string{}
 	failures := []redisHostFailure{}
 	for _, h := range hosts {
 		ports := h.redisNodePorts()
@@ -169,27 +169,25 @@ func fullestRedisNodeUsage(ctx context.Context, env *probeEnv) (*host, redisNode
 			portNames[i] = fmt.Sprint(port)
 		}
 		out, err := env.runner.shell(ctx, h, fmt.Sprintf(`for p in %s; do
-  m=$(timeout 3 redis-cli -p $p INFO memory 2>/dev/null | tr -d '\r')
-  [ -z "$m" ] && continue
-  echo "$p $(echo "$m" | awk -F: 'BEGIN{u=0;x=0}/^used_memory:/{u=$2}/^maxmemory:/{x=$2}END{print u" "x}')"
+  m=$(timeout 3 redis-cli -p "$p" INFO memory 2>/dev/null)
+  info_exit=$?
+  [ "$info_exit" -eq 0 ] && [ -n "$m" ] || { echo "$p unreachable"; continue; }
+  echo "$p $(printf '%%s\n' "$m" | awk -F: '
+    {sub(/\r$/, ""); if($0=="" || /^#/)next; if($0 !~ /^[a-zA-Z0-9_]+:/){invalid=1;next}}
+    /^used_memory:/{if(NF!=2 || used_seen++ || $2 !~ /^[0-9]+$/)invalid=1;u=$2}
+    /^maxmemory:/{if(NF!=2 || max_seen++ || $2 !~ /^[0-9]+$/)invalid=1;x=$2}
+    END{if(invalid || !used_seen || !max_seen)print "unreachable";else print u" "x}')"
 done`, strings.Join(portNames, " ")))
 		if err != nil {
 			failures = append(failures, redisHostFailure{host: h, err: err})
 			continue
 		}
-		outputs = append(outputs, strings.TrimSpace(out))
-
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 3 {
-				continue
-			}
-			candidate := redisNodeUsage{
-				port:           atoi(fields[0]),
-				usedBytes:      atoi64(fields[1]),
-				maxmemoryBytes: atoi64(fields[2]),
-			}
-			if candidate.port == 0 || candidate.usedBytes <= 0 || candidate.maxmemoryBytes <= 0 {
+		nodes, censusErr := parseRedisNodeUsage(h, out)
+		if censusErr != nil {
+			failures = append(failures, redisHostFailure{host: h, err: censusErr})
+		}
+		for _, candidate := range nodes {
+			if candidate.maxmemoryBytes == 0 {
 				continue
 			}
 			ratio := float64(candidate.usedBytes) / float64(candidate.maxmemoryBytes)
@@ -200,11 +198,11 @@ done`, strings.Join(portNames, " ")))
 			}
 		}
 	}
-	if len(failures) == len(hosts) {
-		return nil, redisNodeUsage{}, nil, redisHostFailuresError(failures)
-	}
 	if fullest.port == 0 {
-		return nil, redisNodeUsage{}, nil, fmt.Errorf("could not determine fullest Redis node from %q", strings.Join(outputs, "\n"))
+		if len(failures) > 0 {
+			return nil, redisNodeUsage{}, nil, redisHostFailuresError(failures)
+		}
+		return nil, redisNodeUsage{}, nil, fmt.Errorf("could not determine fullest Redis node from the configured census")
 	}
 	return fullestHost, fullest, failures, nil
 }
@@ -410,28 +408,35 @@ func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		if len(ports) == 0 {
 			return nil, fmt.Errorf("no redis node ports configured")
 		}
-		lo, hi := ports[0], ports[len(ports)-1]
+		portNames := make([]string, len(ports))
+		for i, port := range ports {
+			portNames[i] = strconv.Itoa(port)
+		}
 
 		// one round trip: per node, one compact line. Client-buffer memory is
 		// mem_clients_normal + mem_clients_slaves (the INFO fields this redis
 		// actually exposes — there is no used_memory_clients key; SIGNALS.md 3.2
-		// note). awk defaults keep every field numeric even if a key is absent.
+		// note). Required measurements need explicit numeric values; only
+		// optional diagnostic fields may use zero when absent.
 		script := fmt.Sprintf(`awk '/^MemTotal:/{total=$2*1024}/^MemAvailable:/{available=$2*1024}END{print "host_memory",total,available}' /proc/meminfo 2>/dev/null
-for p in $(seq %d %d); do
-  m=$(timeout 3 redis-cli -p $p INFO 2>/dev/null | tr -d '\r')
-  [ -z "$m" ] && { echo "$p unreachable"; continue; }
-  echo "$p $(echo "$m" | awk -F: '
+for p in %s; do
+  m=$(timeout 3 redis-cli -p "$p" INFO 2>/dev/null)
+  info_exit=$?
+  [ "$info_exit" -eq 0 ] && [ -n "$m" ] || { echo "$p unreachable"; continue; }
+  echo "$p $(printf '%%s\n' "$m" | awk -F: '
+    function number(name,value) {if(NF!=2 || seen[name]++ || value !~ /^[0-9]+$/)invalid=1;return value}
     BEGIN{u=0;rss=0;x=0;d=0;c=0;n=0;policy="unknown";keys=0;expires=0;avg=0;evicted=0;exceeded=0;errors=0;oom=0}
-    /^used_memory:/{u=$2} /^used_memory_rss:/{rss=$2} /^maxmemory:/{x=$2} /^used_memory_dataset:/{d=$2}
-    /^mem_clients_normal:/{c+=$2} /^mem_clients_slaves:/{c+=$2}
-    /^connected_clients:/{n=$2}
-    /^maxmemory_policy:/{policy=$2}
-    /^evicted_keys:/{evicted=$2} /^current_eviction_exceeded_time:/{exceeded=$2}
-    /^total_error_replies:/{errors=$2}
-    /^errorstat_OOM:/{split($2,a,"=");oom=a[2]+0}
-    /^db0:/{split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=v[2];else if(v[1]=="expires")expires=v[2];else if(v[1]=="avg_ttl")avg=v[2]}}
-    END{print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
-done`, lo, hi)
+    {sub(/\r$/,"");if($0=="" || /^#/)next;if($0 !~ /^[a-zA-Z0-9_]+:/){invalid=1;next}}
+    /^used_memory:/{u=number($1,$2)} /^used_memory_rss:/{rss=number($1,$2)} /^maxmemory:/{x=number($1,$2)} /^used_memory_dataset:/{d=number($1,$2)}
+    /^mem_clients_normal:/{c+=number($1,$2)} /^mem_clients_slaves:/{c+=number($1,$2)}
+    /^connected_clients:/{n=number($1,$2)}
+    /^maxmemory_policy:/{if(seen[$1]++ || NF!=2)invalid=1;else if($2 ~ /^(noeviction|allkeys-lru|volatile-lru|allkeys-random|volatile-random|volatile-ttl|allkeys-lfu|volatile-lfu)$/)policy=$2}
+    /^evicted_keys:/{evicted=number($1,$2)} /^current_eviction_exceeded_time:/{exceeded=number($1,$2)}
+    /^total_error_replies:/{errors=number($1,$2)}
+    /^errorstat_OOM:/{if($2 !~ /^count=[0-9]+$/)invalid=1;split($2,a,"=");oom=number($1,a[2])}
+    /^db0:/{if(seen[$1]++)invalid=1;split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=number("db0_keys",v[2]);else if(v[1]=="expires")expires=number("db0_expires",v[2]);else if(v[1]=="avg_ttl")avg=number("db0_avg_ttl",v[2])}if(!seen["db0_keys"] || !seen["db0_expires"] || !seen["db0_avg_ttl"])invalid=1}
+    END{if(invalid || !seen["used_memory"] || !seen["maxmemory"] || !seen["used_memory_dataset"] || !seen["mem_clients_normal"] || !seen["mem_clients_slaves"] || !seen["connected_clients"])print "unreachable";else print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
+done`, strings.Join(portNames, " "))
 		out, err := env.runner.shell(ctx, h, script)
 		if err != nil {
 			failedHosts = append(failedHosts, failedHost{host: h, err: err})
@@ -445,9 +450,11 @@ done`, lo, hi)
 
 	nodeMems := []redisNodeMem{}
 	unreachablePorts := []string{}
+	completeInfo := len(failedHosts) == 0
 	for _, observed := range observedHosts {
 		nodeMems = append(nodeMems, observed.nodes...)
 		unreachablePorts = append(unreachablePorts, observed.unreachable...)
+		completeInfo = completeInfo && len(observed.unreachable) == 0 && !observed.invalidRows
 	}
 	if len(nodeMems) == 0 {
 		return nil, fmt.Errorf("no node INFO parsed (unreachable: %v)", unreachablePorts)
@@ -464,17 +471,17 @@ done`, lo, hi)
 	sort.Float64s(connectedValues)
 	medianUsed := usedValues[len(usedValues)/2]
 	medianConnected := connectedValues[len(connectedValues)/2]
-	// a fleet median with a whole host missing is not a baseline sample
-	if env.baseline != nil && len(failedHosts) == 0 {
+	// Missing or ambiguous nodes cannot establish a fleet median.
+	if env.baseline != nil && completeInfo {
 		env.baseline.record("redis/used-median", time.Now(), medianUsed)
 		env.baseline.record("redis/clients-median", time.Now(), medianConnected)
 	}
 
 	findings := []finding{}
 	for _, observed := range observedHosts {
-		// a host with no node INFO has no capacity evidence; its unreachable
-		// nodes are reported below
-		if len(observed.nodes) == 0 {
+		// Aggregate ceilings need every configured node; the observation gap
+		// is reported below without clearing the previous capacity finding.
+		if len(observed.nodes) == 0 || len(observed.unreachable) != 0 || observed.invalidRows {
 			continue
 		}
 		findings = append(findings, redisHostCapacityFinding(observed))
@@ -548,7 +555,7 @@ done`, lo, hi)
 			}
 
 			// skew: > 3x fleet median (3.1)
-			if medianUsed > 0 && n.usedBytes > 3*medianUsed {
+			if completeInfo && medianUsed > 0 && n.usedBytes > 3*medianUsed {
 				findings = append(findings, finding{
 					probeId: "redis/mem-skew", tier: tierWarn,
 					class: "mem-skew", target: target, sustain: 1,
@@ -557,7 +564,7 @@ done`, lo, hi)
 					observed: fmt.Sprintf("used=%.2fG median=%.2fG dataset=%.2fG clients=%.2fG", gb(n.usedBytes), gb(medianUsed), gb(n.datasetBytes), gb(n.clientsBytes)),
 					playbook: "SIGNALS.md 5.4",
 				})
-			} else {
+			} else if completeInfo {
 				findings = append(findings, healthyFinding("redis/mem-skew", tierWarn, "mem-skew", target))
 			}
 
@@ -579,9 +586,9 @@ done`, lo, hi)
 				findings = append(findings, healthyFinding("redis/client-buffers", tierWarn, "client-buffers", target))
 			}
 
-			// connected_clients spike vs fleet median (3.5 approximation of the
-			// step-change rule until per-node history is kept)
-			if medianConnected > 0 && n.connectedClients > 3*medianConnected {
+			// The native spatial arm of §3.5. redisConnectionsProbe combines it
+			// with independently timestamped per-node history before reporting health.
+			if completeInfo && medianConnected > 0 && n.connectedClients > 3*medianConnected {
 				evidence := self.batteryEvidence("redis/clients-spike", "clients-spike/"+target, func() string {
 					return redisConnectionBattery(ctx, env, h, n.port)
 				})
@@ -599,7 +606,7 @@ done`, lo, hi)
 					verify:    diagnosis.verify,
 					playbook:  "SIGNALS.md 3.5",
 				})
-			} else {
+			} else if completeInfo {
 				self.rearmBattery("redis/clients-spike", "clients-spike/"+target)
 				findings = append(findings, healthyFinding("redis/clients-spike", tierWarn, "clients-spike", target))
 			}
@@ -608,18 +615,19 @@ done`, lo, hi)
 	}
 
 	for _, observed := range observedHosts {
-		if len(observed.unreachable) == 0 {
+		if len(observed.unreachable) == 0 && !observed.invalidRows {
 			continue
 		}
 		// per-node ping is the tier-0 probe's page; here just visibility
 		findings = append(findings, finding{
 			probeId: "redis/node-mem", tier: tierWarn,
 			class: "cannot-observe", target: observed.host.name,
-			frame:    strings.Join(observed.unreachable, ","),
-			sustain:  2,
-			symptom:  fmt.Sprintf("INFO unavailable from %d node(s): %s", len(observed.unreachable), strings.Join(observed.unreachable, ",")),
-			observed: fmt.Sprintf("unreachable_ports=%s", strings.Join(observed.unreachable, ",")),
-			playbook: "SIGNALS.md 5.2",
+			frame:     "node-info",
+			sustain:   2,
+			symptom:   "The configured Redis node INFO census is incomplete or invalid",
+			mechanism: "A command failure, missing measurement, or ambiguous node row leaves part of this signal unknown. Valid sibling measurements remain usable for per-node thresholds, but an incomplete census cannot establish fleet medians or aggregate host capacity.",
+			observed:  fmt.Sprintf("unreachable_ports=%s invalid_rows=%t", strings.Join(observed.unreachable, ","), observed.invalidRows),
+			playbook:  "SIGNALS.md 5.2",
 		})
 	}
 
@@ -633,11 +641,26 @@ type redisHostMemory struct {
 	availableBytes float64
 	nodes          []redisNodeMem
 	unreachable    []string
+	invalidRows    bool
 }
 
+// Admit one finite, nonnegative measurement row per configured port. Missing,
+// duplicate, foreign, or malformed rows never become healthy zero samples.
 func parseRedisHostMemory(h *host, out string) redisHostMemory {
 	nodeMems := []redisNodeMem{}
 	unreachablePorts := []string{}
+	ports := h.redisNodePorts()
+	nodeByPort := make(map[int]redisNodeMem, len(ports))
+	seenPorts := make(map[int]bool, len(ports))
+	expectedPorts := make(map[int]bool, len(ports))
+	for _, port := range ports {
+		expectedPorts[port] = true
+	}
+	invalidRows := false
+	parseNumber := func(value string) (float64, bool) {
+		number, err := strconv.ParseFloat(value, 64)
+		return number, err == nil && number >= 0 && !math.IsNaN(number) && !math.IsInf(number, 0)
+	}
 	hostMemoryTotalBytes := 0.0
 	hostMemoryAvailableBytes := 0.0
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -647,35 +670,63 @@ func parseRedisHostMemory(h *host, out string) redisHostMemory {
 			hostMemoryAvailableBytes = atof(fields[2])
 			continue
 		}
-		if len(fields) == 2 && fields[1] == "unreachable" {
-			unreachablePorts = append(unreachablePorts, fields[0])
+		if len(fields) == 0 {
 			continue
 		}
-		if len(fields) < 6 {
+		port, err := strconv.Atoi(fields[0])
+		if err != nil || !expectedPorts[port] {
+			invalidRows = true
 			continue
 		}
-		node := redisNodeMem{
-			port:             atoi(fields[0]),
-			usedBytes:        atof(fields[1]),
-			maxmemoryBytes:   atof(fields[2]),
-			datasetBytes:     atof(fields[3]),
-			clientsBytes:     atof(fields[4]),
-			connectedClients: atof(fields[5]),
+		if seenPorts[port] {
+			delete(nodeByPort, port)
+			invalidRows = true
+			continue
+		}
+		seenPorts[port] = true
+		if len(fields) != 6 && len(fields) != 14 && len(fields) != 15 {
+			invalidRows = invalidRows || len(fields) != 2 || fields[1] != "unreachable"
+			continue
+		}
+		node := redisNodeMem{port: port, maxmemoryPolicy: "unknown"}
+		measurements := []*float64{&node.usedBytes, &node.maxmemoryBytes, &node.datasetBytes, &node.clientsBytes, &node.connectedClients}
+		valid := true
+		for i, measurement := range measurements {
+			value, ok := parseNumber(fields[i+1])
+			*measurement = value
+			valid = valid && ok
 		}
 		if len(fields) >= 14 {
 			node.maxmemoryPolicy = fields[6]
-			node.keys = atof(fields[7])
-			node.expiringKeys = atof(fields[8])
-			node.averageTTLMillis = atof(fields[9])
-			node.evictedKeys = atof(fields[10])
-			node.currentEvictionExceededTime = atof(fields[11])
-			node.totalErrorReplies = atof(fields[12])
-			node.oomErrors = atof(fields[13])
+			switch node.maxmemoryPolicy {
+			case "unknown", "noeviction", "allkeys-lru", "volatile-lru", "allkeys-random", "volatile-random", "volatile-ttl", "allkeys-lfu", "volatile-lfu":
+			default:
+				node.maxmemoryPolicy = "unknown"
+			}
+			measurements = []*float64{&node.keys, &node.expiringKeys, &node.averageTTLMillis, &node.evictedKeys, &node.currentEvictionExceededTime, &node.totalErrorReplies, &node.oomErrors}
+			for i, measurement := range measurements {
+				value, ok := parseNumber(fields[i+7])
+				*measurement = value
+				valid = valid && ok
+			}
 		}
-		if len(fields) >= 15 {
-			node.rssBytes = atof(fields[14])
+		if len(fields) == 15 {
+			value, ok := parseNumber(fields[14])
+			node.rssBytes = value
+			valid = valid && ok
 		}
-		nodeMems = append(nodeMems, node)
+		if valid {
+			nodeByPort[port] = node
+		} else {
+			invalidRows = true
+		}
+	}
+	for _, port := range ports {
+		if node, ok := nodeByPort[port]; ok {
+			nodeMems = append(nodeMems, node)
+		} else {
+			unreachablePorts = append(unreachablePorts, strconv.Itoa(port))
+		}
 	}
 	return redisHostMemory{
 		host:           h,
@@ -683,6 +734,7 @@ func parseRedisHostMemory(h *host, out string) redisHostMemory {
 		availableBytes: hostMemoryAvailableBytes,
 		nodes:          nodeMems,
 		unreachable:    unreachablePorts,
+		invalidRows:    invalidRows,
 	}
 }
 

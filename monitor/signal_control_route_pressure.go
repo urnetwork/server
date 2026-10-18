@@ -116,7 +116,9 @@ func (controlRoutePressureProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return []finding{controlRouteUnknown("Bounded Mimir query unavailable")}, nil
+		unobservable := controlRouteUnknown("Bounded Mimir query unavailable")
+		unobservable.observed += " " + observationFailureDetails(err, classifyObservationError(err))
+		return []finding{unobservable}, nil
 	}
 	processes, err := parseControlRoutePressure(out, env.cfg.env, env.now())
 	if err != nil {

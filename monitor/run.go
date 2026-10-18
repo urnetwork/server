@@ -392,6 +392,10 @@ func runSignalInSlot(ctx context.Context, slots *runSlotPool, signal Signal, set
 		ctx, cancel = context.WithTimeout(ctx, bounded.runBudget())
 		defer cancel()
 	}
+	if signal.ID() == "pg/query-sample" {
+		ctx = observePgSampleRunSlot(ctx)
+	}
+	ctx = context.WithValue(ctx, runSlotSignalContextKey{}, signal.Key())
 	release, err := slots.acquire(ctx, priority)
 	if err != nil {
 		return nil, &runSlotAdmissionError{cause: err}

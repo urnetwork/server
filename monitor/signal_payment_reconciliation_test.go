@@ -166,6 +166,10 @@ func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
 		"`destination_unresolved`",
 		"Missing or malformed authority data",
 		"Incomplete checkout pagination",
+		"`reason=destination_unresolved` and `leg=webhook`",
+		"Missing/blank evidence, missing/unknown reasons or legs",
+		"webhook-classification correction requires only a refreshed monitor",
+		"An adjacent §2.22 WARN is not by itself a join to the same payment",
 	} {
 		if !strings.Contains(section, expected) {
 			t.Errorf("SIGNALS.md §2.21 omits %q", expected)
@@ -303,7 +307,9 @@ func TestPaymentReconciliationSurfacesUnfulfillableStripeDestinationOncePerEvide
 		"1 paid invoice destination(s)",
 		"distinct_evidence_24h=1 observations_24h=3 distinct_runs_24h=3",
 		"deleted before the ledger-gated credit",
-		"legacy-email resolution found no destination",
+		"metadata and checkout-reference resolution found no destination",
+		"customer-email fallback is removed",
+		"unresolved destination does not prove account deletion",
 		"incomplete pages",
 		"destination_unresolved",
 		"not a provider-listing failure",

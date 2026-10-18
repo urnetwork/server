@@ -264,6 +264,8 @@ type pgQuerySampleReceipt struct {
 	PrivateSql                *pgSampleSqlCoverage   `json:"private_sql,omitempty"`
 	privateSqlRows            []pgSampleSqlRow
 	privateQueryIds           map[string]string
+
+	TransportObservation *pgSampleTransportReceipt `json:"transport_observation,omitempty"`
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -708,6 +710,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	ctx, cancelSample := context.WithTimeout(ctx, pgQuerySampleBudget)
 	defer cancelSample()
+	ctx, transportObservation := observePgSampleTransport(ctx)
 	h := env.cfg.hostByRole("pg-primary")
 	if h == nil {
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryMissing}
@@ -716,7 +719,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryDisabled}
 	}
 	if env.cfg.routerGenerationCheck != nil {
+		transportObservation.beginLocalPhase(pgLocalSettingsGeneration)
 		ok, err := env.cfg.routerGenerationCheck(ctx)
+		transportObservation.endLocalPhase(pgLocalSettingsGeneration)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightGenerationUnobservable, err: err}
 		}
@@ -730,12 +735,16 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	identity := until.UTC().Format(time.RFC3339Nano)
 	if recurring {
+		transportObservation.beginLocalPhase(pgLocalCadenceLock)
 		lock, err := lockProviderState(ctx, env.cfg.stateDir, "pg-query-sample-cadence")
+		transportObservation.endLocalPhase(pgLocalCadenceLock)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceLock, err: err}
 		}
 		defer lock.Close()
-		admitted, err := pgSampleContinuousAdmission(dir, now, p.syncAttemptFile)
+		transportObservation.beginLocalPhase(pgLocalCadenceAdmission)
+		admitted, err := pgSampleContinuousAdmissionObserved(dir, now, p.syncAttemptFile, transportObservation)
+		transportObservation.endLocalPhase(pgLocalCadenceAdmission)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceState, err: err}
 		}
@@ -748,7 +757,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	name := hex.EncodeToString(hash[:8])
 	if !recurring {
 		marker := filepath.Join(dir, name+".attempt")
+		transportObservation.beginLocalPhase(pgLocalOneShotMarker)
 		created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
+		transportObservation.endLocalPhase(pgLocalOneShotMarker)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightMarker, err: err}
 		}
@@ -758,9 +769,13 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now, Reason: "source-unavailable"}
-	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb)})
+	transportObservation.beginLocalPhase(pgLocalSampleCommand)
+	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb), "transport_nonce": transportObservation.nonce})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
+	transportObservation.endLocalPhase(pgLocalSampleCommand)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
+	transportReceipt := transportObservation.receipt
+	transportReceipt.OwnerDeadlineExceeded = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	if failure, valid := parsePgSampleSourceFailure(out); valid {
 		r.SourceFailure = failure
 	} else if readErr != nil {
@@ -776,6 +791,19 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		} else {
 			r.Reason = "projection-unavailable"
 			r.SourceFailure = &pgSampleSourceFailure{Phase: "projection", Cause: "invalid_response"}
+		}
+	}
+	r.TransportObservation = &transportReceipt
+	// A native owner can expire with less time at Start than the unchanged SQL's
+	// mandatory waits alone require. This does not locate earlier owner time or
+	// replace the original transport/source failure with a database diagnosis.
+	budgetQualifier := ""
+	minimumWaitMs := ((pgQuerySampleCount - 1) * 2 * time.Second).Milliseconds()
+	if !r.Complete && r.Reason == "deadline" && transportReceipt.OwnerDeadlineExceeded && transportReceipt.Spawn == "started" && transportReceipt.Joined && transportReceipt.SpawnRemainingBudgetMs != nil {
+		remainingMs := *transportReceipt.SpawnRemainingBudgetMs
+		if 0 <= remainingMs && remainingMs < minimumWaitMs {
+			budgetQualifier = fmt.Sprintf("collection_budget=below-mandatory-waits minimum_wait_ms=%d spawn_remaining_budget_ms=%d", minimumWaitMs, remainingMs)
+			r.Qualifiers = append(r.Qualifiers, budgetQualifier)
 		}
 	}
 	r.FinishedAt = env.now().UTC()
@@ -808,6 +836,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	observed := "reason=" + r.Reason
 	if f := r.SourceFailure; f != nil {
 		observed += fmt.Sprintf(" phase=%s cause=%s stderr_truncated=%t", f.Phase, f.Cause, f.StderrTruncated)
+	}
+	if budgetQualifier != "" {
+		observed += " " + budgetQualifier
 	}
 	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: observed, evidence: "Finite private immutable receipt_sha256=" + receiptSHA256 + "; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect the private finite receipt and sampler status; recurring mode waits for its next cadence, while one-shot mode needs a fresh explicit arm. Do not infer health or tune pools from missing evidence.", verify: "The next eligible finite sample qualifies under the same source and host limits.", playbook: "SIGNALS.md §2.1a"}}, nil
 }

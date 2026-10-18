@@ -112,7 +112,7 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 					"client_list_total=472 client_output_memory_bytes=0 client_output_memory_max_bytes=0\n" +
 					"472 max_idle_s=5 max_age_s=3600 source=192.0.2.181 flags=N cmd=expire lib=go-redis", nil
 			}
-			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 55", nil
+			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6382 100 1000 90 1 55", nil
 		},
 	}
 	alerts, err := NewRedisConnectionsSignal().Run(context.Background(), syntheticSettings(source))
@@ -155,7 +155,7 @@ func TestRedisConnectionsSignalAttributesPeerDeltaReadAmplification(t *testing.T
 					"375 max_idle_s=95 max_age_s=4132 source=192.0.2.180 flags=N cmd=hget lib=go-redis\n" +
 					"294 max_idle_s=268 max_age_s=5096 source=192.0.2.181 flags=N cmd=hget lib=go-redis", nil
 			}
-			return "6380 100 1000 90 1 281\n6381 100 1000 90 1 280\n6393 100 1000 90 1 954", nil
+			return "6380 100 1000 90 1 281\n6381 100 1000 90 1 280\n6382 100 1000 90 1 954", nil
 		},
 	}
 	alerts, err := NewRedisConnectionsSignal().Run(context.Background(), syntheticSettings(source))
@@ -227,9 +227,9 @@ func TestRedisConnectionsSignalKeepsTripFrameDistinctFromSustainedCount(t *testi
 			}
 			snapshotCalls++
 			if snapshotCalls == 1 {
-				return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 55", nil
+				return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6382 100 1000 90 1 55", nil
 			}
-			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 45", nil
+			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6382 100 1000 90 1 45", nil
 		},
 	}
 	signal := NewRedisConnectionsSignal()

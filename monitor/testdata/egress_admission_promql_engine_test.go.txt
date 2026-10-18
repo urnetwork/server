@@ -1,0 +1,23 @@
+// Executes the proposed or exact owning query on a pinned native Mimir engine.
+package egress_admission_test
+
+import (
+	"os"
+	"testing"
+	"time"
+
+	"github.com/prometheus/prometheus/promql/promqltest"
+)
+
+func TestEgressAdmissionNativeWindow(t *testing.T) {
+	path := os.Getenv("MONITOR_PROMQL_TEST_SCRIPT")
+	if path == "" {
+		t.Fatal("MONITOR_PROMQL_TEST_SCRIPT is required")
+	}
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := promqltest.NewTestEngine(t, false, 5*time.Minute, 1_000_000)
+	promqltest.RunTest(t, string(script), engine)
+}

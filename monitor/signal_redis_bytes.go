@@ -119,14 +119,15 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
 	// the fullest node may be on any redis-cluster host; sample it where it runs.
-	// An unreadable host is reported and the fullest node of the others sampled.
+	// Missing or unranked nodes leave fleet selection unknown; sample the
+	// fullest observed bounded node with an explicit coverage qualification.
 	h, fullest, failures, err := fullestRedisNodeUsage(ctx, env)
 	if err != nil {
 		return nil, err
 	}
 	visibility := []finding{}
 	for _, failure := range failures {
-		visibility = append(visibility, redisHostCannotObserveFinding(failure, "byte-families"))
+		visibility = append(visibility, redisUsageCannotObserveFinding(failure, "byte-families"))
 	}
 	sample, err := sampleRedisByteFamilies(ctx, env, h, fullest.port)
 	if err != nil {
@@ -159,8 +160,7 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		)
 	}
 	if len(failures) > 0 {
-		// the sampled node is the fullest of the readable hosts only
-		observedParts = append(observedParts, redisUnobservedHosts(failures))
+		observedParts = append(observedParts, redisUsageSelectionScope(failures))
 	}
 	glog.Infof("[monitor]redis byte families on %s: %s\n", target, strings.Join(observedParts, " "))
 
@@ -194,7 +194,7 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			mechanism: mechanism,
 			baseline:  "A Redis node above 85% has no single avoidably duplicated family owning at least 50% and 128KiB of a 1,000-key MEMORY USAGE sample.",
 			observed:  strings.Join(observedParts, " "),
-			evidence:  "The probe selected the node closest to maxmemory, then classified keys and summed MEMORY USAGE SAMPLES 1 entirely inside a bounded EVAL_RO. Only aggregate family counts and bytes left Redis.",
+			evidence:  "The probe selected the observed bounded node closest to maxmemory; any missing selection authority is qualified in the observed values. It classified keys and summed MEMORY USAGE SAMPLES 1 entirely inside a bounded EVAL_RO. Only aggregate family counts and bytes left Redis.",
 			context:   context,
 			action:    action,
 			verify:    "After one complete alias-aware export plus the five-hour legacy TTL, sampled score bytes fall below 50% or the node falls below 85%; aliases resolve to the same provider sets, excluded callers still use overrides, and OOM/error counters remain flat.",
@@ -202,7 +202,10 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		}}, visibility...), nil
 	}
 
-	return append([]finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, visibility...), nil
+	if len(failures) > 0 {
+		return visibility, nil
+	}
+	return []finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, nil
 }
 
 func redisScoreAliasesReady(ctx context.Context, env *probeEnv, h *host) (bool, error) {

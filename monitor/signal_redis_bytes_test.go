@@ -20,7 +20,7 @@ func TestRedisBytesSignalSyntheticScorePayloadDominance(t *testing.T) {
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			switch {
 			case strings.Contains(command, "INFO memory"):
-				return "6380 12700000000 12884901888\n6381 8000000000 12884901888", nil
+				return "6380 12700000000 12884901888\n6381 8000000000 12884901888\n6382 7000000000 12884901888", nil
 			case strings.Contains(command, "EVAL_RO"):
 				sawBoundedReadOnlySample = strings.Contains(command, "timeout 45") &&
 					strings.Contains(command, "base64 -d") &&
@@ -62,7 +62,7 @@ func TestRedisBytesSignalReadyAliasSchemaWaitsForLegacyExpiry(t *testing.T) {
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			switch {
 			case strings.Contains(command, "INFO memory"):
-				return "6380 12700000000 12884901888\n6381 8000000000 12884901888", nil
+				return "6380 12700000000 12884901888\n6381 8000000000 12884901888\n6382 7000000000 12884901888", nil
 			case strings.Contains(command, "EVAL_RO"):
 				return syntheticRedisByteSample, nil
 			default:
@@ -104,7 +104,7 @@ func TestRedisBytesSignalReadyAliasSchemaWaitsForLegacyExpiry(t *testing.T) {
 func TestRedisBytesSignalSyntheticLowUtilizationIsHealthy(t *testing.T) {
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
 		if strings.Contains(command, "INFO memory") {
-			return "6380 5000000000 12884901888", nil
+			return "6380 5000000000 12884901888\n6381 4000000000 12884901888\n6382 3000000000 12884901888", nil
 		}
 		if strings.Contains(command, "EVAL_RO") {
 			return syntheticRedisByteSample, nil

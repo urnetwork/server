@@ -100,8 +100,60 @@ func egressAdmissionTestJson(t *testing.T, now time.Time, processes []egressAdmi
 	return string(encoded)
 }
 
+// Builds explicit native history. With no supplied historical body, the
+// synthetic source is idle for that minute; no observer state is consulted.
+func egressAdmissionTestPairJson(t *testing.T, now time.Time, body string, historical ...string) string {
+	t.Helper()
+	if len(body) > egressAdmissionResponseMax {
+		return body
+	}
+	rows := []map[string]any{}
+	for _, window := range []string{"current", "previous"} {
+		input := body
+		if window == "previous" && len(historical) > 0 {
+			input = historical[0]
+		}
+		var response struct {
+			Status   string   `json:"status"`
+			Warnings []string `json:"warnings"`
+			Data     struct {
+				ResultType string           `json:"resultType"`
+				Result     []map[string]any `json:"result"`
+			} `json:"data"`
+		}
+		if json.Unmarshal([]byte(input), &response) != nil || response.Status != "success" || response.Data.ResultType != "vector" || len(response.Warnings) != 0 {
+			return input
+		}
+		for _, row := range response.Data.Result {
+			metric := row["metric"].(map[string]any)
+			metric["monitor_egress_window"] = window
+			value := row["value"].([]any)
+			value[0] = now.Unix()
+			if window == "previous" && len(historical) == 0 && metric["monitor_egress_part"] == "timestamp" {
+				at, err := strconv.ParseFloat(value[1].(string), 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				value[1] = strconv.FormatFloat(at-time.Minute.Seconds(), 'f', -1, 64)
+			}
+			rows = append(rows, row)
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": rows}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
 // Runs the real adapter with one synthetic inventory gateway and asserts cost.
-func runEgressAdmissionTest(t *testing.T, signal Signal, now time.Time, body string) Alerts {
+func runEgressAdmissionTest(t *testing.T, signal Signal, now time.Time, body string, historical ...string) Alerts {
+	t.Helper()
+	return runEgressAdmissionNativeTest(t, signal, now, egressAdmissionTestPairJson(t, now, body, historical...))
+}
+
+// Executes an already assembled native response without filling missing sides.
+func runEgressAdmissionNativeTest(t *testing.T, signal Signal, now time.Time, body string) Alerts {
 	t.Helper()
 	calls := 0
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
@@ -137,7 +189,8 @@ func TestEgressAdmissionWarmupAndStableHealthyControl(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	first := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	first := runEgressAdmissionTest(t, signal, now, previous)
 	unknown := requireAlertClass(t, first, "egress-admission-unobservable")
 	for _, want := range []string{"only when executable capability is proved missing", "If capability is present", "instead of redeploying from absent metrics"} {
 		if !strings.Contains(unknown.Markdown(), want) {
@@ -149,7 +202,7 @@ func TestEgressAdmissionWarmupAndStableHealthyControl(t *testing.T) {
 	processes[0].values["selected/stale-health/false"] += 2
 	processes[1].values["submission/health/acknowledged"] += 2
 	processes[1].values["submission/attempt/acknowledged"] += 2
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	if len(alerts) != 0 {
 		t.Fatalf("healthy control alerted: %+v", alerts)
 	}
@@ -202,9 +255,10 @@ func TestEgressAdmissionMissingMixedResetAndSourceFreshnessFailClosed(t *testing
 		now := time.Unix(1_700_000_000, 0).UTC()
 		processes := egressAdmissionTestProcesses(now)
 		signal := NewEgressAdmissionSignal()
-		runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+		previous := egressAdmissionTestJson(t, now, processes)
+		runEgressAdmissionTest(t, signal, now, previous)
 		now = now.Add(time.Minute)
-		alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, test.mutate(processes)))
+		alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, test.mutate(processes)), previous)
 		if len(alerts) != 1 || alerts[0].Class != "egress-admission-unobservable" {
 			t.Fatalf("%s must fail closed without manufactured events: %+v", test.name, alerts)
 		}
@@ -215,7 +269,8 @@ func TestEgressAdmissionExpiredAndAllSubmissionFailuresKeepOwningLimits(t *testi
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	runEgressAdmissionTest(t, signal, now, previous)
 	now = now.Add(time.Minute)
 	processes[0].values["requests"]++
 	processes[0].values["selected/stale-health/true"] += 3
@@ -224,7 +279,7 @@ func TestEgressAdmissionExpiredAndAllSubmissionFailuresKeepOwningLimits(t *testi
 			processes[1].values["submission/"+kind+"/"+outcome]++
 		}
 	}
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	if len(alerts) != 3 {
 		t.Fatalf("findings = %d, want expired plus each submission kind", len(alerts))
 	}
@@ -252,12 +307,13 @@ func TestEgressAdmissionPagesWhenFullProbesFailWithoutAnySubmission(t *testing.T
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	runEgressAdmissionTest(t, signal, now, previous)
 	now = now.Add(time.Minute)
 	processes[1].values["full/attempted"] += 8
 	processes[1].values["full/failed"] += 8
 	processes[1].values["pass_error/canceled"]++
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	alert := requireAlertClass(t, alerts, "egress-full-no-submission")
 	if alert.Severity != SeverityPage || alert.Frame != "control-plane" {
 		t.Fatalf("full no-submission alert identity = %+v", alert)
@@ -278,10 +334,11 @@ func TestEgressAdmissionPagesForUnfundedProberWithoutProviderAttempts(t *testing
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	runEgressAdmissionTest(t, signal, now, previous)
 	now = now.Add(time.Minute)
 	processes[1].values["pass_error/funding_unavailable"]++
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	alert := requireAlertClass(t, alerts, "egress-prober-unfunded")
 	if alert.Severity != SeverityPage || alert.Frame != "shared-prober" {
 		t.Fatalf("unfunded alert identity = %+v", alert)
@@ -301,10 +358,11 @@ func TestEgressAdmissionUnknownFundingCannotBecomeUnfundedOrHealthy(t *testing.T
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	runEgressAdmissionTest(t, signal, now, previous)
 	now = now.Add(time.Minute)
 	processes[1].values["pass_error/funding_unknown"]++
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	alert := requireAlertClass(t, alerts, "egress-prober-funding-unobservable")
 	if alert.Severity != SeverityWarn || !strings.Contains(alert.Markdown(), "does not establish insufficient credit") {
 		t.Fatalf("unknown funding lost its observation qualifier: %+v", alert)
@@ -322,9 +380,10 @@ func TestEgressAdmissionMissingFundingSeriesRemainsUnobservable(t *testing.T) {
 		processes := egressAdmissionTestProcesses(now)
 		processes[1].omit = missing
 		signal := NewEgressAdmissionSignal()
-		runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+		previous := egressAdmissionTestJson(t, now, processes)
+		runEgressAdmissionTest(t, signal, now, previous)
 		now = now.Add(time.Minute)
-		alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+		alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 		requireAlertClass(t, alerts, "egress-admission-unobservable")
 		if requireAlertClassCount(alerts, "egress-prober-unfunded") != 0 {
 			t.Fatal("missing producer capability manufactured a funding failure")
@@ -336,11 +395,12 @@ func TestEgressAdmissionMixedTelemetryPreservesKnownFailure(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
-	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	previous := egressAdmissionTestJson(t, now, processes)
+	runEgressAdmissionTest(t, signal, now, previous)
 	now = now.Add(time.Minute)
 	processes[0].omit = "enabled"
 	processes[1].values["submission/health/error_or_unknown"]++
-	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes), previous)
 	requireAlertClass(t, alerts, "egress-admission-unobservable")
 	requireAlertClass(t, alerts, "egress-submission-unacknowledged")
 }
@@ -351,12 +411,13 @@ func TestEgressAdmissionRepeatedScrapeAndLongGapRemainUnobservable(t *testing.T)
 		processes := egressAdmissionTestProcesses(now)
 		signal := NewEgressAdmissionSignal()
 		body := egressAdmissionTestJson(t, now, processes)
+		previous := body
 		runEgressAdmissionTest(t, signal, now, body)
 		later := now.Add(gap)
 		if gap > 0 {
 			body = egressAdmissionTestJson(t, later, processes)
 		}
-		requireAlertClass(t, runEgressAdmissionTest(t, signal, later, body), "egress-admission-unobservable")
+		requireAlertClass(t, runEgressAdmissionTest(t, signal, later, body, previous), "egress-admission-unobservable")
 	}
 }
 
@@ -365,8 +426,8 @@ func TestEgressAdmissionBoundedInvalidResponseAndQueryContract(t *testing.T) {
 	if strings.Contains(query, `}{`) || !strings.Contains(query, `urnetwork_egress_probe_pass_providers_total{env="synthetic",job=~"taskworker",schedule="full"}`) {
 		t.Fatalf("full-pass selector is not one valid, bounded label matcher: %s", query)
 	}
-	if strings.Count(query, `"monitor_egress_part","timestamp"`) != 9 || strings.Count(query, `"monitor_egress_part","value"`) != 9 {
-		t.Fatal("every fixed family needs its source timestamp; query cost changed")
+	if strings.Count(query, `"monitor_egress_part","timestamp"`) != 18 || strings.Count(query, `"monitor_egress_part","value"`) != 18 {
+		t.Fatal("each of the nine fixed families needs current and historical values with original timestamps")
 	}
 	for _, forbidden := range []string{"provider_id", "client_id", "network_id", "shard", "group_left", "query_range"} {
 		if strings.Contains(query, forbidden) {

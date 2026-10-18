@@ -16,7 +16,7 @@ and continue until the operator ends the run or its requested duration expires.
 Use two explicit, long-lived agent roles for every pass; reuse the same agents
 so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-6-sol` agent at `medium` reasoning ("Sol Medium") owns monitor execution,
+- A `gpt-6.1-sol` agent at `low` reasoning ("Sol Low") owns monitor execution,
   the monitor-test gates, and initial evidence work: preflight, immutable binary,
   authoritative watcher and tails, alert capture, bounded read-only failure
   fact collection, initial triage, evidence-authority checks, focused reruns,
@@ -26,29 +26,49 @@ so their evidence context and open causal boundaries remain intact:
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
-- A `gpt-6-astra` agent at `max` reasoning ("Astra Max") owns all
+- A `gpt-6.1-sol` agent at `medium` reasoning ("Sol Medium") owns all
   post-triage root-cause debugging, bounded read-only discriminator collection,
-  and repair for every new, changed, or unresolved causal boundary. Astra
-  consumes Sol's initial alert/triage manifest, inspects bounded relevant
+  and repair for every new, changed, or unresolved causal boundary.
+  Sol Medium consumes Sol Low's initial alert/triage manifest, inspects bounded relevant
   source, collects only the precise missing production fact under the same
-  authority and privacy rules, and runs local deterministic controls. Every
+  authority and privacy rules, and authors local deterministic controls for
+  Sol Low to run. Every
   self-improvement fix to the probes, shared monitoring utilities, signal
-  catalog, or this harness also belongs to Astra Max.
+  catalog, or this harness also belongs to Sol Medium.
 
-For each such boundary, Sol sends an initial deterministic delta and triage
+For each such boundary, Sol Low sends an initial deterministic delta and triage
 manifest referencing the prior ledger record and object hashes described below;
 group shared dependency/artifact/rollout failures and keep unrelated causes
 separate. Never paste full all-signal Markdown, logs, raw evidence, or test
-output into a model handoff. Astra pulls the complete Alert and only bounded
+output into a model handoff. Sol Medium pulls the complete Alert and only bounded
 relevant source objects by hash on demand, then records any precise additional
-fact it collects. Astra returns cause/patch/regressions/prerequisites/window;
-Sol returns independent gate manifests. Keep both agents and the watcher
+fact it collects. Sol Medium returns cause/patch/regressions/prerequisites/window;
+Sol Low returns independent gate manifests. Keep both agents and the watcher
 alive unless safe promotion requires a handoff.
 
-The primary agent owns the append-only run ledger. Sol and Astra produce
+The primary agent owns the append-only run ledger. Sol Low and Sol Medium produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
 must not append ledger records themselves. This keeps process/session ownership,
 production mutation authority, and the single-writer chain in one place.
+
+## Unresolved issue handoff
+
+When Sol Medium cannot resolve an issue, write a concise Markdown handoff to
+`factury/monitor/alerts/` under the mono root (a sibling of `server/`). Create
+that directory if needed. Use one stable file per issue and update it as new
+evidence arrives, so another developer can pick it up without repeating the
+investigation. Do not silently escalate to another model.
+
+Include the alert identity and severity, observed times, confirmed impact,
+evidence paths and hashes, source/artifact identity, ranked hypotheses,
+what was tried and its results, deterministic reproducer/test status,
+false-positive and false-negative qualifiers, and the exact remaining question
+and next action. Keep credentials, raw customer identifiers, raw SQL, and private
+log contents out of the handoff; reference restricted evidence files instead.
+Check `factury/HANDOFF-MONITOR.md`, `factury/HANDOFF-MONITOR2.md` when present,
+and existing alert handoffs before assigning work already owned by another
+developer. Record the handoff path and owner in the run ledger; keep the finding
+open and continue monitoring and independent work.
 
 ## Agent contract
 
@@ -58,8 +78,8 @@ all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
 Every investigation and root-cause handoff must explicitly report
-`false_positive_qualifiers` and `false_negative_qualifiers`. Sol records
-initial authority/source-completeness boundaries; Astra records the
+`false_positive_qualifiers` and `false_negative_qualifiers`. Sol Low records
+initial authority/source-completeness boundaries; Sol Medium records the
 post-triage candidate discriminator, its observation authority, source
 completeness, and healthy control, then decides whether the evidence establishes
 a real probe boundary. When it does, update the owning numbered
@@ -71,9 +91,9 @@ qualifier from speculation, suppress the original symptom, or wait for the
 daily research pass to record a discriminator learned during an active
 incident.
 
-This is context-delivery optimization only: use Sol at medium to run the
+This is context-delivery optimization only: use Sol 6.1 at low reasoning to run the
 monitor tests, deterministic monitoring, initial failure fact collection, and
-triage; retain Astra at max for all post-triage debugging, bounded fact
+triage; retain Sol 6.1 at medium reasoning for all post-triage debugging, bounded fact
 collection, and repair. Monitor tests are harness gates, never an implicit part
 of a production probe invocation. Never silently change those roles or efforts,
 skip a severity, lose warnings or `cannot-observe`, or delete/truncate evidence.
@@ -174,10 +194,10 @@ Before the first production command:
    topology; and
 5. resolve each host endpoint from its current owning inventory and verify its
    remote hostname before any privileged action; and
-6. have Sol run the local monitor tests before trusting a newly built
+6. have Sol Low run the local monitor tests before trusting a newly built
    detector; and
-7. have Sol capture and triage bounded initial facts for every failed gate or
-   alert before handing its manifest to Astra Max for debugging and repair.
+7. have Sol Low capture and triage bounded initial facts for every failed gate or
+   alert before handing its manifest to Sol Medium for debugging and repair.
 
 The normal workstation mode is `overlay`; use `lan` only from a host with the
 configured LAN routes. An explicit `-ssh-key` may be repeated when the SSH
@@ -200,9 +220,9 @@ test -d "$WARP_HOME/vault"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
@@ -268,15 +288,23 @@ Use one-shot mode for an initial inventory, a focused before/after snapshot, or
 manual diagnosis:
 
 ```sh
+set -euo pipefail
 test -n "$BRINGYOUR_HOME"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapshot.XXXXXXXX")
+monitor_snapshot_warpctl=$("$BRINGYOUR_HOME/warp/warpctl/run.sh" --print-executable)
+test -x "$monitor_snapshot_warpctl"
+go version -m "$monitor_snapshot_warpctl" >"$monitor_snapshot_dir/warpctl.version.txt"
+rg -q 'vcs\.revision=[0-9a-f]{40}$' "$monitor_snapshot_dir/warpctl.version.txt"
+rg -q 'vcs\.modified=(true|false)$' "$monitor_snapshot_dir/warpctl.version.txt"
+shasum -a 256 "$monitor_snapshot_warpctl" >"$monitor_snapshot_dir/warpctl.sha256"
+monitor_snapshot_warpctl_dir=$(dirname "$monitor_snapshot_warpctl")
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_snapshot_dir/monitor"
 test -x "$monitor_snapshot_dir/monitor"
 monitor_exit=0
-WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
+PATH="$monitor_snapshot_warpctl_dir:$PATH" WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -output "$monitor_snapshot_dir/alerts.partial.md" \
   2>"$monitor_snapshot_dir/stderr.log" || monitor_exit=$?
 if rg -qx '<!-- monitor-alerts-complete -->' "$monitor_snapshot_dir/alerts.partial.md"; then
@@ -326,7 +354,7 @@ selectors are mutually exclusive; empty, unknown, or ambiguous includes fail
 closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
 
 ```sh
-WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
+PATH="$monitor_snapshot_warpctl_dir:$PATH" WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -include-signal edge-ipv6 -include-signal 20.2 \
   -format jsonl -output "$monitor_snapshot_dir/alerts.partial.jsonl" \
   && mv "$monitor_snapshot_dir/alerts.partial.jsonl" "$monitor_snapshot_dir/alerts.jsonl"
@@ -342,15 +370,36 @@ snapshot is an empty file. As with Markdown, parse only the promoted
 Build a unique immutable binary and keep its artifacts together:
 
 ```sh
+set -euo pipefail
 test -n "$BRINGYOUR_HOME"
-install -d -m 700 "$BRINGYOUR_HOME/monitor"
+install -d -m 700 "$BRINGYOUR_HOME/monitor" "$BRINGYOUR_HOME/temp"
 umask 077
 monitor_run_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.watch.XXXXXXXX")
-go build -o "$monitor_run_dir/monitor" ./cli/monitor
+monitor_build_tmp_dir=$(mktemp -d "${GOTMPDIR:-$BRINGYOUR_HOME/temp}/server-monitor-build.XXXXXXXX")
+GOTMPDIR="$monitor_build_tmp_dir" go build -o "$monitor_run_dir/monitor" ./cli/monitor
+rmdir "$monitor_build_tmp_dir"
 chmod 700 "$monitor_run_dir/monitor"
 test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
-monitor_warpctl=$(command -v warpctl)
+```
+
+Before building, record the selected Go executable, its version and effective
+`GOROOT`; an explicit toolchain override must pair the executable with its
+matching installation. Check free space on the temporary filesystem. The
+private `GOTMPDIR` above avoids a small default `/tmp`; an already configured
+`GOTMPDIR` selects its parent instead. Preserve a failed build's diagnostics and
+temporary workspace. A prior `package ... is not in std` failure does not
+establish that the installation remains incomplete when current source checks
+show the files exist.
+
+Resolve the host-native collector through the existing checkout launcher and
+record it before starting the watcher. Run the selector in Bash; a failed
+selection or identity check stops before watcher contact:
+
+```sh
+# monitor-warpctl-launch-selector
+set -euo pipefail
+monitor_warpctl=$("$BRINGYOUR_HOME/warp/warpctl/run.sh" --print-executable)
 test -n "$monitor_warpctl"
 test -x "$monitor_warpctl"
 go version -m "$monitor_warpctl" >"$monitor_run_dir/warpctl.version.txt"
@@ -359,12 +408,13 @@ rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
 shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
 monitor_warpctl_dir=$(dirname "$monitor_warpctl")
 PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
-  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m \
+  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m -slack-alerts=false \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
 
-The watcher's stderr carries one notifier line at startup:
+The command above disables external notifications explicitly. For a watcher
+started with notifications enabled, stderr carries one notifier line at startup:
 `monitor: Slack alert notifications enabled: ...` when
 `vault/main/monitor.yml` `alerts.slack_webhook_url` is set, or
 `monitor: Slack alert notifications disabled: ...` when it is empty or not an
@@ -395,17 +445,25 @@ webhook does not make it stale. A posting watcher does go stale on a rotation
 and needs the normal handoff. `-once` never posts. Never print the webhook to
 check it: the startup line is the evidence.
 
-Treat the exact Warpctl resolved by the watcher as part of the immutable
-observation boundary. Before launch, require its `go version -m` output to carry
+Treat the exact native Warpctl selected by the checkout launcher as part of the
+immutable observation boundary. Before launch, require its `go version -m`
+output to carry
 a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
 that its source revision contains every collector capability assumed by the
 active catalog. In particular, §1.5 requires the Loki live-tail cursor guard at
 Warp commit `d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`. Do not infer capability
-from the HEAD of a nearby checkout while an older executable appears first on
-ambient `PATH`. Build through the existing local Warp checkout convention when
-the resolved executable is stale, then pin only this watcher invocation's
+from the HEAD of a nearby checkout or from an ambient `PATH` entry. Executable
+mode and readable Go metadata can both pass for a foreign-architecture binary;
+they do not prove host compatibility. The launcher selects the Makefile's
+host-native artifact without executing Warpctl or contacting Main. Build through
+the existing local Warp checkout convention when that artifact is stale, then
+pin only this watcher invocation's
 `PATH` to the validated executable directory. This does not alter Warpctl's
-release/build architecture or install anything on managed hosts.
+release/build architecture, edit shell profiles, or install anything on managed
+hosts. A current wrong `PATH` proves a launch-selection defect, not the cause of
+an earlier watcher's termination or a production-service failure. Native path
+selection alone does not prove a child started; retain the loaded-image and
+standing-tail evidence below.
 
 Check support for the effective `services.yml` schema as well as collector
 capabilities, both before launch and after a settings-generation change. A
@@ -534,12 +592,12 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Sol and Astra may prepare manifests;
-they do not append. Do not allow two agents to append in parallel.
+make its old physical layout valid JSONL.
+Sol Low and Sol Medium may prepare manifests; they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a
-primary-agent-owned session handle with Sol validating the binary, parent,
+primary-agent-owned session handle with Sol Low validating the binary, parent,
 tails, files, and cadence through read-only checks. A handoff is complete only
 after the receiver can poll the exact session handle; sharing a PID, run
 directory, lock file, or narrative status is insufficient. If this execution
@@ -592,8 +650,8 @@ current watcher stopped observing.
 For a temporary exact-edge pause, preserve all other coverage:
 
 ```sh
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-edge-ipv6-host HOSTNAME
 ```
 
@@ -604,8 +662,8 @@ exact public IPv6 paths.
 For a whole-host pause, use repeatable exact inventory names:
 
 ```sh
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
-  -min-probe-cadence=15m \
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m -slack-alerts=false \
   -exclude-host HOSTNAME
 ```
 
@@ -865,7 +923,7 @@ Use the existing SSH and Warpctl transports and the commands documented in
 host while trying to improve denominator coverage.
 
 For a two-reconciliation closure gate, retain the exact `monitor-log-reconcile `
-prefix plus schema-1 JSON from the current watcher generation's stderr artifact.
+prefix plus supported versioned JSON from the current watcher generation's stderr artifact.
 Require `collectors=enabled=fresh=consecutive_two > 0`, matching the intended
 collector inventory. Check `collector_started_at`, `previous_window_start`,
 `latest_window_start`, `previous_completed_at`, and `latest_completed_at`:
@@ -877,7 +935,20 @@ source-record timestamps or live-stream liveness; retain those independent
 controls and the required no-loss window. Missing, malformed, stale, or
 partial-scope receipts leave completion unknown; alert absence alone is
 insufficient. This diagnostic does not change alert-only JSONL or invent
-healthy Alerts. See `SIGNALS.md` §1.5 and `MONITOR.md` §3.7 for the fixed schema.
+healthy Alerts. Schema 1 is aggregate-only; it cannot identify deficient
+collectors. Schema 2 uses `collector_scopes` with fixed public service keys
+alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+`scope_projection_complete`; this is identity completeness, not healthy
+coverage. Unsupported or duplicate services leave the scope map incomplete.
+Null, partial and future timestamps retain their authority qualifiers.
+`last_failure_present` does not identify HTTP429 or a cause. The `fresh` and
+`consecutive_two` booleans retain the original latest/pair predicates:
+`invalid-time` can coexist with `fresh=true` when another stored clock is
+future-dated. Such a row does not qualify a fully coherent time window; do not
+silently rewrite aggregate booleans. An older retained scope Alert is not a
+same-receipt row. Update version-aware readers before promotion; never
+reconstruct predecessor scope rows from aggregate ranges. See `SIGNALS.md`
+§1.5 and `MONITOR.md` §3.7 for the fixed schema.
 
 ## Daily three-way improvement research
 
@@ -923,13 +994,13 @@ Research all three directions:
    observation failure are explicit candidates, but become probe rules only
    when a bounded discriminator and healthy control establish them.
 
-Sol Medium owns the reproducible crosswalk, registry/test inventory, current
+Sol Low owns the reproducible crosswalk, registry/test inventory, current
 watcher delta, initial failure fact collection and triage, and independent test
-and verification manifests. Astra Max owns all post-triage bounded
+and verification manifests. Sol Medium owns all post-triage bounded
 investigation/fact collection, root-cause debugging, causal discrimination,
 false-positive/false-negative boundaries, and every self-improvement repair to
-a probe, shared monitoring utility, signal catalog, or this harness. Astra
-writes the smallest source and deterministic-test correction; Sol reruns the
+a probe, shared monitoring utility, signal catalog, or this harness. Sol Medium
+writes the smallest source and deterministic-test correction; Sol Low reruns the
 relevant tests and verifies the repaired observation boundary independently.
 The primary agent reviews their manifests, writes the single chained ledger
 record, and owns all source and production authority decisions.
@@ -973,7 +1044,7 @@ an expected test name with `action=fail`, or native exit 1 alone, is insufficien
 Separately classify preflight, missing synthetic fixtures, compile failures,
 retry-wrapped setup panics and outer timeouts, and preserve those failed attempts
 without calling them reproductions. Pin the complete local-only resource profile
-and expose the first failure with the existing fail-fast gate setting; never use
+and expose the first failure with `WARP_TEST_ENV_FAIL_FAST=1`; never use
 production resources to make a fixture pass. Any derived metric in an evidence
 receipt must carry its unit and expression so rates per second and per minute
 cannot be silently exchanged.
@@ -1102,7 +1173,7 @@ the reviewed replacement command. `pg-query-sample` stays registered; retain
 all other signals, URL floors, exclusions, host concurrency and standing tails.
 A disabled/expired sample is coverage failure, not a healthy database.
 
-Before promotion, Sol independently verifies focused reducer/cadence/CLI
+Before promotion, Sol Low independently verifies focused reducer/cadence/CLI
 controls and the full sequential monitor/package, race and vet gates below.
 Verify actual SQL classification and authority guards against the attested
 local fixture; never use Main to test a query. The recurring state must survive
@@ -1140,6 +1211,15 @@ that budget; require an immediate qualified coverage failure, never an invented
 completion. Startup priority must leave standing log ingestion running and
 delay ordinary active probes by at most the same finite owner. Recurring
 priority must include an ordinary-work fairness control.
+For a late global grant, inspect the optional fixed `run_slot_holders` enqueue
+and pre-grant snapshots in that same receipt. Their at-most-four code-owned
+signal keys and monotonic grant ages identify the calls holding permits, not
+their internal work or whether the delay was avoidable. Unknown keys, invalid
+clocks and unavailable snapshots remain explicit; two snapshots are not a
+complete grant/release timeline. Follow the observed owning signal before
+proposing a scheduling change. Preserve the inclusive 40-second owner, existing caps,
+cadence and first-miss coverage alert; observation alone does not fix sampling
+availability or explain a historical receipt without these facts.
 Gate the actual remote adapter against bounded local executable/connection,
 SQL authority/schema/PGSS, statement-timeout, capped-stderr/output and stalled
 child controls, with a complete12-frame healthy parser control. Psql phase
@@ -1154,11 +1234,11 @@ triaging absent, stale, partial, disabled or overdue query evidence.
 
 ## Deterministic verification gates
 
-Every confirmed problem needs an Astra Max-authored synthetic regression. The
+Every confirmed problem needs a Sol Medium-authored synthetic regression. The
 test should construct the smallest input that reproduces the causal failure
-without production access or wall-clock sleeps. Sol Medium runs the narrow,
+without production access or wall-clock sleeps. Sol Low runs the narrow,
 package, race, and vet gates below and supplies the initial failure facts and
-triage manifest before Astra begins the repair. Cover, as applicable:
+triage manifest before Sol Medium begins the repair. Cover, as applicable:
 
 - the failing observation and exact alert identity;
 - a healthy boundary and threshold edge;
@@ -1173,14 +1253,33 @@ Run the narrow test first, then the package and race suite:
 
 ```sh
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor -run "TestRelevantName" -count=1'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -run "TestRelevantName" -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test ./monitor -count=1'
 bash -c \
-  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
+  'unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test -race ./monitor -count=1'
 go vet ./monitor
 git diff --check
 ```
+
+Set `WARP_TEST_ENV_FAIL_FAST=1` after successful `test-env.sh` sourcing for
+every narrow, package, and race gate. `TestEnv.Run` otherwise permits a failed
+fixture attempt to pass on retry; the release setting limits it to one attempt,
+including explicit positive `RerunCount` values. Ordinary `testing.T` tests do
+not use that retry wrapper. Go's `-failfast` flag stops later tests and does not
+disable fixture retries. Keep `-count=1` so qualification runs the native tests.
+
+Retain each gate's exact launcher and argv, toolchain, source/config hashes,
+and relevant environment fingerprint. For the full and race gates, bind the
+actual native test child's `WARP_TEST_ENV_FAIL_FAST == "1"` observation to its
+PID, start identity, executable, and output receipts. A launcher-side assertion
+or printed Boolean alone proves only intended inheritance. A separate native
+inheritance control plus the existing hermetic release-fail-fast fixture proves
+the launcher boundary without provisioning databases. A short plain-`testing.T`
+narrow test can finish before an external environment read; preserve that limit
+and its actual result without inventing a native-child receipt. An older PASS
+without the required environment evidence remains an actual PASS, with
+first-attempt qualification unproved for retry-wrapped fixtures.
 
 `WARP_ENV=main` selects the production probe target; it is not a Go-test
 environment. Run the monitor package and race gates sequentially in separate
@@ -1194,6 +1293,22 @@ the watcher, and let each subshell leave that parent state unchanged on exit.
 Do not overlap the package and race gates: although no fixed-path collision is
 established, they share local PostgreSQL, proxy, CPU, and process capacity, so
 overlap can create load-dependent failures and is not formal gate evidence.
+
+Signal, timeout, and native-child experiments must not share an active native
+database fixture, even when they issue no SQL. Use an independently owned
+disposable fixture. Reuse of an idle fixture requires proof of exact PID, PPID,
+PGID and SID ownership and database noninterference through child termination;
+a terminal status and joined local launcher do not establish that proof. The
+primary agent owns that reuse admission after the fixture's prior consumers
+have terminated.
+
+The 2026-10-17 local qualification retains its first failed attempt: PostgreSQL
+logged SIGKILL at 07:20:57.408Z, followed by one connection loss and 32 setup
+refusals during recovery. The primary agent had authorized a separate timeout
+control that overlapped that window. Filesystem receipt clocks, status 137 and
+local join did not identify the signal sender. Preserve the original failure,
+authorization and clock provenance when separately admitting a fresh run after
+readiness succeeds; neither temporal overlap nor a later PASS resolves causality.
 
 Run the owning repository's full release-relevant tests for product fixes. A
 focused test is not sufficient when the change affects generated service

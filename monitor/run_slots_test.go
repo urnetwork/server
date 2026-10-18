@@ -100,7 +100,7 @@ func TestPgQuerySampleQueueDeadlineIsVisibleOnFirstCadence(t *testing.T) {
 			t.Fatal("shared-slot owner budget changed")
 		}
 		alert := visibilityAlert(settings, s, err)
-		if alert.Sustain != 1 || !strings.Contains(alert.Observed, "phase=shared-slot-admission") || !strings.Contains(alert.Observed, "source_contact_attempted=false") || !strings.Contains(alert.Observed, "last_completed_at=unknown") {
+		if alert.Sustain != 1 || !strings.Contains(alert.Observed, "phase=global-run-slot-admission") || !strings.Contains(alert.Observed, "source_contact_attempted=false") || !strings.Contains(alert.Observed, "last_completed_at=unknown") {
 			t.Fatal("precontact loss invented a source observation or hid its phase")
 		}
 		if got := newCadenceAlertGate().filter(s, Alerts{alert}); len(got) != 1 {

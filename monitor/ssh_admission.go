@@ -41,7 +41,11 @@ type sshAdmissionBackend interface {
 	acquire(context.Context, string) (func() error, error)
 }
 
-type sshAdmissionUnavailableError struct{ err error }
+// The local failure stage is independent of any wrapped lifecycle cause.
+type sshAdmissionUnavailableError struct {
+	err   error
+	phase sshAdmissionFailurePhase
+}
 
 func (self *sshAdmissionUnavailableError) Error() string {
 	return "local shared SSH admission unavailable"
