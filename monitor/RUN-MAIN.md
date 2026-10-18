@@ -54,17 +54,23 @@ production mutation authority, and the single-writer chain in one place.
 ## Unresolved issue handoff
 
 When Sol Medium cannot resolve an issue, write a concise Markdown handoff to
-`factury/monitor/alerts/` under the mono root (a sibling of `server/`). Create
-that directory if needed. Use one stable file per issue and update it as new
-evidence arrives, so another developer can pick it up without repeating the
-investigation. Do not silently escalate to another model.
+`factury/monitor/alerts/` under the mono root (a sibling of `server/`). For each
+new issue, create one stable directory `alerts/<issue>/` containing `message.md`
+and `log.yml`. Keep the current handoff in `message.md`; append chronological
+entries to `log.yml` summarizing all decisions and work, including ownership,
+evidence reviewed, attempted actions, results, verification and next steps.
+Record UTC timestamps and distinguish proposals from actions actually taken.
+Update both as work continues so another developer can pick up the issue
+without repeating the investigation. Existing flat alert files may remain in
+place; check both layouts before creating a duplicate. Do not silently escalate
+to another model.
 
 Include the alert identity and severity, observed times, confirmed impact,
 evidence paths and hashes, source/artifact identity, ranked hypotheses,
 what was tried and its results, deterministic reproducer/test status,
 false-positive and false-negative qualifiers, and the exact remaining question
 and next action. Keep credentials, raw customer identifiers, raw SQL, and private
-log contents out of the handoff; reference restricted evidence files instead.
+log contents out of both files; reference restricted evidence files instead.
 Check `factury/HANDOFF-MONITOR.md`, `factury/HANDOFF-MONITOR2.md` when present,
 and existing alert handoffs before assigning work already owned by another
 developer. Record the handoff path and owner in the run ledger; keep the finding
