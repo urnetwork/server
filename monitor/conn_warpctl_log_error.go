@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 const warpctlLogDiagnosticLimit = 64 * 1024
@@ -28,6 +29,7 @@ const (
 type warpctlLogQueryError struct {
 	class         string
 	responseShape string
+	retryAfter    time.Time
 	err           error
 }
 
@@ -69,7 +71,7 @@ func newWarpctlLogQueryError(err error, stderr string) *warpctlLogQueryError {
 	if class == observationErrorClassLogHttp429 {
 		responseShape = warpctlLog429ResponseShape(err, stderr)
 	}
-	return &warpctlLogQueryError{class: class, responseShape: responseShape, err: err}
+	return &warpctlLogQueryError{class: class, responseShape: responseShape, retryAfter: warpctlLogRetryAfter(err, stderr, false), err: err}
 }
 
 // HTTP500 uses the same complete owned trace grammar as the response hint,
