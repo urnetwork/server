@@ -4767,8 +4767,8 @@ func primeFullTunMixed(
 	if err := waitForRouteCount(ctx, providerRouteStateObserver, 2); err != nil {
 		return fmt.Errorf("wait for provider promotion: %w", err)
 	}
-	observedClient.ContractManager().AddNoContractPeer(providerClientId)
-	path.providerClient.ContractManager().AddNoContractPeer(observedClient.ClientId())
+	// Both payload carriers remain selectable and need real relay authority.
+	// Peer-local no-contract permission cannot replace that authorization.
 	deviceStatsBefore := path.deviceStats.Snapshot()
 	providerStatsBefore := path.providerStats.Snapshot()
 	if err := probeFullTunPath(ctx, path); err != nil {

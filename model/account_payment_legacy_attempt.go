@@ -29,6 +29,8 @@ type LegacyProviderPaymentAttempt struct {
 	WalletAddress   string
 	Blockchain      string
 	WalletNetworkId *server.Id
+	// Keep the attempt in reconciliation, but never correct its amounts twice.
+	CorrectionJournaled bool
 }
 
 const legacyProviderPaymentAttemptSql = `
@@ -50,10 +52,11 @@ const legacyProviderPaymentAttemptSql = `
 func GetLegacyProviderPaymentAttempts(ctx context.Context) (attempts []*LegacyProviderPaymentAttempt, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		type attemptWallet struct {
-			paymentId       server.Id
-			walletAddress   *string
-			blockchain      *string
-			walletNetworkId *server.Id
+			paymentId           server.Id
+			walletAddress       *string
+			blockchain          *string
+			walletNetworkId     *server.Id
+			correctionJournaled bool
 		}
 		attemptWallets := []attemptWallet{}
 		result, err := conn.Query(
@@ -63,7 +66,8 @@ func GetLegacyProviderPaymentAttempts(ctx context.Context) (attempts []*LegacyPr
 				p.payment_id,
 				w.wallet_address,
 				w.blockchain,
-				w.network_id
+				w.network_id,
+				`+legacyProviderPaymentCorrectionJournaledSql("p.payment_id")+`
 			FROM account_payment p
 			LEFT JOIN account_wallet w ON w.wallet_id = p.wallet_id
 			WHERE `+legacyProviderPaymentAttemptSql+`
@@ -73,7 +77,7 @@ func GetLegacyProviderPaymentAttempts(ctx context.Context) (attempts []*LegacyPr
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var row attemptWallet
-				server.Raise(result.Scan(&row.paymentId, &row.walletAddress, &row.blockchain, &row.walletNetworkId))
+				server.Raise(result.Scan(&row.paymentId, &row.walletAddress, &row.blockchain, &row.walletNetworkId, &row.correctionJournaled))
 				attemptWallets = append(attemptWallets, row)
 			}
 		})
@@ -87,8 +91,9 @@ func GetLegacyProviderPaymentAttempts(ctx context.Context) (attempts []*LegacyPr
 				continue
 			}
 			attempt := &LegacyProviderPaymentAttempt{
-				Payment:         payment,
-				WalletNetworkId: row.walletNetworkId,
+				Payment:             payment,
+				WalletNetworkId:     row.walletNetworkId,
+				CorrectionJournaled: row.correctionJournaled,
 			}
 			if row.walletAddress != nil {
 				attempt.WalletAddress = *row.walletAddress

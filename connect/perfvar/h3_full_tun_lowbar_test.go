@@ -795,6 +795,26 @@ func subtractH3FullTunReceive(
 	start clientconnect.ClientReceiveStatsSnapshot,
 	end clientconnect.ClientReceiveStatsSnapshot,
 ) clientconnect.ClientReceiveStatsSnapshot {
+	var ackRouteWriteFailures *clientconnect.AckRouteWriteFailureStatsSnapshot
+	if end.AckRouteWriteFailures != nil {
+		// Missing evidence is optional; a first failure starts from zero.
+		var before clientconnect.AckRouteWriteFailureStatsSnapshot
+		if start.AckRouteWriteFailures != nil {
+			before = *start.AckRouteWriteFailures
+		}
+		after := end.AckRouteWriteFailures
+		ackRouteWriteFailures = &clientconnect.AckRouteWriteFailureStatsSnapshot{
+			ErrorCount:          after.ErrorCount - before.ErrorCount,
+			RouteTimeoutCount:   after.RouteTimeoutCount - before.RouteTimeoutCount,
+			CallerCanceledCount: after.CallerCanceledCount - before.CallerCanceledCount,
+			CallerDeadlineCount: after.CallerDeadlineCount - before.CallerDeadlineCount,
+			SelectorClosedCount: after.SelectorClosedCount - before.SelectorClosedCount,
+			OtherCount:          after.OtherCount - before.OtherCount,
+			BlockedCount:        after.BlockedCount - before.BlockedCount,
+			WaitDuration:        after.WaitDuration - before.WaitDuration,
+			MaxWait:             after.MaxWait,
+		}
+	}
 	return clientconnect.ClientReceiveStatsSnapshot{
 		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
 		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
@@ -837,6 +857,7 @@ func subtractH3FullTunReceive(
 		AckRouteWriteCountByTransport:          subtractH3FullTunCarrierCounters(start.AckRouteWriteCountByTransport, end.AckRouteWriteCountByTransport),
 		AckRouteWriteWaitByTransport:           subtractH3FullTunCarrierCounters(start.AckRouteWriteWaitByTransport, end.AckRouteWriteWaitByTransport),
 		AckRouteWriteTimeoutByTransport:        subtractH3FullTunCarrierCounters(start.AckRouteWriteTimeoutByTransport, end.AckRouteWriteTimeoutByTransport),
+		AckRouteWriteFailures:                  ackRouteWriteFailures,
 	}
 }
 

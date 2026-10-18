@@ -224,16 +224,21 @@ func TestReliableExchangeQueueSaturationPreservesFramedOrder(t *testing.T) {
 	clientconnect.MessagePoolReturn(got)
 }
 
-func TestExchangeGenerationRetiresAfterAnyUndeliveredFrame(t *testing.T) {
-	if !pooledMessageSendKeepsGeneration(pooledMessageSendDelivered) {
-		t.Fatal("delivered exchange frame retired its generation")
-	}
-	for _, result := range []pooledMessageSendResult{
-		pooledMessageSendDropped,
-		pooledMessageSendDone,
+// A queue refusal consumes a complete message without writing its stream bytes.
+// This policy control is not proof of either actual owner-loop recovery path.
+func TestExchangeGenerationKeepsCompleteRefusalButStopsDone(t *testing.T) {
+	for _, c := range []struct {
+		result pooledMessageSendResult
+		keep   bool
+	}{
+		{result: pooledMessageSendDelivered, keep: true},
+		{result: pooledMessageSendDropped, keep: true},
+		{result: pooledMessageSendDone, keep: false},
+		{result: pooledMessageSendResult(-1), keep: false},
+		{result: pooledMessageSendResult(99), keep: false},
 	} {
-		if pooledMessageSendKeepsGeneration(result) {
-			t.Fatalf("undelivered exchange result=%d kept a gapped generation", result)
+		if got := pooledMessageSendKeepsGeneration(c.result); got != c.keep {
+			t.Errorf("exchange result=%d keeps generation=%t, want %t", c.result, got, c.keep)
 		}
 	}
 }
@@ -332,7 +337,7 @@ func TestProductionSocketReadersDeclareExactReceiveLanes(t *testing.T) {
 	}
 }
 
-func TestResidentForwardCallbackRetiresFullIngressWithoutWaiting(t *testing.T) {
+func TestResidentForwardCallbackRefusesFullIngressWithoutWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	clientId := server.NewId()
@@ -373,8 +378,8 @@ func TestResidentForwardCallbackRetiresFullIngressWithoutWaiting(t *testing.T) {
 	}
 	select {
 	case <-ctx.Done():
+		t.Fatal("complete forward refusal retired unrelated resident flows")
 	default:
-		t.Fatal("reliable forward refusal did not retire the resident generation")
 	}
 	clientconnect.MessagePoolReturn(message)
 	if !clientconnect.MessagePoolReturn(witness) {
@@ -495,9 +500,12 @@ func TestResidentClientCallbacksContainOnlyZeroWaitIngressWork(t *testing.T) {
 				"MessagePoolShareReadOnly(transferFrameBytes)",
 				"case queue <- message:",
 				"default:",
-				"self.cancel()",
+				"self.releaseForwardIngress(shared)",
+				"recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward,",
 			},
 			forbidden: []string{
+				"self.cancel()",
+				"self.Cancel()",
 				"stateLock.",
 				"HasActiveContract(",
 				"NewResidentForward(",

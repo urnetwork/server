@@ -78,25 +78,45 @@ func TestExchangeConnectionWritevForwardImmediateClose(t *testing.T) {
 // all vector slots while the closed connection and shared-root witnesses remain live.
 func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outcome string) {
 	t.Helper()
+	testExchangeConnectionWritevTerminalBatchWithFailure(t, op, outcome, nil)
+}
+
+// The failure hook is local to one fixture invocation and runs only after the
+// first real writer owns its message and the next pair has three pool shares.
+func testExchangeConnectionWritevTerminalBatchWithFailure(
+	t testing.TB,
+	op ExchangeOp,
+	outcome string,
+	beforeBatchAdmissionForTest func(*exchangeWritevFixtureOwner),
+) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	owner := newExchangeWritevFixtureOwner(t, cancel)
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	owner.listener = listener
 
 	settings := DefaultExchangeSettings()
 	settings.ExchangePingTimeout = time.Hour
 	settings.WriteTimeout = time.Second
 	const batchCount = 32
 	const payloadSize = 8 * 1024
+	const pressureBatchCount = 16
+	const pressureDrainFrameCount = 8
+	queuedMessageCount := batchCount
+	if outcome == "partial_timeout" {
+		queuedMessageCount *= pressureBatchCount
+	}
 	if settings.ExchangeBufferSize != 4096 || settings.ExchangeWriteBatchCount != 256 ||
 		settings.ExchangeWriteBatchByteCount != batchCount*payloadSize || settings.FramerSettings.MaxMessageLen != 16*1024 {
 		t.Fatal("fixture no longer exercises the resident's production queue and batch bounds")
 	}
 
-	peerFinished := make(chan error, 1)
+	owner.peerDone = make(chan struct{})
+	peerDrainRequests := make(chan chan error)
+	var peerDrainedWireBytes atomic.Int64
 	peerReadBatch := make(chan struct{})
 	peerRelease := make(chan struct{})
 	peerSettings := *settings
@@ -104,10 +124,14 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 	// partway through the second payload. Framing is unchanged.
 	peerSettings.ExchangeReadBufferByteCount = 16
 	go func() {
-		peerFinished <- func() error {
+		defer close(owner.peerDone)
+		owner.peerErr = func() error {
 			peer, err := listener.AcceptTCP()
 			if err != nil {
 				return err
+			}
+			if !owner.acceptPeer(peer) {
+				return ctx.Err()
 			}
 			defer peer.Close()
 			readBufferSize := 4096
@@ -170,11 +194,48 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 				}
 			}
 			close(peerReadBatch)
-			select {
-			case <-peerRelease:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
+			// Later targets drain exactly eight framed messages' worth of bytes
+			// from already successful batches. The original partial prefix stays
+			// verified above, and every following header/body byte is checked.
+			peerWireByteOffset := payloadSize + exchangeIOFrameHeaderByteCount + exchangeIOFrameHeaderByteCount + 17
+			var drain []byte
+			var frameHeader [exchangeIOFrameHeaderByteCount]byte
+			binary.BigEndian.PutUint16(frameHeader[:2], payloadSize)
+			for {
+				select {
+				case result := <-peerDrainRequests:
+					if drain == nil {
+						drain = make([]byte, pressureDrainFrameCount*(payloadSize+exchangeIOFrameHeaderByteCount))
+					}
+					err := func() error {
+						if _, err := io.ReadFull(buffer.connReader(peer), drain); err != nil {
+							return err
+						}
+						for i, got := range drain {
+							offset := peerWireByteOffset + i
+							frameIndex := offset / (payloadSize + exchangeIOFrameHeaderByteCount)
+							frameOffset := offset % (payloadSize + exchangeIOFrameHeaderByteCount)
+							want := byte(frameIndex%batchCount/2 + 1)
+							if frameOffset < exchangeIOFrameHeaderByteCount {
+								want = frameHeader[frameOffset]
+							}
+							if got != want {
+								return fmt.Errorf("pressure drain wire byte %d = %d, want %d", offset, got, want)
+							}
+						}
+						peerWireByteOffset += len(drain)
+						peerDrainedWireBytes.Add(int64(len(drain)))
+						return nil
+					}()
+					result <- err
+					if err != nil {
+						return err
+					}
+				case <-peerRelease:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}()
 	}()
@@ -199,11 +260,14 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	owner.connection = connection
 	firstDequeued := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var dequeuedBatches int
 	var writesBeforeBatch int64
+	var batchWriteStarted atomic.Bool
+	var previousNativeBatchFull atomic.Bool
+	var peerDrainErr error
 	connection.afterSendDequeueForTest = func() {
 		dequeuedBatches++
 		if dequeuedBatches == 1 {
@@ -214,12 +278,132 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 			}
 		} else if dequeuedBatches == 2 {
 			writesBeforeBatch = socket.writes.Load()
+			batchWriteStarted.Store(true)
+		} else if outcome == "partial_timeout" {
+			if !previousNativeBatchFull.Load() {
+				peerDrainErr = fmt.Errorf("pressure drain requested without a fully written predecessor")
+				connection.Cancel()
+				return
+			}
+			// The single writer owns its next target. Drain only bytes from
+			// prior full native batches, then begin its unchanged write deadline.
+			result := make(chan error, 1)
+			select {
+			case peerDrainRequests <- result:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case peerDrainErr = <-result:
+				if peerDrainErr != nil {
+					connection.Cancel()
+				}
+			case <-ctx.Done():
+			}
 		}
 	}
 	before := snapshotExchangeIO("sent", "data")
+	// Only immutable scalar/error observations cross the native writer boundary.
+	type batchWriteResult struct {
+		messageCount   int
+		err            error
+		elapsed        time.Duration
+		connectionDone bool
+		parentErr      error
+	}
+	var batchWriteMessages atomic.Pointer[batchWriteResult]
+	batchWriteResults := make(chan *batchWriteResult, pressureBatchCount)
+	type nativeWritevResult struct {
+		messageCount     int
+		writtenByteCount int64
+		err              error
+	}
+	var nativeWritev atomic.Pointer[nativeWritevResult]
+	var nativeWritevCalls atomic.Int64
+	// Only the writer appends; the test reads the history after owner join.
+	nativeHistory := make([]nativeWritevResult, 0, pressureBatchCount)
+	connection.sendBuffer.afterWritevForTest = func(messageCount int, writtenByteCount int64, writeErr error) {
+		result := nativeWritevResult{
+			messageCount:     messageCount,
+			writtenByteCount: writtenByteCount,
+			err:              writeErr,
+		}
+		nativeHistory = append(nativeHistory, result)
+		nativeWritevCalls.Add(1)
+		nativeWritev.Store(&result)
+		previousNativeBatchFull.Store(messageCount == batchCount && writtenByteCount == batchCount*(payloadSize+4) && writeErr == nil)
+	}
+	observationStarted := time.Now()
+	connection.afterSendWriteForTest = func(messageCount int, writeErr error) {
+		if 1 < messageCount {
+			result := &batchWriteResult{
+				messageCount:   messageCount,
+				err:            writeErr,
+				elapsed:        time.Since(observationStarted),
+				connectionDone: connection.IsDone(),
+				parentErr:      ctx.Err(),
+			}
+			batchWriteMessages.Store(result)
+			nativeResult := nativeWritev.Load()
+			nativeWrittenByteCount := int64(-1)
+			var nativeWriteErr error
+			if nativeResult != nil {
+				nativeWrittenByteCount = nativeResult.writtenByteCount
+				nativeWriteErr = nativeResult.err
+			}
+			after := snapshotExchangeIO("sent", "data")
+			t.Logf("native_pressure_batch index=%d batch_messages=%d native_bytes=%d native_error=%v write_error=%v complete_frames=%v complete_frame_wire_bytes=%v drained_wire_bytes=%d return_elapsed=%s parent_error=%v",
+				nativeWritevCalls.Load(), messageCount, nativeWrittenByteCount, nativeWriteErr, writeErr, after.frames-before.frames, after.bytes-before.bytes, peerDrainedWireBytes.Load(), result.elapsed, result.parentErr)
+			select {
+			case batchWriteResults <- result:
+			case <-ctx.Done():
+			}
+		}
+	}
+	logBatchWrite := func(phase string) {
+		result := batchWriteMessages.Load()
+		nativeResult := nativeWritev.Load()
+		nativeMessageCount, nativeWrittenByteCount := 0, int64(-1)
+		var nativeWriteErr error
+		if nativeResult != nil {
+			nativeMessageCount = nativeResult.messageCount
+			nativeWrittenByteCount = nativeResult.writtenByteCount
+			nativeWriteErr = nativeResult.err
+		}
+		batchStarted := batchWriteStarted.Load()
+		fallbackWrites := int64(-1)
+		if batchStarted {
+			fallbackWrites = socket.writes.Load() - writesBeforeBatch
+		}
+		messageCount, elapsed, doneAtReturn := 0, time.Duration(0), false
+		var writeErr error
+		if result != nil {
+			messageCount, writeErr = result.messageCount, result.err
+			elapsed, doneAtReturn = result.elapsed, result.connectionDone
+		}
+		var timeoutError net.Error
+		writeTimeout := errors.As(writeErr, &timeoutError) && timeoutError.Timeout()
+		peerPrefixReady, ownerJoined := false, false
+		select {
+		case <-peerReadBatch:
+			peerPrefixReady = true
+		default:
+		}
+		select {
+		case <-connection.done:
+			ownerJoined = true
+		default:
+		}
+		after := snapshotExchangeIO("sent", "data")
+		t.Logf("native_write_observation phase=%s batch_started=%t batch_returned=%t batch_messages=%d write_error=%v write_timeout=%t return_elapsed=%s done_at_return=%t complete_frames=%v complete_frame_wire_bytes=%v peer_prefix_ready=%t done=%t owner_joined=%t parent_error=%v deadlines=%d fallback_writes=%d native_writev_calls=%d native_writev_messages=%d native_writev_bytes=%d native_writev_error=%v drained_wire_bytes=%d queued_messages=%d",
+			phase, batchStarted, result != nil, messageCount, writeErr, writeTimeout, elapsed, doneAtReturn,
+			after.frames-before.frames, after.bytes-before.bytes, peerPrefixReady, connection.IsDone(), ownerJoined, ctx.Err(),
+			socket.deadlines.Load(), fallbackWrites, nativeWritevCalls.Load(), nativeMessageCount, nativeWrittenByteCount, nativeWriteErr, peerDrainedWireBytes.Load(), queuedMessageCount)
+	}
 	first := clientconnect.MessagePoolCopy([]byte("first"))
-	witnesses := [][]byte{retainResidentPoolWitness(first)}
-	if result := connection.sendMessage(ctx.Done(), first, nil, time.Second); result != pooledMessageSendDelivered {
+	firstIndex := owner.keepPending(first)
+	owner.witnesses = append(owner.witnesses, retainResidentPoolWitness(first))
+	if result := connection.sendMessage(ctx.Done(), owner.takePending(firstIndex), nil, time.Second); result != pooledMessageSendDelivered {
 		t.Fatalf("first admission = %v", result)
 	}
 	select {
@@ -229,15 +413,20 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 	}
 	// Two accepted frames share each root, while a third reference stays in the
 	// test. This detects missing or duplicate returns without relying on gc.
-	for i := range batchCount / 2 {
-		message := clientconnect.MessagePoolCopy(bytes.Repeat([]byte{byte(i + 1)}, payloadSize))
+	for i := range queuedMessageCount / 2 {
+		message := clientconnect.MessagePoolCopy(bytes.Repeat([]byte{byte(i%(batchCount/2) + 1)}, payloadSize))
+		messageIndex := owner.keepPending(message)
 		if cap(message) != payloadSize+clientconnect.MessagePoolMetaByteCount {
 			t.Fatal("expected an exact pooled protocol-frame root")
 		}
 		shared := clientconnect.MessagePoolShareReadOnly(message)
-		witnesses = append(witnesses, retainResidentPoolWitness(message))
-		for _, offered := range [][]byte{message, shared} {
-			if result := connection.sendMessage(ctx.Done(), offered, nil, time.Second); result != pooledMessageSendDelivered {
+		sharedIndex := owner.keepPending(shared)
+		owner.witnesses = append(owner.witnesses, retainResidentPoolWitness(message))
+		if i == 0 && beforeBatchAdmissionForTest != nil {
+			beforeBatchAdmissionForTest(owner)
+		}
+		for _, index := range []int{messageIndex, sharedIndex} {
+			if result := connection.sendMessage(ctx.Done(), owner.takePending(index), nil, time.Second); result != pooledMessageSendDelivered {
 				t.Fatalf("batch admission = %v", result)
 			}
 		}
@@ -246,26 +435,47 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 	if outcome == "success" {
 		select {
 		case <-peerReadBatch:
-		case err := <-peerFinished:
-			t.Fatalf("peer ended before complete batch: %v", err)
+		case <-owner.peerDone:
+			t.Fatalf("peer ended before complete batch: %v", owner.peerErr)
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
 	} else {
+		if outcome == "partial_timeout" {
+			failedBatch := false
+			for range pressureBatchCount {
+				select {
+				case result := <-batchWriteResults:
+					failedBatch = result.err != nil
+				case <-ctx.Done():
+					logBatchWrite("guard_timeout")
+					t.Fatal("bounded native pressure did not produce a terminal write")
+				}
+				if failedBatch {
+					break
+				}
+			}
+			if !failedBatch {
+				logBatchWrite("all_pressure_batches_full")
+				t.Fatal("bounded native pressure fully wrote every batch; no partial timeout was exercised")
+			}
+		}
 		// The real failed write cancels Run. Done is cancellation; Close below
 		// additionally joins socket workers and drains both ownership queues.
 		select {
 		case <-connection.Done():
 		case <-ctx.Done():
+			logBatchWrite("guard_timeout")
 			t.Fatal("native batch did not terminate")
 		}
 	}
 	connection.Close()
+	logBatchWrite("after_terminal_join")
 	close(peerRelease)
 	select {
-	case err := <-peerFinished:
-		if err != nil {
-			t.Fatal(err)
+	case <-owner.peerDone:
+		if owner.peerErr != nil {
+			t.Fatal(owner.peerErr)
 		}
 	case <-ctx.Done():
 		t.Fatal("peer did not join")
@@ -277,14 +487,41 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 			t.Fatal("peer did not consume the verified partial frame prefix")
 		}
 	}
-	if dequeuedBatches != 2 || socket.deadlines.Load() != 3 || socket.writes.Load() != writesBeforeBatch {
-		t.Fatalf("expected header, singleton, then one native writev: batches=%d deadlines=%d fallback writes=%d",
+	wantDequeuedBatches := 2
+	var terminalCompletedFrameCount int64
+	if outcome == "partial_timeout" {
+		wantDequeuedBatches = 1 + len(nativeHistory)
+		if result := batchWriteMessages.Load(); result == nil || len(nativeHistory) == 0 {
+			t.Errorf("native terminal write result missing: %+v", result)
+		} else {
+			nativeResult := nativeHistory[len(nativeHistory)-1]
+			if frameCount, err := exchangeWritevPartialTimeoutFrameCount(nativeResult.writtenByteCount, payloadSize+4, batchCount, nativeResult.err, result.parentErr); err != nil {
+				t.Error(err)
+			} else {
+				terminalCompletedFrameCount = frameCount
+			}
+		}
+		if len(nativeHistory) == 0 || pressureBatchCount < len(nativeHistory) {
+			t.Errorf("native pressure batch count = %d, want 1..%d", len(nativeHistory), pressureBatchCount)
+		}
+		if peerDrainErr != nil {
+			t.Errorf("pressure peer drain failed: %v", peerDrainErr)
+		}
+		wantDrainedWireBytes := int64(max(0, len(nativeHistory)-1) * pressureDrainFrameCount * (payloadSize + exchangeIOFrameHeaderByteCount))
+		if peerDrainedWireBytes.Load() != wantDrainedWireBytes {
+			t.Errorf("pressure drained %d wire bytes, want %d", peerDrainedWireBytes.Load(), wantDrainedWireBytes)
+		}
+	}
+	if dequeuedBatches != wantDequeuedBatches || socket.deadlines.Load() != int64(wantDequeuedBatches+1) || socket.writes.Load() != writesBeforeBatch {
+		t.Fatalf("expected header, singleton, then bounded native batches: batches=%d deadlines=%d fallback writes=%d",
 			dequeuedBatches, socket.deadlines.Load(), socket.writes.Load()-writesBeforeBatch)
 	}
 	if len(connection.send) != 0 || len(connection.receive) != 0 {
 		t.Fatal("joined connection retained queued messages")
 	}
-	requireResidentPoolOwnersReturned(t, witnesses, "joined native writev")
+	if err := owner.close(); err != nil {
+		t.Error(err)
+	}
 	after := snapshotExchangeIO("sent", "data")
 	frames, wireBytes := after.frames-before.frames, after.bytes-before.bytes
 	switch outcome {
@@ -293,8 +530,20 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 	case "immediate_close":
 		requireExchangeIODelta(t, "sent", "data", before, 1, 9)
 	case "partial_timeout":
-		if frames < 2 || batchCount+1 <= frames || wireBytes != 9+(frames-1)*(payloadSize+4) {
-			t.Errorf("partial metrics = %v frames/%v bytes, want a completed frame prefix only", frames, wireBytes)
+		completedBatchFrameCount := terminalCompletedFrameCount
+		for i, result := range nativeHistory {
+			if result.messageCount != batchCount {
+				t.Errorf("native batch %d has %d messages, want %d", i, result.messageCount, batchCount)
+			}
+			if i < len(nativeHistory)-1 {
+				if result.err != nil || result.writtenByteCount != batchCount*(payloadSize+4) {
+					t.Errorf("pressure predecessor %d was not fully written: %+v", i, result)
+				}
+				completedBatchFrameCount += result.writtenByteCount / (payloadSize + 4)
+			}
+		}
+		if frames != float64(1+completedBatchFrameCount) || wireBytes != float64(9+completedBatchFrameCount*(payloadSize+4)) {
+			t.Errorf("native pressure accounting = %v frames/%v bytes, want %d frames/%d bytes", frames, wireBytes, 1+completedBatchFrameCount, 9+completedBatchFrameCount*(payloadSize+4))
 		}
 	}
 	vector := connection.sendBuffer.writeBuffers
@@ -308,7 +557,7 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 		}
 	}
 	t.Logf("outcome=%s frames=%v wire_bytes=%v vector_len=%d vector_cap=%d retained_references=%d shared_payload_roots=%d",
-		outcome, frames, wireBytes, len(vector), cap(vector), retained, batchCount/2)
+		outcome, frames, wireBytes, len(vector), cap(vector), retained, queuedMessageCount/2)
 	if retained != 0 {
 		t.Errorf("closed ExchangeConnection retains %d borrowed writev references after returning payload ownership", retained)
 	}

@@ -95,7 +95,7 @@ var abuseDroppedCounter = prometheus.NewCounter(
 	},
 )
 
-// Receive-side queue refusals are loss signals for the end-to-end Transfer
+// Carrier/bridge queue refusals are loss signals for the end-to-end Transfer
 // recovery layer. The bounded label set identifies the exact carrier/bridge
 // boundary without creating per-client series.
 const (
@@ -105,6 +105,8 @@ const (
 	receiveQueueBoundaryExchangeAcceptForward   = "exchange_accept_forward"
 	receiveQueueBoundaryExchangeOutboundSocket  = "exchange_outbound_socket"
 	receiveQueueBoundaryExchangeToResident      = "exchange_to_resident"
+	receiveQueueBoundaryExchangeTransportSend   = "exchange_transport_send"
+	receiveQueueBoundaryExchangeForwardSend     = "exchange_forward_send"
 	receiveQueueBoundaryResidentClientControl   = "resident_client_control"
 	receiveQueueBoundaryResidentClientForward   = "resident_client_forward"
 )
@@ -114,7 +116,7 @@ var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "receive_queue_dropped_messages",
-		Help:      "Complete Transfer messages dropped by zero-wait receive queue admission",
+		Help:      "Complete Transfer messages dropped before carrier or bridge queue admission",
 	},
 	[]string{"boundary"},
 )
@@ -124,7 +126,7 @@ var receiveQueueDroppedBytesCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "receive_queue_dropped_bytes",
-		Help:      "Complete Transfer message bytes dropped by zero-wait receive queue admission",
+		Help:      "Complete Transfer message bytes dropped before carrier or bridge queue admission",
 	},
 	[]string{"boundary"},
 )
@@ -349,6 +351,8 @@ func init() {
 		receiveQueueBoundaryExchangeAcceptForward,
 		receiveQueueBoundaryExchangeOutboundSocket,
 		receiveQueueBoundaryExchangeToResident,
+		receiveQueueBoundaryExchangeTransportSend,
+		receiveQueueBoundaryExchangeForwardSend,
 		receiveQueueBoundaryResidentClientControl,
 		receiveQueueBoundaryResidentClientForward,
 	} {
@@ -440,6 +444,9 @@ type ExchangeSettings struct {
 	// Nil retains the host TCP dialer. The exchange owns and closes successful
 	// returned connections.
 	DialContext connect.DialContextFunction
+	// Nil in production. Tests publish instance-owned barriers after the real
+	// header succeeds and before any connection worker starts, outside locks.
+	beforeExchangeConnectionRunForTest func(*ExchangeConnection)
 
 	ExchangeResidentTtl time.Duration
 
@@ -2207,6 +2214,9 @@ type ExchangeBuffer struct {
 	// The single writer allocates this only for a non-empty message that fits.
 	// Receive-only, idle, and oversized-only senders retain no payload scratch.
 	writeStorage []byte
+
+	// Test-only scalar observation after the real native writev returns.
+	afterWritevForTest func(messageCount int, writtenByteCount int64, writeErr error)
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
@@ -2352,6 +2362,9 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	// keeps its backing for the next batch.
 	buffers := self.writeBuffers
 	n, err := buffers.WriteTo(conn)
+	if callback := self.afterWritevForTest; callback != nil {
+		callback(len(transferFrameBytesBatch), n, err)
+	}
 	// A failed WriteTo leaves its unconsumed tail in the shared backing array.
 	// Drop those borrowed references before returning the payload ownership.
 	clear(self.writeBuffers)
@@ -2364,6 +2377,10 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		if frameByteCount <= n {
 			recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
 			n -= frameByteCount
+		} else {
+			// No later frame belongs to the completed prefix, even if it is
+			// smaller than the bytes written into this partial frame.
+			n = 0
 		}
 		connect.MessagePoolReturn(transferFrameBytes)
 	}
@@ -2453,6 +2470,12 @@ type ExchangeConnection struct {
 	// locks after a socket worker has taken or transferred queue ownership.
 	afterReceiveEnqueueForTest func([]byte)
 	afterSendDequeueForTest    func()
+	// Prepublished, nil by default; nonblocking scalar observation only. The
+	// consumed message is never exposed after its ownership has transferred.
+	afterSendMessageForTest func(pooledMessageSendResult, int)
+
+	// Test-only scalar completion observer, assigned before the first send.
+	afterSendWriteForTest func(messageCount int, writeErr error)
 }
 
 func NewExchangeConnection(
@@ -2550,6 +2573,9 @@ func NewExchangeConnection(
 		host:              host,
 		port:              port,
 		trackActiveMetric: true,
+	}
+	if beforeRun := settings.beforeExchangeConnectionRunForTest; beforeRun != nil {
+		beforeRun(connection)
 	}
 	exchangeActiveConnectionsGauge.WithLabelValues("outbound", exchangeOpMetricLabel(header.Op)).Inc()
 	go server.HandleError(connection.Run, cancel)
@@ -2693,6 +2719,9 @@ func (self *ExchangeConnection) Run() {
 				trace = beginH1RelayLineageBatch("exchange_socket_write_begin", self.header.ClientId, self.header.ResidentId, batch)
 			}
 			err := self.sendBuffer.WriteMessages(self.conn, batch)
+			if callback := self.afterSendWriteForTest; callback != nil {
+				callback(len(batch), err)
+			}
 			if h1RelayLineageTraceEnabled {
 				endH1RelayLineageBatch(trace, "exchange_socket_write_end", err == nil)
 			}
@@ -2783,19 +2812,25 @@ func (self *ExchangeConnection) sendMessage(
 	timer *time.Timer,
 	timeout time.Duration,
 ) pooledMessageSendResult {
+	messageByteCount := len(message)
+	result := pooledMessageSendDone
 	if !self.sendAdmission.start() {
 		connect.MessagePoolReturn(message)
-		return pooledMessageSendDone
+	} else {
+		defer self.sendAdmission.done()
+		result = sendPooledMessage(
+			ctxDone,
+			self.Done(),
+			self.send,
+			message,
+			timer,
+			timeout,
+		)
 	}
-	defer self.sendAdmission.done()
-	return sendPooledMessage(
-		ctxDone,
-		self.Done(),
-		self.send,
-		message,
-		timer,
-		timeout,
-	)
+	if afterSend := self.afterSendMessageForTest; afterSend != nil {
+		afterSend(result, messageByteCount)
+	}
+	return result
 }
 
 func (self *ExchangeConnection) Close() {
@@ -2858,11 +2893,10 @@ const (
 	pooledMessageSendDone
 )
 
-// A timeout has already returned the skipped message to the pool, so the
-// framed connection may continue only after an actual enqueue. Done and drop
-// both retire this generation; reconnect starts from a recoverable boundary.
+// Complete messages refused before socket admission do not break framing.
+// Their retry/loss contract remains end-to-end; only live outcomes may continue.
 func pooledMessageSendKeepsGeneration(result pooledMessageSendResult) bool {
-	return result == pooledMessageSendDelivered
+	return result == pooledMessageSendDelivered || result == pooledMessageSendDropped
 }
 
 // pooledMessageSendAdmission joins queue producers with owner teardown without
@@ -3186,6 +3220,7 @@ func (self *ResidentTransport) Run() {
 							self.cancel()
 							return
 						}
+						messageByteCount := len(message)
 						var trace h1RelayLineageSpan
 						if h1RelayLineageTraceEnabled {
 							trace = beginH1RelayLineage("resident_transport_dequeue", self.clientId, self.instanceId, message, len(self.send), cap(self.send))
@@ -3198,6 +3233,9 @@ func (self *ResidentTransport) Run() {
 						)
 						if h1RelayLineageTraceEnabled {
 							trace.end("resident_transport_socket_admit", sendResult == pooledMessageSendDelivered, len(connection.send), cap(connection.send))
+						}
+						if sendResult == pooledMessageSendDropped {
+							recordReceiveQueueDrop(receiveQueueBoundaryExchangeTransportSend, messageByteCount)
 						}
 						if !pooledMessageSendKeepsGeneration(sendResult) {
 							return
@@ -3476,6 +3514,7 @@ func (self *ResidentForward) runWithResidentLookup(
 			}
 			// Capture the scalar charge while this stage still owns the frame.
 			// sendMessage consumes this exact owner on every outcome.
+			messageByteCount := len(message)
 			ledger := self.exchange.residentPayloadLedger()
 			var charge residentPayloadCharge
 			if ledger != nil {
@@ -3487,10 +3526,13 @@ func (self *ResidentForward) runWithResidentLookup(
 			if ledger != nil {
 				ledger.update(residentPayloadForwardOutput, self.clientId[15], charge, false)
 			}
-			if !pooledMessageSendKeepsGeneration(sendResult) {
-				if sendResult == pooledMessageSendDropped && glog.V(1) {
-					glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
+			if sendResult == pooledMessageSendDropped {
+				recordReceiveQueueDrop(receiveQueueBoundaryExchangeForwardSend, messageByteCount)
+				if glog.V(1) {
+					glog.Infof("[rf]drop saturated exchange %s->\n", self.clientId)
 				}
+			}
+			if !pooledMessageSendKeepsGeneration(sendResult) {
 				return
 			}
 		}
@@ -4380,12 +4422,10 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	default:
 		self.releaseForwardIngress(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
-		// This callback carries reliable Transfer frames. It cannot block the
-		// shared client receive loop, so retire this generation on saturation;
-		// reconnect/recovery can replay from a known sequence boundary.
-		self.cancel()
+		// Refuse this complete frame without retiring unrelated flows.
+		// The endpoint owns ack-required Transfer retries; no-ack loss is counted.
 		if glog.V(1) {
-			glog.Infof("[rf]retire ingress full %s->%s\n", sourceId, destinationId)
+			glog.Infof("[rf]drop ingress full %s->%s\n", sourceId, destinationId)
 		}
 	}
 }
