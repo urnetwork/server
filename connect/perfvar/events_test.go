@@ -673,8 +673,8 @@ func newLiveP2pRoute(t testing.TB, environment *routeEnvironment) *liveP2pRoute 
 		network.close()
 		t.Fatalf("wait for live P2P promotion: %v", err)
 	}
-	source.client.ContractManager().AddNoContractPeer(clientconnect.Id(destination.clientId))
-	destination.client.ContractManager().AddNoContractPeer(clientconnect.Id(source.clientId))
+	// Keep real contracts while platform fallback remains selectable.
+	// Peer-local no-contract permission does not authorize the exchange relay.
 	return fixture
 }
 

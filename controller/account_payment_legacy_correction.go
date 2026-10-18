@@ -276,7 +276,13 @@ func correctLegacyProviderPaymentGroups(
 		}
 		for _, paymentId := range decision.absentPaymentIds {
 			result.AbsentCount += 1
-			payment := attemptsById[paymentId].Payment
+			attempt := attemptsById[paymentId]
+			// Its uncertain submit stays in destination attribution above. The
+			// existing pair owns correction/resume; never reduce it a second time.
+			if attempt.CorrectionJournaled {
+				continue
+			}
+			payment := attempt.Payment
 			window, ok := windows[paymentId]
 			if !ok {
 				result.MissingWindowCount += 1

@@ -795,6 +795,29 @@ func subtractH3FullTunReceive(
 	start clientconnect.ClientReceiveStatsSnapshot,
 	end clientconnect.ClientReceiveStatsSnapshot,
 ) clientconnect.ClientReceiveStatsSnapshot {
+	var ackRouteWriteFailures *clientconnect.AckRouteWriteFailureStatsSnapshot
+	if end.AckRouteWriteFailures != nil {
+		// Missing evidence is optional; a first failure starts from zero.
+		var before clientconnect.AckRouteWriteFailureStatsSnapshot
+		if start.AckRouteWriteFailures != nil {
+			before = *start.AckRouteWriteFailures
+		}
+		after := end.AckRouteWriteFailures
+		// No new failure keeps the interval absent, including an old MaxWait.
+		if after.ErrorCount != before.ErrorCount {
+			ackRouteWriteFailures = &clientconnect.AckRouteWriteFailureStatsSnapshot{
+				ErrorCount:          after.ErrorCount - before.ErrorCount,
+				RouteTimeoutCount:   after.RouteTimeoutCount - before.RouteTimeoutCount,
+				CallerCanceledCount: after.CallerCanceledCount - before.CallerCanceledCount,
+				CallerDeadlineCount: after.CallerDeadlineCount - before.CallerDeadlineCount,
+				SelectorClosedCount: after.SelectorClosedCount - before.SelectorClosedCount,
+				OtherCount:          after.OtherCount - before.OtherCount,
+				BlockedCount:        after.BlockedCount - before.BlockedCount,
+				WaitDuration:        after.WaitDuration - before.WaitDuration,
+				MaxWait:             after.MaxWait,
+			}
+		}
+	}
 	return clientconnect.ClientReceiveStatsSnapshot{
 		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
 		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
@@ -837,38 +860,7 @@ func subtractH3FullTunReceive(
 		AckRouteWriteCountByTransport:          subtractH3FullTunCarrierCounters(start.AckRouteWriteCountByTransport, end.AckRouteWriteCountByTransport),
 		AckRouteWriteWaitByTransport:           subtractH3FullTunCarrierCounters(start.AckRouteWriteWaitByTransport, end.AckRouteWriteWaitByTransport),
 		AckRouteWriteTimeoutByTransport:        subtractH3FullTunCarrierCounters(start.AckRouteWriteTimeoutByTransport, end.AckRouteWriteTimeoutByTransport),
-		AckRouteWriteFailures:                  subtractH3FullTunAckRouteWriteFailures(start.AckRouteWriteFailures, end.AckRouteWriteFailures),
-	}
-}
-
-// Connect publishes the failure totals only after a failed ACK route write,
-// so a missing start is a zero baseline and an interval without a failure has
-// no totals either. MaxWait is a lifetime maximum, like AckRouteWriteMaxWait.
-// The result never aliases a lifetime snapshot.
-func subtractH3FullTunAckRouteWriteFailures(
-	start *clientconnect.AckRouteWriteFailureStatsSnapshot,
-	end *clientconnect.AckRouteWriteFailureStatsSnapshot,
-) *clientconnect.AckRouteWriteFailureStatsSnapshot {
-	if end == nil {
-		return nil
-	}
-	var baseline clientconnect.AckRouteWriteFailureStatsSnapshot
-	if start != nil {
-		baseline = *start
-	}
-	if end.ErrorCount == baseline.ErrorCount {
-		return nil
-	}
-	return &clientconnect.AckRouteWriteFailureStatsSnapshot{
-		ErrorCount:          end.ErrorCount - baseline.ErrorCount,
-		RouteTimeoutCount:   end.RouteTimeoutCount - baseline.RouteTimeoutCount,
-		CallerCanceledCount: end.CallerCanceledCount - baseline.CallerCanceledCount,
-		CallerDeadlineCount: end.CallerDeadlineCount - baseline.CallerDeadlineCount,
-		SelectorClosedCount: end.SelectorClosedCount - baseline.SelectorClosedCount,
-		OtherCount:          end.OtherCount - baseline.OtherCount,
-		BlockedCount:        end.BlockedCount - baseline.BlockedCount,
-		WaitDuration:        end.WaitDuration - baseline.WaitDuration,
-		MaxWait:             end.MaxWait,
+		AckRouteWriteFailures:                  ackRouteWriteFailures,
 	}
 }
 

@@ -226,16 +226,21 @@ func TestReliableExchangeQueueSaturationPreservesFramedOrder(t *testing.T) {
 	clientconnect.MessagePoolReturn(got)
 }
 
-func TestExchangeGenerationRetiresAfterAnyUndeliveredFrame(t *testing.T) {
-	if !pooledMessageSendKeepsGeneration(pooledMessageSendDelivered) {
-		t.Fatal("delivered exchange frame retired its generation")
-	}
-	for _, result := range []pooledMessageSendResult{
-		pooledMessageSendDropped,
-		pooledMessageSendDone,
+// A queue refusal consumes a complete message without writing its stream bytes.
+// This policy control is not proof of either actual owner-loop recovery path.
+func TestExchangeGenerationKeepsCompleteRefusalButStopsDone(t *testing.T) {
+	for _, c := range []struct {
+		result pooledMessageSendResult
+		keep   bool
+	}{
+		{result: pooledMessageSendDelivered, keep: true},
+		{result: pooledMessageSendDropped, keep: true},
+		{result: pooledMessageSendDone, keep: false},
+		{result: pooledMessageSendResult(-1), keep: false},
+		{result: pooledMessageSendResult(99), keep: false},
 	} {
-		if pooledMessageSendKeepsGeneration(result) {
-			t.Fatalf("undelivered exchange result=%d kept a gapped generation", result)
+		if got := pooledMessageSendKeepsGeneration(c.result); got != c.keep {
+			t.Errorf("exchange result=%d keeps generation=%t, want %t", c.result, got, c.keep)
 		}
 	}
 }
@@ -340,7 +345,7 @@ func TestProductionSocketReadersDeclareExactReceiveLanes(t *testing.T) {
 // boundary and its pooled bytes go back to the caller. Retiring here used to
 // discard every frame the generation held, in both directions, for a refusal
 // the frame's source recovers end to end by resending this one frame.
-func TestResidentForwardCallbackRefusesFullIngressWithoutRetiring(t *testing.T) {
+func TestResidentForwardCallbackRefusesFullIngressWithoutWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	clientId := server.NewId()
@@ -504,9 +509,12 @@ func TestResidentClientCallbacksContainOnlyZeroWaitIngressWork(t *testing.T) {
 				"MessagePoolShareReadOnly(transferFrameBytes)",
 				"case queue <- message:",
 				"default:",
-				"recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward",
+				"self.releaseForwardIngress(shared)",
+				"recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward,",
 			},
 			forbidden: []string{
+				"self.cancel()",
+				"self.Cancel()",
 				"stateLock.",
 				"HasActiveContract(",
 				"NewResidentForward(",

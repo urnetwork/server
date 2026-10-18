@@ -87,6 +87,14 @@ func legacyProviderPaymentReplacesSql(paymentIdExpression string) string {
 		paymentIdExpression, paymentIdExpression, legacyProviderPaymentReplacementEventType)
 }
 
+// Either role already belongs to an immutable correction pair. Its legacy
+// attempt still needs reconciliation, but cannot take another amount reduction.
+func legacyProviderPaymentCorrectionJournaledSql(paymentIdExpression string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM audit_account_payment correction
+		WHERE correction.event_id = %s AND correction.payment_id = %s AND correction.event_type IN ('%s','%s'))`,
+		paymentIdExpression, paymentIdExpression, legacyProviderPaymentReplacedEventType, legacyProviderPaymentReplacementEventType)
+}
+
 var ErrLegacyProviderPaymentAnchorUnavailable = errors.New("legacy provider payment has no sweep the earning admission accepts; replacement held")
 
 // The configured subsidy floor and the period over which the reliability
@@ -257,8 +265,8 @@ type legacyProviderPaymentReplacementDetails struct {
 // ReplaceLegacyProviderPayment cancels the exact observed legacy attempt and
 // inserts its corrected replacement in one transaction, journaled on both.
 // Refuses without a write when the attempt changed (including a retained
-// request appearing for its key), carries a bonus, belongs to a plan whose
-// sweep assignment is pending, or the correction would not reduce it.
+// request appearing for its key), already belongs to a correction pair, carries
+// a bonus, has pending sweep assignment, or the correction would not reduce it.
 func ReplaceLegacyProviderPayment(ctx context.Context, correction *LegacyProviderPaymentCorrection, policy *LegacyProviderPaymentCorrectionPolicy, observation string) (replacementPaymentId server.Id, returnErr error) {
 	original := correction.Original
 	if original == nil || original.WalletId == nil || original.BonusPayout != 0 || !correction.Changed() ||
@@ -305,6 +313,7 @@ func ReplaceLegacyProviderPayment(ctx context.Context, correction *LegacyProvide
 				WHERE p.payment_id = $1 AND p.payment_plan_id = $2 AND p.payout_byte_count = $3 AND p.min_sweep_time = $4 AND
 					p.subsidy_payout_nano_cents = $5 AND p.reliability_subsidy_nano_cents = $6 AND
 					p.bonus_payout_nano_cents = 0 AND NOT p.attribution_review_required AND
+					NOT `+legacyProviderPaymentCorrectionJournaledSql("p.payment_id")+` AND
 					NOT EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id = p.payment_id OR b.origin_payment_id = p.payment_id) AND
 					NOT `+paymentPlanAssignmentPendingSql+`
 			)

@@ -54,7 +54,7 @@ func snapshotExchangeIO(direction string, kind string) exchangeIOMetricSnapshot 
 }
 
 func requireExchangeIODelta(
-	t *testing.T,
+	t testing.TB,
 	direction string,
 	kind string,
 	before exchangeIOMetricSnapshot,
@@ -180,17 +180,29 @@ func TestExchangeBufferDoesNotRecordFailedFrame(t *testing.T) {
 	requireExchangeIODelta(t, "sent", "data", before, 0, 0)
 }
 
+// A partial middle frame cannot credit a smaller later frame, and every
+// accepted input owner is returned even after accounting stops.
 func TestExchangeBufferRecordsOnlyCompletedBatchPrefix(t *testing.T) {
 	settings := DefaultExchangeSettings()
 	buffer := NewDefaultExchangeBuffer(settings)
-	messageLengths := []int{23, 41, 67}
+	messageLengths := []int{23, 41, 7}
 	batch := make([][]byte, 0, len(messageLengths))
+	witnesses := make([][]byte, 0, len(messageLengths))
+	t.Cleanup(func() {
+		for i, witness := range witnesses {
+			if !connectlib.MessagePoolReturn(witness) {
+				t.Errorf("partial batch retained or over-returned input owner %d", i)
+			}
+		}
+	})
 	for _, messageLength := range messageLengths {
-		batch = append(batch, connectlib.MessagePoolGet(messageLength))
+		message := connectlib.MessagePoolGet(messageLength)
+		batch = append(batch, message)
+		witnesses = append(witnesses, connectlib.MessagePoolShareReadOnly(message))
 	}
 	firstFrameByteCount := exchangeIOFrameHeaderByteCount + messageLengths[0]
 	conn := &exchangeWriteBudgetConn{
-		remaining: firstFrameByteCount,
+		remaining: firstFrameByteCount + exchangeIOFrameHeaderByteCount + 16,
 		err:       errors.New("injected batch write failure"),
 	}
 
