@@ -123,6 +123,12 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
   customer identifiers, balances, contract IDs, or stream labels into a shell
   transcript, alert, test failure, commit, or agent response. Feed credentials
   on stdin through the existing monitor transports.
+- Treat `services.yml` `hidden_prefixes` as potentially capability-bearing
+  route locators, including those in ordinary configuration. When inspecting
+  config shape, check sequence and mapping types and emit only allowlisted
+  schema field names; never serialize configuration objects or values. On a
+  parse or shape failure, emit a fixed error without raw input, exception text,
+  or object representations.
 - Bind diagnostic-request fields by JSON name or a NUL-safe typed encoding;
   never unpack optional or secret-bearing fields with whitespace/TSV `read`.
   Before contact, assert the rendered argv separately from execution: an empty
