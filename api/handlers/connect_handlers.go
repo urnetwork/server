@@ -41,7 +41,7 @@ func GetClientKey(w http.ResponseWriter, r *http.Request) {
 	pathValues := router.GetPathValues(r)
 	clientId, err := server.ParseId(pathValues[0])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid client id.", http.StatusBadRequest)
 		return
 	}
 	args := &controller.GetClientKeyArgs{
@@ -62,7 +62,7 @@ func GetClientKeyHistory(w http.ResponseWriter, r *http.Request) {
 	pathValues := router.GetPathValues(r)
 	clientId, err := server.ParseId(pathValues[0])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid client id.", http.StatusBadRequest)
 		return
 	}
 	args := &controller.GetClientKeyHistoryArgs{

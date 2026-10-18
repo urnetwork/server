@@ -28,12 +28,13 @@ func requireVerifyEnabled(w http.ResponseWriter) bool {
 // (PLAN.md D-7): the protocol is self-authenticating — the body carries the
 // validator's client_id and an Ed25519 signature under that client's
 // registered key — and unknown callers are answered with indistinguishable
-// poisoned trails (§9).
+// poisoned trails (§9). A storage failure, such as the registered-key lookup's,
+// is answered 503 without its text (router.PrivateErrorsWithInput).
 func Verify(w http.ResponseWriter, r *http.Request) {
 	if !requireVerifyEnabled(w) {
 		return
 	}
-	router.WrapWithInputNoAuth(controller.Verify, w, r)
+	router.WrapWithInputNoAuth(router.PrivateErrorsWithInput(controller.Verify), w, r)
 }
 
 // GetVerifyKeys backs `GET /verify/keys`. Unauthenticated by design: the
@@ -92,6 +93,7 @@ func GetVerifyStats(w http.ResponseWriter, r *http.Request) {
 	}, w, r)
 }
 
+// A corrupt stored proof is answered 503 without its trail id or text.
 func GetVerifyProofs(w http.ResponseWriter, r *http.Request) {
 	if !requireVerifyEnabled(w) {
 		return
@@ -101,7 +103,7 @@ func GetVerifyProofs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad evidence query.", http.StatusBadRequest)
 		return
 	}
-	router.WrapNoAuth(func(s *session.ClientSession) (*controller.GetVerifyProofsResult, error) {
+	router.WrapNoAuth(router.PrivateErrors(func(s *session.ClientSession) (*controller.GetVerifyProofsResult, error) {
 		return controller.GetVerifyProofs(args, s)
-	}, w, r)
+	}), w, r)
 }

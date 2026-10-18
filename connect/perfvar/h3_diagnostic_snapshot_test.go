@@ -2,6 +2,7 @@ package perfvar
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,13 +11,15 @@ import (
 
 // Every published field gets a distinct nonzero sentinel. Adding an endpoint
 // counter without extending the diagnostic reducer must fail here instead of
-// quietly reporting a zero that could be mistaken for absence of loss.
+// quietly reporting a zero that could be mistaken for absence of loss. A
+// nested snapshot behind a pointer is a field of fields: each of those gets a
+// sentinel as well, and a gauge among them is named by its dotted path.
 func TestH3DiagnosticCounterDeltasCoverEveryField(t *testing.T) {
 	t.Run("receive", func(t *testing.T) {
 		testH3DiagnosticCounterDeltas(t, subtractH3FullTunReceive, map[string]bool{
 			"PackHandoffMaxCount": true, "PackHandoffMaxByteCount": true,
 			"PackHandoffAdaptiveMaxDepth": true, "PackHandoffAdaptiveMaxByteCount": true,
-			"AckRouteWriteMaxWait": true,
+			"AckRouteWriteMaxWait": true, "AckRouteWriteFailures.MaxWait": true,
 		})
 	})
 	t.Run("recovery", func(t *testing.T) {
@@ -55,19 +58,64 @@ func testH3DiagnosticCounterDeltas[T any](t *testing.T, subtract func(T, T) T, g
 	actual := reflect.ValueOf(subtract(start, end))
 	for index := range before.NumField() {
 		field := before.Type().Field(index).Name
-		want := after.Field(index)
-		if !gauges[field] {
-			want = h3DiagnosticSentinelDifference(t, before.Field(index), want)
-		}
+		want := h3DiagnosticSentinelDelta(t, field, before.Field(index), after.Field(index), gauges)
 		if !reflect.DeepEqual(actual.Field(index).Interface(), want.Interface()) {
 			t.Errorf("%s = %v, want %v", field, actual.Field(index).Interface(), want.Interface())
 		}
 	}
 	for field := range gauges {
-		if _, exists := before.Type().FieldByName(field); !exists {
+		if !h3DiagnosticFieldExists(before.Type(), field) {
 			t.Errorf("gauge manifest names nonexistent field %s", field)
 		}
 	}
+}
+
+// A gauge keeps its end value and a counter is its end minus its start. A
+// nested snapshot is reduced field by field under its dotted path.
+func h3DiagnosticSentinelDelta(
+	t *testing.T,
+	path string,
+	before reflect.Value,
+	after reflect.Value,
+	gauges map[string]bool,
+) reflect.Value {
+	t.Helper()
+	if gauges[path] {
+		return after
+	}
+	if after.Kind() != reflect.Pointer {
+		return h3DiagnosticSentinelDifference(t, before, after)
+	}
+	result := reflect.New(after.Type().Elem())
+	for index := range after.Elem().NumField() {
+		field := after.Elem().Type().Field(index).Name
+		result.Elem().Field(index).Set(h3DiagnosticSentinelDelta(
+			t,
+			path+"."+field,
+			before.Elem().Field(index),
+			after.Elem().Field(index),
+			gauges,
+		))
+	}
+	return result
+}
+
+// Resolves a dotted gauge path through nested snapshots.
+func h3DiagnosticFieldExists(snapshotType reflect.Type, path string) bool {
+	for _, name := range strings.Split(path, ".") {
+		if snapshotType.Kind() == reflect.Pointer {
+			snapshotType = snapshotType.Elem()
+		}
+		if snapshotType.Kind() != reflect.Struct {
+			return false
+		}
+		field, ok := snapshotType.FieldByName(name)
+		if !ok {
+			return false
+		}
+		snapshotType = field.Type
+	}
+	return true
 }
 
 func setH3DiagnosticSentinel(t *testing.T, value reflect.Value, seed int64) {
@@ -88,6 +136,16 @@ func setH3DiagnosticSentinel(t *testing.T, value reflect.Value, seed int64) {
 			setH3DiagnosticSentinel(t, entry, seed*int64(index+1))
 			value.SetMapIndex(reflect.ValueOf(carrier), entry)
 		}
+	case reflect.Pointer:
+		// a nested snapshot, whose own fields must each be classified
+		if value.Type().Elem().Kind() != reflect.Struct {
+			t.Fatalf("unclassified diagnostic field type %s", value.Type())
+		}
+		snapshot := reflect.New(value.Type().Elem())
+		for index := range snapshot.Elem().NumField() {
+			setH3DiagnosticSentinel(t, snapshot.Elem().Field(index), seed*int64(index+1))
+		}
+		value.Set(snapshot)
 	default:
 		t.Fatalf("unclassified diagnostic field type %s", value.Type())
 	}
@@ -145,5 +203,56 @@ func TestH3DiagnosticAckCarrierDeltasOwnNewCarrierMaps(t *testing.T) {
 		start.AckRouteWriteWaitByTransport[clientconnect.TransportTypeH1] != time.Second || end.AckRouteWriteWaitByTransport[clientconnect.TransportTypeH1] != 3*time.Second ||
 		start.AckRouteWriteTimeoutByTransport[clientconnect.TransportTypeH1] != 2 || end.AckRouteWriteTimeoutByTransport[clientconnect.TransportTypeH1] != 5 {
 		t.Fatal("diagnostic delta aliases a lifetime snapshot")
+	}
+}
+
+// Connect publishes ACK route failure totals only after a failed write. A
+// first failure inside the interval reduces against a zero baseline, an
+// interval without a new failure has no totals, and the delta owns its value.
+func TestH3DiagnosticAckRouteWriteFailureDeltas(t *testing.T) {
+	first := &clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:        3,
+		RouteTimeoutCount: 2,
+		OtherCount:        1,
+		BlockedCount:      2,
+		WaitDuration:      3 * time.Second,
+		MaxWait:           2 * time.Second,
+	}
+	later := &clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:          5,
+		RouteTimeoutCount:   3,
+		CallerCanceledCount: 1,
+		OtherCount:          1,
+		BlockedCount:        3,
+		WaitDuration:        5 * time.Second,
+		MaxWait:             4 * time.Second,
+	}
+	receive := func(failures *clientconnect.AckRouteWriteFailureStatsSnapshot) clientconnect.ClientReceiveStatsSnapshot {
+		return clientconnect.ClientReceiveStatsSnapshot{AckRouteWriteFailures: failures}
+	}
+
+	if delta := subtractH3FullTunReceive(receive(nil), receive(nil)).AckRouteWriteFailures; delta != nil {
+		t.Fatalf("an interval without any failure reported totals %+v", *delta)
+	}
+	delta := subtractH3FullTunReceive(receive(nil), receive(first)).AckRouteWriteFailures
+	if delta == nil || *delta != *first {
+		t.Fatalf("first failures against a zero baseline = %+v, want %+v", delta, *first)
+	}
+	if delta == first {
+		t.Fatal("the interval delta aliases the lifetime snapshot")
+	}
+	if delta := subtractH3FullTunReceive(receive(first), receive(first)).AckRouteWriteFailures; delta != nil {
+		t.Fatalf("an interval without a new failure reported totals %+v", *delta)
+	}
+	want := clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:          2,
+		RouteTimeoutCount:   1,
+		CallerCanceledCount: 1,
+		BlockedCount:        1,
+		WaitDuration:        2 * time.Second,
+		MaxWait:             4 * time.Second,
+	}
+	if delta := subtractH3FullTunReceive(receive(first), receive(later)).AckRouteWriteFailures; delta == nil || *delta != want {
+		t.Fatalf("later failures = %+v, want %+v", delta, want)
 	}
 }

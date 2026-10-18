@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,15 +33,36 @@ import (
 
 const wgHandoffSealedPrefix = "enc1:"
 
-var wgHandoffKey = sync.OnceValue(func() []byte {
+// A blank handoff_encryption_key would stretch to sha256(""), which anyone
+// can compute, so without one no blob is sealed or opened.
+func loadWgHandoffKey() ([]byte, error) {
 	wireguardKeys := Vault.RequireSimpleResource("wireguard.yml")
 	keyMaterial := wireguardKeys.RequireString("handoff_encryption_key")
+	if strings.TrimSpace(keyMaterial) == "" {
+		return nil, errors.New("wireguard.yml handoff_encryption_key is blank")
+	}
 	key := sha256.Sum256([]byte(keyMaterial))
-	return key[:]
-})
+	return key[:], nil
+}
 
-func wgHandoffAead() cipher.AEAD {
-	block, err := aes.NewCipher(wgHandoffKey())
+var wgHandoffKey = sync.OnceValues(loadWgHandoffKey)
+
+// Testing_ReloadWgHandoffKey loads the handoff key from the vault again, for a
+// test that pushed wireguard.yml. The returned pop restores the previous key.
+func Testing_ReloadWgHandoffKey() func() {
+	previous := wgHandoffKey
+	wgHandoffKey = sync.OnceValues(loadWgHandoffKey)
+	return func() {
+		wgHandoffKey = previous
+	}
+}
+
+func wgHandoffAead() (cipher.AEAD, error) {
+	key, err := wgHandoffKey()
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err)
 	}
@@ -48,18 +70,22 @@ func wgHandoffAead() cipher.AEAD {
 	if err != nil {
 		panic(err)
 	}
-	return aead
+	return aead, nil
 }
 
-// WgHandoffSeal encrypts a handoff blob for persistence.
-func WgHandoffSeal(plain []byte) string {
-	aead := wgHandoffAead()
+// WgHandoffSeal encrypts a handoff blob for persistence, or refuses without a
+// key.
+func WgHandoffSeal(plain []byte) (string, error) {
+	aead, err := wgHandoffAead()
+	if err != nil {
+		return "", err
+	}
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		panic(err)
 	}
 	sealed := aead.Seal(nonce, nonce, plain, nil)
-	return wgHandoffSealedPrefix + base64.StdEncoding.EncodeToString(sealed)
+	return wgHandoffSealedPrefix + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
 // WgHandoffOpen decrypts a persisted handoff blob. `sealed` reports whether
@@ -74,7 +100,10 @@ func WgHandoffOpen(value string) (plain []byte, sealed bool, err error) {
 	if err != nil {
 		return nil, true, err
 	}
-	aead := wgHandoffAead()
+	aead, err := wgHandoffAead()
+	if err != nil {
+		return nil, true, err
+	}
 	if len(raw) < aead.NonceSize() {
 		return nil, true, fmt.Errorf("sealed wg handoff too short")
 	}

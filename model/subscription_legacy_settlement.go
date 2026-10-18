@@ -227,8 +227,9 @@ func flushLegacySettlementWithExpiryPolicyInTx(ctx context.Context, tx server.Pg
 		return posts, !closed.Missing, false, legacySettlementBusyNone, nil
 	}
 	if !hasEscrow {
-		if closeOwner.Kind != ContractCloseOwnerSourceClient {
-			return nil, false, false, legacySettlementBusyNone, errContractFreeSettlementOwner
+		// the no-payout owner rule, before expiry continuation writes reports
+		if err := validateContractFreeSettlementOwnerInTx(ctx, tx, contractId); err != nil {
+			return nil, false, false, legacySettlementBusyNone, err
 		}
 		if needsExpiryContinuation && prepareExpiry {
 			if err := prepareLegacySettlementExpiryUsageInTx(ctx, tx, contractId, outcome, closeOwner); err != nil {
@@ -372,6 +373,7 @@ func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contrac
 }
 
 // Classify only errors returned by the bounded grant query, never later DML.
+// isSettlementPageCancellation applies the same rule to a stopped statement.
 func legacySettlementGrantWaitExpired(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {

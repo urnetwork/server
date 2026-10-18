@@ -5,10 +5,11 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
+	"net/http"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 // The server chooses the deployment; no request may select quota namespaces,
@@ -29,7 +30,7 @@ func StReserveAttemptUpload(ctx context.Context, accountId server.Id, size uint6
 		if errors.As(err, &rateLimit) {
 			return err
 		}
-		return fmt.Errorf("503 Attempt upload quota unavailable: %w", err)
+		return router.PrivateCause(http.StatusServiceUnavailable, "Attempt upload quota unavailable.", err)
 	}
 	return nil
 }

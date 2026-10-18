@@ -173,7 +173,13 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 			if returnErr == nil && escrow != nil && escrow.ContractId == admission.contractId {
 				publication = escrow
 			}
-			admission.recoverRetainedWithPublication(ctx, publication)
+			recoveryCtx := ctx
+			if publication == nil && ctx.Err() != nil {
+				// The foreground owner has joined. Cancellation cannot skip the
+				// bounded SQL custody check for its possibly rolled-back token.
+				recoveryCtx = context.WithoutCancel(ctx)
+			}
+			admission.recoverRetainedWithPublication(recoveryCtx, publication)
 		}
 	}()
 	escrow, returnErr = action(ctx)

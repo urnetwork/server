@@ -85,7 +85,8 @@ type SnGetWalletResult struct {
 	Error   *SnGetWalletError `json:"error,omitempty"`
 }
 
-func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, error) {
+func SnGetWallet(clientSession *session.ClientSession) (getResult *SnGetWalletResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
 	result := &SnGetWalletResult{Wallets: []SnWallet{}}

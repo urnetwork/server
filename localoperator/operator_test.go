@@ -320,8 +320,9 @@ func TestRefusalsReadAsTheClientReadsTheHandler(t *testing.T) {
 	if rejected(refusal).Error() != httpErr.Error() || !errors.Is(rejected(refusal), ingest.ErrRejected) {
 		t.Fatalf("in-process %q, HTTP %q", rejected(refusal), httpErr)
 	}
-	// a plain controller error is the 400 the attempt and location handlers answer
-	if got := rejected(refusalOf(errors.New("Unknown client."))).Error(); got != ingest.RejectedError(http.StatusBadRequest, "Unknown client.").Error() {
+	// a plain controller error is the 400 the attempt and location handlers
+	// answer: their fixed message, never the error's own text
+	if got := rejected(refusalOf(errors.New("synthetic plain controller error"))).Error(); got != ingest.RejectedError(http.StatusBadRequest, controller.ProviderEgressIngestFailedMessage).Error() {
 		t.Fatalf("plain controller error: %q", got)
 	}
 }

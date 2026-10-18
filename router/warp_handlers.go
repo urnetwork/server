@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -48,7 +50,9 @@ func (self *WarpStatusState) Handler(w http.ResponseWriter, r *http.Request) {
 	if session, err := session.NewClientSessionFromRequest(r); err == nil {
 		clientAddress = session.ClientAddress
 	} else {
-		clientAddress = fmt.Sprintf("error: %s", err.Error())
+		// the error quotes the peer address; the log keeps it
+		glog.Infof("[h]status client session error: %s\n", err)
+		clientAddress = "error"
 	}
 
 	status := self.Status()
@@ -65,7 +69,8 @@ func (self *WarpStatusState) Handler(w http.ResponseWriter, r *http.Request) {
 
 	responseJson, err := json.Marshal(result)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[h]status encoding error: %s\n", err)
+		http.Error(w, UnexpectedErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

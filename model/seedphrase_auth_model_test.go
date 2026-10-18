@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
@@ -100,9 +101,10 @@ func TestSeedphraseAlreadyExists(t *testing.T) {
 		_, err := GenerateSeedphrase(ctx, userId)
 		assert.Equal(t, err, nil)
 
-		// Second generate should fail
+		// Second generate should fail, with the error the controller answers
+		// as its existence check does
 		_, err = GenerateSeedphrase(ctx, userId)
-		assert.NotEqual(t, err, nil)
+		assert.Equal(t, errors.Is(err, ErrSeedphraseAuthExists), true)
 	})
 }
 

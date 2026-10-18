@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
@@ -29,6 +31,37 @@ type SnWalletMappingChallengeArgs struct {
 // The exact displayed bytes must be passed unchanged to the coldkey signer.
 type SnWalletMappingChallengeResult struct {
 	Message string `json:"message"`
+}
+
+// The refusals the wallet routes answer with their own words, which the apps,
+// the SDK and the tests read.
+var snWalletMappingRefusals = []error{
+	protocol.ErrWalletMappingIntegrity,
+	protocol.ErrWalletMappingUnavailable,
+	protocol.ErrWalletMappingCapacity,
+	model.ErrWalletMappingChallengeCapacity,
+	model.ErrWalletMappingChallengeExpired,
+	model.ErrNetworkWalletMappingChallengeCapacity,
+	model.ErrNetworkWalletMappingChallengeExpired,
+	model.ErrHotkeyNetworkDelegationChallengeCapacity,
+	model.ErrHotkeyNetworkDelegationChallengeExpired,
+}
+
+// Every wallet route's error. A refusal keeps the 500 its clients pin and is
+// answered with its own text alone: a cause joined to it, such as a decoder's
+// or the stored record's, goes to the log. Any other undeclared failure, such
+// as the operator's configuration or a chain read naming its RPC url, is the
+// same 500 with a fixed message. A declared status passes unchanged.
+func snWalletMappingAnswer(err error) error {
+	if err == nil || router.DeclaresHttpStatus(err) {
+		return err
+	}
+	for _, refusal := range snWalletMappingRefusals {
+		if errors.Is(err, refusal) {
+			return router.PrivateCause(http.StatusInternalServerError, refusal.Error(), err)
+		}
+	}
+	return router.PrivateCause(http.StatusInternalServerError, router.UnexpectedErrorMessage, err)
 }
 
 // The authenticated session selects user/network; an optional client must
@@ -88,7 +121,8 @@ func snWalletMappingProspective(ctx context.Context, domain protocol.ClientKeyHi
 
 // This public authenticated request cannot override the configured deployment,
 // JWT identities, original predecessor or bounded challenge expiry.
-func SnWalletMappingChallenge(args *SnWalletMappingChallengeArgs, clientSession *session.ClientSession) (*SnWalletMappingChallengeResult, error) {
+func SnWalletMappingChallenge(args *SnWalletMappingChallengeArgs, clientSession *session.ClientSession) (result *SnWalletMappingChallengeResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
@@ -180,7 +214,8 @@ type SnWalletMappingHistoryResult struct {
 
 // Signature-bearing originals are public evidence, with bounded database and
 // response work. Missing history stays unavailable rather than known-empty.
-func SnWalletMappingHistory(args *SnWalletMappingHistoryArgs, clientSession *session.ClientSession) (*SnWalletMappingHistoryResult, error) {
+func SnWalletMappingHistory(args *SnWalletMappingHistoryArgs, clientSession *session.ClientSession) (result *SnWalletMappingHistoryResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if args == nil || clientSession == nil || clientSession.Ctx == nil {
 		return nil, protocol.ErrWalletMappingUnavailable
 	}

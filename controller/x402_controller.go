@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
@@ -145,7 +147,18 @@ var x402Config = sync.OnceValue(func() *X402Config {
 	return c
 })
 
+// x402ConfigInstance, when set, overrides the vault config (the swappable
+// instance pattern of `SetStConfig`, for tests).
+var x402ConfigInstance *X402Config
+
+func SetX402Config(c *X402Config) {
+	x402ConfigInstance = c
+}
+
 func X402() *X402Config {
+	if x402ConfigInstance != nil {
+		return x402ConfigInstance
+	}
 	return x402Config()
 }
 
@@ -525,7 +538,9 @@ func X402Purchase(
 
 	verifyResponse, err := X402Verify(ctx, payment, *requirements)
 	if err != nil {
-		return nil, fmt.Errorf("x402 verify failed: %w", err)
+		// the facilitator's error quotes its answer, which stays in the log
+		glog.Errorf("[x402]verify failed network=%s sku=%s: %s\n", networkId, sku.SkuId, err)
+		return nil, errors.New("x402 verify failed")
 	}
 	if !verifyResponse.IsValid {
 		return nil, fmt.Errorf("x402 payment invalid: %s", verifyResponse.InvalidReason)
@@ -533,7 +548,8 @@ func X402Purchase(
 
 	settleResponse, err := X402Settle(ctx, payment, *requirements)
 	if err != nil {
-		return nil, fmt.Errorf("x402 settle failed: %w", err)
+		glog.Errorf("[x402]settle failed network=%s sku=%s: %s\n", networkId, sku.SkuId, err)
+		return nil, errors.New("x402 settle failed")
 	}
 	if !settleResponse.Success {
 		return nil, fmt.Errorf("x402 settlement failed: %s", settleResponse.ErrorReason)
@@ -549,7 +565,8 @@ func X402Purchase(
 		}
 	}
 	if err := x402GrantSettled(ctx, networkId, sku, settleResponse, receipt); err != nil {
-		return nil, err
+		// x402GrantSettled logged the cause and recorded it for the reconciler
+		return nil, errors.New("x402 grant failed after settlement")
 	}
 
 	// Record the settled transfer in Stripe. The money is already on chain and
@@ -742,7 +759,8 @@ func X402SettleInlineUpgrade(w http.ResponseWriter, r *http.Request) bool {
 
 	clientSession, err := session.NewClientSessionFromRequest(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[x402]client session error: %s\n", err)
+		http.Error(w, router.UnexpectedErrorMessage, http.StatusInternalServerError)
 		return false
 	}
 	if err := clientSession.Auth(r); err != nil {
@@ -1068,7 +1086,8 @@ func X402PurchaseHandler(w http.ResponseWriter, r *http.Request) {
 
 	clientSession, err := session.NewClientSessionFromRequest(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		glog.Infof("[x402]client session error: %s\n", err)
+		http.Error(w, router.UnexpectedErrorMessage, http.StatusInternalServerError)
 		return
 	}
 	if err := clientSession.Auth(r); err != nil {

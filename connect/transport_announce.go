@@ -4,7 +4,6 @@ package connect
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	// "fmt"
 	"math"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -191,25 +191,16 @@ type SpeedTest struct {
 	TotalByteCount model.ByteCount
 }
 
-// Each speed test probe is a zero byte, the big-endian test id, then random
-// bytes. While a test runs, the client echoes every frame over 16 bytes,
-// including user frames the platform interleaves with the probes, and keeps
-// sending its own traffic, so the reader must tell the test's probes apart. No
-// Transfer frame starts with a zero byte, which as a protobuf tag would be
-// field number zero.
-const speedTestProbeByteCount = 1024
+// Speed probes share their exact wire grammar with the client. Real Transfer
+// frames interleaved by the writer remain data at both ends of the connection.
+const speedTestProbeByteCount = clientconnect.TransportSpeedTestProbeByteCount
 
-// Writes the probe header of the test over the start of the probe.
 func setSpeedTestProbeHeader(probe []byte, testId uint32) {
-	probe[0] = 0
-	binary.BigEndian.PutUint32(probe[1:5], testId)
+	clientconnect.SetTransportSpeedTestProbeHeader(probe, testId)
 }
 
-// Reports whether the frame is a probe of the test.
 func isSpeedTestProbe(message []byte, testId uint32) bool {
-	return len(message) == speedTestProbeByteCount &&
-		message[0] == 0 &&
-		binary.BigEndian.Uint32(message[1:5]) == testId
+	return clientconnect.IsTransportSpeedTestProbe(message, testId)
 }
 
 func DefaultTestConfig() *TestConfig {
@@ -967,9 +958,8 @@ func (self *ConnectionAnnounce) samplePassiveSpeed() {
 
 // a synthetic speed test runs only when the connection has not passively
 // demonstrated `SyntheticSpeedBytesPerSecond` after `SyntheticSpeedTimeout`.
-// Busy connections prove their speed with passive samples, and a synthetic
-// test would disrupt active traffic since the client transport echoes all
-// messages upstream during the test instead of delivering them.
+// Prefer passive samples from busy connections. Synthetic probes only add
+// measurement traffic when the connection has not shown the threshold rate.
 func (self *ConnectionAnnounce) allowSyntheticSpeedWithLock() bool {
 	if !self.testConfig.AllowSpeed() {
 		return false

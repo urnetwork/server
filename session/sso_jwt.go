@@ -21,11 +21,13 @@ import (
 // ssoAllowedClientIds reads the sign in oauth client id(s) from the vault
 // resource (`client_id` at the top level of vault/<env>/apple.yml or
 // google.yml, either a single value or a list). A missing file or empty value
-// means not configured: the audience check is skipped so environments that
-// have not populated the vault keep working.
+// leaves no accepted audience, so authentication refuses until configured.
 func ssoAllowedClientIds(vaultResource string) []string {
 	resource, err := server.Vault.SimpleResource(vaultResource)
 	if err != nil {
+		return nil
+	}
+	if _, err := resource.ParseE(); err != nil {
 		return nil
 	}
 	clientIds := []string{}
@@ -47,7 +49,7 @@ var googleSsoClientIds = sync.OnceValue(func() []string {
 
 // validateSsoClaims checks the non-signature claims of a provider id token:
 // the issuer must be the provider and the audience must be one of our client
-// ids (when configured). The time claims (exp/nbf/iat) are validated by the
+// ids. An absent audience configuration refuses every token. Time claims are validated by the
 // gojwt parser itself.
 func validateSsoClaims(claims gojwt.MapClaims, issuers []string, allowedClientIds []string) error {
 	issuer, err := claims.GetIssuer()
@@ -55,17 +57,15 @@ func validateSsoClaims(claims gojwt.MapClaims, issuers []string, allowedClientId
 		return errors.New("Invalid issuer.")
 	}
 
-	if 0 < len(allowedClientIds) {
-		audiences, err := claims.GetAudience()
-		if err != nil {
-			return errors.New("Invalid audience.")
-		}
-		audienceAllowed := slices.ContainsFunc(audiences, func(audience string) bool {
-			return slices.Contains(allowedClientIds, audience)
-		})
-		if !audienceAllowed {
-			return errors.New("Invalid audience.")
-		}
+	audiences, err := claims.GetAudience()
+	if err != nil {
+		return errors.New("Invalid audience.")
+	}
+	audienceAllowed := slices.ContainsFunc(audiences, func(audience string) bool {
+		return strings.TrimSpace(audience) != "" && slices.Contains(allowedClientIds, audience)
+	})
+	if !audienceAllowed {
+		return errors.New("Invalid audience.")
 	}
 
 	return nil

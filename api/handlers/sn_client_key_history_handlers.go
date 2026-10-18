@@ -23,6 +23,8 @@ var snClientKeyObservationSlots = make(chan struct{}, protocol.MaxClientKeyObser
 
 // Authentication precedes body consumption, quota, chain reads and storage.
 // The same retained-body owner used by artifact upload joins deadlines/Close.
+// A failure that declares no status, such as a chain read naming its RPC urls,
+// is a fixed 503 the validator retries (router.PrivateErrors).
 func SnClientKeyObservation(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
@@ -34,7 +36,7 @@ func SnClientKeyObservation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Client authentication required.", http.StatusUnauthorized)
 		return
 	}
-	router.WrapRequireClient(func(clientSession *session.ClientSession) (*controller.SnClientKeyObservationResult, error) {
+	router.WrapRequireClient(router.PrivateErrors(func(clientSession *session.ClientSession) (*controller.SnClientKeyObservationResult, error) {
 		defer clientSession.Cancel()
 		if r.Body == nil || r.ContentLength <= 0 || r.ContentLength > 16*1024 || r.Header.Get("Content-Type") != "application/json" || len(r.Header.Values("Content-Type")) != 1 || len(r.Header.Values("Content-Encoding")) != 0 || len(r.TransferEncoding) != 0 || len(r.Trailer) != 0 {
 			return nil, errors.New("400 Client-key observation framing is invalid.")
@@ -65,7 +67,7 @@ func SnClientKeyObservation(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(bytes.NewReader(encoded))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&args); err != nil {
-			return nil, err
+			return nil, router.PrivateCause(http.StatusBadRequest, "Client-key observation is invalid.", err)
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF {
@@ -76,5 +78,5 @@ func SnClientKeyObservation(w http.ResponseWriter, r *http.Request) {
 			return nil, errors.New("400 Client-key observation is noncanonical.")
 		}
 		return controller.SnClientKeyObservation(&args, clientSession)
-	}, w, r)
+	}), w, r)
 }

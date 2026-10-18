@@ -352,7 +352,7 @@ func authPasswordReset(
 ) (*AuthPasswordResetResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&reset.UserAuth)
 	if userAuth == nil {
-		return nil, fmt.Errorf("Invalid user auth.")
+		return nil, fmt.Errorf("400 Invalid user auth.")
 	}
 
 	resetCreateCode := model.AuthPasswordResetCreateCodeArgs{

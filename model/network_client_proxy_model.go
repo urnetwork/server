@@ -32,20 +32,36 @@ func base32Encoder() *base32.Encoding {
 	return base32.HexEncoding.WithPadding(base32.NoPadding)
 }
 
-// ordered in precedence
-var proxySigningSecrets = sync.OnceValue(func() [][]byte {
+// The proxy.yml secrets, ordered in precedence: the first signs and any one
+// verifies. A blank entry is skipped, since anyone can compute an HMAC under an
+// empty key and so sign any proxy id.
+func loadProxySigningSecrets() [][]byte {
 	proxy := server.Vault.RequireSimpleResource("proxy.yml")
 	secretStrs := proxy.RequireStringList("secrets")
 	var secrets [][]byte
 	for _, secretStr := range secretStrs {
+		if strings.TrimSpace(secretStr) == "" {
+			continue
+		}
 		secrets = append(secrets, []byte(secretStr))
 	}
 	return secrets
-})
+}
 
-var proxySigningSecret = sync.OnceValue(func() []byte {
-	return proxySigningSecrets()[0]
-})
+// Memoized: every proxy request verifies a signed proxy id.
+var proxySigningSecrets = sync.OnceValue(loadProxySigningSecrets)
+
+// The secret proxy ids are signed with, the first of the secrets. Without one
+// no id is signed.
+func loadProxySigningSecret() []byte {
+	secrets := proxySigningSecrets()
+	if len(secrets) == 0 {
+		panic(errors.New("proxy.yml has no non-blank secret to sign proxy ids with"))
+	}
+	return secrets[0]
+}
+
+var proxySigningSecret = sync.OnceValue(loadProxySigningSecret)
 
 type ServerProxyConfig struct {
 	// host -> block -> service -> port
@@ -115,7 +131,7 @@ func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr erro
 			h := hmac.New(sha1.New, secret)
 			h.Write(b[0:16])
 			checkSignature := h.Sum(nil)
-			if slices.Equal(signature, checkSignature) {
+			if hmac.Equal(signature, checkSignature) {
 				return true
 			}
 		}

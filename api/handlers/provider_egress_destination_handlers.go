@@ -32,7 +32,7 @@ func ProviderEgressDestinations(w http.ResponseWriter, r *http.Request) {
 	pool, err := controller.GetProviderEgressDestinationPool(r.Context())
 	if err != nil {
 		glog.Errorf("[pegd]could not build the egress destination pool: %s\n", err)
-		http.Error(w, "The destination pool cannot be served: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "The destination pool cannot be served.", http.StatusInternalServerError)
 		return
 	}
 

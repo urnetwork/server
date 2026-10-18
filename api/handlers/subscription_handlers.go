@@ -42,7 +42,23 @@ func SubscriptionResume(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.SubscriptionResume, w, r)
 }
 
+// Answers 503 with a fixed message, and logs why, while a webhook's
+// verification secret is unavailable. The webhook's body formatter refuses
+// then as well, but the router answers a formatter refusal 400, a caller
+// fault, where this is the server's.
+func webhookVerifiable(w http.ResponseWriter, webhook string, verifiable func() error) bool {
+	if err := verifiable(); err != nil {
+		glog.Warningf("[%s]webhook refused, verification secret unavailable: %s\n", webhook, err)
+		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
+}
+
 func StripeWebhook(w http.ResponseWriter, r *http.Request) {
+	if !webhookVerifiable(w, "stripe", controller.StripeWebhookVerifiable) {
+		return
+	}
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyStripeBody,
 		controller.StripeWebhook,
@@ -52,6 +68,9 @@ func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
+	if !webhookVerifiable(w, "coinbase", controller.CoinbaseWebhookVerifiable) {
+		return
+	}
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyCoinbaseBody,
 		controller.CoinbaseWebhook,
@@ -61,6 +80,9 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
+	if !webhookVerifiable(w, "play", controller.PlayWebhookVerifiable) {
+		return
+	}
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyPlayBody,
 		controller.PlayWebhook,
@@ -70,6 +92,9 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func HeliusWebhook(w http.ResponseWriter, r *http.Request) {
+	if !webhookVerifiable(w, "helius", controller.HeliusWebhookVerifiable) {
+		return
+	}
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyHeliusBody,
 		controller.HeliusWebhook,

@@ -91,7 +91,8 @@ type SnSetWalletResult struct {
 func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
-) (*SnSetWalletResult, error) {
+) (result *SnSetWalletResult, resultErr error) {
+	defer func() { resultErr = snWalletMappingAnswer(resultErr) }()
 	if setWallet == nil {
 		return nil, protocol.ErrWalletMappingIntegrity
 	}
@@ -274,7 +275,7 @@ func SnPoolClaim(
 	}
 
 	if artifactRecord != nil && root != artifactRecord.PayoutRoot {
-		return nil, fmt.Errorf("payout leaf set differs from its retained artifact root")
+		return nil, snPoolClaimUnavailable("payout leaf set differs from its retained artifact root", nil)
 	}
 
 	result := &SnPoolClaimResult{

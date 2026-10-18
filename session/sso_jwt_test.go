@@ -180,11 +180,11 @@ func TestParseGoogleJwt(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 	}
 
-	// no configured client id: audience check is skipped
+	// no configured client id: every token is refused
 	claims = testingGoogleClaims()
 	claims["aud"] = "attacker-app.apps.googleusercontent.com"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, nil)
-	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// wrong issuer
 	claims = testingGoogleClaims()
@@ -271,11 +271,11 @@ func TestParseAppleJwt(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 	}
 
-	// no configured client id: audience check is skipped
+	// no configured client id: every token is refused
 	claims = testingAppleClaims()
 	claims["aud"] = "com.attacker.app"
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, nil)
-	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// wrong issuer
 	claims = testingAppleClaims()
@@ -306,7 +306,7 @@ func TestParseAppleJwt(t *testing.T) {
 }
 
 // the vault `client_id` field accepts a single value or a list, and a missing
-// file or empty value disables the audience check
+// file or empty value leaves no accepted audience
 func TestSsoAllowedClientIds(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		// missing resource

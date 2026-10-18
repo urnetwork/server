@@ -550,10 +550,10 @@ func TestCompetitionRoundBaselineFreezesOnceAndIsReused(t *testing.T) {
 }
 
 // A staging round freezes a zero takeover margin, and its evaluator records
-// that margin in the round baseline. The round's next claim authenticates
-// the baseline against the round's margin, not the configured production
-// margin, which would refuse every later claim in the round.
-func TestCompetitionClaimAuthenticatesAZeroMarginStagingBaseline(t *testing.T) {
+// that margin in the round baseline. The round's next claim attaches that
+// baseline; checked against the configured production margin, it refused
+// every later claim in the round.
+func TestCompetitionClaimAttachesAZeroMarginStagingBaseline(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -622,6 +622,95 @@ func TestCompetitionClaimAuthenticatesAZeroMarginStagingBaseline(t *testing.T) {
 		if err != nil || second == nil || second.JobId == first.JobId || second.RoundBaseline == nil ||
 			second.RoundBaseline.Sha256 != outcome.RoundBaselineSha256 {
 			t.Fatalf("claim after the zero-margin baseline froze = %#v, %v", second, err)
+		}
+	})
+}
+
+// A release that changes the evaluator while a round holds its frozen
+// baseline cannot stop the queue at the oldest job. The claim attaches the
+// baseline, Evaluate refuses that job with its typed round policy error, and
+// the worker's next claim takes the next job.
+func TestCompetitionClaimProceedsPastAnEvaluatorReleaseDuringARound(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-evaluator-release-claim"
+		settings.ArtifactRoot = t.TempDir()
+		// a real pinned command, so Evaluate reaches its frozen policy check
+		settings.EvaluatorCommand = filepath.Join(t.TempDir(), "evaluator.sh")
+		command := []byte("#!/bin/sh\nexit 99\n")
+		if err := os.WriteFile(settings.EvaluatorCommand, command, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		commandDigest := sha256.Sum256(command)
+		settings.EvaluatorCommandSha256 = hex.EncodeToString(commandDigest[:])
+		currentTime := server.NowUtc().Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		listKey, memberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, listKey, memberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), listKey, memberKey).Err()
+			})
+		})
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"release-a", "release-b", "release-c"} {
+			patch, patchErr := ValidateAndCanonicalizePatch(testPatch(name), settings.PatchPolicy)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			if _, cacheHit, enqueueErr := store.Enqueue(
+				ctx, settings, round.RoundId, patch, "miner-"+name, testApiImageDigest(),
+			); enqueueErr != nil || cacheHit {
+				t.Fatalf("enqueue %s: hit=%t error=%v", name, cacheHit, enqueueErr)
+			}
+		}
+		first, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || first == nil || first.RoundBaseline != nil {
+			t.Fatalf("first claim = %#v, %v", first, err)
+		}
+		baselineJson := testRoundBaseline(t, settings, &first.Round, []float64{100, 101, 99})
+		baselineDigest := sha256.Sum256(baselineJson)
+		outcome := EvaluationOutcome{
+			Error:               submissionError("run_unstable", "synthetic candidate instability"),
+			ArtifactManifest:    json.RawMessage(`{"schema":1}`),
+			RoundBaselineJson:   baselineJson,
+			RoundBaselineSha256: hex.EncodeToString(baselineDigest[:]),
+		}
+		if retry, err := store.Complete(ctx, settings, "worker-a", first.JobId, outcome); err != nil || retry {
+			t.Fatalf("freeze baseline: retry=%t error=%v", retry, err)
+		}
+
+		released := *settings
+		released.EvaluatorImageDigest = "sha256:" + strings.Repeat("c", 64)
+		second, err := store.Claim(ctx, &released, "worker-a", testWorkerImageDigest())
+		if err != nil || second == nil || second.JobId == first.JobId || second.RoundBaseline == nil ||
+			second.RoundBaseline.Sha256 != outcome.RoundBaselineSha256 {
+			t.Fatalf("claim after an evaluator release = %#v, %v", second, err)
+		}
+		refused := (CommandEvaluator{}).Evaluate(ctx, &released, second)
+		if refused.Error == nil || refused.Error.Kind != "infrastructure" ||
+			refused.Error.Code != "round_policy_mismatch" || !refused.Error.Retriable {
+			t.Fatalf("evaluation after an evaluator release = %#v", refused.Error)
+		}
+		if retry, err := store.Complete(ctx, &released, "worker-a", second.JobId, refused); err != nil || !retry {
+			t.Fatalf("refused job: retry=%t error=%v", retry, err)
+		}
+		third, err := store.Claim(ctx, &released, "worker-a", testWorkerImageDigest())
+		if err != nil || third == nil || third.JobId == first.JobId || third.JobId == second.JobId {
+			t.Fatalf("claim after the refused job = %#v, %v", third, err)
 		}
 	})
 }

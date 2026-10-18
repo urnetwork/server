@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"net/netip"
 	"strings"
 	"time"
@@ -92,11 +91,11 @@ type ProviderEgressExit struct {
 func ResolveProviderEgressExit(exitIp string, cityConfidentRadiusKm int) (*ProviderEgressExit, error) {
 	addr, err := netip.ParseAddr(strings.TrimSpace(exitIp))
 	if err != nil {
-		return nil, fmt.Errorf("The exit address does not parse.")
+		return nil, refuseProviderEgressIngest("The exit address does not parse.")
 	}
 	ipInfo, err := server.GetIpInfo(addr.Unmap())
 	if err != nil {
-		return nil, fmt.Errorf("GeoLite2 has no place for the exit address.")
+		return nil, refuseProviderEgressIngest("GeoLite2 has no place for the exit address.")
 	}
 	return providerEgressExitFromIpInfo(ipInfo, cityConfidentRadiusKm)
 }
@@ -107,7 +106,7 @@ func ResolveProviderEgressExit(exitIp string, cityConfidentRadiusKm int) (*Provi
 func providerEgressExitFromIpInfo(ipInfo *server.IpInfo, cityConfidentRadiusKm int) (*ProviderEgressExit, error) {
 	countryCode := strings.ToLower(strings.TrimSpace(ipInfo.CountryCode))
 	if len(countryCode) != 2 || strings.TrimSpace(ipInfo.Country) == "" {
-		return nil, fmt.Errorf("GeoLite2 places the exit address in no country.")
+		return nil, refuseProviderEgressIngest("GeoLite2 places the exit address in no country.")
 	}
 
 	cityConfident := strings.TrimSpace(ipInfo.City) != "" &&
@@ -189,19 +188,19 @@ func SubmitProviderEgressLocation(
 	args *SubmitProviderEgressLocationArgs,
 ) (*SubmitProviderEgressLocationResult, error) {
 	if strings.TrimSpace(args.ExitIp) == "" {
-		return nil, fmt.Errorf("Missing exit_ip: submit the address the operator's /ip echo saw through the tunnel; vendor-consensus locations are no longer accepted.")
+		return nil, refuseProviderEgressIngest("Missing exit_ip: submit the address the operator's /ip echo saw through the tunnel; vendor-consensus locations are no longer accepted.")
 	}
 	if args.ObservedAt.IsZero() {
-		return nil, fmt.Errorf("Missing observed_at.")
+		return nil, refuseProviderEgressIngest("Missing observed_at.")
 	}
 	if args.ObservedAt.Before(server.NowUtc().Add(-MaxProviderEgressLocationSubmissionAge)) {
-		return nil, fmt.Errorf("Submission is too old.")
+		return nil, refuseProviderEgressIngest("Submission is too old.")
 	}
 	if server.NowUtc().Add(MaxProviderEgressLocationSubmissionSkew).Before(args.ObservedAt) {
-		return nil, fmt.Errorf("Submission is too far in the future.")
+		return nil, refuseProviderEgressIngest("Submission is too far in the future.")
 	}
 	if networkId := model.GetNetworkClientNetwork(ctx, args.ClientId); networkId == nil {
-		return nil, fmt.Errorf("Unknown client.")
+		return nil, refuseProviderEgressIngest("Unknown client.")
 	}
 
 	exit, err := ResolveProviderEgressExit(args.ExitIp, model.GetProviderEgressRules().CityConfidentRadiusKm)
@@ -277,13 +276,13 @@ func RecordProviderEgressProbeAttempt(
 	args *RecordProviderEgressProbeAttemptArgs,
 ) (*RecordProviderEgressProbeAttemptResult, error) {
 	if maxProbeFailureLen < len(args.ProbeFailure) {
-		return nil, fmt.Errorf("Probe failure class is too long.")
+		return nil, refuseProviderEgressIngest("Probe failure class is too long.")
 	}
 	// same check as SubmitProviderEgressLocation: without it a typo'd or stale
 	// client id writes a row keyed to a client that does not exist, which
 	// nothing ever reads and only the sweep ever removes.
 	if networkId := model.GetNetworkClientNetwork(ctx, args.ClientId); networkId == nil {
-		return nil, fmt.Errorf("Unknown client.")
+		return nil, refuseProviderEgressIngest("Unknown client.")
 	}
 
 	attemptAt := server.NowUtc()
@@ -293,7 +292,9 @@ func RecordProviderEgressProbeAttempt(
 			CompletedAt: args.CompletedAt, ProbeFailure: args.ProbeFailure, AllowPacing: args.AllowPacing,
 		}, attemptAt)
 		if err != nil {
-			return nil, err
+			// the completion's refusals are the prober's own errors: an unknown,
+			// retired or mistimed claim
+			return nil, refuseProviderEgressIngest(err.Error())
 		}
 		return &RecordProviderEgressProbeAttemptResult{
 			AttemptAt: receipt.CompletedAt, ClaimOrdinal: args.ClaimOrdinal,

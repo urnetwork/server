@@ -78,7 +78,9 @@ func (self *VerifyRequestClosureHandlers) ServeHTTP(w http.ResponseWriter, r *ht
 		http.Error(w, "Noncanonical verification closure.", http.StatusBadRequest)
 		return
 	}
-	router.WrapNoAuth(func(owner *session.ClientSession) (*model.VerifyRequestClosureResult, error) {
+	// Storage and signing failures, returned or raised, are answered as the
+	// provider work routes answer theirs, never with their own text.
+	router.WrapNoAuth(router.PrivateErrors(func(owner *session.ClientSession) (*model.VerifyRequestClosureResult, error) {
 		return controller.CloseVerifyOriginalRequest(&closure, owner)
-	}, w, r.WithContext(ctx))
+	}), w, r.WithContext(ctx))
 }
