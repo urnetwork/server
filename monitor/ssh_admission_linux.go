@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -28,11 +29,16 @@ type sharedSshAdmission struct {
 	owner sshAdmissionOwner
 }
 
+// Concurrent callers share one queue and its bounded cleanup proofs. The
+// instance mutex protects only proofs, never filesystem or owner observations.
 type sshAdmissionStore struct {
 	directory string
 	bootId    string
 	now       func() (int64, error)
 	status    func(context.Context, sshAdmissionOwner) sshAdmissionOwnerStatus
+
+	stateLock   sync.Mutex
+	tokenClaims map[string]sshAdmissionClaim
 }
 
 // Register before the first probe so a diagnostic need not wait for a cadence
@@ -125,12 +131,24 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
 		deadline = parentDeadline
 	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if err := self.recoverClaims(ctx); err != nil {
+		return nil, err
+	}
+	if err := self.trackClaim(token, owner); err != nil {
+		return nil, err
+	}
 	queued := false
 	defer func() {
-		if resultErr != nil && queued {
-			cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			resultErr = errors.Join(resultErr, self.remove(cleanup, token, owner))
+		if resultErr != nil {
+			if queued {
+				// No transport received this claim, even if publication succeeded
+				// before cancellation or an ambiguous directory-sync failure.
+				resultErr = errors.Join(resultErr, self.releaseClaim(token, owner))
+			} else {
+				self.forgetClaims(map[string]sshAdmissionOwner{token: owner})
+			}
 		}
 	}()
 	for {
@@ -190,9 +208,7 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 				return nil, err
 			}
 			return func() error {
-				cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				return self.remove(cleanup, token, owner)
+				return self.releaseClaim(token, owner)
 			}, nil
 		}
 		if err := waitSshAdmission(ctx); err != nil {
@@ -209,21 +225,6 @@ func (self *sshAdmissionStore) prune(ctx context.Context, state *sshAdmissionSta
 		}
 	}
 	state.prune(now, statuses)
-}
-
-func (self *sshAdmissionStore) remove(ctx context.Context, token string, owner sshAdmissionOwner) error {
-	return self.update(ctx, func(state *sshAdmissionState, _ int64) error {
-		for i, request := range state.Requests {
-			if request.Token == token {
-				if request.Owner != owner {
-					return errors.New("SSH admission release owner mismatch")
-				}
-				state.Requests = slices.Delete(state.Requests, i, i+1)
-				break
-			}
-		}
-		return nil
-	})
 }
 
 // Lock-file identity is stable across state renames. Failed writes cannot

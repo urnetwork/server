@@ -30,6 +30,24 @@ func (s *credentialsSignal) Run(_ context.Context, settings SignalSettings) (Ale
 	sort.Slice(requirements, func(i, j int) bool { return requirements[i].Key < requirements[j].Key })
 	alerts := make(Alerts, 0)
 	for _, requirement := range requirements {
+		if requirement.ActivationUnknown {
+			alerts = append(alerts, Alert{
+				SignalNumber: s.Number(), SignalKey: s.Key(), SignalID: s.ID(), SignalName: s.Name(),
+				Severity: SeverityWarn, Class: "credential-activation-unobservable", Target: requirement.Key,
+				Frame: "config_resource=" + requirement.Resource, Environment: settings.Environment,
+				ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
+				Symptom:   "The monitor cannot determine which analytics collectors require credentials.",
+				Mechanism: "The shared analytics Config loader could not resolve, decode, or validate the policy. Unknown activation cannot establish that collection is disabled or that credentials are complete.",
+				Baseline:  "The analytics policy is absent by its optional contract or loads and validates before provider and site gates are evaluated.",
+				Observed:  "activation=unknown credential_readiness=unknown",
+				Evidence:  "Only the fixed configuration resource name and unknown activation state are retained; configuration values, paths, errors, and credentials are discarded.",
+				Context:   requirement.Purpose,
+				Action:    "Repair the analytics Config resolution or policy through its owning workflow, then load a fresh complete monitor settings generation. Preserve existing credential findings until activation can be evaluated.",
+				Verify:    "A fresh settings generation evaluates activation, enabled collectors retain their credential requirements, and intended collectors produce authenticated output through two complete cadences.",
+				Playbook:  "SIGNALS.md §8.7",
+			})
+			continue
+		}
 		if !requirement.Present && !requirement.Required {
 			// Missing optional crash-report credentials deliberately preserve the
 			// providers' graceful no-op contract.

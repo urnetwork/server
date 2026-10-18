@@ -24,6 +24,7 @@ func TestCredentialsCatalogNamesEveryLiteralClassAndSummaryBoundary(t *testing.T
 	}
 	section := catalog[start:end]
 	for _, class := range []string{
+		"credential-activation-unobservable",
 		"credential-resource-missing",
 		"credential-resource-malformed",
 		"credential-fields-missing",
@@ -159,7 +160,10 @@ sites:
 `))
 	defer pop()
 
-	fields := enabledAnalyticsCredentialFields()
+	fields, err := enabledAnalyticsCredentialFields()
+	if err != nil {
+		t.Fatal(err)
+	}
 	names := make([]string, 0, len(fields))
 	for _, field := range fields {
 		names = append(names, field.name)
@@ -189,7 +193,11 @@ sites:
 `))
 	defer pop()
 
-	if fields := enabledAnalyticsCredentialFields(); len(fields) != 0 {
+	fields, err := enabledAnalyticsCredentialFields()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 0 {
 		t.Fatalf("credential fields = %+v, want none", fields)
 	}
 }

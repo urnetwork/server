@@ -73,16 +73,11 @@ func inspectProviderUsdcPaymentAttributionWithReview(ctx context.Context, query 
 	result, err := query.Query(ctx, `SELECT
 			NOT p.completed AND (NOT p.canceled OR $3) AND (NOT p.attribution_review_required OR $4) AND p.payout_nano_cents >= 0
 			AND p.subsidy_payout_nano_cents >= 0 AND p.reliability_subsidy_nano_cents >= 0
-			AND EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
-			AND (NOT $3 OR p.payout_byte_count=(SELECT COALESCE(SUM(s.payout_byte_count),0) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id))
-			AND NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep s
-				LEFT JOIN transfer_contract c ON c.contract_id=s.contract_id
-				WHERE s.payment_id=p.payment_id AND
-				(c.close_time IS NULL OR ($2::timestamp IS NOT NULL AND c.close_time >= $2) OR c.outcome IS NULL OR
-				 c.outcome NOT IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') OR
-				 s.network_id <> p.network_id OR s.payout_net_revenue_nano_cents < 0))
+			AND attribution.sweep_count > 0
+			AND (NOT $3 OR p.payout_byte_count=attribution.payout_byte_count)
+			AND NOT attribution.invalid
 			AND p.payout_nano_cents = p.subsidy_payout_nano_cents::numeric + p.reliability_subsidy_nano_cents + p.bonus_payout_nano_cents +
-				(SELECT COALESCE(SUM(s.payout_net_revenue_nano_cents),0) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
+				attribution.payout_net_revenue_nano_cents
 			AND p.bonus_payout_nano_cents = (SELECT COALESCE(SUM(b.amount_nano_cents),0) FROM account_payment_bonus b WHERE b.payment_id=p.payment_id)
 			AND NOT EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND
 				(b.network_id<>p.network_id OR ($2::timestamp IS NOT NULL AND
@@ -90,9 +85,27 @@ func inspectProviderUsdcPaymentAttributionWithReview(ctx context.Context, query 
 			AND ((p.subsidy_payout_nano_cents=0 AND p.reliability_subsidy_nano_cents=0) OR
 				EXISTS (SELECT 1 FROM subsidy_payment sp WHERE sp.payment_plan_id=p.payment_plan_id
 				AND sp.start_time < sp.end_time AND ($2::timestamp IS NULL OR sp.end_time <= $2))),
-			(SELECT MAX(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=p.payment_id),
+			attribution.latest_close,
 			(SELECT MAX(sp.end_time) FROM subsidy_payment sp WHERE sp.payment_plan_id=p.payment_plan_id AND (p.subsidy_payout_nano_cents>0 OR p.reliability_subsidy_nano_cents>0))
-			FROM account_payment p WHERE p.payment_id=$1`, paymentId, cutoff, allowCanceled, allowReviewHeld)
+			FROM account_payment p
+			CROSS JOIN LATERAL (
+				SELECT COUNT(*) AS sweep_count,
+					COALESCE(SUM(s.payout_byte_count),0) AS payout_byte_count,
+					COALESCE(SUM(s.payout_net_revenue_nano_cents),0) AS payout_net_revenue_nano_cents,
+					COALESCE(BOOL_OR(c.close_time IS NULL OR ($2::timestamp IS NOT NULL AND c.close_time >= $2) OR
+						c.outcome IS NULL OR c.outcome NOT IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') OR
+						s.network_id <> p.network_id OR s.payout_net_revenue_nano_cents < 0),false) AS invalid,
+					MAX(c.close_time) AS latest_close
+				FROM transfer_escrow_sweep s
+				-- Keep contract reads keyed to the selected sweeps. Flattening this
+				-- join can choose a census of unrelated historical contracts.
+				LEFT JOIN LATERAL (
+					SELECT c.close_time,c.outcome FROM transfer_contract c
+					WHERE c.contract_id=s.contract_id OFFSET 0
+				) c ON true
+				WHERE s.payment_id=p.payment_id
+			) attribution
+			WHERE p.payment_id=$1`, paymentId, cutoff, allowCanceled, allowReviewHeld)
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider USDC earning authority unavailable: %w", err)
 	}

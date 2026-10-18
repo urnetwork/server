@@ -197,15 +197,17 @@ type AppleReportingSettings struct {
 // Required means the integration is expected to work in this environment. An
 // absent optional resource is healthy; once an optional resource is present,
 // it must still be complete and parseable so a half-configured integration
-// cannot disappear silently.
+// cannot disappear silently. ActivationUnknown means the policy could not be
+// evaluated; presence and missing fields then supply no readiness verdict.
 type CredentialRequirement struct {
-	Key           string
-	Resource      string
-	Purpose       string
-	Required      bool
-	Present       bool
-	Malformed     bool
-	MissingFields []string
+	Key               string
+	Resource          string
+	Purpose           string
+	Required          bool
+	Present           bool
+	Malformed         bool
+	MissingFields     []string
+	ActivationUnknown bool
 }
 
 // SourceAttributionSettings arms SIGNALS.md §8.8. Each configured expected

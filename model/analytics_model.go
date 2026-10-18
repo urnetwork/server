@@ -104,10 +104,15 @@ func NewDefaultAnalyticsConfig() *AnalyticsConfig {
 	return config
 }
 
+// An absent optional policy disables collection. Lookup and validation failures
+// remain errors so collectors and readiness checks cannot mistake them for it.
 func LoadAnalyticsConfig() (*AnalyticsConfig, error) {
 	resource, err := server.Config.SimpleResource("analytics.yml")
 	if err != nil {
-		return &AnalyticsConfig{}, nil
+		if errors.Is(err, server.ErrResourceNotFound) {
+			return &AnalyticsConfig{}, nil
+		}
+		return nil, err
 	}
 	var config AnalyticsConfig
 	if err := resource.UnmarshalYamlE(&config); err != nil {

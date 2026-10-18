@@ -174,8 +174,9 @@ type appleReportingVault struct {
 }
 
 type credentialFieldSpec struct {
-	name string
-	path []string
+	name    string
+	path    []string
+	present func(any) bool
 }
 
 type credentialRequirementSpec struct {
@@ -880,20 +881,21 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			credentialRequirementSpec{
 				key: "apple-sign-in", resource: "apple.yml", purpose: "Apple sign-in audience validation", required: required,
 				fields: []credentialFieldSpec{
-					field("client_id", "client_id"),
+					{name: "client_id", path: []string{"client_id"}, present: credentialStringCollectionPresent},
 				},
 			},
 			credentialRequirementSpec{
 				key: "google-sign-in", resource: "google.yml", purpose: "Google sign-in audience validation and browser authorization-code exchange", required: required,
 				fields: []credentialFieldSpec{
-					field("client_id", "client_id"),
-					field("sign_in_oauth.client_id", "sign_in_oauth", "client_id"),
-					field("sign_in_oauth.client_secret", "sign_in_oauth", "client_secret"),
+					{name: "client_id", path: []string{"client_id"}, present: credentialStringCollectionPresent},
+					{name: "sign_in_oauth.client_id", path: []string{"sign_in_oauth", "client_id"}, present: credentialStringPresent},
+					{name: "sign_in_oauth.client_secret", path: []string{"sign_in_oauth", "client_secret"}, present: credentialStringPresent},
 				},
 			},
 		)
 	}
-	if analyticsFields := enabledAnalyticsCredentialFields(); len(analyticsFields) != 0 {
+	analyticsFields, analyticsErr := enabledAnalyticsCredentialFields()
+	if analyticsErr == nil && len(analyticsFields) != 0 {
 		specs = append(specs, credentialRequirementSpec{
 			key: "analytics", resource: "analytics.yml", purpose: "Enabled search and webmaster analytics collection",
 			required: required && serviceEnabled("taskworker"), fields: analyticsFields,
@@ -932,6 +934,14 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 	for _, spec := range specs {
 		requirements = append(requirements, inspectCredentialRequirement(spec))
 	}
+	if analyticsErr != nil && serviceEnabled("taskworker") {
+		// No provider fields or parser details are authoritative after a failed
+		// policy load. Preserve that unknown state without inspecting secrets.
+		requirements = append(requirements, CredentialRequirement{
+			Key: "analytics", Resource: "analytics.yml", Purpose: "Search and webmaster analytics activation",
+			Required: required, ActivationUnknown: true,
+		})
+	}
 	sort.Slice(requirements, func(i, j int) bool { return requirements[i].Key < requirements[j].Key })
 	return requirements
 }
@@ -940,10 +950,13 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 // provider needs a credential only when global search ingestion, its API
 // adapter, and at least one matching site property are all enabled. This keeps
 // a deliberately unused provider from becoming a false missing-secret page.
-func enabledAnalyticsCredentialFields() []credentialFieldSpec {
+func enabledAnalyticsCredentialFields() ([]credentialFieldSpec, error) {
 	config, err := model.LoadAnalyticsConfig()
-	if err != nil || !config.Enabled || !config.Search.Enabled {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if !config.Enabled || !config.Search.Enabled {
+		return nil, nil
 	}
 	hasSiteProperty := func(property func(model.AnalyticsSiteProperties) string) bool {
 		for _, site := range config.Sites {
@@ -973,7 +986,7 @@ func enabledAnalyticsCredentialFields() []credentialFieldSpec {
 			credentialFieldSpec{name: "yandex_webmaster.user_id", path: []string{"yandex_webmaster", "user_id"}},
 		)
 	}
-	return fields
+	return fields, nil
 }
 
 func inspectCredentialRequirement(spec credentialRequirementSpec) CredentialRequirement {
@@ -1003,12 +1016,36 @@ func inspectCredentialRequirement(spec credentialRequirementSpec) CredentialRequ
 			}
 			value = object[component]
 		}
-		if !credentialValuePresent(value) {
+		present := field.present
+		if present == nil {
+			present = credentialValuePresent
+		}
+		if !present(value) {
 			requirement.MissingFields = append(requirement.MissingFields, field.name)
 		}
 	}
 	sort.Strings(requirement.MissingFields)
 	return requirement
+}
+
+// Browser authorization-code credentials are scalar strings; other nonnil
+// values cannot configure the callback even when generic presence accepts them.
+func credentialStringPresent(value any) bool {
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) != ""
+}
+
+// Audience readers recursively collect strings from lists and discard blank
+// entries. This checks that shape without expanding templates or retaining IDs.
+func credentialStringCollectionPresent(value any) bool {
+	switch values := value.(type) {
+	case string:
+		return credentialStringPresent(values)
+	case []any:
+		return slices.ContainsFunc(values, credentialStringCollectionPresent)
+	default:
+		return false
+	}
 }
 
 func credentialValuePresent(value any) bool {
