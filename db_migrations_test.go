@@ -289,6 +289,35 @@ func TestPublishedMigrationVersionsRemainStable(t *testing.T) {
 	}
 }
 
+// The automation sequence, including staging at version 847, reached main
+// while the feedback index was still unlanded. Keeping its branch-local
+// position would make a database that already applied automation skip it and
+// replay different SQL under published migration versions.
+func TestFeedbackIndexFollowsPublishedAutomationMigrations(t *testing.T) {
+	published := []string{
+		competitionAutomationMigration,
+		competitionAutomationIncidentMigration,
+		competitionAutomationGuardMigration,
+		competitionAutomationFallbackMigration,
+		competitionAutomationTargetMigration,
+		competitionAutomationStagingMigration,
+	}
+	for offset, sql := range published {
+		version := 842 + offset
+		index := version - 1
+		if len(migrations) <= index {
+			t.Fatalf("published automation migration version %d is missing", version)
+		}
+		migration, ok := migrations[index].(*SqlMigration)
+		if !ok || migration.sql != sql {
+			t.Errorf("migration version %d no longer names its published automation SQL", version)
+		}
+	}
+	if version := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time") + 1; version != 848 {
+		t.Errorf("feedback index migration version = %d, want 848 after published automation history", version)
+	}
+}
+
 // The release-1.0 testnet durably published this exact numeric prefix. New
 // migrations append after it; moving a suffix to make room changes the SQL
 // named by every shifted migration_audit version.
@@ -964,6 +993,80 @@ func TestNetEscrowReconcileUnsettledCoveringIndex(t *testing.T) {
 				t.Fatalf("unsettled net-escrow index %q missing %q", indexDefinition, want)
 			}
 		}
+	})
+}
+
+// account_feedback is read by network in the onboarding campaign, the results
+// job and the onboarding email tracker. Without this index each of those
+// reads scans the whole table. The build must stay online and restartable,
+// and appended after the published history.
+func TestAccountFeedbackNetworkIndex(t *testing.T) {
+	index := migrationIndex(t, "CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time")
+	if index < publishedMigrationPrefixCount {
+		t.Fatalf("account_feedback network index = %d is inside the published prefix %d", index, publishedMigrationPrefixCount)
+	}
+	migration, ok := migrations[index].(*OnlineSqlMigration)
+	if !ok {
+		t.Fatalf("account_feedback network index is %T, want *OnlineSqlMigration", migrations[index])
+	}
+	if !strings.Contains(migration.sql, "ON account_feedback (network_id, feedback_time)") {
+		t.Fatalf("account_feedback network index = %q", migration.sql)
+	}
+	if !strings.Contains(migration.recoverySql, "DROP INDEX CONCURRENTLY IF EXISTS account_feedback_network_id_feedback_time") {
+		t.Fatalf("account_feedback network index recovery = %q", migration.recoverySql)
+	}
+
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var indexDefinition string
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT indexdef
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND indexname = 'account_feedback_network_id_feedback_time'
+			`)
+			WithPgResult(result, err, func() {
+				if result.Next() {
+					Raise(result.Scan(&indexDefinition))
+				}
+			})
+		}, OptReadOnly())
+		if !strings.Contains(indexDefinition, "ON public.account_feedback USING btree (network_id, feedback_time)") {
+			t.Fatalf("account_feedback network index definition = %q", indexDefinition)
+		}
+	})
+}
+
+// Both production reads need a bounded network/time range. Disable sequential
+// scans only to make this structural plan assertion independent of table size:
+// PostgreSQL still must fall back to a Seq Scan when this index is absent.
+func TestAccountFeedbackNetworkReadUsesTimeRangeIndex(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		Tx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
+			for _, query := range []string{
+				`SELECT 1 FROM account_feedback WHERE network_id = $1 AND feedback_time >= $2 LIMIT 1`,
+				`SELECT feedback_time FROM account_feedback WHERE network_id = $1 AND feedback_time >= $2 ORDER BY feedback_time LIMIT 1`,
+			} {
+				result, err := tx.Query(ctx, `EXPLAIN (COSTS OFF) `+query, NewId(), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+				var lines []string
+				WithPgResult(result, err, func() {
+					for result.Next() {
+						var line string
+						Raise(result.Scan(&line))
+						lines = append(lines, line)
+					}
+				})
+				plan := strings.Join(lines, "\n")
+				if !strings.Contains(plan, "account_feedback_network_id_feedback_time") ||
+					!strings.Contains(plan, "Index Cond:") || !strings.Contains(plan, "network_id =") ||
+					!strings.Contains(plan, "feedback_time >=") || strings.Contains(plan, "Seq Scan") || strings.Contains(plan, "Sort") {
+					t.Fatalf("network/time lookup cannot use the bounded ordered index:\n%s", plan)
+				}
+			}
+		}, TxReadCommitted)
 	})
 }
 

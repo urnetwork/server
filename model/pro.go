@@ -395,6 +395,25 @@ func Testing_SetMaxContractTransferByteCount(free ByteCount, pro ByteCount) func
 	}
 }
 
+// Overrides the Pro month's price and data and the data code skus on the
+// process's parsed config, returning a restore function. Same caveats as
+// Testing_SetEnforceConcurrentClients (mutates the shared config; defer the
+// return). For tests that buy a sku whatever the environment's pro.yml prices.
+func Testing_SetSkuPrices(proMonthlyUsd float64, proData ByteCount, dataCodeSkus []ProDataCodeSku) func() {
+	c := Pro()
+	prevMonthlyUsd := c.Pro.PriceMonthlyUsd
+	prevData := c.Pro.Data
+	prevSkus := c.DataCodeSkus
+	c.Pro.PriceMonthlyUsd = proMonthlyUsd
+	c.Pro.Data = proData
+	c.DataCodeSkus = dataCodeSkus
+	return func() {
+		c.Pro.PriceMonthlyUsd = prevMonthlyUsd
+		c.Pro.Data = prevData
+		c.DataCodeSkus = prevSkus
+	}
+}
+
 // Tier returns the free or pro tier limits/features.
 func (c *ProConfig) Tier(pro bool) *ProTier {
 	if pro {

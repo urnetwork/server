@@ -248,79 +248,95 @@ func TestLegacySettlementPayerRoundRestartAndArrivals(t *testing.T) {
 // A native outcome trigger holds the second payer after the first financial
 // commit. Ending the owning budget at that barrier retains exactly that prefix,
 // including its payer cursor; replay settles the untouched second owner once.
+// The stop lets the held outcome statement finish, and it ends in its own
+// statement or lock timeout, each joined with the stop. The trigger raises
+// that exact refusal once the test opens its gate after the stop, so neither
+// ending depends on a timer: not the page's 2 s statement timeout against the
+// 5 s statement stop bound, nor a lock timeout against either.
 func TestLegacySettlementPayerOwnedBudgetRetainsCommittedPrefix(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		firstOwner, first := legacySettlementTestIntent(t, ctx)
-		secondOwner, second := legacySettlementTestIntent(t, ctx)
-		if firstOwner.sourceNetworkId.Cmp(secondOwner.sourceNetworkId) > 0 {
-			firstOwner, secondOwner = secondOwner, firstOwner
-			first, second = second, first
-		}
-		shard := int(first[15]) % 16
-		server.Tx(ctx, func(tx server.PgTx) {
-			// Move the second identity before queueing it into the same shard.
-			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, second))
-			newId := second
-			newId[15] = first[15]
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET contract_id=$2 WHERE contract_id=$1`, second, newId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET contract_id=$2 WHERE contract_id=$1`, second, newId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET contract_id=$2 WHERE contract_id=$1`, second, newId))
-			second = newId
-			server.Raise(queueLegacySettlementInTx(ctx, tx, second, ContractOutcomeSettled, false))
-			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`CREATE FUNCTION synthetic_payer_budget_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
-			 BEGIN IF NEW.contract_id=TG_ARGV[0]::uuid THEN PERFORM set_config('lock_timeout','0',true); PERFORM pg_advisory_xact_lock(731071); END IF; RETURN NEW; END $$;
-			 CREATE TRIGGER synthetic_payer_budget_barrier BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW
-			 WHEN (OLD.outcome IS NULL AND NEW.outcome IS NOT NULL) EXECUTE FUNCTION synthetic_payer_budget_barrier('%s');`, second)))
+	for _, ending := range []struct {
+		code    string
+		message string
+	}{
+		{code: "57014", message: "canceling statement due to statement timeout"},
+		{code: "55P03", message: "canceling statement due to lock timeout"},
+	} {
+		env := server.DefaultTestEnv()
+		env.RerunCount = 0
+		env.Run(t, func(t testing.TB) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			firstOwner, first := legacySettlementTestIntent(t, ctx)
+			secondOwner, second := legacySettlementTestIntent(t, ctx)
+			if firstOwner.sourceNetworkId.Cmp(secondOwner.sourceNetworkId) > 0 {
+				firstOwner, secondOwner = secondOwner, firstOwner
+				first, second = second, first
+			}
+			shard := int(first[15]) % 16
+			server.Tx(ctx, func(tx server.PgTx) {
+				// Move the second identity before queueing it into the same shard.
+				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, second))
+				newId := second
+				newId[15] = first[15]
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET contract_id=$2 WHERE contract_id=$1`, second, newId))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET contract_id=$2 WHERE contract_id=$1`, second, newId))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET contract_id=$2 WHERE contract_id=$1`, second, newId))
+				second = newId
+				server.Raise(queueLegacySettlementInTx(ctx, tx, second, ContractOutcomeSettled, false))
+				server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`CREATE FUNCTION synthetic_payer_budget_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+				 BEGIN IF NEW.contract_id=TG_ARGV[0]::uuid THEN PERFORM set_config('lock_timeout','0',true); PERFORM pg_advisory_xact_lock(731071);
+				 RAISE EXCEPTION USING ERRCODE=TG_ARGV[1], MESSAGE=TG_ARGV[2]; END IF; RETURN NEW; END $$;
+				 CREATE TRIGGER synthetic_payer_budget_barrier BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW
+				 WHEN (OLD.outcome IS NULL AND NEW.outcome IS NOT NULL) EXECUTE FUNCTION synthetic_payer_budget_barrier('%s','%s','%s');`,
+					second, ending.code, ending.message)))
+			})
+			refreshNetEscrow(ctx, []server.Id{firstOwner.balanceId, secondOwner.balanceId})
+			conn := acquireContractLifecycleTestConnection(t, ctx)
+			defer conn.Release()
+			held, err := conn.Begin(ctx)
+			server.Raise(err)
+			defer held.Rollback(context.Background())
+			server.RaisePgResult(held.Exec(ctx, `SELECT pg_advisory_xact_lock(731071)`))
+			blocker := contractLifecycleTestBackendPid(t, ctx, held)
+			bounded, expire := context.WithCancelCause(ctx)
+			defer expire(context.Canceled)
+			type outcome struct {
+				page LegacySettlementShardResult
+				err  error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				page, err := flushLegacySettlementShardPage(ctx, bounded, shard, nil, nil, 64)
+				done <- outcome{page: page, err: err}
+			}()
+			requireContractLifecycleBlockedBy(t, ctx, held, blocker)
+			expire(errLegacySettlementPageBudget)
+			// the stopped statement now leaves the gate and raises its ending
+			server.Raise(held.Rollback(ctx))
+			var got outcome
+			select {
+			case got = <-done:
+			case <-ctx.Done():
+				t.Fatal("payer owner failed to join its bounded operation", ctx.Err())
+			}
+			conn.Release()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_payer_budget_barrier ON transfer_contract; DROP FUNCTION synthetic_payer_budget_barrier()`))
+			})
+			if got.err != nil || got.page.Visited != 1 || got.page.Completed != 1 || got.page.Failed != 0 || got.page.PayerVisited != 1 || got.page.PayerCursor == nil || got.page.PayerCursor.After == nil || !got.page.More {
+				t.Fatalf("%s: payer deadline lost exact committed prefix: %+v %v", ending.code, got.page, got.err)
+			}
+			requireLegacySettlementTestState(t, ctx, firstOwner, first, false, true, 989, 0)
+			requireLegacySettlementTestState(t, ctx, secondOwner, second, true, false, 1000, 100)
+			resumed, err := FlushLegacySettlementShard(ctx, shard, got.page.Cursor, got.page.PayerCursor, 64)
+			if err != nil || resumed.Completed != 1 || resumed.PayerCompleted != 1 || resumed.Failed != 0 {
+				t.Fatalf("%s: payer deadline replay failed: %+v %v", ending.code, resumed, err)
+			}
+			requireLegacySettlementTestState(t, ctx, secondOwner, second, false, true, 989, 0)
+			requireLegacyProviderDurability(t, ctx, firstOwner, first, 11)
+			requireLegacyProviderDurability(t, ctx, secondOwner, second, 11)
 		})
-		refreshNetEscrow(ctx, []server.Id{firstOwner.balanceId, secondOwner.balanceId})
-		conn := acquireContractLifecycleTestConnection(t, ctx)
-		defer conn.Release()
-		held, err := conn.Begin(ctx)
-		server.Raise(err)
-		defer held.Rollback(context.Background())
-		server.RaisePgResult(held.Exec(ctx, `SELECT pg_advisory_xact_lock(731071)`))
-		blocker := contractLifecycleTestBackendPid(t, ctx, held)
-		bounded, expire := context.WithCancelCause(ctx)
-		defer expire(context.Canceled)
-		type outcome struct {
-			page LegacySettlementShardResult
-			err  error
-		}
-		done := make(chan outcome, 1)
-		go func() {
-			page, err := flushLegacySettlementShardPage(ctx, bounded, shard, nil, nil, 64)
-			done <- outcome{page: page, err: err}
-		}()
-		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
-		expire(errLegacySettlementPageBudget)
-		var got outcome
-		select {
-		case got = <-done:
-		case <-ctx.Done():
-			t.Fatal("payer owner failed to join its bounded operation", ctx.Err())
-		}
-		server.Raise(held.Rollback(ctx))
-		conn.Release()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_payer_budget_barrier ON transfer_contract; DROP FUNCTION synthetic_payer_budget_barrier()`))
-		})
-		if got.err != nil || got.page.Visited != 1 || got.page.Completed != 1 || got.page.Failed != 0 || got.page.PayerVisited != 1 || got.page.PayerCursor == nil || got.page.PayerCursor.After == nil || !got.page.More {
-			t.Fatalf("payer deadline lost exact committed prefix: %+v %v", got.page, got.err)
-		}
-		requireLegacySettlementTestState(t, ctx, firstOwner, first, false, true, 989, 0)
-		requireLegacySettlementTestState(t, ctx, secondOwner, second, true, false, 1000, 100)
-		resumed, err := FlushLegacySettlementShard(ctx, shard, got.page.Cursor, got.page.PayerCursor, 64)
-		if err != nil || resumed.Completed != 1 || resumed.PayerCompleted != 1 || resumed.Failed != 0 {
-			t.Fatalf("payer deadline replay failed: %+v %v", resumed, err)
-		}
-		requireLegacySettlementTestState(t, ctx, secondOwner, second, false, true, 989, 0)
-		requireLegacyProviderDurability(t, ctx, firstOwner, first, 11)
-		requireLegacyProviderDurability(t, ctx, secondOwner, second, 11)
-	})
+	}
 }
 
 // Optional metadata repair rolls back on its own statement budget. Holding its

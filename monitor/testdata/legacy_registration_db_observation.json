@@ -1,0 +1,111 @@
+{
+  "database": {
+    "acquire_ns": 0,
+    "admitted": false,
+    "at_return": {
+      "at_unix_ns": 0,
+      "has_deadline": true,
+      "remaining_ns": 0,
+      "state": "deadline"
+    },
+    "attempt": 0,
+    "before_acquire": {
+      "at_unix_ns": 0,
+      "has_deadline": true,
+      "remaining_ns": 0,
+      "state": "deadline"
+    },
+    "before_open": {
+      "at_unix_ns": 0,
+      "has_deadline": true,
+      "remaining_ns": 0,
+      "state": "deadline"
+    },
+    "pool_entry": {
+      "acquired": 0,
+      "acquires": 0,
+      "at_unix_ns": 0,
+      "canceled": 0,
+      "constructing": 0,
+      "created": 0,
+      "empty": 0,
+      "idle": 0,
+      "maximum": 0,
+      "total": 0
+    },
+    "pool_open_ns": 0,
+    "pool_return": {
+      "acquired": 0,
+      "acquires": 0,
+      "at_unix_ns": 0,
+      "canceled": 0,
+      "constructing": 0,
+      "created": 0,
+      "empty": 0,
+      "idle": 0,
+      "maximum": 0,
+      "total": 0
+    },
+    "returned": true
+  },
+  "entry": {
+    "parent": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": false,
+        "remaining_ns": 0,
+        "state": "live"
+      },
+      "cause": "live"
+    },
+    "registration": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": true,
+        "remaining_ns": 0,
+        "state": "deadline"
+      },
+      "cause": "deadline"
+    },
+    "turn": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": true,
+        "remaining_ns": 0,
+        "state": "live"
+      },
+      "cause": "live"
+    }
+  },
+  "phase": "acquire",
+  "return": {
+    "parent": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": false,
+        "remaining_ns": 0,
+        "state": "live"
+      },
+      "cause": "live"
+    },
+    "registration": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": true,
+        "remaining_ns": 0,
+        "state": "deadline"
+      },
+      "cause": "deadline"
+    },
+    "turn": {
+      "budget": {
+        "at_unix_ns": 0,
+        "has_deadline": true,
+        "remaining_ns": 0,
+        "state": "live"
+      },
+      "cause": "live"
+    }
+  },
+  "schema": 1
+}

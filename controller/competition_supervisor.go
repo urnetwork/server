@@ -47,7 +47,7 @@ func reviewedSourceSealedEntry(review model.CompetitionIntegrityReviewResult, se
 		if entry.JobId != review.Request.JobId {
 			continue
 		}
-		if entry.State != "succeeded" || !entry.Eligible || model.CompetitionRewardEligibility(entry.Score, seal.BaselineRawScore, seal.TakeoverMargin) != "" ||
+		if entry.State != "succeeded" || !entry.Eligible || model.CompetitionRewardEligibilityForMode(entry.Score, seal.BaselineRawScore, seal.TakeoverMargin, seal.Staging) != "" ||
 			entry.PatchSha256 != review.Request.PatchSha256 || hex.EncodeToString(patchDigest[:]) != entry.PatchSha256 || entry.BaseSourceLockSha256 != review.Request.BaseSourceLockSha256 ||
 			entry.ScoreSha256 != review.Request.ScoreSha256 || entry.ArtifactManifestSha256 != review.Request.ArtifactManifestSha256 {
 			return nil, ErrConflict
@@ -74,7 +74,7 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 			server.Raise(json.Unmarshal(reviewJson, &review))
 			policy, decodeErr := decodeRoundPolicySnapshot(policyJson)
 			server.Raise(decodeErr)
-			if policy.AutomationPolicy == nil || policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment ||
+			if policy.AutomationPolicy == nil || policy.AutomationPolicy.Staging != settings.AutomationPolicy.Staging || policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment ||
 				policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId || review.Request.SourceDisposition != "approved" {
 				panic(ErrConflict)
 			}
@@ -118,23 +118,26 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 // The trusted deployment adapter installs this exact envelope on every
 // participating runtime. It contains no token, workload, patch, or seed.
 type CompetitionRuntimeManifest struct {
-	Environment             string    `json:"environment"`
-	CompetitionId           string    `json:"competition_id"`
-	SeasonId                string    `json:"season_id"`
-	Generation              int64     `json:"generation"`
-	TargetRoundId           server.Id `json:"target_round_id"`
-	ManifestCommit          string    `json:"manifest_commit"`
-	ManifestSha256          string    `json:"manifest_sha256"`
-	Manifest                []byte    `json:"manifest"`
-	SourceLockSha256        string    `json:"source_lock_sha256"`
-	EvaluatorImageDigest    string    `json:"evaluator_image_digest"`
-	HostQualificationSha256 string    `json:"host_qualification_sha256"`
+	Staging                   bool      `json:"staging,omitempty"`
+	StagingRoundWindowSeconds int       `json:"staging_round_window_seconds,omitempty"`
+	StagingPreparationSeconds int       `json:"staging_preparation_seconds,omitempty"`
+	Environment               string    `json:"environment"`
+	CompetitionId             string    `json:"competition_id"`
+	SeasonId                  string    `json:"season_id"`
+	Generation                int64     `json:"generation"`
+	TargetRoundId             server.Id `json:"target_round_id"`
+	ManifestCommit            string    `json:"manifest_commit"`
+	ManifestSha256            string    `json:"manifest_sha256"`
+	Manifest                  []byte    `json:"manifest"`
+	SourceLockSha256          string    `json:"source_lock_sha256"`
+	EvaluatorImageDigest      string    `json:"evaluator_image_digest"`
+	HostQualificationSha256   string    `json:"host_qualification_sha256"`
 }
 
 // Authenticates installed runtime content instead of accepting a caller's
 // readiness boolean. Missing installation is an explicit source-not-ready gate.
 func LoadCompetitionRuntimeManifest(settings *Settings, intent *model.CompetitionSourceActivation) error {
-	if settings == nil || intent == nil || !settings.AutomationPolicy.Enabled ||
+	if !sourceModeMatches(settings, intent) ||
 		intent.Environment != settings.AutomationPolicy.Environment ||
 		intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.TargetRoundId == (server.Id{}) {
 		return errors.New("source_not_ready: runtime manifest scope is invalid")
@@ -173,6 +176,7 @@ func LoadCompetitionRuntimeManifest(settings *Settings, intent *model.Competitio
 	digest := sha256.Sum256(installed.Manifest)
 	lockDigest, err := model.CompetitionSourceLockDigest(intent.Commits)
 	if err != nil || lockDigest != intent.SourceLockSha256 ||
+		installed.Staging != intent.Staging || installed.StagingRoundWindowSeconds != intent.StagingRoundWindowSeconds || installed.StagingPreparationSeconds != intent.StagingPreparationSeconds ||
 		installed.Environment != intent.Environment || installed.CompetitionId != intent.CompetitionId || installed.SeasonId != intent.SeasonId ||
 		installed.Generation != intent.Generation || installed.TargetRoundId != intent.TargetRoundId || installed.ManifestCommit != intent.ManifestCommit ||
 		installed.ManifestSha256 != intent.ManifestSha256 || hex.EncodeToString(digest[:]) != intent.ManifestSha256 ||
@@ -266,7 +270,7 @@ func (self *PostgresCompetitionSupervisorDriver) Renew(ctx context.Context, leas
 // final journal update was lost. The current round always wins over local state.
 func (self *PostgresCompetitionSupervisorDriver) Snapshot(ctx context.Context, lease model.CompetitionSupervisorLease) (*CompetitionSupervisorSnapshot, error) {
 	snapshot := &CompetitionSupervisorSnapshot{}
-	round, err := self.Store.CurrentRound(ctx, self.Settings)
+	round, err := self.Store.CurrentAutomationRound(ctx, self.Settings)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
@@ -552,7 +556,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 			}
 			return state, prepareErr
 		}
-		if now.Before(snapshot.Intent.PreparedAt.Add(competitionPreparationInterval)) {
+		if now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return checkpoint("preparation_ready", "", snapshot.Intent, time.Time{})
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {
@@ -563,7 +567,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if snapshot.Intent == nil {
 			return "preparation_blocked", errors.New("durable source intent is missing")
 		}
-		if now.Before(snapshot.Intent.PreparedAt.Add(competitionPreparationInterval)) {
+		if now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return "preparation_ready", nil
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {

@@ -1,3 +1,4 @@
+// Paid-sweep weeks advance atomically with a resumable contract cursor.
 package model
 
 import (
@@ -24,7 +25,23 @@ func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnE
 	for advancedBatches < pointsBlockRollupMaxBatches && server.NowUtc().Before(deadline) {
 		var batchCount int64 = -1
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			result, err := tx.Query(ctx, `
+			result, err := tx.Query(ctx, pointsBlockRollupSql, pointsBlockRollupBatchContracts, SubnetBlockGenesis, int64(SubnetBlockDuration/time.Second))
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&batchCount))
+				}
+			})
+		}, server.TxReadCommitted)
+		if batchCount < 0 {
+			return advancedBatches, nil
+		}
+		advancedBatches++
+	}
+	return advancedBatches, nil
+}
+
+// The production statement is shared with the native plan and accounting regression.
+const pointsBlockRollupSql = `
 				WITH payment AS MATERIALIZED (
 					SELECT payment_id, block_rollup_cursor
 					FROM account_payment
@@ -47,18 +64,30 @@ func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnE
 					FOR UPDATE SKIP LOCKED
 				), batch AS MATERIALIZED (
 					SELECT DISTINCT sweep.contract_id
-					FROM payment
-					JOIN transfer_escrow_sweep AS sweep USING (payment_id)
-					WHERE payment.block_rollup_cursor IS NULL
-						OR sweep.contract_id > payment.block_rollup_cursor
+					FROM transfer_escrow_sweep AS sweep
+					-- Scalar bounds reach the payment/contract index before joins.
+					-- The inclusive floor retains zero UUIDs for a null cursor;
+					-- the strict check excludes an actual cursor's contract.
+					WHERE sweep.payment_id = (SELECT payment_id FROM payment)
+						AND sweep.contract_id >= COALESCE(
+							(SELECT block_rollup_cursor FROM payment),
+							'00000000-0000-0000-0000-000000000000'::uuid
+						)
+						AND ((SELECT block_rollup_cursor FROM payment) IS NULL
+							OR sweep.contract_id > (SELECT block_rollup_cursor FROM payment))
 					ORDER BY sweep.contract_id
-					LIMIT $1
+					-- Keep custom and generic plans streaming the bounded prefix.
+					LIMIT (SELECT $1::bigint)
 				), paid AS MATERIALIZED (
 					SELECT sweep.sweep_time
-					FROM payment, batch
+					FROM batch
 					JOIN transfer_escrow_sweep AS sweep ON
 						sweep.contract_id = batch.contract_id
-					WHERE sweep.payment_id = payment.payment_id
+					WHERE sweep.payment_id = (SELECT payment_id FROM payment)
+						-- Bound sweep reads as well as batch membership. Empty
+						-- batches give null bounds and cannot read paid history.
+						AND sweep.contract_id >= (SELECT contract_id FROM batch ORDER BY contract_id LIMIT 1)
+						AND sweep.contract_id <= (SELECT contract_id FROM batch ORDER BY contract_id DESC LIMIT 1)
 						AND sweep.payout_byte_count > 0
 				), inserted AS (
 					INSERT INTO account_payment_block (payment_id, block_number)
@@ -80,17 +109,4 @@ func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnE
 					RETURNING (SELECT COUNT(*) FROM batch) AS batch_count
 				)
 				SELECT batch_count FROM advanced
-			`, pointsBlockRollupBatchContracts, SubnetBlockGenesis, int64(SubnetBlockDuration/time.Second))
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&batchCount))
-				}
-			})
-		}, server.TxReadCommitted)
-		if batchCount < 0 {
-			return advancedBatches, nil
-		}
-		advancedBatches++
-	}
-	return advancedBatches, nil
-}
+			`

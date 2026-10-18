@@ -86,7 +86,11 @@ func (hostPressureProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		output, err := env.runner.sshTimeout(ctx, target,
 			"hostname -s; head -c 512 /proc/pressure/cpu", "", 10*time.Second)
 		var sample hostPressureSample
+		failurePhase := "source"
+		errorClass := classifyObservationError(err)
 		if err == nil {
+			failurePhase = "parse"
+			errorClass = observationErrorClassInvalidResponse
 			sample, err = parseHostPressure(output, target.name)
 		}
 		if err != nil {
@@ -96,8 +100,9 @@ func (hostPressureProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				symptom:   "The host's direct CPU runnable-delay observation is unavailable.",
 				mechanism: "The SSH source, remote host identity, or Linux CPU pressure file could not be verified. Missing pressure is unknown, not zero.",
 				baseline:  "Every enabled host returns its own hostname and a valid /proc/pressure/cpu some sample each minute.",
-				observed:  "source_status=unavailable",
-				action:    "Check the inventory-owned SSH route, exact remote hostname, and /proc/pressure/cpu. Preserve any operator host exclusion; do not infer spare CPU from missing PSI.",
+				observed:  "source_status=unavailable failure_phase=" + failurePhase + " " + observationFailureDetails(err, errorClass),
+				context:   "The failure phase identifies a source-return or parser boundary. Source errors may occur before contact; parse includes remote identity and PSI validation. Error classes and admission markers alone do not prove native contact, command completion, a shared SSH cause, or CPU load.",
+				action:    observationFailureAction(err, errorClass, "Check the inventory-owned SSH route, exact remote hostname, and /proc/pressure/cpu. Preserve any operator host exclusion; do not infer spare CPU from missing PSI."),
 				verify:    "Two consecutive bounded reads match the inventory host and parse a complete CPU PSI some sample.",
 				playbook:  "SIGNALS.md §8.14a",
 			})

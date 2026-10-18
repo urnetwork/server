@@ -90,6 +90,15 @@ WHERE store = 'stripe'
   AND action = 'credit_unfulfillable'
   AND NOT dry_run
   AND event_time >= now() - interval '24 hours'
+  -- The S11 webhook writer has a separate, valid audit contract. Its uncredited
+  -- payment remains observable through payment-failures (§2.22).
+  -- Exclude only the complete tuple; malformed webhook rows still page here.
+  AND NOT (
+      evidence IS NOT NULL
+      AND btrim(evidence) <> ''
+      AND COALESCE(details::jsonb ->> 'reason', '') = 'destination_unresolved'
+      AND COALESCE(details::jsonb ->> 'leg', '') = 'webhook'
+  )
 `
 
 const (
@@ -368,12 +377,12 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 		return &finding{
 			probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable-invalid", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
 			symptom:   fmt.Sprintf("Stripe reconciliation recorded %d credit-unfulfillable event(s) with an invalid terminal disposition", invalid),
-			mechanism: "A credit_unfulfillable event is terminal only when it has provider evidence plus a destination_deleted or destination_unresolved credit-leg disposition. Other details may be historical incompatible events or a writer-contract regression. They are not safe payment dispositions and cannot be silently treated as uncreditable destinations.",
+			mechanism: "A reconciliation credit_unfulfillable event requires nonblank provider evidence plus a destination_deleted or destination_unresolved credit-leg disposition. The separate webhook writer uses destination_unresolved with leg=webhook and nonblank evidence; that valid tuple remains a payment-credit-unfulfillable WARN under §2.22. Other tuples can reflect incompatible audit data or a writer-contract regression; they do not establish an authorized payment disposition.",
 			baseline:  "Zero invalid non-dry-run credit_unfulfillable events; terminal records have provider evidence and an audited deleted or unresolved destination reason.",
 			observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable invalid_observations_24h=%d distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", invalid, distinctEvidence, observations, distinctRuns, latestAge),
 			evidence:  "Only aggregate validation counts and latest age are selected. Event details, provider evidence, run IDs, network IDs, accounts, and credentials remain in the restricted audit store.",
 			action:    "Use the restricted audit trail to classify each invalid event as a historical schema/version mismatch or a current writer regression. Repair the writer or record an explicit authorized finance disposition; do not infer destination_deleted, retarget a payment, consume its evidence, or force the Stripe watermark.",
-			verify:    "New Taskworker runs write only complete terminal dispositions, the invalid aggregate reaches zero through two natural hourly runs, and each historical payment has an explicit authorized restricted-audit disposition.",
+			verify:    "New API webhook and Taskworker records satisfy their respective audit contracts, the invalid aggregate remains zero through two natural hourly runs, and each affected payment has an explicit authorized restricted-audit disposition. A valid unresolved-webhook WARN still requires separate payment disposition; aging out does not prove resolution.",
 			playbook:  "SIGNALS.md §2.21",
 		}, nil
 	}
@@ -383,7 +392,7 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 	return &finding{
 		probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
 		symptom:   fmt.Sprintf("Stripe reconciliation found %d paid invoice destination(s) that can no longer be credited", distinctEvidence),
-		mechanism: "Stripe listed a paid subscription invoice whose destination was deleted before the ledger-gated credit, or whose complete metadata, checkout-reference, and legacy-email resolution found no destination. The controller refused the Stripe ledger, renewal, and balance writes; this terminal business exception is not a provider-listing failure and does not pin the store watermark. Missing or malformed authority data, incomplete pages, conflicting destination references, and provider or database failures remain errors that pin the watermark.",
+		mechanism: "Stripe listed a paid subscription invoice whose destination was deleted before the ledger-gated credit, or whose complete metadata and checkout-reference resolution found no destination. The customer-email fallback is removed; an unresolved destination does not prove account deletion. The controller refused the Stripe ledger, renewal, and balance writes; this terminal business exception is not a provider-listing failure and does not pin the store watermark. Missing or malformed authority data, incomplete pages, conflicting destination references, and provider or database failures remain errors that pin the watermark.",
 		baseline:  "Zero non-dry-run credit_unfulfillable events. Every paid invoice either credits its original live destination exactly once or receives an explicit authorized finance/operations disposition.",
 		observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", distinctEvidence, observations, distinctRuns, latestAge),
 		evidence:  "The aggregate validates destination_deleted or destination_unresolved reasons and returns only distinct-evidence, observation, and run counts plus latest age. Provider evidence, run IDs, network IDs, accounts, details, and credentials remain in the restricted audit store.",

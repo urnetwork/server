@@ -43,8 +43,9 @@ func (self PostgresStore) AbandonSourceIntent(ctx context.Context, settings *Set
 			var unsafe bool
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4)
 			 OR EXISTS(SELECT 1 FROM competition_source_pointer WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4)
-			 OR EXISTS(SELECT 1 FROM competition_round WHERE competition_id=$2 AND NOT staging AND epoch_number=$5)`,
-				intent.Environment, intent.CompetitionId, intent.SeasonId, generation, intent.TargetEpoch).Scan(&unsafe))
+			 OR EXISTS(SELECT 1 FROM competition_round WHERE competition_id=$2 AND staging=$6 AND epoch_number=$5
+			 AND policy_json->'automation_policy'->>'environment'=$1 AND policy_json->'automation_policy'->>'season_id'=$3)`,
+				intent.Environment, intent.CompetitionId, intent.SeasonId, generation, intent.TargetEpoch, intent.Staging).Scan(&unsafe))
 			if unsafe {
 				panic(ErrConflict)
 			}

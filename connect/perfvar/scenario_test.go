@@ -1362,9 +1362,7 @@ func TestPerfvarGitStateHashesDirtyContents(t *testing.T) {
 	}
 	runGit("add", "tracked.txt")
 	runGit(
-		"-c", "user.name=PERFVAR",
-		"-c", "user.email=perfvar@example.invalid",
-		"commit", "--quiet", "-m", "base",
+		"commit", "--quiet", "--no-gpg-sign", "-m", "base",
 	)
 	revision, modified, cleanHash := perfvarGitState(repository)
 	if revision == "" || modified || cleanHash == "" {

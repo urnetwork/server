@@ -1475,7 +1475,8 @@ func AuthVerifyCreateCode(
 		return result, nil
 	}
 
-	return nil, errors.New("Invalid login.")
+	// no account for the user auth: a refusal the caller sees
+	return nil, errors.New("400 Invalid login.")
 }
 
 type AuthPasswordResetCreateCodeArgs struct {
@@ -1560,7 +1561,8 @@ func AuthPasswordResetCreateCode(
 		return result, nil
 	}
 
-	return nil, errors.New("Invalid login.")
+	// no account for the user auth: a refusal the caller sees
+	return nil, errors.New("400 Invalid login.")
 }
 
 type AuthPasswordSetArgs struct {
@@ -1645,7 +1647,8 @@ func AuthPasswordSet(
 	})
 
 	if userAuthResetId == nil {
-		return nil, errors.New("Invalid login.")
+		// an unknown, used or expired reset code
+		return nil, errors.New("400 Invalid login.")
 	}
 
 	// valid reset code

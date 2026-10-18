@@ -107,6 +107,14 @@ func pgSampleActivitySQL(index int) string {
  ), selected AS (SELECT * FROM ranked WHERE load_rank<=64 OR age_rank<=64 ORDER BY load_rank)
  SELECT json_build_object('kind','activity','sample',%d,'at',extract(epoch FROM clock_timestamp()),
  'total',(SELECT count(*) FROM a),'groups',(SELECT count(*) FROM grouped),
+ 'state_totals',(SELECT json_build_array(
+ coalesce(sum(n) FILTER (WHERE state='active'),0),
+ coalesce(sum(n) FILTER (WHERE state='idle'),0),
+ coalesce(sum(n) FILTER (WHERE state='idle in transaction'),0),
+ coalesce(sum(n) FILTER (WHERE state='idle in transaction (aborted)'),0),
+ coalesce(sum(n) FILTER (WHERE state='fastpath function call'),0),
+ coalesce(sum(n) FILTER (WHERE state='disabled'),0),
+ coalesce(sum(n) FILTER (WHERE state='unknown'),0)) FROM grouped),
  'query_text_truncated',(SELECT count(*) FROM a WHERE octet_length(query)>=pg_size_bytes(current_setting('track_activity_query_size'))-1 OR length(query)>2048),
  'sql_capture_version',1,
  'rows',coalesce((SELECT json_agg(json_build_array(s.q,s.state,s.wait,s.owner,s.app,s.backend,s.family,s.db_scope,s.n,s.query_age,s.xact_age,s.state_age,
@@ -180,6 +188,7 @@ type pgSampleWire struct {
 	Sample             int                 `json:"sample"`
 	At                 float64             `json:"at"`
 	Total              int                 `json:"total"`
+	StateTotals        []json.RawMessage   `json:"state_totals,omitempty"`
 	Groups             int                 `json:"groups"`
 	Reset              *float64            `json:"reset"`
 	Primary            bool                `json:"primary"`
@@ -233,6 +242,19 @@ type pgSampleBlocker struct {
 	TransactionAge float64 `json:"max_transaction_age_s"`
 	Observed       bool    `json:"blocker_observed"`
 }
+
+// Every backend type and database in the same materialized activity rowset,
+// excluding only the observer PID. Missing source totals remain a nil entry.
+type pgSampleStateTotals struct {
+	Active                   int `json:"active"`
+	Idle                     int `json:"idle"`
+	IdleInTransaction        int `json:"idle_in_transaction"`
+	IdleInTransactionAborted int `json:"idle_in_transaction_aborted"`
+	FastpathFunctionCall     int `json:"fastpath_function_call"`
+	Disabled                 int `json:"disabled"`
+	Unknown                  int `json:"unknown"`
+}
+
 type pgQuerySampleReceipt struct {
 	Schema                    int                    `json:"schema"`
 	RequestedAt               time.Time              `json:"requested_at"`
@@ -243,6 +265,7 @@ type pgQuerySampleReceipt struct {
 	Samples                   int                    `json:"samples"`
 	SampleClocks              []float64              `json:"sample_clocks"`
 	BackendTotals             []int                  `json:"backend_totals"`
+	BackendStateTotals        []*pgSampleStateTotals `json:"backend_state_totals"`
 	QueryTextTruncated        []int                  `json:"query_text_truncated"`
 	TrackQuerySize            int                    `json:"track_activity_query_size"`
 	PGSSVersion               string                 `json:"pgss_version"`
@@ -264,6 +287,8 @@ type pgQuerySampleReceipt struct {
 	PrivateSql                *pgSampleSqlCoverage   `json:"private_sql,omitempty"`
 	privateSqlRows            []pgSampleSqlRow
 	privateQueryIds           map[string]string
+
+	TransportObservation *pgSampleTransportReceipt `json:"transport_observation,omitempty"`
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -327,6 +352,7 @@ func pgSampleNumber(raw json.RawMessage) (float64, error) {
 func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error) {
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now}
 	fail := func() (pgQuerySampleReceipt, error) {
+		r.BackendStateTotals = nil
 		return r, errors.New("monitor: invalid bounded PostgreSQL sample")
 	}
 	if len(raw) > pgQuerySampleMaxBytes || !strings.HasSuffix(raw, "\n") {
@@ -371,6 +397,9 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 		}
 		lastClock = w.At
 		if w.SqlCaptureVersion != nil && w.Kind != "activity" {
+			return fail()
+		}
+		if w.StateTotals != nil && w.Kind != "activity" {
 			return fail()
 		}
 		switch w.Kind {
@@ -445,11 +474,38 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 			if r.Samples > 0 && w.At-r.SampleClocks[r.Samples-1] < 1.9 {
 				return fail()
 			}
+			// Wire order is the existing seven normalized states. Count the full
+			// grouping before rank caps; an absent/null vector is unknown, not zero.
+			var stateCounts [7]int
+			var stateTotals *pgSampleStateTotals
+			if w.StateTotals != nil {
+				if len(w.StateTotals) != len(stateCounts) {
+					return fail()
+				}
+				sum := 0
+				for i, raw := range w.StateTotals {
+					count, err := pgSampleNumber(raw)
+					if err != nil || math.Trunc(count) != count || count > float64(w.Total) {
+						return fail()
+					}
+					stateCounts[i] = int(count)
+					sum += stateCounts[i]
+				}
+				if sum != w.Total {
+					return fail()
+				}
+				stateTotals = &pgSampleStateTotals{
+					Active: stateCounts[0], Idle: stateCounts[1],
+					IdleInTransaction: stateCounts[2], IdleInTransactionAborted: stateCounts[3],
+					FastpathFunctionCall: stateCounts[4], Disabled: stateCounts[5], Unknown: stateCounts[6],
+				}
+			}
 			r.Samples++
 			r.SampleClocks = append(r.SampleClocks, w.At)
 			r.BackendTotals = append(r.BackendTotals, w.Total)
 			r.OmittedGroups += w.Groups - len(w.Rows)
 			seen := map[string]bool{}
+			selectedStateCounts := map[string]int{}
 			total := 0
 			captured := 0
 			for _, row := range w.Rows {
@@ -519,6 +575,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 					l.MaintenanceSlowSamples++
 				}
 				l.BackendSamples += int(nums[0])
+				selectedStateCounts[parts[1]] += int(nums[0])
 				l.SeenSamples++
 				l.Peak = max(l.Peak, int(nums[0]))
 				l.QueryAge = max(l.QueryAge, nums[1])
@@ -528,6 +585,13 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 			if total > w.Total || (w.Groups == len(w.Rows) && total != w.Total) {
 				return fail()
 			}
+			if stateTotals != nil {
+				for i, state := range pgSampleAllowed["state"] {
+					if selectedStateCounts[state] > stateCounts[i] {
+						return fail()
+					}
+				}
+			}
 			if sqlCaptureVersion == 1 {
 				if captured < min(w.Groups, 8) || captured > min(len(w.Rows), 16) {
 					return fail()
@@ -535,6 +599,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 				r.PrivateSql.CapturedGroupSamples += captured
 				r.PrivateSql.OmittedGroupSamples += w.Groups - captured
 			}
+			r.BackendStateTotals = append(r.BackendStateTotals, stateTotals)
 		case "blockers":
 			if r.Samples != pgQuerySampleCount || seenBlockers || len(w.Rows) > 256 {
 				return fail()
@@ -643,6 +708,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 
 	r.Complete = true
 	r.Qualifiers = []string{"12 snapshots are backend-samples, not distinct statements, continuous waits or CPU attribution", "query/transaction/state ages are separate; wait residence unknown", "completed statistics are endpoint entry-lifetime gauges, not sample-window or per-owner runtimes; exclude canceled/incomplete and possibly utility statements; eviction/selective-reset continuity is unproved, so interval deltas are withheld", "history is current database only, capped to top5000 lifetime execution-time IDs at each endpoint; missing entries unknown", "each snapshot retains the union of top64 active/count and top64 active/age groups; output retains40 count-ranked plus40 slow/age-ranked groups; blockers one final snapshot of oldest16 lock waiters, at most16 blockers each", "SQL family matching is descriptive source shape, not runtime executable or task ownership; reservation_census_prefix is a suspected source-shaped prefix, not full identity. SQL truncation counts include configured activity buffer and local2048-character cap", "local/loopback client owner and declared application do not identify originating service through PgBouncer", "NULL query IDs share an unknown token; recognized families only partly distinguish those statements", "this projection excludes raw SQL, database/application values, client addresses, PIDs and query IDs; an available private SQL companion contains bounded representative prefixes and query-ID/token mappings only; absence or truncation leaves source identity unknown"}
+	r.Qualifiers = append(r.Qualifiers, "backend_state_totals aligns with sample_clocks/backend_totals and covers all backend types/databases except the observer PID before group caps; a null entry is unavailable, while unknown counts observed unrecognized/null states; counts are sampled occupancies, not unique sessions, continuous state, CPU or caller attribution")
 	return r, nil
 }
 
@@ -708,6 +774,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	ctx, cancelSample := context.WithTimeout(ctx, pgQuerySampleBudget)
 	defer cancelSample()
+	ctx, transportObservation := observePgSampleTransport(ctx)
 	h := env.cfg.hostByRole("pg-primary")
 	if h == nil {
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryMissing}
@@ -716,7 +783,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryDisabled}
 	}
 	if env.cfg.routerGenerationCheck != nil {
+		transportObservation.beginLocalPhase(pgLocalSettingsGeneration)
 		ok, err := env.cfg.routerGenerationCheck(ctx)
+		transportObservation.endLocalPhase(pgLocalSettingsGeneration)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightGenerationUnobservable, err: err}
 		}
@@ -730,12 +799,16 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	identity := until.UTC().Format(time.RFC3339Nano)
 	if recurring {
+		transportObservation.beginLocalPhase(pgLocalCadenceLock)
 		lock, err := lockProviderState(ctx, env.cfg.stateDir, "pg-query-sample-cadence")
+		transportObservation.endLocalPhase(pgLocalCadenceLock)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceLock, err: err}
 		}
 		defer lock.Close()
-		admitted, err := pgSampleContinuousAdmission(dir, now, p.syncAttemptFile)
+		transportObservation.beginLocalPhase(pgLocalCadenceAdmission)
+		admitted, err := pgSampleContinuousAdmissionObserved(dir, now, p.syncAttemptFile, transportObservation)
+		transportObservation.endLocalPhase(pgLocalCadenceAdmission)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceState, err: err}
 		}
@@ -748,7 +821,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	name := hex.EncodeToString(hash[:8])
 	if !recurring {
 		marker := filepath.Join(dir, name+".attempt")
+		transportObservation.beginLocalPhase(pgLocalOneShotMarker)
 		created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
+		transportObservation.endLocalPhase(pgLocalOneShotMarker)
 		if err != nil {
 			return nil, &pgSamplePreflightError{reason: pgSamplePreflightMarker, err: err}
 		}
@@ -758,9 +833,13 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now, Reason: "source-unavailable"}
-	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb)})
+	transportObservation.beginLocalPhase(pgLocalSampleCommand)
+	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb), "transport_nonce": transportObservation.nonce})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
+	transportObservation.endLocalPhase(pgLocalSampleCommand)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
+	transportReceipt := transportObservation.receipt
+	transportReceipt.OwnerDeadlineExceeded = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	if failure, valid := parsePgSampleSourceFailure(out); valid {
 		r.SourceFailure = failure
 	} else if readErr != nil {
@@ -776,6 +855,19 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		} else {
 			r.Reason = "projection-unavailable"
 			r.SourceFailure = &pgSampleSourceFailure{Phase: "projection", Cause: "invalid_response"}
+		}
+	}
+	r.TransportObservation = &transportReceipt
+	// A native owner can expire with less time at Start than the unchanged SQL's
+	// mandatory waits alone require. This does not locate earlier owner time or
+	// replace the original transport/source failure with a database diagnosis.
+	budgetQualifier := ""
+	minimumWaitMs := ((pgQuerySampleCount - 1) * 2 * time.Second).Milliseconds()
+	if !r.Complete && r.Reason == "deadline" && transportReceipt.OwnerDeadlineExceeded && transportReceipt.Spawn == "started" && transportReceipt.Joined && transportReceipt.SpawnRemainingBudgetMs != nil {
+		remainingMs := *transportReceipt.SpawnRemainingBudgetMs
+		if 0 <= remainingMs && remainingMs < minimumWaitMs {
+			budgetQualifier = fmt.Sprintf("collection_budget=below-mandatory-waits minimum_wait_ms=%d spawn_remaining_budget_ms=%d", minimumWaitMs, remainingMs)
+			r.Qualifiers = append(r.Qualifiers, budgetQualifier)
 		}
 	}
 	r.FinishedAt = env.now().UTC()
@@ -808,6 +900,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	observed := "reason=" + r.Reason
 	if f := r.SourceFailure; f != nil {
 		observed += fmt.Sprintf(" phase=%s cause=%s stderr_truncated=%t", f.Phase, f.Cause, f.StderrTruncated)
+	}
+	if budgetQualifier != "" {
+		observed += " " + budgetQualifier
 	}
 	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: observed, evidence: "Finite private immutable receipt_sha256=" + receiptSHA256 + "; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect the private finite receipt and sampler status; recurring mode waits for its next cadence, while one-shot mode needs a fresh explicit arm. Do not infer health or tune pools from missing evidence.", verify: "The next eligible finite sample qualifies under the same source and host limits.", playbook: "SIGNALS.md §2.1a"}}, nil
 }

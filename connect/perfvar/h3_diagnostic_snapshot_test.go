@@ -224,9 +224,7 @@ func TestH3DiagnosticAckFailureDeltasPreserveNilAndOwnership(t *testing.T) {
 			SelectorClosedCount: 4, OtherCount: 5, BlockedCount: 7,
 			WaitDuration: 42 * time.Second, MaxWait: 23 * time.Second,
 		}},
-		{name: "no new failure", start: &start, end: &start, want: &clientconnect.AckRouteWriteFailureStatsSnapshot{
-			MaxWait: 19 * time.Second,
-		}},
+		{name: "no new failure", start: &start, end: &start},
 	} {
 		var beforeStart, beforeEnd clientconnect.AckRouteWriteFailureStatsSnapshot
 		if c.start != nil {
@@ -251,5 +249,56 @@ func TestH3DiagnosticAckFailureDeltasPreserveNilAndOwnership(t *testing.T) {
 		if (c.start != nil && *c.start != beforeStart) || (c.end != nil && *c.end != beforeEnd) {
 			t.Fatalf("%s: reducer or result mutation changed a lifetime snapshot", c.name)
 		}
+	}
+}
+
+// Connect publishes ACK route failure totals only after a failed write. A
+// first failure inside the interval reduces against a zero baseline, an
+// interval without a new failure has no totals, and the delta owns its value.
+func TestH3DiagnosticAckRouteWriteFailureDeltas(t *testing.T) {
+	first := &clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:        3,
+		RouteTimeoutCount: 2,
+		OtherCount:        1,
+		BlockedCount:      2,
+		WaitDuration:      3 * time.Second,
+		MaxWait:           2 * time.Second,
+	}
+	later := &clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:          5,
+		RouteTimeoutCount:   3,
+		CallerCanceledCount: 1,
+		OtherCount:          1,
+		BlockedCount:        3,
+		WaitDuration:        5 * time.Second,
+		MaxWait:             4 * time.Second,
+	}
+	receive := func(failures *clientconnect.AckRouteWriteFailureStatsSnapshot) clientconnect.ClientReceiveStatsSnapshot {
+		return clientconnect.ClientReceiveStatsSnapshot{AckRouteWriteFailures: failures}
+	}
+
+	if delta := subtractH3FullTunReceive(receive(nil), receive(nil)).AckRouteWriteFailures; delta != nil {
+		t.Fatalf("an interval without any failure reported totals %+v", *delta)
+	}
+	delta := subtractH3FullTunReceive(receive(nil), receive(first)).AckRouteWriteFailures
+	if delta == nil || *delta != *first {
+		t.Fatalf("first failures against a zero baseline = %+v, want %+v", delta, *first)
+	}
+	if delta == first {
+		t.Fatal("the interval delta aliases the lifetime snapshot")
+	}
+	if delta := subtractH3FullTunReceive(receive(first), receive(first)).AckRouteWriteFailures; delta != nil {
+		t.Fatalf("an interval without a new failure reported totals %+v", *delta)
+	}
+	want := clientconnect.AckRouteWriteFailureStatsSnapshot{
+		ErrorCount:          2,
+		RouteTimeoutCount:   1,
+		CallerCanceledCount: 1,
+		BlockedCount:        1,
+		WaitDuration:        2 * time.Second,
+		MaxWait:             4 * time.Second,
+	}
+	if delta := subtractH3FullTunReceive(receive(first), receive(later)).AckRouteWriteFailures; delta == nil || *delta != want {
+		t.Fatalf("later failures = %+v, want %+v", delta, want)
 	}
 }

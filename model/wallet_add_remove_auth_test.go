@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 
@@ -395,20 +397,14 @@ func TestAddWalletAuthReAddingTheSameWalletIsIdempotent(t *testing.T) {
 
 // --- A5 -------------------------------------------------------------------
 
-// DESIGN LIMITATION, PINNED ON PURPOSE.
+// An account holds one wallet per chain: a Solana wallet and a Bittensor
+// wallet at the same time, both usable for sign-in. Before
+// network_user_auth_wallet was keyed by (user_id, blockchain) the second
+// chain's wallet was refused with "A different wallet is already linked".
 //
-// network_user_auth_wallet is PRIMARY KEY (user_id), so an account holds at
-// most one wallet: a user cannot keep a Solana wallet and a Bittensor wallet at
-// the same time. The verbatim ask ("add and remove a solana, email or sso
-// account at will") reads like holding both, so this is pinned rather than
-// left implicit -- supporting both chains at once is a schema change
-// (PRIMARY KEY(user_id) -> UNIQUE(user_id, blockchain), plus GetNetworkUser's
-// walletAuths[0] becoming a loop), and whoever makes it has to come here and
-// delete this test deliberately.
-//
-// Both directions are asserted, because "Bittensor is refused while Solana is
+// Both orders are asserted, because "Bittensor is refused while Solana is
 // allowed" would be exactly the asymmetry this file exists to catch.
-func TestAddWalletAuthRefusesASecondWalletOfAnotherChain(t *testing.T) {
+func TestAddWalletAuthAcceptsOneWalletPerChain(t *testing.T) {
 	for _, chain := range walletChains {
 		t.Run(chain.name+"-then-"+chain.otherChain().name, func(t *testing.T) {
 			server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -419,20 +415,83 @@ func TestAddWalletAuthRefusesASecondWalletOfAnotherChain(t *testing.T) {
 				if result := addWalletThroughAddAuth(t, ctx, clientSession, first); result.Error != nil {
 					t.Fatalf("first (%s) add refused: %s", chain.name, result.Error.Message)
 				}
-
 				second := chain.otherChain().newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, second); result.Error != nil {
+					t.Fatalf(
+						"an account bound to a %s wallet refused a %s wallet: %s",
+						chain.name, chain.otherChain().name, result.Error.Message,
+					)
+				}
+
+				if count := walletRowCount(t, ctx, userId); count != 2 {
+					t.Fatalf("wallet rows = %d, want one per chain", count)
+				}
+				networkUser := GetNetworkUser(ctx, userId)
+				if len(networkUser.WalletAuths) != 2 {
+					t.Fatalf("wallet_auths = %#v, want both wallets", networkUser.WalletAuths)
+				}
+				for _, authType := range []string{chain.authType, chain.otherChain().authType, "email"} {
+					if !hasAuthType(networkUser.AuthTypes, authType) {
+						t.Fatalf("auth_types = %#v, want it to contain %q", networkUser.AuthTypes, authType)
+					}
+				}
+				if len(networkUser.AuthTypes) != 3 {
+					t.Fatalf("auth_types = %#v, want each method once", networkUser.AuthTypes)
+				}
+
+				// the first wallet bound keeps the single-valued mirror
+				address, blockchain := networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != first.address {
+					t.Fatalf("network_user.wallet_address = %v, want the first wallet %q", address, first.address)
+				}
+				if blockchain == nil || *blockchain != chain.chainName {
+					t.Fatalf("network_user.wallet_blockchain = %v, want %q", blockchain, chain.chainName)
+				}
+
+				// both wallets sign in to this account
+				for _, signer := range []acceptanceWalletSigner{first, second} {
+					login, err := handleLoginWallet(signedAcceptanceWalletChallenge(t, ctx, signer), ctx)
+					if err != nil {
+						t.Fatalf("%s wallet login: %v", signer.blockchain, err)
+					}
+					if login.Network == nil || login.Network.ByJwt == "" {
+						t.Fatalf("%s wallet did not sign in: %#v", signer.blockchain, login)
+					}
+					walletAuths, err := getWalletAuthsByAddress(ctx, signer.address)
+					if err != nil || len(walletAuths) != 1 || *walletAuths[0].UserId != userId {
+						t.Fatalf("%s wallet binding = %#v (%v), want this account", signer.blockchain, walletAuths, err)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A second wallet of a chain the account already has is refused, not swapped
+// in: the bound wallet may be the only credential that still signs the user in.
+func TestAddWalletAuthRefusesASecondWalletOfTheSameChain(t *testing.T) {
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "same-chain")
+
+				first := chain.newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, first); result.Error != nil {
+					t.Fatalf("first add refused: %s", result.Error.Message)
+				}
+
+				second := chain.newSigner(t)
 				result := addWalletThroughAddAuth(t, ctx, clientSession, second)
 				if result.Error == nil {
-					t.Fatalf(
-						"an account bound to a %s wallet also accepted a %s wallet; "+
-							"network_user_auth_wallet is PRIMARY KEY (user_id), so if this "+
-							"now succeeds one of the two wallets was silently discarded",
-						chain.name, chain.otherChain().name,
-					)
+					t.Fatalf("an account bound to a %s wallet accepted a second %s wallet", chain.name, chain.name)
 				}
 				assertNoStatusPrefix(t, "second wallet", result.Error.Message)
 				if !strings.Contains(result.Error.Message, "A different wallet is already linked") {
 					t.Fatalf("refusal = %q", result.Error.Message)
+				}
+				if !strings.Contains(strings.ToLower(result.Error.Message), chain.name) {
+					t.Fatalf("refusal = %q, want it to name the %s chain", result.Error.Message, chain.name)
 				}
 				// the refusal must say what the user can actually do. A
 				// wallet-only account cannot remove its wallet first (that is
@@ -448,13 +507,470 @@ func TestAddWalletAuthRefusesASecondWalletOfAnotherChain(t *testing.T) {
 				}
 
 				// the original wallet survived untouched
+				if count := walletRowCount(t, ctx, userId); count != 1 {
+					t.Fatalf("wallet rows = %d after the refusal, want 1", count)
+				}
 				address, _ := networkUserWalletColumns(t, ctx, userId)
 				if address == nil || *address != first.address {
 					t.Fatalf("the bound wallet changed to %v", address)
 				}
+				secondAuths, err := getWalletAuthsByAddress(ctx, second.address)
+				if err != nil || len(secondAuths) != 0 {
+					t.Fatalf("the refused wallet was bound: %#v (%v)", secondAuths, err)
+				}
 			})
 		})
 	}
+}
+
+// A row written with a legacy label -- the lowercase 'solana' that
+// MigrateNetworkUserChildAuths writes, or the 'bittensor' spelling
+// ParseBlockchain also accepts -- is a wallet of that chain. The primary key
+// compares labels byte for byte, so only the Go pre-check can see that a
+// canonical add is the same chain: a different wallet of that chain is still
+// refused, the same wallet re-added stays one row, and the other chain's
+// wallet is accepted beside it. On removal the legacy row is classified the
+// same way, and a slot repointed at it is written with the canonical label.
+func TestAddWalletAuthClassifiesALegacyWalletLabel(t *testing.T) {
+	legacyLabels := map[string]string{
+		"solana":    AuthTypeSolana,
+		"bittensor": AuthTypeBittensor,
+	}
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "legacy-chain")
+				legacy := chain.newSigner(t)
+				writeWalletAuthRowForTest(t, ctx, userId, legacy.address, legacyLabels[chain.name])
+
+				other := chain.newSigner(t)
+				result := addWalletThroughAddAuth(t, ctx, clientSession, other)
+				if result.Error == nil {
+					t.Fatalf(
+						"a %q wallet was bound beside a legacy %q row: two %s wallets on one account",
+						chain.chainName, legacyLabels[chain.name], chain.name,
+					)
+				}
+				if !strings.Contains(result.Error.Message, "A different wallet is already linked") {
+					t.Fatalf("refusal = %q", result.Error.Message)
+				}
+
+				// the other chain's wallet is accepted and takes the empty slot
+				otherChain := chain.otherChain().newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, otherChain); result.Error != nil {
+					t.Fatalf("a %s wallet beside a legacy %s row was refused: %s", chain.otherChain().name, chain.name, result.Error.Message)
+				}
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, legacy); result.Error != nil {
+					t.Fatalf("re-adding the legacy-labelled wallet was refused: %s", result.Error.Message)
+				}
+				if count := walletRowCount(t, ctx, userId); count != 2 {
+					t.Fatalf("wallet rows = %d, want the legacy row and the %s row", count, chain.otherChain().name)
+				}
+				authTypes := authTypesOf(t, ctx, userId)
+				if !hasAuthType(authTypes, AuthTypeSolana) || !hasAuthType(authTypes, AuthTypeBittensor) {
+					t.Fatalf("auth_types = %#v, want both solana and bittensor", authTypes)
+				}
+				address, _ := networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != otherChain.address {
+					t.Fatalf("network_user.wallet_address = %v, want the first wallet added %q", address, otherChain.address)
+				}
+
+				// removing the slot's wallet repoints it at the legacy row,
+				// with the canonical label
+				if err := RemoveAuth(ctx, userId, chain.otherChain().authType); err != nil {
+					t.Fatalf("RemoveAuth(%s) = %v", chain.otherChain().authType, err)
+				}
+				address, blockchain := networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != legacy.address {
+					t.Fatalf("network_user.wallet_address = %v, want the legacy wallet %q", address, legacy.address)
+				}
+				if blockchain == nil || *blockchain != chain.chainName {
+					t.Fatalf("network_user.wallet_blockchain = %v, want the canonical %q", blockchain, chain.chainName)
+				}
+
+				// removing the legacy-labelled chain removes only that row
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, otherChain); result.Error != nil {
+					t.Fatalf("re-adding the %s wallet was refused: %s", chain.otherChain().name, result.Error.Message)
+				}
+				if err := RemoveAuth(ctx, userId, chain.authType); err != nil {
+					t.Fatalf("RemoveAuth(%s) of the legacy row = %v", chain.authType, err)
+				}
+				if count := walletRowCount(t, ctx, userId); count != 1 {
+					t.Fatalf("wallet rows = %d after removing the legacy row, want 1", count)
+				}
+				walletAuths, err := getWalletAuthsByAddress(ctx, otherChain.address)
+				if err != nil || len(walletAuths) != 1 || *walletAuths[0].UserId != userId {
+					t.Fatalf("the %s wallet binding = %#v (%v), want it kept", chain.otherChain().name, walletAuths, err)
+				}
+				address, _ = networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != otherChain.address {
+					t.Fatalf("network_user.wallet_address = %v, want the kept wallet %q", address, otherChain.address)
+				}
+			})
+		})
+	}
+}
+
+// Removing one chain's wallet leaves the other chain's wallet bound, listed,
+// and signing in. The single-valued mirror on network_user follows the wallet
+// it names: removing that wallet points it at the remaining one, removing the
+// other wallet leaves it alone.
+func TestRemoveOneWalletLeavesTheOtherChainBound(t *testing.T) {
+	for _, chain := range walletChains {
+		for _, removeFirst := range []bool{true, false} {
+			name := chain.name + "-then-" + chain.otherChain().name + "-remove-"
+			if removeFirst {
+				name += chain.name
+			} else {
+				name += chain.otherChain().name
+			}
+			t.Run(name, func(t *testing.T) {
+				server.DefaultTestEnv().Run(t, func(t testing.TB) {
+					ctx := context.Background()
+					userId, _, clientSession := authParityAccount(t, ctx, "remove-one")
+					first := chain.newSigner(t)
+					second := chain.otherChain().newSigner(t)
+					for _, signer := range []acceptanceWalletSigner{first, second} {
+						if result := addWalletThroughAddAuth(t, ctx, clientSession, signer); result.Error != nil {
+							t.Fatalf("add %s refused: %s", signer.blockchain, result.Error.Message)
+						}
+					}
+
+					// the single wallet field the API reports names the first
+					// wallet bound while both are
+					if walletAddress := GetNetworkUser(ctx, userId).WalletAddress; walletAddress == nil || *walletAddress != first.address {
+						t.Fatalf("GetNetworkUser.WalletAddress = %v, want the first wallet %q", walletAddress, first.address)
+					}
+
+					removed, kept := chain, chain.otherChain()
+					removedSigner, keptSigner := first, second
+					if !removeFirst {
+						removed, kept = kept, removed
+						removedSigner, keptSigner = keptSigner, removedSigner
+					}
+					if err := RemoveAuth(ctx, userId, removed.authType); err != nil {
+						t.Fatalf("RemoveAuth(%s) = %v, want success", removed.authType, err)
+					}
+
+					if count := walletRowCount(t, ctx, userId); count != 1 {
+						t.Fatalf("wallet rows = %d after removing one wallet, want 1", count)
+					}
+					walletAuths, err := getWalletAuthsByAddress(ctx, keptSigner.address)
+					if err != nil || len(walletAuths) != 1 || *walletAuths[0].UserId != userId {
+						t.Fatalf("the %s wallet binding = %#v (%v), want it kept", kept.name, walletAuths, err)
+					}
+					authTypes := authTypesOf(t, ctx, userId)
+					if hasAuthType(authTypes, removed.authType) {
+						t.Fatalf("auth_types = %#v still lists the removed %s wallet", authTypes, removed.name)
+					}
+					if !hasAuthType(authTypes, kept.authType) || !hasAuthType(authTypes, "email") {
+						t.Fatalf("auth_types = %#v, want %s and email kept", authTypes, kept.authType)
+					}
+
+					// either way the mirror now names the kept wallet: it was
+					// repointed, or it already named it
+					address, blockchain := networkUserWalletColumns(t, ctx, userId)
+					if address == nil || *address != keptSigner.address {
+						t.Fatalf("network_user.wallet_address = %v, want the kept wallet %q", address, keptSigner.address)
+					}
+					if blockchain == nil || *blockchain != kept.chainName {
+						t.Fatalf("network_user.wallet_blockchain = %v, want %q", blockchain, kept.chainName)
+					}
+					if walletAddress := GetNetworkUser(ctx, userId).WalletAddress; walletAddress == nil || *walletAddress != keptSigner.address {
+						t.Fatalf("GetNetworkUser.WalletAddress = %v, want the kept wallet %q", walletAddress, keptSigner.address)
+					}
+
+					// the kept wallet still signs in; the removed one is a new user
+					login, err := handleLoginWallet(signedAcceptanceWalletChallenge(t, ctx, keptSigner), ctx)
+					if err != nil || login.Network == nil {
+						t.Fatalf("the kept %s wallet no longer signs in: %#v (%v)", kept.name, login, err)
+					}
+					login, err = handleLoginWallet(signedAcceptanceWalletChallenge(t, ctx, removedSigner), ctx)
+					if err != nil || login.Network != nil {
+						t.Fatalf("the removed %s wallet still signs in: %#v (%v)", removed.name, login, err)
+					}
+
+					// the removed chain is no longer bound
+					err = RemoveAuth(ctx, userId, removed.authType)
+					if err == nil || !strings.Contains(err.Error(), "not a sign-in method on this account") {
+						t.Fatalf("removing the %s wallet again = %v, want the not-bound refusal", removed.name, err)
+					}
+					if count := walletRowCount(t, ctx, userId); count != 1 {
+						t.Fatalf("the refused removal changed the wallet rows to %d", count)
+					}
+				})
+			})
+		}
+	}
+}
+
+// With two wallets and nothing else, one wallet can go and the other is then
+// the last auth method. The legacy auth_type scalar follows the wallet that
+// remains.
+func TestRemoveWalletAuthWithTwoWalletsKeepsTheLastMethod(t *testing.T) {
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "two-wallets-last")
+				for _, signer := range []acceptanceWalletSigner{chain.newSigner(t), chain.otherChain().newSigner(t)} {
+					if result := addWalletThroughAddAuth(t, ctx, clientSession, signer); result.Error != nil {
+						t.Fatalf("add %s refused: %s", signer.blockchain, result.Error.Message)
+					}
+				}
+				// leave the two wallets as the only methods
+				if err := RemoveAuth(ctx, userId, "email"); err != nil {
+					t.Fatalf("removing the email failed: %v", err)
+				}
+				if scalar := networkUserAuthTypeScalar(t, ctx, userId); scalar != chain.authType {
+					t.Fatalf("network_user.auth_type = %q with both wallets bound, want the first, %q", scalar, chain.authType)
+				}
+
+				if err := RemoveAuth(ctx, userId, chain.authType); err != nil {
+					t.Fatalf("removing one of two wallets failed: %v", err)
+				}
+				if scalar := networkUserAuthTypeScalar(t, ctx, userId); scalar != chain.otherChain().authType {
+					t.Fatalf(
+						"network_user.auth_type = %q after removing the %s wallet, want the remaining %q",
+						scalar, chain.name, chain.otherChain().authType,
+					)
+				}
+
+				err := RemoveAuth(ctx, userId, chain.otherChain().authType)
+				if err == nil {
+					t.Fatal("the account's last auth method was removed, locking the user out")
+				}
+				if !strings.Contains(err.Error(), "cannot remove your last auth method") {
+					t.Fatalf("refusal = %q", err)
+				}
+				if count := walletRowCount(t, ctx, userId); count != 1 {
+					t.Fatalf("wallet rows = %d after a refused last-method removal, want 1", count)
+				}
+			})
+		})
+	}
+}
+
+// plantNetworkUserWalletSlot writes network_user's wallet columns directly,
+// the legacy shape auth_link_refusal_test.go seeds: a slot set before
+// network_user_auth_wallet existed, with no row there to match it.
+func plantNetworkUserWalletSlot(
+	t testing.TB,
+	ctx context.Context,
+	userId server.Id,
+	address string,
+	blockchain string,
+) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user SET wallet_address = $2, wallet_blockchain = $3 WHERE user_id = $1`,
+			userId, address, blockchain,
+		))
+	})
+}
+
+// A stale slot -- a wallet named on network_user with no wallet row of this
+// account -- holds no bound wallet, so it is treated as empty: an add takes
+// it, and a removal repoints or clears it. Otherwise the stale wallet stays
+// reserved by the slot's global unique index for good, and GET /network/user
+// reports a wallet that does not sign in to the account.
+func TestWalletSlotReleasesAStaleLegacyWallet(t *testing.T) {
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "stale-slot")
+				stale := chain.newSigner(t)
+				plantNetworkUserWalletSlot(t, ctx, userId, stale.address, chain.chainName)
+
+				bound := chain.newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, bound); result.Error != nil {
+					t.Fatalf("add refused: %s", result.Error.Message)
+				}
+				address, blockchain := networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != bound.address {
+					t.Fatalf("after add: network_user.wallet_address = %v, want the bound wallet %q, not the stale %q", address, bound.address, stale.address)
+				}
+				if blockchain == nil || *blockchain != chain.chainName {
+					t.Fatalf("after add: network_user.wallet_blockchain = %v, want %q", blockchain, chain.chainName)
+				}
+
+				// with both chains bound, a stale slot is repointed by
+				// removing the wallet it does not name
+				other := chain.otherChain().newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, other); result.Error != nil {
+					t.Fatalf("add %s refused: %s", chain.otherChain().name, result.Error.Message)
+				}
+				plantNetworkUserWalletSlot(t, ctx, userId, stale.address, chain.chainName)
+				if err := RemoveAuth(ctx, userId, chain.otherChain().authType); err != nil {
+					t.Fatalf("RemoveAuth(%s) = %v", chain.otherChain().authType, err)
+				}
+				address, _ = networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != bound.address {
+					t.Fatalf("after removing the other wallet: network_user.wallet_address = %v, want the remaining %q", address, bound.address)
+				}
+
+				// removing the only wallet clears a stale slot too
+				plantNetworkUserWalletSlot(t, ctx, userId, stale.address, chain.chainName)
+				if err := RemoveAuth(ctx, userId, chain.authType); err != nil {
+					t.Fatalf("RemoveAuth(%s) = %v", chain.authType, err)
+				}
+				address, blockchain = networkUserWalletColumns(t, ctx, userId)
+				if address != nil || blockchain != nil {
+					t.Fatalf("after removing the only wallet: network_user wallet columns = %v/%v, want NULL", address, blockchain)
+				}
+
+				// and the stale wallet is free for another account
+				_, _, otherSession := authParityAccount(t, ctx, "stale-slot-taker")
+				if result := addWalletThroughAddAuth(t, ctx, otherSession, stale); result.Error != nil {
+					t.Fatalf("the released stale wallet was refused on another account: %s", result.Error.Message)
+				}
+			})
+		})
+	}
+}
+
+// The slot has a global unique index. When the wallet that would take it on
+// removal is already in another account's slot (a legacy diverged shape),
+// RemoveAuth clears it instead of failing the removal on the index.
+func TestRemoveSlotWalletClearsTheSlotWhenTheRemainingWalletIsHeldElsewhere(t *testing.T) {
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "held-elsewhere")
+				first := chain.newSigner(t)
+				second := chain.otherChain().newSigner(t)
+				for _, signer := range []acceptanceWalletSigner{first, second} {
+					if result := addWalletThroughAddAuth(t, ctx, clientSession, signer); result.Error != nil {
+						t.Fatalf("add %s refused: %s", signer.blockchain, result.Error.Message)
+					}
+				}
+				holderUserId, _, _ := authParityAccount(t, ctx, "held-elsewhere-holder")
+				plantNetworkUserWalletSlot(t, ctx, holderUserId, second.address, chain.otherChain().chainName)
+
+				if err := RemoveAuth(ctx, userId, chain.authType); err != nil {
+					t.Fatalf("RemoveAuth(%s) = %v, want success", chain.authType, err)
+				}
+				if count := walletRowCount(t, ctx, userId); count != 1 {
+					t.Fatalf("wallet rows = %d, want the %s wallet only", count, chain.otherChain().name)
+				}
+				walletAuths, err := getWalletAuthsByAddress(ctx, second.address)
+				if err != nil || len(walletAuths) != 1 || *walletAuths[0].UserId != userId {
+					t.Fatalf("the %s wallet binding = %#v (%v), want it kept", chain.otherChain().name, walletAuths, err)
+				}
+				address, blockchain := networkUserWalletColumns(t, ctx, userId)
+				if address != nil || blockchain != nil {
+					t.Fatalf("network_user wallet columns = %v/%v, want NULL", address, blockchain)
+				}
+			})
+		})
+	}
+}
+
+// RemoveAuth locks network_user and reads the bound wallets from its
+// snapshot. An add of the other chain's wallet that commits while the removal
+// waits on that lock must make the removal rerun: otherwise it sees no
+// remaining wallet and clears the slot while the added wallet is bound. The
+// add writes the network_user row even when the slot keeps its value, which is
+// what turns the wait into a serialization failure.
+func TestRemoveSlotWalletRacingAnAddOfTheOtherChainKeepsTheSlot(t *testing.T) {
+	for _, chain := range walletChains {
+		t.Run(chain.name, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				userId, _, clientSession := authParityAccount(t, ctx, "slot-race")
+				first := chain.newSigner(t)
+				if result := addWalletThroughAddAuth(t, ctx, clientSession, first); result.Error != nil {
+					t.Fatalf("add refused: %s", result.Error.Message)
+				}
+				second := chain.otherChain().newSigner(t)
+				secondAuth := signedAcceptanceWalletChallenge(t, ctx, second)
+
+				removeErr := make(chan error, 1)
+				var startRemove sync.Once
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.Raise(addWalletAuthInTx(tx, &AddWalletAuthArgs{
+						UserId:     userId,
+						WalletAuth: secondAuth,
+					}, ctx))
+					startRemove.Do(func() {
+						go func() {
+							removeErr <- RemoveAuth(ctx, userId, chain.authType)
+						}()
+					})
+					// hold the add open until the removal waits on its lock,
+					// so the removal's snapshot predates the add's commit
+					waiting := false
+					for deadline := time.Now().Add(30 * time.Second); !waiting; {
+						if time.Now().After(deadline) {
+							t.Fatal("RemoveAuth never waited on the add's lock")
+						}
+						time.Sleep(20 * time.Millisecond)
+						server.Db(ctx, func(conn server.PgConn) {
+							server.Raise(conn.QueryRow(
+								ctx,
+								`SELECT EXISTS (
+									SELECT 1 FROM pg_stat_activity
+									WHERE datname = current_database() AND wait_event_type = 'Lock'
+								)`,
+							).Scan(&waiting))
+						})
+					}
+				})
+				if err := <-removeErr; err != nil {
+					t.Fatalf("RemoveAuth(%s) = %v", chain.authType, err)
+				}
+
+				if count := walletRowCount(t, ctx, userId); count != 1 {
+					t.Fatalf("wallet rows = %d, want the added %s wallet only", count, chain.otherChain().name)
+				}
+				address, blockchain := networkUserWalletColumns(t, ctx, userId)
+				if address == nil || *address != second.address {
+					t.Fatalf("network_user.wallet_address = %v with the %s wallet bound, want %q", address, chain.otherChain().name, second.address)
+				}
+				if blockchain == nil || *blockchain != chain.otherChain().chainName {
+					t.Fatalf("network_user.wallet_blockchain = %v, want %q", blockchain, chain.otherChain().chainName)
+				}
+			})
+		})
+	}
+}
+
+// Deleting an account removes both of its wallets: each signs in afterwards
+// as a new wallet user.
+func TestRemoveNetworkWithTwoWalletsClearsBoth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		userId, _, clientSession := authParityAccount(t, ctx, "delete-two")
+		signers := []acceptanceWalletSigner{
+			newSolanaAcceptanceWalletSigner(t),
+			newBittensorAcceptanceWalletSigner(t),
+		}
+		for _, signer := range signers {
+			if result := addWalletThroughAddAuth(t, ctx, clientSession, signer); result.Error != nil {
+				t.Fatalf("add %s refused: %s", signer.blockchain, result.Error.Message)
+			}
+		}
+
+		RemoveNetwork(ctx, clientSession.ByJwt.NetworkId, &userId)
+
+		if count := walletRowCount(t, ctx, userId); count != 0 {
+			t.Fatalf("wallet rows = %d after deleting the account, want 0", count)
+		}
+		for _, signer := range signers {
+			login, err := handleLoginWallet(signedAcceptanceWalletChallenge(t, ctx, signer), ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if login.Network != nil || login.WalletAuth == nil {
+				t.Fatalf("the %s wallet of a deleted account still resolved: %#v", signer.blockchain, login)
+			}
+		}
+	})
 }
 
 // --- A6 -------------------------------------------------------------------

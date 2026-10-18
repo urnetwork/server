@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ const (
 	proxyUDPReceiveDropPagePerMinute = 10_000.0
 	proxyUDPReceiveDropPageRatio     = 0.01
 )
+
+// The kernel boot_id source returns one UUID; unavailable sentinels are not generations.
+var proxyMemoryBootIdPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Signal proxy-memory implements SIGNALS.md §14.7. It treats a proxy image or
 // config-generation rollout as a host-capacity event: either change creates
@@ -70,7 +74,15 @@ func (self *proxyMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 			continue
 		}
 		findings = append(findings, evaluateProxyMemory(target.name, sample)...)
-		if delta, ok := self.observeUDP(target.name, sample, observedAt); ok {
+		delta, observed := self.observeUDP(target.name, sample, observedAt)
+		if sample.bootID == "" {
+			unavailable := cannotObserveFinding(target.name+"/proxy-udp-receive-drops", fmt.Errorf("proxy memory: invalid response for kernel boot_id"))
+			unavailable.observed += " boot_identity=unavailable"
+			unavailable.mechanism = "The kernel boot identity is missing, unavailable, malformed, or ambiguous, so these cumulative UDP counters cannot prove a same-boot interval. This does not prove a reboot or packet loss; independent memory and kernel OOM evidence remains valid."
+			unavailable.verify = "Restore the successful kernel boot-id read. A matching known UUID and nondecreasing counters can measure from the last valid sample; a new UUID or absent baseline requires a second valid sample at least 30 seconds later."
+			unavailable.playbook = "SIGNALS.md §14.7"
+			findings = append(findings, unavailable)
+		} else if observed {
 			findings = append(findings, evaluateProxyUDPReceiveDrops(target.name, sample, delta))
 		} else {
 			findings = append(findings, healthyFinding("proxy/host-memory", tierWarn, "proxy-udp-receive-drops", target.name))
@@ -90,7 +102,9 @@ if [ "$running_units" -eq 0 ] && [ "$proxy_processes" -eq 0 ]; then
 fi
 printf 'proxy_host 1\n'
 
-boot_id=$(tr -d '\n' < /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+if ! boot_id=$(tr -d '\n' < /proc/sys/kernel/random/boot_id 2>/dev/null); then
+  boot_id=unknown
+fi
 if [ -z "$boot_id" ]; then
   boot_id=unknown
 fi
@@ -217,15 +231,22 @@ type proxyUDPDelta struct {
 	rcvbufErrors int64
 }
 
-// observeUDP turns the kernel's boot-lifetime UDP counters into an adjacent
-// host sample. The first sample, a reboot/counter reset, and an immediate
-// manual rerun are warmups: none is evidence that the live receive path
-// dropped packets.
+// Compares consecutive valid host samples. Unavailable boot identity preserves
+// the last known baseline; matching valid UUIDs prove the full elapsed interval.
+// First samples, generation/counter resets and immediate reruns remain warmups.
 func (self *proxyMemoryProbe) observeUDP(host string, sample proxyMemorySample, observedAt time.Time) (proxyUDPDelta, bool) {
 	self.udpLock.Lock()
 	defer self.udpLock.Unlock()
 	if self.udpSamples == nil {
 		self.udpSamples = map[string]proxyUDPCounterSample{}
+	}
+	previous, initialized := self.udpSamples[host]
+	if initialized && !proxyMemoryBootIdPattern.MatchString(previous.bootID) {
+		delete(self.udpSamples, host)
+		initialized = false
+	}
+	if !proxyMemoryBootIdPattern.MatchString(sample.bootID) {
+		return proxyUDPDelta{}, false
 	}
 	current := proxyUDPCounterSample{
 		bootID:       sample.bootID,
@@ -233,7 +254,6 @@ func (self *proxyMemoryProbe) observeUDP(host string, sample proxyMemorySample, 
 		inDatagrams:  sample.udpInDatagrams,
 		rcvbufErrors: sample.udpRcvbufErrors,
 	}
-	previous, initialized := self.udpSamples[host]
 	self.udpSamples[host] = current
 	if !initialized || previous.bootID != current.bootID ||
 		current.inDatagrams < previous.inDatagrams || current.rcvbufErrors < previous.rcvbufErrors ||
@@ -278,26 +298,28 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		"oom_proxy_processes":    &sample.oomProxyProcesses,
 	}
 	seen := map[string]bool{}
+	bootIdRows := 0
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		key, value, ok := strings.Cut(line, " ")
+		value = strings.TrimSpace(value)
+		if key == "boot_id" {
+			bootIdRows++
+			if bootIdRows == 1 && proxyMemoryBootIdPattern.MatchString(value) {
+				sample.bootID = value
+			} else {
+				sample.bootID = ""
+			}
+			continue
+		}
 		if !ok {
 			continue
 		}
-		value = strings.TrimSpace(value)
 		if key == "oom_line" {
 			sample.oomLine = value
-			continue
-		}
-		if key == "boot_id" {
-			if value == "" || strings.ContainsAny(value, " \t") {
-				return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid %s %q", key, value)
-			}
-			sample.bootID = value
-			seen[key] = true
 			continue
 		}
 		if key == "warpctl_rollout_guard" {
@@ -330,7 +352,6 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		return sample, nil
 	}
 	for _, key := range []string{
-		"boot_id",
 		"warpctl_rollout_guard",
 		"mem_total_kib", "mem_available_kib", "swap_total_kib", "swap_free_kib",
 		"running_units", "proxy_processes", "proxy_rss_kib", "proxy_max_rss_kib",
@@ -361,13 +382,11 @@ func evaluateProxyUDPReceiveDrops(host string, sample proxyMemorySample, delta p
 	if totalObserved > 0 {
 		dropRatio = float64(delta.rcvbufErrors) / float64(totalObserved)
 	}
-	if dropRate < proxyUDPReceiveDropWarnPerMinute {
-		return healthyFinding("proxy/host-memory", tierWarn, "proxy-udp-receive-drops", host)
-	}
-
 	tier := tierWarn
 	if dropRate >= proxyUDPReceiveDropPagePerMinute || dropRatio >= proxyUDPReceiveDropPageRatio {
 		tier = tierPage
+	} else if dropRate < proxyUDPReceiveDropWarnPerMinute {
+		return healthyFinding("proxy/host-memory", tierWarn, "proxy-udp-receive-drops", host)
 	}
 	action := "If a proxy rollout is active, stop launching candidates on this host and preserve the exact interval. Correlate process overlap, RSS, MemAvailable, swap, kernel OOM, CPU scheduling, and per-socket receive queues before changing configuration. If memory is stable, identify the owning UDP socket/read loop with ss -u -m -p. Do not restart WireGuard, reinstall peers, or blindly enlarge receive buffers."
 	if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
@@ -379,13 +398,13 @@ func evaluateProxyUDPReceiveDrops(host string, sample proxyMemorySample, delta p
 		symptom: fmt.Sprintf("%s dropped %d UDP datagrams from full receive buffers in %.0f seconds (%.0f/min)",
 			host, delta.rcvbufErrors, delta.elapsed.Seconds(), dropRate),
 		mechanism: "Linux increments Udp.RcvbufErrors when a datagram reaches the host but the destination socket's receive queue has no room before userspace drains it. This is host-wide loss below WireGuard authentication: memory pressure, CPU starvation, a slow receive loop, or undersized socket buffering can cause it; a peer-install or handshake change cannot recover the discarded datagram.",
-		baseline:  fmt.Sprintf("No material live receive-buffer loss: udp_rcvbuf_errors_rate stays below %.0f/min and incident windows remain at zero.", proxyUDPReceiveDropWarnPerMinute),
+		baseline:  fmt.Sprintf("No material live receive-buffer loss: udp_rcvbuf_errors_rate stays below %.0f/min and udp_receive_drop_ratio stays below %.2f%% of delivered-plus-dropped datagrams; incident windows remain at zero.", proxyUDPReceiveDropWarnPerMinute, proxyUDPReceiveDropPageRatio*100),
 		observed: fmt.Sprintf("warpctl_rollout_guard=%s sample_elapsed_s=%.0f udp_in_datagrams_delta=%d udp_rcvbuf_errors_delta=%d udp_rcvbuf_errors_rate_per_min=%.2f udp_receive_drop_ratio_pct=%.4f udp_in_datagrams_before=%d udp_in_datagrams_after=%d udp_rcvbuf_errors_before=%d udp_rcvbuf_errors_after=%d running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f recent_proxy_oom_kills=%d",
 			sample.warpctlRolloutGuard, delta.elapsed.Seconds(), delta.inDatagrams, delta.rcvbufErrors,
 			dropRate, dropRatio*100, delta.inBefore, delta.inAfter, delta.rcvbufBefore, delta.rcvbufAfter,
 			sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB),
 			kiBToGiB(sample.memAvailableKiB), kiBToGiB(sample.swapFreeKiB), sample.recentProxyOOMKills),
-		evidence: fmt.Sprintf("Same-boot /proc/net/snmp counters advanced over %.0fs; first samples, boot-id changes, counter regressions, and sub-30s reruns are warmups rather than loss findings.", delta.elapsed.Seconds()),
+		evidence: fmt.Sprintf("Known same-UUID /proc/net/snmp counters advanced over %.0fs between consecutive valid samples. Unavailable observations never replace a valid baseline; first samples, boot-id changes, counter regressions, and sub-30s reruns are warmups rather than loss findings.", delta.elapsed.Seconds()),
 		context:  "Udp.RcvbufErrors and InDatagrams cover the whole host, so the delta proves live kernel receive loss but not socket ownership by itself. A high drop ratio or incident-sized rate makes this page-tier. Larger buffers can absorb a short burst but cannot create CPU, RAM, or per-process client capacity; sustained loss at a steady single fleet may require application receive-loop work or additional proxy hardware.",
 		action:   action,
 		verify:   "Across at least ten minutes of production-shaped UDP load and one controlled serialized proxy rollout, adjacent same-boot samples show zero RcvbufErrors delta, process overlap stays bounded, memory reserve and swap remain available, no OOM occurs, and WireGuard acceptance succeeds without a timeout.",

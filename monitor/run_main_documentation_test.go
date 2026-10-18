@@ -168,7 +168,7 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Sol and Astra may prepare manifests; they do not append",
+		"Sol Low and Sol Medium may prepare manifests; they do not append",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -184,12 +184,14 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-6-sol` agent at `medium` reasoning (\"Sol Medium\") owns monitor execution",
+		"A `gpt-6.1-sol` agent at `low` reasoning (\"Sol Low\") owns monitor execution",
 		"monitor-test gates",
-		"bounded read-only failure fact collection, initial triage",
-		"A `gpt-6-astra` agent at `max` reasoning (\"Astra Max\") owns all",
-		"Astra consumes Sol's initial",
-		"every self-improvement repair to a probe, shared monitoring utility, signal catalog, or this harness",
+		"fact collection, initial triage, evidence-authority checks",
+		"A `gpt-6.1-sol` agent at `medium` reasoning (\"Sol Medium\") owns all",
+		"Sol Medium consumes Sol Low's initial",
+		"self-improvement fix to the probes, shared monitoring utilities, signal",
+		"`factury/monitor/alerts/`",
+		"Do not silently escalate to another model.",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -213,7 +215,7 @@ func TestRunMainUsesAttestedLocalSequentialMonitorGates(t *testing.T) {
 			t.Errorf("RUN-MAIN.md does not retain attested test-gate guidance %q", required)
 		}
 	}
-	if got := strings.Count(documentation, "unset WARP_ENV; source ./test-env.sh && exec go test"); got != 5 {
+	if got := strings.Count(documentation, "unset WARP_ENV; source ./test-env.sh && exec env WARP_TEST_ENV_FAIL_FAST=1 go test"); got != 5 {
 		t.Fatalf("attested monitor test command count = %d, want 5", got)
 	}
 }
@@ -382,7 +384,7 @@ func TestRunMainRequiresRetainedReconciliationReceipts(t *testing.T) {
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
 		"`monitor-log-reconcile `",
-		"schema-1 JSON from the current watcher generation's stderr artifact",
+		"supported versioned JSON from the current watcher generation's stderr artifact",
 		"collectors=enabled=fresh=consecutive_two > 0",
 		"collector_started_at",
 		"previous_window_start",
@@ -454,6 +456,43 @@ func TestRunMainPromotesCompleteMarkdownDespiteProbeFailure(t *testing.T) {
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md lost completed-output promotion contract %q", required)
+		}
+	}
+}
+
+// Readers must distinguish historical aggregate proof from qualified scope maps.
+func TestReconciliationDocumentationDistinguishesVersionedScopeAuthority(t *testing.T) {
+	t.Parallel()
+	for _, document := range []struct{ path, start string }{
+		{"RUN-MAIN.md", "For a two-reconciliation closure gate"},
+		{"MONITOR.md", "Every standing-log cadence also writes"},
+	} {
+		content, err := os.ReadFile(document.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, section, found := strings.Cut(string(content), document.start)
+		if !found {
+			t.Fatalf("%s lost its reconciliation authority section", document.path)
+		}
+		section = strings.SplitN(section, "\n## ", 2)[0]
+		// Normalize wrapping only; assertions require the semantic version,
+		// identity, clock and cause contracts inside this owning section.
+		section = strings.Join(strings.Fields(section), " ")
+		for _, required := range []string{
+			"Schema 1 is aggregate-only; it cannot identify deficient collectors.",
+			"Schema 2 uses `collector_scopes` with fixed public service keys",
+			"alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web",
+			"`scope_projection_complete`; this is identity completeness, not healthy coverage.",
+			"Unsupported or duplicate services leave the scope map incomplete.",
+			"Null, partial and future timestamps retain their authority qualifiers.",
+			"`last_failure_present` does not identify HTTP429 or a cause.",
+			"`invalid-time` can coexist with `fresh=true` when another stored clock is future-dated.",
+			"do not silently rewrite aggregate booleans.",
+		} {
+			if !strings.Contains(section, required) {
+				t.Errorf("%s lost versioned reconciliation contract %q", document.path, required)
+			}
 		}
 	}
 }

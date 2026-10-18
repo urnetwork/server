@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ func providerInventoryTestSettings() SignalSettings {
 	settings.LogServices = []string{"api"}
 	settings.LogServiceHosts = map[string][]string{"api": {}}
 	settings.LogServiceBlocks = map[string][]string{"api": {"beta", "g1", "g2", "g3", "g4"}}
+	settings.Grafana = GrafanaSettings{QueryDomain: "metrics.example", QueryUsername: "query-synthetic", QueryPassword: "private-query-password"}
 	for i := range 5 {
 		h := HostSettings{Name: fmt.Sprintf("private-api-%d", i), Roles: []string{"services"}}
 		settings.LogServiceHosts["api"] = append(settings.LogServiceHosts["api"], h.Name)
@@ -208,12 +210,13 @@ func TestProviderInventorySignalAdaptersUseEnabledCohort(t *testing.T) {
 			settings := providerInventoryTestSettings()
 			raw := pickerTestPayload(t, providerInventoryTestRows(selection, false, providerInventoryTestSlots(4)))
 			var calls atomic.Int32
-			settings.Source = &syntheticSource{hostFn: func(h HostSettings, command string) (string, error) {
+			settings.Source = &providerHttpsTestSource{syntheticSource: &syntheticSource{}, do: func(request *http.Request) (*http.Response, error) {
 				calls.Add(1)
-				if h.Name == "private-api-4" || strings.Contains(command, "private-api-4") || !strings.Contains(command, "--max-time 15 --max-filesize 4194304") {
-					return "", fmt.Errorf("unexpected source boundary")
+				providerHttpsTestRequest(t, request, selection)
+				if strings.Contains(request.PostForm.Get("query"), "private-api-4") {
+					t.Fatal("disabled host entered the native source selector")
 				}
-				return raw, nil
+				return providerHttpsTestResponse(raw), nil
 			}}
 			signal := NewProviderPickerSignal()
 			if selection {

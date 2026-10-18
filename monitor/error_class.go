@@ -161,6 +161,10 @@ func classifyObservationError(err error) string {
 	if err == nil {
 		return observationErrorClassUnclassified
 	}
+	var interrupted *signalContextError
+	if errors.As(err, &interrupted) {
+		return classifyObservationError(interrupted.contextErr)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return observationErrorClassTimeout
 	}
@@ -220,6 +224,8 @@ func classifyObservationError(err error) string {
 		strings.Contains(lower, "http 401") ||
 		strings.Contains(lower, "http 403"):
 		return observationErrorClassAccessDenied
+	case sshExit255 && sshFailure.connectTimeoutDiagnostic:
+		return observationErrorClassTimeout
 	case sshExit255:
 		return observationErrorClassSSHExit255
 	case strings.Contains(lower, "exit status"):
@@ -235,11 +241,11 @@ func classifyObservationError(err error) string {
 	}
 }
 
-// observationFailureAction keeps the SSH status discriminator identical for
-// whole-signal and partial-target visibility without attributing a route cause.
-func observationFailureAction(errorClass, fallback string) string {
-	if errorClass == observationErrorClassAdmissionUnavailable {
-		return "Inspect the private shared SSH queue and exact local owner generation. Preserve active reservations until transport children join or the original owner cgroup is proved empty. A local admission refusal leaves the target unobserved; do not attribute host failure or raise concurrency caps."
+// Keep native status and local admission guidance identical for whole-signal
+// and partial-target visibility, without inferring contact from a release call.
+func observationFailureAction(err error, errorClass, fallback string) string {
+	if sshAdmissionFailurePhases(err) != "" {
+		return "Inspect the private shared SSH queue and exact local owner generation. The phase markers identify local acquisition, release or unknown-phase failures in the returned error tree. Preserve active reservations until transport children join or the original owner cgroup is proved empty. Correlate native process evidence before inferring contact, completion or a host fault; keep the existing concurrency limits."
 	}
 	if errorClass == observationErrorClassSSHExit255 {
 		return "Determine whether status 255 came from SSH transport/authentication or the remote command. Correlate failures across independent targets with bounded observer route and intended VPN-session evidence before attributing local overlay loss. Restore the proved observation path and rerun every affected signal."

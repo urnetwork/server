@@ -676,9 +676,22 @@ func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPubli
 	}
 
 	if !sample.fluentBitActive || !sample.processObservable || sample.routeState != "expected" || !sample.connectionsObservable || sample.connectionsTotal == 0 {
-		findings = append(findings, cannotObserveFinding(
+		visibility := cannotObserveFinding(
 			target+"/connections", &observationStateUnavailableError{},
-		))
+		)
+		// Retain the completed sample's finite prerequisites, including all
+		// simultaneous failures, without changing the connection verdict gate.
+		visibility.observed += fmt.Sprintf(
+			" fluent_bit_active=%t process_observable=%t route_state=%s connections_observable=%t connections_total=%d",
+			sample.fluentBitActive, sample.processObservable, sample.routeState, sample.connectionsObservable, sample.connectionsTotal,
+		)
+		visibility.mechanism = "The bounded publisher reducer completed, but at least one required live connection prerequisite is unavailable or differs from the expected route. Connection health remains unknown even when alias placement is independently observable."
+		visibility.baseline = "Fluent Bit is active, its stable process generation is observable, its route inputs match, owned sockets are observable, and at least one owned live connection exists."
+		visibility.evidence = "These five prerequisite values come from the same schema-validated sample after its expected-front count matched the current inventory; only booleans, a fixed route enum, and a bounded count are retained."
+		visibility.context = "Counts alone do not prove current owned connections when process or socket visibility is unavailable. Zero owned connections may reflect idle traffic; a changed process generation or observer access limits may also leave connection health unknown. This warning alone does not establish connection drift or ingestion loss."
+		visibility.action = "Use the prerequisite tuple to identify the missing live-state boundary. Restore qualified process, route, and socket evidence before interpreting connection health or authorizing a publisher reconnect; preserve any independently observed placement drift."
+		visibility.playbook = "SIGNALS.md §11.20c and §1.7; MONITOR.md §3.6"
+		findings = append(findings, visibility)
 		return findings
 	}
 	connectionDrift := sample.connectionsUnknown > 0 ||

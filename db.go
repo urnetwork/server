@@ -758,9 +758,14 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		connectionRetrySafe := false
 		phase.enter(DbOperationAcquire)
 		acquireStarted := timing.start()
+		acquireObservation := timing.acquireObservation()
+		acquireObservation.begin(ctx)
 		pgPool := pool.open()
+		acquireObservation.opened(ctx, pgPool)
 		readObservation.BeginAcquire()
+		acquireObservation.startAcquire()
 		conn, connErr := pgPool.Acquire(ctx)
+		acquireObservation.finish(ctx, pgPool, connErr == nil)
 		readObservation.FinishAcquire(connErr == nil)
 		timing.finish(DbTimingAcquire, acquireStarted)
 		if connErr != nil {

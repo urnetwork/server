@@ -68,7 +68,7 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	}
 
 	// the sampled node may be on any redis-cluster host; scan it where it runs.
-	// With a host unreadable it is only the fullest node of the other hosts:
+	// With any node unreadable or unranked it is only the fullest observed node:
 	// its families are still judged, but they are not the fleet's fullest-node
 	// series, so they are not recorded as its baseline.
 	h, fullest, failures, err := fullestRedisNodeUsage(ctx, env)
@@ -136,7 +136,7 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 			alerted = true
 			observed := fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullest.port)
 			if partial {
-				observed += " " + redisUnobservedHosts(failures)
+				observed += " " + redisUsageSelectionScope(failures)
 			}
 			findings = append(findings, finding{
 				probeId: "redis/key-families", tier: tierWarn,
@@ -151,14 +151,18 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		}
 	}
 	for _, failure := range failures {
-		findings = append(findings, redisHostCannotObserveFinding(failure, "key-families"))
+		findings = append(findings, redisUsageCannotObserveFinding(failure, "key-families"))
 	}
 	// the histogram is the daily inventory a diagnostician greps for — log it
 	// unconditionally, since a healthy finding emits no ticket
-	glog.Infof("[monitor]key families on %s (sample %d keys):\n%s\n",
-		target, familyScanKeyLimit, strings.Join(histogramLines, "\n"))
+	selectionScope := "fleet_fullest=observed"
+	if partial {
+		selectionScope = redisUsageSelectionScope(failures)
+	}
+	glog.Infof("[monitor]key families on %s (sample %d keys; %s):\n%s\n",
+		target, familyScanKeyLimit, selectionScope, strings.Join(histogramLines, "\n"))
 
-	if !alerted {
+	if !alerted && !partial {
 		findings = append(findings, healthyFinding("redis/key-families", tierWarn, "family-growth", target))
 	}
 	return findings, nil

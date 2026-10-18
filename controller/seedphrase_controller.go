@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"errors"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -71,6 +73,19 @@ func RegenerateSeedphrase(
 	}, nil
 }
 
+// Test-only scheduling hook between GenerateSeedphrase's existence check and
+// its create. Production leaves it nil; tests use it to create the seedphrase
+// auth in between, as a concurrent generate would, without scheduler luck.
+var generateSeedphraseAfterCheck func()
+
+func seedphraseExistsResult() *GenerateSeedphraseResult {
+	return &GenerateSeedphraseResult{
+		Error: &GenerateSeedphraseError{
+			Message: "Seedphrase already exists, use regenerate instead.",
+		},
+	}
+}
+
 func GenerateSeedphrase(
 	args GenerateSeedphraseArgs,
 	session *session.ClientSession,
@@ -80,11 +95,7 @@ func GenerateSeedphrase(
 		return nil, err
 	}
 	if hasSeedphrase {
-		return &GenerateSeedphraseResult{
-			Error: &GenerateSeedphraseError{
-				Message: "Seedphrase already exists, use regenerate instead.",
-			},
-		}, nil
+		return seedphraseExistsResult(), nil
 	}
 
 	if err := model.CheckAccountActionRateLimit(
@@ -101,7 +112,14 @@ func GenerateSeedphrase(
 		}, nil
 	}
 
+	if generateSeedphraseAfterCheck != nil {
+		generateSeedphraseAfterCheck()
+	}
 	seedphrase, err := model.GenerateSeedphrase(session.Ctx, session.ByJwt.UserId)
+	if errors.Is(err, model.ErrSeedphraseAuthExists) {
+		// a concurrent generate won: the same answer as the check above
+		return seedphraseExistsResult(), nil
+	}
 	if err != nil {
 		return nil, err
 	}

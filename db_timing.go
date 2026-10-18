@@ -8,6 +8,9 @@ import "time"
 // One sequential owner must finish using it before another goroutine reads it.
 type DbTiming struct {
 	Phases [DbTimingPhaseCount]DbTimingSample
+	// Only callers that supply this fixed observation sample acquire budgets
+	// and pool state. Ordinary timing users retain their existing cost/schema.
+	Acquire *DbAcquireObservation `json:"acquire,omitempty"`
 }
 
 type DbTimingPhase uint8

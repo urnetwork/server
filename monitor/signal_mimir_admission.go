@@ -698,9 +698,11 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 			assessment.directComplete = false
 			assessment.comparable = false
 			preserveHostHistory()
+			// Retain the cause until cannotObserveFinding reduces it to fixed
+			// fields; replacing it here loses lifecycle and transport authority.
 			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
 				target: hostName + "/mimir-admission",
-				err:    fmt.Errorf("host observation failed"),
+				err:    result.err,
 			})
 			continue
 		}

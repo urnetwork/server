@@ -41,6 +41,29 @@ func TestBootstrapRequiresExplicitExactBaselinePolicy(t *testing.T) {
 	}
 }
 
+// A separate approved staging baseline is valid only under its explicit mode;
+// zero margin does not convert an existing production policy into staging.
+func TestBootstrapRequiresExactStagingModeAndZeroMargin(t *testing.T) {
+	manifest := stagingSourceTestManifest(t)
+	generation := manifest.EvaluationSource.Generations[0]
+	settings := &controller.Settings{BaseSha: generation.Repositories.Server.Commit,
+		AutomationPolicy: model.CompetitionAutomationPolicy{Enabled: true, Staging: true, StagingRoundWindowSeconds: 60,
+			PolicyApprovalSha256: strings.Repeat("e", 64), SourceLockSha256: generation.SourceLockSha256, SourceActivationGeneration: 1},
+	}
+	if err := validateBootstrapSource(manifest, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.AutomationPolicy.Staging = false
+	if err := validateBootstrapSource(manifest, settings); err == nil {
+		t.Fatal("staging bootstrap accepted production policy")
+	}
+	settings.AutomationPolicy.Staging = true
+	settings.EvaluationPolicy.TakeoverMargin = 0.161
+	if err := validateBootstrapSource(manifest, settings); err == nil {
+		t.Fatal("staging bootstrap accepted a production threshold")
+	}
+}
+
 // Bootstrap confirms already published immutable refs; it cannot use policy
 // approval as permission to publish an unreviewed source change.
 func TestBootstrapPublicationCannotChangeRefs(t *testing.T) {

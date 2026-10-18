@@ -213,6 +213,8 @@ func TestNetworkCreateExpectedRefusalsUseClientStatuses(t *testing.T) {
 	}
 }
 
+// An unclassified failure is the router's fixed 500: its text, which can be
+// an internal cause, is not sent.
 func TestNetworkCreateUnclassifiedFailureRemainsServerError(t *testing.T) {
 	for _, message := range []string{"Failed to generate network name.", "Account might already exist. Please log in again.", "synthetic internal creation failure", "invalid login", "Could not verify signed token.", "synthetic provider unavailable", "synthetic key-fetch failure"} {
 		w := httptest.NewRecorder()
@@ -220,8 +222,8 @@ func TestNetworkCreateUnclassifiedFailureRemainsServerError(t *testing.T) {
 			return nil, &model.NetworkCreateResultError{Message: message}
 		}
 		router.WrapWithInputNoAuth(impl, w, networkCreateRequest(t, statusTestClientAddress, model.NetworkCreateArgs{}))
-		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != message {
-			t.Fatal("unclassified failure was inferred to be a client error from its text")
+		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != router.UnexpectedErrorMessage {
+			t.Fatal("unclassified failure was inferred to be a client error from its text, or its text was sent")
 		}
 	}
 }

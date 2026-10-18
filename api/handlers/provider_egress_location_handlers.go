@@ -83,7 +83,7 @@ func ProviderEgressLocationSubmit(w http.ResponseWriter, r *http.Request) {
 
 	result, err := controller.SubmitProviderEgressLocation(r.Context(), &args)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeProviderEgressIngestError(w, err)
 		return
 	}
 
@@ -128,7 +128,7 @@ func ProviderEgressLocationAttempt(w http.ResponseWriter, r *http.Request) {
 
 	result, err := controller.RecordProviderEgressProbeAttempt(r.Context(), &args)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeProviderEgressIngestError(w, err)
 		return
 	}
 
@@ -233,7 +233,8 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 
 // Writes a controller refusal exactly as the handlers always wrote it: its
 // status and message, and Retry-After for an exhausted bandwidth budget. Any
-// other error is the 400 these routes answer a controller failure with.
+// other error is the 400 these routes answer a controller failure with, with
+// a fixed message; its own text stays in the log.
 func writeProviderEgressIngestError(w http.ResponseWriter, err error) {
 	if refusal := controller.ProviderEgressIngestRefusalOf(err); refusal != nil {
 		if refusal.Status == http.StatusTooManyRequests {
@@ -243,5 +244,6 @@ func writeProviderEgressIngestError(w http.ResponseWriter, err error) {
 		http.Error(w, refusal.Message, refusal.Status)
 		return
 	}
-	http.Error(w, err.Error(), http.StatusBadRequest)
+	glog.Infof("[pegl]ingest error: %s\n", err)
+	http.Error(w, controller.ProviderEgressIngestFailedMessage, http.StatusBadRequest)
 }

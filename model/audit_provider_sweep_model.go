@@ -357,6 +357,14 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 	return
 }
 
+// Offline and absent state produce the same added transition. Only prior
+// online state is needed for removals and periodic online reassertion.
+const auditDeviceSweepStatesSql = `
+	SELECT device_id, network_id, online, event_time
+	FROM audit_device_state
+	WHERE online
+`
+
 // SweepDeviceAuditEvents is the devices analog of SweepProviderAuditEvents:
 // it appends device_added / device_removed transitions to audit_device_event
 // for EVERY client with a connected connection — not just providers. The
@@ -412,13 +420,12 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 			online    bool
 			eventTime time.Time
 		}
+		// Offline state acts like absent state for a current device, and only
+		// online state can emit a removal. Leave offline history in PostgreSQL.
 		states := map[server.Id]*deviceAuditState{}
 		result, err = tx.Query(
 			ctx,
-			`
-			SELECT device_id, network_id, online, event_time
-			FROM audit_device_state
-			`,
+			auditDeviceSweepStatesSql,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

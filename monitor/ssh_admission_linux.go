@@ -33,6 +33,11 @@ type sshAdmissionStore struct {
 	bootId    string
 	now       func() (int64, error)
 	status    func(context.Context, sshAdmissionOwner) sshAdmissionOwnerStatus
+	claims    sshAdmissionClaims
+	// Attempt-local deterministic controls; production retains its fixed bounds.
+	cleanupContext func() (context.Context, context.CancelFunc)
+	lockWait       func(context.Context) error
+	afterPublish   func() error
 }
 
 // Register before the first probe so a diagnostic need not wait for a cadence
@@ -111,6 +116,22 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Include recovery in the existing admission ceiling. The inherited finite
+	// owner can only shorten it; no cleanup retry renews this deadline.
+	deadline := time.Now().Add(120 * time.Second)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	// Ordinary signals may have a cancellation-only parent. Recovery must not
+	// park a fresh acquisition indefinitely behind an old cleanup's file lock.
+	recovery, cancelRecovery := context.WithTimeout(ctx, time.Second)
+	recoveryErr := self.recoverClaims(recovery)
+	cancelRecovery()
+	if recoveryErr != nil {
+		return nil, recoveryErr
+	}
 	hosts = slices.Clone(hosts)
 	slices.Sort(hosts)
 	if len(hosts) < 1 || len(hosts) > 2 || (len(hosts) == 2 && hosts[0] == hosts[1]) {
@@ -121,16 +142,20 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 		return nil, errors.New("SSH admission token unavailable")
 	}
 	token := hex.EncodeToString(random[:])
-	deadline := time.Now().Add(120 * time.Second)
-	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
-		deadline = parentDeadline
+	claim, err := self.trackClaim(token, owner)
+	if err != nil {
+		return nil, err
 	}
 	queued := false
 	defer func() {
-		if resultErr != nil && queued {
-			cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			resultErr = errors.Join(resultErr, self.remove(cleanup, token, owner))
+		if resultErr != nil {
+			if queued {
+				// No successful acquire reached the transport, even if publication
+				// succeeded before returning an ambiguous write/cancellation error.
+				resultErr = errors.Join(resultErr, self.releaseClaim(claim))
+			} else {
+				self.forgetClaim(claim)
+			}
 		}
 	}()
 	for {
@@ -190,9 +215,7 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 				return nil, err
 			}
 			return func() error {
-				cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				return self.remove(cleanup, token, owner)
+				return self.releaseClaim(claim)
 			}, nil
 		}
 		if err := waitSshAdmission(ctx); err != nil {
@@ -252,6 +275,12 @@ func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmis
 		}
 		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
 			return errors.New("SSH admission lock failed")
+		}
+		if self.lockWait != nil {
+			if err := self.lockWait(ctx); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := waitSshAdmission(ctx); err != nil {
 			return err
@@ -317,6 +346,9 @@ func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmis
 	}
 	if unix.Renameat(directory, name, directory, "queue.json") != nil || unix.Fsync(directory) != nil {
 		return errors.New("SSH admission state publication failed")
+	}
+	if self.afterPublish != nil {
+		return self.afterPublish()
 	}
 	return nil
 }

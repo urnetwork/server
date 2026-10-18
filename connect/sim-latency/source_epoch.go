@@ -133,6 +133,7 @@ type controlPlaneIdentity struct {
 
 type sourceManifest struct {
 	Schema               int                  `yaml:"schema"`
+	Staging              bool                 `yaml:"staging,omitempty"`
 	FrozenAt             string               `yaml:"frozen_at"`
 	EvaluationSource     evaluationSource     `yaml:"evaluation_source"`
 	ControlPlaneIdentity controlPlaneIdentity `yaml:"control_plane_identity"`
@@ -146,6 +147,7 @@ type evaluatorSourceLock struct {
 
 type sourceRecord struct {
 	Schema                        int               `json:"schema"`
+	Staging                       bool              `json:"staging,omitempty"`
 	Epoch                         int               `json:"epoch"`
 	Branch                        string            `json:"branch"`
 	SignificantImprovementPercent float64           `json:"significant_improvement_percent"`
@@ -175,6 +177,15 @@ func loadSourceManifest(path string) (*sourceManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read source config: %w", err)
 	}
+	return decodeSourceManifest(manifestBytes)
+}
+
+// decodeSourceManifest authenticates one bounded strict source ledger equally
+// for local configuration, persisted recovery, and staged config publication.
+func decodeSourceManifest(manifestBytes []byte) (*sourceManifest, error) {
+	if len(manifestBytes) == 0 || len(manifestBytes) > maximumSourceConfigBytes {
+		return nil, errors.New("source manifest is empty or oversized")
+	}
 	manifest := &sourceManifest{}
 	decoder := yaml.NewDecoder(bytes.NewReader(manifestBytes))
 	decoder.KnownFields(true)
@@ -202,7 +213,7 @@ func validateSourceManifest(manifest *sourceManifest) error {
 	if manifest == nil || manifest.Schema != 1 {
 		return errors.New("source config schema must be 1 or 2")
 	}
-	if len(manifest.EvaluationSource.Generations) != 0 || len(manifest.EvaluationSource.Rounds) != 0 {
+	if manifest.Staging || len(manifest.EvaluationSource.Generations) != 0 || len(manifest.EvaluationSource.Rounds) != 0 {
 		return errors.New("schema 1 source config cannot contain v2 source generations or round mappings")
 	}
 	if manifest.EvaluationSource.Branch != "sim-latency" {
@@ -280,7 +291,31 @@ func validateSourceManifest(manifest *sourceManifest) error {
 	return nil
 }
 
+// sourceBranch derives the protected ref from explicit policy, never environment.
+func sourceBranch(staging bool) string {
+	if staging {
+		return stagingEvaluationSourceBranch
+	}
+	return "sim-latency"
+}
+
+// validSourceMargin preserves positive production margins and exact-zero staging.
+func validSourceMargin(percent float64, staging bool) bool {
+	if staging {
+		return percent == 0
+	}
+	return finitePositive(percent) && percent <= 50
+}
+
+// validateSourceSignificance retains the historical production contract.
 func validateSourceSignificance(significance *sourceSignificance) error {
+	return validateSourceSignificanceForMode(significance, false)
+}
+
+// validateSourceSignificanceForMode preserves genuine statistical evidence in
+// staging while allowing its explicitly zero evaluated takeover margin. The
+// recommendation remains evidence; staging never adopts it as a nonzero margin.
+func validateSourceSignificanceForMode(significance *sourceSignificance, staging bool) error {
 	if significance == nil || !validSha256(significance.ScoreSha256) ||
 		significance.Method != scoreSignificanceMethod ||
 		significance.Alpha != scoreSignificanceAlpha ||
@@ -291,14 +326,14 @@ func validateSourceSignificance(significance *sourceSignificance) error {
 		!finiteNonnegative(significance.CandidateSampleVariance) ||
 		!finite(significance.ObservedImprovementPercent) ||
 		significance.ObservedImprovementPercent <= 0 ||
-		!finitePositive(significance.TakeoverMarginPercent) ||
-		50 < significance.TakeoverMarginPercent ||
+		!validSourceMargin(significance.TakeoverMarginPercent, staging) ||
 		!finiteNonnegative(significance.MinimumSignificantImprovementPercent) ||
 		!finiteNonnegative(significance.RequiredImprovementPercent) ||
 		!finite(significance.OneSidedPValue) || significance.OneSidedPValue < 0 ||
 		significance.Alpha < significance.OneSidedPValue ||
 		!finiteNonnegative(significance.NextEpochMinimumImprovementPercent) ||
-		!finitePositive(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		!finiteNonnegative(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		(!staging && significance.RecommendedNextEpochTakeoverMarginPercent == 0) ||
 		50 < significance.RecommendedNextEpochTakeoverMarginPercent {
 		return errors.New("record is incomplete or not statistically significant")
 	}
@@ -480,15 +515,21 @@ func findRepositoriesRoot() (string, error) {
 
 // findSourceConfig locates the non-secret source epoch ledger.
 func findSourceConfig(repositoriesRoot string) (string, error) {
+	return findSourceConfigForMode(repositoriesRoot, false)
+}
+
+// findSourceConfigForMode keeps automatic staging discovery on its separate
+// config path. Explicit overrides are still validated by their caller.
+func findSourceConfigForMode(repositoriesRoot string, staging bool) (string, error) {
 	if path := strings.TrimSpace(os.Getenv("SIM_LATENCY_SOURCE_CONFIG")); path != "" {
 		return filepath.Abs(path)
 	}
 	candidates := []string{}
 	if configHome := strings.TrimSpace(os.Getenv("WARP_CONFIG_HOME")); configHome != "" {
-		candidates = append(candidates, filepath.Join(configHome, "main", "sim-latency.yml"))
+		candidates = append(candidates, filepath.Join(configHome, filepath.FromSlash(sourceManifestRepositoryPath(staging))))
 	}
 	candidates = append(candidates,
-		filepath.Join(repositoriesRoot, "config", "main", "sim-latency.yml"),
+		filepath.Join(repositoriesRoot, "config", filepath.FromSlash(sourceManifestRepositoryPath(staging))),
 		"/opt/urnetwork/sim-latency.yml",
 	)
 	for _, candidate := range candidates {
@@ -496,11 +537,16 @@ func findSourceConfig(repositoriesRoot string) (string, error) {
 			return filepath.Clean(candidate), nil
 		}
 	}
-	return "", errors.New("could not locate config/main/sim-latency.yml")
+	return "", fmt.Errorf("could not locate config/%s", sourceManifestRepositoryPath(staging))
 }
 
 // configuredSourcePaths resolves explicit paths before falling back to the host/image layout.
 func configuredSourcePaths(opts docopt.Opts) (string, string, string, error) {
+	return configuredSourcePathsForMode(opts, false)
+}
+
+// configuredSourcePathsForMode selects staging only from explicit caller policy.
+func configuredSourcePathsForMode(opts docopt.Opts, staging bool) (string, string, string, error) {
 	repositoriesRoot := optString(opts, "--repos-root", "")
 	if repositoriesRoot == "" {
 		var err error
@@ -518,7 +564,7 @@ func configuredSourcePaths(opts docopt.Opts) (string, string, string, error) {
 	sourceConfig := optString(opts, "--source-config", "")
 	if sourceConfig == "" {
 		var err error
-		sourceConfig, err = findSourceConfig(repositoriesRoot)
+		sourceConfig, err = findSourceConfigForMode(repositoriesRoot, staging)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -586,10 +632,14 @@ func runSourceCheck(opts docopt.Opts) {
 		}
 		result := struct {
 			Schema                        int     `json:"schema"`
+			Staging                       bool    `json:"staging,omitempty"`
+			Branch                        string  `json:"branch"`
 			Epoch                         int     `json:"epoch"`
 			SignificantImprovementPercent float64 `json:"significant_improvement_percent"`
 		}{
 			Schema:                        1,
+			Staging:                       manifest.Staging,
+			Branch:                        manifest.EvaluationSource.Branch,
 			Epoch:                         epochNumber,
 			SignificantImprovementPercent: epoch.SignificantImprovementPercent,
 		}
@@ -611,7 +661,8 @@ func runSourceRecord(opts docopt.Opts) {
 	if err != nil {
 		fatalf("source record epoch: %s", err)
 	}
-	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePaths(opts)
+	staging := optBool(opts, "--staging")
+	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePathsForMode(opts, staging)
 	if err != nil {
 		fatalf("source record paths: %s", err)
 	}
@@ -621,6 +672,9 @@ func runSourceRecord(opts docopt.Opts) {
 	manifest, err := loadSourceManifest(sourceConfig)
 	if err != nil {
 		fatalf("source record config: %s", err)
+	}
+	if manifest.Staging != staging {
+		fatalf("source record requires explicit mode to match the frozen manifest")
 	}
 	if err := verifyRemoteSourceEpoch(manifest, epochNumber, repositoriesRoot); err != nil {
 		fatalf("source record remote verification: %s", err)
@@ -636,6 +690,7 @@ func runSourceRecord(opts docopt.Opts) {
 	}
 	result := sourceRecord{
 		Schema:                        1,
+		Staging:                       manifest.Staging,
 		Epoch:                         epochNumber,
 		Branch:                        manifest.EvaluationSource.Branch,
 		SignificantImprovementPercent: epoch.SignificantImprovementPercent,

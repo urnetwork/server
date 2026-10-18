@@ -44,8 +44,11 @@ type reviewedSourceRound struct {
 // Validates historical entries separately so upgrading a manifest never
 // changes their interpretation or relabels an unreviewed winner as source.
 func validateReviewedSourceManifest(manifest *sourceManifest) error {
-	if manifest.Schema != 2 || manifest.EvaluationSource.Branch != "sim-latency" {
-		return errors.New("reviewed source config requires schema 2 and sim-latency branch")
+	if manifest == nil || manifest.Schema != 2 || manifest.EvaluationSource.Branch != sourceBranch(manifest.Staging) {
+		return errors.New("reviewed source config requires schema 2 and the explicit mode's source branch")
+	}
+	if manifest.Staging && len(manifest.EvaluationSource.Epochs) != 0 {
+		return errors.New("staging requires a separate v2 baseline, not relabeled historical production epochs")
 	}
 	if _, err := time.Parse(time.RFC3339, manifest.FrozenAt); err != nil {
 		return errors.New("source config frozen_at must be an RFC3339 timestamp")
@@ -73,8 +76,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 	for index, generation := range generationRecords {
 		if generation.Generation != index || !validSha256(generation.SourceLockSha256) ||
 			!validSha256(generation.ThresholdEvidenceSha256) ||
-			!finitePositive(generation.SignificantImprovementPercent) ||
-			50 < generation.SignificantImprovementPercent {
+			!validSourceMargin(generation.SignificantImprovementPercent, manifest.Staging) {
 			return fmt.Errorf("source generation %d identity or threshold is invalid", index)
 		}
 		for repository, commit := range generation.Repositories.commits() {
@@ -107,11 +109,11 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 			generation.SourceLockSha256 == previous.SourceLockSha256 {
 			return fmt.Errorf("source generation %d requires separate source approval on the exact incumbent", index)
 		}
-		if err := validateSourceSignificance(generation.Significance); err != nil {
+		if err := validateSourceSignificanceForMode(generation.Significance, manifest.Staging); err != nil {
 			return fmt.Errorf("source generation %d significance: %w", index, err)
 		}
 		if generation.Significance.ScoreSha256 != generation.ScoreSha256 ||
-			generation.SignificantImprovementPercent != generation.Significance.RecommendedNextEpochTakeoverMarginPercent ||
+			(!manifest.Staging && generation.SignificantImprovementPercent != generation.Significance.RecommendedNextEpochTakeoverMarginPercent) ||
 			generation.SignificantImprovementPercent < previous.SignificantImprovementPercent {
 			return fmt.Errorf("source generation %d recommendation does not preserve its authenticated calibrated floor", index)
 		}

@@ -279,11 +279,13 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 	if signal.ID() == "pg/query-sample" {
 		return pgSampleFailureAlert(settings, signal, err)
 	}
+	var interrupted *signalContextError
+	parentEnded := errors.As(err, &interrupted)
 	var providerFailure interface{ monitorVisibilityClass() string }
-	if errors.As(err, &providerFailure) {
+	if !parentEnded && errors.As(err, &providerFailure) {
 		return providerFailureAlert(settings, signal, err, providerFailure.monitorVisibilityClass())
 	}
-	if target, ok := sshAdmissionResetTarget(err); ok {
+	if target, ok := sshAdmissionResetTarget(err); ok && !parentEnded {
 		return Alert{
 			SignalNumber: signal.Number(),
 			SignalKey:    signal.Key(),
@@ -322,8 +324,8 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 		Symptom:      fmt.Sprintf("Signal %s (%s) could not run (error_class=%s)", signal.Number(), signal.ID(), errorClass),
 		Mechanism:    "The monitor could not reach or parse a source of truth, so the associated production condition is currently unknown.",
 		Baseline:     "Every registered signal completes within its command timeout.",
-		Observed:     "error_class=" + errorClass,
-		Action:       observationFailureAction(errorClass, "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident."),
+		Observed:     observationFailureDetails(err, errorClass),
+		Action:       observationFailureAction(err, errorClass, "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident."),
 		Verify:       "The signal completes and reports either no alert or a concrete target alert.",
 		Playbook:     "SIGNALS.md §1.7 and MONITOR.md §3.6",
 	}

@@ -104,6 +104,19 @@ func winnerSourceSignificance(
 	result *controller.ScoreResult,
 	content []byte,
 ) (*sourceSignificance, error) {
+	return winnerSourceSignificanceForMode(result, content, false)
+}
+
+// winnerSourceSignificanceForMode projects unchanged score evidence while
+// retaining the distinct production and explicitly zero-margin staging rules.
+func winnerSourceSignificanceForMode(
+	result *controller.ScoreResult,
+	content []byte,
+	staging bool,
+) (*sourceSignificance, error) {
+	if result == nil || result.Significance == nil {
+		return nil, errors.New("winner score significance record is missing")
+	}
 	significance := result.Significance
 	if significance.BaselineSampleVariance == nil ||
 		significance.CandidateSampleVariance == nil ||
@@ -132,7 +145,7 @@ func winnerSourceSignificance(
 		NextEpochMinimumImprovementPercent:        *significance.NextEpochMinimumImprovementPercent,
 		RecommendedNextEpochTakeoverMarginPercent: *significance.RecommendedNextEpochTakeoverMarginPercent,
 	}
-	if err := validateSourceSignificance(source); err != nil {
+	if err := validateSourceSignificanceForMode(source, staging); err != nil {
 		return nil, err
 	}
 	return source, nil

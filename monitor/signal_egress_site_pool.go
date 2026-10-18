@@ -778,13 +778,18 @@ func evaluateEgressSitePool(
 				reason = "candidates-exhausted"
 			}
 			f := egressSitePoolFinding("egress-site-pool-thin", target, class+"/"+reason, 2)
-			f.symptom = fmt.Sprintf("The %s class holds %d active sites against its pool size of %d, with %d candidates to promote", class, active, poolSize, candidates)
-			f.mechanism = "The refresh keeps SitePoolSize sites per class by promoting a candidate for every retirement, and heals only as far as the candidate list reaches. A class under its size samples fewer sites per run; a class with no candidate left cannot replace the next site it retires."
-			f.baseline = fmt.Sprintf("At least SitePoolSize=%d active %s sites and at least one promotable candidate.", poolSize, class)
+			f.symptom = fmt.Sprintf("The %s class holds %d active sites against its pool size of %d, with %d eligible candidates", class, active, poolSize, candidates)
+			f.mechanism = "An active-pool deficit narrows the configured destination pool; an empty candidate reserve can prevent replacing a retired site. The active count alone does not establish the compatible sample available in a provider's place."
+			f.baseline = fmt.Sprintf("At least SitePoolSize=%d active %s sites and at least one eligible candidate.", poolSize, class)
 			f.observed = fmt.Sprintf("class=%s active=%d pool_size=%d candidates=%d reason=%s", class, active, poolSize, candidates, reason)
 			f.evidence = "Pool rows by state, and the candidate names egress-sites.yml lists; no provider identity."
-			f.action = "Extend the " + class + " candidates in config/all/egress-sites.yml with sites of the category that left, each with a load contract a plain GET satisfies; a site retired for good returns by raising its entry's revision."
-			f.verify = "The next refresh promotes into the class and the active count reaches its pool size."
+			f.context = fmt.Sprintf("Configured per-run sample=%d; compatible place counts are measured separately. A non-skipped refresh opens at most SiteMaxRetirePerRun=%d extra vacancies per class and promotes only candidates that pass its host check. Eligible rows or configured candidates do not attest those checks or a completed refresh.", siteSettings.SiteSampleSize[class], siteSettings.SiteMaxRetirePerRun)
+			if candidates == 0 {
+				f.action = "Extend the " + class + " candidates in config/all/egress-sites.yml with sites of the category that left, each with a load contract a plain GET satisfies; a site retired for good returns by raising its entry's revision. Confirm refresh completion and successful candidate host checks before claiming replenishment."
+			} else {
+				f.action = "Check bounded RefreshEgressDestinations completion, protective skip reason, opened vacancies and candidate host-check outcomes. Evaluate the existing candidate reserve before changing the list."
+			}
+			f.verify = "After completed non-skipped refreshes with successful candidate checks, the active count reaches its pool size and an eligible reserve remains. Extra vacancies are capped per run, so several completed refresh cadences may be needed."
 			failing = append(failing, f)
 		}
 		emit("egress-site-pool-thin", failing)

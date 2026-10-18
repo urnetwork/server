@@ -37,7 +37,12 @@ func registerLegacyCloseOwners(ctx context.Context, shard int) int {
 	return registered
 }
 
-func registerLegacyCloseOwnerPage(ctx context.Context, shard int, after *LegacySettlementOwnerCursor) (*LegacySettlementOwnerCursor, int, int) {
+func registerLegacyCloseOwnerPage(ctx context.Context, shard int, after *LegacySettlementOwnerCursor, observations ...*legacyRegistrationDbObservation) (*LegacySettlementOwnerCursor, int, int) {
+	var timing *server.DbTiming
+	var phase *server.DbPhaseObservation
+	if len(observations) > 0 && observations[0] != nil {
+		timing, phase = &observations[0].timing, &observations[0].phase
+	}
 	type registration struct {
 		contractId     server.Id
 		sourceId       server.Id
@@ -110,7 +115,7 @@ func registerLegacyCloseOwnerPage(ctx context.Context, shard int, after *LegacyS
 		if visited < legacySettlementPayerRegistrationLimit {
 			next = nil
 		}
-	}, server.TxReadCommitted, server.OptNoRetry())
+	}, server.TxReadCommitted, server.OptNoRetry(), timing, phase)
 	// None of these acknowledgements escape before the transaction commits.
 	return next, len(registrations), unresolved
 }
@@ -302,9 +307,11 @@ func DispatchLegacySettlementCloseOwners(ctx context.Context, shard int, after *
 	}
 	var registrationUnresolved int
 	result, returnErr = dispatchLegacySettlementPayersPage(ctx, bounded, shard, after, payerAfter,
-		nextLegacySettlementPayer, func(ctx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
+		nextLegacySettlementPayer, func(registrationCtx context.Context, shard int, after *LegacySettlementCursor) (*LegacySettlementCursor, int) {
+			observation := newLegacyRegistrationDbObservation(ctx, bounded, registrationCtx)
+			defer observation.finish()
 			var registered int
-			registrationCursor, registered, registrationUnresolved = registerLegacyCloseOwnerPage(ctx, shard, registrationCursor)
+			registrationCursor, registered, registrationUnresolved = registerLegacyCloseOwnerPage(registrationCtx, shard, registrationCursor, observation)
 			return after, registered
 		}, source)
 	result.RegistrationCursor, result.RegistrationUnresolved = registrationCursor, registrationUnresolved

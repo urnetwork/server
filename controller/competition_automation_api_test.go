@@ -26,15 +26,8 @@ func automationApiSettings() *Settings {
 
 // Service tests exercise the actual v1/v2 boundary before the store's enqueue method.
 func TestCompetitionV2AdmissionContractIsExplicit(t *testing.T) {
-	settings := automationApiSettings()
-	policy, err := policySnapshot(settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roundId, jobId := server.NewId(), server.NewId()
-	round := &roundRecord{RoundResult: RoundResult{RoundId: roundId, Staging: true, Status: "open"}, PolicyJson: policy}
-	store := &fakeStore{stagingRound: round, enqueueJob: &queuedJob{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId, Staging: true, PatchSha256: strings.Repeat("c", 64), State: "queued"}, Round: *round}}
-	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+	_, store, service := newAutomationStagingApiFixture(t)
+	roundId, jobId := store.stagingRound.RoundId, store.enqueueJob.JobId
 	principal := &Principal{Id: "test-submitter", Role: "submitter"}
 	args := ScoreArgs{RoundId: roundId, Patch: testPatch("test-change")}
 	if _, status, evalError := service.Submit(context.Background(), args, principal); status != http.StatusConflict || evalError == nil || evalError.Code != "unsupported_decision_mode" || store.enqueueCalls != 0 {
@@ -159,18 +152,12 @@ func TestCompetitionV2ReviewUsesFrozenCriteria(t *testing.T) {
 
 // Durable policy refusals are non-retriable conflicts, not a storage-outage retry loop.
 func TestCompetitionV2AdmissionPreservesTypedTransitionRefusals(t *testing.T) {
-	settings := automationApiSettings()
-	policy, err := policySnapshot(settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roundId := server.RequireParseId("00000000-0000-0000-0000-000000000402")
 	for _, refusal := range []error{ErrConflict, ErrAutomationHeld, ErrEvaluationInvalidated, ErrAutomationDisabled} {
-		store := &fakeStore{stagingRound: &roundRecord{RoundResult: RoundResult{RoundId: roundId, Staging: true}, PolicyJson: policy}, enqueueErr: refusal}
-		service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
-		_, status, evalError := service.SubmitV2(context.Background(), ScoreArgs{RoundId: roundId, Patch: testPatch("synthetic")}, &Principal{Id: "test-submitter", Role: "submitter"})
-		if status != http.StatusConflict || evalError == nil || evalError.Retriable || evalError.Kind != "submission" {
-			t.Fatalf("durable refusal %v became a retry: %d %+v", refusal, status, evalError)
+		_, store, service := newAutomationStagingApiFixture(t)
+		store.enqueueErr = refusal
+		_, status, evalError := service.SubmitV2(context.Background(), ScoreArgs{RoundId: store.stagingRound.RoundId, Patch: testPatch("synthetic")}, &Principal{Id: "test-submitter", Role: "submitter"})
+		if status != http.StatusConflict || evalError == nil || evalError.Retriable || evalError.Kind != "submission" || store.enqueueCalls != 1 || store.readyCalls != 1 {
+			t.Fatalf("durable refusal %v became a retry or bypassed readiness: %d %+v ready=%d enqueue=%d", refusal, status, evalError, store.readyCalls, store.enqueueCalls)
 		}
 	}
 }

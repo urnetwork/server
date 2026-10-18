@@ -19,10 +19,13 @@ const (
 	egressAdmissionResponseMax = 2 * 1024 * 1024
 	egressAdmissionFreshness   = 90 * time.Second
 	egressAdmissionMaxInterval = 3 * time.Minute
+	egressAdmissionOffset      = time.Minute
 )
 
-// Each new instance owns only its previous complete process snapshots. A
-// restarted observer must warm up again; no durable history is fabricated.
+const egressAdmissionIntervalScope = "Deltas cover only the two native scrape points returned by this request. Time between scheduled observations is unsampled; a clean recent interval cannot prove that historical gap was healthy. Current recovery still requires two clean traffic-bearing intervals and the direct deadline/submission controls."
+
+// Each instance retains only seen process/start/source-clock authority for
+// warmup and duplicate rejection. Both counter points come from Mimir history.
 func NewEgressAdmissionSignal() Signal {
 	return &signalAdapter{
 		number: "2.19a", key: "egress-admission", name: "Egress selection and submission boundaries",
@@ -33,7 +36,7 @@ func NewEgressAdmissionSignal() Signal {
 // Concurrent checks serialize only the in-memory reduction, never transport.
 type egressAdmissionProbe struct {
 	stateLock  sync.Mutex
-	previous   map[egressAdmissionIdentity]egressAdmissionSnapshot
+	previous   map[egressAdmissionIdentity]egressAdmissionObservation
 	observedAt time.Time
 }
 
@@ -65,6 +68,19 @@ type egressAdmissionProcess struct {
 	invalid bool
 }
 
+// A missing or invalid side cannot borrow its observer's preceding snapshot.
+type egressAdmissionPair struct {
+	current  *egressAdmissionProcess
+	previous *egressAdmissionProcess
+	invalid  bool
+}
+
+// These clocks admit an already observed generation, never supply a delta.
+type egressAdmissionObservation struct {
+	start      float64
+	sourceTime float64
+}
+
 // A single scrape owns the bundle. Start time binds counter deltas to one
 // executable process, including reuse of an instance label after restart.
 type egressAdmissionSnapshot struct {
@@ -78,35 +94,41 @@ var egressAdmissionOutcomes = [...]string{"acknowledged", "unsupported", "cancel
 var egressAdmissionFullResults = [...]string{"attempted", "submitted", "skipped", "failed"}
 var egressAdmissionPassErrors = [...]string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled", "funding_unavailable", "funding_unknown"}
 
-// One bounded instant query returns fixed families and their actual source
-// timestamps. The instant evaluation timestamp alone cannot prove freshness.
+// One bounded instant query returns the same fixed families now and one minute
+// earlier. Timestamp applies to the offset selector itself, preserving the
+// original scrape clock rather than the query's current evaluation clock.
 func egressAdmissionQuery(environment string) string {
 	parts := []string{}
-	for _, family := range []struct{ name, metric, job, extraSelector string }{
-		{name: "rss", metric: "process_resident_memory_bytes", job: "api|taskworker"},
-		{name: "start", metric: "process_start_time_seconds", job: "api|taskworker"},
-		{name: "enabled", metric: "urnetwork_egress_due_observation_enabled", job: "api"},
-		{name: "requests", metric: "urnetwork_egress_due_requests_total", job: "api"},
-		{name: "selected", metric: "urnetwork_egress_due_selected_total", job: "api"},
-		{name: "enabled", metric: "urnetwork_egress_probe_submission_observation_enabled", job: "taskworker"},
-		{name: "submission", metric: "urnetwork_egress_probe_submission_outcomes_total", job: "taskworker"},
-		{name: "full", metric: "urnetwork_egress_probe_pass_providers_total", job: "taskworker", extraSelector: `schedule="full"`},
-		{name: "pass_error", metric: "urnetwork_egress_probe_pass_errors_total", job: "taskworker"},
-	} {
-		extraSelector := ""
-		if family.extraSelector != "" {
-			extraSelector = "," + family.extraSelector
-		}
-		selector := fmt.Sprintf(`%s{env=%s,job=~%s%s}`, family.metric, strconv.Quote(environment), strconv.Quote(family.job), extraSelector)
-		for _, part := range []string{"value", "timestamp"} {
-			value := selector
-			if part == "timestamp" {
-				value = "timestamp(" + selector + ")"
+	for _, window := range []string{"current", "previous"} {
+		for _, family := range []struct{ name, metric, job, extraSelector string }{
+			{name: "rss", metric: "process_resident_memory_bytes", job: "api|taskworker"},
+			{name: "start", metric: "process_start_time_seconds", job: "api|taskworker"},
+			{name: "enabled", metric: "urnetwork_egress_due_observation_enabled", job: "api"},
+			{name: "requests", metric: "urnetwork_egress_due_requests_total", job: "api"},
+			{name: "selected", metric: "urnetwork_egress_due_selected_total", job: "api"},
+			{name: "enabled", metric: "urnetwork_egress_probe_submission_observation_enabled", job: "taskworker"},
+			{name: "submission", metric: "urnetwork_egress_probe_submission_outcomes_total", job: "taskworker"},
+			{name: "full", metric: "urnetwork_egress_probe_pass_providers_total", job: "taskworker", extraSelector: `schedule="full"`},
+			{name: "pass_error", metric: "urnetwork_egress_probe_pass_errors_total", job: "taskworker"},
+		} {
+			extraSelector := ""
+			if family.extraSelector != "" {
+				extraSelector = "," + family.extraSelector
 			}
-			parts = append(parts, fmt.Sprintf(
-				`label_replace(label_replace(%s,"monitor_egress_family",%s,"job",".*"),"monitor_egress_part",%s,"job",".*")`,
-				value, strconv.Quote(family.name), strconv.Quote(part),
-			))
+			selector := fmt.Sprintf(`%s{env=%s,job=~%s%s}`, family.metric, strconv.Quote(environment), strconv.Quote(family.job), extraSelector)
+			if window == "previous" {
+				selector += " offset 1m"
+			}
+			for _, part := range []string{"value", "timestamp"} {
+				value := selector
+				if part == "timestamp" {
+					value = "timestamp(" + selector + ")"
+				}
+				parts = append(parts, fmt.Sprintf(
+					`label_replace(label_replace(label_replace(%s,"monitor_egress_family",%s,"job",".*"),"monitor_egress_part",%s,"job",".*"),"monitor_egress_window",%s,"job",".*")`,
+					value, strconv.Quote(family.name), strconv.Quote(part), strconv.Quote(window),
+				))
+			}
 		}
 	}
 	return strings.Join(parts, " or ")
@@ -117,8 +139,15 @@ func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]f
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(egressAdmissionQuery(env.cfg.env))
 	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
 		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(egressAdmissionResponseMax)+" '"+queryUrl+"'")
-	if err != nil || len(out) > egressAdmissionResponseMax {
-		return []finding{egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)}, nil
+	if err != nil {
+		unobservable := egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)
+		unobservable.observed += " " + observationFailureDetails(err, classifyObservationError(err))
+		return []finding{unobservable}, nil
+	}
+	if len(out) > egressAdmissionResponseMax {
+		unobservable := egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)
+		unobservable.observed += " " + observationFailureDetails(nil, observationErrorClassBoundExceeded)
+		return []finding{unobservable}, nil
 	}
 	processes, err := parseEgressAdmission(out, env.cfg.env, env.now())
 	if err != nil {
@@ -129,7 +158,7 @@ func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]f
 
 // Rejects incomplete, duplicate, unknown-label-domain, or source-stale bundles
 // without rendering the offending value. Remote warnings also fail closed.
-func parseEgressAdmission(out, environment string, now time.Time) (map[egressAdmissionIdentity]*egressAdmissionProcess, error) {
+func parseEgressAdmission(out, environment string, now time.Time) (map[egressAdmissionIdentity]*egressAdmissionPair, error) {
 	var response struct {
 		mimirInstantResponse
 		Warnings []string `json:"warnings"`
@@ -138,7 +167,7 @@ func parseEgressAdmission(out, environment string, now time.Time) (map[egressAdm
 		response.Status != "success" || response.Data.ResultType != "vector" || len(response.Warnings) != 0 {
 		return nil, fmt.Errorf("invalid bounded egress observation")
 	}
-	processes := map[egressAdmissionIdentity]*egressAdmissionProcess{}
+	processes := map[egressAdmissionIdentity]*egressAdmissionPair{}
 	for _, series := range response.Data.Result {
 		identity := egressAdmissionIdentity{
 			environment: series.Metric["env"], job: series.Metric["job"],
@@ -148,11 +177,25 @@ func parseEgressAdmission(out, environment string, now time.Time) (map[egressAdm
 			identity.host == "" || identity.block == "" || identity.instance == "" {
 			return nil, fmt.Errorf("invalid egress process join")
 		}
-		process := processes[identity]
-		if process == nil {
-			process = &egressAdmissionProcess{samples: map[string]egressAdmissionSample{}}
-			processes[identity] = process
+		pair := processes[identity]
+		if pair == nil {
+			pair = &egressAdmissionPair{}
+			processes[identity] = pair
 		}
+		var selected **egressAdmissionProcess
+		switch series.Metric["monitor_egress_window"] {
+		case "current":
+			selected = &pair.current
+		case "previous":
+			selected = &pair.previous
+		default:
+			pair.invalid = true
+			continue
+		}
+		if *selected == nil {
+			*selected = &egressAdmissionProcess{samples: map[string]egressAdmissionSample{}}
+		}
+		process := *selected
 		key := series.Metric["monitor_egress_family"]
 		switch key {
 		case "selected":
@@ -224,7 +267,7 @@ func egressAdmissionKeys(job string) []string {
 // Requires one coherent fresh scrape, including source timestamps for zeros.
 func (self *egressAdmissionProcess) snapshot(job string, now time.Time) (egressAdmissionSnapshot, bool) {
 	snapshot := egressAdmissionSnapshot{counters: map[string]float64{}}
-	if self.invalid {
+	if self == nil || self.invalid {
 		return snapshot, false
 	}
 	for _, key := range egressAdmissionKeys(job) {
@@ -264,32 +307,41 @@ func (self *egressAdmissionProcess) snapshot(job string, now time.Time) (egressA
 
 // Preserves confirmed failures from stable complete processes even if another
 // process is unobservable. Overlapping generations never supply a joined delta.
-func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdmissionIdentity]*egressAdmissionProcess) []finding {
+func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdmissionIdentity]*egressAdmissionPair) []finding {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	current := map[egressAdmissionIdentity]egressAdmissionSnapshot{}
+	current := map[egressAdmissionIdentity]egressAdmissionObservation{}
 	blockCounts := map[egressAdmissionIdentity]int{}
+	previousBlockCounts := map[egressAdmissionIdentity]int{}
 	roles := map[string]int{}
-	for identity := range processes {
+	for identity, pair := range processes {
 		block := identity
 		block.instance = ""
-		blockCounts[block]++
-		roles[identity.job]++
+		if pair.current != nil {
+			blockCounts[block]++
+			roles[identity.job]++
+		}
+		if pair.previous != nil {
+			previousBlockCounts[block]++
+		}
 	}
 	unobservable, complete := 0, 0
 	deltas := map[string]float64{}
-	intervalValid := !self.observedAt.IsZero() && now.After(self.observedAt) && now.Sub(self.observedAt) <= egressAdmissionMaxInterval
-	for identity, process := range processes {
+	observerAdvanced := !self.observedAt.IsZero() && now.After(self.observedAt)
+	for identity, pair := range processes {
 		block := identity
 		block.instance = ""
-		snapshot, valid := process.snapshot(identity.job, now)
-		if !valid || blockCounts[block] != 1 {
+		snapshot, valid := pair.current.snapshot(identity.job, now)
+		if pair.invalid || !valid || blockCounts[block] != 1 {
 			unobservable++
 			continue
 		}
-		current[identity] = snapshot
-		previous, exists := self.previous[identity]
-		if !intervalValid || !exists || previous.start != snapshot.start || snapshot.sourceTime <= previous.sourceTime {
+		current[identity] = egressAdmissionObservation{start: snapshot.start, sourceTime: snapshot.sourceTime}
+		seen, exists := self.previous[identity]
+		previous, previousValid := pair.previous.snapshot(identity.job, now.Add(-egressAdmissionOffset))
+		if !observerAdvanced || !exists || seen.start != snapshot.start || snapshot.sourceTime <= seen.sourceTime ||
+			!previousValid || previousBlockCounts[block] != 1 || previous.start != snapshot.start ||
+			snapshot.sourceTime <= previous.sourceTime || snapshot.sourceTime-previous.sourceTime > egressAdmissionMaxInterval.Seconds() {
 			unobservable++
 			continue
 		}
@@ -396,6 +448,11 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 			playbook:  "SIGNALS.md §2.19a, §2.23, §2.9a, and §1.2",
 		})
 	}
+	for i := range findings {
+		if findings[i].context == "" {
+			findings[i].context = egressAdmissionIntervalScope
+		}
+	}
 	return findings
 }
 
@@ -405,9 +462,10 @@ func egressAdmissionUnobservable(reason string, complete, incomplete int) findin
 	return finding{
 		probeId: "runtime/egress-admission", tier: tierWarn, class: "egress-admission-unobservable", target: "egress-fleet", sustain: 1,
 		symptom:   "Egress selection/submission intervals are not completely observable",
-		mechanism: "Each observed API and Taskworker process needs a complete executable-owned bundle and two fresh advancing scrapes in the same generation. Missing, duplicate, stale, reset, overlapping or mixed telemetry cannot supply a healthy delta. Entirely absent process discovery remains owned by provenance and scrape-continuity probes.",
-		baseline:  "Both roles present; one complete fresh process per host/block; two monotonic same-generation observations no more than three minutes apart",
+		mechanism: "Each observed API and Taskworker process needs complete current and historical bundles from the same bounded request, with two fresh advancing scrapes in the same generation. Observer state only gates warmup and duplicate rejection; it cannot supply either counter point. Missing, duplicate, stale, reset, overlapping or mixed telemetry cannot supply a healthy delta. Entirely absent process discovery remains owned by provenance and scrape-continuity probes.",
+		baseline:  "Both roles present; one complete fresh process per host/block; warmed observer generation and two monotonic native source points no more than three minutes apart",
 		observed:  fmt.Sprintf("reason=%s complete_process_intervals=%d incomplete_process_intervals=%d", reason, complete, incomplete),
+		context:   egressAdmissionIntervalScope,
 		action:    "Verify source adapters and exact API/Taskworker artifact ancestry. Deploy approved owning builds only when executable capability is proved missing. If capability is present, diagnose source transport, scrape freshness, joins, resets and overlap instead of redeploying from absent metrics. A config-only rollout cannot add these metrics. Preserve direct §2.19 alerts and any confirmed failures from complete processes.",
 		verify:    "After convergence, obtain two complete advancing observations, then two clean traffic-bearing intervals and direct deadline/submission controls; missing metrics do not prove an old scheduler or failed persistence.",
 		playbook:  "SIGNALS.md §2.19a",

@@ -50,6 +50,12 @@ func pgSampleFailureEnum(value string, allowed ...string) bool {
 // existing finite transport taxonomy and retain only our exact command exits.
 func pgSampleTransportFailure(err error) *pgSampleSourceFailure {
 	f := &pgSampleSourceFailure{Phase: "host_transport", Cause: classifyObservationError(err)}
+	var admissionFailure *sshAdmissionUnavailableError
+	if errors.Is(err, errPgSampleStartBudget) && !errors.As(err, &admissionFailure) {
+		// An owned pre-Start refusal is not a remote failure or an expired owner.
+		f.Phase, f.Cause = "local_start_budget", "below_mandatory_waits"
+		return f
+	}
 	var sshFailure *sshCommandError
 	var exitFailure *exec.ExitError
 	if errors.As(err, &sshFailure) && errors.As(sshFailure, &exitFailure) {

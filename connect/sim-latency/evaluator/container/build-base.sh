@@ -15,16 +15,21 @@ readonly SERVER_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 readonly WORKSPACE_ROOT="$(cd "$SERVER_ROOT/.." && pwd -P)"
 
 include_worktree=false
+staging=false
 image_tag=""
 source_epoch=""
-source_config="$WORKSPACE_ROOT/config/main/sim-latency.yml"
+source_config=""
 
 usage() {
-    printf '%s\n' 'usage: build-base.sh --epoch 0..6 [--source-config FILE] [--include-worktree] [--tag IMAGE]'
+    printf '%s\n' 'usage: build-base.sh --epoch 0..6 [--staging] [--source-config FILE] [--include-worktree] [--tag IMAGE]'
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --staging)
+            staging=true
+            shift
+            ;;
         --include-worktree)
             include_worktree=true
             shift
@@ -50,6 +55,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 [[ "$source_epoch" =~ ^[0-6]$ ]] || { usage >&2; exit 2; }
+source_branch=sim-latency
+mode_args=()
+if [ "$staging" = true ]; then
+    source_branch=sim-latency-staging
+    mode_args=(--staging)
+    [ "$include_worktree" = false ] || { printf 'staging requires immutable published source, not a development worktree\n' >&2; exit 2; }
+fi
+if [ -z "$source_config" ]; then
+    source_config="$WORKSPACE_ROOT/config/main/$source_branch.yml"
+fi
 [ -f "$source_config" ] && [ ! -L "$source_config" ] || {
     printf 'source epoch config must be a regular non-symlink file: %s\n' "$source_config" >&2
     exit 1
@@ -100,21 +115,24 @@ if [ "$include_worktree" = false ]; then
             printf 'SIM_LATENCY_SOURCE_TOOL must be a regular executable: %s\n' "$source_tool" >&2
             exit 1
         }
-        source_record="$("$source_tool" source-record \
+        source_record="$("$source_tool" source-record "${mode_args[@]}" \
             --epoch "$source_epoch" \
             --source-config "$source_config" \
             --repos-root "$WORKSPACE_ROOT")"
     else
-        source_record="$(cd "$SERVER_ROOT/connect/sim-latency" && go run . source-record \
+        source_record="$(cd "$SERVER_ROOT/connect/sim-latency" && go run . source-record "${mode_args[@]}" \
             --epoch "$source_epoch" \
             --source-config "$source_config" \
             --repos-root "$WORKSPACE_ROOT")"
     fi
     jq -e \
         --argjson epoch "$source_epoch" \
+        --argjson staging "$staging" --arg branch "$source_branch" \
         --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' \
-        '.schema == 1 and .epoch == $epoch and .branch == "sim-latency" and
-         (.significant_improvement_percent | type == "number" and . > 0 and . <= 50) and
+        '.schema == 1 and .epoch == $epoch and .branch == $branch and
+         ((.staging // false) == $staging) and
+         (.significant_improvement_percent | type == "number" and
+          (if $staging then . == 0 else . > 0 and . <= 50 end)) and
          (($record.repositories | keys) == ($repositories | sort)) and
          ($repositories |
           all(. as $repository | $record.repositories[$repository] | test("^[0-9a-f]{40}$")))' \
@@ -220,6 +238,7 @@ DOCKER_BUILDKIT=1 sudo -n docker build \
     --build-arg "SOURCE_CONFIG_SHA256=$source_config_sha256" \
     --build-arg "SOURCE_LOCK_SHA256=$source_lock_sha256" \
     --label "com.urnetwork.competition.development-snapshot=$include_worktree" \
+    --label "com.urnetwork.competition.staging=$staging" \
     --label "com.urnetwork.competition.source-epoch=$source_epoch" \
     --tag "$image_tag" \
     "$build_context" >&2
@@ -237,10 +256,11 @@ jq -n \
     --arg image_id "$image_id" \
     --arg base_sha "$base_sha" \
     --argjson source_epoch "$source_epoch" \
+    --argjson staging "$staging" \
     --arg source_config_sha256 "$source_config_sha256" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --argjson development_snapshot "$include_worktree" \
-    '{schema: 1, image: $image, image_id: $image_id, base_sha: $base_sha,
+    '{schema: 1, staging: $staging, image: $image, image_id: $image_id, base_sha: $base_sha,
       source_epoch: $source_epoch, source_config_sha256: $source_config_sha256,
       source_lock_sha256: $source_lock_sha256,
       development_snapshot: $development_snapshot}'

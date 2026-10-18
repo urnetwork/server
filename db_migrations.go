@@ -10452,4 +10452,52 @@ var migrations = []any{
 
 	// 846: bind pre-admission source qualification to its reserved round identity.
 	newSqlMigration(competitionAutomationTargetMigration),
+
+	// 847: isolate explicit fee-free shadow staging automation without rewriting historical rounds.
+	newSqlMigration(competitionAutomationStagingMigration),
+
+	// 848: account_feedback is keyed only by feedback_id, so every read by
+	// network scans the whole table: NetworkHasFeedback in the onboarding
+	// campaign (15,804 calls at 9 ms each from the 2026-08-24 stats reset to
+	// 2026-10-12), the results job's first feedback, and the onboarding email
+	// tracker's feedback match, which since 89aa5103 reads the table once per
+	// rebuild rather than once per send. About 18 feedback rows are written a
+	// day, so the index adds no meaningful write load.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS account_feedback_network_id_feedback_time
+	`, `
+		CREATE INDEX CONCURRENTLY account_feedback_network_id_feedback_time
+		ON account_feedback (network_id, feedback_time)
+	`, `
+		DROP INDEX IF EXISTS account_feedback_network_id_feedback_time;
+		CREATE INDEX account_feedback_network_id_feedback_time
+		ON account_feedback (network_id, feedback_time)
+	`),
+
+	// 849: an account may hold one sign-in wallet per chain (a Solana and a
+	// Bittensor wallet), so network_user_auth_wallet is keyed by
+	// (user_id, blockchain) instead of user_id. The new key cannot fail on
+	// existing rows: the old one allowed at most one row per user. The key is
+	// byte exact; model.addWalletAuthInTx classifies the chain and refuses a
+	// second wallet of one chain. The foreign key and
+	// UNIQUE (wallet_address, blockchain) are unchanged, and no table
+	// references this key. Swapping it takes an exclusive lock on a small
+	// table (one row per wallet user) while its index is rebuilt.
+	//
+	// Deploy ordering: it must be applied in the same cutover that replaces
+	// every api server. A server built before it upserts with
+	// ON CONFLICT (user_id), which no constraint matches once it applies
+	// (SQLSTATE 42P10), so every wallet link and wallet network-create on
+	// such a server fails; stop them all before it applies. A server built
+	// with it needs it too: on the old key a second chain's wallet fails the
+	// insert. Rolling back to a server built before it is unsafe once any
+	// account holds two wallet rows: that server's RemoveAuth deletes every
+	// wallet row of the user, so removing one chain's wallet removes both
+	// and can leave a wallet-only account with no sign-in method.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_user_auth_wallet
+			DROP CONSTRAINT network_user_auth_wallet_pkey,
+			ADD CONSTRAINT network_user_auth_wallet_pkey PRIMARY KEY (user_id, blockchain);
+	`),
 }

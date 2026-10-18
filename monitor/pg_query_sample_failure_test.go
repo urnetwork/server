@@ -16,6 +16,15 @@ import (
 
 func runPgSampleProgramFixture(t *testing.T, program, stub, input string) (string, error) {
 	t.Helper()
+	out, stderr, err := runPgSampleProgramOutputFixture(t, program, stub, input)
+	pgTransportFixtureProgress(t, input, stderr)
+	return out, err
+}
+
+// Keep raw child output inside the fixture so its finite progress guard can
+// reject diagnostics independently of the production progress parser.
+func runPgSampleProgramOutputFixture(t *testing.T, program, stub, input string) (string, string, error) {
+	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 unavailable")
@@ -44,15 +53,12 @@ func runPgSampleProgramFixture(t *testing.T, program, stub, input string) (strin
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if stderr.Len() != 0 {
-		t.Fatal("remote adapter leaked a traceback or child stderr")
-	}
-	return string(out), err
+	return string(out), stderr.String(), err
 }
 
 func pgSampleProgramInput(t *testing.T) string {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{"password": "private-credential-canary", "user": "fixture", "database": "fixture", "port": 5432, "sql": pgQuerySampleSQL("fixture")})
+	raw, err := json.Marshal(map[string]any{"password": "private-credential-canary", "user": "fixture", "database": "fixture", "port": 5432, "sql": pgQuerySampleSQL("fixture"), "transport_nonce": pgTransportFixtureNonce})
 	if err != nil {
 		t.Fatal(err)
 	}

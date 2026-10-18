@@ -459,13 +459,35 @@ fails every aggregate, block, or continuation page, even when the query exits
 zero below the requested cap; the fixed diagnostic resets completion proof
 without retaining the producer's timestamp, count, or block selector.
 
-Every standing-log cadence also writes one line to retained stderr: the exact
-prefix `monitor-log-reconcile ` followed by a schema-1 JSON object. It contains
-`schema`, `observed_at`, integer `collectors`, `enabled`, `fresh`, and
-`consecutive_two`, plus five `{oldest,newest}` UTC timestamp ranges:
+Every standing-log cadence also writes one bounded line to retained stderr:
+the exact prefix `monitor-log-reconcile ` followed by a versioned JSON object.
+Historical schema 1 contains `schema`, `observed_at`, integer `collectors`,
+`enabled`, `fresh`, and `consecutive_two`, plus five `{oldest,newest}` UTC ranges:
 `collector_started_at`, `previous_window_start`, `latest_window_start`,
-`previous_completed_at`, and `latest_completed_at`. Missing range endpoints
-are JSON null. No service, block, host, label, content, or raw error is emitted.
+`previous_completed_at`, and `latest_completed_at`. Missing endpoints are null.
+Schema 1 is aggregate-only; it cannot identify deficient collectors.
+
+Schema 2 uses `collector_scopes` with fixed public service keys
+alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+`scope_projection_complete`; this is identity completeness, not healthy
+coverage. Unsupported or duplicate services leave the scope map incomplete.
+The sorted vector has at most ten rows. Each row retains `service_key`,
+`collector_count`, enabled/start state, `last_success_at`, previous/latest query
+start/completion clocks, `fresh`, `consecutive_two`, `coverage_state`, and
+`last_failure_present`. Duplicate keys have one ambiguous counted row with null
+clocks/authority booleans. Unsupported names contribute only a count.
+Null, partial and future timestamps retain their authority qualifiers.
+`last_failure_present` does not identify HTTP429 or a cause. The `fresh` and
+`consecutive_two` booleans retain the original latest/pair predicates:
+`invalid-time` can coexist with `fresh=true` when another stored clock is
+future-dated. Such a row does not qualify a fully coherent time window; do not
+silently rewrite aggregate booleans. Historical `last_success_at` does not
+replace an invalidated success pair. Sequential collector snapshots are not
+an atomic fleet instant or an in-flight census. No arbitrary service, block,
+host, label, content or raw error is emitted. The same single diagnostic write
+is bounded to 8 KiB including framing; serialization, overflow or sink failure
+leaves diagnostic evidence absent without changing collection or Alerts.
+
 Only two successful query receipts per collector remain in memory; failures,
 incomplete queries, and cancellation clear the pair. Both query lower bounds
 and completions must advance, with less than 90 seconds between completions;

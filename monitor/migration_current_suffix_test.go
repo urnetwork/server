@@ -25,8 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		last := migrationCurrentSuffixContracts[len(migrationCurrentSuffixContracts)-1].artifact.requiredVersion
-		for head := 793; head <= last; head++ {
+		for head := 793; head <= server.MigrationCount(); head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -256,6 +255,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
 				{829, "device", "device_network_id"},
 				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
+				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
 			} {
 				var definition string
 				var predicate *string

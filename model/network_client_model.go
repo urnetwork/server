@@ -1424,7 +1424,7 @@ func RemoveNetworkClients(
 	}
 
 	if MaxRemoveNetworkClientsCount < len(clientIds) {
-		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
+		return nil, fmt.Errorf("400 Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
 	}
 
 	// reserve this request's slot in the earliest hourly bucket with room --

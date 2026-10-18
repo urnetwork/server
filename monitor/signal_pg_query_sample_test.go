@@ -233,7 +233,7 @@ func TestPgQuerySampleRemoteProgramStdinAndOutputCap(t *testing.T) {
 			if os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0700) != nil {
 				t.Fatal("stub write")
 			}
-			payload, _ := json.Marshal(map[string]any{"password": "private-password-value", "user": "fixture", "database": "fixture", "port": 5432, "sql": strings.Repeat("SELECT 1;\n", 6000)})
+			payload, _ := json.Marshal(map[string]any{"password": "private-password-value", "user": "fixture", "database": "fixture", "port": 5432, "sql": strings.Repeat("SELECT 1;\n", 6000), "transport_nonce": pgTransportFixtureNonce})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, python, "-c", pgQuerySampleProgram)
@@ -255,6 +255,7 @@ func TestPgQuerySampleRemoteProgramStdinAndOutputCap(t *testing.T) {
 			if strings.Contains(stderr.String()+string(out), "private-password") {
 				t.Fatal("child stderr escaped")
 			}
+			pgTransportFixtureProgress(t, string(payload), stderr.String())
 		})
 	}
 }

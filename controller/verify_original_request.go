@@ -5,6 +5,7 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server/model"
@@ -31,7 +32,7 @@ func GetVerifyOriginalRequest(args *model.VerifyOriginalRequest, clientSession *
 		return nil, errors.New("400 missing original request owner")
 	}
 	if _, err := args.Hash(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("400 %w", err)
 	}
 	if _, err := protocol.VerifyProviderAttemptRequestWire(args.Message, args.Signature); err != nil {
 		return nil, errors.Join(errors.New("400 original request signature differs"), err)

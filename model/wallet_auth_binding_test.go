@@ -210,9 +210,9 @@ func TestWalletAuthChallengeBittensorDenyMatrix(t *testing.T) {
 	})
 }
 
-// network_user_auth_wallet holds one wallet per user (PRIMARY KEY (user_id)),
-// so adding a second one used to silently replace the first -- discarding the
-// only credential that could still sign that user in.
+// An account holds one wallet per chain, so adding a second wallet of the same
+// chain used to silently replace the first -- discarding the only credential
+// that could still sign that user in.
 func TestAddWalletAuthDoesNotSilentlyReplaceABoundWallet(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -221,7 +221,7 @@ func TestAddWalletAuthDoesNotSilentlyReplaceABoundWallet(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, "add-wallet-replace", userId)
 
 		first := newSolanaAcceptanceWalletSigner(t)
-		second := newBittensorAcceptanceWalletSigner(t)
+		second := newSolanaAcceptanceWalletSigner(t)
 
 		err := addWalletAuth(&AddWalletAuthArgs{
 			WalletAuth: signedAcceptanceWalletChallenge(t, ctx, first),
@@ -320,7 +320,7 @@ func TestHandleLoginWalletResolvesLegacyLowercaseBlockchainRow(t *testing.T) {
 //
 // Today's writers keep network_user.wallet_address and
 // network_user_auth_wallet in step (addWalletAuthInTx mirrors, RemoveAuth
-// clears both), and NetworkCreate pre-checks the mirrored column -- so this
+// repoints or clears the mirror), and NetworkCreate pre-checks the mirrored column -- so this
 // state is only reachable when the two have diverged, which is exactly the
 // legacy shape addWalletAuthInTx's own comment describes. Construct it
 // directly: a binding with no mirror.

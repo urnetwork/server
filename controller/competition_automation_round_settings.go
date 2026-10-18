@@ -15,7 +15,7 @@ type competitionAutomationSourceIntentReader interface {
 // A season's static credentials and runner pins remain trusted configuration;
 // only the exact source identity approved for this frozen round can advance.
 func settingsForAutomationRound(ctx context.Context, settings *Settings, store Store, round *roundRecord) (*Settings, error) {
-	if round == nil || round.Staging {
+	if round == nil {
 		return nil, ErrUnsupportedDecisionMode
 	}
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
@@ -25,6 +25,9 @@ func settingsForAutomationRound(ctx context.Context, settings *Settings, store S
 	if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
 		return nil, ErrUnsupportedDecisionMode
 	}
+	if policy.AutomationPolicy.Staging != round.Staging || settings.AutomationPolicy.Staging != round.Staging {
+		return nil, ErrConflict
+	}
 	reader, ok := store.(competitionAutomationSourceIntentReader)
 	if !ok {
 		return nil, errors.New("runtime cannot load the frozen source activation")
@@ -33,7 +36,7 @@ func settingsForAutomationRound(ctx context.Context, settings *Settings, store S
 	if err != nil {
 		return nil, err
 	}
-	if intent == nil || intent.ActivatedAt == nil || intent.AbandonedAt != nil || intent.TargetRoundId != round.RoundId || intent.TargetEpoch != round.Epoch {
+	if intent == nil || intent.Staging != round.Staging || intent.ActivatedAt == nil || intent.AbandonedAt != nil || intent.TargetRoundId != round.RoundId || intent.TargetEpoch != round.Epoch {
 		return nil, ErrConflict
 	}
 	frozen, err := sourceSettingsFromIntent(settings, intent)

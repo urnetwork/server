@@ -21,6 +21,7 @@ import (
 type probeEnv struct {
 	cfg                          *monitorConfig
 	runner                       probeRunner
+	mimirQueryClient             grafanaHTTPClient
 	baseline                     *baselineStore
 	now                          func() time.Time
 	urlProbeCoverageObservation  *UrlProbeCoverageObservation
@@ -129,8 +130,8 @@ func cannotObserveFinding(target string, err error) finding {
 		symptom:   "The monitor could not complete an observation for " + target + " (error_class=" + errorClass + ")",
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",
-		observed:  "error_class=" + errorClass,
-		action:    observationFailureAction(errorClass, "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident."),
+		observed:  observationFailureDetails(err, errorClass),
+		action:    observationFailureAction(err, errorClass, "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident."),
 		verify:    "The same target returns a concrete healthy or broken observation on the next run.",
 		playbook:  "SIGNALS.md §1.7 and MONITOR.md §3.6",
 	}

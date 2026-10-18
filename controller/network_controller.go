@@ -201,7 +201,7 @@ func NetworkRemove(clientSession *session.ClientSession) (*NetworkRemoveResult, 
 	// deletion must not let a non-admin cancel the network's subscription.
 	network := model.GetNetwork(clientSession)
 	if network == nil || network.AdminUserId == nil || *network.AdminUserId != clientSession.ByJwt.UserId {
-		return nil, fmt.Errorf("Could not remove network")
+		return nil, fmt.Errorf("403 Could not remove network")
 	}
 
 	// Provider cancellation is the fail-closed prerequisite for deleting the

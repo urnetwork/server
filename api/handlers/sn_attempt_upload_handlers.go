@@ -51,6 +51,9 @@ func serveSnUploadAttemptArtifact(w http.ResponseWriter, r *http.Request, loadSt
 
 // Both lanes retain exact JWT/body/Close/storage semantics; only the protected
 // cache/Redis/slot admission differs. Reserved headers never bypass client auth.
+// Every refusal names only its declared answer: a cause, which can quote a
+// socket, a temp path, a store endpoint or a Redis script, stays in the log
+// (router.PrivateCause), and an undeclared failure is a 503 (PrivateErrors).
 func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func() (server.BlobStore, bool), reserve func(context.Context, server.Id, uint64) error, bounds startifact.AttemptObjectBounds, slots chan struct{}, reserved *controller.StReservedAttemptUpload) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
@@ -62,7 +65,7 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 		http.Error(w, "Client authentication required.", http.StatusUnauthorized)
 		return
 	}
-	router.WrapRequireClient(func(clientSession *session.ClientSession) (string, error) {
+	router.WrapRequireClient(router.PrivateErrors(func(clientSession *session.ClientSession) (string, error) {
 		defer clientSession.Cancel()
 		ctx, cancel := context.WithTimeout(clientSession.Ctx, 25*time.Second)
 		defer cancel()
@@ -93,7 +96,7 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 		}
 		size, body := uint64(r.ContentLength), r.Body
 		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("408 Upload canceled: %w", err)
+			return "", router.PrivateCause(http.StatusRequestTimeout, "Upload canceled.", err)
 		}
 		reservedHeaders := r.Header.Values(protocol.ValidatorAttemptUploadHeader)
 		if len(reservedHeaders) != 0 {
@@ -118,7 +121,7 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 			ctx = lease.Context()
 			body, err = ownSnAttemptUploadBody(ctx, w, body)
 			if err != nil {
-				return "", fmt.Errorf("503 Upload read cancellation unavailable: %w", err)
+				return "", router.PrivateCause(http.StatusServiceUnavailable, "Upload read cancellation unavailable.", err)
 			}
 			if err := reserved.Reserve(lease); err != nil {
 				return "", err
@@ -126,7 +129,7 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 		} else {
 			body, err = ownSnAttemptUploadBody(ctx, w, body)
 			if err != nil {
-				return "", fmt.Errorf("503 Upload read cancellation unavailable: %w", err)
+				return "", router.PrivateCause(http.StatusServiceUnavailable, "Upload read cancellation unavailable.", err)
 			}
 			select {
 			case slots <- struct{}{}:
@@ -142,28 +145,28 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 		data, err := readSnAttemptUploadBody(ctx, body, size)
 		if err != nil {
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("408 Upload canceled: %w", err)
+				return "", router.PrivateCause(http.StatusRequestTimeout, "Upload canceled.", err)
 			}
-			return "", fmt.Errorf("400 Incomplete upload: %w", err)
+			return "", router.PrivateCause(http.StatusBadRequest, "Incomplete upload.", err)
 		}
 		if fmt.Sprintf("0x%x", sha256.Sum256(data)) != contentHash {
 			return "", errors.New("400 Upload hash differs from body.")
 		}
 		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("408 Upload canceled: %w", err)
+			return "", router.PrivateCause(http.StatusRequestTimeout, "Upload canceled.", err)
 		}
 		store, ok := loadStore()
 		if !ok || store == nil {
 			return "", errors.New("503 Attempt store unavailable.")
 		}
 		if err := startifact.PublishAttemptObject(ctx, store, bounds, kind, contentHash, data); err != nil {
-			return "", fmt.Errorf("502 Immutable upload or readback failed: %w", err)
+			return "", router.PrivateCause(http.StatusBadGateway, "Immutable upload or readback failed.", err)
 		}
 		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("408 Upload canceled: %w", err)
+			return "", router.PrivateCause(http.StatusRequestTimeout, "Upload canceled.", err)
 		}
 		return contentHash, nil
-	}, w, r, func(_ *session.ClientSession, contentHash string) bool {
+	}), w, r, func(_ *session.ClientSession, contentHash string) bool {
 		w.Header().Set("ETag", `"`+contentHash+`"`)
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusNoContent)

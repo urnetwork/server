@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,10 @@ type logCanonicalCorrelation struct {
 type logClass struct {
 	name string
 	re   *regexp.Regexp
+	// services restricts the class to the named emitting services; empty
+	// matches every service. A line from another service falls through to
+	// the next matching class.
+	services []string
 	// match adds semantic validation after the cheap shape selector. A fixed
 	// structured event must be valid before it can claim a typed mechanism.
 	match func(string) bool
@@ -551,6 +556,24 @@ var logClasses = []logClass{
 		action:    "Match the emitting parent and local child generation, child shutdown/SIGTERM, HTTP-front shutdown, listener, and rollout boundary. If the artifact predates the drain-before-child-stop correction in Warp commit 6544fe1, deploy a Grafana artifact containing it only after proving ancestry. If it is current or occurs outside drain, diagnose the named generation's Mimir readiness, restart, bind, and OOM evidence. Do not restart Redis, suppress the push error, or treat a healthy replacement as proof that the rejected old-generation samples were delivered.",
 		verify:    "Every active Grafana artifact contains Warp commit 6544fe1; during a controlled rolling replacement every old HTTP front stops accepting and finishes in-flight requests (or is closed at the bounded deadline) before its Mimir/Loki children stop; no grafana-mimir-push-refused line occurs through the full rollout plus 10 steady minutes; every exact child /ready and front /status remains healthy; and fresh pushed metrics remain queryable without a new §11.20 continuity gap.",
 	},
+	// A Proxy device's tun path resolves through the provider its customer
+	// selected, so its legs fail whenever that provider is offline or retired.
+	// Keep this before doh-dial-timeout; platform-owned paths keep that page.
+	{name: "doh-tun-dial-timeout", services: []string{"proxy"},
+		re: regexp.MustCompile(`\[family\]dial tag=doh observable=v1 path=tun [^\r\n]*\bresult=timeout(?:$|[[:space:]])`),
+		match: func(line string) bool {
+			match := parseDohDialObservation(line)
+			return match != nil && match[1] == "tun" && match[3] == "timeout"
+		},
+		sample:        dohDialTimeoutSample,
+		groupBy:       func(string) string { return "doh-tun-attempt" },
+		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §1.5, §4, and §5.2",
+		meaning:   "a Proxy device's DoH leg through its own tunnel timed out; the tunnel's provider is the one its customer selected",
+		mechanism: "Remote DoH for a hosted device dials through that device's provider window. A device pinned to an offline or retired provider has no route, so every leg it races times out, and its customer's requests keep resolving. The lines are throttled per process and resolver target, so one such device holds a process above the threshold regardless of how many devices are affected.",
+		context:   "This is provider-path evidence, not a platform DNS outage: the line rate measures neither devices nor failed lookups. A losing hedge after another leg answered reports resolver_outcome=answer; a leg whose call never answered reports canceled or pending. Platform-owned host/caller paths still page under doh-dial-timeout.",
+		action:    "Compare fresh same-process [doh]resolver owner_path=tun cumulative deltas (answer, failed, canceled, timeout) and the Proxy ingress dial outcome ratio with their recent baseline before treating this as a platform incident. A platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups or lengthen resolver timeouts from this class.",
+		verify:    "Logical tun resolver deltas show no failed or timeout growth and the ingress dial failure ratio stays at its baseline; host/caller paths have no doh-dial-timeout page.",
+	},
 	// A resolver fanout leg is not a logical lookup outcome. Keep this before
 	// generic TCP timeouts, including the endpoint-free timeout form.
 	{name: "doh-dial-timeout", re: regexp.MustCompile(`\[(?:family|egress)\]dial tag=doh[[:space:]][^\r\n]*(?:\berr=(?:dial tcp(?:4|6)? [^[:space:]\r\n]+: )?i/o timeout(?:$|[[:space:]])|\bobservable=v1[^\r\n]*\bresult=timeout(?:$|[[:space:]]))`),
@@ -636,9 +659,9 @@ var logClasses = []logClass{
 		groupBy:       lokiTailBackendEOFLogGroup,
 		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
 		meaning:   "Loki's external WebSocket tail remained available while its querier lost an internal gRPC tail backend with EOF; entries assigned to that backend can be absent from the live stream",
-		mechanism: "The historical exact 59-61-second recurrence came from Warp's Grafana ring TCP proxy applying a 60-second application read deadline to long-lived HTTP/2 and gRPC connections; Warp commit 1e95aef removes it. The current off-grid EOF wave has a separate Loki 3.7.3 tail-handoff path. Each ingester tailer has a 100-stream processing queue and a five-stream send queue. Upstream receiveStreamsLoop discarded a stream immediately whenever the five-slot handoff was full, even while the 100-slot processing queue could absorb a short burst. Its first genuine overflow records blockedAt; continued traffic more than 15 seconds later closes that server-side tail. Ingester.Tail then returns nil, the querier's Recv observes EOF and drops the client, and its five-second connection ticker reconnects. A backend process exit or ring loss can still produce the same EOF text, so the backend address and paired reset evidence are required discriminators.",
-		context:   "A quoted rpc Canceled/context-canceled error during explicit watcher retirement is a separate lifecycle and this class deliberately excludes it. In a fixed 04:15:08Z-04:29:30Z window on 2026-09-01, current 2026.8.31+1034210530 containers emitted 182 exact EOFs alongside 11,583 dropped-stream resets; 48 quoted cancellations from watcher retirement were excluded. A later clean post-handoff window from 22:44:05Z through 22:49:22Z used 2026.9.1-outerwerld+1035004200 from clean Warp source 71731e4, which already contained 42168fe and bca37cf. Query-frontend `query stats` fell to zero, but the window still had 2,825 unconditional Mimir `evaluation stats`, 1,084 Loki table lookup records, 942 bucket-index warnings, 1,229 reset records, and 22 attributed EOFs split across every one of the six backend addresses. This rules out a stale rollout and a single failed backend. Fireside and Crisp's controlled LAN activation had already restored all six active ring nodes, so missing LAN identity is no longer a current prerequisite. Bounded log reconciliation remains required for late source timestamps and the Search-to-LiveTail handoff.",
-		action:    "Verify the running Grafana artifacts contain Warp commits 1e95aef and bca37cf, and deploy them only to older Grafana blocks. For the current short-burst loss, deploy one Grafana image containing Warp commit 35453fd. It contains 5927527's producer reduction and bounded descriptor forwarding, and changes only the five-slot ingester handoff to wait cancellation-aware for available capacity so the existing 100-slot processing queue can absorb a short burst. Correlate a residual service-attributed drop with backend EOFs and the same window's reset records, then inspect the named backend's tailer, process, ring, and network state. Do not raise Loki's fixed queues, tail-request limits, or ring session cap, and do not restart the same image.",
+		mechanism: "The historical exact 59-61-second recurrence came from Warp's Grafana ring TCP proxy applying a 60-second application read deadline to long-lived HTTP/2 and gRPC connections; Warp commit 1e95aef removes it. A separate Loki 3.7.3 tail-handoff path can also cause EOF. Each ingester tailer has a 100-stream processing queue and a five-stream send queue. Upstream receiveStreamsLoop discarded a stream immediately whenever the five-slot handoff was full, even while the 100-slot processing queue could absorb a short burst; Warp commit 35453fd makes that handoff cancellation-aware. Its first genuine overflow records blockedAt; continued traffic more than 15 seconds later closes that server-side tail. Ingester.Tail then returns nil, the querier's Recv observes EOF and drops the client, and its five-second connection ticker reconnects. A backend process exit or ring loss can still produce the same EOF text, so the backend address and paired reset evidence are required discriminators.",
+		context:   "A quoted rpc Canceled/context-canceled error during explicit watcher retirement is a separate lifecycle and this class deliberately excludes it. Current artifact ancestry and backend health are unknown from this log event. The dated September controls in §1.5 establish historical mechanisms; they do not rule out a current stale artifact, unhealthy backend, or sustained send pressure. The emitting Grafana service identifies the querier, while the backend frame identifies its failed peer when the artifact supplies that field; a missing frame remains unknown. Bounded log reconciliation remains required for late source timestamps and the Search-to-LiveTail handoff.",
+		action:    "Bind this window to the exact running Grafana/Loki processes and immutable artifacts, then check Warp commits 1e95aef, bca37cf, and 35453fd. Deploy a historical fix only when the running artifact is proven to lack it, through the authorized owning workflow. If the fixes are already present, inspect the named backend's tailer, process, ring, and network state with bounded same-window native counters and send-progress evidence; do not redeploy them from historical guidance. Missing ancestry remains unknown. Correlate a residual service-attributed drop with backend EOFs and the same window's reset records without assuming that timing joins their affected selectors. Do not raise Loki's fixed queues, tail-request limits, or ring session cap, and do not restart the same image.",
 		verify:    "Every Grafana block contains Warp commit 35453fd; Mimir query-frontend/evaluator statistics and Loki table lookup info records are zero while alert rules, query metrics, warnings, and errors remain healthy; bucket-index version gaps converge below two minutes; every configured active ring member owns its LAN identity and heartbeats; and loki-tail-dropped-streams, service-attributed loki-tail-dropped-entries, plus loki-tail-backend-eof remain zero for 10 minutes with stable standing tails and complete bounded reconciliation. Genuine sustained blockage remains bounded and observable; any residual EOF must carry a backend frame and be reconciled against that exact node.",
 	},
 	// This is the ingester-side queue, before the querier's independent HTTP
@@ -652,8 +675,8 @@ var logClasses = []logClass{
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4", observationOnly: true,
 		meaning:   "an ingester-side Loki live tail could not send streams through its bounded internal gRPC path, filled and reset its dropped-stream metadata list, and omitted records before they reached the querier",
 		mechanism: "Loki 3.7.3 gives each ingester tailer a 100-stream processing queue and a five-stream send queue. Its upstream receiveStreamsLoop used a nonblocking send to the five-slot channel and dropped immediately when that channel was full, even while the 100-slot input queue had capacity. Warp 35453fd replaces only that handoff with a blocking cancellation-aware select, so a burst larger than five but smaller than the processing bound drains without loss. Sustained blockage beyond the existing 100-slot bound still drops streams, retains bounded metadata, and can close the tail after 15 seconds; the querier then logs a backend EOF and reconnects on its five-second ticker. Warp 5927527, contained by 35453fd, separately forwards those bounded descriptors through pushTailResponseFromIngester without enlarging either queue.",
-		context:   "This is affirmative internal live-tail loss even when the external WebSocket process remains connected. Grafana is the observation service that emitted the reset, not the affected application-tail identity. The current 2026.9.1-outerwerld+1035004200 binary came from clean Warp source 71731e4 and already contains the earlier ring, query-frontend-statistics, and backend-attribution changes, so neither a stale rollout nor one failed node explains the residual fleet-wide wave. All six active Grafana nodes were healthy after controlled Fireside/Crisp LAN activation. That removes missing LAN identity as the current prerequisite and strengthens the blocked-tail chain without identifying which backend lost each stream. The standing range reconciliation across every service is the recovery path, but a capped service-wide query is not a total: repeat the same absolute window for each configured block and require every partition to drain. Provenance-check historical fixes; do not redeploy already-current blocks from historical prose.",
-		action:    "Deploy Warp commit 1e95aef and server Proxy commit e055c98c only to blocks whose artifacts predate them. For the current short-burst loss, deploy a Grafana artifact containing Warp 35453fd. It contains 13fcd05's producer reductions, 5927527's descriptor forwarding, and the cancellation-aware five-slot handoff fix without changing queue sizes. Retain bounded reconciliation continuation and pair this observation-only reset with service-attributed loki-tail-dropped-entries after the new artifact is live. Do not raise Loki's fixed queues, suppress genuine sustained-backpressure evidence, or disable correctness reconciliation.",
+		context:   "This is affirmative internal live-tail loss even when the external WebSocket process remains connected. Grafana is the observation service that emitted the reset, not the affected application-tail identity. Current artifact ancestry and backend health are unknown from this log event. The dated September artifact and ring-health controls in §1.5 do not establish either for this window or distinguish a missing short-burst fix from genuine sustained pressure. The rate counts reset diagnostics, not unique lost records. The standing range reconciliation across every service is the recovery path, but a capped service-wide query is not a total: repeat the same absolute window for each configured block and require every partition to drain.",
+		action:    "Bind this window to the exact running artifacts before checking the historical fixes: Warp commit 1e95aef, server Proxy commit e055c98c, and Warp 35453fd's producer reductions, descriptor forwarding, and cancellation-aware five-slot handoff. Deploy a historical fix only when the running artifact is proven to lack it, through the authorized owning workflow. If the fixes are already present, inspect current ingester source rate, gRPC send progress, and bounded native tail counters on the same process generation; do not redeploy already-current blocks from historical prose. Missing ancestry remains unknown. Retain bounded reconciliation continuation and service-attributed loki-tail-dropped-entries, without assigning this raw reset to a selector solely by timing. Do not raise Loki's fixed queues, suppress genuine sustained-backpressure evidence, or disable correctness reconciliation.",
 		verify:    "Every Grafana and Proxy block contains the required fixes including Warp 35453fd, every Grafana ring node is healthy, Mimir query-frontend/evaluator statistics and Loki table lookup info records remain zero while alert rules, query metrics, warnings, and errors remain healthy, bucket-index version gaps converge below two minutes, default Proxy logs contain one aggregate summary per reconciling instance, every reconciliation partition drains through bounded continuation, and loki-tail-dropped-streams, service-attributed loki-tail-dropped-entries, plus loki-tail-backend-eof remain zero for 10 minutes with all external tails connected. A greater-than-100 sustained burst may still produce bounded descriptors; any residual EOF is framed by backend address.",
 	},
 	// Both Loki's ingester descriptor path (after Warp 5927527) and its later
@@ -684,10 +707,10 @@ var logClasses = []logClass{
 	// timestamp is behind the WebSocket cursor. Warpctl drops that record before
 	// it can become a current product line and emits only this bounded summary.
 	{name: "loki-tail-pre-cursor-entries", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-pre-cursor-entries\]\s+service=[A-Za-z0-9._-]+\s+count=[1-9][0-9]*\s*$`),
-		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4", countEveryLiveOccurrence: true,
 		meaning:   "Loki delivered late or replayed records behind Warpctl's monotonic live-tail cursor; Warpctl suppressed their contents and retained only this service/count summary",
 		mechanism: "Loki's standing tail is driven by ingestion arrival, so a newly ingested record can carry a source timestamp older than the requested cursor. Printing it would assign historical product evidence to the current monitor window while leaving the reconnect cursor unchanged. Warpctl now compares every returned timestamp with its monotonic cursor, suppresses pre-cursor contents, and emits this privacy-safe aggregate instead.",
-		context:   "This proves a source-time versus arrival-time observation boundary, not a current failure in the emitting product service. It does not distinguish late producer delivery, Loki ingestion delay, or a backend replay, and it does not prove that the historical record was evaluated in its original source window.",
+		context:   "This proves a source-time versus arrival-time observation boundary, not a current failure in the emitting product service. It does not distinguish late producer delivery, Loki ingestion delay, or a backend replay, and it does not prove that the historical record was evaluated in its original source window. The rate counts live summary occurrences, including identical service/count bytes because these local summaries carry no timestamp or record identity; it is not a unique historical-record or current-loss total. Exact source-record and reconciliation replays remain deduplicated.",
 		action:    "Correlate the service with bounded source-time reconciliation, Loki ingestion latency, and tail reconnects. Preserve the Warpctl cursor guard and the monitor's independent source-time guard; do not replay the suppressed contents into the current product window or restart the emitting service.",
 		verify:    "The standing tail stays connected, two consecutive overlap reconciliations complete, current-source controls remain visible, and no pre-cursor summary or monitor-side stale-arrival warning recurs for ten minutes.",
 	},
@@ -768,17 +791,16 @@ var logClasses = []logClass{
 		action:    "Build and deploy Connect from an intentional server checkout containing the RecordConnectDay explicit UUID, varchar, and timestamp casts. Do not restart Taskworker, replay raw connection requests, or fabricate historical analytics rows; any historical repair is a separate product/data-policy decision.",
 		verify:    "A deterministic PostgreSQL test executes the real RecordConnectDay statement, records exactly one connect.day event per network and UTC day, and preserves retry after write failure; every Connect block runs the corrected artifact; and zero onboarding-connect-day-write or matching novel lines occur for ten minutes after log-ingestion delay while connections continue.",
 	},
-	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
-	// match that canonical first line rather than its paired body-write line so
-	// the alert rate remains one logical recovery boundary per occurrence.
+	// Count the canonical header diagnostic, excluding a paired body-write
+	// diagnostic. The immediate writer frame does not identify its caller.
 	{name: "http-hijack-write", re: regexp.MustCompile(`http: response\.WriteHeader on hijacked connection`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
 		sample:    httpHijackWriteLogSample,
-		meaning:   "router recovery attempted to synthesize an HTTP response after a handler transferred ownership of the H1 connection through Hijack",
-		mechanism: "Connect's GET / route hands its socket to Gorilla. The router correctly recognized a later Done panic as expected cancellation and suppressed its error accounting, but then fell through to http.Error. net/http rejected both the 500 header and body because it no longer owned the connection. A two-hour production control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors, isolating the expected-Done fallthrough rather than an application panic.",
-		context:   "The rejected 500 does not itself prove a failed handshake or active transport; it is recovery-path log amplification during connection teardown. A warning paired with [h]unhandled error from route is a different case: preserve and fix that underlying panic rather than hiding all net/http diagnostics.",
-		action:    "Deploy the router recovery fix that returns immediately for server.IsDoneError before http.Error. Do not suppress net/http's error logger globally. If any post-fix occurrence has a paired [h]unhandled route error, diagnose that route panic and its hijack ownership boundary independently.",
-		verify:    "Every Connect block runs the fixed router; normal H1 connection teardown produces zero http-hijack-write lines for 10 minutes, while deterministic recovery tests prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path.",
+		meaning:   "net/http rejected a response header after a handler transferred ownership of the H1 connection through Hijack; the responsible caller and cause remain unknown",
+		mechanism: "The canonical WriteHeader warning proves a response write after Hijack, not the responsible recovery branch. The historical 2026-08-31 Connect control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors: the expected-Done branch fell through to http.Error after Gorilla owned the socket. Server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170 corrected that branch. This log line alone does not establish that historical cause in the current emitter.",
+		context:   "A requestMetricsWriter.WriteHeader frame identifies a forwarding wrapper, not its caller. A retained sample does not establish source event time, paired route errors, or running-artifact ancestry. Samples remain bounded; a missing or truncated frame does not prove caller absence. The warning does not itself prove a failed handshake or active transport. Count only the canonical header line, not a paired body-write diagnostic; the rate is diagnostic volume, not unique incidents.",
+		action:    "Bind the original warning and source event time to the emitting process and immutable artifact; compare its source ancestry with server commit 02f4d29ae575ae68c2a5f0c8ba3207361b353170. Deploy the Done recovery fix only when proved missing. If the artifact already contains it, use same-event [h]unhandled error from route evidence and a bounded caller stack to distinguish an unexpected route panic from another post-Hijack writer. Missing, stale, partial, or ambiguous evidence leaves cause unknown; absence of a paired error is useful only with complete same-event source coverage. Do not suppress net/http's error logger globally or patch away the warning before identifying its cause.",
+		verify:    "After the last implicated emitter converges on the proven correction, require zero http-hijack-write lines for 10 minutes of comparable H1 teardown, fresh standing tails, and two advancing complete reconciliations from the same watcher generation. Keep independent successful H1 handshake and delivery controls. Deterministic recovery tests must prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path. Missing source coverage is unknown, not recovery.",
 	},
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
 		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
@@ -847,7 +869,7 @@ var logClasses = []logClass{
 		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
 		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
 		context:   "Only normalized function ownership, an allowlisted Go error type, and a PostgreSQL SQLSTATE may enter the sample. Unknown, malformed, oversized, or excess-cardinality stacks remain in the aggregate; an absent owner is not a healthy result.",
-		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
+		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. An ownership-admission wrapper alone leaves the business caller and cause unknown; inspect one bounded original structured stack and its error discriminator. A changed owner after parser correction is not recovery. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
 		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
 	},
 	// Contract errors are emitted here only as rate-limited exemplars. Their
@@ -916,14 +938,15 @@ var logClasses = []logClass{
 	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
 		canonical: &logCanonical{
-			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
-			name:    "invalid_destination_events",
+			eventRe:           regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:              "invalid_destination_events",
+			unknownWhenAbsent: true,
 		},
-		meaning:   "Circle definitively rejected a payout destination before creating a transfer because the configured wallet address is invalid for its declared chain",
-		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt when its guarded reset succeeds. After that successful reset, an unchanged account wallet causes the next retry to select the same invalid payout_wallet configuration.",
-		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
-		action:    "Confirm the guarded reset succeeded and inspect the current wallet selection before correcting a proven chain mismatch through the supported account API. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
-		verify:    "After the payout wallet is corrected, the next natural retry selects it with a fresh key released only by the prior definitive rejection, completes without a duplicate transfer, invalid_destination_events remains zero, and the durable processor-invalid-destination count converges to zero within 90 minutes plus log-ingestion delay.",
+		meaning:   "The log reports an HTTP 400 invalid-destination response; text matching alone does not prove typed rejection, current chain compatibility, or guarded-reset outcome",
+		mechanism: "A Circle-client diagnostic precedes the controller's typed-error check and any guarded reset. In the inspected source, a reset is eligible only after a typed HTTP 400 with parsed code 155219 or the exact normalized invalid-address message; it safely releases only that pre-chain submit attempt when its guarded reset succeeds. Historical chain-blind validation admitted cross-chain wallet shapes. Only a current request/wallet join can establish whether an unchanged incompatible selection will select the same invalid payout_wallet configuration on retry.",
+		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Without an evaluator line, the logical event count is unknown. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
+		action:    "Establish the typed rejection, emitting artifact, guarded-reset outcome, and current wallet selection before correcting a proven chain mismatch through the supported account API after a confirmed safe reset. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
+		verify:    "After a confirmed safe reset and authorized wallet correction, the next natural retry selects the corrected wallet with a fresh key released only by the prior definitive rejection and completes without a duplicate transfer. Require complete current evaluator and durable-state observations, zero invalid_destination_events, and the durable processor-invalid-destination count converging to zero within 90 minutes plus log-ingestion delay; missing evaluator evidence remains unknown.",
 		redactIDs: true},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
@@ -1085,8 +1108,8 @@ var logClasses = []logClass{
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
 		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state and failed_window_events is its logical-event cardinality, while the diagnostic line rate can also include a later compatibility transition",
 		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch does not itself emit window_stall failed=1, but a later reason change can publish that compatibility transition while the failed latch remains set. Both lines retain fail-safe class visibility; only exact-replay-deduplicated window_failed lines count as authoritative failed-window events. The reason names the current diagnostic branch, not a proven transport root cause.",
-		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. Read diagnostic_lines as terminal-class telemetry, not incident size. When only a compatibility failed=1 line is present, failed_window_events is unknown rather than zero. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
-		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
+		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. Read diagnostic_lines as terminal-class telemetry, not incident size. When only a compatibility failed=1 line is present, failed_window_events is unknown rather than zero. A taskworker log locates the embedded Connect observer, not task execution progress or a customer/provider identity. On artifacts with the corresponding attribution, platform-unreachable also covers local contract acquisition before provider contact and owned client setup deadlines. Missing companion logs leave the cause unknown; the reason alone cannot identify a failed carrier or provider.",
+		action:    "Verify the emitting artifact's Connect source under §8.12, then correlate the exact window with provider-window progress, local contract acquisition and client setup (§2.19), explicit transport/framer/auth/rate-limit classes, and peer availability. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
 		verify:    "No window_failed event or compatible failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
 		canonical: &logCanonical{
 			eventRe:           windowFailedEventRe,
@@ -1101,8 +1124,8 @@ var logClasses = []logClass{
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
 		meaning:   "a provider window changed stall diagnosis while it was still trying; failed=0 is explicitly nonterminal",
 		mechanism: "The Connect window watchdog emits this structured transition once per reason/state change. At rate, failed=0 measures provider-window diagnostic churn; it is neither a count of failed windows nor an unclassified error merely because the field name contains the word failed.",
-		context:   "Reason is a bounded discriminator, not root-cause proof. Correlate platform-unreachable with explicit carrier/framer/reachability evidence and treat providers-unresponsive, rate-limited, and auth-failing as separate branches. One isolated nonterminal transition stays below the alert threshold.",
-		action:    "Use the structured reason and window to select the matching bounded controls, then repair only a corroborated transport, provider, rate-limit, or authentication boundary. Do not infer terminal user failure, restart Taskworker, or deploy a transport change from failed=0 alone.",
+		context:   "Reason is a bounded discriminator, not root-cause proof. On artifacts with the corresponding attribution, platform-unreachable also covers local contract acquisition before provider contact and owned client setup deadlines. A taskworker log locates the embedded Connect observer, not task execution progress. Missing companion logs leave the cause unknown; the reason alone cannot identify a failed carrier or provider. Treat providers-unresponsive, rate-limited, and auth-failing as separate branches. One isolated nonterminal transition stays below the alert threshold.",
+		action:    "Verify the emitting artifact's Connect source under §8.12, then correlate the same window's local contract acquisition and client setup (§2.19), carrier/framer/reachability evidence, and provider-window progress. Repair only the corroborated local-control, transport, provider, rate-limit, or authentication boundary. Do not infer terminal user failure, restart Taskworker, or deploy a transport change from failed=0 alone.",
 		verify:    "The class remains below 20 transitions/minute for ten minutes under comparable traffic, terminal window-stall remains zero, and provider windows continue to reach their configured minimum.",
 	},
 	{name: "db-maintenance-legacy-reindex", re: dbMaintenanceLegacyReindexRe,
@@ -1177,15 +1200,16 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner     string
-	errorType string
-	sqlstate  string
+	owner      string
+	errorType  string
+	sqlstate   string
+	errorClass string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
 // Unknown stack symbols do not borrow a later caller's apparent ownership.
 func parsePanicLogObservation(line string) panicLogObservation {
-	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown"}
+	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown", errorClass: "unknown"}
 	if len(line) > panicLogMaxBytes {
 		return unknown
 	}
@@ -1242,6 +1266,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		return unknown
 	}
 	observation := unknown
+	observation.errorClass = panicProviderEgressErrorClass(line, errorText, stack)
 	errorType, _, _ := strings.Cut(errorText, "=")
 	switch errorType {
 	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
@@ -1278,8 +1303,11 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		switch wrapperOwner {
 		case "server.HandleError", "server.HandleError1", "server.HandleError2", "server.HandleErrorWithReturn",
 			"server.Raise", "server.RaisePgResult", "server.WithPgResult",
-			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
-			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
+			"server.Db", "server.DbInConn", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
+			"server.Tx", "server.TxInConn", "server.MaintenanceTx", "server.txWithPool", "server.txWithConnection",
+			"server.OwnedTx", "server.TryOwnedTx", "server.ownedTxWithResource", "server.ownedTxWithResourcePolicy",
+			"server.PgOwnedSession.Tx", "server.PgOwnedSession.txWithResource", "server.pgOwnedConnection.run",
+			"server.Redis", "server.RedisDoOnce", "server.redisWithClient",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
 			// The next record is this wrapper's already-validated source line.
 			// A trimpath build can prefix it with the application module too.
@@ -1306,7 +1334,11 @@ func panicLogSample(line string) string {
 	if owner == "" {
 		owner = "unknown"
 	}
-	return fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	sample := fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+	if observation.errorClass != "unknown" {
+		sample += " error_class=" + observation.errorClass
+	}
+	return sample
 }
 
 // One negative mirror is an integrity defect. A hundred mutation exposures in
@@ -1443,11 +1475,9 @@ func netEscrowNegativeLogSample(line string) string {
 	return truncateLinePreservingSuffix(line, marker)
 }
 
-// httpHijackWriteLogSample retains the complete net/http source frame. The
-// warp identity and its duplicate timestamps consume most of the generic
-// 200-byte prefix, while the final ServeHTTP frame is the discriminator that
-// separates the known router recovery fallthrough from another post-hijack
-// writer with a different root cause.
+// Prioritize the immediate net/http source frame within the existing 200-byte
+// sample bound. A forwarding wrapper can hide the actual caller, so this frame
+// guides source collection without proving a recovery branch or cause.
 func httpHijackWriteLogSample(line string) string {
 	const marker = "http: response.WriteHeader on hijacked connection"
 	markerIndex := strings.Index(line, marker)
@@ -1652,6 +1682,8 @@ type logTailer struct {
 	reconcileInitialized bool
 	lastReconcileTime    time.Time
 	lastReconcileError   string
+	// One local recording of the retained failure, never an HTTP response clock.
+	lastReconcileFailure logReconcileFailure
 	// Bounded successful-query receipts belong only to this collector
 	// generation. Failure or cancellation invalidates the consecutive pair.
 	reconcileSuccesses [2]logReconcileSuccess
@@ -1756,7 +1788,8 @@ func (self *logTailer) runStream(ctx context.Context) {
 		default:
 		}
 
-		if err := self.tailOnce(ctx); err == nil {
+		err := self.tailOnce(ctx)
+		if err == nil {
 			// a clean stream end (warpctl exited without a scan error):
 			// restart promptly. Start failures and scan errors keep the
 			// escalating backoff.
@@ -1771,10 +1804,8 @@ func (self *logTailer) runStream(ctx context.Context) {
 
 		// rate-limit restarts; the stream dying repeatedly surfaces via the
 		// probe's tailer-restarting visibility finding
-		select {
-		case <-ctx.Done():
+		if !waitWarpctlLogRetry(ctx, backoff, warpctlLogRetryDeadline(err)) {
 			return
-		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, time.Minute)
 	}
@@ -1784,7 +1815,7 @@ func (self *logTailer) runStream(ctx context.Context) {
 // so the stream/search handoff is covered from collector startup, then on an
 // independent cadence shorter than the alert drain cadence.
 func (self *logTailer) runReconcile(ctx context.Context) {
-	self.reconcileOnce(ctx)
+	retryAfter := self.reconcileOnce(ctx)
 	ticker := time.NewTicker(logReconcileInterval)
 	defer ticker.Stop()
 	for {
@@ -1792,9 +1823,18 @@ func (self *logTailer) runReconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			self.reconcileOnce(ctx)
+			retryAfter = self.reconcileTick(ctx, retryAfter)
 		}
 	}
+}
+
+// Keep the normal overlap cadence. An explicit deadline gates only this
+// collector's next operation; its recorded failure and missing coverage remain.
+func (self *logTailer) reconcileTick(ctx context.Context, retryAfter time.Time) time.Time {
+	if ctx.Err() != nil || self.clock().Before(retryAfter) {
+		return retryAfter
+	}
+	return self.reconcileOnce(ctx)
 }
 
 type reconcileLine struct {
@@ -1922,7 +1962,7 @@ func (self *logTailer) completeReconcilePartition(
 // the same absolute lower boundary once per configured block. A cap-sized
 // block (or a single-block service) then continues from its inclusive final
 // source timestamp under a fixed page budget.
-func (self *logTailer) reconcileOnce(ctx context.Context) {
+func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time) {
 	if self.reconcile == nil {
 		return
 	}
@@ -1942,8 +1982,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		self.recordReconcile(start, err)
-		return
+		return self.recordReconcile(start, err)
 	}
 
 	lines := parseReconcileLines(out)
@@ -1954,8 +1993,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 				return
 			}
 			if err != nil {
-				self.recordReconcile(start, err)
-				return
+				return self.recordReconcile(start, err)
 			}
 		} else {
 			lines = nil
@@ -1966,8 +2004,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(start, fmt.Errorf("block %s overlap: %w", block, err))
-					return
+					return self.recordReconcile(start, fmt.Errorf("block %s overlap: %w", block, err))
 				}
 				blockLines, err := self.completeReconcilePartition(
 					ctx,
@@ -1979,8 +2016,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(start, err)
-					return
+					return self.recordReconcile(start, err)
 				}
 				lines = append(lines, blockLines...)
 			}
@@ -1998,13 +2034,14 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	self.recordReconcile(start, nil)
+	return self.recordReconcile(start, nil)
 }
 
-func (self *logTailer) recordReconcile(start time.Time, err error) {
+func (self *logTailer) recordReconcile(start time.Time, err error) (retryAfter time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if err != nil {
+		retryAfter = warpctlLogRetryDeadline(err)
 		var logQueryError *warpctlLogQueryError
 		if errors.Is(err, errLogReconcileIncomplete) {
 			// Block/continuation wrappers must not add private selectors to
@@ -2016,17 +2053,24 @@ func (self *logTailer) recordReconcile(start time.Time, err error) {
 			err = logQueryError
 		}
 		self.lastReconcileError = err.Error()
+		failure := logReconcileFailure{attemptWindowStart: start}
+		if self.clock != nil {
+			failure.monitorRecordedAt = self.clock()
+		}
+		self.lastReconcileFailure = failure
 		self.reconcileSuccesses = [2]logReconcileSuccess{}
 		return
 	}
 	self.lastReconcileTime = self.clock()
 	self.lastReconcileError = ""
+	self.lastReconcileFailure = logReconcileFailure{}
 	latest := logReconcileSuccess{start: start, completed: self.lastReconcileTime}
 	previous := self.reconcileSuccesses[1]
 	self.reconcileSuccesses = [2]logReconcileSuccess{{}, latest}
 	if previous.advancesTo(latest) {
 		self.reconcileSuccesses[0] = previous
 	}
+	return
 }
 
 // tailOnce runs one log stream to completion: start, scan lines, reap the
@@ -2039,7 +2083,8 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd, stdout, err := self.openStream(streamCtx)
+	retryCapture := &warpctlLogRetryCapture{}
+	cmd, stdout, err := self.openStream(streamCtx, retryCapture)
 	if err != nil {
 		return err
 	}
@@ -2070,11 +2115,14 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 	// A nonzero child exit is not a clean stream rotation. Preserve it so
 	// run() keeps increasing its restart backoff instead of resetting every
 	// failed Loki query to a one-second retry loop.
+	if retryAfter := warpctlLogRetryAfter(waitErr, retryCapture.result(), true); !retryAfter.IsZero() {
+		return &warpctlLogRetryError{err: waitErr, retryAfter: retryAfter}
+	}
 	return waitErr
 }
 
 // openStream starts the warpctl log stream (or the injected test stream).
-func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) {
+func (self *logTailer) openStream(ctx context.Context, retryCapture io.Writer) (*exec.Cmd, io.ReadCloser, error) {
 	if self.stream != nil {
 		return self.stream(ctx)
 	}
@@ -2085,7 +2133,7 @@ func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser
 	// page-tier panic tickets from replayed restart-era lines)
 	return self.env.runner.warpctlStream(
 		ctx,
-		&tailTransportDiagnosticWriter{tailer: self},
+		io.MultiWriter(&tailTransportDiagnosticWriter{tailer: self}, retryCapture),
 		"logs", self.env.cfg.env, self.service, "--since=1s", "-f",
 	)
 }
@@ -2231,6 +2279,9 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 	}
 
 	for _, c := range logClasses {
+		if 0 < len(c.services) && !slices.Contains(c.services, self.service) {
+			continue
+		}
 		if c.re.MatchString(line) && (c.match == nil || c.match(line)) {
 			if deduplicate && !(liveStanding && c.countEveryLiveOccurrence) && self.standingReplayLocked(line, now) {
 				return
@@ -2792,10 +2843,11 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	findings := []finding{}
 	routeEvents := map[string]*tailTransportRouteAggregate{}
-	now := time.Now()
+	clock := time.Now
 	if env != nil && env.now != nil {
-		now = env.now()
+		clock = env.now
 	}
+	now := clock()
 	for i, tailer := range self.tailers {
 		findings = append(findings, tailer.drainWindow()...)
 		for _, event := range tailer.drainTransportRouteEvents() {
@@ -2832,7 +2884,7 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	findings = append(findings, tailTransportRouteFindings(env, routeEvents, monitorEvidence)...)
 	if ctx.Err() == nil {
-		self.writeReconcileReceipt(now)
+		self.writeReconcileReceipt(clock)
 	}
 	return findings, nil
 }
@@ -3221,9 +3273,9 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 		),
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
-		context:   "A fixed bounded-query error_class describes Warpctl's terminal local diagnostic, not a panic in the observed service. HTTP 429/502/503/504 does not identify which gateway or backend returned it; a config/schema panic can originate in local configuration or an invalid upstream response. Unknown, truncated, or unrecognized diagnostics remain failed visibility. Successful retry diagnostics do not make a completed query fail.",
+		context:   "A fixed bounded-query error_class describes Warpctl's terminal local diagnostic, not a panic in the observed service. For HTTP 429, response_shape describes only an exact source-qualified response format: loki-outstanding-requests, nginx-default-429, or unknown. Neither the status nor this hint proves the physical responder, limiting policy, or ingestion cause. A config/schema panic can originate in local configuration or an invalid upstream response. Unknown, truncated, or unrecognized diagnostics remain failed visibility. Successful retry diagnostics do not make a completed query fail.",
 		action:    "Restore bounded warpctl/Loki query visibility. Retain active services.yml block partitioning and inclusive boundary continuation. If one boundary cannot advance or a partition consumes the eight-page budget, diagnose and remove the high-cardinality log producer before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
-		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile schema=1 diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
+		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile versioned diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
 		playbook:  "SIGNALS.md 1.5",
 	}
 }

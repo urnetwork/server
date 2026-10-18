@@ -28,6 +28,13 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 	if len(manifestBytes) == 0 || len(manifestBytes) > maximumSourceConfigBytes {
 		return "", "", errors.New("source successor manifest is empty or oversized")
 	}
+	for _, content := range [][]byte{current.Manifest, manifestBytes} {
+		manifest, err := decodeSourceManifest(content)
+		if err != nil || manifest.Schema != 2 || manifest.Staging != current.Staging {
+			return "", "", errors.New("source config predecessor and successor must retain the explicit v2 mode")
+		}
+	}
+	manifestRepositoryPath := sourceManifestRepositoryPath(current.Staging)
 	if _, err := os.Lstat(stagedRoot); !errors.Is(err, os.ErrNotExist) {
 		return "", "", errors.New("fresh config staging requires a new private path")
 	}
@@ -50,7 +57,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 		return "", "", errors.New("config main no longer descends from the active manifest commit")
 	}
 	for _, commit := range []string{current.ManifestCommit, parent} {
-		content, err := sourceGitBytes(ctx, stagedRoot, maximumSourceConfigBytes, "show", commit+":main/sim-latency.yml")
+		content, err := sourceGitBytes(ctx, stagedRoot, maximumSourceConfigBytes, "show", commit+":"+manifestRepositoryPath)
 		if err != nil {
 			return "", "", err
 		}
@@ -62,7 +69,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 	if _, err := sourceGitText(ctx, stagedRoot, "checkout", "--quiet", "--detach", parent); err != nil {
 		return "", "", err
 	}
-	manifestPath := filepath.Join(stagedRoot, "main", "sim-latency.yml")
+	manifestPath := filepath.Join(stagedRoot, filepath.FromSlash(manifestRepositoryPath))
 	info, err := os.Lstat(manifestPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", "", errors.New("config source manifest must remain a regular file")
@@ -70,7 +77,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 	if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
 		return "", "", err
 	}
-	if _, err := sourceGitText(ctx, stagedRoot, "add", "--", "main/sim-latency.yml"); err != nil {
+	if _, err := sourceGitText(ctx, stagedRoot, "add", "--", manifestRepositoryPath); err != nil {
 		return "", "", err
 	}
 	if _, err := sourceGitText(ctx, stagedRoot, "-c", "core.fsync=all", "-c", "user.name=URnetwork Competition", "-c", "user.email=competition@invalid", "commit", "--quiet", "--no-gpg-sign", "-m", message); err != nil {

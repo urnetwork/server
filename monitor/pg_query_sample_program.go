@@ -3,15 +3,48 @@ package monitor
 // One subprocess and one absolute owner budget. Stderr is drained concurrently
 // but only its first4KiB is kept in remote memory for finite classification.
 // A psql-owned source line maps to our fixed SQL phase comments; it never
-// exports that line number, text, SQL, credentials or addresses. No retries.
-const pgQuerySampleProgram = `import json,os,re,selectors,subprocess,sys,time
+// exports that line number, text, SQL, credentials or addresses. At most 17
+// nonce-bound progress records expose completed response headers and counts.
+// Successful stdout and the existing SQL workload are unchanged. No retries.
+const pgQuerySampleProgram = `import json,math,os,re,selectors,subprocess,sys,time
 p=None
 phase='bootstrap'
 stderr=bytearray()
 stderr_truncated=False
 sql=''
+nonce=''
 class Failure(Exception):
  def __init__(self,phase,cause):self.phase=phase;self.cause=cause
+def unique_object(pairs):
+ result={}
+ for key,value in pairs:
+  if key in result:raise ValueError()
+  result[key]=value
+ return result
+def progress(stage,samples):
+ sys.stderr.write('monitor-pg-phase '+json.dumps({'schema':2,'nonce':nonce,'phase':stage,'samples':samples},separators=(',',':'))+'\n');sys.stderr.flush()
+frames=[('identity',0,'database_identity',0),('history',0,'history_start',0)]+[('activity',i,'activity',i+1) for i in range(12)]+[('blockers',0,'blockers',12),('history',1,'history_end',12)]
+progress_index=0
+progress_cursor=0
+progress_disabled=False
+def observe_output():
+ global progress_index,progress_cursor,progress_disabled
+ while not progress_disabled:
+  end=output.find(b'\n',progress_cursor)
+  if end<0:
+   if progress_index==0 and len(output)>4096:progress_disabled=True
+   return
+  raw=bytes(output[progress_cursor:end]);progress_cursor=end+1
+  if progress_index>0 and not raw.strip():continue
+  if progress_index>=len(frames):progress_disabled=True;return
+  kind,sample,stage,count=frames[progress_index]
+  try:
+   row=json.loads(raw,object_pairs_hook=unique_object)
+   valid=type(row) is dict and row.get('kind')==kind and type(row.get('sample')) is int and row['sample']==sample and type(row.get('at')) in (int,float) and math.isfinite(row['at'])
+  except (ValueError,UnicodeError,OverflowError,RecursionError):valid=False
+  if not valid:progress_disabled=True;return
+  if progress_index==0 and (len(raw)>4096 or not all(type(row.get(k)) is bool for k in ('primary','read_only','database_ok'))):progress_disabled=True;return
+  progress(stage,count);progress_index+=1
 def sql_phase(raw):
  match=re.search(r'psql:(?:<stdin>|-):([0-9]+):',raw)
  if not match:return 'child_process'
@@ -36,13 +69,15 @@ def child_failure():
   return stage,'sql_error'
  return stage,'child_exit_unknown'
 try:
- cfg=json.loads(sys.stdin.buffer.read(262145));assert set(cfg)=={'password','user','database','port','sql'}
- assert all(type(cfg[k]) is str for k in ('password','user','database','sql')) and type(cfg['port']) is int
+ cfg=json.loads(sys.stdin.buffer.read(262145));assert set(cfg)=={'password','user','database','port','sql','transport_nonce'}
+ assert all(type(cfg[k]) is str for k in ('password','user','database','sql','transport_nonce')) and type(cfg['port']) is int
  assert 0<len(cfg['sql'])<200000 and 0<cfg['port']<65536
- sql=cfg['sql']
+ assert re.fullmatch('[0-9a-f]{32}',cfg['transport_nonce'])
+ sql=cfg['sql'];nonce=cfg['transport_nonce']
  env=dict(os.environ,PGPASSWORD=cfg['password'],PGCONNECT_TIMEOUT='3',PGOPTIONS='-c statement_timeout=3000 -c lock_timeout=250 -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=3000',LC_ALL='C')
  deadline=time.monotonic()+32
  phase='child_start'
+ progress('remote_started',0)
  p=subprocess.Popen(['psql','-X','-q','-A','-t','-h','localhost','-p',str(cfg['port']),'-U',cfg['user'],'-d',cfg['database'],'-v','ON_ERROR_STOP=1','-f','-'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
  payload=memoryview(sql.encode());output=bytearray();sel=selectors.DefaultSelector();broken_stdin=False
  for f in (p.stdin,p.stdout,p.stderr):os.set_blocking(f.fileno(),False)
@@ -66,6 +101,7 @@ try:
     else:
      output.extend(chunk)
      if len(output)>4194304:raise Failure('output','output_cap')
+     observe_output()
  status=p.wait(timeout=max(.001,deadline-time.monotonic()))
  if status!=0:raise Failure(*child_failure())
  if broken_stdin:raise Failure('stdin','broken_pipe')

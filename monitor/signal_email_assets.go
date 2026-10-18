@@ -146,6 +146,8 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 	edgeFailures := 0
 	missing := 0
 	edgeMissing := 0
+	edgeChecks := 0
+	edgeUnavailable := 0
 	nonImage := 0
 	empty := 0
 	transportFailures := 0
@@ -156,7 +158,11 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 		// Exact-address transport is already localized by §18.1. The public path
 		// remains independently user-facing and therefore is never suppressed.
 		if result.scope == "edge" && (exitCode == "7" || exitCode == "28") {
+			edgeUnavailable++
 			continue
+		}
+		if result.scope == "edge" {
+			edgeChecks++
 		}
 		checked++
 		problem, category := emailAssetProblem(result.public)
@@ -195,10 +201,14 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 	context := "These absolute URLs are the header wordmark in every transactional email source template (authentication, password, welcome, payout, data code, and receipt). If current email-sending artifacts predate the template change, a 404 is a release-order blocker rather than proof that recipients have seen it; after those templates deploy, it is a functional product regression. Use executable provenance and build time to distinguish those states. The required asset list is maintained beside this probe and must track controller/email_templates."
 	action := "Compare the public response with the same path pinned to every exact edge address. The images are part of the site bundle (mmm/ur.io/react/public/images/emails, mirrored into the astro build by sync-public); if every edge fails, deploy a site build that contains them. If only the public path fails, the fault is in DNS selection, TLS, or a cache in front of the edges."
 	verify := "Require every listed public URL to return HTTP 200 image/* with nonzero bytes; require the same for every enabled edge when pinned with the exact site SNI/Host; then require zero exact-path 404 lines for ten minutes."
-	if edgeMissing > 0 {
+	allEdgesHealthy := edgeChecks > 0 && edgeFailures == 0 && edgeUnavailable == 0
+	if edgeMissing > 0 && edgeMissing == edgeChecks && edgeUnavailable == 0 {
 		mechanism = "Every exact edge returns 404 for the image path while the site's pages serve. The site bundle on the edges does not contain /images/emails/: the deployed build predates the assets, or sync-public did not mirror react/public/images into the astro build."
 		action = "Build and deploy only the Web service from an intentional local Mmm checkout containing b4b229c5c and the intended local SDK checkout. Require the Makefile's sync-public target to place both images in staged output before the Warp build, and record any participating local diffs. If API and Taskworker artifacts containing current-main server commit ec6e3b92 or later are not active yet, keep them behind this Web gate. If any are already active, treat the missing assets as a current broken-email dependency and prioritize the Web rollout; do not roll back or redeploy an otherwise-correct sender merely to clear this alert. Do not copy files into live containers."
-	} else if edgeFailures == 0 && publicFailures > 0 {
+	} else if edgeMissing > 0 {
+		mechanism = fmt.Sprintf("Required images returned HTTP 404 on %d of %d configured exact-edge checks. Compare each failed address and path with the successful responses to establish which site generations lack the requested image.", edgeMissing, edgeChecks+edgeUnavailable)
+		action = "Compare the failed exact-edge paths with healthy peers and the staged site bundle. Verify each affected edge's deployed artifact and sync-public output before choosing a Web repair. Keep successful image responses as controls."
+	} else if allEdgesHealthy && publicFailures > 0 {
 		mechanism = "Every checked exact edge is healthy, but the recipient-facing response is not. The remaining boundary is DNS selection, TLS, or a cache in front of the edges; the image bytes themselves are present and reachable."
 		action = "Confirm which address the public name resolves to and that it serves the exact site Host, then invalidate only the failed /images/emails/ objects if a cache sits in front and its negative-cache TTL has not expired. Recheck the public URLs; do not redeploy unrelated API, Connect, taskworker, or database services."
 	}
@@ -206,12 +216,15 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 		class = "web-email-assets-transport"
 		sustain = 2
 		mechanism = "The failed checks ended before receiving any HTTP response. That proves a recipient-path transport failure but does not prove that the image bytes, edge bundle, or cached object are wrong. A single DNS route, public proxy address, TCP, or TLS failure cannot distinguish those causes."
-		if edgeFailures == 0 && publicFailures > 0 {
+		if allEdgesHealthy && publicFailures > 0 {
 			mechanism += " Every exact edge completed its semantic image check, isolating the observation to the public transport path."
 		}
 		context = "Continuous mode requires this transport-only identity on two consecutive five-minute cadences; one-shot diagnostics still expose the first sample. Semantic HTTP/content failures remain immediate because they affirmatively observe the broken object response."
 		action = "Repeat the failed public path separately over IPv4 and IPv6 while recording the selected remote address and TLS result, and compare the exact edges. If the next cadence is healthy, retain the first sample as a transient control. If the same boundary persists, diagnose the client route, resolver, TLS handshake, and selected public address. Do not invalidate cached objects without an HTTP error response."
 		verify = "The failed URL returns HTTP 200 image/* with nonzero bytes over IPv4, IPv6, and ordinary DNS selection, every exact edge remains healthy, and two consecutive five-minute signal cadences contain no transport failure."
+	}
+	if edgeUnavailable > 0 {
+		context += fmt.Sprintf(" %d configured exact-edge checks were unavailable before an HTTP response and remain owned by §18.1; their image contents are unknown.", edgeUnavailable)
 	}
 
 	return []finding{{

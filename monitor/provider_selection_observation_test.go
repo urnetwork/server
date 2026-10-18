@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,7 @@ func TestProviderSelectionObservationUnknownAndPartialControls(t *testing.T) {
 				settings.LogServiceBlocks["api"] = []string{"blue", "green"}
 			}
 			if defect == "transport" {
-				settings.Source = &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return "", errors.New("private-transport-detail") }}
+				settings.Source = &providerHttpsTestSource{syntheticSource: &syntheticSource{}, do: func(*http.Request) (*http.Response, error) { return nil, errors.New("private-transport-detail") }}
 			}
 			if defect == "inventory" {
 				settings.LogServiceBlocks = nil

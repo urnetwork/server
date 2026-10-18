@@ -803,16 +803,19 @@ func subtractH3FullTunReceive(
 			before = *start.AckRouteWriteFailures
 		}
 		after := end.AckRouteWriteFailures
-		ackRouteWriteFailures = &clientconnect.AckRouteWriteFailureStatsSnapshot{
-			ErrorCount:          after.ErrorCount - before.ErrorCount,
-			RouteTimeoutCount:   after.RouteTimeoutCount - before.RouteTimeoutCount,
-			CallerCanceledCount: after.CallerCanceledCount - before.CallerCanceledCount,
-			CallerDeadlineCount: after.CallerDeadlineCount - before.CallerDeadlineCount,
-			SelectorClosedCount: after.SelectorClosedCount - before.SelectorClosedCount,
-			OtherCount:          after.OtherCount - before.OtherCount,
-			BlockedCount:        after.BlockedCount - before.BlockedCount,
-			WaitDuration:        after.WaitDuration - before.WaitDuration,
-			MaxWait:             after.MaxWait,
+		// No new failure keeps the interval absent, including an old MaxWait.
+		if after.ErrorCount != before.ErrorCount {
+			ackRouteWriteFailures = &clientconnect.AckRouteWriteFailureStatsSnapshot{
+				ErrorCount:          after.ErrorCount - before.ErrorCount,
+				RouteTimeoutCount:   after.RouteTimeoutCount - before.RouteTimeoutCount,
+				CallerCanceledCount: after.CallerCanceledCount - before.CallerCanceledCount,
+				CallerDeadlineCount: after.CallerDeadlineCount - before.CallerDeadlineCount,
+				SelectorClosedCount: after.SelectorClosedCount - before.SelectorClosedCount,
+				OtherCount:          after.OtherCount - before.OtherCount,
+				BlockedCount:        after.BlockedCount - before.BlockedCount,
+				WaitDuration:        after.WaitDuration - before.WaitDuration,
+				MaxWait:             after.MaxWait,
+			}
 		}
 	}
 	return clientconnect.ClientReceiveStatsSnapshot{

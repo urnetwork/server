@@ -28,6 +28,9 @@ var competitionAutomationScope = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{
 // Zero values preserve legacy behavior; enabling requires prospectively approved policies.
 type CompetitionAutomationPolicy struct {
 	Enabled                    bool   `json:"enabled" yaml:"enabled"`
+	Staging                    bool   `json:"staging,omitempty" yaml:"staging,omitempty"`
+	StagingRoundWindowSeconds  int    `json:"staging_round_window_seconds,omitempty" yaml:"staging_round_window_seconds,omitempty"`
+	StagingPreparationSeconds  int    `json:"staging_preparation_seconds,omitempty" yaml:"staging_preparation_seconds,omitempty"`
 	Version                    int    `json:"version" yaml:"version"`
 	Environment                string `json:"environment" yaml:"environment"`
 	SeasonId                   string `json:"season_id" yaml:"season_id"`
@@ -67,6 +70,13 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 	if policy.SettlementMode != "shadow" && policy.SettlementMode != "live" {
 		return errors.New("settlement mode must be explicit")
 	}
+	if policy.Staging {
+		if policy.SettlementMode != "shadow" || policy.StagingRoundWindowSeconds < 60 || policy.StagingRoundWindowSeconds > 604800 || policy.StagingPreparationSeconds < 0 || policy.StagingPreparationSeconds > 57600 {
+			return errors.New("staging automation requires shadow settlement and bounded explicit timing")
+		}
+	} else if policy.StagingRoundWindowSeconds != 0 || policy.StagingPreparationSeconds != 0 {
+		return errors.New("production automation cannot use staging timing")
+	}
 	if policy.SourceChoiceDelaySeconds < 0 || policy.SourceChoiceDelaySeconds > 86400 || policy.SourceGeneration < 0 || policy.SourceGeneration > 6 || policy.SourceActivationGeneration < 1 ||
 		!competitionAutomationSha256.MatchString(policy.PolicyApprovalSha256) || !competitionAutomationSha256.MatchString(policy.SourceLockSha256) {
 		return errors.New("automation source or policy approval identity is invalid")
@@ -104,6 +114,7 @@ type CompetitionSealedEntry struct {
 
 // One immutable inventory, ranking, control and frozen-policy identity per round.
 type CompetitionEvaluationSeal struct {
+	Staging          bool                     `json:"staging,omitempty"`
 	RoundId          server.Id                `json:"round_id"`
 	Environment      string                   `json:"environment"`
 	CompetitionId    string                   `json:"competition_id"`
@@ -125,6 +136,12 @@ type CompetitionEvaluationSeal struct {
 
 // The same exact predicate is used by sealing, review replacement, and adapter validation.
 func CompetitionRewardEligibility(score *CompetitionScoreResult, baselineRaw, margin float64) string {
+	return CompetitionRewardEligibilityForMode(score, baselineRaw, margin, false)
+}
+
+// Staging elects the best gate-passing measured entry without conferring source authority.
+// Replicate and zero-margin identity remain mandatory even when significance is disabled.
+func CompetitionRewardEligibilityForMode(score *CompetitionScoreResult, baselineRaw, margin float64, staging bool) string {
 	if ValidateCompetitionScore(score) != nil {
 		return "invalid_score"
 	}
@@ -145,6 +162,12 @@ func CompetitionRewardEligibility(score *CompetitionScoreResult, baselineRaw, ma
 	if baselineRaw <= 0 || math.IsNaN(baselineRaw) || math.IsInf(baselineRaw, 0) || margin < 0 || margin >= 1 || math.IsNaN(margin) {
 		return "invalid_control"
 	}
+	if staging {
+		if margin != 0 || score.Significance.TakeoverMarginPercent != 0 || score.Significance.ReplicateCount != 9 {
+			return "statistical_identity_mismatch"
+		}
+		return ""
+	}
 	if *score.RawScore > baselineRaw*(1-margin) {
 		return "below_takeover_margin"
 	}
@@ -164,6 +187,11 @@ func CompetitionRewardEligibility(score *CompetitionScoreResult, baselineRaw, ma
 
 // Orders exact raw scores then admission time then id; no display rounding or epsilon ties.
 func RankCompetitionSealedEntries(entries []CompetitionSealedEntry, baselineRaw, margin float64, excludedPatchKVs map[string]bool) ([]CompetitionSealedEntry, error) {
+	return RankCompetitionSealedEntriesForMode(entries, baselineRaw, margin, excludedPatchKVs, false)
+}
+
+// Mode is explicit frozen authority, never inferred from a zero margin or environment label.
+func RankCompetitionSealedEntriesForMode(entries []CompetitionSealedEntry, baselineRaw, margin float64, excludedPatchKVs map[string]bool, staging bool) ([]CompetitionSealedEntry, error) {
 	ranked := append([]CompetitionSealedEntry{}, entries...)
 	seenJobIds := map[server.Id]bool{}
 	for i := range ranked {
@@ -178,7 +206,7 @@ func RankCompetitionSealedEntries(entries []CompetitionSealedEntry, baselineRaw,
 			if err := ValidateCompetitionScore(entry.Score); err != nil {
 				return nil, fmt.Errorf("sealed score: %w", err)
 			}
-			entry.IneligibilityReason = CompetitionRewardEligibility(entry.Score, baselineRaw, margin)
+			entry.IneligibilityReason = CompetitionRewardEligibilityForMode(entry.Score, baselineRaw, margin, staging)
 			if entry.IneligibilityReason == "" && excludedPatchKVs[entry.PatchSha256] {
 				entry.IneligibilityReason = "reward_duplicate"
 			}
@@ -218,6 +246,7 @@ func RankCompetitionSealedEntries(entries []CompetitionSealedEntry, baselineRaw,
 
 // Every revision is immutable; the previous digest authenticates a contiguous history.
 type CompetitionRewardDecision struct {
+	Staging                   bool       `json:"staging,omitempty"`
 	RoundId                   server.Id  `json:"round_id"`
 	Environment               string     `json:"environment"`
 	CompetitionId             string     `json:"competition_id"`
@@ -416,6 +445,7 @@ type CompetitionSettlementReceipt struct {
 
 // This result is public only after close, complete drain, and reveal.
 type CompetitionV2RoundResult struct {
+	Staging                 bool                               `json:"staging,omitempty"`
 	Incidents               []CompetitionAutomationIncident    `json:"incidents"`
 	Invalidated             bool                               `json:"invalidated"`
 	DecisionMode            string                             `json:"decision_mode"`
@@ -441,42 +471,45 @@ type CompetitionSourceGitRef struct {
 
 // An immutable intent stages source; only a separately recorded activation changes runtime authority.
 type CompetitionSourceActivation struct {
-	Environment              string                             `json:"environment"`
-	CompetitionId            string                             `json:"competition_id"`
-	SeasonId                 string                             `json:"season_id"`
-	Generation               int64                              `json:"generation"`
-	ExpectedGeneration       int64                              `json:"expected_generation"`
-	SourceGeneration         int                                `json:"source_generation"`
-	TargetEpoch              int                                `json:"target_epoch"`
-	TargetRoundId            server.Id                          `json:"target_round_id"`
-	SourceDecisionDigest     string                             `json:"source_decision_digest"`
-	ApprovedPatchSha256      string                             `json:"approved_patch_sha256,omitempty"`
-	Kind                     string                             `json:"kind"`
-	Reason                   string                             `json:"reason"`
-	BaseSourceLockSha256     string                             `json:"base_source_lock_sha256"`
-	SourceLockSha256         string                             `json:"source_lock_sha256"`
-	Commits                  map[string]string                  `json:"commits"`
-	GitRefs                  map[string]CompetitionSourceGitRef `json:"git_refs"`
-	ReviewId                 *server.Id                         `json:"review_id,omitempty"`
-	ReviewDecisionDigest     string                             `json:"review_decision_digest,omitempty"`
-	RewardDecisionDigest     string                             `json:"reward_decision_digest,omitempty"`
-	ManifestCommit           string                             `json:"manifest_commit"`
-	ManifestSha256           string                             `json:"manifest_sha256"`
-	Manifest                 []byte                             `json:"manifest,omitempty"`
-	PublicationJournalSha256 string                             `json:"publication_journal_sha256"`
-	ConfigExpectedCommit     string                             `json:"config_expected_commit"`
-	EvaluatorImageDigest     string                             `json:"evaluator_image_digest"`
-	EvaluatedImageDigest     string                             `json:"evaluated_image_digest,omitempty"`
-	HostQualificationSha256  string                             `json:"host_qualification_sha256"`
-	Threshold                float64                            `json:"threshold"`
-	ThresholdEvidenceSha256  string                             `json:"threshold_evidence_sha256"`
-	PreparedAt               time.Time                          `json:"prepared_at"`
-	BuildReadyAt             time.Time                          `json:"build_ready_at,omitempty"`
-	OpensAt                  time.Time                          `json:"opens_at"`
-	ActivatedAt              *time.Time                         `json:"activated_at,omitempty"`
-	AbandonedAt              *time.Time                         `json:"abandoned_at,omitempty"`
-	IntentSha256             string                             `json:"intent_sha256"`
-	State                    string                             `json:"state"`
+	Staging                   bool                               `json:"staging,omitempty"`
+	StagingRoundWindowSeconds int                                `json:"staging_round_window_seconds,omitempty"`
+	StagingPreparationSeconds int                                `json:"staging_preparation_seconds,omitempty"`
+	Environment               string                             `json:"environment"`
+	CompetitionId             string                             `json:"competition_id"`
+	SeasonId                  string                             `json:"season_id"`
+	Generation                int64                              `json:"generation"`
+	ExpectedGeneration        int64                              `json:"expected_generation"`
+	SourceGeneration          int                                `json:"source_generation"`
+	TargetEpoch               int                                `json:"target_epoch"`
+	TargetRoundId             server.Id                          `json:"target_round_id"`
+	SourceDecisionDigest      string                             `json:"source_decision_digest"`
+	ApprovedPatchSha256       string                             `json:"approved_patch_sha256,omitempty"`
+	Kind                      string                             `json:"kind"`
+	Reason                    string                             `json:"reason"`
+	BaseSourceLockSha256      string                             `json:"base_source_lock_sha256"`
+	SourceLockSha256          string                             `json:"source_lock_sha256"`
+	Commits                   map[string]string                  `json:"commits"`
+	GitRefs                   map[string]CompetitionSourceGitRef `json:"git_refs"`
+	ReviewId                  *server.Id                         `json:"review_id,omitempty"`
+	ReviewDecisionDigest      string                             `json:"review_decision_digest,omitempty"`
+	RewardDecisionDigest      string                             `json:"reward_decision_digest,omitempty"`
+	ManifestCommit            string                             `json:"manifest_commit"`
+	ManifestSha256            string                             `json:"manifest_sha256"`
+	Manifest                  []byte                             `json:"manifest,omitempty"`
+	PublicationJournalSha256  string                             `json:"publication_journal_sha256"`
+	ConfigExpectedCommit      string                             `json:"config_expected_commit"`
+	EvaluatorImageDigest      string                             `json:"evaluator_image_digest"`
+	EvaluatedImageDigest      string                             `json:"evaluated_image_digest,omitempty"`
+	HostQualificationSha256   string                             `json:"host_qualification_sha256"`
+	Threshold                 float64                            `json:"threshold"`
+	ThresholdEvidenceSha256   string                             `json:"threshold_evidence_sha256"`
+	PreparedAt                time.Time                          `json:"prepared_at"`
+	BuildReadyAt              time.Time                          `json:"build_ready_at,omitempty"`
+	OpensAt                   time.Time                          `json:"opens_at"`
+	ActivatedAt               *time.Time                         `json:"activated_at,omitempty"`
+	AbandonedAt               *time.Time                         `json:"abandoned_at,omitempty"`
+	IntentSha256              string                             `json:"intent_sha256"`
+	State                     string                             `json:"state"`
 }
 
 // An unpublished failed promotion is retained forever when safe carry-forward replaces it.
@@ -495,6 +528,7 @@ type CompetitionSourceAbandonment struct {
 
 // Api and worker independently acknowledge the exact manifest and production readiness.
 type CompetitionSourceReadiness struct {
+	Staging             bool      `json:"staging,omitempty"`
 	Environment         string    `json:"environment"`
 	CompetitionId       string    `json:"competition_id"`
 	SeasonId            string    `json:"season_id"`

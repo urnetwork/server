@@ -9,24 +9,28 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 const warpctlLogDiagnosticLimit = 64 * 1024
 
 const (
 	observationErrorClassLogHttp429      = "observation-log-query-http-429"
+	observationErrorClassLogHttp500      = "observation-log-query-http-500"
 	observationErrorClassLogHttp502      = "observation-log-query-http-502"
 	observationErrorClassLogHttp503      = "observation-log-query-http-503"
 	observationErrorClassLogHttp504      = "observation-log-query-http-504"
 	observationErrorClassLogConfigSchema = "observation-log-query-config-schema"
 )
 
-// Store only a fixed class and the native execution cause, never stderr or argv.
+// Store only fixed class/response enums and the native cause, never stderr or argv.
 // Unwrap preserves cancellation and exit-status checks without exposing them in
 // alerts that render Error. HTTP classes describe the query, not a remote app.
 type warpctlLogQueryError struct {
-	class string
-	err   error
+	class         string
+	responseShape string
+	retryAfter    time.Time
+	err           error
 }
 
 func (self *warpctlLogQueryError) Error() string {
@@ -34,6 +38,15 @@ func (self *warpctlLogQueryError) Error() string {
 	var exitErr *exec.ExitError
 	if errors.As(self.err, &exitErr) {
 		message += fmt.Sprintf(" exit_status=%d", exitErr.ExitCode())
+	}
+	if self.class == observationErrorClassLogHttp429 {
+		shape := self.responseShape
+		switch shape {
+		case "loki-outstanding-requests", "nginx-default-429":
+		default:
+			shape = "unknown"
+		}
+		message += " response_shape=" + shape
 	}
 	return message
 }
@@ -50,8 +63,43 @@ func newWarpctlLogQueryError(err error, stderr string) *warpctlLogQueryError {
 		class = observationErrorClassTimeout
 	case len(stderr) <= warpctlLogDiagnosticLimit:
 		class = warpctlLogDiagnosticClass(stderr)
+		if class == observationErrorClassLogHttp500 && !warpctlLogHttp500Terminal(err, stderr) {
+			class = observationErrorClassCommandFailed
+		}
 	}
-	return &warpctlLogQueryError{class: class, err: err}
+	responseShape := ""
+	if class == observationErrorClassLogHttp429 {
+		responseShape = warpctlLog429ResponseShape(err, stderr)
+	}
+	return &warpctlLogQueryError{class: class, responseShape: responseShape, retryAfter: warpctlLogRetryAfter(err, stderr, false), err: err}
+}
+
+// HTTP500 uses the same complete owned trace grammar as the response hint,
+// plus native exit2 and one exact terminal header. Response text stays private;
+// another child failure or an incomplete envelope cannot establish this status.
+func warpctlLogHttp500Terminal(err error, stderr string) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || len(stderr) > warpctlLogDiagnosticLimit {
+		return false
+	}
+	text := strings.ReplaceAll(stderr, "\r\n", "\n")
+	const boundary = "\n\ngoroutine "
+	if strings.Count(text, boundary) != 1 {
+		return false
+	}
+	before, stack, _ := strings.Cut(text, boundary)
+	if !warpctlLogOwnedStack.MatchString("goroutine " + stack) {
+		return false
+	}
+	headers := 0
+	statusHeader := false
+	for _, line := range strings.Split(before, "\n") {
+		if strings.HasPrefix(line, "panic: ") {
+			headers++
+			statusHeader = strings.HasPrefix(line, "panic: Loki query error (500): ")
+		}
+	}
+	return headers == 1 && statusHeader
 }
 
 // Warpctl terminates Search failures with a Go panic on stderr. Earlier retry
@@ -71,6 +119,7 @@ func warpctlLogDiagnosticClass(stderr string) string {
 	}
 	for _, status := range []struct{ prefix, class string }{
 		{prefix: "Loki query error (429):", class: observationErrorClassLogHttp429},
+		{prefix: "Loki query error (500):", class: observationErrorClassLogHttp500},
 		{prefix: "Loki query error (502):", class: observationErrorClassLogHttp502},
 		{prefix: "Loki query error (503):", class: observationErrorClassLogHttp503},
 		{prefix: "Loki query error (504):", class: observationErrorClassLogHttp504},

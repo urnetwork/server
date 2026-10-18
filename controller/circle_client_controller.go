@@ -647,13 +647,21 @@ func CreateDeveloperWallet(ctx context.Context, walletSetId string) {
 }
 
 func generateEntitySecretCipher(ctx context.Context, hexEncodedEntitySecret string) ([]byte, error) {
+	return (&CoreCircleApiClient{}).generateEntitySecretCipher(ctx, hexEncodedEntitySecret)
+}
+
+// Uses this client's bounded observation owner for the public key read.
+func (self *CoreCircleApiClient) generateEntitySecretCipher(ctx context.Context, hexEncodedEntitySecret string) ([]byte, error) {
 
 	entitySecret, err := hex.DecodeString(hexEncodedEntitySecret)
 	if err != nil {
-		panic(err)
+		return nil, errors.New("Circle entity secret must be a 32-byte hexadecimal value")
+	}
+	if len(entitySecret) != 32 {
+		return nil, errors.New("Circle entity secret must be a 32-byte hexadecimal value")
 	}
 
-	publicKeyString, err := getPublicKey(ctx)
+	publicKeyString, err := self.getPublicKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +673,7 @@ func generateEntitySecretCipher(ctx context.Context, hexEncodedEntitySecret stri
 
 	cipher, err := encryptOAEP(pubKey, entitySecret)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("encrypt Circle entity secret: %w", err)
 	}
 
 	return cipher, nil

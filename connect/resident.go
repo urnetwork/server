@@ -4420,12 +4420,16 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	case queue <- message:
 		return
 	default:
+		// Refuse this complete frame without waiting or retiring unrelated flows.
+		// The resident has not acknowledged it: the endpoint owns ack-required
+		// Transfer retries, while no-ack loss is counted. Rebinding the carrier
+		// does not resynchronize Transfer and would discard other retained work.
+		// Control ingress is final application delivery: refusal can acknowledge
+		// unapplied control state, so its generation-failure path stays distinct.
 		self.releaseForwardIngress(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
-		// Refuse this complete frame without retiring unrelated flows.
-		// The endpoint owns ack-required Transfer retries; no-ack loss is counted.
 		if glog.V(1) {
-			glog.Infof("[rf]drop ingress full %s->%s\n", sourceId, destinationId)
+			glog.Infof("[rf]refuse ingress full %s->%s\n", sourceId, destinationId)
 		}
 	}
 }

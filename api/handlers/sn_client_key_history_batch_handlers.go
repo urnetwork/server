@@ -16,7 +16,9 @@ import (
 )
 
 // Authentication and finite framing precede body ownership. Logical quota
-// reservations precede all database, chain, signing and publication work.
+// reservations precede all database, chain, signing and publication work. A
+// failure that declares no status, such as a chain read naming its RPC urls,
+// is a fixed 503 the validator retries (router.PrivateErrors).
 func SnClientKeyObservations(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
@@ -32,7 +34,7 @@ func SnClientKeyObservations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Client-key batch request is cancelled.", http.StatusRequestTimeout)
 		return
 	}
-	router.WrapRequireClient(func(clientSession *session.ClientSession) (*protocol.ClientKeyObservationBatchResponse, error) {
+	router.WrapRequireClient(router.PrivateErrors(func(clientSession *session.ClientSession) (*protocol.ClientKeyObservationBatchResponse, error) {
 		defer clientSession.Cancel()
 		operationCtx, cancel := context.WithTimeout(clientSession.Ctx, time.Duration(protocol.ClientKeyObservationBatchOperationSeconds)*time.Second)
 		defer cancel()
@@ -79,5 +81,5 @@ func SnClientKeyObservations(w http.ResponseWriter, r *http.Request) {
 			return nil, errors.New("413 Client-key batch work admission refused.")
 		}
 		return result, err
-	}, w, r)
+	}), w, r)
 }

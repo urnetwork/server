@@ -2,7 +2,13 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/netip"
+	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -38,10 +44,86 @@ func mergeIPv6ObserverRouteObservations(
 }
 
 // observeIPv6ObserverRoute asks the monitor host's routing table whether it
-// has an IPv6 path before exact-address probes begin. This is deliberately a
-// local lookup: it neither contacts an edge nor turns an unrelated public
-// endpoint into an availability dependency.
+// has an IPv6 path before exact-address probes begin, using the native Linux
+// or Darwin adapter. This local lookup neither contacts an edge nor proves
+// external reachability; unavailable native evidence remains unknown.
 func observeIPv6ObserverRoute(ctx context.Context, runner probeRunner) ipv6ObserverRouteObservation {
+	unknown := ipv6ObserverRouteObservation{state: ipv6ObserverRouteUnobservable}
+	if ctx.Err() != nil {
+		return unknown
+	}
+	if runtime.GOOS == "linux" {
+		output, err := runner.local(ctx, "ip", "-j", "-6", "route", "get", ipv6ObserverRouteProbeAddress)
+		if ctx.Err() != nil || len(output) > 16*1024 {
+			return unknown
+		}
+		if err != nil {
+			var process *exec.ExitError
+			if errors.As(err, &process) && process.ExitCode() == 2 {
+				switch strings.TrimSpace(output) {
+				case "RTNETLINK answers: Network is unreachable", "RTNETLINK answers: No route to host":
+					return ipv6ObserverRouteObservation{state: ipv6ObserverRouteAbsent}
+				}
+			}
+			return unknown
+		}
+
+		// One exact route result is required. Reject duplicate keys and extra
+		// records before reading the selected device; no raw route is retained.
+		decoder := json.NewDecoder(strings.NewReader(output))
+		open, err := decoder.Token()
+		if err != nil || open != json.Delim('[') {
+			return unknown
+		}
+		open, err = decoder.Token()
+		if err != nil || open != json.Delim('{') {
+			return unknown
+		}
+		fields := map[string]json.RawMessage{}
+		for decoder.More() {
+			token, err := decoder.Token()
+			name, named := token.(string)
+			if err != nil || !named {
+				return unknown
+			}
+			if _, duplicate := fields[name]; duplicate {
+				return unknown
+			}
+			var value json.RawMessage
+			if decoder.Decode(&value) != nil {
+				return unknown
+			}
+			fields[name] = value
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return unknown
+		}
+		closing, err = decoder.Token()
+		var trailing json.RawMessage
+		if err != nil || closing != json.Delim(']') || decoder.Decode(&trailing) != io.EOF {
+			return unknown
+		}
+		var destination, device, kind string
+		if json.Unmarshal(fields["dst"], &destination) != nil ||
+			json.Unmarshal(fields["dev"], &device) != nil ||
+			device == "" || strings.TrimSpace(device) != device || len(strings.Fields(device)) != 1 {
+			return unknown
+		}
+		if raw, present := fields["type"]; present {
+			if json.Unmarshal(raw, &kind) != nil || kind != "unicast" {
+				return unknown
+			}
+		}
+		address, addressErr := netip.ParseAddr(destination)
+		if addressErr != nil || address != netip.MustParseAddr(ipv6ObserverRouteProbeAddress) {
+			return unknown
+		}
+		return ipv6ObserverRouteObservation{state: ipv6ObserverRouteAvailable, interfaceName: device}
+	}
+	if runtime.GOOS != "darwin" {
+		return unknown
+	}
 	output, err := runner.local(ctx, "/sbin/route", "-n", "get", "-inet6", ipv6ObserverRouteProbeAddress)
 	// Darwin's route command can write an authoritative "not in table"
 	// diagnostic while still exiting zero. Classify the output before the exit

@@ -78,7 +78,7 @@ Usage:
   sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
-  sim-latency source-record --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
   sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
@@ -102,6 +102,7 @@ Usage:
   sim-latency --version
 
 Options:
+  --staging             Require an explicitly staging v2 manifest and staging source refs.
   -h --help              Show this screen.
   --version              Show version.
   --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow finalized epoch transitions.

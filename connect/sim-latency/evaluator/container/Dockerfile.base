@@ -3,7 +3,7 @@
 # Both upstream images are pinned Docker Official Image indexes. A season
 # release publishes the resulting evaluator image and subsequently refers to
 # it only by its registry digest.
-ARG GO_IMAGE=golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+ARG GO_IMAGE=golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 FROM ${GO_IMAGE} AS go-toolchain
