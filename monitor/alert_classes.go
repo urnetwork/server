@@ -238,6 +238,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"doh-dial-observation":                                incidentAlertClass,
 	"doh-dial-timeout":                                    incidentAlertClass,
 	"doh-resolver-observation":                            incidentAlertClass,
+	"doh-tun-dial-timeout":                                incidentAlertClass,
 	"e2e-key-coverage":                                    incidentAlertClass,
 	"e2e-key-publication-stalled":                         incidentAlertClass,
 	"edge-auto-upgrades":                                  incidentAlertClass,
