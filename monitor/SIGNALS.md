@@ -18402,8 +18402,10 @@ Observe all three layers every five minutes:
   `grafana load-defaults` path omitted the dashboard even if the exporter and
   datasources are healthy. Missing/denied authentication, missing UID, other
   HTTP status, malformed response, and wrong UID/title stay distinct. Only
-  status and identity-match Booleans enter findings; the credential and
-  response body never do.
+  status and qualified identity-match Booleans enter findings; the credential
+  and response body never do. Non-2xx responses retain
+  `identity_observed=false` without UID/title comparisons; only a decoded
+  successful response qualifies those comparisons.
 
 The dashboard findings are `subscription-dashboard-auth` for absent/denied
 authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
@@ -18412,6 +18414,20 @@ authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
 title. These are dashboard-publication/visibility failures, not evidence of a
 payment outage. A transport, bounded-body, or decode failure remains
 `cannot-observe`; it cannot clear the dashboard or business-data contract.
+
+For `subscription-dashboard-http`, the responding component and dashboard
+presence/identity remain unknown. In particular, HTTP 429 does not establish
+missing authentication, a missing dashboard, or a Loki/Mimir rejection. The
+stable-UID lookup follows the Grafana UI/API route; its status alone cannot
+distinguish LB request limiting, connection limiting, or an upstream rejection.
+Join bounded same-window request, ingress, and backend evidence with the active
+configuration before selecting a repair. Authentication findings retain their
+credential/policy repair; a 404 requires confirmation of the intended Grafana
+API before using the supported load-defaults workflow for a missing UID.
+Unavailable lookups can conceal a genuine missing or mismatched dashboard;
+alert absence is not a qualified healthy read. Closure requires two successful
+authenticated identity reads from each intended active Grafana generation and
+independent qualification of the Taskworker snapshot.
 
 The dashboard lookup uses the same signal-private Grafana transport contract
 as §1.4a and §11.15. A route/reset/timeout result gets one fresh IPv4 replay;
@@ -18438,6 +18454,9 @@ states; fresh, absent, stale, future, malformed, and post-completion-lost
 snapshot states; exact top-one and bounded SQL contracts; authenticated exact
 dashboard identity plus missing/auth/HTTP/body-redaction cases; and complete
 identifier-free findings.
+HTTP controls include 429 with a misleading matching document, an unknown
+responding component, no HTTP retry or IPv4 replay, 401/403-specific guidance,
+404 versus ambiguous status, and malformed or oversized successful bodies.
 
 ### 2.28 Current signup progress, route errors, and total consistency
 Probe: `signup-liveness`

@@ -407,26 +407,36 @@ func observeSubscriptionMetricsDashboard(
 
 func subscriptionMetricsDashboardFinding(class, target string, status int, uidMatches, titleMatches bool) finding {
 	symptom := "The live subscription dashboard definition is unavailable"
-	mechanism := "Grafana returned an unexpected HTTP status for the authenticated stable-UID lookup. The service and datasource can remain healthy while the dashboard definition is unreadable."
+	mechanism := "The authenticated stable-UID lookup received an unexpected HTTP status. The responding component, dashboard presence, and dashboard identity remain unknown; this response does not establish an authentication or dashboard-publication defect."
+	action := "Use bounded same-window request, ingress, and backend evidence to identify the responding component and status cause. For HTTP 429, distinguish request limiting, connection limiting, and an upstream rejection against the active configuration before selecting a repair."
 	if class == "subscription-dashboard-auth" {
 		symptom = "The subscription dashboard probe cannot authenticate to Grafana"
 		mechanism = "The configured Grafana admin credential is absent or the authenticated stable-UID lookup was denied; dashboard presence is unknown rather than healthy."
+		action = "Verify the configured admin credential and the responding layer's authentication policy, then repair the identified authentication failure. Dashboard presence and identity remain unknown until an authenticated lookup succeeds."
 	} else if class == "subscription-dashboard-missing" {
-		symptom = "The live Grafana instance does not contain the subscription dashboard UID"
-		mechanism = "The exporter may be healthy while `grafana load-defaults` omitted or failed to load the authenticated subscription dashboard. A healthy Grafana process and datasource do not prove this definition exists."
+		symptom = "The subscription dashboard stable-UID lookup returned HTTP 404"
+		mechanism = "A 404 from the intended Grafana API means the dashboard UID is missing. Confirm the responding route before attributing this status to dashboard publication; the exporter and datasources can remain healthy."
+		action = "Confirm the 404 came from the intended Grafana API, then use the supported load-defaults workflow from the intended server dashboard artifact for a missing UID. Keep the dashboard authenticated and preserve its stable UID."
 	} else if class == "subscription-dashboard-identity" {
 		symptom = "The live subscription dashboard UID or title does not match the source contract"
 		mechanism = "The stable-UID lookup returned a document, but its bounded identity is not the expected authenticated subscription dashboard. A stale or colliding definition can silently show the wrong operational contract."
+		action = "Use the supported load-defaults workflow from the intended server dashboard artifact to restore the expected UID and title. Keep the dashboard authenticated and preserve its stable UID."
+	}
+	observed := fmt.Sprintf("http_status=%d identity_observed=false", status)
+	evidence := "Only HTTP status is retained; dashboard identity was not observed. The admin credential and Grafana response body never enter the finding."
+	if 200 <= status && status < 300 {
+		observed = fmt.Sprintf("http_status=%d identity_observed=true uid_matches=%t title_matches=%t", status, uidMatches, titleMatches)
+		evidence = "Only HTTP status and two identity-match Booleans from the decoded successful response are retained; the admin credential and Grafana response body never enter the finding."
 	}
 	return finding{
 		probeId: "observability/subscription-metrics", tier: tierPage,
 		class: class, target: target, sustain: 2,
 		symptom: symptom, mechanism: mechanism,
 		baseline: "Authenticated GET /api/dashboards/uid/urnetwork-subscriptions returns HTTP 2xx with UID urnetwork-subscriptions and title urnetwork / subscriptions.",
-		observed: fmt.Sprintf("http_status=%d uid_matches=%t title_matches=%t", status, uidMatches, titleMatches),
-		evidence: "Only HTTP status and two identity-match Booleans are retained; the admin credential and Grafana response body never enter the finding.",
-		action:   "Repair Grafana authentication or run the supported load-defaults workflow from the intended server dashboard artifact. Do not make the dashboard public, hand-edit a colliding UID, or treat a healthy datasource as proof that the definition loaded.",
-		verify:   "Two authenticated reads return the exact UID and title after every active Grafana generation loads defaults; the fresh Taskworker snapshot remains independently healthy.",
+		observed: observed,
+		evidence: evidence,
+		action:   action,
+		verify:   "Two authenticated reads return the exact UID and title from each intended active Grafana generation; the fresh Taskworker snapshot remains independently healthy.",
 		playbook: "SIGNALS.md §2.27 and §11.15",
 	}
 }
