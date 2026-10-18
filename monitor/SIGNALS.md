@@ -160,6 +160,29 @@ The database follow-up adds §1.3a (`pg-capacity`) and a typed
 generic panic amplification and records the validated legacy-reindex, WAL
 stall, client-deadline, and PgBouncer replacement chain.
 
+Historical evidence reviewed 2026-10-16: the
+[October outage postmortem](../../factury/postmortem/2026-10-10.md) and its
+[visual timeline](../../factury/postmortem/2026-10-10-timeline.html), the
+[huge-page restart runbook](../../factury/postmortem/2026-10-13-hugepages-restart.md),
+[owner decisions](../../factury/postmortem/2026-10-13-owner-decisions.md), and
+[secret-rotation runbook](../../factury/postmortem/2026-10-13-secret-rotation.md).
+Read each observation with its own date: later outcome and owner-decision
+updates supersede opening preparation status and proposed windows. The visual
+timeline ends on October 13 and cannot establish later closure. Its provider
+curve interpolates sparse quoted readings; those segments cannot establish a
+sustained alert interval or an exact onset/recovery time. The reported exporter
+versus direct-SQL discrepancies also came from different observation times:
+they prompted a stale-exporter hypothesis, not proof of one. Require aligned,
+fresh source windows before attributing a disagreement. For example,
+the October 13 second restart reported `huge_pages=try` with
+`huge_pages_status=on`, superseding the first attempt's rollback. Database
+startup preceded pool recovery until about 08:40Z: use effective settings and
+measured recovery, not the runbook's planned outage budget. A prepared
+procedure, successful command, or planned deployment is not proof of effective
+runtime state. The [monitor handoff](../../factury/HANDOFF-MONITOR.md) supplies
+subsequent coordination context; these historical notes grant no operational
+authority and do not establish current fleet health.
+
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
 specifies: WHAT to measure, HOW (query/command), HEALTHY vs BROKEN bands, and
@@ -2905,6 +2928,19 @@ failure in the named product service. Distinct records at the cursor timestamp
 remain visible. Reconcile the source-time overlap and inspect Loki ingestion
 latency/reconnects; never replay suppressed contents into the current window.
 
+Each live summary counts as one occurrence, even when successive WebSocket
+responses emit identical service/count bytes. These local summaries carry no
+source timestamp or record identity and cannot enter source-time reconciliation.
+The rate counts summary occurrences, not unique historical records or current
+record loss. **False-negative qualifier:** the ordinary four-minute exact-line
+replay guard would hide repeated summaries and could falsely mark a later
+window healthy; the pre-cursor class therefore counts every live occurrence,
+as the dropped-entry summary classes do. **False-positive qualifier:** this
+exception does not replay suppressed product contents or establish a current
+product failure. Exact source-record and reconciliation replays remain
+deduplicated. Keep the first-summary WARN threshold and the existing two
+reconciliations plus ten-minute verification window.
+
 The resolved Warpctl executable is part of this observation contract. On
 2026-09-17, the standing watcher resolved revision
 `3745537bca26d16a4641ebf33bc8b84ae9f25b5c`, which predates the cursor guard in
@@ -3460,9 +3496,10 @@ wall-minute peer-install count to 9,894. A matching exact Grafana query found
 adjacent minutes, while the standing rolling window reported 5,535/min. The
 discrete producer/reset shape rules out watcher handover as the spike source
 and independently confirms the high-cardinality full-sync amplification.
-The nonzero adjacent-minute reset baseline remains a separate reason to deploy
-the Grafana transport fix. Deploy server Proxy `e055c98c` or later and Grafana
-with Warp `1e95aef` or later; verify the next full sync has one aggregate
+The nonzero adjacent-minute reset baseline was separate evidence for the
+then-missing Grafana transport fix. For an artifact proven to predate server
+Proxy `e055c98c` or Warp `1e95aef`, deploy the corresponding fix through the
+authorized owning workflow; verify the next full sync has one aggregate
 summary per reconciling instance and zero dropped-stream resets rather than
 treating either fix as a substitute for the other.
 
@@ -3518,7 +3555,7 @@ redeploy already-current blocks from this historical evidence.
 
 The first post-fix control on `2026.8.31+1034210530` changed the active diagnosis.
 Every responding Grafana and Proxy block contained the ring-deadline and
-per-peer-log fixes, and the current edge-4 Grafana container had started at
+per-peer-log fixes, and the then-running edge-4 Grafana container had started at
 `02:29Z`, after that artifact boundary. A fresh one-minute Grafana window still
 contained 1,762 records: 344 Mimir query-frontend statistics lines, 344 Mimir
 evaluator statistics lines, 252 Loki table-manager lines, 238
@@ -3541,8 +3578,8 @@ were Loki `caller=table_manager.go:195 msg="get or create table"` records, and
 182 were exact unquoted backend EOFs. Those EOFs split 37 on edge-0 and 145 on
 edge-4; 48 quoted cancellation records
 from deliberate watcher retirement were counted separately and remain excluded
-from the class. All six active nodes were healthy, so missing LAN identity is no
-longer the current reset or EOF prerequisite.
+from the class. All six active nodes were healthy in that historical window,
+so missing LAN identity did not explain its reset or EOF wave.
 
 The exact transition supplied the causal discriminator. Loki 3.7.3 gives each
 ingester tail a 100-stream processing queue and a five-stream send queue. The
@@ -3551,11 +3588,12 @@ seconds later, the ingester closes that server-side tail. `Ingester.Tail`
 returns nil, the querier's `Recv` observes EOF and removes the client, and its
 five-second connection ticker reconnects. The first edge-0 EOF arrived about 17
 seconds after the replacement watcher's tail children started, during the same
-reset wave. Current `loki_querier_tail_active` state then showed all eight
+reset wave. That window's `loki_querier_tail_active` state showed all eight
 external tails on edge-0 and zero on the other five nodes, proving that the
 emitting host followed the selected querier and was not the failed backend
-identity. This makes the present off-grid EOF a downstream blocked-tail symptom,
-while process exit or ring loss remain alternate ways to produce the same text.
+identity. This identified that window's off-grid EOF as a downstream
+blocked-tail symptom, while process exit or ring loss remain alternate ways
+to produce the same text.
 
 Warp commit `42168fe` disables Mimir `frontend.query_stats_enabled` in the
 generated Grafana config. That option controls the query-frontend `query stats`
@@ -3579,9 +3617,9 @@ Fireside, and Crisp), the running container's generated `mimir.yml` omitted
 `3.7.3-urnetwork.1` at revision `82cdcdc0+tail-close-once`, not the
 `urnetwork.2` / `+tail-backend-addr` build produced by `bca37cf`. The same live
 monitor cadence observed 556 dropped-stream resets/minute and ten backend
-EOFs/minute with an empty backend frame. This is immutable runtime evidence
-that another Grafana build/deploy is required; the later-looking version label
-does not satisfy either commit gate.
+EOFs/minute with an empty backend frame. This immutable runtime evidence
+established that those artifacts still lacked the fixes; the later-looking
+version label did not satisfy either commit gate.
 
 The later `2026.9.1-outerwerld+1035004200` deployment supplied that missing
 discriminator. All 20 endpoints reported the generation. Extracting the
@@ -3595,8 +3633,9 @@ the query-frontend option. The same window contained 1,084 Loki
 `get or create table` info records, 942 Mimir bucket-index warnings, 1,229
 caller-attributed dropped-stream resets, and 22 exact backend EOFs. The EOFs
 named every active backend: edge-3 6, Fireside 5, edge-1 4, edge-4 3, Crisp 2,
-and edge-0 2. This rules out stale provenance and a single failed node while
-showing that `42168fe` removed only half of the originally paired Mimir stream.
+and edge-0 2. That window ruled out stale provenance and a single failed node
+for its observed artifacts while showing that `42168fe` removed only half of
+the originally paired Mimir stream.
 
 Warp commit `13fcd05` supplies the bounded producer-side fix. It renders Mimir
 `server.log_level: warn`, stopping the unconditional evaluator info records at
@@ -3620,7 +3659,7 @@ the exact downstream response; ten race repetitions, the full upstream tail
 package, focused vet, the complete Warp suite, and an exact patch dry-run pass.
 Current official Loki main inspected on 2026-09-01 still discards this field.
 
-Warp commit `35453fd` is the subsequent correctness boundary for the live
+Warp commit `35453fd` is the subsequent correctness boundary for the historical
 short-burst loss. In upstream Loki 3.7.3, `receiveStreamsLoop` reads the
 100-stream processing queue but sends into the five-stream channel with a
 nonblocking `select`; a momentarily full five-slot channel therefore discards a
@@ -3638,12 +3677,33 @@ matched durable Loki while the live Grafana frames still contained 1,099
 ingester reset markers and 28 backend EOFs. Clean no-watcher-overlap windows at
 `16:17Z` through `16:25Z` continued at 269--614 resets/minute with
 service-attributed drops across API, Connect, Grafana, Proxy, and Taskworker.
-That rules out source-journal loss, a sole watcher-handoff amplifier, and one
-failed application selector; it proves loss in the live ingester handoff while
-leaving genuine greater-than-100 or slow-send pressure observable.
+That control ruled out source-journal loss, a sole watcher-handoff amplifier,
+and one failed application selector for the observed window; it proved loss
+in the live ingester handoff while leaving genuine greater-than-100 or
+slow-send pressure observable.
 
-Deploy a Grafana image containing `35453fd`; this is neither a queue increase
-nor an alert suppression. Closure requires zero query-frontend/evaluator and
+**Current-runtime evidence boundary (2026-10-16):** the dated artifact and
+ring-health observations above are historical controls, not facts supplied by
+a new reset or EOF event. The log classifier has no current runtime ancestry
+or backend-health input. It must retain those states as unknown and preserve
+the affirmative loss warning. A fresh event cannot rule out an old artifact,
+an unhealthy backend, or sustained pressure merely by quoting a September
+deployment or all-node health check.
+
+Bind each new window to the exact running Grafana/Loki processes and immutable
+artifacts before checking the required fixes. Deploy `35453fd` only when the
+running artifact is proven to lack it, through the authorized owning workflow.
+If the fixes are already present, diagnose bounded same-window native tail
+counters, source rate, gRPC send progress, process generation, ring, and network
+state instead of redeploying a historical fix. Missing or partial ancestry and
+backend evidence remain unknown. This correction changes the explanation, not
+the loss classes, WARN severity, reset threshold of one/minute, or EOF threshold
+of five/minute. False-positive qualifier: the emitting Grafana service does
+not identify the affected application selector, and an EOF does not identify
+one cause. False-negative qualifier: an incomplete reconciliation or missing
+backend frame cannot establish healthy coverage or exclude a failing node.
+
+Closure requires zero query-frontend/evaluator and
 table-lookup info records, bucket-index version convergence below two minutes,
 healthy rules/metrics/warnings/errors, complete bounded reconciliation, and
 zero raw reset, service-attributed dropped-entry, plus EOF classes for ten
@@ -3738,18 +3798,19 @@ The standing classifier reports only the unquoted internal EOF form as
 `loki-tail-backend-eof` at 5/minute. It deliberately excludes quoted gRPC
 `Canceled ... context canceled` lines: explicitly retiring the old v150
 watchers at `19:17:37Z` produced a large expected cancellation burst without
-proving a backend fault. The current fixed-image window above proves the same
+proving a backend fault. The historical fixed-image window above proves the same
 EOF text is not cause-specific: its off-grid instances co-occurred with the
 15-second blocked-tailer reset path after all active ring nodes were healthy.
 Because the emitting host follows the externally selected querier, a pre-
 `bca37cf` line cannot identify its failed backend and must retain an empty frame.
 After `bca37cf`, the exact `addr=<backend>` becomes the stable alert frame; the
 synthetic regression requires that format while preserving legacy detection and
-the cancellation negative control. Verify the running artifacts contain `1e95aef` and `bca37cf`, and
-deploy them only to older Grafana blocks. For the current fleet, deploy one
-Grafana image containing `35453fd` (and therefore `5927527`, `13fcd05`, plus the
-earlier fixes). This repairs the proven short-burst handoff while preserving
-bounded descriptor evidence under genuine sustained pressure. Do not claim the
+the cancellation negative control. Verify the exact running artifacts contain
+`1e95aef`, `bca37cf`, and `35453fd` (and therefore `5927527`, `13fcd05`, plus the
+earlier fixes). Deploy only a proven missing fix. On already-current artifacts,
+use the current-runtime evidence boundary above to diagnose continued loss.
+The short-burst correction preserves bounded descriptor evidence under genuine
+sustained pressure. Do not claim the
 producer or attribution changes themselves fix loss,
 rebuild from the historical deadline prose, raise Loki tail-request limits,
 raise the fixed queues, or raise the ring-session cap. Closure requires
@@ -7547,6 +7608,23 @@ GROUP BY 1 ORDER BY 1;
   verify the §2.15 root fix, then require destination diversity and two mature
   cohorts to recover. Raw client/network ids never leave PostgreSQL.
 
+**Fresh-credential failure hidden by aggregate connections (October 12):**
+the [postmortem, root cause 6](../../factury/postmortem/2026-10-10.md)
+records a TLS-key rotation that also changed JWT signing. New API processes
+signed with the new key while older Connect/Alt verifiers retained their
+startup key sets. Signature rejections rose to about 400–450/s, and only about
+9 of 5,400 fresh top-level clients connected during 18:00–19:30Z. Existing
+sessions and reconnects using older credentials could conceal this cohort.
+For early detection, pair fresh per-generation
+`urnetwork_auth_jwt_rejections_total{cause="signature"}` with aggregate
+new-login/refresh-to-connect outcomes and an explicit cohort denominator.
+Before a key-affecting rollout, verify overlap of effective signer/verifier
+key generations; recovery needs successful fresh credentials on every active
+verifier generation. Keep keys, tokens and client identities out of evidence.
+These are additional detection requirements: `connection-rate`'s insert
+counter and §8.7's resource-presence check do not attest them. A rejection
+counter alone does not distinguish rollout mismatch from invalid client input.
+
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
 Probe: `selection-freshness`
 
@@ -9172,6 +9250,20 @@ not attribution for that incident: fresh active-query evidence assigned the
 wall to transfer-contract pair/payer plans, while provider-stat cache fills
 were absent from the active top shapes. Verify cache coalescing independently
 and never use it to clear §2.3.
+
+**October 12–13 historical trigger controls** ([postmortem, root cause 6](../../factury/postmortem/2026-10-10.md)):
+the October 12 pool collapse followed a whole-database stall before the
+Connect restarts began. Later captures found dirty-page writeback queued
+above a low-latency disk, WAL waits, and synchronous PgBouncer log writes
+blocked on the same filesystem. For early diagnosis, align slow-statement
+release bursts, WAL waits, dirty/writeback and device-mapper queue pressure
+with native pool progress; a quiet disk-latency average does not clear that
+path. Conversely, isolated queue spikes occurred without freezes, and lower
+write load confounded the mitigation comparisons. Neither a queue spike nor
+missing host telemetry identifies the trigger. For the separate October 13
+16:45–17:30Z recurrence, the [October 15 readiness update](../../factury/postmortem/2026-10-13-secret-rotation.md)
+still recorded no closed cause; do not assign it the October 12 mechanism by
+resemblance.
 
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
@@ -16826,6 +16918,21 @@ Probe: `redis-connections`
 - connected_clients per node: baseline ~pool_floor × processes; step change
   +50% in 10 min = reconnect storm or pool misconfig (min_connections is PER
   NODE ×32 — a config of 64 = 2k idle conns per process).
+- Temporal coverage findings use `cannot-observe`, with probe id
+  `redis/clients-spike` and stable frame `clients-history`. A failed shared
+  transport, invalid response, or response with no configured-node series is
+  one incident on stable target `redis-clients-history`, with finite configured
+  and unobservable node counts. It covers the whole configured census, keeping
+  previously raised node spikes open until actual healthy observations satisfy
+  the usual recovery hold. This shared dependency is not repeated per node and
+  cannot fill the notification budget with duplicate source failures. A usable
+  partial response retains the affected configured host:port identities for
+  node-local gaps. Coverage findings preserve known native-median violations and complete
+  historical siblings. No combined healthy finding is emitted until both arms
+  can actually be evaluated. Each observation reads the window again, so
+  corrected history replaces the prior verdict rather than inheriting a cached
+  growth flag. The connection battery belongs to the combined trip and re-arms
+  after both arms recover or a new source-proven Redis generation appears.
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery and aggregates on the Redis host by source, flags, last command, and
   client library. The same trip-time battery records blocked clients, local
@@ -16975,6 +17082,21 @@ Probe: `redis-topology`
   now known=32/state:ok. Replica count is genuinely 0 (the phantom "slaves"
   were the only slave entries): no failover exists, any single wedge is a
   partial outage until manual restart — standing risk, unchanged.
+
+**Sharded subscriptions after a slot move (October 12):** the
+[postmortem, root cause 6](../../factury/postmortem/2026-10-10.md) records
+Redis ending `SSUBSCRIBE` subscriptions with `sunsubscribe` during rebalance.
+The deployed Proxy watcher treated that as a generic event and did not
+re-subscribe: 16 of 40 expected `proxy_client_*` channels had no subscribers,
+and window setups timed out on 12 of 20 blocks. A healthy cluster or TCP
+connection did not establish delivery. A post-move control must inventory
+expected live channels, resolve their current slot owners, and count missing
+subscriptions there, then correlate affected-block setup completion and
+churn. Retain only bounded counts and coverage, not channel/client identities.
+Missing ownership or an incomplete inventory remains unknown; one subscriber
+proves presence, not that the consumer handles events. Recovery requires both
+subscription coverage and working window setups. This requirement is not
+implemented by `redis-topology` or §9's separate keyspace-pattern checks.
 
 ### 3.7 Reliability/scores pipeline load — busy vs degraded
 Probe: `reliability-pipeline`
@@ -17171,8 +17293,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing current-main commits `908a8b2c` plus `d8392c83`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | One request named a plugin type that the serving Grafana process could not resolve. A missing native datasource is one cause; a stale dashboard/browser payload or another unsupported request type can emit the same generic line while the required datasource plugins work. | Retain the request path/referer and query both `warp-mimir` and `warp-loki` through that exact generation's `/api/ds/query`. A failed control is the image/plugin branch in §11.15; if both controls succeed and both plugin processes remain present, repair the request/dashboard client instead. Do not infer an image omission or recreate a datasource from the generic log alone. |
-| `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path after all six active ring nodes were healthy. Loki 3.7.3 also discarded short bursts whenever its five-slot handoff was momentarily full despite capacity in the 100-slot processing queue. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Verify the running Grafana artifacts contain Warp `1e95aef` and `bca37cf`; deploy them only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `35453fd`, which contains `5927527`'s descriptor forwarding and makes the short-burst handoff cancellation-aware without enlarging queues or hiding sustained pressure. Require query-frontend/evaluator and table-lookup info records zero, bucket-index convergence below two minutes, rules/metrics healthy, and EOF/reset/service-drop classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
-| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3 uses a nonblocking handoff into a five-stream channel, so a burst larger than five can drop despite room in the 100-stream processing queue; sustained pressure beyond that queue remains a genuine bounded-overflow case. The accompanying `resp.DroppedStreams` also requires the `5927527` forwarding contained by `35453fd`. Continued genuine blockage after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. | Verify the running Grafana and Proxy artifacts contain Warp `1e95aef` and server `e055c98c`, deploying only where absent. For current Grafana blocks, deploy Warp `35453fd`; its blocking cancellation-aware handoff preserves short bursts and retains bounded drop metadata under real pressure without raising a queue. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
+| `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. Historical controls identified a 60-second ring TCP read deadline and a separate ingester tail-handoff defect; process exit, ring loss, and sustained pressure can also produce EOF. This log event supplies no current artifact ancestry or backend-health measurement. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Bind the current window to exact running artifacts before checking Warp `1e95aef`, `bca37cf`, and `35453fd`; deploy only a proven missing fix through the authorized workflow. If present, inspect same-window native tail counters, send progress, process generation, ring, and network state on the framed backend. Missing evidence remains unknown. Require query-frontend/evaluator and table-lookup info records zero, bucket-index convergence below two minutes, rules/metrics healthy, and EOF/reset/service-drop classes zero for ten minutes with stable tails and bounded reconciliation. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
+| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3's short-burst handoff defect and genuine pressure beyond the bounded processing queue can both produce loss; `35453fd` corrects the former and retains bounded drop metadata under the latter. The reset alone does not prove which source is running or whether any backend is healthy. Grafana is the observation point, not affected-service attribution, and reset rate is not unique lost-record count. | Bind current Grafana/Proxy artifacts before checking Warp `1e95aef`, server `e055c98c`, and Warp `35453fd`; deploy only a proven missing fix through the authorized workflow. If present, diagnose same-process ingester source rate, gRPC send progress, and native tail counters. Missing evidence remains unknown. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. A residual EOF needs current backend attribution. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
@@ -19235,6 +19357,16 @@ VERIFY    the signal that proves it fixed (and its healthy band)
 
 ## 7. Alert emission spec (for the future service)
 
+Historical delivery control ([owner decisions, §10d and §11](../../factury/postmortem/2026-10-13-owner-decisions.md)):
+on October 13, Grafana had 29 provisioned rules but its default receiver had
+no integrations, and its email route lacked SMTP. Evaluating a rule therefore
+did not prove anyone received it. The later update records a default Slack
+route and a delivered test notification. Treat that as dated recovery
+evidence, not perpetual delivery assurance. After routing changes, verify the
+effective receiver/integration and an authorized test's receipt through the
+intended route; a configured webhook or healthy scheduler alone is insufficient.
+This is a delivery-verification requirement, not an implemented catalog probe.
+
 Tier-0 (page):
 | id | source | check | threshold | payload extras |
 |---|---|---|---|---|
@@ -19567,6 +19699,22 @@ Detection rule: a fix is not "live" until the OLD build tag **disappears**
 from `docker ps` on the edges — "new containers are up" ≠ "old behavior is
 gone." Track the old build-tag count falling to 0, not just the new tag
 appearing.
+
+**A stopped supervisor is not a stopped workload.** The
+[October 13 correction](../../factury/postmortem/2026-10-10.md) records
+Taskworker containers running through both PostgreSQL restarts after their
+Warp units stopped: `ExecStop` signaled warpctl only. Handler-expiry tasks ran
+immediately after PostgreSQL returned. Before relying on a maintenance stop,
+verify every expected container/process has stopped and its owned work has
+drained; unit inactivity alone cannot satisfy that gate. The corrected
+[runbook, §8.3](../../factury/postmortem/2026-10-13-hugepages-restart.md)
+checks the containers explicitly. For database recovery, also require fresh
+handler heartbeats and usable pools before resuming the expiry worker.
+Four Connect handlers were re-created during the second restart's recovery,
+but deletion by the 08:17 expiry pass was only a likely, unverified cause.
+Do not promote that hypothesis to proof from matching timestamps. These are
+maintenance verification requirements, not automatic stop attestation by
+`rollout-guard` or `connection-orphans`.
 
 ### 8.3 Confirm "live" with the behavior signal, not just the tag
 The decisive proof a deploy took effect is the target signal moving, keyed to
@@ -20169,6 +20317,19 @@ whether that resource exists and parses, and sorted missing field names. Secret
 values and malformed parser input are discarded while settings are loaded and
 can never reach a monitor alert or state file.
 
+Historical rotation qualifier ([secret-rotation runbook, §2.2, §5 and dated
+readiness updates](../../factury/postmortem/2026-10-13-secret-rotation.md)):
+resource presence or a file `MATCH` does not prove that its consumer is enabled,
+has loaded that generation, or produces working output. Record the actual
+consumer, read path and load/reload boundary. The October 13–15 checks found
+valid stats salt while the observed APIs had stats disabled by their read-only
+site mount; a credential check could not establish a working stats writer.
+Likewise, a running container cannot prove its next authenticated image pull
+will work. Separate distribution, consumer usability and revocation evidence.
+The October 15 ~19:30Z owner update cancels Docker Hub token rotation and leaves
+salt/passphrase changes planned; earlier checklists are not executed-rotation
+evidence. This is an interpretation limit of `credentials`, not a new probe.
+
 On Main, the inventory requires the credentials used by PostgreSQL (including
 any configured direct-maintenance identity), Redis, Grafana administration and
 metric push, password hashing, OAuth and JWT signing, enabled analytics
@@ -20354,6 +20515,18 @@ A helper filename that violates that convention does not establish a missing
 probe, but its contract must still reach the owning probe's emitted query and
 drift reducer. The registry guard and missing-artifact controls enforce both
 boundaries; adding duplicate probes or ignoring the naming failure does not.
+
+Historical command-outcome discriminator ([owner decisions, §5 outcome](../../factury/postmortem/2026-10-13-owner-decisions.md)):
+on October 13, migration audit and catalog evidence recorded successful
+versions 821–831 before `db migrate` failed in its
+`EnsureProviderPayoutBoundary` post-step. Inherited `PGOPTIONS` reached that
+step's PgBouncer connection, which rejected the `options` startup parameter
+with `08P01`; the existing boundary row lacked only the confirmation line.
+Keep command exit, applied migration artifacts and post-step completion as
+separate evidence. A late command failure does not prove DDL rolled back, and
+a numeric head does not prove every post-step succeeded. Inspect the current
+audit, exact catalog and owning post-step before proposing a retry; do not
+pass global `PGOPTIONS` through this mixed direct/pooled command.
 
 The catalog now includes the final published contracts at versions 781 and 782.
 Version 781 requires an ordinary stored, nullable `transfer_balance.grant_kind`
@@ -21966,6 +22139,25 @@ incident query, use `warp/warpctl/run.sh --print-executable`, then record the
 printed artifact's SHA-256 and `go version -m` identity. This path rule does not
 require a clean tree or exact-HEAD build; the base revision and modified bit
 remain the attribution boundary described above.
+
+The 2026-10-16 local launch preflight found a Linux x86_64 workstation resolving
+a Darwin arm64 Warpctl through a hard-coded shell-profile path. The native
+Makefile artifact existed and `run.sh --print-executable` selected it without
+running Warpctl. `RUN-MAIN.md` now uses that selector and pins its directory in
+each snapshot/watcher invocation; a failed selector or identity check stops
+before contact. The synthetic launch regression retains a valid-metadata
+foreign-path decoy, the healthy native selection, and absent, non-executable,
+malformed and failed-command controls. This is launch-environment repair;
+`release-builder` continues to measure the exact effective executable's identity.
+
+False-positive qualifier: a local collector launch failure is not a Loki or
+product-service failure, and current `PATH` does not explain an earlier
+watcher's termination. False-negative qualifier: executable mode and readable
+Go build metadata can pass for a foreign-architecture binary. Native selection
+alone proves neither child startup nor current log coverage. Retain the exact
+loaded child image and two fresh complete same-generation reconciliation
+windows, plus independent standing-stream and source-time controls in §1.5.
+Missing or partial runtime evidence remains unknown or `cannot-observe`.
 
 The 2026-09-03 API status-sampling incident is the discriminator. Every false
 sample used the ignored `warp/warpctl/warpctl`, whose 2026-04-29 mtime,
@@ -25164,6 +25356,21 @@ The validators never decrypt a database artifact, start PostgreSQL or Redis,
 or prove Git checkout/restore behavior. Byte and bounded container-format
 verification is not a restore drill.
 
+Historical key-lifecycle qualifier ([secret-rotation runbook, §3.3–§4.7 and
+October 15 updates](../../factury/postmortem/2026-10-13-secret-rotation.md)):
+the physical-backup writer rereads its passphrase across generation and verify
+steps, so replacing the file mid-run can mix encryption generations. Retain
+each historical decryption key for every still-needed artifact, including a
+new key if a later rollback restores an older writer key. Vault commit dates
+did not establish host adoption dates; classify with authorized key-use
+evidence, returning only labels/booleans. A first-MiB decrypt check identifies
+a candidate key but does not prove full authenticated decryption or restore;
+missing evidence remains unknown. The [owner decisions, §11](../../factury/postmortem/2026-10-13-owner-decisions.md)
+record an October 15 backup start; the later rotation update schedules backup
+for October 19 after passphrase rotation. Neither a start nor a rescheduled
+window proves verified completion. Changing the current writer key also does
+not remove exposure of historical ciphertext encrypted with an exposed key.
+
 The integrity report lives off the removable archive and is replaced
 atomically. An ordinary `--refresh-metrics` only parses and republishes the
 last bounded report, preserving its original check time; it never rereads a
@@ -28204,6 +28411,22 @@ Require ten minutes of fresh comparable evaluation traffic below the exact
 20/min class threshold plus independent window progress. Generic admission,
 structural ping errors, cancellation, malformed lines and the other novel
 shapes retain their independent controls.
+
+**Local control behind a platform window reason:** the §1.5 `window-stall`
+and `window-stall-terminal` classes observe embedded Connect provider windows;
+a Taskworker emitter does not establish a task scheduler stall. On a Connect
+artifact containing §2.19's attribution, `platform-unreachable` also covers
+local contract acquisition before any provider-directed write. An owned client
+setup deadline produces the same reason. Verify the emitting artifact's
+Connect source under §8.12 and correlate the same window's setup/contract
+witnesses, carrier/framer evidence and provider progress before choosing the
+owning repair. The event alone does not select a transport or provider fault,
+and it does not prove that the local-control branch occurred either.
+Missing companion logs or incomplete source coverage leave the cause unknown.
+Preserve the nonterminal/terminal distinction, diagnostic-line counts and
+existing thresholds. Recovery still requires the class's ten-minute window
+under comparable traffic, provider windows reaching their configured minimum,
+and the independently identified causal control remaining healthy.
 
 **Window-teardown false platform attribution:** a post-promotion observation
 beginning near `04:17Z` on 2026-09-09 reached 20--34 taskworker
@@ -31919,7 +32142,10 @@ A missing linked payment is not silently equated with a resumable linked-payment
 backfill. Only counts, ages, block numbers and booleans are returned; no
 network, payment, chain deployment or contract identity is rendered.
 
-The rollup uses bounded resumable batches outside payout write transactions.
+The rollup commits resumable contract batches outside payout write transactions.
+Its 1000-distinct-contract limit bounds output, not sweep rows examined; one
+contract can have many sweeps. The 45-second run budget is checked between
+batches and does not impose an in-flight statement deadline.
 While incomplete, a new snapshot preserves total-point ranks but marks block
 metrics unavailable. Snapshot publication and source progress are separate
 reads/transactions: a new pending payment does not invalidate an earlier snapshot.
@@ -31930,6 +32156,33 @@ an old Sunday boundary alone cannot prove an overdue rebuild.
 Keep these handoffs WARN, not corruption PAGE. The independent stale-snapshot
 warning still detects a missing publication cadence, but this query does not
 prove sustained rollup progress or a completion-to-publication deadline.
+
+**2026-10-17 local query-work discriminator:** independently qualified native
+controls held the selected batch at 1000 contracts while increasing the preceding
+cursor history from zero to 512 and 4096 contracts. The unchanged rollup's two
+sweep stages both revisited that history: custom-plan base-sweep visits per
+stage grew from 3000 to 3512 to 7096; generic plans showed the same prefix
+growth through scan/join filtering. Actual JSON plan rows, loops and filters
+establish this local repeated-prefix mechanism; they do not identify Main's
+plan or explain its CPU. Measured root shared reads were zero; sibling DML
+CTEs can report additional reads and hits outside the root counter. Compare
+corresponding CTE counters separately; never add inclusive parents and children. Preserve selected sweep fanout
+as necessary work and compare both prepared-plan modes. A correction must seek
+within one payment and retain the selected-contract scope of paid-sweep reads,
+preserving NULL/zero UUID cursors, pending-assignment eligibility, every paid
+week and atomic cursor/completion writes. Require deterministic per-stage work
+limits and unchanged accounting controls before qualifying that correction.
+
+The retained Main observation matches only a truncated rollup-shaped prefix;
+its full statement, caller, deployed artifact and resource causality remain
+unknown. The broad `escrow_access` family does not identify the separately owned
+payment-attribution reader. Query age and a no-wait snapshot prove neither CPU
+share nor lock residence. Keep §2.1's original resource finding and this readiness
+warning independent. Before any rollout, compare the exact running Taskworker
+artifact and required schema/index state with the reviewed correction, respect
+the independent deployment hold, and require fresh post-boundary rollup progress
+and resource observations. Local query-work qualification alone closes neither
+Main attribution nor readiness; missing runtime evidence remains unknown.
 
 - `points-leaderboard-unavailable` warns when no snapshot exists.
 - `points-leaderboard-incomplete` pages when the latest header and its exact

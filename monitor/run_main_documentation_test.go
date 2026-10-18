@@ -168,7 +168,7 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Sol and Astra may prepare manifests; they do not append",
+		"Sol Low and Sol Medium may prepare manifests; they do not append",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -184,12 +184,14 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-6-sol` agent at `medium` reasoning (\"Sol Medium\") owns monitor execution",
+		"A `gpt-6.1-sol` agent at `low` reasoning (\"Sol Low\") owns monitor execution",
 		"monitor-test gates",
-		"bounded read-only failure fact collection, initial triage",
-		"A `gpt-6-astra` agent at `max` reasoning (\"Astra Max\") owns all",
-		"Astra consumes Sol's initial",
-		"every self-improvement repair to a probe, shared monitoring utility, signal catalog, or this harness",
+		"fact collection, initial triage, evidence-authority checks",
+		"A `gpt-6.1-sol` agent at `medium` reasoning (\"Sol Medium\") owns all",
+		"Sol Medium consumes Sol Low's initial",
+		"self-improvement fix to the probes, shared monitoring utilities, signal",
+		"`factury/monitor/alerts/`",
+		"Do not silently escalate to another model.",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
