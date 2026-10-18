@@ -6510,6 +6510,40 @@ Compare source-qualified task processes, cursor progress, completed batches and
 both ages. Busy grants advance the cursor; they must not starve later keys.
 Never delete journal debt or force-release Redis to make these signals healthy.
 
+Both per-balance owners use one nonwaiting ownership probe. A complete known-busy
+reply, after partial ownership and checkout cleanup, leaves pending or applied
+journal rows in place and advances the normal fair traversal. Cleanup refusal can
+follow a committed debit and acknowledged Redis release; the applied bit remains
+the replay fence until a later admitted deletion. Pool acquisition, probe,
+refusal-cleanup, transaction and commit failures remain errors. No deadline is
+reclassified as busy after the fact, and the existing recurring task Post still
+owns retry scheduling.
+
+The bounded 2026-10-18 02:59:28–03:04:28Z Taskworker capture contained 20 complete
+flush recovery records. Eighteen ended at the acknowledged-busy admission wait
+for the first per-balance owner, before its financial callback; this waiting
+policy could exhaust the owner budget instead of skipping the busy balance.
+Two joined-deadline records reached the later cleanup owner or deletion. Those
+two are not established known-busy outcomes and remain separate failures. No
+captured record identified a Redis-release error. Matching function/source lines
+support this phase distinction but do not identify the immutable emitting build;
+the retained stream labels contain no revision, image digest or release identity.
+
+False-positive qualifier: this recovered panic boundary is not process death or
+proof of a lost debit. A post-commit cleanup failure can coexist with a correct
+financial debit and Redis release. Deterministic controls hold the actual balance
+owner, verify refusal before admission to financial or deletion SQL, let an
+independent payer progress, then release the owner and verify exact debit,
+retained-journal recovery, replay and an unchanged neighboring reservation.
+Aggregate and owner log counts overlap and must not be summed as incidents.
+False-negative qualifier: a quiet panic series or increased busy count cannot
+prove recovery. Bounded historical logs can omit other causes, older/mixed builds
+can retain waiting callers, and successful refusal can leave debt indefinitely
+under a persistent owner. Require emitter provenance, continuing fair visits and
+fresh pending/applied ages for all sixteen shards; absent or stale observations
+remain unknown. Cleanup deadlines, acquisition/protocol failures and unknown
+commit replies still need their own cause and durable-outcome evidence.
+
 The Sep 27 commit 35274673 moved a previously separate post-transaction per-contract
 PG debit into `settleEscrowInTx` and added a shared grant lock. History supports
 that ordering regression; it does **not** establish an earlier aggregate Redis
