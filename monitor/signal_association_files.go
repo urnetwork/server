@@ -265,6 +265,7 @@ func containsString(values []string, wanted string) bool {
 	return false
 }
 
+// Preserve observed response/content failures without assigning an unobserved serving cause.
 func associationFilesFindings(hostname string, results []associationProbeResult) []finding {
 	failures := []string{}
 	missing := 0
@@ -321,11 +322,15 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 		return nil
 	}
 
-	mechanism := "At least one serving web generation does not expose a valid Android/Apple ownership document. Platform verifiers therefore cannot prove that the site owns the declared mobile app, even while ordinary pages remain healthy."
-	action := "Compare the tracked files, Astro dist output, staged build/main tree, and the exact web image on each failed edge. Repair the first boundary that loses or mutates the documents, deploy one web generation to every edge, and do not mask the failure with an nginx-generated 200 response."
+	mechanism := "At least one exact edge/path check did not return usable Android/Apple ownership metadata. A failed HTTP or transport response leaves the responding component and bundle contents unknown; ordinary page health cannot substitute for the required contract."
+	action := "Identify the responding component and running artifact for each failed edge/path using bounded existing request, upstream-status, and effective configuration evidence. For HTTP 429, distinguish request admission, connection admission, and an upstream rejection before choosing a repair. Preserve successful paths as controls."
 	if missing > 0 {
-		mechanism = "The required documents exist in the tracked Astro public tree and in dist, but the deployable web tree omitted the root .well-known directory. The production build used `mv dist/*`; the shell glob excludes dot-prefixed entries after the SEO gate has already passed, so the web image legitimately returned 404 from every generation."
-		action = "Build and deploy the web service from mmm/ur.io commit 72190198 or later, whose dotfile-safe staging script moves every dist entry and whose regression test requires both association files. Confirm every web block carries that build; do not edit the platform files in-place on containers or add a fallback 200 in nginx."
+		mechanism += fmt.Sprintf(" %d required paths returned HTTP 404; that response alone does not identify a packaging defect, wrong serving route, or missing deployed asset.", missing)
+		action += " For 404 responses, compare the tracked files, Astro dist output, staged tree, and running artifact. Check ancestry of the historical mmm/ur.io 72190198 repair for the `mv dist/*` dotfile omission; an already-current artifact needs a new discriminator. Deploy a Web correction only after identifying the boundary that loses the required documents. Do not edit live platform files or synthesize fallback JSON."
+	}
+	if invalid > 0 {
+		mechanism += fmt.Sprintf(" %d HTTP 200 responses independently failed the metadata content contract.", invalid)
+		action += " For invalid HTTP 200 responses, compare the returned media type and semantic authorization with the tracked document and its serving artifact before selecting the content or route repair."
 	}
 
 	return []finding{{

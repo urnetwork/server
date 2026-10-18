@@ -139,6 +139,7 @@ func emailAssetHostName(result emailAssetResult) string {
 	return result.host.name
 }
 
+// Response classes establish the failed boundary; artifact and cache ownership need separate evidence.
 func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 	var failures []string
 	checked := 0
@@ -199,18 +200,22 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 	sustain := 1
 	mechanism := "A recipient-facing request or one exact edge did not return the byte-bearing image the shared email layout embeds. Ordinary page checks can remain healthy because they never exercise the /images/emails/ namespace, content type, and body together."
 	context := "These absolute URLs are the header wordmark in every transactional email source template (authentication, password, welcome, payout, data code, and receipt). If current email-sending artifacts predate the template change, a 404 is a release-order blocker rather than proof that recipients have seen it; after those templates deploy, it is a functional product regression. Use executable provenance and build time to distinguish those states. The required asset list is maintained beside this probe and must track controller/email_templates."
-	action := "Compare the public response with the same path pinned to every exact edge address. The images are part of the site bundle (mmm/ur.io/react/public/images/emails, mirrored into the astro build by sync-public); if every edge fails, deploy a site build that contains them. If only the public path fails, the fault is in DNS selection, TLS, or a cache in front of the edges."
+	action := "Compare the failed public and exact-edge paths with successful controls. Identify the responding component, upstream result, active route, and running artifact from bounded existing evidence before selecting an admission, content, deployment, or cache repair. The images are part of the site bundle (mmm/ur.io/react/public/images/emails, mirrored into the astro build by sync-public), but a response failure alone does not prove that bundle is missing them."
 	verify := "Require every listed public URL to return HTTP 200 image/* with nonzero bytes; require the same for every enabled edge when pinned with the exact site SNI/Host; then require zero exact-path 404 lines for ten minutes."
 	allEdgesHealthy := edgeChecks > 0 && edgeFailures == 0 && edgeUnavailable == 0
 	if edgeMissing > 0 && edgeMissing == edgeChecks && edgeUnavailable == 0 {
-		mechanism = "Every exact edge returns 404 for the image path while the site's pages serve. The site bundle on the edges does not contain /images/emails/: the deployed build predates the assets, or sync-public did not mirror react/public/images into the astro build."
-		action = "Build and deploy only the Web service from an intentional local Mmm checkout containing b4b229c5c and the intended local SDK checkout. Require the Makefile's sync-public target to place both images in staged output before the Warp build, and record any participating local diffs. If API and Taskworker artifacts containing current-main server commit ec6e3b92 or later are not active yet, keep them behind this Web gate. If any are already active, treat the missing assets as a current broken-email dependency and prioritize the Web rollout; do not roll back or redeploy an otherwise-correct sender merely to clear this alert. Do not copy files into live containers."
+		mechanism = "Every exact edge returned HTTP 404 for an image path. Whether the deployed build predates the assets, sync-public omitted images, or a serving route or intermediary returned the 404 remains to be established from the current artifact and response."
+		action = "Identify the responding route and running artifact first. If the serving artifact is confirmed to omit these images, build and deploy only the Web service from an intentional local Mmm checkout containing b4b229c5c and the intended local SDK checkout. Require the Makefile's sync-public target to place both images in staged output before the Warp build, and record any participating local diffs. If API and Taskworker artifacts containing current-main server commit ec6e3b92 or later are not active yet, keep them behind this Web gate. If any are already active, treat verified missing assets as a current broken-email dependency and prioritize the Web rollout; do not roll back or redeploy an otherwise-correct sender merely to clear this alert. Do not copy files into live containers."
 	} else if edgeMissing > 0 {
-		mechanism = fmt.Sprintf("Required images returned HTTP 404 on %d of %d configured exact-edge checks. Compare each failed address and path with the successful responses to establish which site generations lack the requested image.", edgeMissing, edgeChecks+edgeUnavailable)
-		action = "Compare the failed exact-edge paths with healthy peers and the staged site bundle. Verify each affected edge's deployed artifact and sync-public output before choosing a Web repair. Keep successful image responses as controls."
+		mechanism = fmt.Sprintf("Required images returned HTTP 404 on %d of %d configured exact-edge checks. Successful peers localize the failed response paths; they do not prove the failed artifact's contents or identify its responding route.", edgeMissing, edgeChecks+edgeUnavailable)
+		action = "Compare the failed exact-edge responses with healthy peers. Identify each failed response's serving route and current artifact, then check staged bundle contents and sync-public output before choosing a Web repair. Keep successful image responses as controls."
 	} else if allEdgesHealthy && publicFailures > 0 {
-		mechanism = "Every checked exact edge is healthy, but the recipient-facing response is not. The remaining boundary is DNS selection, TLS, or a cache in front of the edges; the image bytes themselves are present and reachable."
-		action = "Confirm which address the public name resolves to and that it serves the exact site Host, then invalidate only the failed /images/emails/ objects if a cache sits in front and its negative-cache TTL has not expired. Recheck the public URLs; do not redeploy unrelated API, Connect, taskworker, or database services."
+		mechanism = "Every checked exact edge is healthy, but the recipient-facing response failed. These controls isolate the observation to the public delivery path; they do not identify the responding component or establish a cached failure."
+		action = "Identify the public path's selected responding component, exact site Host, upstream status, and effective route using bounded existing evidence. Compare the failed response with healthy exact-edge controls. Consider path-scoped cache repair only after proving the cache owns the failed response and that its current origin is healthy."
+	}
+	if other > 0 {
+		mechanism += " Non-200 responses other than 404 do not establish missing image bytes or a stale bundle."
+		action += " For HTTP 429, distinguish request admission, connection admission, and an upstream rejection against the active configuration before choosing a repair; response status alone is insufficient."
 	}
 	if transportFailures == len(failures) {
 		class = "web-email-assets-transport"

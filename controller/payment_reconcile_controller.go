@@ -262,6 +262,32 @@ type appleLastTransaction struct {
 	SignedRenewalInfo string `json:"signedRenewalInfo"`
 }
 
+// Only documented provider statuses can authorize an entitlement decision.
+// Validate the complete response before selecting an entitled transaction, so
+// an earlier valid row cannot hide a malformed later group. Empty lists retain
+// their existing no-conclusion behavior.
+func validateAppleSubscriptionStatuses(statuses *appleSubscriptionStatusesResponse) error {
+	if statuses == nil {
+		return errors.New("missing App Store subscription statuses")
+	}
+	for _, group := range statuses.Data {
+		if group == nil {
+			return errors.New("missing App Store subscription status group")
+		}
+		for _, transaction := range group.LastTransactions {
+			if transaction == nil {
+				return errors.New("missing App Store subscription transaction status")
+			}
+			switch transaction.Status {
+			case 1, 2, 3, 4, 5:
+			default:
+				return fmt.Errorf("unsupported App Store subscription status %d", transaction.Status)
+			}
+		}
+	}
+	return nil
+}
+
 func (self *appleLastTransaction) entitled() bool {
 	return self.Status == 1 || self.Status == 4
 }
@@ -1173,6 +1199,9 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 			},
 			server.ResponseJsonObject[*appleSubscriptionStatusesResponse],
 		)
+		if err == nil {
+			err = validateAppleSubscriptionStatuses(statuses)
+		}
 		if err != nil {
 			run.record(
 				store,
