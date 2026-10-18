@@ -322,7 +322,7 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "network_onboarding_experiment_state", requiredVersion: 649, rowColumn: 60},
 	{name: "network_onboarding_created_at", requiredVersion: 650, rowColumn: 61},
 	{name: "signed client-key history tables and guards", requiredVersion: 651, removedVersion: 744, rowColumn: 62},
-	{name: "repeatable competition staging lifecycle", requiredVersion: 652, rowColumn: 63},
+	{name: "repeatable competition staging lifecycle", requiredVersion: 652, removedVersion: 847, rowColumn: 63},
 	{name: "competition_round.admission_closed_at and guard", requiredVersion: 653, rowColumn: 64},
 	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
 	{name: "onboarding_email_tracker_daily", requiredVersion: 655, rowColumn: 66},

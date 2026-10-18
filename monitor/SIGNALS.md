@@ -23371,6 +23371,30 @@ future columns remain pending migration; a matching numeric head cannot hide
 a missing required column, and a failed catalog read remains unknown. This
 detector repair does not establish that Main applied these migrations.
 
+The 2026-10-18 current-source gate exposed two separate detector defects at
+published head 848. Thirteen native schema controls reported only the old
+version-652 staging-index predicate after version 847 deliberately replaced
+it; two coverage controls found seven missing contracts at 842–848. These
+were local validator failures, not observations of Main schema corruption.
+The old version-652 contract remains mandatory through 846. Version 847
+requires its replacement staging indexes and retains the epoch constraint
+and absence of the obsolete finalization trigger.
+
+Versions 842–847 require the published automation columns, durable ledgers,
+validated keys and operative foreign-key custody, exact function bodies and
+metadata, and enabled triggers with their published events and deferred
+commit semantics. Replaced function bodies, serial defaults and target
+uniqueness remain checked until their specific successor takes ownership;
+that successor's contract becomes mandatory at the same recorded head.
+Version 848 requires the exact valid, ready, nonunique btree index on
+`account_feedback(network_id, feedback_time)`, without a predicate or included
+keys. The existing version-minus-589 row protocol covers all seven appends.
+Native controls exercise the real 846→847 transition, historical function
+replacements, physical schema faults with rollback, and interrupted index
+readiness. A failed or canceled catalog query remains unknown. This detector
+repair does not apply migrations, activate automation, or establish Main's
+migration head or runtime health.
+
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
 permits retirement with unchanged, previously retained excluded proof. The
@@ -24012,8 +24036,9 @@ keys, and the exact INCLUDE set/order. The status predicates require all five
 exact statuses; the unresolved-contract CASE preserves its false/NULL behavior
 and family-nonnull term; active staging requires the unique competition key
 and all three predicate terms. The legacy version-618 index remains required
-only through 621 and obsolete from 622; the independent grouped version-652
-constraint/trigger lifecycle checks remain intact.
+only through 621 and obsolete from 622. Version 652's original staging
+predicate is required through 846; version 847 requires the automation-aware
+replacement while retaining the grouped constraint/trigger lifecycle checks.
 
 Synthetic fixtures execute the actual emitted relation-scoped SQL guards in
 local PostgreSQL and pass their results through ordinary Signal/Markdown

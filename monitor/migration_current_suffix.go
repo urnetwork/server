@@ -561,6 +561,13 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(841, "retained original verification seed window",
 		snMainnetMigrationColumns("verify_original_transition",
 			snMainnetMigrationColumn{name: "head_window", kind: "character varying(32)"})),
+	migrationCurrentSuffix(842, "sealed competition evaluation and append-only automation custody", competitionMigration842ArtifactQuery),
+	migrationCurrentSuffix(843, "independent competition holds and immutable integrity incidents", competitionMigration843ArtifactQuery),
+	migrationCurrentSuffix(844, "competition source authority and atomic outbox custody", competitionMigration844ArtifactQuery),
+	migrationCurrentSuffix(845, "competition source abandonment and committed review custody", competitionMigration845ArtifactQuery),
+	migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery),
+	migrationCurrentSuffix(847, "isolated automation staging and current lifecycle guards", competitionMigration847ArtifactQuery),
+	migrationCurrentSuffix(848, "network-leading account feedback time index", competitionMigration848ArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
