@@ -640,7 +640,7 @@ func TestHostScopePreservesWholeEnvironmentServiceTails(t *testing.T) {
 		if tailer.service != settings.LogServices[index] || !reflect.DeepEqual(tailer.blocks, settings.LogServiceBlocks[tailer.service]) {
 			t.Fatal("service tail topology changed")
 		}
-		_, stream, err := tailer.openStream(context.Background())
+		_, stream, err := tailer.openStream(context.Background(), io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}

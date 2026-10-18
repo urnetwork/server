@@ -3500,7 +3500,43 @@ All other HTTP 429 forms retain `response_shape=unknown` and their original
 status/class. This adds no HTTP request, host read, retry, sampling window,
 query budget, severity, or visibility identity.
 
-The source contract is Warpctl
+The separate Retry-After diagnostic preserves the retry owner's admission
+boundary across a failed CLI process. Warpctl emits only a parsed canonical UTC
+deadline immediately before its unchanged terminal panic. The monitor accepts
+it only from the just-joined native exit 2, a complete unique owning traceback,
+and the matching HTTP 429 query or opening-handshake failure. The deadline is
+parsed once at response receipt and is never renewed from relative seconds at
+each retry. Ordinary successful queries and response bodies cannot supply it.
+Standing diagnostics retain the bounded first-panic envelope, including late
+failures after ordinary output; malformed, duplicate, partial, oversized and
+body-injected envelopes grant no advice. Earlier panic lookalikes conservatively
+leave later advice unknown within that child.
+
+The standing owner admits its next child only after both its existing backoff
+and that absolute deadline; the reconciliation owner checks its own deadline on
+the unchanged 45-second cadence. Cancellation remains immediate. Original
+terminal failures, missing coverage, `tailer-reconcile` and `cannot-observe`
+remain visible while waiting; severity, sustain, windows and limits do not
+change. Advice is local to the current stream or reconciliation owner, with no
+global or persisted cooldown. The WebSocket handshake loop also honors advice
+within its existing attempt budget. Gorilla exposes a rejected response after
+its bounded error-body read, so its delta deadline starts conservatively at
+that handoff and can be later after a slow body; an absolute HTTP date is
+unchanged. This does not identify the production rejecting component.
+
+This correction extends the operation-local query handling present in Warp
+`1def4861a35a41d04bf8325ba0bbec347eff8955`; that source revision alone does not
+establish the new terminal diagnostic or monitor-owner adoption. Require
+matching collector/CLI source authority and original response headers before
+claiming a production Retry-After violation or remedy. Recurring HTTP 429,
+log loss or a successful tiny route control does not attribute aggregate
+pressure to this watcher. Recovered coverage still requires the existing
+advancing completed windows and independent live-tail qualification. The
+native fake-CLI, first-panic forgery, cancellation and fake-WebSocket controls
+qualify client retry correctness; they cannot establish Main's missing headers
+or actual limiter policy.
+
+The response-shape source contract remains Warpctl
 `89a47cb6561d003a903d7f1b7b2b39ac4884ddbf` (`warpctl/loki/client.go` trims
 the non-200 body and `warpctl/main.go` panics on the terminal Search error),
 [Loki v3.7.3's frontend outstanding-request literal](https://github.com/grafana/loki/blob/v3.7.3/pkg/lokifrontend/frontend/v1/frontend.go),
@@ -3531,7 +3567,8 @@ route to host ... Reconnecting` does not exit the child or increment the
 tailer's restart counter. Class `tailer-ipv6-route-loss` now reconstructs that
 diagnostic across arbitrary stderr write chunks, groups independent service
 tails by exact active edge address, and sends only the structured route event
-through the alert path. Every other stderr line remains operator-only. A clean
+through the alert path. Other stderr remains operator-only apart from the bounded terminal advice
+above; neither diagnostic path enters service log classification. A clean
 next cadence emits the same address identity healthy, while §18.1 owns the
 direct interface, public path, router, and same-second IPv6 controls. On the
 macOS monitor host, a route event also triggers one bounded local `configd`

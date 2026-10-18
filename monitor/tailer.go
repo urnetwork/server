@@ -1786,7 +1786,8 @@ func (self *logTailer) runStream(ctx context.Context) {
 		default:
 		}
 
-		if err := self.tailOnce(ctx); err == nil {
+		err := self.tailOnce(ctx)
+		if err == nil {
 			// a clean stream end (warpctl exited without a scan error):
 			// restart promptly. Start failures and scan errors keep the
 			// escalating backoff.
@@ -1801,10 +1802,8 @@ func (self *logTailer) runStream(ctx context.Context) {
 
 		// rate-limit restarts; the stream dying repeatedly surfaces via the
 		// probe's tailer-restarting visibility finding
-		select {
-		case <-ctx.Done():
+		if !waitWarpctlLogRetry(ctx, backoff, warpctlLogRetryDeadline(err)) {
 			return
-		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, time.Minute)
 	}
@@ -1814,7 +1813,7 @@ func (self *logTailer) runStream(ctx context.Context) {
 // so the stream/search handoff is covered from collector startup, then on an
 // independent cadence shorter than the alert drain cadence.
 func (self *logTailer) runReconcile(ctx context.Context) {
-	self.reconcileOnce(ctx)
+	retryAfter := self.reconcileOnce(ctx)
 	ticker := time.NewTicker(logReconcileInterval)
 	defer ticker.Stop()
 	for {
@@ -1822,9 +1821,18 @@ func (self *logTailer) runReconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			self.reconcileOnce(ctx)
+			retryAfter = self.reconcileTick(ctx, retryAfter)
 		}
 	}
+}
+
+// Keep the normal overlap cadence. An explicit deadline gates only this
+// collector's next operation; its recorded failure and missing coverage remain.
+func (self *logTailer) reconcileTick(ctx context.Context, retryAfter time.Time) time.Time {
+	if ctx.Err() != nil || self.clock().Before(retryAfter) {
+		return retryAfter
+	}
+	return self.reconcileOnce(ctx)
 }
 
 type reconcileLine struct {
@@ -1952,7 +1960,7 @@ func (self *logTailer) completeReconcilePartition(
 // the same absolute lower boundary once per configured block. A cap-sized
 // block (or a single-block service) then continues from its inclusive final
 // source timestamp under a fixed page budget.
-func (self *logTailer) reconcileOnce(ctx context.Context) {
+func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time) {
 	if self.reconcile == nil {
 		return
 	}
@@ -1972,8 +1980,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		self.recordReconcile(start, err)
-		return
+		return self.recordReconcile(start, err)
 	}
 
 	lines := parseReconcileLines(out)
@@ -1984,8 +1991,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 				return
 			}
 			if err != nil {
-				self.recordReconcile(start, err)
-				return
+				return self.recordReconcile(start, err)
 			}
 		} else {
 			lines = nil
@@ -1996,8 +2002,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(start, fmt.Errorf("block %s overlap: %w", block, err))
-					return
+					return self.recordReconcile(start, fmt.Errorf("block %s overlap: %w", block, err))
 				}
 				blockLines, err := self.completeReconcilePartition(
 					ctx,
@@ -2009,8 +2014,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(start, err)
-					return
+					return self.recordReconcile(start, err)
 				}
 				lines = append(lines, blockLines...)
 			}
@@ -2028,13 +2032,14 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	self.recordReconcile(start, nil)
+	return self.recordReconcile(start, nil)
 }
 
-func (self *logTailer) recordReconcile(start time.Time, err error) {
+func (self *logTailer) recordReconcile(start time.Time, err error) (retryAfter time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if err != nil {
+		retryAfter = warpctlLogRetryDeadline(err)
 		var logQueryError *warpctlLogQueryError
 		if errors.Is(err, errLogReconcileIncomplete) {
 			// Block/continuation wrappers must not add private selectors to
@@ -2057,6 +2062,7 @@ func (self *logTailer) recordReconcile(start time.Time, err error) {
 	if previous.advancesTo(latest) {
 		self.reconcileSuccesses[0] = previous
 	}
+	return
 }
 
 // tailOnce runs one log stream to completion: start, scan lines, reap the
@@ -2069,7 +2075,8 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd, stdout, err := self.openStream(streamCtx)
+	retryCapture := &warpctlLogRetryCapture{}
+	cmd, stdout, err := self.openStream(streamCtx, retryCapture)
 	if err != nil {
 		return err
 	}
@@ -2100,11 +2107,14 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 	// A nonzero child exit is not a clean stream rotation. Preserve it so
 	// run() keeps increasing its restart backoff instead of resetting every
 	// failed Loki query to a one-second retry loop.
+	if retryAfter := warpctlLogRetryAfter(waitErr, retryCapture.result(), true); !retryAfter.IsZero() {
+		return &warpctlLogRetryError{err: waitErr, retryAfter: retryAfter}
+	}
 	return waitErr
 }
 
 // openStream starts the warpctl log stream (or the injected test stream).
-func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) {
+func (self *logTailer) openStream(ctx context.Context, retryCapture io.Writer) (*exec.Cmd, io.ReadCloser, error) {
 	if self.stream != nil {
 		return self.stream(ctx)
 	}
@@ -2115,7 +2125,7 @@ func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser
 	// page-tier panic tickets from replayed restart-era lines)
 	return self.env.runner.warpctlStream(
 		ctx,
-		&tailTransportDiagnosticWriter{tailer: self},
+		io.MultiWriter(&tailTransportDiagnosticWriter{tailer: self}, retryCapture),
 		"logs", self.env.cfg.env, self.service, "--since=1s", "-f",
 	)
 }
