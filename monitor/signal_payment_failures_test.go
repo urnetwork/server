@@ -133,6 +133,10 @@ func TestPaymentCreditUnfulfillableNeverSuggestsEmailAuthority(t *testing.T) {
 		"set network_id metadata on the Stripe subscription",
 		"resend the invoice.paid event",
 		"Email alone is not safe write authority",
+		"destination_unresolved with leg=webhook",
+		"does not distinguish those reasons, establish account deletion, or prove a provider failure",
+		"malformed records remain a separate §2.21 PAGE",
+		"neither aging out nor a fresh reconciliation watermark proves disposition",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("unfulfillable credit alert missing %q:\n%s", want, markdown)
