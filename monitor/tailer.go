@@ -1682,6 +1682,8 @@ type logTailer struct {
 	reconcileInitialized bool
 	lastReconcileTime    time.Time
 	lastReconcileError   string
+	// One local recording of the retained failure, never an HTTP response clock.
+	lastReconcileFailure logReconcileFailure
 	// Bounded successful-query receipts belong only to this collector
 	// generation. Failure or cancellation invalidates the consecutive pair.
 	reconcileSuccesses [2]logReconcileSuccess
@@ -2051,11 +2053,17 @@ func (self *logTailer) recordReconcile(start time.Time, err error) (retryAfter t
 			err = logQueryError
 		}
 		self.lastReconcileError = err.Error()
+		failure := logReconcileFailure{attemptWindowStart: start}
+		if self.clock != nil {
+			failure.monitorRecordedAt = self.clock()
+		}
+		self.lastReconcileFailure = failure
 		self.reconcileSuccesses = [2]logReconcileSuccess{}
 		return
 	}
 	self.lastReconcileTime = self.clock()
 	self.lastReconcileError = ""
+	self.lastReconcileFailure = logReconcileFailure{}
 	latest := logReconcileSuccess{start: start, completed: self.lastReconcileTime}
 	previous := self.reconcileSuccesses[1]
 	self.reconcileSuccesses = [2]logReconcileSuccess{{}, latest}

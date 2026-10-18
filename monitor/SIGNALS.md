@@ -3740,6 +3740,38 @@ class, proof of HTTP429, current request state, or a cause. Cancellation can
 invalidate a pair without setting an error. `last_success_at` remains
 historical after a pair is invalidated and cannot supply current freshness.
 
+The additive schema-2 fields `last_failure_monitor_recorded_at` and
+`last_failure_attempt_window_start` describe only the currently retained failure.
+The monitor samples its collector clock once when recording a non-canceled
+failed logical attempt and stores that value with the attempt's original
+source-time lower bound. A continuation or block failure keeps the original
+logical bound, not that page's boundary. These are neither the original HTTP
+response time nor a complete request range, response class, or rejecting-layer
+identity. The check/receipt clock never replaces the failure recording time.
+Repeated checks retain the same values; a later failed attempt replaces both,
+and a successful attempt clears both with the stored error. Cancellation keeps
+the existing error state and any prior failure metadata while invalidating the
+successful pair; it does not manufacture a failed-response timestamp.
+
+Zero or unavailable clocks are null. Partial, backward and future values remain
+visible without changing coverage states, freshness, or the two-window predicate;
+qualify the local order against the attempt lower bound and receipt observation
+before comparing failure times. Clocks can repeat, so these fields are not a
+unique attempt counter. Old producers omit these additive keys; absence supplies
+no historical timing authority. Collector replacement starts with no failure
+metadata, and ambiguous duplicate keys select none. The value snapshot is copied
+under the same collector lock before the existing receipt observation clock.
+
+VERIFY with a failed query followed by repeated checks at later clocks: the
+local failure time and attempt bound stay fixed, and the original visibility
+failure remains. A new failed return replaces the pair; success clears it and
+still needs two advancing windows. Cancel before/during a query without inventing
+failure timing, distinguish a returned timeout while the parent remains live,
+and retain null/partial/backward-clock and post-copy publication controls. This
+is prospective diagnostic attribution, not an HTTP429 cause or remediation;
+it cannot repair old receipts, prove simultaneous remote failures, or make
+partial log coverage healthy.
+
 `unsupported_collectors` counts arbitrary service names without emitting them.
 `duplicate_service_keys` counts repeated fixed keys; their one ambiguous row
 contains the count but null clocks/authority booleans, choosing no collector.

@@ -23,6 +23,13 @@ func (s logReconcileSuccess) advancesTo(next logReconcileSuccess) bool {
 		next.completed.Sub(s.completed) < 2*logReconcileInterval
 }
 
+// The logical attempt's original source lower bound and one local failure
+// recording. Neither clock identifies the failed HTTP page or response time.
+type logReconcileFailure struct {
+	monitorRecordedAt  time.Time
+	attemptWindowStart time.Time
+}
+
 type logReconcileTimeRange struct {
 	Oldest *time.Time `json:"oldest"`
 	Newest *time.Time `json:"newest"`
@@ -66,6 +73,9 @@ type logReconcileCollectorScope struct {
 	ConsecutiveTwo      *bool      `json:"consecutive_two"`
 	CoverageState       string     `json:"coverage_state"`
 	LastFailurePresent  *bool      `json:"last_failure_present"`
+
+	LastFailureMonitorRecordedAt  *time.Time `json:"last_failure_monitor_recorded_at"`
+	LastFailureAttemptWindowStart *time.Time `json:"last_failure_attempt_window_start"`
 }
 
 // Return a separate UTC value without modifying the collector's clock.
@@ -148,6 +158,7 @@ type logReconcileCollectorSnapshot struct {
 	started     time.Time
 	lastSuccess time.Time
 	failed      bool
+	failure     logReconcileFailure
 	previous    logReconcileSuccess
 	latest      logReconcileSuccess
 }
@@ -161,6 +172,7 @@ func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileR
 		snapshot := logReconcileCollectorSnapshot{
 			service: tailer.service, enabled: tailer.reconcile != nil, started: tailer.startedAt,
 			lastSuccess: tailer.lastReconcileTime, failed: tailer.lastReconcileError != "",
+			failure:  tailer.lastReconcileFailure,
 			previous: tailer.reconcileSuccesses[0], latest: tailer.reconcileSuccesses[1],
 		}
 		tailer.stateLock.Unlock()
@@ -179,6 +191,10 @@ func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileR
 			receipt.UnsupportedCollectors++
 		} else if scopes[index].CollectorCount == 0 {
 			scopes[index] = logReconcileScope(service, enabled, started, lastSuccess, failed, previous, latest, now)
+			if failed {
+				scopes[index].LastFailureMonitorRecordedAt = logReconcileTime(snapshot.failure.monitorRecordedAt)
+				scopes[index].LastFailureAttemptWindowStart = logReconcileTime(snapshot.failure.attemptWindowStart)
+			}
 		} else {
 			count := scopes[index].CollectorCount + 1
 			// Do not choose one duplicate's clocks or health as authoritative.
