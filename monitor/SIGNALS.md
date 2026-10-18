@@ -6632,6 +6632,16 @@ captured record identified a Redis-release error. Matching function/source lines
 support this phase distinction but do not identify the immutable emitting build;
 the retained stream labels contain no revision, image digest or release identity.
 
+A cleanup deadline does not identify a lock or failed connection. The admitted
+backend check and deletion reuse one session under the original page context;
+the first transaction's local SQL limits do not carry into cleanup. An
+acknowledged rollback that leaves this session open, idle and synchronized
+permits bounded advisory unlock and normal validated reuse, while retaining the
+deadline as an error. Closed, busy, non-idle or uncertain sessions, server
+connection errors and failed rollback or unlock still require disposal. This contains connection churn;
+it does not establish the timer's cause or close the two historical failures
+without emitter, phase/remaining-budget and journal-custody evidence.
+
 False-positive qualifier: this recovered panic boundary is not process death or
 proof of a lost debit. A post-commit cleanup failure can coexist with a correct
 financial debit and Redis release. Deterministic controls hold the actual balance
