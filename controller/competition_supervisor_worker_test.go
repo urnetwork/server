@@ -28,7 +28,6 @@ func TestCompetitionSupervisorWorkerRequestRequiresExactBoundedIdentity(t *testi
 	for _, mutate := range []func(*CompetitionSupervisorWorkerRequest){
 		func(value *CompetitionSupervisorWorkerRequest) { value.Operation = "run_latest" },
 		func(value *CompetitionSupervisorWorkerRequest) { value.Round.RoundId = server.Id{} },
-		func(value *CompetitionSupervisorWorkerRequest) { value.Round.Staging = true },
 		func(value *CompetitionSupervisorWorkerRequest) { value.Round.Epoch = 7 },
 		func(value *CompetitionSupervisorWorkerRequest) { value.Round.DecisionMode = "" },
 		func(value *CompetitionSupervisorWorkerRequest) { value.Lease.OwnerId = "" },

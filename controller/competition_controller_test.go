@@ -2600,7 +2600,10 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	for _, required := range []string{
 		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
-		`checkout --quiet -B sim-latency "$expected_commit"`,
+		`checkout --quiet -B "$source_branch" "$expected_commit"`,
+		`source_branch=sim-latency`,
+		`source_branch=sim-latency-staging`,
+		`com.urnetwork.competition.staging`,
 		`source_lock_sha256`,
 		`candidate_patch_sha256:null`,
 	} {

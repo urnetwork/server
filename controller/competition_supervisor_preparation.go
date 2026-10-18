@@ -15,7 +15,7 @@ import (
 // pins, vault access and containment settings retain their approved release.
 // Callers obtain the intent from the store, never from a worker request body.
 func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourceActivation) (*Settings, error) {
-	if settings == nil || intent == nil || !settings.AutomationPolicy.Enabled || intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.State == "abandoned" || intent.TargetRoundId == (server.Id{}) {
+	if !sourceModeMatches(settings, intent) || intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.State == "abandoned" || intent.TargetRoundId == (server.Id{}) {
 		return nil, ErrConflict
 	}
 	lock, err := model.CompetitionSourceLockDigest(intent.Commits)
@@ -37,7 +37,7 @@ func sourcePreparationReceiptsMatch(intent *model.CompetitionSourceActivation, r
 	}
 	roles := map[string]bool{}
 	for _, receipt := range receipts {
-		if (receipt.Role != "api" && receipt.Role != "worker") || roles[receipt.Role] || !receipt.Ready || receipt.Environment != intent.Environment || receipt.CompetitionId != intent.CompetitionId || receipt.SeasonId != intent.SeasonId || receipt.Generation != intent.Generation || receipt.TargetRoundId != intent.TargetRoundId ||
+		if (receipt.Role != "api" && receipt.Role != "worker") || roles[receipt.Role] || !receipt.Ready || receipt.Staging != intent.Staging || receipt.Environment != intent.Environment || receipt.CompetitionId != intent.CompetitionId || receipt.SeasonId != intent.SeasonId || receipt.Generation != intent.Generation || receipt.TargetRoundId != intent.TargetRoundId ||
 			receipt.ManifestCommit != intent.ManifestCommit || receipt.ManifestSha256 != intent.ManifestSha256 || receipt.SourceLockSha256 != intent.SourceLockSha256 || receipt.QualificationSha256 != intent.HostQualificationSha256 || !imageDigestPattern.MatchString(receipt.RuntimeImageDigest) || !tokenNamePattern.MatchString(receipt.ActorId) {
 			return ErrReviewNotReady
 		}
@@ -113,6 +113,6 @@ func AcknowledgeCompetitionSourceWorker(ctx context.Context, settings *Settings,
 	if !sourceWorkerHostReady(host, settings, intent) || settings.artifactArchive == nil || settings.artifactArchive.Check(ctx) != nil {
 		return errors.New("source_not_ready: exact-round worker host or archive qualification is incomplete")
 	}
-	return store.RecordSourceReadiness(ctx, settings, model.CompetitionSourceReadiness{Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation, TargetRoundId: intent.TargetRoundId, Role: "worker", ActorId: workerId,
+	return store.RecordSourceReadiness(ctx, settings, model.CompetitionSourceReadiness{Staging: intent.Staging, Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation, TargetRoundId: intent.TargetRoundId, Role: "worker", ActorId: workerId,
 		ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256, SourceLockSha256: intent.SourceLockSha256, RuntimeImageDigest: worker.workerImageDigest, QualificationSha256: host.QualificationSha256, Ready: true})
 }

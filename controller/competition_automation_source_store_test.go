@@ -46,6 +46,11 @@ func competitionAutomationSourceIntent(t testing.TB, fixture *competitionRanking
 	digest := sha256.Sum256(intent.Manifest)
 	intent.ManifestSha256 = hex.EncodeToString(digest[:])
 	intent.GitRefs["config"] = model.CompetitionSourceGitRef{Branch: "synthetic-config", ExpectedCommit: intent.ConfigExpectedCommit, Commit: intent.ManifestCommit}
+	if intent.Staging {
+		ref := intent.GitRefs["config"]
+		ref.Branch = "main"
+		intent.GitRefs["config"] = ref
+	}
 	return intent
 }
 
@@ -54,6 +59,7 @@ func acknowledgeCompetitionAutomationSource(t testing.TB, fixture *competitionRa
 	t.Helper()
 	for _, role := range roles {
 		if err := fixture.store.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
+			Staging:     intent.Staging,
 			Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation, TargetRoundId: intent.TargetRoundId,
 			Role: role, ActorId: "synthetic-" + role, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256,
 			SourceLockSha256: intent.SourceLockSha256, RuntimeImageDigest: testWorkerImageDigest(), QualificationSha256: intent.HostQualificationSha256, Ready: true,

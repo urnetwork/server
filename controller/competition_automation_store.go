@@ -50,7 +50,8 @@ func loadAutomationRoundInTx(ctx context.Context, tx server.PgTx, settings *Sett
 	if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
 		return nil, nil, ErrUnsupportedDecisionMode
 	}
-	if policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment || policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId {
+	if policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment || policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId ||
+		policy.AutomationPolicy.Staging != round.Staging || round.Staging != settings.AutomationPolicy.Staging {
 		return nil, nil, ErrConflict
 	}
 	return round, policy, nil
@@ -94,7 +95,7 @@ func automationDecision(seal *model.CompetitionEvaluationSeal, policy model.Comp
 		}
 	}
 	selected, reason := model.SelectCompetitionReward(seal.Entries, disqualifiedJobIds)
-	decision := model.CompetitionRewardDecision{RoundId: seal.RoundId, Environment: seal.Environment, CompetitionId: seal.CompetitionId, SeasonId: seal.SeasonId,
+	decision := model.CompetitionRewardDecision{Staging: seal.Staging, RoundId: seal.RoundId, Environment: seal.Environment, CompetitionId: seal.CompetitionId, SeasonId: seal.SeasonId,
 		Revision: 1, SealSha256: seal.SealSha256, Action: "elect", ReasonCode: reason, DecidedAt: now,
 		SettlementPolicyVersion: policy.SettlementPolicyVersion, BurnPolicyVersion: policy.BurnPolicyVersion, SettlementMode: policy.SettlementMode}
 	if previous != nil {
@@ -145,7 +146,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			if active != 0 {
 				panic(ErrReviewNotReady)
 			}
-			seal := model.CompetitionEvaluationSeal{RoundId: roundId, Environment: policy.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: policy.AutomationPolicy.SeasonId,
+			seal := model.CompetitionEvaluationSeal{Staging: round.Staging, RoundId: roundId, Environment: policy.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: policy.AutomationPolicy.SeasonId,
 				Epoch: round.Epoch, SealedAt: now, PublicationAt: now, TerminalCounts: map[string]int{}, Entries: []model.CompetitionSealedEntry{}}
 			if now.Before(round.RevealAt) {
 				seal.PublicationAt = round.RevealAt
@@ -221,7 +222,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 					}
 				})
 			}
-			seal.Entries, loadErr = model.RankCompetitionSealedEntries(seal.Entries, baselineRaw, policy.EvaluationPolicy.TakeoverMargin, excludedPatchKVs)
+			seal.Entries, loadErr = model.RankCompetitionSealedEntriesForMode(seal.Entries, baselineRaw, policy.EvaluationPolicy.TakeoverMargin, excludedPatchKVs, round.Staging)
 			server.Raise(loadErr)
 			seal.RankingSha256, loadErr = model.CompetitionAutomationDigest(seal.Entries)
 			server.Raise(loadErr)
@@ -252,6 +253,7 @@ func automationResultInTx(ctx context.Context, tx server.PgTx, roundId server.Id
 	}
 	server.Raise(tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&content))
 	server.Raise(json.Unmarshal(content, &result.Seal))
+	result.Staging = result.Seal.Staging
 	rows, err := tx.Query(ctx, `SELECT decision_json FROM competition_reward_decision WHERE round_id=$1 ORDER BY revision`, roundId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
@@ -449,7 +451,8 @@ func (self PostgresStore) RewardEvents(ctx context.Context, settings *Settings, 
 			page = &model.CompetitionRewardEventPage{Events: []model.CompetitionRewardEvent{}, NextCursor: afterCursor}
 			rows, queryErr := conn.Query(ctx, `SELECT event_cursor,event_id,payload_sha256,publication_at,payload_json FROM competition_reward_outbox
 	 WHERE payload_json->>'competition_id'=$1 AND payload_json->>'environment'=$2 AND payload_json->>'season_id'=$3 AND event_cursor>$4
-	 ORDER BY event_cursor LIMIT $5`, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, afterCursor, limit)
+	 AND COALESCE((payload_json->>'staging')::boolean,false)=$6
+	 ORDER BY event_cursor LIMIT $5`, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, afterCursor, limit, settings.AutomationPolicy.Staging)
 			server.WithPgResult(rows, queryErr, func() {
 				for rows.Next() {
 					var event model.CompetitionRewardEvent
@@ -492,6 +495,9 @@ func (self PostgresStore) RecordSettlementReceipt(ctx context.Context, settings 
 			server.Raise(tx.QueryRow(ctx, `SELECT payload_sha256,payload_json,publication_at FROM competition_reward_outbox WHERE event_id=$1 FOR UPDATE`, receipt.EventId).Scan(&digest, &content, &publicationAt))
 			var decision model.CompetitionRewardDecision
 			server.Raise(json.Unmarshal(content, &decision))
+			if decision.Staging != settings.AutomationPolicy.Staging || (decision.Staging && (decision.SettlementMode != "shadow" || receipt.ChainTransaction != "" || receipt.AppliedAt != nil || (receipt.Status != "received" && receipt.Status != "rejected"))) {
+				panic(ErrConflict)
+			}
 			if self.nowUtc().Before(publicationAt) || digest != receipt.PayloadSha256 || decision.DecisionSha256 != receipt.DecisionSha256 || decision.RoundId != receipt.RoundId || decision.Revision != receipt.Revision || decision.Environment != receipt.Environment || decision.CompetitionId != receipt.CompetitionId || decision.SeasonId != receipt.SeasonId {
 				panic(ErrConflict)
 			}
@@ -590,14 +596,14 @@ func (self PostgresStore) CreateAutomationRound(ctx context.Context, settings *S
 	if err != nil {
 		return nil, err
 	}
-	if intent.TargetRoundId == (server.Id{}) || intent.AbandonedAt != nil {
+	if !sourceModeMatches(settings, intent) || intent.TargetRoundId == (server.Id{}) || intent.AbandonedAt != nil {
 		return nil, ErrConflict
 	}
-	if intent.ActivatedAt == nil || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(opensAt)) || opensAt.Before(intent.PreparedAt.Add(16*time.Hour)) || opensAt.Before(*intent.ActivatedAt) {
+	if intent.ActivatedAt == nil || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(opensAt)) || opensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || opensAt.Before(*intent.ActivatedAt) {
 		return nil, ErrReviewNotReady
 	}
 	// A retry after a committed creation returns that exact round without preparing a replacement workload.
-	current, err := self.CurrentRound(ctx, settings)
+	current, err := self.CurrentAutomationRound(ctx, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -621,8 +627,17 @@ func (self PostgresStore) CreateAutomationRound(ctx context.Context, settings *S
 	frozen.EvaluatorImageDigest = intent.EvaluatorImageDigest
 	frozen.EvaluationPolicy.TakeoverMargin = intent.Threshold
 	frozen.EvaluationPolicy.HostQualificationSha256 = intent.HostQualificationSha256
-	args := GenerateRoundArgs{OpensAt: opensAt, ClosesAt: opensAt.Add(7 * 24 * time.Hour), RevealAt: opensAt.Add(7 * 24 * time.Hour)}
-	round, err := self.CreateRound(ctx, &frozen, args)
+	window := 7 * 24 * time.Hour
+	if intent.Staging {
+		window = time.Duration(intent.StagingRoundWindowSeconds) * time.Second
+	}
+	args := GenerateRoundArgs{OpensAt: opensAt, ClosesAt: opensAt.Add(window), RevealAt: opensAt.Add(window)}
+	var round *roundRecord
+	if intent.Staging {
+		round, err = self.createAutomationStagingRound(ctx, &frozen, args)
+	} else {
+		round, err = self.CreateRound(ctx, &frozen, args)
+	}
 	if err != nil {
 		return nil, err
 	}

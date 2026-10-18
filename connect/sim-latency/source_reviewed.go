@@ -26,6 +26,7 @@ import (
 // execution boundary, not a caller's unsupported "build passed" assertion.
 type reviewedSourceBuildReceipt struct {
 	Schema                  int       `json:"schema"`
+	Staging                 bool      `json:"staging,omitempty"`
 	ReviewId                server.Id `json:"review_id"`
 	PatchSha256             string    `json:"patch_sha256"`
 	SourceLockSha256        string    `json:"source_lock_sha256"`
@@ -46,6 +47,7 @@ type reviewedSourceBuildReceipt struct {
 // Choice later rechecks genuine approval and the unchanged evaluated base.
 type reviewedSourceProposal struct {
 	Schema               int                        `json:"schema"`
+	Staging              bool                       `json:"staging,omitempty"`
 	ReviewId             server.Id                  `json:"review_id"`
 	JobId                server.Id                  `json:"job_id"`
 	SubmittedAt          time.Time                  `json:"submitted_at"`
@@ -67,6 +69,12 @@ type reviewedSourceProposal struct {
 // Projects statistical fields while retaining the separately authenticated
 // archived score-file identity supplied by the sealed review boundary.
 func reviewedSourceSignificance(approved *controller.CompetitionReviewedSource) (*sourceSignificance, error) {
+	return reviewedSourceSignificanceForMode(approved, false)
+}
+
+// Preserves the signed statistics and archived digest for the explicit mode.
+// A staging score must itself have been evaluated at zero takeover margin.
+func reviewedSourceSignificanceForMode(approved *controller.CompetitionReviewedSource, staging bool) (*sourceSignificance, error) {
 	if approved == nil || !validSha256(approved.ScoreSha256) {
 		return nil, errors.New("reviewed source lacks its archived score identity")
 	}
@@ -74,7 +82,7 @@ func reviewedSourceSignificance(approved *controller.CompetitionReviewedSource) 
 	if err != nil {
 		return nil, err
 	}
-	significance, err := winnerSourceSignificance(&approved.Score, content)
+	significance, err := winnerSourceSignificanceForMode(&approved.Score, content, staging)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +93,12 @@ func reviewedSourceSignificance(approved *controller.CompetitionReviewedSource) 
 // A real sandbox receipt is required even for a reviewed candidate: review
 // authority never authorizes candidate execution in the main host environment.
 func validateReviewedSourceBuild(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string) error {
-	if receipt.Schema != 1 || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
+	return validateReviewedSourceBuildForMode(receipt, reviewId, patchDigest, lockDigest, false)
+}
+
+// Binds independent image qualification to the explicit mode as well as pins.
+func validateReviewedSourceBuildForMode(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool) error {
+	if receipt.Schema != 1 || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
 		!receipt.Passed || !receipt.Offline || !receipt.NoMainCredentials || !receipt.ReadOnlySource || receipt.SandboxId == "" ||
 		receipt.TestModel != "gpt-6-sol" || receipt.TestReasoning != "medium" ||
 		!strings.HasPrefix(receipt.EvaluatorImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(receipt.EvaluatorImageDigest, "sha256:")) ||
@@ -98,15 +111,19 @@ func validateReviewedSourceBuild(receipt reviewedSourceBuildReceipt, reviewId se
 // Selects only a completed, applicable proposal at the frozen deadline. Exact
 // raw score, admission time, and job id retain the original sealed ranking.
 func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *model.CompetitionSourceActivation, deadline time.Time) *reviewedSourceProposal {
+	if current == nil || !validSourceMargin(current.Threshold*100, current.Staging) {
+		return nil
+	}
 	eligible := []reviewedSourceProposal{}
 	for _, proposal := range proposals {
-		if proposal.Schema != 2 || proposal.JobId == (server.Id{}) || proposal.SubmittedAt.IsZero() || proposal.BaseSourceLockSha256 != current.SourceLockSha256 || proposal.ReadyAt.IsZero() || proposal.ReviewedAt.IsZero() ||
-			proposal.ReadyAt.After(deadline) || proposal.ReviewedAt.After(deadline) || !finitePositive(proposal.RawScore) || validateSourceSignificance(proposal.Significance) != nil ||
+		if proposal.Schema != 2 || proposal.Staging != current.Staging || proposal.ReviewId == (server.Id{}) || !validSha256(proposal.ReviewDecisionDigest) ||
+			proposal.JobId == (server.Id{}) || proposal.SubmittedAt.IsZero() || proposal.BaseSourceLockSha256 != current.SourceLockSha256 || proposal.ReadyAt.IsZero() || proposal.ReviewedAt.IsZero() ||
+			proposal.ReadyAt.After(deadline) || proposal.ReviewedAt.After(deadline) || !finitePositive(proposal.RawScore) || validateSourceSignificanceForMode(proposal.Significance, current.Staging) != nil ||
 			proposal.Significance.RecommendedNextEpochTakeoverMarginPercent < current.Threshold*100 {
 			continue
 		}
 		lockDigest, err := model.CompetitionSourceLockDigest(proposal.Commits)
-		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuild(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest) != nil {
+		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuildForMode(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging) != nil {
 			continue
 		}
 		applicable := proposal.Commits["server"] != current.Commits["server"]
@@ -174,6 +191,10 @@ func (self *sourceSupervisorRuntime) readySourceProposal(ctx context.Context, cu
 			!approved.Review.CreatedAt.Equal(proposal.ReviewedAt) || approved.EvaluatedImageDigest != proposal.EvaluatedImageDigest || approved.Score.RawScore == nil || *approved.Score.RawScore != proposal.RawScore {
 			continue
 		}
+		authenticatedSignificance, err := reviewedSourceSignificanceForMode(approved, current.Staging)
+		if err != nil || *authenticatedSignificance != *proposal.Significance {
+			continue
+		}
 		proposals = append(proposals, proposal)
 	}
 	return selectReviewedSourceProposal(proposals, current, deadline), nil
@@ -198,6 +219,9 @@ func runStageReviewedSource(opts docopt.Opts) {
 	current, err := store.CurrentSourceActivation(ctx, settings)
 	if err != nil {
 		fatalf("source incumbent: %s", err)
+	}
+	if err := validateSourceActivationMode(current, settings); err != nil {
+		fatalf("source incumbent mode: %s", err)
 	}
 	approved, err := store.ReviewedSource(ctx, settings, reviewId)
 	if err != nil {
@@ -224,7 +248,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		fatalf("source proposal: %s", err)
 	}
-	_, repositoriesRoot, lock, err := configuredSourcePaths(opts)
+	_, repositoriesRoot, lock, err := configuredSourcePathsForMode(opts, settings.AutomationPolicy.Staging)
 	if err != nil || lock != "" {
 		fatalf("source stage requires host-only paths: %v", err)
 	}
@@ -236,7 +260,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err := writePrivateReviewFile(patchPath, approved.Patch); err != nil {
 		fatalf("source patch: %s", err)
 	}
-	proposal := &reviewedSourceProposal{Schema: 2, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
+	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
 		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, EvaluatedImageDigest: approved.EvaluatedImageDigest}
 	for _, repository := range sourceRepositoryNames() {
 		origin, err := sourceGitText(ctx, filepath.Join(repositoriesRoot, repository), "remote", "get-url", "origin")
@@ -269,7 +293,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 				fatalf("source commit identity: %s", err)
 			}
 			backend := &gitSourcePublicationBackend{patchPolicy: approved.PatchPolicy}
-			if err := backend.Verify(ctx, sourcePublicationRef{Repository: "server", Branch: "sim-latency", ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
+			if err := backend.Verify(ctx, sourcePublicationRef{Repository: "server", Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
 				fatalf("exact approved source tree: %s", err)
 			}
 		}
@@ -278,7 +302,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err != nil {
 		fatalf("source lock: %s", err)
 	}
-	proposal.Significance, err = reviewedSourceSignificance(approved)
+	proposal.Significance, err = reviewedSourceSignificanceForMode(approved, current.Staging)
 	if err != nil {
 		fatalf("source significance: %s", err)
 	}
@@ -298,7 +322,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(output, &proposal.BuildReceipt, "isolated build receipt"); err != nil {
 		fatalf("source build receipt: %s", err)
 	}
-	if err := validateReviewedSourceBuild(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256); err != nil {
+	if err := validateReviewedSourceBuildForMode(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256, current.Staging); err != nil {
 		fatalf("source build readiness: %s", err)
 	}
 	// The trusted local completion time prevents an adapter from backdating a

@@ -16,6 +16,7 @@ policy_path=""
 source_root=""
 image_tag=""
 allow_local_base=false
+staging=false
 original_args=("$@")
 
 # Exit 2 is reserved for evaluator/tooling failures; the caller must not turn
@@ -27,12 +28,16 @@ infrastructure_failure() {
 
 usage() {
     printf '%s\n' \
-        'usage: build-submission.sh --base-image IMAGE@sha256:DIGEST --source-root DIR --patch FILE --policy FILE [--tag IMAGE]' \
-        '       build-submission.sh --allow-local-base --base-image LOCAL_IMAGE --source-root DIR --patch FILE --policy FILE [--tag IMAGE]'
+        'usage: build-submission.sh --base-image IMAGE@sha256:DIGEST --source-root DIR --patch FILE --policy FILE [--tag IMAGE] [--staging]' \
+        '       build-submission.sh --allow-local-base --base-image LOCAL_IMAGE --source-root DIR --patch FILE --policy FILE [--tag IMAGE] [--staging]'
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --staging)
+            staging=true
+            shift
+            ;;
         --base-image|--source-root|--patch|--policy|--tag)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
             case "$1" in
@@ -97,6 +102,17 @@ policy_path="$(realpath -e "$policy_path")"
 source_root="$(realpath -e "$source_root")"
 
 base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
+image_staging="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
+source_branch=sim-latency
+if [ "$staging" = true ]; then
+    [ "$image_staging" = true ] || infrastructure_failure "staging build requires an explicitly staging evaluator image"
+    source_branch=sim-latency-staging
+else
+    case "$image_staging" in
+        false|''|'<no value>') ;;
+        *) infrastructure_failure "production build cannot use a staging evaluator image" ;;
+    esac
+fi
 base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
 image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
 source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
@@ -134,12 +150,13 @@ source_identity="$source_root/.evaluation-source.json"
     exit 1
 }
 jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
+    --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' \
     '. as $identity |
      .schema == 1 and .kind == "sim-latency-evaluation-source" and
      .temporary == true and .base_image_id == $base_image_id and
-     .base_sha == $base_sha and .branch == "sim-latency" and
+     .base_sha == $base_sha and .branch == $branch and ((.staging // false) == $staging) and
      .source_lock_sha256 == $source_lock_sha256 and
      .candidate_patch_sha256 == null and
      ((.repositories | keys) == ($repositories | sort)) and
@@ -162,7 +179,7 @@ for repository in server connect sdk proxy glog goidenticons userwireguard sn op
         infrastructure_failure "could not read evaluation $repository source commit"
     source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
         infrastructure_failure "could not inspect evaluation $repository source worktree"
-    [ "$actual_branch" = sim-latency ] && [ "$actual_commit" = "$expected_commit" ] &&
+    [ "$actual_branch" = "$source_branch" ] && [ "$actual_commit" = "$expected_commit" ] &&
         [ -z "$source_status" ] ||
         infrastructure_failure "evaluation source repository does not match its temporary source identity: $repository"
 done
@@ -213,7 +230,7 @@ candidate_branch="$(git -C "$source_root/server" symbolic-ref --quiet --short HE
     infrastructure_failure "could not read the candidate source branch"
 candidate_status="$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all)" ||
     infrastructure_failure "could not inspect the candidate source worktree"
-[ "$candidate_branch" = sim-latency ] && [ -z "$candidate_status" ] ||
+[ "$candidate_branch" = "$source_branch" ] && [ -z "$candidate_status" ] ||
     infrastructure_failure "committed candidate source is not clean on the temporary branch"
 candidate_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
     infrastructure_failure "could not read the candidate protected sim-latency source tree"

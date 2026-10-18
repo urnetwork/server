@@ -17,29 +17,39 @@ import (
 	"testing"
 )
 
-// A real immutable module read catches newly required measured dependencies.
-// Current main may require other local repositories for its control plane.
+// Audit the repository under test through a private immutable Git object. The
+// operator's deployed checkpoint may intentionally preserve historical pins;
+// it must never choose this regression's input or require live Git access.
 func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
-	root, err := findRepositoriesRoot()
+	moduleBytes, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := findSourceConfig(root)
-	if err != nil {
+	root := t.TempDir()
+	sourceTestRepository(t, root, "server")
+	serverRoot := filepath.Join(root, "server")
+	if err := os.WriteFile(filepath.Join(serverRoot, "go.mod"), moduleBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := loadSourceManifest(path)
-	if err != nil {
+	sourceTestGit(t, serverRoot, "add", "--", "go.mod")
+	sourceTestGit(t, serverRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic repository-under-test module snapshot")
+	commit := sourceTestGit(t, serverRoot, "rev-parse", "HEAD")
+	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, commit); err != nil {
 		t.Fatal(err)
 	}
-	var commit string
-	if manifest.Schema == 2 {
-		commit = manifest.EvaluationSource.Generations[len(manifest.EvaluationSource.Generations)-1].Repositories.Server.Commit
-	} else {
-		commit = manifest.EvaluationSource.Epochs[len(manifest.EvaluationSource.Epochs)-1].Repositories.Server.Commit
-	}
-	if err := verifyFrozenSourceGraph(context.Background(), filepath.Join(root, "server"), commit); err != nil {
-		t.Fatal(err)
+}
+
+// Removing the operational-checkpoint dependency from the graph test must not
+// make historical ten-repository manifests eligible for a new activation.
+func TestSourceRepositoryManifestRejectsMissingGvisorForNewActivation(t *testing.T) {
+	production := reviewedSourceTestManifest(t)
+	production.EvaluationSource.Epochs = nil
+	staging := stagingSourceTestManifest(t)
+	for _, manifest := range []*sourceManifest{production, staging} {
+		manifest.EvaluationSource.Generations[0].Repositories.Gvisor.Commit = ""
+		if err := validateSourceManifest(manifest); err == nil || !strings.Contains(err.Error(), "repository gvisor has an invalid commit") {
+			t.Fatalf("staging=%t: new activation accepted missing required gvisor pin: %v", manifest.Staging, err)
+		}
 	}
 }
 
@@ -509,6 +519,7 @@ case $1 in
         [[ $2 == inspect && $3 == --format ]]
         case $4 in
             '{{.Id}}') printf '%s\n' "$SOURCE_TEST_IMAGE_ID" ;;
+            *competition.staging*) printf '%s\n' "$SOURCE_TEST_IMAGE_STAGING" ;;
             *image-kind*) printf '%s\n' evaluator-base ;;
             *base-sha*) git -C "$SOURCE_TEST_IMAGE_ROOT/server" rev-parse HEAD ;;
             *source-epoch*) printf '%s\n' 0 ;;
@@ -555,9 +566,14 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		extra      string
 		change     string
 		failStatus bool
+		staging    bool
+		imageStage bool
 		wantErr    string
 	}{
 		{name: "complete"},
+		{name: "explicit-staging", staging: true, imageStage: true},
+		{name: "staging-rejects-production-image", staging: true, wantErr: "staging source requires an explicitly staging evaluator image"},
+		{name: "production-rejects-staging-image", imageStage: true, wantErr: "production source cannot use a staging evaluator image"},
 		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
 		{name: "missing-operator-proxy", omit: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "missing-warp", omit: "warp", wantErr: "source lock is malformed"},
@@ -586,11 +602,16 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 			t.Fatal(err)
 		}
 		destination := filepath.Join(root, fixture.name)
-		command := exec.Command("bash", "evaluator/container/prepare-evaluation-source.sh", "--base-image", imageId, "--destination", destination)
+		arguments := []string{"evaluator/container/prepare-evaluation-source.sh", "--base-image", imageId, "--destination", destination}
+		if fixture.staging {
+			arguments = append(arguments, "--staging")
+		}
+		command := exec.Command("bash", arguments...)
 		command.Env = append(os.Environ(),
 			"PATH="+commandRoot+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"SOURCE_TEST_IMAGE_ROOT="+imageRoot,
 			"SOURCE_TEST_IMAGE_ID="+imageId,
+			fmt.Sprintf("SOURCE_TEST_IMAGE_STAGING=%t", fixture.imageStage),
 			"SOURCE_TEST_REAL_GIT="+gitPath,
 			fmt.Sprintf("SOURCE_TEST_FAIL_STATUS=%t", fixture.failStatus),
 		)
@@ -608,13 +629,15 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 			t.Fatalf("prepare complete source: %v: %s", err, output)
 		}
 		var identity struct {
+			Staging      bool              `json:"staging"`
+			Branch       string            `json:"branch"`
 			BaseImageId  string            `json:"base_image_id"`
 			Repositories map[string]string `json:"repositories"`
 		}
 		if err := json.Unmarshal(output, &identity); err != nil {
 			t.Fatal(err)
 		}
-		if identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, repositoryCommits) {
+		if identity.Staging != fixture.staging || identity.Branch != sourceBranch(fixture.staging) || identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, repositoryCommits) {
 			t.Fatalf("prepared source identity = %+v, want image %s and repositories %v", identity, imageId, repositoryCommits)
 		}
 		moduleBytes, err := os.ReadFile(filepath.Join(destination, "connect", nestedModulePath))
@@ -623,7 +646,7 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		}
 		for _, repository := range sourceRepositoryNames() {
 			preparedRoot := filepath.Join(destination, repository)
-			if branch := sourceTestGit(t, preparedRoot, "symbolic-ref", "--short", "HEAD"); branch != "sim-latency" {
+			if branch := sourceTestGit(t, preparedRoot, "symbolic-ref", "--short", "HEAD"); branch != sourceBranch(fixture.staging) {
 				t.Errorf("prepared %s branch = %s", repository, branch)
 			}
 			if status := sourceTestGit(t, preparedRoot, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {

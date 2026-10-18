@@ -72,7 +72,7 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 			server.Raise(json.Unmarshal(sealJson, &packet.Seal))
 			policy, err := decodeRoundPolicySnapshot(policyJson)
 			server.Raise(err)
-			if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled || policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment ||
+			if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled || policy.AutomationPolicy.Staging != settings.AutomationPolicy.Staging || packet.Seal.Staging != settings.AutomationPolicy.Staging || policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment ||
 				policy.AutomationPolicy.SeasonId != settings.AutomationPolicy.SeasonId {
 				panic(ErrConflict)
 			}
@@ -99,7 +99,7 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 			server.Raise(json.Unmarshal(intentJson, &intent))
 			lock, err := model.CompetitionSourceLockDigest(intent.Commits)
 			server.Raise(err)
-			if intent.TargetRoundId != roundId || lock != packet.Entry.BaseSourceLockSha256 || intent.Commits["server"] != packet.BaseSha ||
+			if intent.Staging != policy.AutomationPolicy.Staging || intent.TargetRoundId != roundId || lock != packet.Entry.BaseSourceLockSha256 || intent.Commits["server"] != packet.BaseSha ||
 				intent.SourceGeneration != policy.AutomationPolicy.SourceGeneration || intent.EvaluatorImageDigest != packet.EvaluatedImageDigest {
 				panic(ErrConflict)
 			}
