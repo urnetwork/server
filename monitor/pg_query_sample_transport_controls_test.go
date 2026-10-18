@@ -71,13 +71,8 @@ func TestPgTransportAuthorityInjectedSuccessKeepsNativeUnknown(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), nonce) {
 			t.Fatal("private attempt nonce entered argv")
 		}
-		var stderr strings.Builder
-		for _, phase := range []string{"remote_started", "database_identity"} {
-			raw, _ := json.Marshal(map[string]any{"schema": 1, "nonce": nonce, "phase": phase})
-			fmt.Fprintln(&stderr, "monitor-pg-phase "+string(raw))
-		}
-		stderr.WriteString("private-pg-transport-stderr-canary\n")
-		return pgSampleTestEncode(t, pgSampleTestFrames(env.now())), stderr.String(), nil
+		stderr := pgCompletedProgressStream(nonce, 12, true) + "private-pg-transport-stderr-canary\n"
+		return pgSampleTestEncode(t, pgSampleTestFrames(env.now())), stderr, nil
 	})
 	if _, err := (pgQuerySampleProbe{}).check(t.Context(), env); err != nil {
 		t.Fatal(err)
@@ -89,6 +84,9 @@ func TestPgTransportAuthorityInjectedSuccessKeepsNativeUnknown(t *testing.T) {
 	}
 	if proof.RemainingBudgetMs <= 0 || proof.RemainingBudgetMs > 40000 || strings.Contains(string(raw), nonce) {
 		t.Fatal("receipt reset its owner or retained its nonce")
+	}
+	if pgCompletedProgressReceipt(t, raw).Frames != nil {
+		t.Fatal("injected callback invented observed remote sample frames")
 	}
 }
 

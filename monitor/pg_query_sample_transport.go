@@ -26,11 +26,13 @@ type pgSampleTransportObservation struct {
 }
 
 // Finite source facts only. Joined covers the local SSH process and its pipes,
-// not remote descendants. Remote progress is neither SQL authority nor health.
+// not remote descendants. Completed response headers are neither valid samples
+// nor SQL authority. Missing/legacy frame counts remain unknown, never zero.
 type pgSampleTransportReceipt struct {
 	Phase                           string                  `json:"phase"`
 	Spawn                           string                  `json:"spawn"`
 	RemotePhase                     string                  `json:"remote_phase"`
+	RemoteSampleFramesObserved      *int                    `json:"remote_sample_frames_observed"`
 	RemainingBudgetMs               int64                   `json:"remaining_budget_ms"`
 	RunSlotWaitMs                   *int64                  `json:"run_slot_wait_ms,omitempty"`
 	RunSlotGrantedRemainingBudgetMs *int64                  `json:"run_slot_granted_remaining_budget_ms,omitempty"`
@@ -323,17 +325,20 @@ func (self *pgSampleTransportObservation) joined(state *os.ProcessState, stderr 
 			self.receipt.NativeExitCode = &exitCode
 		}
 	}
-	self.receipt.RemotePhase, self.receipt.ProgressStatus = parsePgSampleTransportProgress(stderr, self.nonce)
+	self.receipt.RemotePhase, self.receipt.ProgressStatus, self.receipt.RemoteSampleFramesObserved = parsePgSampleTransportProgress(stderr, self.nonce)
 }
 
 // Only complete, ordered records for this private stdin nonce count. Valid
 // foreign records do not consume its lane. Malformed/capped input keeps remote
 // progress unknown; none of the raw bytes or correlation nonce is retained.
-func parsePgSampleTransportProgress(stderr, nonce string) (string, string) {
+// Version2 has at most 17 records; its last result never names a failed operation.
+func parsePgSampleTransportProgress(stderr, nonce string) (string, string, *int) {
 	if len(stderr) > 4*1024 {
-		return "unknown", "capped"
+		return "unknown", "capped", nil
 	}
 	phase, status := "unknown", "absent"
+	version, records := 0, 0
+	var observed *int
 	for _, line := range strings.SplitAfter(stderr, "\n") {
 		const prefix = "monitor-pg-phase "
 		if !strings.HasPrefix(line, prefix) {
@@ -341,11 +346,11 @@ func parsePgSampleTransportProgress(stderr, nonce string) (string, string) {
 		}
 		raw := strings.TrimPrefix(line, prefix)
 		if !pgSampleUniqueObject(raw) {
-			return "unknown", "invalid"
+			return "unknown", "invalid", nil
 		}
 		var fields map[string]json.RawMessage
 		if json.Unmarshal([]byte(raw), &fields) != nil {
-			return "unknown", "invalid"
+			return "unknown", "invalid", nil
 		}
 		var routedNonce string
 		if json.Unmarshal(fields["nonce"], &routedNonce) != nil || routedNonce != nonce {
@@ -353,13 +358,45 @@ func parsePgSampleTransportProgress(stderr, nonce string) (string, string) {
 		}
 		var schema int
 		var next string
-		if !strings.HasSuffix(line, "\n") || len(fields) != 3 || json.Unmarshal(fields["schema"], &schema) != nil || schema != 1 || json.Unmarshal(fields["phase"], &next) != nil {
-			return "unknown", "invalid"
+		if !strings.HasSuffix(line, "\n") || json.Unmarshal(fields["schema"], &schema) != nil || (schema != 1 && schema != 2) || (version != 0 && version != schema) || json.Unmarshal(fields["phase"], &next) != nil {
+			return "unknown", "invalid", nil
 		}
-		if !((phase == "unknown" && next == "remote_started") || (phase == "remote_started" && next == "database_identity")) {
-			return "unknown", "invalid"
+		if schema == 1 {
+			// The old two-record protocol has no observed-frame count. Never
+			// upgrade that absence to zero or combine versions in one attempt.
+			if len(fields) != 3 || !((phase == "unknown" && next == "remote_started") || (phase == "remote_started" && next == "database_identity")) {
+				return "unknown", "invalid", nil
+			}
+		} else {
+			var samples *int
+			if len(fields) != 4 || json.Unmarshal(fields["samples"], &samples) != nil || samples == nil {
+				return "unknown", "invalid", nil
+			}
+			wantPhase, wantSamples := "", 0
+			switch {
+			case records == 0:
+				wantPhase = "remote_started"
+			case records == 1:
+				wantPhase = "database_identity"
+			case records == 2:
+				wantPhase = "history_start"
+			case 3 <= records && records <= 14:
+				wantPhase, wantSamples = "activity", records-2
+			case records == 15:
+				wantPhase, wantSamples = "blockers", 12
+			case records == 16:
+				wantPhase, wantSamples = "history_end", 12
+			default:
+				return "unknown", "invalid", nil
+			}
+			if next != wantPhase || *samples != wantSamples {
+				return "unknown", "invalid", nil
+			}
+			observed = samples
 		}
+		version = schema
+		records++
 		phase, status = next, "valid"
 	}
-	return phase, status
+	return phase, status, observed
 }
