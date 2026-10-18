@@ -1211,6 +1211,15 @@ that budget; require an immediate qualified coverage failure, never an invented
 completion. Startup priority must leave standing log ingestion running and
 delay ordinary active probes by at most the same finite owner. Recurring
 priority must include an ordinary-work fairness control.
+For a late global grant, inspect the optional fixed `run_slot_holders` enqueue
+and pre-grant snapshots in that same receipt. Their at-most-four code-owned
+signal keys and monotonic grant ages identify the calls holding permits, not
+their internal work or whether the delay was avoidable. Unknown keys, invalid
+clocks and unavailable snapshots remain explicit; two snapshots are not a
+complete grant/release timeline. Follow the observed owning signal before
+proposing a scheduling change. Preserve the inclusive 40-second owner, existing caps,
+cadence and first-miss coverage alert; observation alone does not fix sampling
+availability or explain a historical receipt without these facts.
 Gate the actual remote adapter against bounded local executable/connection,
 SQL authority/schema/PGSS, statement-timeout, capped-stderr/output and stalled
 child controls, with a complete12-frame healthy parser control. Psql phase

@@ -4790,6 +4790,34 @@ the active holders or prove their source/host condition. Direct probes and
 older receipts without these facts keep grant timing unknown. Admission order,
 the queue-inclusive owner, caps and no-early-retry cadence are unchanged.
 
+Scheduled receipts can also retain `run_slot_holders` schema1 with two bounded
+snapshots: `enqueued`, under the global pool lock before this request joins the
+queue, and `before_grant`, after a permit becomes available but before this
+request receives it. Each records a monotonic `captured_ns` offset from the
+existing run-slot request, an `active` count and at most four holders. A holder
+has only a code-owned catalog `signal_key` (otherwise fixed `unknown`) and its
+monotonic `grant_age_ns`. Caller-provided signal keys are matched against the
+static registry before projection; arbitrary labels, host details, commands,
+SQL, credentials and private identities are excluded. The sampler's new grant
+is absent from its own pre-grant snapshot. Exact grant/cancellation/release
+ownership removes only the ended holder, and later changes do not mutate either
+captured snapshot. Observation data never selects a grant or changes capacity.
+
+`status=ok` qualifies the snapshot's occupancy and clocks, not workload health
+or the identity of an `unknown` key. `clock_invalid` retains known occupancy but
+withholds capture offset and all grant ages. `unavailable` withholds the holder
+list when bounded bookkeeping cannot establish complete occupancy. Legacy
+receipts and direct probes omit the block. A request canceled before admission
+still creates no durable PG receipt; it does not acquire an invented grant.
+These two snapshots identify owning signals for focused source review. They
+are not a release timeline, source-operation timing, CPU attribution, a verdict
+that occupancy was avoidable, or proof that the same key denotes one grant
+across both captures. They cannot reconstruct older missing holder evidence.
+Global permits still cover the entire `Signal.Run` call, including subordinate
+admission and cleanup, and end before the alert handler or cadence wait. The
+inclusive 40-second owner, native 22-second minimum and global-four/host-two
+caps are unchanged; a lawful wait over 18 seconds can still prevent sampling.
+
 New PG receipts optionally include fixed-schema `local_phase_timing` offsets
 in nanoseconds from the original monotonic run-slot request, or explicitly
 `sampler_observer_entry` when request timing is unavailable. Named aggregate
