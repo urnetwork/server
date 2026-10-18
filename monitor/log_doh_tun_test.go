@@ -30,6 +30,11 @@ func TestProxyTunDohDialTimeoutIsProviderPathEvidence(t *testing.T) {
 	if finding.healthy || finding.tier != tierWarn || finding.frame != "doh-tun-attempt" {
 		t.Fatalf("tun-path legs lost their bounded warning: healthy=%t tier=%s frame=%s", finding.healthy, finding.tier, finding.frame)
 	}
+	// a measured timeout must not hide other log incidents' recovery
+	alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", finding)
+	if alert.Severity != SeverityWarn || isVisibilityAlert(alert) {
+		t.Fatalf("measured tun timeout must remain an observable WARN: severity=%s visibility=%t", alert.Severity, isVisibilityAlert(alert))
+	}
 	for _, want := range []string{"path=tun", "resolver_outcome=canceled"} {
 		if !strings.Contains(finding.evidence, want) {
 			t.Errorf("bounded sample omitted %s: %s", want, finding.evidence)
