@@ -1220,6 +1220,16 @@ complete grant/release timeline. Follow the observed owning signal before
 proposing a scheduling change. Preserve the inclusive 40-second owner, existing caps,
 cadence and first-miss coverage alert; observation alone does not fix sampling
 availability or explain a historical receipt without these facts.
+Global holder snapshots cannot partition shared SSH admission into recovery,
+queue-file locking, publication or capacity waiting. The shared span still
+measures that whole acquisition; do not assign its elapsed time to a subphase
+without evidence from that interval.
+For a started but incomplete sample, inspect the nullable completed-frame count
+and last remote progress boundary in its receipt. They survive native owner
+cancellation when complete nonce-matched records arrived. They cannot identify
+the next failed SQL operation or turn missing samples into a healthy result;
+older receipts and version 1 progress have an unknown count. Preserve the
+first-miss cannot-observe finding and its original phase/cause.
 Gate the actual remote adapter against bounded local executable/connection,
 SQL authority/schema/PGSS, statement-timeout, capped-stderr/output and stalled
 child controls, with a complete12-frame healthy parser control. Psql phase

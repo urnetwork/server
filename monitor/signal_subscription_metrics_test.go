@@ -204,8 +204,15 @@ func TestSubscriptionMetricsDashboardFailuresStayDistinctAndPrivate(t *testing.T
 		wantClass string
 	}{
 		{status: http.StatusUnauthorized, body: privateMarker, wantClass: "subscription-dashboard-auth"},
+		{status: http.StatusForbidden, body: privateMarker, wantClass: "subscription-dashboard-auth"},
 		{status: http.StatusNotFound, body: privateMarker, wantClass: "subscription-dashboard-missing"},
+		{status: http.StatusFound, body: privateMarker, wantClass: "subscription-dashboard-http"},
 		{status: http.StatusServiceUnavailable, body: privateMarker, wantClass: "subscription-dashboard-http"},
+		{
+			status:    http.StatusTooManyRequests,
+			body:      `{"dashboard":{"uid":"` + subscriptionMetricsDashboardUid + `","title":"` + subscriptionMetricsDashboardTitle + `","private":"` + privateMarker + `"}}`,
+			wantClass: "subscription-dashboard-http",
+		},
 		{
 			status:    http.StatusOK,
 			body:      `{"dashboard":{"uid":"synthetic-wrong-uid","title":"synthetic wrong title","private":"` + privateMarker + `"}}`,
@@ -236,7 +243,136 @@ func TestSubscriptionMetricsDashboardFailuresStayDistinctAndPrivate(t *testing.T
 			t.Errorf("dashboard status %d alerts = %+v, want %s", test.status, alerts, test.wantClass)
 			continue
 		}
+		alert := alerts[0]
+		wantIdentity := "observability/subscription-metrics|" + test.wantClass + "|" + settings.Environment + "-grafana." + settings.PublicDomain + "/" + subscriptionMetricsDashboardUid + "|"
+		if alert.Identity() != wantIdentity || alert.Severity != SeverityPage || alert.Sustain != 2 {
+			t.Errorf("dashboard status %d changed alert identity, severity, or sustain: %+v", test.status, alert)
+		}
+		if 200 <= test.status && test.status < 300 {
+			if !strings.Contains(alert.Observed, "identity_observed=true uid_matches=false title_matches=false") {
+				t.Errorf("decoded mismatched identity is unqualified: %s", alert.Observed)
+			}
+		} else if alert.Observed != fmt.Sprintf("http_status=%d identity_observed=false", test.status) {
+			t.Errorf("non-2xx response claimed dashboard identity: %s", alert.Observed)
+		}
+		switch test.wantClass {
+		case "subscription-dashboard-http":
+			if !strings.Contains(alert.Mechanism, "responding component, dashboard presence, and dashboard identity remain unknown") ||
+				!strings.Contains(alert.Action, "bounded same-window") {
+				t.Errorf("status-only response lacks attribution boundary: %+v", alert)
+			}
+			requireAlertOmits(t, alert, "Repair Grafana authentication", "load-defaults", "Grafana returned", "uid_matches=", "title_matches=")
+		case "subscription-dashboard-auth":
+			if !strings.Contains(alert.Action, "admin credential") || !strings.Contains(alert.Action, "authentication policy") {
+				t.Errorf("authentication response lacks credential/policy action: %s", alert.Action)
+			}
+			requireAlertOmits(t, alert, "load-defaults", "uid_matches=", "title_matches=")
+		case "subscription-dashboard-missing":
+			if !strings.Contains(alert.Action, "Confirm the 404 came from the intended Grafana API") || !strings.Contains(alert.Action, "load-defaults") {
+				t.Errorf("missing response lacks qualified publication action: %s", alert.Action)
+			}
+		case "subscription-dashboard-identity":
+			if !strings.Contains(alert.Action, "load-defaults") {
+				t.Errorf("identity mismatch lacks publication action: %s", alert.Action)
+			}
+		}
 		requireAlertOmits(t, alerts[0], password, privateMarker, "synthetic-wrong-uid", "synthetic wrong title")
+	}
+}
+
+// A status-only refusal remains a failure until a separate qualified read.
+func TestSubscriptionMetricsDashboard429DoesNotReplayAndLaterIdentityRecovers(t *testing.T) {
+	const password = "synthetic-dashboard-password"
+	body := `{"dashboard":{"uid":"` + subscriptionMetricsDashboardUid + `","title":"` + subscriptionMetricsDashboardTitle + `"}}`
+	primaryCalls, ipv4Calls := 0, 0
+	primary := grafanaHTTPClientFunc(func(request *http.Request) (*http.Response, error) {
+		primaryCalls++
+		username, gotPassword, ok := request.BasicAuth()
+		if request.Method != http.MethodGet || request.URL.Path != "/api/dashboards/uid/"+subscriptionMetricsDashboardUid || !ok || username != "admin" || gotPassword != password {
+			t.Error("dashboard request lost method, route, or synthetic authentication")
+		}
+		status := http.StatusOK
+		if primaryCalls == 1 {
+			status = http.StatusTooManyRequests
+		}
+		response := grafanaFixtureResponse(status, body)
+		response.Header.Set("Retry-After", "120")
+		return response, nil
+	})
+	ipv4 := grafanaHTTPClientFunc(func(*http.Request) (*http.Response, error) {
+		ipv4Calls++
+		return grafanaFixtureResponse(http.StatusOK, body), nil
+	})
+	settings, _, _ := subscriptionMetricsSyntheticSettings(
+		[]Row{{"1", "0", "0", "300", "1", "0"}},
+		subscriptionMetricsMimirFixture(t, subscriptionMetricsTestNow, subscriptionMetricsTestNow.Add(-time.Minute)),
+	)
+	settings.Grafana.AdminPassword = password
+	signal := newSubscriptionMetricsSignal(newGrafanaObservationHTTPClientWithClients(primary, ipv4), "https://grafana.fixture.example")
+	alerts, err := signal.Run(context.Background(), settings)
+	if err != nil || len(alerts) != 1 || alerts[0].Class != "subscription-dashboard-http" || alerts[0].Observed != "http_status=429 identity_observed=false" {
+		t.Fatalf("429 did not retain the unknown dashboard boundary: alerts=%+v err=%v", alerts, err)
+	}
+	if primaryCalls != 1 || ipv4Calls != 0 {
+		t.Fatalf("429 was replayed: primary=%d ipv4=%d", primaryCalls, ipv4Calls)
+	}
+	alerts, err = signal.Run(context.Background(), settings)
+	if err != nil || len(alerts) != 0 || primaryCalls != 2 || ipv4Calls != 0 {
+		t.Fatalf("separate qualified identity read did not recover: alerts=%+v err=%v primary=%d ipv4=%d", alerts, err, primaryCalls, ipv4Calls)
+	}
+}
+
+// A dashboard result cannot clear the separate snapshot observation failure.
+func TestSubscriptionMetricsDashboard429PreservesSnapshotUnknown(t *testing.T) {
+	settings, _, _ := subscriptionMetricsSyntheticSettings([]Row{{"1", "0", "0", "300", "1", "0"}}, "")
+	settings.Source.(*syntheticSource).hostFn = func(HostSettings, string) (string, error) {
+		return "", context.DeadlineExceeded
+	}
+	settings.Grafana.AdminPassword = "synthetic-dashboard-password"
+	client := grafanaHTTPClientFunc(func(*http.Request) (*http.Response, error) {
+		return grafanaFixtureResponse(http.StatusTooManyRequests, "synthetic refusal"), nil
+	})
+	alerts, err := newSubscriptionMetricsSignal(client, "https://grafana.fixture.example").Run(context.Background(), settings)
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("dashboard and snapshot boundaries did not remain separate: alerts=%+v err=%v", alerts, err)
+	}
+	dashboard := requireAlertClass(t, alerts, "subscription-dashboard-http")
+	snapshot := requireAlertClass(t, alerts, "cannot-observe")
+	if dashboard.Observed != "http_status=429 identity_observed=false" || snapshot.Target != "subscription-metrics/snapshot" {
+		t.Errorf("dashboard and snapshot observations were conflated: %+v", alerts)
+	}
+}
+
+// A successful status without a complete document cannot observe identity.
+func TestSubscriptionMetricsDashboardMalformedSuccessRemainsUnobservable(t *testing.T) {
+	const privateMarker = "synthetic-private-dashboard-body"
+	cases := []struct {
+		body string
+		err  error
+	}{
+		{body: privateMarker},
+		{body: `{"dashboard":{"uid":"` + privateMarker},
+		{body: privateMarker + strings.Repeat("x", subscriptionMetricsDashboardBodyLimit)},
+		{err: context.DeadlineExceeded},
+	}
+	for index, test := range cases {
+		client := grafanaHTTPClientFunc(func(*http.Request) (*http.Response, error) {
+			if test.err != nil {
+				return nil, test.err
+			}
+			return grafanaFixtureResponse(http.StatusOK, test.body), nil
+		})
+		settings, _, _ := subscriptionMetricsSyntheticSettings(
+			[]Row{{"1", "0", "0", "300", "1", "0"}},
+			subscriptionMetricsMimirFixture(t, subscriptionMetricsTestNow, subscriptionMetricsTestNow.Add(-time.Minute)),
+		)
+		settings.Grafana.AdminPassword = "synthetic-dashboard-password"
+		alerts, err := newSubscriptionMetricsSignal(client, "https://grafana.fixture.example").Run(context.Background(), settings)
+		if err != nil || len(alerts) != 1 || alerts[0].SignalID != "monitor/visibility" || alerts[0].Class != "cannot-observe" {
+			t.Errorf("unavailable dashboard case %d is not unknown: alerts=%+v err=%v", index, alerts, err)
+			continue
+		}
+		requireAlertOmits(t, alerts[0], privateMarker, settings.Grafana.AdminPassword, "uid_matches=", "title_matches=")
 	}
 }
 
@@ -252,6 +388,10 @@ func TestSubscriptionMetricsDashboardMissingCredentialIsAuthFailure(t *testing.T
 	if len(alerts) != 1 || alerts[0].Class != "subscription-dashboard-auth" {
 		t.Fatalf("missing dashboard credential alerts = %+v", alerts)
 	}
+	if alerts[0].Observed != "http_status=0 identity_observed=false" || !strings.Contains(alerts[0].Action, "admin credential") {
+		t.Errorf("missing credential claimed dashboard identity or lost authentication action: %+v", alerts[0])
+	}
+	requireAlertOmits(t, alerts[0], "load-defaults", "uid_matches=", "title_matches=")
 }
 
 func subscriptionMetricsSyntheticSettings(taskRows []Row, mimirResponse string) (SignalSettings, *string, *string) {

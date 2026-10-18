@@ -4866,23 +4866,40 @@ Deterministic controls attribute separately forced settings, durable-write,
 lock, host/shared-admission and command-ready delays, preserve healthy and
 canceled lifecycle outcomes, and keep partial/invalid/absent evidence unknown.
 
-Remote progress requires two ordered, fixed records matched to this attempt's
-private stdin nonce. `remote_started` proves validated reader input;
-`database_identity` proves receipt of the first bounded identity response,
-not primary/database/read-only authority, later SQL progress or completion.
-The marker validates the response shape and boolean types, not their values.
-It carries no phase clock or later-sample count. After an owner deadline,
-`samples=0` means no complete retained sample, not no database work.
+Remote progress uses ordered fixed records matched to this attempt's private
+stdin nonce. Version 1's two records remain supported with an unknown frame
+count: `remote_started` proves validated reader input and `database_identity`
+proves receipt of the first bounded identity response. The latter checks shape
+and boolean types, not primary/database/read-only authority or their values.
+
+Version 2 adds completed response headers through the same channel, with at most
+17 records and the unchanged 4 KiB limit: reader start, identity, initial history,
+12 ordered activity frames, blockers and final history. `remote_phase` is the
+last observed boundary, never the subsequently failed operation. The nullable
+`remote_sample_frames_observed` is the number 0..12 of ordered activity frames
+seen at that boundary. It is a progress lower bound, not retained samples,
+validated row content, SQL authority, CPU time or proof of complete collection.
+The reader validates complete JSON framing, duplicate keys, fixed kind/index
+order and finite response timestamps. Unexpected or malformed source headers
+stop later progress; the unchanged full-result parser still decides validity.
+Even count 12 with `history_end` cannot make a failed native/source result healthy.
+
+Source output remains buffered until successful child completion. Cancellation
+and owner deadlines preserve the original cannot-observe result, top-level
+`samples=0`, cadence and source-failure class while retaining valid progress.
+A precise source-failure envelope takes precedence over inference from the last
+progress boundary. Missing progress cannot prove that no database work occurred.
 The existing SQL and successful stdout are unchanged. Raw SSH/child stderr,
 nonce and source identities never enter this projection. Unobserved, absent,
-invalid or over4KiB progress stays unknown; valid foreign nonces cannot claim
-the attempt. Buffered source output can hide a reached database boundary, so
-missing progress does not prove no connection. Older receipts lacking these
-facts remain unknown, and a later healthy sample cannot explain their failures.
-Deterministic controls cover unspawned queue expiry, actual child progress and
-join before timeout receipt storage, native start/exit failures, injected
-callbacks without spawn authority, malformed/foreign progress, private output,
-complete12-frame observations and the unchanged no-early-retry cadence.
+invalid, mixed-version, partial-record or over 4 KiB progress has an unknown frame
+count; valid foreign nonces consume no positions in the sequence. Older receipts
+without the new field and version 1 records remain unknown, never known zero.
+A later healthy sample cannot explain a prior failure's unrecorded progress.
+Deterministic controls force partial output through the actual reader before its
+owner failure, cancel a native child after a partial-progress barrier and join
+it before receipt storage. They preserve full healthy sampling, reject broken
+ordering/counts and foreign claims, retain invalid source authority as unknown,
+and keep the unchanged no-early-retry cadence.
 
 Immediately before native SSH Start, after host/shared admission and command
 construction, the ordinary PG sampler refuses a known remaining owner budget
@@ -18402,8 +18419,10 @@ Observe all three layers every five minutes:
   `grafana load-defaults` path omitted the dashboard even if the exporter and
   datasources are healthy. Missing/denied authentication, missing UID, other
   HTTP status, malformed response, and wrong UID/title stay distinct. Only
-  status and identity-match Booleans enter findings; the credential and
-  response body never do.
+  status and qualified identity-match Booleans enter findings; the credential
+  and response body never do. Non-2xx responses retain
+  `identity_observed=false` without UID/title comparisons; only a decoded
+  successful response qualifies those comparisons.
 
 The dashboard findings are `subscription-dashboard-auth` for absent/denied
 authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
@@ -18412,6 +18431,20 @@ authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
 title. These are dashboard-publication/visibility failures, not evidence of a
 payment outage. A transport, bounded-body, or decode failure remains
 `cannot-observe`; it cannot clear the dashboard or business-data contract.
+
+For `subscription-dashboard-http`, the responding component and dashboard
+presence/identity remain unknown. In particular, HTTP 429 does not establish
+missing authentication, a missing dashboard, or a Loki/Mimir rejection. The
+stable-UID lookup follows the Grafana UI/API route; its status alone cannot
+distinguish LB request limiting, connection limiting, or an upstream rejection.
+Join bounded same-window request, ingress, and backend evidence with the active
+configuration before selecting a repair. Authentication findings retain their
+credential/policy repair; a 404 requires confirmation of the intended Grafana
+API before using the supported load-defaults workflow for a missing UID.
+Unavailable lookups can conceal a genuine missing or mismatched dashboard;
+alert absence is not a qualified healthy read. Closure requires two successful
+authenticated identity reads from each intended active Grafana generation and
+independent qualification of the Taskworker snapshot.
 
 The dashboard lookup uses the same signal-private Grafana transport contract
 as §1.4a and §11.15. A route/reset/timeout result gets one fresh IPv4 replay;
@@ -18438,6 +18471,9 @@ states; fresh, absent, stale, future, malformed, and post-completion-lost
 snapshot states; exact top-one and bounded SQL contracts; authenticated exact
 dashboard identity plus missing/auth/HTTP/body-redaction cases; and complete
 identifier-free findings.
+HTTP controls include 429 with a misleading matching document, an unknown
+responding component, no HTTP retry or IPv4 replay, 401/403-specific guidance,
+404 versus ambiguous status, and malformed or oversized successful bodies.
 
 ### 2.28 Current signup progress, route errors, and total consistency
 Probe: `signup-liveness`
