@@ -151,7 +151,12 @@ func parsePgCpuSample(frame, expectedHost string) (pgCpuSample, error) {
 		uptime: (uptime + endUptime) / 2, cores: cores, unitIdCpu: map[string]pgCpuUnit{},
 	}
 	for _, block := range blocks[1 : len(blocks)-1] {
-		fields, err := pgCpuFields(block, "Id", "ActiveState", "SubState", "CPUAccounting", "CPUUsageNSec", "InvocationID")
+		// systemd 258 can omit the deprecated accounting switch;
+		// the usable counter remains the independent accounting evidence.
+		fields, err := pgCpuFields(block, "Id", "ActiveState", "SubState", "CPUUsageNSec", "InvocationID")
+		if err != nil {
+			fields, err = pgCpuFields(block, "Id", "ActiveState", "SubState", "CPUAccounting", "CPUUsageNSec", "InvocationID")
+		}
 		if err != nil {
 			return pgCpuSample{}, err
 		}
@@ -162,7 +167,8 @@ func parsePgCpuSample(frame, expectedHost string) (pgCpuSample, error) {
 		if fields["ActiveState"] != "active" || fields["SubState"] != "running" {
 			continue
 		}
-		if fields["CPUAccounting"] != "yes" || len(fields["InvocationID"]) != 32 {
+		accounting, hasAccounting := fields["CPUAccounting"]
+		if (hasAccounting && accounting != "yes") || len(fields["InvocationID"]) != 32 {
 			return pgCpuSample{}, fmt.Errorf("pg CPU: unavailable service accounting")
 		}
 		cpuNs, err := strconv.ParseUint(fields["CPUUsageNSec"], 10, 64)

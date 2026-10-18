@@ -51,6 +51,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"connection-live-failures-unobservable":            visibilityAlertClass,
 	"connection-reconcile-unobservable":                visibilityAlertClass,
 	"control-route-pressure-unobservable":              visibilityAlertClass,
+	"credential-activation-unobservable":               visibilityAlertClass,
 	"derive-run-history-unobservable":                  visibilityAlertClass,
 	"derived-locations-schema-unavailable":             visibilityAlertClass,
 	"dns-alias-config-invalid":                         visibilityAlertClass,
