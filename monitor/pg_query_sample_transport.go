@@ -28,17 +28,18 @@ type pgSampleTransportObservation struct {
 // Finite source facts only. Joined covers the local SSH process and its pipes,
 // not remote descendants. Remote progress is neither SQL authority nor health.
 type pgSampleTransportReceipt struct {
-	Phase                           string `json:"phase"`
-	Spawn                           string `json:"spawn"`
-	RemotePhase                     string `json:"remote_phase"`
-	RemainingBudgetMs               int64  `json:"remaining_budget_ms"`
-	RunSlotWaitMs                   *int64 `json:"run_slot_wait_ms,omitempty"`
-	RunSlotGrantedRemainingBudgetMs *int64 `json:"run_slot_granted_remaining_budget_ms,omitempty"`
-	SpawnRemainingBudgetMs          *int64 `json:"spawn_remaining_budget_ms"`
-	OwnerDeadlineExceeded           bool   `json:"owner_deadline_exceeded"`
-	Joined                          bool   `json:"joined"`
-	NativeExitCode                  *int   `json:"native_exit_code"`
-	ProgressStatus                  string `json:"progress_status"`
+	Phase                           string                  `json:"phase"`
+	Spawn                           string                  `json:"spawn"`
+	RemotePhase                     string                  `json:"remote_phase"`
+	RemainingBudgetMs               int64                   `json:"remaining_budget_ms"`
+	RunSlotWaitMs                   *int64                  `json:"run_slot_wait_ms,omitempty"`
+	RunSlotGrantedRemainingBudgetMs *int64                  `json:"run_slot_granted_remaining_budget_ms,omitempty"`
+	RunSlotHolders                  *pgSampleRunSlotHolders `json:"run_slot_holders,omitempty"`
+	SpawnRemainingBudgetMs          *int64                  `json:"spawn_remaining_budget_ms"`
+	OwnerDeadlineExceeded           bool                    `json:"owner_deadline_exceeded"`
+	Joined                          bool                    `json:"joined"`
+	NativeExitCode                  *int                    `json:"native_exit_code"`
+	ProgressStatus                  string                  `json:"progress_status"`
 	// Only a local refusal populates this field; it is never a native Start fact.
 	StartRefusalRemainingBudgetNs *int64               `json:"start_refusal_remaining_budget_ns,omitempty"`
 	LocalPhaseTiming              *pgSampleLocalTiming `json:"local_phase_timing,omitempty"`
@@ -213,6 +214,7 @@ func (self *pgSampleTransportObservation) runSlotRequested() {
 		self.runSlotRequestedAt = self.localNow()
 		self.localOrigin = self.runSlotRequestedAt
 		self.localLastNs = 0
+		self.receipt.RunSlotHolders = nil
 		self.receipt.LocalPhaseTiming = &pgSampleLocalTiming{Schema: 1, Origin: "run_slot_request", ClockStatus: "ok"}
 	}
 }
@@ -263,6 +265,7 @@ func observePgSampleTransport(ctx context.Context) (context.Context, *pgSampleTr
 	if prior != nil {
 		observation.receipt.RunSlotWaitMs = prior.receipt.RunSlotWaitMs
 		observation.receipt.RunSlotGrantedRemainingBudgetMs = prior.receipt.RunSlotGrantedRemainingBudgetMs
+		observation.receipt.RunSlotHolders = prior.receipt.RunSlotHolders
 		if !prior.runSlotRequestedAt.IsZero() {
 			observation.localOrigin = prior.runSlotRequestedAt
 			observation.receipt.LocalPhaseTiming.Origin = "run_slot_request"
