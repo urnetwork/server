@@ -420,6 +420,8 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 			online    bool
 			eventTime time.Time
 		}
+		// Offline state acts like absent state for a current device, and only
+		// online state can emit a removal. Leave offline history in PostgreSQL.
 		states := map[server.Id]*deviceAuditState{}
 		result, err = tx.Query(
 			ctx,
