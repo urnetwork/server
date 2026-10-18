@@ -279,11 +279,13 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 	if signal.ID() == "pg/query-sample" {
 		return pgSampleFailureAlert(settings, signal, err)
 	}
+	var interrupted *signalContextError
+	parentEnded := errors.As(err, &interrupted)
 	var providerFailure interface{ monitorVisibilityClass() string }
-	if errors.As(err, &providerFailure) {
+	if !parentEnded && errors.As(err, &providerFailure) {
 		return providerFailureAlert(settings, signal, err, providerFailure.monitorVisibilityClass())
 	}
-	if target, ok := sshAdmissionResetTarget(err); ok {
+	if target, ok := sshAdmissionResetTarget(err); ok && !parentEnded {
 		return Alert{
 			SignalNumber: signal.Number(),
 			SignalKey:    signal.Key(),

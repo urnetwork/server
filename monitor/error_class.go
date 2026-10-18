@@ -161,6 +161,10 @@ func classifyObservationError(err error) string {
 	if err == nil {
 		return observationErrorClassUnclassified
 	}
+	var interrupted *signalContextError
+	if errors.As(err, &interrupted) {
+		return classifyObservationError(interrupted.contextErr)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return observationErrorClassTimeout
 	}
