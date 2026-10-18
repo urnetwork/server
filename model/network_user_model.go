@@ -19,7 +19,7 @@ type NetworkUser struct {
 	Verified        bool                        `json:"verified"`
 	AuthType        string                      `json:"auth_type"`
 	NetworkName     string                      `json:"network_name"`
-	WalletAddress   *string                     `json:"wallet_address,omitempty"`
+	WalletAddress   *string                     `json:"wallet_address,omitempty"` // one bound wallet, or empty; WalletAuths lists all, at most one per chain
 	UserAuths       []NetworkUserUserAuth       `json:"user_auths,omitempty"`
 	SsoAuths        []NetworkUserSsoAuth        `json:"sso_auths,omitempty"`
 	WalletAuths     []NetworkUserWalletAuth     `json:"wallet_auths,omitempty"`
@@ -142,8 +142,14 @@ func GetNetworkUser(
 	for _, a := range ssoAuths {
 		networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
 	}
-	if len(walletAuths) > 0 {
-		networkUser.AuthTypes = append(networkUser.AuthTypes, walletAuthType(walletAuths[0].Blockchain))
+	// an account holds at most one wallet per chain, each listed once
+	walletAuthTypes := map[AuthType]bool{}
+	for _, a := range walletAuths {
+		authType := walletAuthType(a.Blockchain)
+		if !walletAuthTypes[authType] {
+			walletAuthTypes[authType] = true
+			networkUser.AuthTypes = append(networkUser.AuthTypes, authType)
+		}
 	}
 	if len(seedphraseAuths) > 0 {
 		networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
@@ -703,8 +709,8 @@ func getSsoAuthsByUserAuth(
 }
 
 /**
- * Currently only allowing 1 wallet auth per user
- * We can expand on this if needed
+ * One wallet auth per chain per user: at most one Solana and one Bittensor
+ * wallet (see addWalletAuthInTx)
  */
 type AddWalletAuthArgs struct {
 	UserId     server.Id       `json:"user_id"`
@@ -848,10 +854,15 @@ func addWalletAuthInTx(
 	// Bittensor address cannot collide), so any row for this address that
 	// belongs to another user is a conflict regardless of its label.
 	//
-	// The user half enforces the one-wallet-per-user shape the table's
-	// PRIMARY KEY (user_id) already has: without it the upsert below would
-	// silently replace a user's bound wallet with a different one, discarding
-	// the only credential that could still sign them in.
+	// The user half enforces one wallet per chain per account: at most one
+	// Solana and one Bittensor wallet, both usable for sign-in. The chain is
+	// classified in Go through walletAuthType, never by comparing labels, for
+	// the same reason as above: a legacy 'solana' row and a canonical 'SOL'
+	// add are the same chain, and the table's PRIMARY KEY (user_id,
+	// blockchain) is byte exact, so it is only a backstop for a concurrent
+	// add of the same canonical label. A different wallet of the same chain
+	// is refused rather than replacing the bound one, which may be the only
+	// credential that could still sign the user in.
 	//
 	// Note the interaction with RemoveAuth, which refuses to remove the last
 	// remaining auth method: a wallet-only account (created through wallet
@@ -861,12 +872,14 @@ func addWalletAuthInTx(
 	// is the sole credential -- keeps the silent overwrite in the one case
 	// where getting it wrong loses the account permanently, so the error says
 	// what to do instead.
+	addChain := walletAuthType(walletAuth.Blockchain)
 	var conflictUserId *server.Id
-	var boundWalletAddress *string
+	alreadyBound := false
+	sameChainBound := false
 	result, queryErr := tx.Query(
 		ctx,
 		`
-				SELECT user_id, wallet_address FROM network_user_auth_wallet
+				SELECT user_id, wallet_address, blockchain FROM network_user_auth_wallet
 				WHERE wallet_address = $1 OR user_id = $2
 			`,
 		walletAuth.PublicKey,
@@ -876,9 +889,14 @@ func addWalletAuthInTx(
 		for result.Next() {
 			var rowUserId *server.Id
 			var rowWalletAddress *string
-			server.Raise(result.Scan(&rowUserId, &rowWalletAddress))
+			var rowBlockchain string
+			server.Raise(result.Scan(&rowUserId, &rowWalletAddress, &rowBlockchain))
 			if rowUserId != nil && *rowUserId == addWalletAuth.UserId {
-				boundWalletAddress = rowWalletAddress
+				if rowWalletAddress != nil && *rowWalletAddress == walletAuth.PublicKey {
+					alreadyBound = true
+				} else if walletAuthType(rowBlockchain) == addChain {
+					sameChainBound = true
+				}
 				continue
 			}
 			if rowWalletAddress != nil && *rowWalletAddress == walletAuth.PublicKey {
@@ -890,8 +908,11 @@ func addWalletAuthInTx(
 		err = errors.New("409 This wallet is already linked to another account.")
 		return
 	}
-	if boundWalletAddress != nil && *boundWalletAddress != walletAuth.PublicKey {
-		err = errors.New("409 A different wallet is already linked to this account. Remove that wallet first; if it is your only sign-in method, add an email, phone, or generate a seedphrase before removing it.")
+	if !alreadyBound && sameChainBound {
+		err = fmt.Errorf(
+			"409 A different wallet is already linked to this account. Remove that %s wallet first; if it is your only sign-in method, add an email, phone, or generate a seedphrase before removing it.",
+			walletChainName(addChain),
+		)
 		return
 	}
 
@@ -917,37 +938,62 @@ func addWalletAuthInTx(
 		return
 	}
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
+	// Re-adding a bound wallet is a no-op. The address check above, not a
+	// constraint, is what keeps it one: a legacy 'solana' row re-added as
+	// 'SOL' matches neither unique key, and an INSERT would give the account
+	// two rows for one wallet.
+	if !alreadyBound {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
 				INSERT INTO network_user_auth_wallet
 				(user_id, wallet_address, blockchain)
 				VALUES ($1, $2, $3)
-				ON CONFLICT (user_id)
-				DO UPDATE SET
-					wallet_address = $2,
-					blockchain = $3,
-					create_time = now();
 			`,
-		addWalletAuth.UserId,
-		walletAuth.PublicKey,
-		walletAuth.Blockchain,
-	))
+			addWalletAuth.UserId,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		))
+	}
 
-	// Mirror onto network_user's top-level wallet columns, symmetric
-	// with RemoveAuth's solana branch which clears them. Without this,
-	// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
-	// nil even though network_user_auth_wallet has the wallet bound.
+	// Mirror onto network_user's top-level wallet columns. They hold one
+	// wallet, and a bound wallet keeps them: they take this wallet only while
+	// they name none of this user's wallets -- empty, or a stale legacy value
+	// with no row here (this wallet's row, inserted above, counts) -- so
+	// adding the second chain's wallet leaves them alone, and a stale value
+	// is released from the global unique index as it was before. RemoveAuth
+	// points them at the remaining wallet when it removes the one they name.
+	//
+	// The row is written even when the columns keep their value: a
+	// concurrent RemoveAuth holds it FOR UPDATE on a snapshot that cannot see
+	// this wallet, and only a write makes that removal fail to serialize and
+	// rerun, instead of clearing the columns while this wallet is bound.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`UPDATE network_user
-			 SET wallet_address = $2, wallet_blockchain = $3
+			 SET
+				wallet_address = CASE WHEN NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				) THEN $2 ELSE wallet_address END,
+				wallet_blockchain = CASE WHEN NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				) THEN $3 ELSE wallet_blockchain END
 			 WHERE user_id = $1`,
 		addWalletAuth.UserId,
 		walletAuth.PublicKey,
 		walletAuth.Blockchain,
 	))
 	return nil
+}
+
+// walletChainName names a wallet auth type's chain for a person to read.
+func walletChainName(authType AuthType) string {
+	if authType == AuthTypeBittensor {
+		return "Bittensor"
+	}
+	return "Solana"
 }
 
 func getWalletAuths(
@@ -967,6 +1013,7 @@ func getWalletAuths(
 				blockchain
 			FROM network_user_auth_wallet
 			WHERE user_id = $1
+			ORDER BY create_time, wallet_address
 		`,
 			userId,
 		)
@@ -1574,28 +1621,37 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 			return
 		}
 
-		// The wallet this account has bound, named the way auth_types[] names
-		// it, or empty when it has none. Read before the switch because two
-		// things need it: the refusal below, and the scalar reconcile at the
-		// end of this function, which used to classify the chain with its own
-		// SQL CASE. That CASE recognised 'TAO' but not the 'bittensor' spelling
-		// ParseBlockchain also accepts, so a row carrying the non-canonical
-		// label was reconciled to 'solana'. Deriving the name once, in Go,
-		// through walletAuthType leaves one classification rule instead of two.
+		// The wallets this account has bound -- at most one per chain, oldest
+		// first -- each named the way auth_types[] names it. Read before the
+		// switch because two things need them: the wallet branch below, and
+		// the scalar reconcile at the end of this function, which used to
+		// classify the chain with its own SQL CASE. That CASE recognised 'TAO'
+		// but not the 'bittensor' spelling ParseBlockchain also accepts, so a
+		// row carrying the non-canonical label was reconciled to 'solana'.
+		// Deriving the name once, in Go, through walletAuthType leaves one
+		// classification rule instead of two.
 		//
 		// blockchain is `varchar(32) NOT NULL`, so scanning into a string
 		// cannot raise and turn a refusal into a 500.
-		walletLabel := ""
-		var storedBlockchain string
+		type boundWallet struct {
+			address    string
+			blockchain string
+			label      AuthType
+		}
+		var wallets []boundWallet
 		walletResult, walletErr := tx.Query(
 			ctx,
-			`SELECT blockchain FROM network_user_auth_wallet WHERE user_id = $1`,
+			`SELECT wallet_address, blockchain FROM network_user_auth_wallet
+			 WHERE user_id = $1
+			 ORDER BY create_time, wallet_address`,
 			userId,
 		)
 		server.WithPgResult(walletResult, walletErr, func() {
-			if walletResult.Next() {
-				server.Raise(walletResult.Scan(&storedBlockchain))
-				walletLabel = walletAuthType(storedBlockchain)
+			for walletResult.Next() {
+				var wallet boundWallet
+				server.Raise(walletResult.Scan(&wallet.address, &wallet.blockchain))
+				wallet.label = walletAuthType(wallet.blockchain)
+				wallets = append(wallets, wallet)
 			}
 		})
 
@@ -1604,11 +1660,13 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 		// then matched nothing and the call still reported success, so a client
 		// that unlinked Apple from a google+email account was told it worked.
 		//
-		// The wallet branch was the sharpest instance. Its DELETE has no
+		// The wallet branch was the sharpest instance. Its DELETE had no
 		// blockchain predicate, so "solana" and "bittensor" behaved as
 		// interchangeable aliases and {"auth_type":"solana"} deleted a
-		// Bittensor wallet. Comparing against walletLabel makes the chain a
-		// predicate instead of a label, without a special case.
+		// Bittensor wallet. Matching the requested type against each wallet's
+		// label makes the chain a predicate instead of a label, and deleting
+		// by the matched wallet's address leaves the other chain's wallet
+		// bound.
 		//
 		// The message carries the status the refusal deserves even though this
 		// function's only caller answers 200 with a structured body and peels
@@ -1652,26 +1710,64 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId, authType,
 			))
 		case "solana", "bittensor":
-			if walletLabel != authType {
+			var removed *boundWallet
+			var remaining []boundWallet
+			for i, wallet := range wallets {
+				if removed == nil && wallet.label == authType {
+					removed = &wallets[i]
+				} else {
+					remaining = append(remaining, wallet)
+				}
+			}
+			if removed == nil {
 				notBound()
 				return
 			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_wallet
-				 WHERE user_id = $1`,
-				userId,
+				 WHERE user_id = $1 AND wallet_address = $2`,
+				userId, removed.address,
 			))
-			// Clear wallet fields on network_user so the wallet
-			// can be reused to create a fresh account
+			// If network_user's wallet fields name no wallet this account
+			// still has -- the removed one, a stale legacy value, or nothing
+			// -- point them at the remaining wallet, or clear them, so the
+			// removed wallet can be reused to create a fresh account. Fields
+			// naming the remaining wallet are left alone. They have a global
+			// unique index: a remaining wallet that another account still
+			// holds there (a legacy shape) clears them instead of failing the
+			// removal.
+			var slotAddress, slotBlockchain *string
+			if 0 < len(remaining) {
+				var heldElsewhere bool
+				server.Raise(tx.QueryRow(
+					ctx,
+					`SELECT EXISTS (
+						SELECT 1 FROM network_user
+						WHERE wallet_address = $1 AND user_id <> $2
+					)`,
+					remaining[0].address, userId,
+				).Scan(&heldElsewhere))
+				if !heldElsewhere {
+					// canonical, as the add path writes it, even when the
+					// remaining row carries a legacy label
+					blockchain := migratedWalletBlockchain(&remaining[0].blockchain)
+					slotAddress = &remaining[0].address
+					slotBlockchain = &blockchain
+				}
+			}
+			// runs after the DELETE, so the removed wallet no longer has a row
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`UPDATE network_user
-				 SET wallet_address = NULL, wallet_blockchain = NULL
-				 WHERE user_id = $1`,
-				userId,
+				 SET wallet_address = $2, wallet_blockchain = $3
+				 WHERE user_id = $1 AND NOT EXISTS (
+					SELECT 1 FROM network_user_auth_wallet w
+					WHERE w.user_id = $1 AND w.wallet_address = network_user.wallet_address
+				 )`,
+				userId, slotAddress, slotBlockchain,
 			))
-			walletLabel = ""
+			wallets = remaining
 		case "seedphrase":
 			if !removeAuthMethodIsBound(
 				ctx, tx,
@@ -1703,12 +1799,12 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 		// The app reads this field to show available sign-in methods,
 		// so it must reflect reality after removal.
 		//
-		// walletLabel is NULL when no wallet row survives this call, so the
-		// wallet arm of the COALESCE is skipped exactly as an empty subquery
-		// would have been.
+		// The wallet arm names the oldest wallet that survives this call, and
+		// is NULL when none does, so it is skipped exactly as an empty
+		// subquery would have been.
 		var remainingWalletLabel *string
-		if walletLabel != "" {
-			remainingWalletLabel = &walletLabel
+		if 0 < len(wallets) {
+			remainingWalletLabel = &wallets[0].label
 		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1742,6 +1838,11 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 // codes AuthTypeSolana -- a TAO fixture built on that helper silently produces
 // a SOL row and any assertion about Bittensor reporting passes for the wrong
 // reason.
+//
+// A second call with the byte-identical blockchain label replaces that row's
+// wallet; any other label, including another spelling of the same chain
+// ('solana' and 'SOL'), adds a second row. Production code never holds two
+// rows of one chain, so build legacy-label shapes with care.
 func Testing_AddWalletAuth(
 	ctx context.Context,
 	userId server.Id,
@@ -1755,10 +1856,9 @@ func Testing_AddWalletAuth(
 				INSERT INTO network_user_auth_wallet
 				(user_id, wallet_address, blockchain)
 				VALUES ($1, $2, $3)
-				ON CONFLICT (user_id)
+				ON CONFLICT (user_id, blockchain)
 				DO UPDATE SET
-					wallet_address = $2,
-					blockchain = $3
+					wallet_address = $2
 			`,
 			userId,
 			walletAddress,

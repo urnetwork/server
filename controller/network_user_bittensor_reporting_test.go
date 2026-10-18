@@ -84,6 +84,56 @@ func TestGetNetworkUserReportsBittensorWallet(t *testing.T) {
 	})
 }
 
+// An account may hold a Solana and a Bittensor wallet at once. GET
+// /network/user must list both, under both fields a client reads, or the
+// client offers neither wallet for removal.
+func TestGetNetworkUserReportsBothWallets(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "tworeport", userId)
+
+		userSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		model.Testing_AddWalletAuth(ctx, userId, model.SOL.String(), "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s")
+		model.Testing_AddWalletAuth(ctx, userId, model.TAO.String(), testingTaoAddress)
+
+		result, err := GetNetworkUser(userSession)
+		if err != nil {
+			t.Fatalf("GetNetworkUser: %v", err)
+		}
+		if result == nil || result.NetworkUser == nil {
+			t.Fatal("GetNetworkUser returned no network user")
+		}
+
+		counts := map[string]int{}
+		for _, authType := range result.NetworkUser.AuthTypes {
+			counts[authType] += 1
+		}
+		if counts["solana"] != 1 || counts["bittensor"] != 1 {
+			t.Errorf("auth_types = %#v, want \"solana\" and \"bittensor\" once each",
+				result.NetworkUser.AuthTypes)
+		}
+
+		blockchains := map[string]bool{}
+		for _, walletAuth := range result.NetworkUser.WalletAuths {
+			blockchains[walletAuth.Blockchain] = true
+		}
+		if len(result.NetworkUser.WalletAuths) != 2 ||
+			!blockchains[model.SOL.String()] || !blockchains[model.TAO.String()] {
+			t.Errorf("wallet_auths = %#v, want one SOL and one TAO entry",
+				result.NetworkUser.WalletAuths)
+		}
+	})
+}
+
 // The same surface must not claim a chain the account does not have: an account
 // with no wallet reports no wallet, rather than an empty-stringed entry that a
 // client would render as an unknown chain.
