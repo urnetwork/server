@@ -837,6 +837,8 @@ func subtractH3FullTunReceive(
 		ReceiveQueueTentativeEvictionCount:     end.ReceiveQueueTentativeEvictionCount - start.ReceiveQueueTentativeEvictionCount,
 		ReceiveQueueTentativeEvictionByteCount: end.ReceiveQueueTentativeEvictionByteCount - start.ReceiveQueueTentativeEvictionByteCount,
 		ReceiveQueueCommitCount:                end.ReceiveQueueCommitCount - start.ReceiveQueueCommitCount,
+		ReceiveQueueCommitShortfallCount:       end.ReceiveQueueCommitShortfallCount - start.ReceiveQueueCommitShortfallCount,
+		ReceiveQueueExitWithdrawCount:          end.ReceiveQueueExitWithdrawCount - start.ReceiveQueueExitWithdrawCount,
 		SendNoAckOfferedCount:                  end.SendNoAckOfferedCount - start.SendNoAckOfferedCount,
 		SendNoAckWriteCount:                    end.SendNoAckWriteCount - start.SendNoAckWriteCount,
 		SendNoAckRefusedCount:                  end.SendNoAckRefusedCount - start.SendNoAckRefusedCount,
