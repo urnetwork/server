@@ -299,9 +299,28 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 	return &CompetitionPreparationResult{Generation: intent.Generation, TargetRoundId: intent.TargetRoundId, EnvelopeSha256: receipt.Sha256, EnvelopeKey: receipt.Key, EnvelopeVersion: receipt.VersionId}, nil
 }
 
-// Token bytes are sent only to the configured TLS endpoint. The response must
-// advertise blob capability and independently report the pinned API release.
+// Reuse only an immutable genuine acknowledgment for this exact intent and
+// pinned release. A later API rollout must not rewrite the original role row.
+// Without one, token bytes go only to the configured TLS endpoint, whose new
+// response must advertise blob capability and its independent runtime identity.
 func (self *competitionPreparationAdapter) acknowledgeApi(ctx context.Context, intent *model.CompetitionSourceActivation) error {
+	readiness, err := self.receipts(ctx, self.settings, intent.Generation)
+	if err != nil {
+		return err
+	}
+	apiCount := 0
+	for _, receipt := range readiness {
+		if receipt.Role != "api" {
+			continue
+		}
+		apiCount++
+		if !sourcePreparationReceiptMatches(intent, receipt) || receipt.RuntimeImageDigest != self.config.ApiImageDigest || apiCount > 1 {
+			return errors.New("persisted API readiness differs from the exact intent or pinned deployment identity")
+		}
+	}
+	if apiCount == 1 {
+		return nil
+	}
 	content, err := readCompetitionPreparationFile(self.config.SourcePromoterTokenFile, 4096, true)
 	if err != nil {
 		return err

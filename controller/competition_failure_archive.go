@@ -63,12 +63,18 @@ type evaluatorStageFailure struct {
 
 // Rejects unknown, repeated, and trailing fields before accepting any identity.
 func decodeFailureEvidenceJson(value []byte, result any) error {
+	return decodeCompetitionEvidenceJson(value, result, nil)
+}
+
+// Typed protocol keys stay lowercase and exact. Only explicitly identified
+// data maps may use mixed-case keys; duplicates remain forbidden at every depth.
+func decodeCompetitionEvidenceJson(value []byte, result any, dataMapKeys func([]string) bool) error {
 	if !utf8.Valid(value) {
 		return errors.New("failure evidence is not valid utf-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(value))
-	var checkValue func(int) error
-	checkValue = func(depth int) error {
+	var checkValue func(int, []string) error
+	checkValue = func(depth int, path []string) error {
 		if 64 < depth {
 			return errors.New("failure evidence nesting exceeds limit")
 		}
@@ -89,17 +95,17 @@ func decodeFailureEvidenceJson(value []byte, result any) error {
 					return err
 				}
 				key, ok := keyToken.(string)
-				if !ok || key != strings.ToLower(key) || seenKeys[key] {
+				if !ok || seenKeys[key] || key != strings.ToLower(key) && (dataMapKeys == nil || !dataMapKeys(path)) {
 					return errors.New("failure evidence contains a duplicate field")
 				}
 				seenKeys[key] = true
-				if err := checkValue(depth + 1); err != nil {
+				if err := checkValue(depth+1, append(path, key)); err != nil {
 					return err
 				}
 			}
 		case '[':
 			for decoder.More() {
-				if err := checkValue(depth + 1); err != nil {
+				if err := checkValue(depth+1, append(path, "")); err != nil {
 					return err
 				}
 			}
@@ -109,7 +115,7 @@ func decodeFailureEvidenceJson(value []byte, result any) error {
 		_, err = decoder.Token()
 		return err
 	}
-	if err := checkValue(0); err != nil {
+	if err := checkValue(0, nil); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); err != io.EOF {

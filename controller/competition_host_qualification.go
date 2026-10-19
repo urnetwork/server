@@ -363,6 +363,17 @@ func competitionQualificationArtifactPath(root, relative string) error {
 	}
 }
 
+// Gate names and diagnostic maps carry scorer data, not typed protocol fields.
+// Permit their mixed-case keys without relaxing gate/score/security field names.
+func decodeCompetitionQualificationResult(content []byte, result *evaluatorResult) error {
+	return decodeCompetitionEvidenceJson(content, result, func(path []string) bool {
+		if len(path) < 2 || path[0] != "score" {
+			return false
+		}
+		return path[1] == "diagnostics" || path[1] == "gates" && (len(path) == 2 || len(path) >= 4 && path[3] == "details")
+	})
+}
+
 // Validates real output without storing a scoring result, baseline or job.
 func authenticateCompetitionQualification(directory string, request evaluatorRequest, settings *Settings) error {
 	resultBytes, err := readRegularFile(filepath.Join(directory, "worker-result.json"), maxEvaluatorResultBytes)
@@ -370,16 +381,19 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 		return err
 	}
 	var result evaluatorResult
-	if err := decodeCompetitionPreparationJson(bytes.NewReader(resultBytes), maxEvaluatorResultBytes, &result); err != nil {
+	if err := decodeCompetitionQualificationResult(resultBytes, &result); err != nil {
 		return err
 	}
 	if result.Schema != 1 || result.JobId != request.JobId || result.EvalError != nil || validateScore(result.Score) != nil || !result.Score.Placeable ||
 		!scoreMatchesFrozenMargin(result.Score, request.EvaluationPolicy.TakeoverMargin) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
 		return errors.New("host-readiness evaluation did not pass its score and security gates")
 	}
-	for _, gate := range result.Score.Gates {
-		if !gate.Passed {
-			return errors.New("host-readiness score has a failed gate")
+	if len(result.Score.Gates) != 6 {
+		return errors.New("host-readiness score does not contain exactly the six required gates")
+	}
+	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+		if gate, ok := result.Score.Gates[name]; !ok || !gate.Passed {
+			return errors.New("host-readiness score has a missing or failed required gate")
 		}
 	}
 	for _, artifact := range result.Artifacts {
