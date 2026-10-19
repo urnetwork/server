@@ -11068,6 +11068,66 @@ individual saturated cores. Preserve the historical and current causal
 questions until their own missing evidence is obtained; this diagnostic
 practice authorizes no restart, tuning or production write.
 
+A successful metric API response can contain informational PromQL annotations.
+The [Prometheus annotation producer](https://github.com/prometheus/prometheus/blob/main/util/annotations/annotations.go)
+uses a metric-name suffix heuristic; the configured [postgres_exporter v0.19.1
+producer](https://github.com/prometheus-community/postgres_exporter/blob/v0.19.1/collector/pg_stat_database.go)
+emits `pg_stat_database_xact_commit` and `pg_stat_database_xact_rollback` as
+counters despite their names. This annotation alone is not database failure.
+For the V5c single-current-evaluation query with exactly one commit-rate and
+one rollback-rate expression, the reviewed exception permits only those two
+exact naming-message shapes, at most one per metric. It does not apply to
+repeated historical expressions: StageA has a separate source-owned policy
+binding each metric to its exact rate-argument position, with a maximum of
+26 unique annotations for 13 points. Unknown, duplicate, additional or
+ambiguous annotations and all warnings remain disqualifying. A serving
+parser/rewriter changing positions leaves authority unknown; source references
+and normalized query spelling do not attest the serving implementation.
+Preserve the original failed receipt and hash-bind any corrected offline
+reduction to the saved response, request, scope, evaluation and reviewed source.
+
+The qualified offline reduction of the retained 2026-10-19 07:56:53 UTC
+response found 25,962.50 published commits/s and 120.87 rollbacks/s over the
+same two-minute evaluation window: 14/14 PG scalars, six series per counter,
+zero observed resets and maximum publication age 2.798s. HTTP terminal-window
+coverage was API 17/20 and Connect 19/20; contract-window coverage was API
+19/20, Connect 19/20, Taskworker 7/8 and Proxy 19/20. Metadata publications
+covered 68/68 slots, but a covered subset cannot certify omitted slots and
+fresh source/build tuples do not attest native serving artifacts or ancestry.
+These are dated observed published counters, not fleet recovery, every-reset
+exclusion, collector collection freshness, sustained capacity or lower demand.
+The immutable original diagnostic remains incomplete; a separate qualified
+offline reduction used the existing response without another Main read.
+
+Qualify each application's full enabled slot denominator, process identity,
+publication age, window/early-window sample counts and observed resets.
+HTTP terminal counters combine statuses and outcomes unless preserved by the
+query; they do not measure request starts, errors or route demand. In-flight
+router gauges span handler lifetime, including long-lived Connect transports;
+neither their size nor a completed-handler mean is database queue or latency.
+Duration count coverage does not independently establish sum-window coverage.
+Contract counters describe the producer's acknowledged-commit operations;
+terminal close includes quarantine/deletion and does not assert completed
+asynchronous financial work, client delivery or crash-durable history.
+Absent queue age, debt, offered arrivals or artifact joins remain unknown.
+
+For a later sparse historical discriminator, first reuse retained windows for
+their own transitions. With [historical selectors](https://prometheus.io/docs/prometheus/latest/querying/basics/#modifier),
+bind the outer result clock separately from each selected instant's publication
+age. Count source series across the full rate window: stale series can still
+contribute earlier floats after disappearing from an instant count. Six series
+per counter means twelve source counter series, not twelve databases. A
+post-read cardinality fence cannot bound the preceding scan cost; estimated
+unique source floats differ from repeated range evaluations and engine work.
+
+False-positive/negative qualifiers: equal counts do not prove OID/reset or
+collector identity. Sparse points miss brief stalls and two-minute rates smooth
+transitions; proximity to a restart does not establish causality. A current
+point without matched earlier workload, historical scope and build evidence
+cannot adjudicate work-per-request changes or reduced offered demand. No new
+StageA result, deployed reader, automatic closure rule or incident root cause
+is claimed; this section's coverage gap and recovery questions remain open.
+
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
@@ -24671,9 +24731,12 @@ running worker. Probe every enabled host with the `services` role and require
 both the executable capability and the worker lifecycle to agree:
 
 - `rollout_guard=full-overlap`: the installed binary contains the host-lock
-  timeout path introduced by Warp commit `7e2075c`; the lease begins before
-  candidate start, remains held through synchronous old-container drain, and
-  refuses a replacement when acquisition times out.
+  timeout path introduced by Warp commit `7e2075c`. This marker does not
+  establish the exact lease release boundary. In qualified Warp source
+  `2aa7fb4c77405fd518887fa0c66a7d940ce02a0c`, the per-host, per-environment,
+  per-service lease covers candidate startup, readiness, redirect and a
+  five-second settle; old-container retirement follows outside the lease.
+  Failure to acquire the lease refuses candidate startup.
 - `rollout_guard=drain-only`: the binary contains the legacy
   `Draining %d overlapping container(s) (staggered=%t)` path. That lease covers
   only drain, so independent workers can start almost a complete duplicate
@@ -24723,10 +24786,13 @@ alerts remain open when a serialized old/candidate pair or the steady client
 load does not fit.
 
 Verify without creating the unsafe condition: every managed services host
-reports `full-overlap`, zero stale workers, and zero unverifiable workers. Then
-use one controlled ordinary service replacement to show overlap remains within
-the configured host bound. Do not validate by launching a full proxy-fleet
-rollout. Implementation convention: SIGNALS.md §8.11 (`rollout-guard`) maps to
+reports `full-overlap`, zero stale workers, and zero unverifiable workers.
+Join the exact resident worker source and executable before assigning its
+lease policy. For the qualified policy below, one controlled ordinary service
+replacement must serialize candidate warmup and promotion across blocks of
+the same environment and service; ready replacements and retiring old
+containers may legitimately overlap. Different services have independent
+leases. Do not validate by launching a full proxy-fleet rollout. Implementation convention: SIGNALS.md §8.11 (`rollout-guard`) maps to
 `signal_rollout_guard.go` and `signal_rollout_guard_test.go`. Synthetic cases
 cover legacy, disabled, missing, unknown, healthy full-overlap, an on-disk fix
 with stale/unverifiable workers, partial host failure, a managed host with no
@@ -24794,17 +24860,32 @@ The bounded runtime reader's `current_unique_process=false` also means that one
 fresh newest process could not be selected: a missing/stale start witness and
 a tied newest value can both cause it. It is not a native overlap count.
 
-The inspected worker's `deploy` (`warpctl/run.go:1323`) holds the per-host,
-per-service overlap lease through candidate startup, readiness, redirect and
-old-container drain, then a five-second settle. `NewDrainWorker` (line 3655)
-allows the existing sixty-minute drain, so other blocks can legitimately wait
-before starting a replacement. `TestHostDrainLockCoversReplacementOverlap` and
-`TestHostDrainLockTimeoutRefusesReplacement` cover that source contract. A mixed
-generation observation does not distinguish this wait from failed readiness,
-stale metrics, unavailable observation or a stalled worker. Bind the actual
-resident worker, lock ownership, candidate readiness, front route and current
-container state before choosing a cause. This qualifier changes no deployment
-semantics and authorizes no forced restart or retirement.
+The qualified workstation Warpctl has SHA-256
+`e29feab55aa387e87f0ff1bc59f8fce2ebbb6648be8731d455a1bff0a7190e5c`
+and reports clean source `2aa7fb4c77405fd518887fa0c66a7d940ce02a0c`.
+The matching committed `RunWorker.deploy` (`warpctl/run.go:1402`) acquires
+an environment-and-service-scoped lease before candidate startup. After
+readiness, redirect and a five-second settle, it explicitly releases that
+lease before joining old-container retirement. The old container keeps its
+existing sixty-minute graceful-drain bound. A failed, unpromoted candidate
+retains the lease during its cleanup attempts; an acquisition timeout never
+starts a replacement. This policy permits sibling blocks to progress after
+promotion without waiting for a full old-container drain; it does not require
+restoring a full-drain-held lease or changing deployment behavior.
+
+The exact helper controls are
+`TestHostDrainLockCoversCandidateUntilCallbackReturns`,
+`TestHostDrainLockPromotionReleaseDoesNotUnlockReacquiredOwner` and
+`TestHostDrainLockTimeoutRefusesReplacement`. Their source assertions describe
+candidate exclusion, explicit promotion release and timeout refusal; source
+inspection alone is not native execution evidence. The qualified workstation
+tool and matching source do not attest an installed or mapped resident worker.
+Earlier dated observations above retain their original source and clock
+boundaries. A mixed generation can reflect legitimate post-promotion
+retirement, lease wait, failed readiness, stale metrics, unavailable observation
+or a stalled worker. Bind the actual resident worker, lease ownership,
+candidate readiness, front route and current containers before choosing a
+cause. This clarification authorizes no forced restart or retirement.
 
 The 2026-10-08 R44 Connect attempt provides a timeout counterexample at one
 native owner. All five desired-version updates returned, but the workstation
