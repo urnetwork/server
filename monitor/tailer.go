@@ -1165,6 +1165,14 @@ var logClasses = []logClass{
 // row matches.
 var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b|\bevent=evaluation_budget_exhausted\b`)
 
+// The prober's per-provider egress-health result record
+// (qualityprobe/prober): `egress-health: provider=<id> ok=48/50 ... failed=a,b`.
+// Its failed= field names the destinations one provider failed in a
+// measurement that ran, judged by §2.19b and §2.23; the record is not an error
+// of the emitting process. The prober's "did not run" and "skipped" lines have
+// no ok= tally and stay novel-eligible.
+var egressHealthResultRecordRe = regexp.MustCompile(`egress-health: provider=\S+ ok=[0-9]+/[0-9]+ `)
+
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
 var logIDRe = regexp.MustCompile(`[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`)
@@ -2361,7 +2369,7 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			return
 		}
 	}
-	if errorShapedRe.MatchString(line) {
+	if errorShapedRe.MatchString(line) && !egressHealthResultRecordRe.MatchString(line) {
 		if deduplicate && self.standingReplayLocked(line, now) {
 			return
 		}

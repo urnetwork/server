@@ -2807,6 +2807,20 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+False-positive qualifier for `novel`: the prober's per-provider egress-health
+result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit`
+(qualityprobe/prober), names in `failed=` the destinations one provider failed
+in a measurement that ran. It is the measurement working, judged by §2.19b
+`egress-site-pool` and §2.23 `egress-outcomes`, not an error of the emitting
+Taskworker, and it stays out of `novel` by its `ok=<n>/<n>` tally. The
+prober's `did not run` and `skipped` lines carry no tally and stay eligible.
+On 2026-10-18 these records were Main's top novel shape (46/min of 178/min
+across 21 shapes), so the alert's sample showed a provider's DNS timeout
+instead of the unclassified errors beside it. Controls:
+`TestEgressHealthResultRecordsStayOutOfNovel` (result records at three times
+the rate stay healthy) and `TestEgressHealthCheckThatDidNotRunRemainsNovel`
+(checks that did not run still alert).
+
 Task finalization remains a separate failure boundary from the function result.
 A recovered `task finalization failed` or `task completion batch remains
 unacknowledged` record can accompany an execution that returned successfully.
