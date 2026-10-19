@@ -12533,12 +12533,42 @@ legacy leak and a harmless sub-two-minute cleanup race. Model regressions cover
 orphan sweeping, handler-qualified location reliability, and disconnected
 fallback semantics.
 
-A long database outage reaches the same cleanup from the other side. With the
-Taskworker running, `CloseExpiredNetworkClientHandlers` deletes every live
-handler whose heartbeat is older than 2 × 60 s once the database returns, and
-each Connect process whose handler is gone cancels itself on its next
-heartbeat. An outage longer than about 105–110 s therefore drops every Connect
-process. Stop the Taskworker before a planned primary restart (§5.13).
+A long database outage reaches the same cleanup from the other side. Before
+server `53e858563`, `CloseExpiredNetworkClientHandlers` deleted every handler
+whose heartbeat was older than 2 × 60 s, and each Connect process whose handler
+was gone cancelled itself on its next heartbeat, so a heartbeat path that
+failed for longer than about 105–110 s dropped every Connect process. On
+2026-10-19 a PgBouncer livelock did exactly that: the reaper's maintenance
+transactions still got through, it deleted all 22 live handlers at 10:21:35Z,
+and connected providers fell from 76k to 1.8k (§5.12).
+
+Since `53e858563` (Taskworker and Connect 2026-10-19), expiry deletes a stale
+handler only on evidence that its process ended. A stale handler whose process
+still stamps the provider liveness writer set in Redis is kept. When the set
+cannot vouch, because its read failed or no process stamped within the window,
+stale handlers are deleted only while at least as many handlers still
+heartbeat. A Connect process that finds its handler gone keeps its transports
+until three consecutive answered reads confirm the row is gone, then shuts down
+after a random delay within one heartbeat timeout. Two counters show which path
+ran:
+
+- `urnetwork_network_client_handler_expiry_total{verdict}` (Taskworker):
+  `expired` handlers were deleted and their rows retired; `deferred_stamped`
+  were kept because their process still stamps liveness; `deferred_fleet` were
+  kept because the set could not vouch and fewer handlers heartbeat than went
+  stale.
+- `urnetwork_connect_handler_retirement_total{event}` (Connect): `detected` a
+  heartbeat found the row gone; `unanswered` a confirmation read the database
+  did not answer, which restarts the count; `restored` the row was back;
+  `shutdown` the retirement was confirmed.
+
+Read them together. `expired` rising after a Connect deploy or a lost host is
+normal: the first connect deploy on 2026-10-19 expired exactly its four drained
+beta handlers. `deferred_stamped` or `deferred_fleet` rising while handlers
+stay stale means the heartbeat path is failing for processes that are alive, so
+look at the pools (§2.11a) and the database path; the fix is what keeps those
+processes connected. `detected` without a later `shutdown` is a process that
+saw its row missing before the database could confirm it.
 
 ### 2.16a Live handler connection reconcile — rows a running process no longer holds
 Probe: `connection-reconcile`
@@ -22794,12 +22824,17 @@ Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
 huge-pages attempt.
 
 1. Stop the Taskworker before the outage; its drain needs the database.
-   `CloseExpiredNetworkClientHandlers` deletes handlers whose heartbeat is
-   older than 2 × 60 s (`taskworker/work/network_client_work.go:28,36`), and
-   a Connect process whose handler is deleted cancels itself on its next
-   heartbeat (`connect/connect_router.go:92-108`). With the Taskworker
-   running, an outage longer than about 105–110 s drops every Connect process
-   (§2.16).
+   Before server `53e858563`, handler expiry also deleted every handler whose
+   heartbeat was older than 2 × 60 s, and a Connect process whose handler was
+   deleted cancelled itself on its next heartbeat, so with the Taskworker
+   running an outage longer than about 105–110 s dropped every Connect
+   process. Since then expiry keeps a stale handler whose process still stamps
+   liveness in Redis (`model/network_client_handler_retirement.go`), and
+   Connect shuts down only after three answered reads confirm its handler is
+   gone (`connect/handler_heartbeat.go`). With Redis up, the outage no longer
+   drops Connect through expiry; watch
+   `urnetwork_network_client_handler_expiry_total{verdict="deferred_stamped"}`
+   rise and then stop once heartbeats resume (§2.16).
 2. Read the handlers before the stop and again before starting the
    Taskworker:
    ```sql
