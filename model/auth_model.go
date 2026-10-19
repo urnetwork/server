@@ -1581,6 +1581,9 @@ type AuthPasswordSetError struct {
 	Message string `json:"message"`
 }
 
+// the refusal for a reset of an account with no email or phone password sign-in
+const AuthPasswordSetNoPasswordAuthMessage = "This account has no password sign-in. Add an email or phone with a password in Settings, or sign in with Google, Apple or your wallet."
+
 type authPasswordSetBeforeLifecycleLockKey struct{}
 
 func AuthPasswordSet(
@@ -1613,6 +1616,7 @@ func AuthPasswordSet(
 	var userAuthResetId *server.Id
 	var networkId server.Id
 	var networkName string
+	var hasPasswordAuth bool
 
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1622,7 +1626,11 @@ func AuthPasswordSet(
 					network_user.user_id,
 					user_auth_reset.user_auth_reset_id,
 					network.network_id,
-					network.network_name
+					network.network_name,
+					EXISTS (
+						SELECT 1 FROM network_user_auth_password
+						WHERE network_user_auth_password.user_id = network_user.user_id
+					) AS has_password_auth
 				FROM network_user
 				INNER JOIN user_auth_reset ON
 					user_auth_reset.user_id = network_user.user_id AND
@@ -1641,6 +1649,7 @@ func AuthPasswordSet(
 					&userAuthResetId,
 					&networkId,
 					&networkName,
+					&hasPasswordAuth,
 				))
 			}
 		})
@@ -1649,6 +1658,19 @@ func AuthPasswordSet(
 	if userAuthResetId == nil {
 		// an unknown, used or expired reset code
 		return nil, errors.New("400 Invalid login.")
+	}
+
+	// A reset code also reaches an account whose only email is the legacy
+	// network_user.user_auth, e.g. a Google or Apple sign-in. Such an account
+	// has no password sign-in, so the update below would change nothing while
+	// the result reported success. The code is left unused and no session is
+	// retired.
+	if !hasPasswordAuth {
+		return &AuthPasswordSetResult{
+			Error: &AuthPasswordSetError{
+				Message: AuthPasswordSetNoPasswordAuthMessage,
+			},
+		}, nil
 	}
 
 	// valid reset code
