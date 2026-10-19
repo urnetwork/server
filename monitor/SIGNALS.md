@@ -3794,6 +3794,45 @@ inventory, not healthy coverage. Unsupported/duplicate scope leaves the map
 incomplete without changing aggregates. A receipt is a sequence of per-collector
 locked snapshots, not an atomic fleet instant or an in-flight request census.
 
+A local evidence reader's full-prefix size cap can hide these receipts while
+both the watcher and independent alert/coverage/PG packet continue. The earlier
+packet-abort correction remains separate: an optional unavailable collector
+projection is not a stopped watcher or a product failure. The qualified passive
+reader now selects at most 4 MiB minus 8192 bytes from the recent stderr window;
+two bounded boundary rechecks keep total requested source-content reads within
+the original 4 MiB. It requires the qualified stderr generation and retains
+source identity, byte offsets, hashes, skipped/partial bytes and append metadata.
+Only complete LF-terminated exact-prefix lines within the writer's 8 KiB bound
+enter version-aware JSON parsing. The current fixed schema-2 receipt passes the
+source-qualified address-scrubbing relay unchanged; arbitrary diagnostics can
+expand, and this is no atomic-write or complete-delivery guarantee.
+
+The normal 2026-10-19 08:56:45Z passive capture restored 628 schema-2 receipts
+with no malformed records under that unchanged total read budget. Its latest
+receipt was about 26.531 seconds old, with 10 enabled, 7 fresh and 6 two-window
+collectors. This verifies bounded projection availability, not complete or
+healthy collection. The selected window skipped an older prefix and a cut
+leading line. Matching source identity, append flags and unchanged sampled
+size/mtime/ctime do not prove a sole writer or arbitrary interior immutability.
+
+False-positive qualifier: accepted framing and a fresh receipt do not override
+its stale, null, ambiguous or incomplete collector scopes, prove stream
+liveness, or clear independent log-loss findings. False-negative qualifier:
+receipts outside the window, cut/unfinished lines, later appends and malformed,
+oversized or unsupported records remain unobserved. Missing authority stays
+unknown; neither an empty projection nor alert absence proves healthy absence.
+Optional source failure preserves independent packet authority and never
+substitutes an older receipt. Keep per-receipt source/generation and clock
+checks; no retry, backfill, extra standing tail or cap raise is implied.
+
+VERIFY with the exact baseline size-refusal causal RED, the healthy baseline,
+and the 13 passed synthetic reader controls: cap edges, partial/quoted/bad JSON,
+unsupported versions, stale/future/null values, append, rotation/shrink/rewrite,
+short/error reads, source identity, privacy and independent packet completion.
+Require the next admitted normal passive capture to retain bounded source and
+individual-receipt authority. These controls do not establish an independent
+hard wall-time/RSS cap or replace the signal's two-window recovery gate.
+
 The receipt now copies every collector's fields under its existing lock before
 sampling one `observed_at` clock, then projects only those immutable copies.
 The earlier q13 producer sampled the check clock before copying collector state;

@@ -962,6 +962,31 @@ same-receipt row. Update version-aware readers before promotion; never
 reconstruct predecessor scope rows from aggregate ranges. See `SIGNALS.md`
 §1.5 and `MONITOR.md` §3.7 for the fixed schema.
 
+A passive local reader of retained stderr may select a bounded recent window
+under its unchanged total source-content read budget, including any witness
+rechecks. Pin the immutable watcher/session and stderr device/inode through the
+actual output path: process-wide scrubbing can put fd 2 on a pipe while a
+duplicated original descriptor owns the retained file. Check that descriptor's
+identity and append flags without assuming a sole writer. Retain window
+offsets, excluded partial lines, hashes, append-after-snapshot and unavailable
+reasons. Parse only complete LF-terminated exact-prefix receipt lines within
+the source-qualified writer/relay framing bound. The current fixed schema-2
+receipt remains unchanged by the address scrubber; arbitrary diagnostics can
+expand, and one writer call is not an atomicity or complete-delivery proof.
+
+A skipped prefix, cut first line, unfinished last line, unsupported or malformed
+receipt, source failure, or missing/stale scope leaves that authority unknown.
+Never infer full collection coverage or healthy absence from a tail, reuse old
+receipts as current, retry for backfill, or add a standing observer. Keep
+optional collector-source failure isolated from independent alert/coverage/PG
+evidence. Bounded witnesses and sampled unchanged size/mtime/ctime do not prove
+arbitrary interior mutation absent; qualify append-only source authority
+separately. Tool yield is not a hard deadline, and a byte cap does not establish
+an RSS or wall-time cap; name unattested bounds explicitly. Verify reader
+recovery at the next admitted normal passive capture under the unchanged
+cadence. Reader recovery does not close the log-loss or collector-health gate;
+see the qualified boundary and controls in `SIGNALS.md` §1.5.
+
 ## Daily three-way improvement research
 
 Run this research at least once per UTC day, and again after any material
