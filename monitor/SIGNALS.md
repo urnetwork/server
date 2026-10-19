@@ -22774,7 +22774,20 @@ narrows the window but does not close it. Step 2 then needs a lower runtime
 value (1 s, then 4 s again once the pools hold servers), or step 3. The fix is
 §2.11's source repair, `urnetwork/pgbouncer` 5594f22, which drops a waiting
 client that has hung up before it is given a server. Roll it out with xops
-`run-dbs.sh --pgbouncer-binary`.
+`run-dbs.sh --pgbouncer-binary`. That rollout ran at 19:08:45–19:18Z, moving
+one instance at a time, and ended the recurrence. Every pool came back with
+16–20 servers and 0 waiting. PostgreSQL's `incomplete message from client`
+lines fell from 4–5k a minute to fewer than 20 from 19:12Z, and commits rose
+from 10.8k/s to about 20k/s.
+
+Do not judge recovery by the commit rate alone. From at least 10-15 until the
+05Z edge reboots on 10-19, about 15–19k commits a second were contract
+creations that ended in `protocol_reject`
+(`urnetwork_contract_creation_completed_total{outcome="protocol_reject"}`),
+with almost no row work. That stream stopped at the reboots and has not come
+back, so commits sit about 20k/s below the days before even with every pool
+healthy. Judge the work rate by `outcome="contract_reply"`, which was 200–650
+a second over those days, and by inserts and updates.
 
 ### 5.13 Planned primary restart — stop the Taskworker first
 Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
