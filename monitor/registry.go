@@ -41,6 +41,7 @@ func NewWithSignals(settings SignalSettings, signals ...Signal) *Monitor {
 func NewSignals() []Signal {
 	return []Signal{
 		NewContractRateSignal(),
+		NewProviderConnectionsSignal(),
 		NewTaskCanariesSignal(),
 		NewNetEscrowSignal(),
 		NewPostgresStateSignal(),
@@ -74,6 +75,7 @@ func NewSignals() []Signal {
 		NewArindbCanarySignal(),
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
+		NewPgBouncerPoolStarvationSignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewWorkerCapSignal(),
