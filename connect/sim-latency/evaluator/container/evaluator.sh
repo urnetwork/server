@@ -552,7 +552,12 @@ exchange_hosts="$(jq -er '.evaluation_policy.exchange_hosts' "$request_path")"
 site_listen="$(jq -er '.evaluation_policy.site_listen' "$request_path")"
 api_port="$(jq -er '.evaluation_policy.api_port' "$request_path")"
 impairment_enabled="$(jq -r '.evaluation_policy.impairment_enabled' "$request_path")"
-takeover_margin="$(jq -er '.evaluation_policy.takeover_margin' "$request_path")"
+# JSON zero is numeric; the immutable official runner requires decimal text.
+takeover_margin="$(jq -er --argjson staging "$staging" '
+    .evaluation_policy.takeover_margin | select(type == "number") |
+    if $staging then select(. == 0) | "0.0"
+    else select(. > 0 and . <= 0.5) end
+    ' "$request_path")" || die "takeover margin does not match the explicit evaluation mode"
 queue_limit="$(jq -er '.evaluation_policy.queue_limit' "$request_path")"
 score_timeout_seconds="$(jq -er '.evaluation_policy.score_timeout_seconds' "$request_path")"
 for numeric in client_warmup_timeout_ms duration_ms request_timeout_ms pipeline_interval_ms test_timeout_ms announce_timeout_ms exchange_hosts api_port score_timeout_seconds; do
