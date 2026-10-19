@@ -163,6 +163,7 @@ func NewSignals() []Signal {
 		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),
 		NewEmailAssetsSignal(),
+		NewAccountMessagesSignal(),
 		NewPlayCrashesSignal(),
 		NewAppleCrashesSignal(),
 		NewVPNSessionsSignal(),

@@ -36772,6 +36772,85 @@ Every cataloged public path and every enabled exact-edge path must return HTTP
 and bounded Web logs must contain zero new exact-path 404/ENOENT records for ten
 minutes.
 
+### 19.3 Account message delivery — every channel that sends must deliver
+
+Probe: `account-messages`
+
+Every account email and SMS (sign-in and verification codes, password resets,
+payout and earnings notices) is one SES or Pinpoint SMS (`sms-voice`) call in
+`controller/aws_controller.go`, counted per sending process by
+`urnetwork_account_message_sends_total{channel,result}`: channel `email` or
+`sms`, result `sent`, `failed` or `timeout`. The API, Taskworker and Alt push
+it through their stats pushers. A failed call is logged only as
+`[aws]account <channel> send failed (<code>)`, at info level and at most once a
+report interval with a count of the suppressed failures, so the log rate
+understates failures and no §1.5 class pages on it.
+
+HOW: one Mimir instant query every five minutes through a services gateway:
+`sum by (job,channel,result) (increase(urnetwork_account_message_sends_total{env}[24h]))`.
+The range is a day because SMS is rare: a few sign-in codes a day, plus the
+Taskworker's burst when an epoch finalizes. A shorter range holds fewer
+failures than the floor while every call fails.
+
+- `account-message-channel-down` (PAGE, frame `channel=<email|sms>`, sustain 2):
+  the channel delivered nothing in the range (`sent=0`) while at least 3 sends
+  failed or timed out. Every user who signs in by that channel is locked out.
+  One delivered send ends it at once, whatever failures remain in the range.
+- `account-message-channel-degraded` (WARN, same frame, sustain 2): the channel
+  still delivers but failed or timed out at least 25% of at least 20 sends in
+  the range. A recovered channel can stay degraded until its failures leave
+  the range.
+- `account-message-sends-unobservable` (WARN, sustain 2, an unknown state):
+  no series at all (no sending process exports the counter: an artifact older
+  than the send-timeout counter or stats pushers that do not reach Mimir), or a
+  sample that is unlabeled, names a channel or result the producer does not
+  count, is stale, or is negative. A fixed `visibility_reason` is the only
+  value kept.
+
+A channel without series had no send of any result since its processes
+started, so it cannot be failing; the other channel's series prove the counter
+is exported. The observed line carries the channel's sent, failed and timeout
+totals, its failure share, and the failed/attempted counts by sending job. No
+address, phone number, message or identity leaves Mimir.
+
+ACTION: read the failing service's `[aws]account <channel> send failed (<code>)`
+line for the SDK error code and fix the provider side. `AccessDeniedException`
+is an IAM policy that does not allow `ses:SendEmail` or
+`sms-voice:SendTextMessage` for the messaging user on the configured identity
+or origination number; `ThrottlingException` is a quota; a suspended identity
+or origination number refuses every call. Do not retry sends by hand or
+restart services for this alone: the credential and policy are read per call,
+so a policy fix applies to the next send. Verify with one successful send on
+the channel (`sent > 0`), then a real sign-in code arriving.
+
+False-positive qualifier: three refusals during a short provider outage on a
+day with no other send of that channel page until the next successful send,
+though delivery recovered; the observed failed-by-job counts and the error
+code on the log line separate an outage that ended from a standing refusal.
+False negative: the counter covers only these provider calls. A message that
+is never handed to the provider (an outbox row held for a missing wallet or a
+template that fails to render) is not counted, and a provider that accepts a
+message it later fails to deliver (a bounce, a carrier block) counts as sent.
+Delivery receipts and the account message outbox are separate evidence.
+
+2026-10-18 incident: every SMS call failed for at least the seven days of the
+counter's range, with zero sent: 28 API sign-in or verification sends, 13
+Taskworker epoch-1 earnings notices and 2 Alt sends, each refused with
+`AccessDeniedException` for `sms-voice:SendTextMessage` because no
+identity-based policy of the messaging IAM user allows it. Email delivered
+normally (1,868 API and 2,444 Taskworker sends). `vault/main/aws.yml` had not
+changed since 2023 and the Pinpoint SMS v2 sender has been in place since
+2026-04-16, so the refusal is an IAM policy state outside the repositories.
+The closure is an operator IAM change, not a software release.
+
+Implementation convention: SIGNALS.md §19.3 (`account-messages`) maps to
+`signal_account_messages.go` and `signal_account_messages_test.go`, registered
+by `NewAccountMessagesSignal`. Synthetic Mimir answers cover healthy channels,
+the incident's shape (SMS down beside healthy email, named by job), a
+timeout-only channel, the floor, a first success clearing the page, the
+degraded share and its edge, a channel without series, and unreadable frames
+(no series, unlabeled, unknown channel or result, stale, negative).
+
 ## 20. Mobile store crash reports
 
 Mobile-store reporting is an optional external observation plane. Each
