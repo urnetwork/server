@@ -17,7 +17,9 @@
 // many handlers still heartbeat, which holds for a dead process, a lost host
 // and a restarted fleet, but not for a heartbeat path that failed for all.
 // Deferral keeps a handler's rows connected; its heartbeat or the next round
-// settles it.
+// settles it. The readers that join a handler on its heartbeat take the same
+// judgement (network_client_handler_liveness.go), so a kept handler's
+// providers stay live to them too.
 package model
 
 import (
@@ -242,64 +244,37 @@ func expireNetworkClientHandlers(
 	var staleHandlerIds []server.Id
 	var freshCount int
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		staleHandlerIds = nil
-		rows, err := tx.Query(
-			ctx,
-			`SELECT handler_id FROM network_client_handler WHERE heartbeat_time < $1 ORDER BY heartbeat_time, handler_id LIMIT $2`,
-			minTime.UTC(),
-			networkClientHandlerExpiryCandidateLimit,
-		)
-		server.Raise(err)
-		defer rows.Close()
-		for rows.Next() {
-			var handlerId server.Id
-			server.Raise(rows.Scan(&handlerId))
-			staleHandlerIds = append(staleHandlerIds, handlerId)
-		}
-		rowErr := rows.Err()
-		rows.Close()
-		server.Raise(rowErr)
-		server.Raise(tx.QueryRow(
-			ctx,
-			`SELECT count(*) FROM network_client_handler WHERE heartbeat_time >= $1`,
-			minTime.UTC(),
-		).Scan(&freshCount))
+		staleHandlerIds, freshCount = readStaleNetworkClientHandlers(ctx, tx, minTime)
 	}, server.TxReadCommitted)
 	if len(staleHandlerIds) == 0 {
 		return
 	}
 
 	// no database connection is held across the Redis read
-	stampedHandlerIds, stampsKnown := readStamps(ctx, staleHandlerIds)
-	expiredHandlerIds, deferredStampedCount, deferredFleetCount := selectExpiredNetworkClientHandlers(
-		staleHandlerIds,
-		freshCount,
-		stampedHandlerIds,
-		stampsKnown,
-	)
+	verdicts := judgeStaleNetworkClientHandlers(ctx, staleHandlerIds, freshCount, readStamps)
 	expiredCount := 0
-	if 0 < len(expiredHandlerIds) {
+	if 0 < len(verdicts.expiredHandlerIds) {
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// a handler that heartbeat since the read is no longer stale and stays
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_client_handler WHERE handler_id = ANY($1::uuid[]) AND heartbeat_time < $2`,
-				expiredHandlerIds,
+				verdicts.expiredHandlerIds,
 				minTime.UTC(),
 			))
 			expiredCount = int(tag.RowsAffected())
 		}, server.TxReadCommitted)
 	}
 	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryExpired).Add(float64(expiredCount))
-	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredStamped).Add(float64(deferredStampedCount))
-	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredFleet).Add(float64(deferredFleetCount))
-	if 0 < deferredStampedCount+deferredFleetCount {
+	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredStamped).Add(float64(verdicts.deferredStampedCount))
+	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredFleet).Add(float64(verdicts.deferredFleetCount))
+	if 0 < verdicts.deferredStampedCount+verdicts.deferredFleetCount {
 		glog.Infof(
 			"[nch]handler expiry kept %d of %d stale handlers (%d still stamp liveness, %d without fleet evidence, %d heartbeat)\n",
-			deferredStampedCount+deferredFleetCount,
+			verdicts.deferredStampedCount+verdicts.deferredFleetCount,
 			len(staleHandlerIds),
-			deferredStampedCount,
-			deferredFleetCount,
+			verdicts.deferredStampedCount,
+			verdicts.deferredFleetCount,
 			freshCount,
 		)
 	}

@@ -164,9 +164,13 @@ func TestFindProviders2NamedQualityStillNeedsLiveConnection(t *testing.T) {
 				WHERE handler_id = (SELECT handler_id FROM network_client_connection WHERE connection_id = $1)`,
 				stale.connectionId, server.NowUtc().Add(-3*NetworkClientHandlerHeartbeatTimeout)))
 		})
+		// another live process stamps, so the writer set vouches and the
+		// stopped handler, which does not stamp, is an ended process
+		// (network_client_handler_liveness.go)
+		liveStaleTestVouchingHandler(ctx, t)
 		assertNamedRedialRefused(ctx, t, closed, "a provider with its only connection closed", nil, nil)
 		assertNamedRedialRefused(ctx, t, closedVerified, "a verified provider with its only connection closed", nil, nil)
-		assertNamedRedialRefused(ctx, t, stale, "a provider whose handler stopped heartbeating", nil, nil)
+		assertNamedRedialRefused(ctx, t, stale, "a provider whose process ended", nil, nil)
 
 		// Reconnects at once, before the announce classifies the connection:
 		// unknown is not risk, as the common risk gate reads it.
