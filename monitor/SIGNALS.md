@@ -10897,6 +10897,46 @@ PostgreSQL stop the backends rule sees the held last value and stays quiet;
 use `accepted` handshakes and a direct 5432 read. A rule that routes to the
 broken email contact point notifies no one.
 
+The 2026-10-18 21:59–23:59 UTC historical discriminator aligned the TPS
+boundary with pool-path progress. A bounded authenticated native Mimir read
+returned all 24 fixed aggregate families on 240 finite, unique 30-second
+samples (21:59:30–23:59; the subquery excludes its exact left boundary), with
+no internal gaps, zero observed commit/API counter resets, six commit source
+series throughout and fresh source timestamps. At 22:39:30 commits were
+63,367/s, backends 929, pool wait/starvation maxima zero and API in-flight
+45. At 22:40:00 backends fell to 340 and API in-flight rose to 54,155; by
+22:43 commits were 19,535/s, maximum pool wait 10.24s, starvation age 180s
+and API in-flight 79,243. Host CPU busy fell from 58% to 28%, rather than
+reaching whole-host saturation. A brief aggregate recovery at 23:04 preceded
+another backend loss and queue buildup at 23:05. This localizes the sharp
+collapse to pool admission/progress; it does not establish the triggering
+login, authentication, process lifecycle, configuration or handoff defect.
+The checked exporter definition is historical xops source, not attestation of
+the installed exporter or current settings. Preserve the external PgBouncer/
+Postgres tuning owner's decision and mutation boundary.
+
+False-positive qualifier: a two-minute rate smooths transition timing;
+API completions/in-flight do not measure all incoming work, host CPU is not
+backend CPU, and a fresh metrics timestamp plus `pg_up` does not certify
+collection freshness or process generation. A maximum across pools cannot
+identify which or how many pools failed. In this same observation TPS
+recovered to about 60k/s by 23:22 while at least one pool's starvation timer
+continued, so a positive aggregate maximum is not sufficient to explain every
+throughput level. A timer reset may mean a healthy pool or exporter restart;
+require same-window per-pool established servers, queued clients, login state,
+up/coverage and generation evidence before choosing a mechanism or calling
+all pools recovered. The exporter preserves a streak across an unavailable
+console read, and its established-server sum excludes cancellation states.
+
+False-negative qualifier: a missing console/pool/series remains unknown,
+not zero or healthy; 30-second evaluations can miss shorter events, and
+aggregate projection discards publisher/shard ownership. Missing uptime,
+login-error and authenticated backend-path evidence cannot be supplied by
+an old source template. The fresh low-queue aggregate controls at 23:04 and
+after 23:44 narrow the affected interval, but neither close the earlier
+trigger nor establish current health. This historical discriminator changes
+no automatic probe, cadence, threshold or runtime action.
+
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
