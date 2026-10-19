@@ -120,14 +120,38 @@ bootstrap evidence preserved. Do not replace its immutable intent or readiness
 receipt. The replacement scope is `sim-latency-v2-staging-20261019-r2`, using
 separate root-owned state under `/var/lib/urnetwork/competition-v2-staging-r2`.
 
-The replacement config and scoped vault credentials have been deployed and
-verified through the live API. Migration 851 and the runtime-blob guard are live.
-Bootstrap completed against the published config commit above. The reserved
-round is `01a15630-5f90-8b15-19e3-74ce7177cb50`; it is **not open**.
+The replacement config (`14229f9`) and scoped vault credentials (`dd39358`)
+have been deployed and verified through the live API. Migration 851 and the
+runtime-blob guard are live. Bootstrap completed against the published config
+commit above. Round `01a15630-5f90-8b15-19e3-74ce7177cb50` is **open**:
 
-The first real host-readiness probe completed both simulations, passed G1–G6,
-and reported successful containment and cleanup. A subsequent qualification
-check failed before worker acknowledgment or activation. The supervisor was
-stopped to prevent repeated probes while this is diagnosed. Successful simulator
-output alone is not host qualification; do not announce admission until the
-remaining qualification checks pass and the API advertises an open round.
+- staging epoch 1 of the replacement six-round season;
+- opens `2026-10-19T22:40:05.671124Z`;
+- closes `2026-10-21T22:40:05.671124Z`;
+- decision mode `provisional_reward_v2`, zero fee and zero takeover margin;
+- nine scoring replicates; the separate qualification probe does not replace
+  the round's authenticated scoring baseline.
+
+The first completed probe exposed a trusted qualifier decoder defect: real
+scorer gate identifiers such as `G1_success` were rejected as noncanonical keys.
+Server `858a067fa3413ca1fdf89fc1de9b197167925019` fixes this with narrowly
+scoped scorer-data decoding, exact G1–G6 requirements, and deterministic
+regressions. It also resumes the exact genuine persisted API acknowledgment
+after a later API rollout, without changing immutable evidence. Independent
+focused tests passed 31/31 normally and 31/31 with the race detector; a read-only
+replay authenticated the original preserved probe without altering state.
+
+The fixed host-side `competitionprepare` and `competitionqualify` are installed
+root-owned under `/usr/local/libexec/urnetwork/competition-qualification-858a067fa`.
+A fresh real probe then completed, authenticated its artifacts, retained evidence
+in MinIO, promoted containment and exact-round rebaseline checks, and obtained
+the independent worker acknowledgment. The supervisor activated source and
+created the round through its normal fenced state machine. At 22:40 UTC,
+`/competition/info` advertised the open round and authenticated
+`/competition/readyz` returned `ready: true` with every check passing.
+
+`competition-v2-staging.service` is enabled and running with its durable
+supervisor and worker. The source checkpoint, simulator/scorer bytes and
+evaluator image did not change during the qualifier fix. Admission readiness
+does not establish the full public submission → evaluation → automatic winner
+→ next-round lifecycle; that remains the purpose of Macrocosmos's staging test.
