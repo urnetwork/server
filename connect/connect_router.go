@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -103,25 +102,9 @@ func newConnectRouter(
 		)
 	})
 
-	// update the heartbeat
-	go server.HandleError(func() {
-		defer cancel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(min(5*time.Second, model.NetworkClientHandlerHeartbeatTimeout/2)):
-			}
-			// try again after unhandled errors. these signal a transient issue such as db load
-			server.HandleError(func() {
-				err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
-				if err != nil {
-					// shut down
-					cancel()
-				}
-			})
-		}
-	})
+	// update the heartbeat. a handler that handler expiry retired shuts the
+	// process down only once the database confirms it (handler_heartbeat.go)
+	newHandlerHeartbeat(ctx, handlerId, DefaultHandlerHeartbeatSettings(), cancel)
 
 	service := strings.ToLower(server.RequireService())
 	envService := strings.ToLower(fmt.Sprintf("%s-%s", server.RequireEnv(), server.RequireService()))

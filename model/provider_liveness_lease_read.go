@@ -378,14 +378,19 @@ func (self *providerLivenessCoverage) read(ctx context.Context) (bool, string, e
 	return true, "", nil
 }
 
-// Runs one pipelined read within ProviderLivenessReadTimeout on the
-// deadline-bound pool, which applies the deadline to its socket I/O and
-// retries no command or redirect, without its preflight ping, which would
-// reach an arbitrary node. The read is single-key commands only, which that
-// pool's routing serves shard by shard. A command's own failure is on the
-// command; the error is the read's.
+// Runs one pipelined read within ProviderLivenessReadTimeout
+// (readProviderLivenessWithin).
 func readProviderLiveness(ctx context.Context, queue func(context.Context, redis.Pipeliner)) error {
-	readCtx, readCancel := context.WithTimeout(ctx, ProviderLivenessReadTimeout)
+	return readProviderLivenessWithin(ctx, ProviderLivenessReadTimeout, queue)
+}
+
+// Runs one pipelined read within timeout on the deadline-bound pool, which
+// applies the deadline to its socket I/O and retries no command or redirect,
+// without its preflight ping, which would reach an arbitrary node. The read is
+// single-key commands only, which that pool's routing serves shard by shard. A
+// command's own failure is on the command; the error is the read's.
+func readProviderLivenessWithin(ctx context.Context, timeout time.Duration, queue func(context.Context, redis.Pipeliner)) error {
+	readCtx, readCancel := context.WithTimeout(ctx, timeout)
 	defer readCancel()
 	return server.RedisWithDeadline(readCtx, func(r server.RedisClient) error {
 		_, err := r.Pipelined(readCtx, func(pipe redis.Pipeliner) error {

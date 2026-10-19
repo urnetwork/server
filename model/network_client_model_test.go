@@ -237,6 +237,9 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 	})
 }
 
+// A handler's lifecycle: a connection under it, its heartbeat, expiry once its
+// process ended, and removal of the retired row. Each cutoff is set after the
+// event it must follow, so nothing waits.
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -255,23 +258,22 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
 		connect.AssertEqual(t, err, nil)
 
-		select {
-		case <-time.After(1 * time.Second):
-		}
-
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, true)
 
-		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
+		// a live process stamps the writer set, so expiry can tell that this
+		// handler's process ended
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		connect.AssertEqual(t, PublishProviderLivenessWriter(ctx, liveHandlerId), nil)
+
+		// a cutoff after the last heartbeat makes the handler stale
+		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(time.Second))
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, false)
 
-		select {
-		case <-time.After(1 * time.Second):
-		}
-
-		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
+		// a cutoff after the retirement removes the retired row
+		RemoveDisconnectedNetworkClients(ctx, time.Now().Add(time.Second), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		connect.AssertNotEqual(t, err, nil)
@@ -281,7 +283,8 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 	})
 }
 
-func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
+// The handler lifecycle over an IPv6 client address.
+func TestNetworkClientHandlerLifecycleIpv6(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -299,19 +302,22 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
 		connect.AssertEqual(t, err, nil)
 
-		time.Sleep(1 * time.Second)
-
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, true)
 
-		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
+		// a live process stamps the writer set, so expiry can tell that this
+		// handler's process ended
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		connect.AssertEqual(t, PublishProviderLivenessWriter(ctx, liveHandlerId), nil)
+
+		// a cutoff after the last heartbeat makes the handler stale
+		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(time.Second))
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, false)
 
-		time.Sleep(1 * time.Second)
-
-		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
+		// a cutoff after the retirement removes the retired row
+		RemoveDisconnectedNetworkClients(ctx, time.Now().Add(time.Second), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		connect.AssertNotEqual(t, err, nil)
