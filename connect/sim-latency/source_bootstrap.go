@@ -158,12 +158,12 @@ func runBootstrapSource(opts docopt.Opts) {
 			Staging: settings.AutomationPolicy.Staging, StagingRoundWindowSeconds: settings.AutomationPolicy.StagingRoundWindowSeconds, StagingPreparationSeconds: settings.AutomationPolicy.StagingPreparationSeconds,
 			Generation: 1, ExpectedGeneration: 0, SourceGeneration: 0, TargetEpoch: 1, Kind: "baseline", Reason: "policy_approved_baseline", SourceDecisionDigest: round.SourceDecisionDigest,
 			TargetRoundId:    server.NewId(),
-			SourceLockSha256: generation.SourceLockSha256, Commits: generation.Repositories.commits(), GitRefs: map[string]model.CompetitionSourceGitRef{}, Manifest: manifestBytes,
+			SourceLockSha256: generation.SourceLockSha256, Commits: generation.Repositories.commitsForMode(manifest.Staging), GitRefs: map[string]model.CompetitionSourceGitRef{}, Manifest: manifestBytes,
 			ManifestCommit: manifestCommit, ManifestSha256: hex.EncodeToString(digest[:]), ConfigExpectedCommit: manifestCommit,
 			Threshold: settings.EvaluationPolicy.TakeoverMargin, ThresholdEvidenceSha256: generation.ThresholdEvidenceSha256,
 			EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256, PreparedAt: time.Now().UTC()}
 		publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: 1, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, Bootstrap: true}
-		for _, repository := range append(sourceRepositoryNames(), "config") {
+		for _, repository := range append(sourceRepositoryNamesForMode(intent.Staging), "config") {
 			localRoot := filepath.Join(repositoriesRoot, repository)
 			commit, branch := intent.Commits[repository], sourceBranch(intent.Staging)
 			if repository == "config" {
@@ -184,7 +184,7 @@ func runBootstrapSource(opts docopt.Opts) {
 				fatalf("baseline exact checkout: %s", err)
 			}
 			if repository == "server" {
-				if err := verifyFrozenSourceGraph(ctx, stagedRoot, commit); err != nil {
+				if err := verifyFrozenSourceGraphForMode(ctx, stagedRoot, commit, intent.Staging); err != nil {
 					fatalf("baseline measured dependency graph: %s", err)
 				}
 			}

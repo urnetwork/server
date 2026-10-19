@@ -174,7 +174,7 @@ func LoadCompetitionRuntimeManifest(settings *Settings, intent *model.Competitio
 		return errors.New("source_not_ready: runtime manifest has trailing content")
 	}
 	digest := sha256.Sum256(installed.Manifest)
-	lockDigest, err := model.CompetitionSourceLockDigest(intent.Commits)
+	lockDigest, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
 	if err != nil || lockDigest != intent.SourceLockSha256 ||
 		installed.Staging != intent.Staging || installed.StagingRoundWindowSeconds != intent.StagingRoundWindowSeconds || installed.StagingPreparationSeconds != intent.StagingPreparationSeconds ||
 		installed.Environment != intent.Environment || installed.CompetitionId != intent.CompetitionId || installed.SeasonId != intent.SeasonId ||

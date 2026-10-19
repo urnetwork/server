@@ -122,7 +122,7 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 			proposal.Significance.RecommendedNextEpochTakeoverMarginPercent < current.Threshold*100 {
 			continue
 		}
-		lockDigest, err := model.CompetitionSourceLockDigest(proposal.Commits)
+		lockDigest, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
 		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuildForMode(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging) != nil {
 			continue
 		}
@@ -262,7 +262,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	}
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
 		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, EvaluatedImageDigest: approved.EvaluatedImageDigest}
-	for _, repository := range sourceRepositoryNames() {
+	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin, err := sourceGitText(ctx, filepath.Join(repositoriesRoot, repository), "remote", "get-url", "origin")
 		if err != nil {
 			fatalf("source origin: %s", err)
@@ -279,7 +279,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 		}
 		proposal.StagedRoots[repository], proposal.Commits[repository] = stagedRoot, current.Commits[repository]
 		if repository == "server" {
-			if err := verifyFrozenSourceGraph(ctx, stagedRoot, current.Commits[repository]); err != nil {
+			if err := verifyFrozenSourceGraphForMode(ctx, stagedRoot, current.Commits[repository], current.Staging); err != nil {
 				fatalf("reviewed measured dependency graph: %s", err)
 			}
 			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", patchPath); err != nil {
@@ -298,7 +298,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 			}
 		}
 	}
-	proposal.SourceLockSha256, err = model.CompetitionSourceLockDigest(proposal.Commits)
+	proposal.SourceLockSha256, err = model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
 	if err != nil {
 		fatalf("source lock: %s", err)
 	}

@@ -10,10 +10,19 @@ import (
 
 var competitionSourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// Hashes the compact evaluator-lock object. Artifact file digests remain
-// separate: pretty-printed copies need not have this canonical content hash.
+// Accepts only either complete supported graph. Callers with an authenticated
+// execution mode must use the mode-bound variant rather than infer authority.
 func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
-	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"}
+	return CompetitionSourceLockDigestForMode(commits, len(commits) == 10)
+}
+
+// Explicit staging retires operator-proxy; production retains its historical
+// eleven-repository contract. Canonical bytes stay identical for existing locks.
+func CompetitionSourceLockDigestForMode(commits map[string]string, staging bool) (string, error) {
+	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
+	if !staging {
+		repositoryNames = append(repositoryNames, "operator-proxy")
+	}
 	if len(commits) != len(repositoryNames) {
 		return "", fmt.Errorf("source lock requires exactly %d frozen repositories", len(repositoryNames))
 	}

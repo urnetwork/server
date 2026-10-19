@@ -260,7 +260,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	if proposal != nil {
 		publication.ApprovedPatchSha256, publication.ApprovedPatchPath = proposal.PatchSha256, filepath.Join(finalRoot, "canonical.patch")
 	}
-	for _, repository := range sourceRepositoryNames() {
+	for _, repository := range sourceRepositoryNamesForMode(intent.Staging) {
 		stagedRoot := filepath.Join(root, repository)
 		origin, err := sourceGitText(ctx, filepath.Join(self.repositoriesRoot, repository), "remote", "get-url", "origin")
 		if err != nil {

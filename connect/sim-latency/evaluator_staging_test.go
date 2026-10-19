@@ -31,29 +31,38 @@ func TestEvaluatorBaseRecordRequiresExplicitMatchingStagingMode(t *testing.T) {
 	}
 	body := "set -Eeuo pipefail\n" + script[start:start+1+end] + "\n"
 	for _, fixture := range []struct {
-		name        string
-		staging     bool
-		recordStage bool
-		branch      string
-		margin      float64
-		wantSuccess bool
+		name           string
+		staging        bool
+		recordStage    bool
+		branch         string
+		margin         float64
+		includeRetired bool
+		wantSuccess    bool
 	}{
 		{name: "production", branch: "sim-latency", margin: 16.1, wantSuccess: true},
 		{name: "staging", staging: true, recordStage: true, branch: stagingEvaluationSourceBranch, wantSuccess: true},
 		{name: "implicit-stage", staging: true, branch: stagingEvaluationSourceBranch},
 		{name: "stage-production-branch", staging: true, recordStage: true, branch: "sim-latency"},
 		{name: "stage-positive-margin", staging: true, recordStage: true, branch: stagingEvaluationSourceBranch, margin: 16.1},
+		{name: "stage-retired-repository", staging: true, recordStage: true, branch: stagingEvaluationSourceBranch, includeRetired: true},
 		{name: "production-zero-margin", branch: "sim-latency"},
 		{name: "production-stage-branch", branch: stagingEvaluationSourceBranch, margin: 16.1},
 	} {
 		record := sourceRecord{Schema: 1, Staging: fixture.recordStage, Epoch: 0, Branch: fixture.branch,
 			SignificantImprovementPercent: fixture.margin, Repositories: sourceTestCommits(strings.Repeat("a", 40))}
+		if fixture.staging && !fixture.includeRetired {
+			delete(record.Repositories, "operator-proxy")
+		}
 		recordBytes, err := json.Marshal(record)
 		if err != nil {
 			t.Fatal(err)
 		}
 		command := exec.CommandContext(t.Context(), "bash", "-c", body)
-		command.Env = []string{"PATH=" + os.Getenv("PATH"), "LANG=C", "LC_ALL=C", "source_epoch=0",
+		repositoryNames, err := json.Marshal(sourceRepositoryNamesForMode(fixture.staging))
+		if err != nil {
+			t.Fatal(err)
+		}
+		command.Env = []string{"PATH=" + os.Getenv("PATH"), "LANG=C", "LC_ALL=C", "source_epoch=0", "repository_names_json=" + string(repositoryNames),
 			"staging=" + strconv.FormatBool(fixture.staging), "source_branch=" + sourceBranch(fixture.staging), "source_record=" + string(recordBytes)}
 		output, err := command.CombinedOutput()
 		if (err == nil) != fixture.wantSuccess {

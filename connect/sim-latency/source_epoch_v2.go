@@ -74,17 +74,20 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		return errors.New("reviewed source config requires baseline generation 0 and at most six promotions")
 	}
 	for index, generation := range generationRecords {
+		if manifest.Staging && generation.Repositories.OperatorProxy.Commit != "" {
+			return errors.New("staging source cannot include retired operator-proxy")
+		}
 		if generation.Generation != index || !validSha256(generation.SourceLockSha256) ||
 			!validSha256(generation.ThresholdEvidenceSha256) ||
 			!validSourceMargin(generation.SignificantImprovementPercent, manifest.Staging) {
 			return fmt.Errorf("source generation %d identity or threshold is invalid", index)
 		}
-		for repository, commit := range generation.Repositories.commits() {
+		for repository, commit := range generation.Repositories.commitsForMode(manifest.Staging) {
 			if !sourceGitShaPattern.MatchString(commit) {
 				return fmt.Errorf("source generation %d repository %s has an invalid commit", index, repository)
 			}
 		}
-		lockDigest, err := model.CompetitionSourceLockDigest(generation.Repositories.commits())
+		lockDigest, err := model.CompetitionSourceLockDigestForMode(generation.Repositories.commitsForMode(manifest.Staging), manifest.Staging)
 		if err != nil || lockDigest != generation.SourceLockSha256 {
 			return fmt.Errorf("source generation %d lock digest does not bind the complete commit map", index)
 		}
@@ -117,8 +120,8 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 			generation.SignificantImprovementPercent < previous.SignificantImprovementPercent {
 			return fmt.Errorf("source generation %d recommendation does not preserve its authenticated calibrated floor", index)
 		}
-		for repository, commit := range generation.Repositories.commits() {
-			if repository != "server" && commit != previous.Repositories.commits()[repository] {
+		for repository, commit := range generation.Repositories.commitsForMode(manifest.Staging) {
+			if repository != "server" && commit != previous.Repositories.commitsForMode(manifest.Staging)[repository] {
 				return fmt.Errorf("source generation %d changes protected dependency %s", index, repository)
 			}
 		}

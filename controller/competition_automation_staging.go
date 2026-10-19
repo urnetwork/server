@@ -24,6 +24,9 @@ func sourceModeMatches(settings *Settings, intent *model.CompetitionSourceActiva
 	if settings == nil || intent == nil || !settings.AutomationPolicy.Enabled {
 		return false
 	}
+	if _, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging); err != nil {
+		return false
+	}
 	policy := settings.AutomationPolicy
 	return intent.Staging == policy.Staging &&
 		intent.StagingRoundWindowSeconds == policy.StagingRoundWindowSeconds && intent.StagingPreparationSeconds == policy.StagingPreparationSeconds &&

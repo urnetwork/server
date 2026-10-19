@@ -284,13 +284,17 @@ func verifyRemoteSourceEpochHead(manifest *sourceManifest, epochNumber int, repo
 
 // verifyRemoteSourceEpochBranchHead proves that a named era branch is an
 // exact alias of one configured checkpoint. Unlike production history checks,
-// staging aliases are never allowed to advance past the frozen baseline.
+// legacy staging aliases are never allowed to advance past the frozen baseline.
+// Explicit v2 staging uses its own manifest and source-record --staging instead.
 func verifyRemoteSourceEpochBranchHead(
 	manifest *sourceManifest,
 	epochNumber int,
 	repositoriesRoot string,
 	branch string,
 ) error {
+	if manifest.Staging {
+		return errors.New("legacy staging source aliases cannot use an explicit v2 staging manifest; use source-record --staging")
+	}
 	if branch != stagingEvaluationSourceBranch {
 		return fmt.Errorf("unsupported staging source branch %q", branch)
 	}
@@ -313,7 +317,7 @@ func verifyRemoteSourceEpochMode(
 		return err
 	}
 	defer os.RemoveAll(temporaryRoot)
-	for _, repositoryName := range sourceRepositoryNames() {
+	for _, repositoryName := range sourceRepositoryNamesForMode(manifest.Staging) {
 		localRoot := filepath.Join(repositoriesRoot, repositoryName)
 		origin, err := gitOutput(localRoot, "remote", "get-url", "origin")
 		if err != nil {
@@ -332,7 +336,7 @@ func verifyRemoteSourceEpochMode(
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("clone repository %s competition branch: %s", repositoryName, strings.TrimSpace(string(output)))
 		}
-		expectedCommit := epoch.Repositories.commits()[repositoryName]
+		expectedCommit := epoch.Repositories.commitsForMode(manifest.Staging)[repositoryName]
 		if _, err := gitOutput(cloneRoot, "cat-file", "-e", expectedCommit+"^{commit}"); err != nil {
 			return fmt.Errorf("repository %s competition branch does not contain epoch commit %s", repositoryName, expectedCommit)
 		}

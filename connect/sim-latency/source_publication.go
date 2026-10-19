@@ -88,10 +88,10 @@ type sourcePublicationBackend interface {
 func validateSourcePublicationIntent(intent *sourcePublicationIntent) error {
 	if intent == nil || intent.Schema != 2 || intent.ActivationGeneration < 1 ||
 		!validSha256(intent.SourceDecisionDigest) || !validSha256(intent.ManifestSha256) ||
-		len(intent.Refs) != len(sourceRepositoryNames())+1 {
+		len(intent.Refs) != len(sourceRepositoryNamesForMode(intent.Staging))+1 {
 		return errors.New("source publication intent identity or complete repository set is invalid")
 	}
-	for index, repository := range append(sourceRepositoryNames(), "config") {
+	for index, repository := range append(sourceRepositoryNamesForMode(intent.Staging), "config") {
 		ref := intent.Refs[index]
 		branch := sourceBranch(intent.Staging)
 		if repository == "config" {
