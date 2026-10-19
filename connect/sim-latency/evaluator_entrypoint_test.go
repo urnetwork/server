@@ -1,8 +1,7 @@
-package main
-
 // Runs the evaluator entrypoint's job-service attestation with a synthetic
 // vault and a scripted getent. No container, resolver or service is used, and
 // the dispatch that would exec the migrator or runner is never reached.
+package main
 
 import (
 	"bytes"
@@ -23,6 +22,7 @@ func runEvaluatorEntrypointAttestation(
 	postgresAuthority string,
 	redisAuthority string,
 	answers map[string][]string,
+	environment ...string,
 ) (string, error) {
 	t.Helper()
 	content, err := os.ReadFile(evaluatorEntrypointPath)
@@ -73,6 +73,7 @@ func runEvaluatorEntrypointAttestation(
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"WARP_HOME=" + warpHome,
 	}
+	cmd.Env = append(cmd.Env, environment...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -98,6 +99,118 @@ func TestEvaluatorEntrypointAttestsJobServices(t *testing.T) {
 		output, err := runEvaluatorEntrypointAttestation(t, "postgres:5432", "redis:6379", c.answers)
 		if err != nil || output != c.attestation+"\n" {
 			t.Errorf("attestation for %v = %v, %q; want %q", c.answers, err, output, c.attestation)
+		}
+	}
+}
+
+// Direct local vault leaves use these exact resolver placeholders. Only their
+// resource-specific Compose hostname is substituted; literal authorities remain
+// compatible and the final attestation still contains resolved addresses only.
+func TestEvaluatorEntrypointAttestsApprovedEnvironmentAuthorities(t *testing.T) {
+	cases := []struct {
+		postgresAuthority string
+		redisAuthority    string
+	}{
+		{postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379"},
+		{postgresAuthority: "pg.service.example:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379"},
+		{postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis.service.example:6379"},
+	}
+	answers := map[string][]string{"pg.service.example": {"192.0.2.21"}, "redis.service.example": {"2001:db8::22"}}
+	for _, c := range cases {
+		output, err := runEvaluatorEntrypointAttestation(t, c.postgresAuthority, c.redisAuthority, answers,
+			"BRINGYOUR_POSTGRES_HOSTNAME=pg.service.example", "BRINGYOUR_REDIS_HOSTNAME=redis.service.example")
+		if err != nil || output != "192.0.2.21:5432,[2001:db8::22]:6379\n" {
+			t.Errorf("approved authorities %q / %q = %v, %q", c.postgresAuthority, c.redisAuthority, err, output)
+		}
+	}
+}
+
+// The compatibility path is deliberately not a general template evaluator:
+// absent variables, other variable names, cross-resource references and malformed
+// expressions fail before any endpoint can become authoritative.
+func TestEvaluatorEntrypointRefusesMalformedEnvironmentAuthorities(t *testing.T) {
+	cases := []struct {
+		name              string
+		postgresAuthority string
+		redisAuthority    string
+		environment       []string
+		resource          string
+	}{
+		{name: "missing postgres variable", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis:6379", resource: "pg.yml"},
+		{name: "empty postgres variable", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME="}, resource: "pg.yml"},
+		{name: "missing redis variable", postgresAuthority: "postgres:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379", resource: "redis.yml"},
+		{name: "empty redis variable", postgresAuthority: "postgres:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379", environment: []string{"BRINGYOUR_REDIS_HOSTNAME="}, resource: "redis.yml"},
+		{name: "other variable", postgresAuthority: "{{ env:SYNTHETIC_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"SYNTHETIC_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "postgres references redis", postgresAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_REDIS_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "redis references postgres", postgresAuthority: "postgres:5432", redisAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=redis"}, resource: "redis.yml"},
+		{name: "missing expression brace", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "unapproved expression spacing", postgresAuthority: "{{env:BRINGYOUR_POSTGRES_HOSTNAME}}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "expression prefix", postgresAuthority: "prefix-{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "expression suffix", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}.example:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "templated port", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:{{ env:SYNTHETIC_PORT }}", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres", "SYNTHETIC_PORT=5432"}, resource: "pg.yml"},
+		{name: "environment contains port", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres:5432"}, resource: "pg.yml"},
+		{name: "environment contains newline", postgresAuthority: "postgres:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379", environment: []string{"BRINGYOUR_REDIS_HOSTNAME=redis\npostgres"}, resource: "redis.yml"},
+		{name: "port outside range", postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:65536", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=postgres"}, resource: "pg.yml"},
+		{name: "unmatched quotation", postgresAuthority: "postgres:5432\"", redisAuthority: "redis:6379", resource: "pg.yml"},
+		{name: "duplicate literal authority", postgresAuthority: "postgres:5432\"\nauthority: \"postgres:5432", redisAuthority: "redis:6379", resource: "pg.yml"},
+		{name: "duplicate empty authority", postgresAuthority: "postgres:5432\"\nauthority: \"", redisAuthority: "redis:6379", resource: "pg.yml"},
+		{name: "duplicate redis authority", postgresAuthority: "postgres:5432", redisAuthority: "redis:6379\"\nauthority: \"redis:6379", resource: "redis.yml"},
+	}
+	answers := map[string][]string{"postgres": {"192.0.2.21"}, "redis": {"192.0.2.22"}}
+	for _, c := range cases {
+		output, err := runEvaluatorEntrypointAttestation(t, c.postgresAuthority, c.redisAuthority, answers, c.environment...)
+		if err == nil || !strings.Contains(output, c.resource+" needs one host:port authority") {
+			t.Errorf("%s: attestation = %v, %q", c.name, err, output)
+		}
+	}
+}
+
+// Hostname environment values and vault text are inert data, even if they
+// resemble shell substitutions. A private marker catches accidental evaluation.
+func TestEvaluatorEntrypointNeverEvaluatesAuthorityExpressions(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "must-not-exist")
+	answers := map[string][]string{"postgres": {"192.0.2.21"}, "redis": {"192.0.2.22"}}
+	for _, expression := range []string{"$(touch '" + markerPath + "')", "`touch '" + markerPath + "'`"} {
+		for _, c := range []struct {
+			postgresAuthority string
+			redisAuthority    string
+			environment       []string
+		}{
+			{postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", redisAuthority: "redis:6379", environment: []string{"BRINGYOUR_POSTGRES_HOSTNAME=" + expression}},
+			{postgresAuthority: "postgres:5432", redisAuthority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379", environment: []string{"BRINGYOUR_REDIS_HOSTNAME=" + expression}},
+			{postgresAuthority: expression + ":5432", redisAuthority: "redis:6379"},
+		} {
+			output, err := runEvaluatorEntrypointAttestation(t, c.postgresAuthority, c.redisAuthority, answers, c.environment...)
+			if err == nil || !strings.Contains(output, "needs one host:port authority") {
+				t.Errorf("shell-like authority was not refused: %v, %q", err, output)
+			}
+			if _, err := os.Lstat(markerPath); !os.IsNotExist(err) {
+				t.Fatalf("authority expression executed: %v", err)
+			}
+		}
+	}
+}
+
+// Environment substitution does not bypass the existing address proof: both
+// services must still resolve uniquely to a non-loopback job endpoint.
+func TestEvaluatorEntrypointEnvironmentAuthoritiesRetainAddressGuards(t *testing.T) {
+	cases := []struct {
+		name      string
+		answers   map[string][]string
+		errorText string
+	}{
+		{name: "postgres loopback", answers: map[string][]string{"postgres": {"127.0.0.1"}, "redis": {"192.0.2.22"}}, errorText: "postgres resolves to loopback"},
+		{name: "redis loopback", answers: map[string][]string{"postgres": {"192.0.2.21"}, "redis": {"::1"}}, errorText: "redis resolves to loopback"},
+		{name: "postgres ambiguous", answers: map[string][]string{"postgres": {"192.0.2.21", "192.0.2.23"}, "redis": {"192.0.2.22"}}, errorText: "postgres must resolve to exactly one address"},
+		{name: "redis ambiguous", answers: map[string][]string{"postgres": {"192.0.2.21"}, "redis": {"192.0.2.22", "192.0.2.24"}}, errorText: "redis must resolve to exactly one address"},
+		{name: "postgres absent", answers: map[string][]string{"redis": {"192.0.2.22"}}, errorText: "postgres did not resolve"},
+		{name: "redis absent", answers: map[string][]string{"postgres": {"192.0.2.21"}}, errorText: "redis did not resolve"},
+	}
+	for _, c := range cases {
+		output, err := runEvaluatorEntrypointAttestation(t, "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432", "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379", c.answers,
+			"BRINGYOUR_POSTGRES_HOSTNAME=postgres", "BRINGYOUR_REDIS_HOSTNAME=redis")
+		if err == nil || !strings.Contains(output, c.errorText) {
+			t.Errorf("%s: attestation = %v, %q", c.name, err, output)
 		}
 	}
 }
@@ -137,7 +250,7 @@ func TestEvaluatorEntrypointRefusesUnattestableJobServices(t *testing.T) {
 			errorText:         "postgres did not resolve",
 		},
 		{
-			name:              "templated authority",
+			name:              "unset templated authority",
 			postgresAuthority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432",
 			answers:           map[string][]string{"postgres": {"192.0.2.21"}, "redis": {"192.0.2.22"}},
 			errorText:         "pg.yml needs one host:port authority",

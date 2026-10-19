@@ -55,6 +55,12 @@ Provision private root-owned inventories at:
 - a separate private source-promoter token file; and
 - the durable supervisor service, state directory, and exact command hashes.
 
+The root service PATH must include the trusted Go installation as well as Git,
+SSH, Docker and the normal system tools. Bootstrap verifies frozen `go.mod`
+graphs by invoking `go mod edit -json`; the restricted default sudo PATH is
+insufficient. Verify this command under the actual service environment before
+bootstrap, not only from the operator's interactive shell.
+
 The qualifier additionally requires the real current-boot 72 GiB adversarial
 cleanup report, pinned promotion script, exact host configuration and genuine
 API receipt. Qualification paths and their ancestors must be root-owned,
@@ -70,8 +76,14 @@ Installed files and a measured host identity are not a passed qualification.
 
 ## Bootstrap and acceptance
 
-Only after the operator rollout, bootstrap the exact frozen ledger from config
-commit `587f764beaea20332493bd7e349d415ecc39edb5`, then start the durable supervisor.
+Only after the operator rollout, bootstrap from an explicit pushed config-main
+commit whose ledger bytes match the frozen SHA-256
+`085dbd51908fe08d57ff7fb397aac7e85c2918511c25f89dd84fa3e363b5ad5d`.
+For this release that commit is `9dc76e83f7568c4ea4ab46fc6b830a0a932d8abf`;
+the original snapshot was `587f764beaea20332493bd7e349d415ecc39edb5`.
+The published config ref must match the requested commit: do not move `main`
+backwards to the historical snapshot or alter the frozen ledger to accommodate
+control-plane changes. Then start the durable supervisor.
 The preparation sequence must perform all of the following without fabricated
 receipts or manual successful-marker files:
 
