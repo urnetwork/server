@@ -262,6 +262,11 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, true)
 
+		// a live process stamps the writer set, so expiry can tell that this
+		// handler's process ended
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		connect.AssertEqual(t, PublishProviderLivenessWriter(ctx, liveHandlerId), nil)
+
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
@@ -303,6 +308,11 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		connect.AssertEqual(t, connected, true)
+
+		// a live process stamps the writer set, so expiry can tell that this
+		// handler's process ended
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		connect.AssertEqual(t, PublishProviderLivenessWriter(ctx, liveHandlerId), nil)
 
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
