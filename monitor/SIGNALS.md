@@ -22759,6 +22759,23 @@ restart. `pgbouncer-pool-starvation` (§2.11a) and `provider-connections`
 (§1.1a) now page this shape; before them the monitor read neither the pool
 exporter nor the provider gauge.
 
+2026-10-19 (15:07Z–): it recurred with the 4 s queue timeout already
+persistent on every instance (xops `1f8d45c`, applied 13:57Z). A
+whole-database stall at 15:07:49–52Z (§2.2b: about 85 statements of every
+kind finished at 1–2.2 s, with no lock wait in those seconds, in the middle
+of a spread checkpoint) queued every pool. 26 instances logged their first
+`query_wait_timeout` within 4 s, and by 15:10Z all 31 stock pools were
+starved: servers fell from 627 to about 30, about 10k clients waited,
+PostgreSQL commits fell from 36k/s to 10.5k/s, and PostgreSQL logged about 4k
+`incomplete message from client` lines a minute. pgbouncer@1's waiter build
+kept its 20 servers, and providers held at about 73k. A waiter that is given
+a server is at most 4 s old, so clients still hang up while they wait: 4 s
+narrows the window but does not close it. Step 2 then needs a lower runtime
+value (1 s, then 4 s again once the pools hold servers), or step 3. The fix is
+§2.11's source repair, `urnetwork/pgbouncer` 5594f22, which drops a waiting
+client that has hung up before it is given a server. Roll it out with xops
+`run-dbs.sh --pgbouncer-binary`.
+
 ### 5.13 Planned primary restart — stop the Taskworker first
 Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
 huge-pages attempt.
