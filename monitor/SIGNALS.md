@@ -11185,6 +11185,48 @@ not establish offered arrivals. Pool admission/progress, busy servers, PG
 locks/IO/query-specific limits and historical workload/build scope remain
 unresolved. No current recovery, deployed reader or runtime action is implied.
 
+The separately qualified two-point pressure request at 2026-10-19
+12:19:14.049–12:19:15.279 UTC returned HTTP 200 with unchanged settings and
+complete 32/32 selected-database ordinal coverage at both historical points.
+At 03:30 the published tuples had 632 established normal servers, 11,060
+active clients, no waiting clients and no logins. At 04:00 they had only 20
+established normal servers, 936 active clients and 13,296 waiting clients:
+31 ordinals had zero normal servers and one login each, while one retained
+20 normal servers with a queue. Maximum wait was 10.2894s. This aligns
+pool-path loss of normal-server progress with the independently qualified
+50,219.06 to 14,288.69 commits/s bracket, before the retained postmaster start
+2026-10-19T04:12:44.511128Z. Lower offered demand or improved efficiency must
+not be accepted as the explanation without resolving this pressure evidence.
+
+The host's published nonidle mean fell from 50.79% to 22.57% and iowait from
+5.00% to 1.21%, with 96 idle source-counter series at each point. These are
+host CPU observations, not PostgreSQL attribution or an exclusion of capacity,
+locks, IO, quota, startup admission or transient stalls. The checked exporter
+sums the selected database's user pools; its normal-server sum excludes
+cancellation states. Queued clients may already have disconnected. One login
+can represent repeated attempts, including successful logins immediately lost
+at handoff, rather than one stuck physical connection. The source-owned
+starvation streak does not itself identify the initiating event.
+
+False-positive qualifiers: source timestamps and console-up publications do
+not establish collector collection age, installed collector identity or
+historical process generations. Exporter cache/restart and missing collection
+intervals can confound a streak's apparent onset; do not turn its elapsed age
+into an exact event time. Two points do not attest continuous pool state or
+prove that an older livelock, external tuning or maximum connections caused
+this incident. Preserve the October 18 versus October 19 date guard.
+
+False-negative qualifiers: the one surviving ordinal does not clear the
+other 31; selected-database coverage excludes other databases, cancellation
+states and intervening stalls. Missing/capped/empty native logs cannot prove
+absence of errors or successful startup. Next distinguish repeated startup
+failure from post-login server disposal using bounded affected/control native
+PgBouncer errors and PostgreSQL evidence in the October 19 03:30–04:15
+window. Existing retained empty journal results covered October 18 only, and
+the checked central pipeline does not establish a native PgBouncer log route.
+Any new read requires separate review; no restart, tuning, deployed reader,
+capacity clearance or current recovery follows from this historical result.
+
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
