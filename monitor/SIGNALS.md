@@ -24634,18 +24634,18 @@ numeric head at or above one of these versions is coherent only when the
 corresponding typed relation or index contract is present; never reconstruct
 the attestation table or its indexes manually after a failed migration.
 
-Versions 693–697 append the pinger-reported ping table of
+Versions 694–698 append the pinger-reported ping table of
 `POST /network/ping-report` (connect/GEOMAP.md §2.5–§2.6) and its four
 indexes. The replay key is the unique `(target_extender_id, pinger_kind,
 pinger_id, probe_nonce)` index, not a table constraint, so it is checked in
 the index catalog with its exact uniqueness and key order; the other three
 bound the hourly retention sweep and the per-target and per-pinger reads. The
 table guard pins every column's type, nullability and default, including the
-zero `cosign_reason` default and the `now()` creation time. Versions 698–699
+zero `cosign_reason` default and the `now()` creation time. Versions 699–700
 add the nullable genesis accuracy radius to `network_client_location` and to
 `network_extender_activation`; a NULL is the normal value for rows written
 before the column and for locations with no radius, so only the column shape is
-checked. Version 700 adds the NLayer relay depth `network_ping.hop_count`
+checked. Version 701 adds the NLayer relay depth `network_ping.hop_count`
 (connect/GEOMAP.md §2.9), required with a zero default so a direct ping and a
 row written before the column read the same. False-positive qualifier: absent
 artifacts before their published version are a pending-migration gate, not
@@ -24653,14 +24653,14 @@ drift. False-negative qualifier: a numeric head or a matching relation or
 index name cannot clear these checks. Never reconstruct the ping table or its
 indexes by hand after a failed migration.
 
-Versions 701–702 append the derive phase's output (connect/GEOMAP.md §5.4,
-§5.7, §6). Version 701 is `derived_location`, one row per provider or
+Versions 702–703 append the derive phase's output (connect/GEOMAP.md §5.4,
+§5.7, §6). Version 702 is `derived_location`, one row per provider or
 extender whose co-signed pings placed it better than its genesis, keyed by
 `(node_kind, node_id)`; every one of its twenty columns is required and has no
 default, because a derivation writes each row whole, and the table guard pins
 each column's type together with the primary key. The table holds at most one
 row per node that pinged in the last day, so it has no index beyond its key.
-Version 702 adds the nullable `network_client_location.genesis_location_id`:
+Version 703 adds the nullable `network_client_location.genesis_location_id`:
 the location a connection's own address lookup resolved to, stored beside the
 published location, so that once a derived location is published the next
 derivation still anchors the provider to its lookup rather than to its own
@@ -24670,13 +24670,13 @@ Both are location references the de-duplication job repoints, and it refuses
 to run on a schema whose location columns it has not inventoried. Code that
 derives, publishes or reads derived locations -- the derive task, the ping
 sweep, `SetConnectionLocation` and extender record signing -- must stay behind
-version 702. False-positive qualifier: absent artifacts before their published
+version 703. False-positive qualifier: absent artifacts before their published
 version are a pending-migration gate, not drift. False-negative qualifier: a
 numeric head or a matching relation or column name cannot clear these checks.
 Never reconstruct the derived-location table by hand after a failed migration;
 a derivation rewrites it whole on its next run.
 
-Versions 703–705 append the egress index (connect/GEOMAP.md §10.4, D23) to
+Versions 704–706 append the egress index (connect/GEOMAP.md §10.4, D23) to
 `network_client_location_reliability`: `egress_index`, the weighted and
 capped count of the latest health run's scored loads that failed every retry
 (0 without a usable run), `egress_quality`, whether that run passes the 90 %
@@ -24685,32 +24685,32 @@ location probe. The reliability rollup writes all three per provider in the
 pass that fills the net-type maxima, and the client-score job reads them into
 the quality and speed tiers. All three are nullable with no default, and a
 NULL is a normal value, so only the column shapes are checked: a NULL index is
-a row the new rollup has not written yet -- every row before version 703, or
+a row the new rollup has not written yet -- every row before version 704, or
 one an older binary inserted -- which FindProviders2 ranks exactly as before
 on `max_net_type_score` and `max_net_type_score_speed`, and a NULL verdict is
 a provider without usable evidence, which the online bucket answers for. Adding the
 columns rewrites nothing. Code that writes or reads them -- the rollup, the
 client-score job, the location counts, the provider stats and `bringyourctl
-provider inspect` -- must stay behind version 705. False-positive qualifier:
+provider inspect` -- must stay behind version 706. False-positive qualifier:
 absent artifacts before their published version are a pending-migration gate,
 not drift, and a NULL-heavy table after a deploy is the transition, not a
 fault, until the next rollup pass. False-negative qualifier: a numeric head or
 a matching column name cannot clear these checks. Never backfill the columns
 by hand; the next rollup pass writes every connected provider's row.
 
-Versions 706–712 append the prober's server side of connect/GEOMAP.md §11.3
-and §11.4. Versions 706–708 give `provider_blackhole_check` the run a dark
+Versions 707–713 append the prober's server side of connect/GEOMAP.md §11.3
+and §11.4. Versions 707–709 give `provider_blackhole_check` the run a dark
 verdict now needs: `consecutive_failures`, how many measured checks in a row
 failed, `first_failed_at`, when the first of them started, and `next_due_at`,
 the backoff step after a failure or the ordinary due age after a pass. A
 provider is dark only at `DarkConsecutiveFailures` failures spanning
-`DarkMinimumSpan`, so every row before 706 reads as a run of 0 -- the
+`DarkMinimumSpan`, so every row before 707 reads as a run of 0 -- the
 single-check verdicts it held were the false dark of §11.2 -- and a NULL
-`next_due_at` is due at its old `checked_at` age. Version 709 gives
+`next_due_at` is due at its old `checked_at` age. Version 710 gives
 `provider_egress_health` what a run could not score: the loads whose tunnel
 was gone, the canaries, the classes too thin for the provider's place, and
 the failures ingest left out of the counts; the defaults describe a run with
-none, which is every run before it. Versions 710–712 are the destination pool
+none, which is every run before it. Versions 711–713 are the destination pool
 and the two daily tallies the pool refresh judges sites by (§2.19b); the pool
 is seeded from the prober's built-in table on first use and the tallies fill
 as runs are submitted, so empty tables after a deploy are the transition.
@@ -24718,7 +24718,7 @@ Adding these columns and tables rewrites nothing. Code that ingests checks
 and health runs, serves or refreshes the pool, or reads the tallies -- the
 blackhole and health ingest, `GET /network/provider-egress-destinations`,
 `ProviderEgressProbe`, `RefreshEgressDestinations` and the §2.19b signal --
-must stay behind version 712. False-positive qualifier: absent artifacts
+must stay behind version 713. False-positive qualifier: absent artifacts
 before their published version are a pending-migration gate, not drift, and a
 pool whose rows are all `builtin` is a pool no refresh has changed yet.
 False-negative qualifier: a numeric head or a matching relation or column
