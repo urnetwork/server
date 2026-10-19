@@ -104,7 +104,8 @@ func TestEgressOutcomesPagesAtTheExactPopulationBoundary(t *testing.T) {
 	for _, want := range []string{
 		"18 of 20 currently eligible providers",
 		"dominant_failure=no_consensus",
-		"prober_identity",
+		"Producer generation is unknown from this aggregate",
+		"Only for confirmed legacy/in-flight singleton work",
 		"six-hour failure backoff",
 		"12-hour health due age",
 		"Alert absence caused only by failures aging to unobserved is not recovery",
@@ -121,6 +122,48 @@ func TestEgressOutcomesPagesAtTheExactPopulationBoundary(t *testing.T) {
 	} {
 		if strings.Contains(rendered, forbidden) {
 			t.Fatalf("common-mode alert leaked obsolete/private value %q:\n%s", forbidden, rendered)
+		}
+	}
+}
+
+// The aggregate has no producer identity: current and retained classes must
+// preserve the page while giving conditional owner-specific diagnostics.
+func TestEgressOutcomesCredentialActionRequiresGenerationAuthority(t *testing.T) {
+	for _, class := range []string{"tunnel_failed", "no_consensus", "contract_failed"} {
+		snapshot := egressOutcomeSnapshot{
+			eligible: 20, observed: 20, successes: 2, failures: 18,
+			newestOutcomeAgeSeconds: 30, oldestOutcomeAgeSeconds: 600,
+		}
+		switch class {
+		case "tunnel_failed":
+			snapshot.tunnelFailed = 18
+		case "no_consensus":
+			snapshot.noConsensus = 18
+		case "contract_failed":
+			snapshot.contractFailed = 18
+		}
+		alert := requireAlertClass(t, runSyntheticEgressOutcomes(t, snapshot), "egress-common-mode")
+		if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, "dominant_failure="+class) {
+			t.Fatalf("%s changed page or retained class: %+v", class, alert)
+		}
+		for _, want := range []string{
+			"Producer generation is unknown from this aggregate",
+			"identify the executing Taskworker artifact and bounded same-attempt evidence first",
+			"For a confirmed disposable-shard generation",
+			"BeginProberShard admission", "task/epoch/shard owner and deadline",
+			"ProberShardIdentity runtime credential/mint readiness", "that pass's private network funding",
+			"ProberBootstrap only reaps expired shard accounts",
+			"cleanup success does not prove probe readiness", "an absent legacy singleton is expected",
+			"Only for confirmed legacy/in-flight singleton work, inspect prober_identity",
+			"no_consensus and contract_failed are retained legacy classes with no current emitter established here",
+			"Class alone does not identify generation or a credential cause",
+		} {
+			if !strings.Contains(alert.Action, want) {
+				t.Errorf("%s action missing %q: %s", class, want, alert.Action)
+			}
+		}
+		if strings.Contains(alert.Action, "Inspect the persisted prober_identity singleton") {
+			t.Errorf("%s restored unconditional singleton advice", class)
 		}
 	}
 }

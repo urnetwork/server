@@ -212,7 +212,7 @@ func TestRedisProcessSignalKernelVictimEvidenceIsRedacted(t *testing.T) {
 // Existing raw-row sources also pass the victim check at the reducer boundary.
 func TestRedisProcessSignalKernelRawOtherVictimIsHealthy(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "kernel_oom Out of memory: Killed process 31415 (worker)\nkernel_source complete\n", nil
+		return "process_source complete 0\nkernel_oom Out of memory: Killed process 31415 (worker)\nkernel_source complete\n", nil
 	}}
 	redisKernelOomRequireHealthy(t, syntheticSettings(source))
 }
@@ -220,7 +220,7 @@ func TestRedisProcessSignalKernelRawOtherVictimIsHealthy(t *testing.T) {
 // Unsupported source text must not turn into the old unconditional Redis PAGE.
 func TestRedisProcessSignalKernelRawUnknownVictimIsUnknown(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "kernel_oom victim-unknown synthetic-private-context\nkernel_source complete\n", nil
+		return "process_source complete 0\nkernel_oom victim-unknown synthetic-private-context\nkernel_source complete\n", nil
 	}}
 	redisKernelOomRequireUnknown(t, syntheticSettings(source))
 }

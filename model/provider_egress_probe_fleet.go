@@ -125,19 +125,18 @@ type ProbeFleetDiagnosis struct {
 // probeFleetHint maps a failure class to the prober-side cause worth checking
 // before anyone starts investigating providers.
 //
-// Every hint leads with the prober rather than the fleet, because reaching this
-// function already means the fleet-wide test passed -- the providers have
-// already been ruled out as the common factor by the distribution itself.
+// A common class warrants checking the shared prober path first. Distribution
+// alone does not identify a failed component or the executing generation.
 func probeFleetHint(class string) string {
 	switch class {
-	case "no_consensus":
-		return "CREDENTIAL READINESS FIRST: inspect the persisted prober_identity singleton, its " +
-			"bootstrap/mint state, and its network balance. Then verify platform and API reachability " +
-			"plus egress confinement before investigating individual providers"
-	case "tunnel_failed", "contract_failed":
-		return "CREDENTIAL READINESS FIRST: inspect the persisted prober_identity singleton and " +
-			"bootstrap/mint state, then its network transfer balance. A prober network with no usable " +
-			"credential or balance cannot form contracts with any provider"
+	case "no_consensus", "tunnel_failed", "contract_failed":
+		return "Producer generation is unknown from this aggregate; identify the executing Taskworker artifact and bounded same-attempt evidence first. " +
+			"For a confirmed disposable-shard generation, inspect BeginProberShard admission, the task/epoch/shard owner and deadline, ProberShardIdentity runtime credential/mint readiness, and that pass's private network funding; then check tunnel transport, platform/API reachability and egress confinement. " +
+			"ProberBootstrap only reaps expired shard accounts; cleanup success does not prove probe readiness, and an absent legacy singleton is expected. " +
+			"Only for confirmed legacy/in-flight singleton work, inspect prober_identity credential/mint state and that legacy network's balance. " +
+			"tunnel_failed is emitted by the current prober; no_consensus and contract_failed are retained legacy classes with no current emitter established here. " +
+			"Class alone does not identify generation or a credential cause. " +
+			"Never print credentials or introduce an environment credential."
 	case ProbeFleetUnknownFailureClass:
 		return "the producer emitted one or more failure classes outside the reader's bounded " +
 			"vocabulary. Compare deployed producer and reader schemas before attributing a common cause"

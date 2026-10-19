@@ -3,6 +3,8 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,7 +43,17 @@ func (redisProcessProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 
 func redisProcessHostFindings(ctx context.Context, env *probeEnv, host *host) ([]finding, error) {
 	command := fmt.Sprintf(`
-ps -eo pid=,pcpu=,vsz=,rss=,comm= | awk '$5 ~ /^redis-server/ {print "redis",$1,$2,$3,$4}'
+if redis_process_rows=$(/bin/bash -o pipefail <<'REDIS_PROCESS'
+LC_ALL=C ps -eo pid=,pcpu=,vsz=,rss=,comm= 2>/dev/null | awk '
+NF < 5 || $1 !~ /^[0-9]+$/ || $1 + 0 <= 0 || $2 !~ /^[0-9]+([.][0-9]+)?$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ { invalid = 1; next }
+$5 ~ /^redis-server/ { print "redis",$1,$2,$3,$4; count++ }
+END { if (invalid) exit 1; print "process_source complete", count + 0 }'
+REDIS_PROCESS
+); then
+  printf '%%s\n' "$redis_process_rows"
+else
+  printf 'process_source unavailable\n'
+fi
 if redis_kernel_rows=$(/bin/bash -o pipefail <<'REDIS_KERNEL'
 dmesg -T 2>/dev/null | %s
 REDIS_KERNEL
@@ -68,7 +80,7 @@ fi
 			continue
 		}
 		switch fields[0] {
-		case "redis":
+		case "redis", "process_source":
 		case "kernel_oom":
 			kernelRows++
 			if len(fields) < 2 || kernelRows > 1 {
@@ -90,6 +102,7 @@ fi
 	} else if kernelStatus == "unavailable" {
 		kernelErr = fmt.Errorf("Redis kernel source exit status failure")
 	}
+	processErr := redisProcessSourceError(lines)
 	findings := []finding{}
 	for _, line := range lines {
 		fields := strings.Fields(line)
@@ -98,7 +111,7 @@ fi
 		}
 		switch fields[0] {
 		case "redis":
-			if len(fields) < 5 || atof(fields[2]) <= 200 {
+			if processErr != nil || atof(fields[2]) <= 200 {
 				continue
 			}
 			findings = append(findings, finding{
@@ -139,6 +152,9 @@ fi
 			})
 		}
 	}
+	if processErr != nil {
+		findings = append(findings, cannotObserveFinding(host.name+"/redis-process", processErr))
+	}
 	if kernelErr != nil {
 		findings = append(findings, cannotObserveFinding(host.name+"/redis-kernel", kernelErr))
 	}
@@ -146,4 +162,60 @@ fi
 		findings = append(findings, healthyFinding("redis/process", tierWarn, "redis-process", host.name))
 	}
 	return findings, nil
+}
+
+// Process authority is independent of kernel authority; no partial census can
+// establish absence or publish a numeric finding from malformed source rows.
+func redisProcessSourceError(lines []string) error {
+	status := ""
+	rows := 0
+	seenPids := map[uint64]bool{}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "redis":
+			if status != "" || len(fields) != 5 {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+			pid, pidErr := strconv.ParseUint(fields[1], 10, 64)
+			cpu, cpuErr := strconv.ParseFloat(fields[2], 64)
+			_, virtErr := strconv.ParseUint(fields[3], 10, 64)
+			_, resErr := strconv.ParseUint(fields[4], 10, 64)
+			if pidErr != nil || pid == 0 || seenPids[pid] || cpuErr != nil || math.IsNaN(cpu) || math.IsInf(cpu, 0) || cpu < 0 || virtErr != nil || resErr != nil {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+			seenPids[pid] = true
+			rows++
+		case "process_source":
+			if status != "" {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+			if len(fields) == 2 && fields[1] == "unavailable" && rows == 0 {
+				return fmt.Errorf("Redis process source exit status failure")
+			}
+			if len(fields) != 3 || fields[1] != "complete" {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+			count, err := strconv.Atoi(fields[2])
+			if err != nil || count != rows {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+			status = fields[1]
+		case "kernel_oom", "kernel_source":
+			if status == "" {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+		default:
+			if status == "" {
+				return fmt.Errorf("invalid response from Redis process source")
+			}
+		}
+	}
+	if status != "complete" {
+		return fmt.Errorf("invalid response from Redis process source")
+	}
+	return nil
 }

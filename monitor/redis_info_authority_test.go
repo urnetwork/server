@@ -374,7 +374,7 @@ func TestRedisInfoAuthorityThresholdControls(t *testing.T) {
 	}{
 		{used: 85}, {used: 86, want: "node-mem-high"}, {used: 92, want: "node-mem-high"}, {used: 93, want: "node-mem-critical"},
 	} {
-		rows := fmt.Sprintf("6380 %d 100 80 0 10", sample.used)
+		rows := fmt.Sprintf("host_memory 17179869184 12884901888\n6380 %d 100 80 0 10", sample.used)
 		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return rows, nil }}
 		settings := syntheticSettings(source)
 		settings.Hosts[1].RedisNodePorts = []int{6380}

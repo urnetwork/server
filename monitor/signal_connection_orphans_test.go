@@ -53,3 +53,41 @@ func TestConnectionOrphansSignalSyntheticFreshRaceIsHealthy(t *testing.T) {
 		t.Fatalf("fresh cleanup race alerted: %+v", alerts)
 	}
 }
+
+// Every required metric must be authoritative before either health or an alert.
+func TestConnectionOrphansSignalRejectsInvalidAggregates(t *testing.T) {
+	validRow := Row{"10", "1", "1", "180", "2", "0"}
+	invalidRows := [][]Row{nil, {{}}, {{"0"}}, {validRow, validRow}, {append(append(Row{}, validRow...), "0")},
+		{{"0", "1", "0", "0", "0", "0"}}, {{"10", "0", "1", "180", "0", "0"}}, {{"10", "0", "0", "0", "0", "1"}}}
+	for width := 2; width < 6; width++ {
+		invalidRows = append(invalidRows, []Row{append(Row{}, validRow[:width]...)})
+	}
+	for column := range validRow {
+		for _, invalid := range []string{"", "synthetic-invalid", "0.9", "-1", "9223372036854775808"} {
+			row := append(Row{}, validRow...)
+			row[column] = invalid
+			invalidRows = append(invalidRows, []Row{row})
+		}
+	}
+	for i, rows := range invalidRows {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return rows, nil }}
+		alerts, err := NewConnectionOrphansSignal().Run(context.Background(), syntheticSettings(source))
+		if err == nil || len(alerts) != 0 {
+			t.Fatalf("case %d: invalid aggregate accepted: alerts=%d err=%v", i, len(alerts), err)
+		}
+		if strings.Contains(err.Error(), "synthetic-invalid") {
+			t.Fatalf("case %d: source cell escaped into error", i)
+		}
+	}
+}
+
+// Numeric zero is a valid observation, distinct from absent or malformed input.
+func TestConnectionOrphansSignalAcceptsZeroAggregate(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"0", "0", "0", "0", "0", "0"}}, nil
+	}}
+	alerts, err := NewConnectionOrphansSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("valid zero aggregate: alerts=%d err=%v", len(alerts), err)
+	}
+}

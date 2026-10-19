@@ -4,7 +4,7 @@ package monitor
 func NewRedisBuffersSignal() Signal {
 	return &signalAdapter{
 		number: "3.2", key: "redis-buffers", name: "Redis dataset versus client buffers",
-		probe:  newRedisMemoryProbe("redis/client-buffers"),
+		probe:  newRedisMemoryProbe("redis/client-buffers").nodeMeasurementsOnly(),
 		accept: acceptProbeIDs("redis/client-buffers"),
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -77,14 +78,45 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	}
 	partial := len(failures) > 0
 
-	// sampled scan, ids normalized to <id>, counted by shape. LC_ALL=C per
-	// 3.3; head bounds the scan; the generous remote+ssh timeouts cover a
-	// slow walk.
-	scan := fmt.Sprintf(
-		`LC_ALL=C timeout 170 redis-cli -p %d --scan --count 5000 2>/dev/null | head -%d `+
-			`| sed -E 's/[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}/<id>/g; s/[0-9]{6,}/<n>/g' `+
-			`| sort | uniq -c | sort -rn | head -20`,
-		fullest.port, familyScanKeyLimit)
+	// Retain only the bounded histogram in the shell. A streaming validator
+	// counts newlines in fixed chunks and distinguishes cap completion from early EOF.
+	scan := fmt.Sprintf(`/bin/bash <<'REDIS_FAMILY'
+export LC_ALL=C
+if observation=$(
+ exec 3>&1
+ # Preserve NUL fragment presence across Bash read without making it a known
+ # family: 0xff is non-UTF-8 and is redacted by the persistence boundary.
+ timeout 170 redis-cli -p %d --scan --count 5000 2>/dev/null | head -n %d | tr '\000' '\377' | /bin/bash -c '
+ count=0
+ last=
+ newline="
+"
+ while IFS= read -r -N 16384 chunk || [[ -n "$chunk" ]]; do
+  printf "%%s" "$chunk" || exit 1
+  without_newlines=${chunk//$newline/}
+  count=$((count + ${#chunk} - ${#without_newlines}))
+  last=${chunk: -1}
+ done
+ [[ -z "$last" || "$last" == "$newline" ]] || exit 2
+ printf "family_source complete %%d\n" "$count" >&3 || exit 1
+ if (( count == %d )); then exit 42; fi
+ exit 0
+ ' | sed -E 's/[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}/<id>/g; s/[0-9]{6,}/<n>/g' | sort | uniq -c | sort -rn | sed -n '1,20p'
+ statuses=("${PIPESTATUS[@]}")
+ if (( statuses[1] != 0 || statuses[2] != 0 || (statuses[3] != 0 && statuses[3] != 42) || statuses[4] != 0 || statuses[5] != 0 || statuses[6] != 0 || statuses[7] != 0 || statuses[8] != 0 )); then exit 1; fi
+ if (( statuses[0] != 0 && !(statuses[0] == 141 && statuses[3] == 42) )); then exit 1; fi
+); then
+ # sort needs EOF, so the validator's side-channel header precedes histogram
+ # output. Move that header to the terminal position expected by the parser.
+ source_header=${observation%%%%$'\n'*}
+ if [[ "$observation" == *$'\n'* ]]; then
+  printf '%%s\n' "${observation#*$'\n'}"
+ fi
+ printf '%%s\n' "$source_header"
+else
+ printf 'family_source unavailable\n'
+fi
+REDIS_FAMILY`, fullest.port, familyScanKeyLimit, familyScanKeyLimit)
 	out, err := env.runner.sshTimeout(ctx, h, scan, "", 200*time.Second)
 	if err != nil {
 		return nil, err
@@ -94,15 +126,13 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	findings := []finding{}
 	histogramLines := []string{}
 	alerted := false
-	familyCounts := map[string]int{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+	familyCounts, scanErr := redisFamilyCounts(out)
+	if scanErr != nil {
+		findings = append(findings, cannotObserveFinding(target+"/key-families", scanErr))
+		for _, failure := range failures {
+			findings = append(findings, redisUsageCannotObserveFinding(failure, "key-families"))
 		}
-		count := atoi(fields[0])
-		family := safeRedisFamilyLabel(strings.Join(fields[1:], " "))
-		familyCounts[family] += count
+		return findings, nil
 	}
 	type familyCount struct {
 		family string
@@ -195,4 +225,49 @@ func safeRedisFamilyLabel(family string) string {
 		}
 	}
 	return "redacted-unnormalized-family"
+}
+
+// Validate the entire bounded histogram before labels or counts can reach a
+// baseline, log or alert. Missing completion cannot authorize an empty scan.
+func redisFamilyCounts(output string) (map[string]int, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	familyCounts := map[string]int{}
+	seenFamilies := map[string]bool{}
+	total := 0
+	rows := 0
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "family_source" {
+			if index != len(lines)-1 {
+				return nil, fmt.Errorf("invalid response from Redis family source")
+			}
+			if len(fields) == 2 && fields[1] == "unavailable" && rows == 0 {
+				return nil, fmt.Errorf("Redis family source exit status failure")
+			}
+			if len(fields) != 3 || fields[1] != "complete" {
+				return nil, fmt.Errorf("invalid response from Redis family source")
+			}
+			count, err := strconv.Atoi(fields[2])
+			if err != nil || count < 0 || count > familyScanKeyLimit || total > count || (count > 0 && rows == 0) || (rows < 20 && total != count) {
+				return nil, fmt.Errorf("invalid response from Redis family source")
+			}
+			return familyCounts, nil
+		}
+		if len(fields) < 2 || rows >= 20 {
+			return nil, fmt.Errorf("invalid response from Redis family source")
+		}
+		count, err := strconv.Atoi(fields[0])
+		family := strings.Join(fields[1:], " ")
+		if err != nil || count <= 0 || count > familyScanKeyLimit || seenFamilies[family] || total > familyScanKeyLimit-count {
+			return nil, fmt.Errorf("invalid response from Redis family source")
+		}
+		seenFamilies[family] = true
+		total += count
+		rows++
+		familyCounts[safeRedisFamilyLabel(family)] += count
+	}
+	return nil, fmt.Errorf("invalid response from Redis family source")
 }

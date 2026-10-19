@@ -253,7 +253,8 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 	}{
 		"baseline count branch":  {alert.Baseline, "five active client backends"},
 		"baseline age branch":    {alert.Baseline, "query age above one minute"},
-		"sample attribution":     {alert.Evidence, sample},
+		"query privacy":          {alert.Evidence, "query=withheld"},
+		"application privacy":    {alert.Evidence, "application=withheld"},
 		"pid attribution":        {alert.Evidence, "pid=8123"},
 		"query attribution":      {alert.Evidence, "query_id=9911"},
 		"client attribution":     {alert.Evidence, "client_owner=worker-synthetic"},
@@ -265,6 +266,9 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		if !strings.Contains(check.got, check.want) {
 			t.Fatalf("%s missing %q: %q", name, check.want, check.got)
 		}
+	}
+	if strings.Contains(alert.Evidence, sample) || strings.Contains(alert.Evidence, "application=taskworker") {
+		t.Fatal("wait-event attribution retained private query or declared application")
 	}
 	if strings.Contains(alert.Markdown(), "192.0.2.44/32") {
 		t.Fatalf("wait-event alert leaked exact client address: %s", alert.Markdown())

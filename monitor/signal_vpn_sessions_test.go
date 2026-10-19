@@ -317,6 +317,10 @@ for address do :; done
 
 func vpnSessionTestSettings(t *testing.T, now time.Time, output string) SignalSettings {
 	t.Helper()
+	// Existing source fixtures represent successful authoritative unit reads.
+	if !strings.Contains(output, "server_unit_observed ") {
+		output = "server_unit_observed true\n" + output
+	}
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "server.example.test" || host.SSHUser != "ubuntu" || len(host.SSHKeyPaths) != 1 || host.SSHKeyPaths[0] != "/keys/vpn" {
 			return "", fmt.Errorf("unexpected VPN host settings: %+v", host)

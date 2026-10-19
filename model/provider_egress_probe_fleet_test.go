@@ -261,34 +261,30 @@ func TestAssessProbeFleetOutcomesUsesTheEligiblePopulation(t *testing.T) {
 	}
 }
 
-// The two failure classes that mean "the prober never got a tunnel up" must
-// point at credentials explicitly, by name.
-//
-// This is the one assertion that directly encodes "nothing said credential".
-// A generic "something is wrong with probing" hint would satisfy the non-empty
-// check in the table test above while still leaving the operator exactly where
-// the incident left them.
-//
-// MUTATION THAT MUST BREAK THIS: collapse probeFleetHint's switch to its
-// default branch. The word "CREDENTIAL" disappears from the no_consensus and
-// tunnel_failed hints and this fails.
-func TestProbeFleetHintNamesTheCredential(t *testing.T) {
+// A retained class cannot select an account owner without generation authority.
+func TestProbeFleetHintRequiresGenerationAuthority(t *testing.T) {
 	for _, class := range []string{"no_consensus", "tunnel_failed", "contract_failed"} {
 		hint := probeFleetHint(class)
-		if !strings.Contains(hint, "CREDENTIAL") {
-			t.Errorf("probeFleetHint(%q) = %q, which never mentions a credential. "+
-				"A prober whose jwt was rejected produces exactly this class fleet-wide, and the "+
-				"operator's 8h of investigation went to the providers because nothing pointed at auth",
-				class, hint)
+		for _, want := range []string{
+			"Producer generation is unknown from this aggregate",
+			"For a confirmed disposable-shard generation", "BeginProberShard admission",
+			"ProberShardIdentity runtime credential/mint readiness", "that pass's private network funding",
+			"ProberBootstrap only reaps expired shard accounts",
+			"cleanup success does not prove probe readiness", "an absent legacy singleton is expected",
+			"Only for confirmed legacy/in-flight singleton work, inspect prober_identity",
+			"no_consensus and contract_failed are retained legacy classes with no current emitter established here",
+			"Class alone does not identify generation or a credential cause",
+		} {
+			if !strings.Contains(hint, want) {
+				t.Errorf("probeFleetHint(%q) missing %q: %s", class, want, hint)
+			}
+		}
+		for _, forbidden := range []string{"CREDENTIAL READINESS FIRST", "UR_PROBER_BY_JWT"} {
+			if strings.Contains(hint, forbidden) {
+				t.Errorf("probeFleetHint(%q) restored obsolete advice %q", class, forbidden)
+			}
 		}
 	}
-	if hint := probeFleetHint("no_consensus"); strings.Contains(hint, "UR_PROBER_BY_JWT") ||
-		!strings.Contains(hint, "prober_identity") {
-		t.Fatalf("credential hint does not describe the current persisted identity boundary: %q", hint)
-	}
-	// and the fallback still has to say something actionable rather than
-	// nothing, since an unknown class is precisely when an operator has least
-	// to go on
 	if strings.TrimSpace(probeFleetHint("something_new")) == "" {
 		t.Error("an unrecognised failure class must still produce a hint")
 	}

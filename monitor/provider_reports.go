@@ -497,14 +497,15 @@ func saveProviderState(stateDir, key string, version int, value any) error {
 }
 
 var (
-	providerStateKeyPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
-	providerResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
-	providerEmailPattern      = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
-	providerJWTPattern        = regexp.MustCompile(`\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b`)
-	providerBearerPattern     = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]+`)
-	providerGoogleToken       = regexp.MustCompile(`\bya29\.[A-Za-z0-9._~\-]+`)
-	providerHexPattern        = regexp.MustCompile(`(?i)\b[0-9a-f]{24,}\b`)
-	providerURLPattern        = regexp.MustCompile(`https?://[^\s<>()]+`)
+	providerStateKeyPattern    = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	providerResourceIDPattern  = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+	providerEmailPattern       = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
+	providerJWTPattern         = regexp.MustCompile(`\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b`)
+	providerBearerPattern      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]+`)
+	providerGoogleToken        = regexp.MustCompile(`\bya29\.[A-Za-z0-9._~\-]+`)
+	providerHexPattern         = regexp.MustCompile(`(?i)\b[0-9a-f]{24,}\b`)
+	providerURLPattern         = regexp.MustCompile(`(?i)https?://[^\s<>()]+`)
+	providerUrlUserinfoPattern = regexp.MustCompile(`(?i)(https?://)[^/\s?#]*@`)
 )
 
 func providerErrorText(err error) string {
@@ -543,6 +544,9 @@ func providerErrorText(err error) string {
 // text, but the monitor retains its own last-mile privacy boundary.
 func providerEvidence(value string) string {
 	value = strings.ToValidUTF8(value, "�")
+	// Strip through the final authority @ before other redactors can obscure it.
+	// Lexical matching also removes malformed escapes and userinfo parentheses.
+	value = providerUrlUserinfoPattern.ReplaceAllString(value, "${1}")
 	value = providerBearerPattern.ReplaceAllString(value, "Bearer [redacted-token]")
 	value = providerGoogleToken.ReplaceAllString(value, "[redacted-token]")
 	value = providerJWTPattern.ReplaceAllString(value, "[redacted-token]")

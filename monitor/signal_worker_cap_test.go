@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +140,180 @@ func TestWorkerCapSignalRejectsDuplicateRuntimeSeries(t *testing.T) {
 	if requireAlertClassCount(alerts, "worker-scheduler-capacity") != 0 ||
 		!strings.Contains(requireAlertClass(t, alerts, "worker-scheduler-unobservable").Markdown(), "incomplete_runtimes=1") {
 		t.Fatalf("ambiguous same-instance series were accepted: %+v", alerts)
+	}
+}
+
+// A fully rejected returned tuple must survive beside a complete runtime.
+func TestWorkerCapSignalRetainsFullyRejectedRuntimeCoverage(t *testing.T) {
+	now := time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC)
+	for _, rejected := range []struct {
+		name  string
+		value float64
+		age   time.Duration
+	}{
+		{name: "stale", value: 1, age: 91 * time.Second},
+		{name: "future", value: 1, age: -31 * time.Second},
+		{name: "negative", value: -1},
+		{name: "nan", value: math.NaN()},
+		{name: "positive-infinity", value: math.Inf(1)},
+		{name: "negative-infinity", value: math.Inf(-1)},
+	} {
+		for _, pressured := range []bool{false, true} {
+			complete := workerCapFixture{host: "edge-a", block: "g1", instance: "complete", cpu: 1, maxprocs: 4, goroutines: 1000}
+			if pressured {
+				complete.cpu, complete.goroutines = 3.6, 10_000
+			}
+			settings := workerCapSyntheticSettings(t, now, complete,
+				workerCapFixture{host: "edge-b", block: "g2", instance: "rejected-private", cpu: rejected.value, maxprocs: rejected.value, goroutines: rejected.value,
+					cpuAge: rejected.age, maxprocsAge: rejected.age, goroutinesAge: rejected.age})
+			env, err := newProbeEnv(settings.withDefaults())
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := (workerCapProbe{}).check(context.Background(), env)
+			if err != nil {
+				t.Fatalf("%s pressured=%t: %v", rejected.name, pressured, err)
+			}
+			visibility, capacity := 0, 0
+			for _, finding := range findings {
+				switch finding.class {
+				case "worker-scheduler-unobservable":
+					visibility++
+					if finding.healthy || finding.observed != "paired_runtimes=1 incomplete_runtimes=1" || finding.sustain != 2 {
+						t.Fatalf("%s pressured=%t: fully rejected runtime lost from visibility: %+v", rejected.name, pressured, finding)
+					}
+				case "worker-scheduler-capacity":
+					capacity++
+					if finding.target != "edge-a/g1" || finding.frame != "complete" || finding.healthy == pressured {
+						t.Fatalf("%s pressured=%t: independent complete runtime changed: %+v", rejected.name, pressured, finding)
+					}
+				}
+			}
+			if visibility != 1 || capacity != 1 {
+				t.Fatalf("%s pressured=%t: visibility=%d capacity=%d", rejected.name, pressured, visibility, capacity)
+			}
+			alerts, err := NewWorkerCapSignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCapacity := 0
+			if pressured {
+				wantCapacity = 1
+			}
+			if requireAlertClassCount(alerts, "worker-scheduler-capacity") != wantCapacity || requireAlertClassCount(alerts, "worker-scheduler-unobservable") != 1 {
+				t.Fatalf("%s pressured=%t: public findings changed", rejected.name, pressured)
+			}
+			if strings.Contains(requireAlertClass(t, alerts, "worker-scheduler-unobservable").Markdown(), "rejected-private") {
+				t.Fatal("rejected runtime identity escaped aggregate visibility alert")
+			}
+		}
+	}
+}
+
+// Each complete runtime remains quiet when either pressure condition is low.
+func TestWorkerCapSignalCompleteRuntimeThresholdControls(t *testing.T) {
+	now := time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC)
+	for _, control := range []struct {
+		cpu        float64
+		goroutines float64
+		age        time.Duration
+		pressure   bool
+	}{
+		{cpu: 1, goroutines: 1000},
+		{cpu: 3.6, goroutines: 9999},
+		{cpu: 3.59, goroutines: 10_000},
+		{cpu: 3.6, goroutines: 10_000, pressure: true},
+		{cpu: 1, goroutines: 1000, age: 90 * time.Second},
+		{cpu: 1, goroutines: 1000, age: -30 * time.Second},
+	} {
+		settings := workerCapSyntheticSettings(t, now,
+			workerCapFixture{host: "edge-a", block: "g1", instance: "control", cpu: control.cpu, maxprocs: 4, goroutines: control.goroutines,
+				cpuAge: control.age, maxprocsAge: control.age, goroutinesAge: control.age},
+			workerCapFixture{host: "edge-b", block: "g2", instance: "quiet", cpu: 1, maxprocs: 4, goroutines: 1000})
+		env, err := newProbeEnv(settings.withDefaults())
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings, err := (workerCapProbe{}).check(context.Background(), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		visibility, capacity := 0, 0
+		for _, finding := range findings {
+			if finding.class == "worker-scheduler-unobservable" {
+				visibility++
+				if !finding.healthy {
+					t.Fatalf("complete fresh control lost visibility: %+v", control)
+				}
+			}
+			if finding.class == "worker-scheduler-capacity" && !finding.healthy {
+				capacity++
+				if !control.pressure || finding.target != "edge-a/g1" || finding.frame != "control" || finding.sustain != 2 {
+					t.Fatalf("wrong pressure boundary: %+v", control)
+				}
+			}
+		}
+		wantCapacity := 0
+		if control.pressure {
+			wantCapacity = 1
+		}
+		if visibility != 1 || capacity != wantCapacity {
+			t.Fatalf("complete control: %+v visibility=%d capacity=%d", control, visibility, capacity)
+		}
+	}
+}
+
+// Zero parallelism and duplicate tuples remain unknown beside a valid runtime.
+func TestWorkerCapSignalAmbiguityPreservesCompleteSibling(t *testing.T) {
+	now := time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC)
+	for _, duplicate := range []bool{false, true} {
+		workers := []workerCapFixture{
+			{host: "edge-a", block: "g1", instance: "complete", cpu: 3.6, maxprocs: 4, goroutines: 10_000},
+			{host: "edge-b", block: "g2", instance: "ambiguous", cpu: 4, goroutines: 10_000},
+		}
+		if duplicate {
+			workers[1].maxprocs = 4
+			workers = append(workers, workers[1])
+		}
+		alerts, err := NewWorkerCapSignal().Run(context.Background(), workerCapSyntheticSettings(t, now, workers...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		capacity := requireAlertClass(t, alerts, "worker-scheduler-capacity")
+		visibility := requireAlertClass(t, alerts, "worker-scheduler-unobservable")
+		if requireAlertClassCount(alerts, "worker-scheduler-capacity") != 1 || capacity.Frame != "complete" ||
+			!strings.Contains(visibility.Markdown(), "paired_runtimes=1 incomplete_runtimes=1") {
+			t.Fatalf("duplicate=%t: ambiguity changed independent sibling", duplicate)
+		}
+	}
+}
+
+// Rejection reasons do not need to agree to preserve returned coverage.
+func TestWorkerCapSignalRetainsMixedRejectedRuntimeCoverage(t *testing.T) {
+	now := time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC)
+	settings := workerCapSyntheticSettings(t, now,
+		workerCapFixture{host: "edge-a", block: "g1", instance: "complete", cpu: 1, maxprocs: 4, goroutines: 1000},
+		workerCapFixture{host: "edge-b", block: "g2", instance: "rejected", cpu: 1, cpuAge: 91 * time.Second,
+			maxprocs: 1, maxprocsAge: -31 * time.Second, goroutines: math.NaN()})
+	alerts, err := NewWorkerCapSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requireAlertClassCount(alerts, "worker-scheduler-capacity") != 0 ||
+		!strings.Contains(requireAlertClass(t, alerts, "worker-scheduler-unobservable").Markdown(), "paired_runtimes=1 incomplete_runtimes=1") {
+		t.Fatal("mixed rejected tuple disappeared beside complete runtime")
+	}
+}
+
+// Unparseable scalars remain a fixed whole-probe error without source text.
+func TestWorkerCapSignalMalformedScalarRemainsSourceError(t *testing.T) {
+	now := time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC)
+	payload := workerCapFixtureJSON(t, now,
+		workerCapFixture{host: "edge-a", block: "g1", instance: "complete", cpu: 1, maxprocs: 4, goroutines: 1000})
+	payload = strings.Replace(payload, `"1.000000"`, `"private-invalid-scalar"`, 1)
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return payload, nil }}
+	alerts, err := NewWorkerCapSignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
+	if err == nil || err.Error() != "worker cap: invalid metric value" || len(alerts) != 0 {
+		t.Fatal("malformed scalar changed source-error or privacy contract")
 	}
 }

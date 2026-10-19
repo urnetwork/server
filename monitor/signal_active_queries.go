@@ -98,7 +98,7 @@ func (pgActiveQueryProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			mechanism: "A query shape remaining active across samples is load; a short connection count snapshot alone cannot distinguish it.",
 			baseline:  "Known heavy shapes may exceed two minutes; one is anomalous after 2x its completed mean. Five concurrent copies are anomalous regardless of history.",
 			observed:  fmt.Sprintf("query_id=%s active=%s oldest_s=%s historical_mean_s=%d", row.str(0), row.str(1), row.str(2), historicalMeanSeconds),
-			evidence:  "sample: " + row.str(3),
+			evidence:  "query=withheld",
 			action:    "Compare this query ID with pg_stat_statements deltas and its plan before changing pool sizes or terminating a backend.",
 			verify:    "The query completes below twice its historical mean and concurrent copies return below five.",
 			playbook:  "SIGNALS.md §2.1 and §5.8",
@@ -108,7 +108,7 @@ func (pgActiveQueryProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			alert.symptom = fmt.Sprintf("Payout subsidy-range query %s has scanned the complete sweep history for %ss", row.str(0), row.str(2))
 			alert.mechanism = "The deployed planner already materializes its exact unpaid/safely-canceled and optionally close-time-bounded rows in temp_account_payment, but this later MIN/MAX query ignores that selected set and reads all of transfer_escrow_sweep. The historical scan is both semantically overbroad and proportional to the lifetime sweep table rather than this payout slice."
 			alert.baseline = "The subsidy range is computed from temp_account_payment; no active query reads the complete transfer_escrow_sweep history to derive one payout epoch."
-			alert.evidence = "legacy sample: " + row.str(3)
+			alert.evidence = "legacy shape matched; query=withheld"
 			alert.context = "Completed-history means can normalize a repeatedly deployed defect, so this exact legacy shape remains actionable even while its current duration is below twice that bad mean. The task heartbeat and MaxTime still bound the in-flight attempt; its age alone is not permission to cancel it."
 			alert.action = "Deploy the taskworker payment planner that joins transfer_contract to temp_account_payment for this MIN/MAX. Let the current attempt reach its bounded outcome; do not add an index for the redundant full-history query or manually replay the Payout row."
 			alert.verify = "After deployment, pg_stat_activity and pg_stat_statements show no new legacy subsidy-range executions, the selected-set query finishes within the bounded Payout slice, and the same Payout task commits and clears its error."

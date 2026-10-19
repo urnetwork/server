@@ -147,6 +147,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"tls-certificate-unobservable":                     visibilityAlertClass,
 	"url-probe-coverage-unobservable":                  visibilityAlertClass,
 	"vpn-server-unhealthy":                             visibilityAlertClass,
+	"vpn-server-unavailable":                           visibilityAlertClass,
 	"vpn-status-stale":                                 visibilityAlertClass,
 	"web-email-assets-transport":                       visibilityAlertClass,
 	"worker-scheduler-unobservable":                    visibilityAlertClass,

@@ -109,15 +109,16 @@ func (workerCapProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		if err != nil {
 			return nil, fmt.Errorf("worker cap: invalid metric value")
 		}
-		if age := now.Sub(observedAt); age > workerCapFreshness || age < -30*time.Second ||
-			math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			continue
-		}
 		key := host + "\x00" + block + "\x00" + instance
 		worker := workers[key]
 		if worker == nil {
 			worker = &workerCapMetrics{host: host, block: block, instance: instance}
 			workers[key] = worker
+		}
+		// Retain returned runtime coverage even when every scalar is rejected.
+		if age := now.Sub(observedAt); age > workerCapFreshness || age < -30*time.Second ||
+			math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			continue
 		}
 		switch kind {
 		case "cpu":

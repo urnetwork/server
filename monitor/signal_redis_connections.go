@@ -15,7 +15,7 @@ func NewRedisConnectionsSignal() Signal {
 	return &signalAdapter{
 		number: "3.5", key: "redis-connections", name: "Redis connection shape",
 		probe: &redisConnectionsProbe{
-			redisMemoryProbe: newRedisMemoryProbe(), connectionBatteries: newBatteryLatch(), targetRunIds: map[string]string{},
+			redisMemoryProbe: newRedisMemoryProbe().nodeMeasurementsOnly(), connectionBatteries: newBatteryLatch(), targetRunIds: map[string]string{},
 		},
 		accept: acceptProbeIDs("redis/clients-spike"),
 	}

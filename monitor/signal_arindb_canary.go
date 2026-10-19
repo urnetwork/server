@@ -148,7 +148,7 @@ type arindbCanaryObservation struct {
 	servingEpoch       float64
 	decisionAt         time.Time
 	hasDecisionAt      bool
-	hasState           bool
+	complete           bool
 	observedSeries     int
 }
 
@@ -245,31 +245,132 @@ func (arindbCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	}
 	var response mimirInstantResponse
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
-		return nil, fmt.Errorf("arindb canary: decode Mimir response: %w", err)
+		return nil, fmt.Errorf("arindb canary: decode Mimir response failed")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
-		return nil, fmt.Errorf("arindb canary: Mimir status=%q result_type=%q error=%q", response.Status, response.Data.ResultType, response.Error)
+		return nil, fmt.Errorf("arindb canary: Mimir response was not a successful vector")
 	}
 	observation := &arindbCanaryObservation{
 		flags: map[string]bool{}, losses: map[string]float64{}, gains: map[string]float64{}, churns: map[string]float64{},
 		oldSupply: map[string]float64{}, emptied: map[string]map[string]float64{}, coverage: map[string]float64{}, cohort: map[string]float64{},
 	}
-	for _, series := range response.Data.Result {
-		_, value, err := mimirInstantValue(series.Value)
-		if err != nil {
-			return nil, fmt.Errorf("arindb canary: parse %s sample: %w", series.Metric["monitor_metric"], err)
+	// Completeness is about the fixed publisher projection, not the number
+	// of samples. A nil decision still exports four zero states and retains
+	// its previous decision time. Optional countries and no-attempt rates do
+	// not belong to the required projection.
+	required := map[string]string{}
+	addRequired := func(metric, label, domain string) {
+		required["urnetwork_stats_arindb_"+metric+"/"+label] = domain
+	}
+	for _, state := range []string{"single", "warming", "latest", "fallback"} {
+		addRequired("canary_state", state, "boolean")
+	}
+	for _, flag := range []string{"warming_tripped", "warming_serves_latest", "latched", "accepted", "latest_unavailable", "pair_carried", "fallback_dropped"} {
+		addRequired("decision_flags", flag, "boolean")
+	}
+	addRequired("fallback_active", "", "boolean")
+	for _, bucket := range []string{"quality", "speed", "online"} {
+		for _, database := range []string{"old", "latest"} {
+			addRequired("providers", bucket+"/"+database, "count")
 		}
-		if (series.Metric["monitor_metric"] == arindbCanaryReadsNotOkMetric || series.Metric["monitor_metric"] == arindbCanaryLatestLookupErrorsMetric) && math.IsNaN(value) {
-			// no reads or lookups in the window: 0 / 0
+		addRequired("loss_ratio", bucket, "loss")
+		addRequired("gain_ratio", bucket, "nonnegative")
+		addRequired("churn_ratio", bucket, "nonnegative")
+	}
+	for _, database := range []string{"latest", "old", "paired"} {
+		addRequired("coverage_ratio", database, "share")
+	}
+	for _, reference := range []string{"current", "reference"} {
+		addRequired("cohort_providers", reference, "count")
+	}
+	addRequired("cohort_loss_ratio", "", "share")
+	addRequired("serving_changes", "", "count")
+	addRequired("pair_since_seconds", "", "time")
+	addRequired("serving_epoch_seconds", "", "count")
+	addRequired("decision_seconds", "", "decision_time")
+	keyFor := func(metric map[string]string) string {
+		label := ""
+		switch metric["monitor_metric"] {
+		case "urnetwork_stats_arindb_canary_state":
+			label = metric["state"]
+		case "urnetwork_stats_arindb_decision_flags":
+			label = metric["flag"]
+		case "urnetwork_stats_arindb_providers":
+			label = metric["bucket"] + "/" + metric["database"]
+		case "urnetwork_stats_arindb_loss_ratio", "urnetwork_stats_arindb_gain_ratio", "urnetwork_stats_arindb_churn_ratio":
+			label = metric["bucket"]
+		case "urnetwork_stats_arindb_coverage_ratio":
+			label = metric["database"]
+		case "urnetwork_stats_arindb_cohort_providers":
+			label = metric["reference"]
+		case "urnetwork_stats_arindb_emptied_country":
+			label = metric["bucket"] + "/" + metric["country_code"]
+		}
+		return metric["monitor_metric"] + "/" + label
+	}
+	counts := map[string]int{}
+	for _, series := range response.Data.Result {
+		counts[keyFor(series.Metric)]++
+	}
+	observation.complete = true
+	seen := map[string]bool{}
+	now := env.now().UTC()
+	for _, series := range response.Data.Result {
+		metric := series.Metric["monitor_metric"]
+		key := keyFor(series.Metric)
+		domain, mandatory := required[key]
+		optionalRate := metric == arindbCanaryReadsNotOkMetric || metric == arindbCanaryLatestLookupErrorsMetric
+		optionalCountry := metric == "urnetwork_stats_arindb_emptied_country"
+		if !mandatory && !optionalRate && !optionalCountry {
+			observation.complete = false
 			continue
 		}
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, fmt.Errorf("arindb canary: invalid %s value %v", series.Metric["monitor_metric"], value)
+		observedAt, value, err := mimirInstantValue(series.Value)
+		if optionalRate && err == nil && math.IsNaN(value) {
+			// no reads or lookups in the window: 0 / 0
+			if counts[key] != 1 || series.Metric["env"] != env.cfg.env || observedAt.After(now.Add(30*time.Second)) || arindbCanaryDecisionStaleAfter < now.Sub(observedAt) {
+				observation.complete = false
+			}
+			continue
 		}
+		valid := err == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && counts[key] == 1 && series.Metric["env"] == env.cfg.env
+		// The result timestamp is the query evaluation clock, not a scrape
+		// or decision-generation proof. Reject expired/future evaluations;
+		// the content timestamp retains its independent age alerts below.
+		valid = valid && !observedAt.After(now.Add(30*time.Second)) && now.Sub(observedAt) <= arindbCanaryDecisionStaleAfter
+		switch domain {
+		case "boolean":
+			valid = valid && (value == 0 || value == 1)
+		case "count":
+			valid = valid && 0 <= value && value == math.Trunc(value)
+		case "nonnegative":
+			valid = valid && 0 <= value
+		case "share":
+			valid = valid && 0 <= value && value <= 1
+		case "loss":
+			valid = valid && value <= 1
+		case "time", "decision_time":
+			valid = valid && 0 <= value && value <= float64(now.Add(30*time.Second).Unix())
+			if domain == "decision_time" {
+				valid = valid && 0 < value
+			}
+		}
+		if optionalRate {
+			valid = valid && 0 <= value && value <= 1
+		}
+		if optionalCountry {
+			country := series.Metric["country_code"]
+			validCountry := country == "unknown" || (len(country) == 2 && 'a' <= country[0] && country[0] <= 'z' && 'a' <= country[1] && country[1] <= 'z')
+			valid = valid && slices.Contains([]string{"quality", "speed", "online"}, series.Metric["bucket"]) && validCountry && 0 <= value && value == math.Trunc(value)
+		}
+		if !valid {
+			observation.complete = false
+			continue
+		}
+		seen[key] = true
 		observation.observedSeries += 1
 		switch series.Metric["monitor_metric"] {
 		case "urnetwork_stats_arindb_canary_state":
-			observation.hasState = true
 			if value == 1 {
 				observation.states = append(observation.states, series.Metric["state"])
 			}
@@ -318,11 +419,27 @@ func (arindbCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			observation.decisionAt = unixFloatTime(value)
 		}
 	}
+	for key := range required {
+		if !seen[key] {
+			observation.complete = false
+		}
+	}
+	if len(observation.states) != 1 {
+		observation.complete = false
+		observation.states = nil
+	} else {
+		state := observation.states[0]
+		if (state == "fallback") != (observation.fallback == 1) ||
+			(state == "single" && observation.servingEpoch != 0) ||
+			((state == "latest" || state == "fallback") && observation.servingEpoch <= 0) {
+			observation.complete = false
+		}
+	}
 	slices.Sort(observation.states)
 	return arindbCanaryFindings(observation, env.now().UTC(), metricHost.name), nil
 }
 
-// The tiers of one observation; every class that does not fire is healthy.
+// The tiers of one observation; absence is healthy only with complete evidence.
 func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, gateway string) []finding {
 	const probeId = "provider/arindb-canary"
 	const target = "score-export"
@@ -338,15 +455,15 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		observation.lossSummary(), observation.emptiedSummary(), observation.coverageSummary(),
 		observation.cohort["current"], observation.cohort["reference"], observation.servingChanges, gateway)
 
-	if !observation.hasState || !observation.hasDecisionAt {
+	if !observation.complete {
 		add(finding{
 			probeId: probeId, tier: tierWarn, class: "arindb-canary-unobservable", target: target, frame: gateway, sustain: 15,
-			symptom:   "No Taskworker exports the ARIN canary state and decision time",
-			mechanism: "Every score publication writes a canary decision and every Taskworker's stats collector exports it. Missing gauges mean no Taskworker with the canary is running its collector, or no decision was ever readable by one, so a fallback or a risk-driven loss would not be seen.",
-			baseline:  "urnetwork_stats_arindb_canary_state and urnetwork_stats_arindb_decision_seconds are exported for the environment.",
+			symptom:   "The ARIN canary publisher projection is missing, incomplete or ambiguous",
+			mechanism: "Every score publication writes a canary decision and every Taskworker's stats collector exports it. A nil or unreadable decision exports four zero states and retains its previous decision time. Missing or invalid mandatory values cannot establish that incident conditions are absent; independently valid positive evidence remains reportable.",
+			baseline:  "One recognized state is selected; all fixed publisher scalars, flags, bucket comparisons and coverage values are present and valid.",
 			observed:  observed,
 			action:    "Check that the Taskworkers run a build with the canary and that their stats pusher reaches Mimir; read {arindb_canary_decision} through the monitor's Redis access to see whether the indexer published one.",
-			verify:    "Both gauges are exported and the decision age stays under 30 minutes.",
+			verify:    "The complete publisher projection is readable and the decision age stays under 30 minutes.",
 			playbook:  "SIGNALS.md §2.9d",
 		})
 	}
@@ -526,7 +643,7 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 			})
 		}
 	}
-	// every class that is not firing resolves
+	// Only a complete projection can establish absence for other classes.
 	for _, healthy := range []finding{
 		healthyFinding(probeId, tierWarn, "arindb-canary-unobservable", target),
 		healthyFinding(probeId, tierPage, "arindb-fallback-active", target),
@@ -544,7 +661,7 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		healthyFinding(probeId, tierPage, "arindb-serving-flapping", target),
 		healthyFinding(probeId, tierWarn, "arindb-decision-reads-not-ok", target),
 	} {
-		if !firing[healthy.class] {
+		if observation.complete && !firing[healthy.class] {
 			findings = append(findings, healthy)
 		}
 	}

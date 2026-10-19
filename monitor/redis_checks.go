@@ -31,8 +31,9 @@ const (
 // gets its own ticket identity. The per-node escalation battery runs once per
 // trip (batteryLatch), not on every 5-minute tick while a node stays sick.
 type redisMemoryProbe struct {
-	batteries       *batteryLatch
-	batteryProbeIDs map[string]bool
+	batteries         *batteryLatch
+	batteryProbeIDs   map[string]bool
+	judgeHostCapacity bool
 }
 
 func newRedisMemoryProbe(batteryProbeIDs ...string) *redisMemoryProbe {
@@ -40,7 +41,14 @@ func newRedisMemoryProbe(batteryProbeIDs ...string) *redisMemoryProbe {
 	for _, probeID := range batteryProbeIDs {
 		enabled[probeID] = true
 	}
-	return &redisMemoryProbe{batteries: newBatteryLatch(), batteryProbeIDs: enabled}
+	return &redisMemoryProbe{batteries: newBatteryLatch(), batteryProbeIDs: enabled, judgeHostCapacity: true}
+}
+
+// Node-only adapters require the shared INFO census, but host RAM is not an
+// input to their buffer or connection verdicts. Configure before first use.
+func (self *redisMemoryProbe) nodeMeasurementsOnly() *redisMemoryProbe {
+	self.judgeHostCapacity = false
+	return self
 }
 
 func (self *redisMemoryProbe) batteryEvidence(probeID, key string, battery func() string) string {
@@ -418,7 +426,16 @@ func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		// actually exposes — there is no used_memory_clients key; SIGNALS.md 3.2
 		// note). Required measurements need explicit numeric values; only
 		// optional diagnostic fields may use zero when absent.
-		script := fmt.Sprintf(`awk '/^MemTotal:/{total=$2*1024}/^MemAvailable:/{available=$2*1024}END{print "host_memory",total,available}' /proc/meminfo 2>/dev/null
+		script := fmt.Sprintf(`host_memory=$(awk '
+  /^MemTotal:/{if(total_seen++ || NF!=3 || $2 !~ /^[0-9]+$/ || $3!="kB")invalid=1;total=$2*1024}
+  /^MemAvailable:/{if(available_seen++ || NF!=3 || $2 !~ /^[0-9]+$/ || $3!="kB")invalid=1;available=$2*1024}
+  END{if(invalid || !total_seen || !available_seen || total<=0 || available>total)exit 1;printf "host_memory %%.0f %%.0f\n",total,available}' /proc/meminfo 2>/dev/null)
+host_memory_exit=$?
+if [ "$host_memory_exit" -eq 0 ]; then
+  printf '%%s\n' "$host_memory"
+else
+  echo "host_memory unavailable"
+fi
 for p in %s; do
   m=$(timeout 3 redis-cli -p "$p" INFO 2>/dev/null)
   info_exit=$?
@@ -479,6 +496,9 @@ done`, strings.Join(portNames, " "))
 
 	findings := []finding{}
 	for _, observed := range observedHosts {
+		if !self.judgeHostCapacity {
+			continue
+		}
 		// Aggregate ceilings need every configured node; the observation gap
 		// is reported below without clearing the previous capacity finding.
 		if len(observed.nodes) == 0 || len(observed.unreachable) != 0 || observed.invalidRows {
@@ -636,16 +656,18 @@ done`, strings.Join(portNames, " "))
 
 // redisHostMemory is one redis-cluster host's memory and node observation.
 type redisHostMemory struct {
-	host           *host
-	totalBytes     float64
-	availableBytes float64
-	nodes          []redisNodeMem
-	unreachable    []string
-	invalidRows    bool
+	host            *host
+	totalBytes      float64
+	availableBytes  float64
+	hostMemoryKnown bool
+	nodes           []redisNodeMem
+	unreachable     []string
+	invalidRows     bool
 }
 
 // Admit one finite, nonnegative measurement row per configured port. Missing,
 // duplicate, foreign, or malformed rows never become healthy zero samples.
+// Host authority is independent: require exactly one finite consistent frame.
 func parseRedisHostMemory(h *host, out string) redisHostMemory {
 	nodeMems := []redisNodeMem{}
 	unreachablePorts := []string{}
@@ -663,11 +685,22 @@ func parseRedisHostMemory(h *host, out string) redisHostMemory {
 	}
 	hostMemoryTotalBytes := 0.0
 	hostMemoryAvailableBytes := 0.0
+	hostMemoryFrames := 0
+	hostMemoryKnown := false
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == "host_memory" {
-			hostMemoryTotalBytes = atof(fields[1])
-			hostMemoryAvailableBytes = atof(fields[2])
+		if len(fields) > 0 && fields[0] == "host_memory" {
+			hostMemoryFrames++
+			hostMemoryKnown = false
+			if hostMemoryFrames == 1 && len(fields) == 3 {
+				total, totalKnown := parseNumber(fields[1])
+				available, availableKnown := parseNumber(fields[2])
+				if totalKnown && availableKnown && total > 0 && available <= total {
+					hostMemoryTotalBytes = total
+					hostMemoryAvailableBytes = available
+					hostMemoryKnown = true
+				}
+			}
 			continue
 		}
 		if len(fields) == 0 {
@@ -729,12 +762,13 @@ func parseRedisHostMemory(h *host, out string) redisHostMemory {
 		}
 	}
 	return redisHostMemory{
-		host:           h,
-		totalBytes:     hostMemoryTotalBytes,
-		availableBytes: hostMemoryAvailableBytes,
-		nodes:          nodeMems,
-		unreachable:    unreachablePorts,
-		invalidRows:    invalidRows,
+		host:            h,
+		totalBytes:      hostMemoryTotalBytes,
+		availableBytes:  hostMemoryAvailableBytes,
+		hostMemoryKnown: hostMemoryKnown,
+		nodes:           nodeMems,
+		unreachable:     unreachablePorts,
+		invalidRows:     invalidRows,
 	}
 }
 
@@ -742,6 +776,13 @@ func parseRedisHostMemory(h *host, out string) redisHostMemory {
 // the RAM that host can still supply.
 func redisHostCapacityFinding(observed redisHostMemory) finding {
 	h := observed.host
+	if !observed.hostMemoryKnown {
+		unknown := cannotObserveFinding(h.name, fmt.Errorf("host memory frame missing or invalid"))
+		unknown.probeId = "redis/host-capacity"
+		unknown.frame = "host-memory"
+		unknown.playbook = "SIGNALS.md §3.1"
+		return unknown
+	}
 	hostMemoryTotalBytes := observed.totalBytes
 	hostMemoryAvailableBytes := observed.availableBytes
 	nodeMems := observed.nodes
@@ -766,7 +807,7 @@ func redisHostCapacityFinding(observed redisHostMemory) finding {
 	remainingConfiguredHeadroom := max(0.0, sumMaxmemoryBytes-sumUsedBytes)
 	operationalReserve := max(redisHostCapacityReserveMinimum, redisHostCapacityReserveRatio*hostMemoryTotalBytes)
 	requiredAvailable := remainingConfiguredHeadroom + operationalReserve
-	if criticalNodeCount > 0 && hostMemoryAvailableBytes > 0 && hostMemoryAvailableBytes < requiredAvailable {
+	if criticalNodeCount > 0 && hostMemoryAvailableBytes < requiredAvailable {
 		capacityDeficit := requiredAvailable - hostMemoryAvailableBytes
 		action := "Do not increase maxmemory on this host. Add physical memory or Redis masters, or reduce the retained dataset, before expanding aggregate ceilings; preserve enough reserve for Redis RSS overhead, the kernel, and non-Redis processes."
 		if impossibleTTLNodeCount > 0 {
@@ -806,20 +847,12 @@ func (self redisTopologyProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if err != nil {
 		return nil, err
 	}
-	phantomCount := 0
-	replicaCount := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if strings.Contains(line, "noaddr") || strings.Contains(line, " :0@0 ") || strings.HasPrefix(line, ":0") {
-			phantomCount += 1
-			continue
-		}
-		if strings.Contains(line, "slave") {
-			replicaCount += 1
-		}
+	topology, err := parseRedisClusterTopology(out)
+	if err != nil {
+		return []finding{cannotObserveFinding(h.name+"/node-inventory", err)}, nil
 	}
+	phantomCount := topology.phantomCount
+	replicaCount := topology.replicaCount
 
 	findings := []finding{}
 	if phantomCount > 0 {
@@ -870,13 +903,25 @@ type redisClusterMember struct {
 	port    int
 }
 
-// parseRedisClusterMembers reads the addressed members of a CLUSTER NODES
-// reply. Phantom entries (noaddr, or port 0) belong to the phantom check and
-// handshake entries have not joined, so neither is a member. A line without
-// the documented shape fails the whole read: a member it hid would otherwise
-// read as a configured node missing from the cluster.
+// A complete cluster reply owns topology counts and addressed membership together.
+type redisClusterTopology struct {
+	members      []redisClusterMember
+	phantomCount int
+	replicaCount int
+}
+
+// Reads only addressed members, sharing the topology parser's source authority.
 func parseRedisClusterMembers(out string) ([]redisClusterMember, error) {
-	members := []redisClusterMember{}
+	topology, err := parseRedisClusterTopology(out)
+	return topology.members, err
+}
+
+// Flags come only from the third field, never optional hostnames or slot text.
+// Phantom entries (noaddr or port 0) and unjoined handshakes are not members
+// or replicas. A malformed or empty reply invalidates the entire observation.
+func parseRedisClusterTopology(out string) (redisClusterTopology, error) {
+	topology := redisClusterTopology{members: []redisClusterMember{}}
+	rowCount := 0
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -885,27 +930,39 @@ func parseRedisClusterMembers(out string) ([]redisClusterMember, error) {
 		// <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent>
 		// <pong-recv> <config-epoch> <link-state> [<slot> ...]
 		if len(fields) < 8 {
-			return nil, fmt.Errorf("invalid response: CLUSTER NODES line has %d fields", len(fields))
+			return redisClusterTopology{}, fmt.Errorf("invalid response: CLUSTER NODES line has %d fields", len(fields))
 		}
+		rowCount++
 		flags := strings.Split(fields[2], ",")
-		if slices.Contains(flags, "noaddr") || slices.Contains(flags, "handshake") {
+		if slices.Contains(flags, "noaddr") {
+			topology.phantomCount++
+			continue
+		}
+		if slices.Contains(flags, "handshake") {
 			continue
 		}
 		address, _, _ := strings.Cut(fields[1], "@")
 		separator := strings.LastIndex(address, ":")
 		if separator < 0 {
-			return nil, fmt.Errorf("invalid response: CLUSTER NODES address without a port")
+			return redisClusterTopology{}, fmt.Errorf("invalid response: CLUSTER NODES address without a port")
 		}
 		port, err := strconv.Atoi(address[separator+1:])
 		if err != nil || port < 0 || 65535 < port {
-			return nil, fmt.Errorf("invalid response: CLUSTER NODES address with an invalid port")
+			return redisClusterTopology{}, fmt.Errorf("invalid response: CLUSTER NODES address with an invalid port")
 		}
 		if port == 0 {
+			topology.phantomCount++
 			continue
 		}
-		members = append(members, redisClusterMember{address: redisInventoryAddress(address[:separator]), port: port})
+		if slices.Contains(flags, "slave") {
+			topology.replicaCount++
+		}
+		topology.members = append(topology.members, redisClusterMember{address: redisInventoryAddress(address[:separator]), port: port})
 	}
-	return members, nil
+	if rowCount == 0 {
+		return redisClusterTopology{}, fmt.Errorf("invalid response: CLUSTER NODES listed no entries")
+	}
+	return topology, nil
 }
 
 // redisInventoryAddress compares numeric addresses by value.

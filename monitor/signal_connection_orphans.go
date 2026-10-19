@@ -55,14 +55,15 @@ func (pgConnectionOrphansProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) != 1 || len(rows[0]) < 6 {
-		return nil, fmt.Errorf("connection orphan query returned %d malformed rows", len(rows))
+	values, err := pgAggregateIntegers(rows, 6)
+	if err != nil {
+		return nil, err
 	}
-	row := rows[0]
-	connectedCount := atoiRow(row, 0)
-	orphanCount := atoiRow(row, 1)
-	matureOrphanCount := atoiRow(row, 2)
-	oldestOrphanAgeSeconds := atoi64(row.str(3))
+	connectedCount, orphanCount, matureOrphanCount := values[0], values[1], values[2]
+	oldestOrphanAgeSeconds, handlerCount, staleHandlerCount := values[3], values[4], values[5]
+	if connectedCount < orphanCount || orphanCount < matureOrphanCount || handlerCount < staleHandlerCount {
+		return nil, fmt.Errorf("invalid response for connection orphan aggregate: inconsistent counts")
+	}
 	if matureOrphanCount == 0 {
 		return []finding{healthyFinding(
 			"pg/connection-orphans", tierPage, "connection-orphans", pgTarget(env),
@@ -80,13 +81,13 @@ func (pgConnectionOrphansProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		mechanism: "Handler rows are ephemeral while connection history is durable and there is intentionally no foreign key. The legacy cleanup selected expired handler IDs first, so it could close only connections whose handler still existed; a process loss, earlier deletion, or insertion race could leave an open row permanently invisible to every later cleanup. Those rows inflate connected supply and keep stale locations eligible.",
 		baseline:  "Every connected row older than two handler-heartbeat intervals joins an existing handler; mature orphan count is zero.",
 		observed: fmt.Sprintf(
-			"connected_rows=%d orphan_rows=%d mature_orphan_rows=%d oldest_orphan_age_s=%d handler_rows=%s stale_handler_rows=%s",
+			"connected_rows=%d orphan_rows=%d mature_orphan_rows=%d oldest_orphan_age_s=%d handler_rows=%d stale_handler_rows=%d",
 			connectedCount,
 			orphanCount,
 			matureOrphanCount,
 			oldestOrphanAgeSeconds,
-			row.str(4),
-			row.str(5),
+			handlerCount,
+			staleHandlerCount,
 		),
 		evidence: "PostgreSQL left-joins the bounded current open set to handler primary keys and exports aggregate counts plus age only; no client, network, connection, or handler identifier leaves the database.",
 		context:  "Fresh orphans younger than two minutes can exist briefly across the handler-cleanup cadence. This page requires older rows on two probes. Closing the durable row is necessary but provider publication also needs the §2.9 active top-level eligibility filter and a refreshed location snapshot.",

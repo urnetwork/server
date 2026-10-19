@@ -4842,6 +4842,20 @@ the tail reconciliation window above until their own evidence closes them.
 ### 2.1 Active query sampling (what is the load, really)
 Probe: `active-queries`
 
+Privacy boundary: query samples remain internal inputs to concurrent-reindex
+and legacy payout-shape classification. Both ordinary and legacy alerts emit
+`query=withheld`, retaining query ID, active count, query age and completed
+history. Truncating SQL does not redact literals or identities. Withholding
+does not change anomaly thresholds, severity or sustain.
+
+False-positive qualifier: a private SQL prefix is not safe public evidence even
+when normalized or parameterized. Use the fixed shape diagnosis and numeric
+attribution; inspect exact statements only through private read-only evidence.
+False-negative qualifier: a withheld prefix cannot establish exact statement or
+caller identity; unknown query IDs remain unknown. Source errors remain errors,
+not healthy observations. This correction establishes an output defect, not a
+confirmed production disclosure.
+
 Repeated snapshots beat any single view. 12 samples × 2s apart, aggregate:
 ```sql
 SELECT state, coalesce(wait_event_type,'-')||':'||coalesce(wait_event,'-'),
@@ -5691,16 +5705,29 @@ wait; there was no DDL lock or persistent I/O cluster. This also exposed an
 alert-detail defect: the probe selected a representative SQL sample but did
 not put it into the structured alert, and its rendered baseline named only the
 five-backend branch even though the query deliberately also selects one
-waiter older than a minute. The alert now carries the sample query, both
-thresholds, and `DataFileRead`-specific attribution guidance. The query also
+waiter older than a minute. The alert carries both thresholds and `DataFileRead`-specific attribution
+guidance. Its current privacy contract withholds the raw SQL sample and
+declared application (`query=withheld application=withheld`); truncation and
+whitespace normalization do not remove private literals or identities. The query also
 selects the PID, query ID, application, client address, and sample from the
-same oldest waiter, retaining an attribution snapshot when a transient command
-finishes before the follow-up query. The client address is used only for an
+same oldest waiter. SQL remains an internal shape-classification input;
+public attribution retains PID, query ID and privacy-safe client owner when a
+transient command finishes before the follow-up query. Withholding SQL and
+application does not alter count/query-age thresholds, sustain, or wait-family
+and maintenance diagnoses. The client address is used only for an
 in-memory unique inventory match; the alert renders the configured host alias
 or a fixed local/unmapped/ambiguous class and never the address or CIDR. A
 one-shot aged singleton remains evidence to validate, while the standing
 monitor's two-observation gate distinguishes recurrence before opening a
 ticket.
+
+False-positive qualifier for attribution: declared application and representative
+SQL are untrusted free text, not public caller identity. The safe client-owner
+projection and fixed shape diagnosis remain available. False-negative qualifier:
+PID/query ID/owner cannot reconstruct the withheld statement or prove caller
+identity, and grouped snapshots do not prove continuous wait residence. Missing
+or failed source evidence remains unavailable; withholding is not a health
+verdict or proof of a production disclosure.
 
 At 06:05Z the next one-shot found a different singleton,
 `Client:ClientWrite` at 96s. It too completed before the immediate PID query,
@@ -10457,8 +10484,24 @@ were not ok over ten minutes. They are the series the providers dashboard's
   of decision reads over ten minutes were absent, invalid or Redis errors.
   Absent and invalid reads serve each provider's latest slot; an error keeps a
   process's last decision for up to 15 minutes.
-- `arindb-canary-unobservable` **WARN**, sustained 15 minutes: no Taskworker
-  exports the state and decision time.
+- `arindb-canary-unobservable` **WARN**, sustained 15 minutes: the queried
+  publisher projection is incomplete, malformed or ambiguous. A readable
+  decision requires all four Boolean state rows with exactly one selected,
+  all seven Boolean flags, the Boolean fallback scalar, all three buckets'
+  old/latest counts and loss/gain/churn ratios, all three coverage values,
+  both cohort counts and the decision/cohort/serving/pair scalars. Required
+  counts are nonnegative integers; shares stay in [0,1]; net loss may be
+  negative and gain/churn may exceed one. Latest/fallback require a positive
+  serving epoch; single requires zero, and warming may legitimately use zero.
+  A nil decision exports four zero states, resets the flags/scalars and
+  removes comparisons while retaining its previous decision timestamp. That
+  timestamp cannot establish a readable decision. Partial input preserves
+  independently valid positive findings, including stale/stalled ages; it
+  cannot establish absence or allow notifier clears, even before the visibility
+  warning's sustain matures. Absent emptied-country rows and absent/NaN
+  no-attempt rates are valid optional observations. Query evaluations older
+  than 30 minutes or more than 30 seconds in the future are unavailable;
+  future decision/pair timestamps beyond that skew are invalid.
 
 Action on a fallback: judge whether the latest database is a bad release from
 the losses and emptied countries, its catalog audit and its Atlas validation.
@@ -10481,7 +10524,13 @@ qualifiers: a release that is wrong but removes little supply passes (the
 reviewed rules, catalog audit and Atlas validation remain the quality gates);
 a refused copy at build ships a release without a canary, which is the
 `arindb-canary-unavailable` warning, or the `fallback_dropped` page right after
-a fallback.
+a fallback. A complete projection is evidence for the current reducer's
+conditions only: replica-wise max does not join one decision generation, and
+its output timestamp is the query evaluation clock, not scrape freshness.
+Transitioning replicas may produce multiple selected states; this establishes
+visibility uncertainty, not a bad release. Valid small samples and warming,
+single or zero-epoch states keep their existing incident semantics. No
+production occurrence or delivered clear is established by these source controls.
 
 Implementation: `signal_arindb_canary.go` and its synthetic test file,
 registered in `NewSignals`. Controls cover a healthy latest state, a fallback
@@ -10489,9 +10538,28 @@ with named emptied countries, Speed and Online losses at and above the
 threshold with and without their sample, each page and warning the breaker
 cannot see at and below its threshold, the cohort page's release gate, the
 reads warning, the unavailable, warming and stale warnings and missing gauges.
+Additional controls cover the publisher's readable-to-nil projection with its
+retained timestamp, every missing mandatory row, malformed/duplicate/unknown
+state rows, invalid count/share/time domains, expired query evaluations,
+independent positives with partial evidence, valid optional/no-attempt and
+small-sample states, and held visibility through the active Slack notifier.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
+
+Observation authority: require at least one complete 12-column result row and
+nonnegative 64-bit integers for every count, age, time and block metric before
+health or attribution. Missing, short, extra-width, fractional, negative or
+out-of-range cells remain unavailable; they cannot become numeric zero.
+The query-id filter can return several statistics partitions across database,
+user and top-level status. Validate every partition, require its repeated
+activity/task aggregates to agree, retain all partition metrics, and test the
+100,000 rows/call corroboration against any partition. Never let arbitrary
+first-row order hide a qualifying partition or dilute it with another partition.
+The left join's complete zero row when no statement matches is valid; an empty
+result is unavailable. Retained cleanup text alone remains insufficient, and
+lifetime statement metrics do not establish a current execution or CPU share.
+
 
 `CompletePayment` stamps `transfer_contract.reap_time` for every contract in a
 payment's `transfer_escrow_sweep`. The lookup is indexed by `payment_id`, so an
@@ -11757,6 +11825,21 @@ invalid, duplicate, or mixed-instance member is `worker-scheduler-unobservable`,
 proof of spare capacity. Preserve the separate §2.12a CPU/allocation-churn
 threshold: scheduler pressure does not require exceptional allocation.
 
+Register each returned, recognized metric's safe host/block/instance identity
+before rejecting a parsed stale, future, nonfinite, or negative scalar. Even
+when all three members are rejected, that returned runtime remains incomplete;
+a complete sibling must not make global visibility healthy. Keep independently
+complete siblings' capacity findings. Invalid values and rejected runtime
+identities stay out of the aggregate visibility alert; malformed scalar shape
+or parsing remains a whole-probe source error.
+
+The denominator is returned safe runtime identities, not an authoritative census
+of active Taskworkers. The query can filter stale raw exports before returning
+them. Entirely absent and legitimately retired runtimes cannot be inferred from
+this vector; proving active-fleet completeness requires separate generation
+inventory. A visibility warning proves incomplete observation, not scheduler
+pressure, and quiet complete siblings do not establish fleet completeness.
+
 The 2026-09-26 Main probe load supplied the discriminator: one 128-full,
 1,000-cheap Taskworker consumed 3.71 CPU cores with `GOMAXPROCS=4` and
 approximately 105,000 goroutines while PostgreSQL still had host-level CPU
@@ -12166,6 +12249,17 @@ remains fresh; a task completion or running marker alone is insufficient.
 ### 2.16 Open connection handler ownership — durable rows need a live owner
 Probe: `connection-orphans`
 
+Observation authority: require exactly one complete six-column aggregate row
+with nonnegative 64-bit integer counts and age before reporting health or an
+orphan finding. Require connected >= orphan >= mature-orphan counts and
+handler >= stale-handler counts. Missing, malformed, fractional, negative,
+out-of-range, extra-width or duplicate rows remain unavailable, including when
+the mature count would previously have coerced to zero. A valid zero mature
+count and fresh cleanup races remain healthy. The existing grouped query's
+empty-connected-set/no-row behavior remains unavailable; this validation does
+not change that separate query boundary.
+
+
 `network_client_connection` is durable history; `network_client_handler` is an
 ephemeral lease owned by a live Connect handler. An open connection may briefly
 precede or outlive its handler across normal task cadence, but every connection
@@ -12368,7 +12462,16 @@ or label_replace(sum by (host,block,operation) (increase(urnetwork_connect_conne
   (§3). Do not restart the block for these failures alone: the transports are
   kept, and a restart reconnects every connection.
 - UNOBSERVABLE (`connection-live-failures-unobservable`, two probes): samples
-  that are unlabeled, stale or negative. Absent counters are §2.16a's: the
+  that are unlabeled, stale or negative, or returned operations missing their
+  `window_min` or `total` companion or repeating either metric (even with equal
+  values). A measured zero in a complete pair remains valid. Incomplete or
+  duplicate operations contribute no sustained conclusion; complete independent
+  operations can still prove sustained failures alongside the visibility warning.
+  No healthy sustained finding is emitted while visibility is incomplete.
+  Missing companions can reflect range startup, retention or metric-generation
+  differences; they do not prove provider failure. Duplicate rows violate query
+  uniqueness but do not identify a backend cause. This checks only returned
+  operations, not fleet membership. Absent counters are §2.16a's: the
   same processes export the reconcile gauge, whose unobservable class covers a
   fleet that does not export them.
 
@@ -12378,8 +12481,10 @@ the Connect dashboard chart the counters.
 Implementation convention: SIGNALS.md §2.16b (`connection-live-failures`)
 maps to `signal_connection_live_failures.go` and
 `signal_connection_live_failures_test.go`. Synthetic tests cover a healthy
-fleet, one failing connection below the floor, a sustained block and a stale
-sample. The log is tested in `connect/transport_announce_failure_log_test.go`.
+fleet, one failing connection below the floor, a sustained block, stale samples,
+missing companions, duplicate metrics in both orders, independent complete
+operations, measured zero and threshold boundaries. Unavailable input remains
+unknown; source-only controls do not establish Main incidence or adoption. The log is tested in `connect/transport_announce_failure_log_test.go`.
 
 ### 2.17 Missing companion-origin contract rate — return path cannot anchor
 Probe: `missing-origin`
@@ -18363,10 +18468,19 @@ evidence floor:
 - `egress-common-mode` (PAGE): one known current failure class covers at least
   90% of all eligible providers. Inspect the shared prober path before
   individual providers. For `no_consensus`, `tunnel_failed`, or
-  `contract_failed`, inspect the persisted `prober_identity` singleton's client
-  credential/mint readiness, the `ProberBootstrap` task, and the prober
-  network's transfer balance first; then verify Taskworker platform/API
-  reachability and egress confinement. Never print the stored token or
+  `contract_failed`, producer generation is unknown from this aggregate.
+  Identify the executing Taskworker artifact and bounded same-attempt evidence
+  before selecting an account owner. For confirmed disposable-shard work,
+  inspect `BeginProberShard` admission, the task/epoch/shard owner and deadline,
+  `ProberShardIdentity` runtime credential/mint readiness, and that pass's
+  private network funding; then check tunnel transport, platform/API
+  reachability and egress confinement. Each pass owns its network, identity,
+  funding and deferred drain/reap. `ProberBootstrap` retains its task name only
+  for expired-shard cleanup (default two-minute task budget, five-minute
+  recurrence); it does not create, mint or replenish a shared account.
+  Cleanup success cannot establish current probe readiness. Only for confirmed
+  legacy/in-flight singleton work, inspect `prober_identity` credential/mint
+  state and that legacy network's balance. Never print credentials or
   reintroduce the retired environment-token design.
 - `egress-mixed-failure` (WARN after two samples): total current failures cover
   at least 90% of eligible providers, but no one known class does. This proves
@@ -18383,6 +18497,21 @@ evidence floor:
   failure vocabularies differ or an invalid class was stored. Compare exact
   artifacts and add a reviewed bounded class when intentional; the raw value
   remains private.
+
+Generation qualification is required even for the current `tunnel_failed`
+vocabulary: the current prober emits it when tunnel opening fails, but the
+class does not identify the deployed writer or prove a credential cause.
+`no_consensus` retains the historical consensus/credential incident meaning;
+`contract_failed` remains a recognized legacy class. Neither has a current
+emitter established by this source review. Keep both names readable in old
+and in-flight evidence without inventing an active writer. Failure classes,
+aliases, severity, thresholds and observation windows remain unchanged.
+
+False-positive qualifier: a missing legacy singleton is expected for disposable
+work; a common class is a shared-path pattern, not a unique failed component.
+False-negative qualifier: a healthy legacy singleton or successful cleanup
+cannot clear failed disposable admission, deadline, credentials, funding or
+transport. Missing artifact or same-attempt authority leaves generation unknown.
 
 A dominant `no_exit_ip` class is a legacy shared observation-stage pattern,
 not an identified failing component or evidence that sampled-site reachability
@@ -19327,6 +19456,27 @@ For each master: `INFO memory` → used_memory, maxmemory, pct.
   or judge aggregate host capacity. Preserve earlier trip evidence while a
   node is unknown; a subsequent valid healthy reading rearms that node's
   battery. A complete corrected census restores the fleet comparisons.
+- Host-capacity authority is independent of node INFO: require a successful
+  native `/proc/meminfo` read with unique `MemTotal` and `MemAvailable` fields,
+  integer KiB values and `kB` units, then exactly one compact `host_memory`
+  frame with finite numbers, positive total and availability from zero through
+  total. Missing, partial, malformed, duplicate or nonfinite frames yield
+  `redis/host-capacity` / `cannot-observe` (host target, `host-memory` frame,
+  sustain 2); they cannot clear a capacity page or erase valid node thresholds.
+  A failed host collector cannot acquire authority from a later successful
+  INFO command. An incomplete node census still prevents aggregate judgment.
+  Scope host-capacity findings and their observation gaps to `redis-memory`;
+  host RAM is not an input to `redis-buffers` or `redis-connections`. Their
+  shared node-INFO gaps still propagate and their independently measured
+  buffer/connection thresholds remain usable with unknown host RAM.
+  False-positive qualifier: measured zero `MemAvailable` is valid exhaustion,
+  not observation loss; a complete critical-node census remains page eligible
+  at zero. Healthy host capacity still permits an independent node breach.
+  False-negative qualifier: absence of this page proves neither unrestricted
+  host health nor a historical incident; the policy requires a node strictly
+  above 92% and compares remaining configured growth plus max(8GiB, 2% RAM)
+  against current `MemAvailable`. These snapshot controls establish no current
+  production host-capacity incidence.
 - volatile-ttl POLICY IMPLICATION: eviction can only touch TTL'd keys. A node
   full of no-TTL keys at maxmemory rejects ALL writes (`OOM command not
   allowed`) while reads keep working and cluster_state stays ok — invisible
@@ -19388,6 +19538,50 @@ or append that partial sample to the full-fleet family baseline. A complete
 corrected census restores baseline publication. Raw native reply text never
 belongs in an error or alert. This is an observation-authority discriminator,
 not evidence that the omitted node is actually fuller or unhealthy.
+
+The scan has its own observation authority, independent of that memory census.
+The native collector streams at most 300,000 selected newline-terminated
+lines into normalization and sorting, buffers only the top-20 histogram and
+completion header in the outer shell, checks both
+`timeout redis-cli` and `head` statuses, and publishes the reduced top-20
+histogram only after successful normalization/counting and terminal completion.
+A source status of 141 is accepted only with a successful `head` and the exact
+300,000-line requested cap: this is bounded-sample completion, not proof of a
+full keyspace scan. Other failures (including timeout after partial output),
+missing/duplicate completion, malformed or impossible counts, an unterminated
+final selected record (including one omitted by the top-20 reduction), and
+truncated histograms remain unknown. They emit `cannot-observe` at
+`<host>:<port>/key-families` (WARN after two daily observations), never
+`family-growth` or a healthy result, and never append to a baseline. Restore
+source access and require the same bounded scan to complete before judging
+recovery. Family growth remains the existing `family-growth` class and alias;
+this adds no key TTL or Redis service diagnosis. A complete empty scan is
+healthy. The daily scan measures line-oriented `redis-cli --scan` output,
+not arbitrary binary-key identity or a full key census. Before Bash reads
+lines, POSIX `tr` maps NUL to the non-UTF-8 byte 0xff; this preserves fragment
+presence and newlines while ensuring that a NUL-bearing known-looking schema
+cannot become an allowlisted family. Complete such lines belong only to the
+redacted binary aggregate; an unterminated NUL-only fragment is unknown.
+The existing Redis probes already require `tr`. Top-20 omissions and
+within-day changes remain outside its coverage. The collector creates no
+raw-key sample file. Its validator holds a 16 KiB input chunk and its LF-free
+projection of at most 16 KiB; the reduced histogram has at most 20 rows. The
+sample and histogram bounds count lines and do not add a byte limit on keys.
+The existing sort implementation may use its own scratch space.
+Cancellation of the local SSH owner does not prove remote descendant cleanup;
+that existing transport limitation is not repaired by this scan framing.
+
+The validator reads fixed chunks rather than interpreting one shell loop per
+key. The former Bash pipe `read` loop performed single-byte input reads and
+300,000 shell read/print/count iterations for a full sample; a local combined
+qualification exhausted its unchanged ten-second native-fixture budget while
+an earlier focused qualification passed. That local failure does not establish
+Main scan failure or machine-load causality. Fixed-size reads count every LF
+and check the last selected byte before authorizing completion, including LF
+at a chunk boundary and a fragment ending at a chunk boundary. Qualification
+keeps the same producer, sample, transport and fixture budgets; a synthetic
+native read-invocation budget distinguishes the excessive loop work without
+using elapsed time as its causal assertion.
 
 The shell normalization is not itself a safe persistence boundary. A key from
 an unknown schema can contain non-UTF-8 bytes, printable identifiers, or a
@@ -19699,6 +19893,21 @@ replace them with immediate deletion.
 ### 3.4 Node process signals (host-level)
 Probe: `redis-process`
 
+Process evidence independently requires a successful complete `ps | awk`
+pipeline and an exact census completion count. Failed or malformed `ps`
+output, missing or duplicate frames, invalid or non-finite numeric fields,
+and duplicate PIDs emit `cannot-observe` at `<host>/redis-process`, WARN after
+two five-minute observations. They cannot become zero CPU, an empty healthy
+census or a CPU breach. A successful census containing no Redis process is a
+valid empty observation; process presence is not this signal's health contract.
+The existing `redis-cpu-sustained` class (historical `redis-process` healthy
+alias), >200% threshold and two-sample sustain remain unchanged. A valid
+kernel victim still pages when process observation fails, and a valid CPU
+breach survives unknown kernel observation. Restore the failed observation
+source and require a complete same-host sample; do not infer Redis service
+failure from visibility alone. These native invocations observe current source
+output; retained kernel event age remains independently qualified below.
+
 Kernel evidence requires a successful bounded `dmesg` pipeline and one complete
 terminal source marker. A readable kernel ring with no matching event is a
 valid empty observation. Permission or command failure, timeout, missing or
@@ -19938,11 +20147,21 @@ Probe: `redis-connections`
 ### 3.6 Cluster topology hygiene
 Probe: `redis-topology`
 
-- `CLUSTER NODES | grep -cE 'noaddr|:0@0'` — phantom entries from restarted
-  processes; they break every iterate-the-cluster tool (scripts must filter
-  `fail|noaddr|handshake` and `^:`); purge with CLUSTER FORGET on every node.
-- Replica count: `CLUSTER NODES | grep -c slave` — 0 means no failover
-  exists and any single wedge is a partial outage until manual restart.
+- Parse each `CLUSTER NODES` row by fields: exact comma-separated `noaddr`
+  in the third field or client port 0 in the second field identifies a phantom.
+  Optional hostnames and other fields containing `noaddr` are not flags.
+  Phantom entries from restarted processes break iterate-the-cluster tools;
+  identify their exact IDs before any authorized per-node CLUSTER FORGET.
+- Replica count: exact third-field `slave` flags among addressed, nonphantom,
+  nonhandshake members. A hostname containing `slave` is not a replica.
+  Zero means no failover exists and any single wedge is a partial outage
+  until manual restart. The inventory's explicit expected replica count arms
+  `replica-cover`; expected zero retains the documented dark state.
+- Counts and membership share one complete parse. A malformed row or empty
+  reply makes the topology observation `cannot-observe`, emits no phantom or
+  replica healthy verdict, and does not advance the replica-count baseline.
+  Genuine `noaddr`/port-0 phantoms remain observable in a complete reply even
+  if no addressed members remain; membership then remains unobservable.
 - known_nodes drift vs expected = membership event worth a warn.
 - Node inventory (`node-inventory-mismatch`): every addressed `CLUSTER NODES`
   member (phantom and handshake entries excluded) must announce the LAN
@@ -37341,6 +37560,32 @@ metric query contains no row, emit `play-crash-data-unobservable` or
 metric row (including explicit zero values) establishes visibility. Empty
 metadata or rows never means zero crashes.
 
+The shared local evidence sanitizer removes HTTP(S) URL userinfo before
+identifier heuristics and query redaction. A query-only reducer previously
+retained arbitrary username/password authority on both query and no-query URLs;
+numeric documentation hosts and short non-email/nonhex synthetic tokens isolate
+that gap from incidental email/token redaction. Remove the entire authority
+prefix through its final `@`, including percent-encoded or malformed userinfo
+and valid sub-delimiters, while keeping safe host/path and crashing-frame
+context. Scheme matching is case-insensitive. Public JSONL and Markdown carry
+sanitized evidence; rendering/escaping and truncation are not credential removal.
+The separate console-URI userinfo rejection and full-URL provider-error
+redaction retain their own protections.
+
+False-positive qualifier: this source-confirmed local privacy gap does not
+establish any actual credential exposure, provider payload occurrence or new
+crash; no real provider response or credentials were inspected. False-negative
+qualifier: identifier heuristics and upstream sanitization cannot prove local
+userinfo removal, and absence of a sample is not privacy verification. This
+narrow HTTP(S) authority correction does not claim arbitrary path/fragment
+secrets or other schemes are sanitized. Keep crash identity, counts, useful
+frames and unavailable/partial provider findings unchanged. VERIFY the numeric-
+host no-query causal RED, healthy safe-context controls, userinfo/query grammar,
+and actual Play sample JSON through Signal.Run to public JSONL and Markdown,
+with only synthetic data and an in-memory provider transport. Gate the shared
+Apple label path in §20.2 as well; qualify tests and watcher promotion before
+claiming the current monitor uses the correction.
+
 This alert normally needs a software root-cause fix in the Android client, an
 embedded SDK, or a server contract used by that client. A device/OS-specific
 cluster can instead require an operational release exclusion or an upstream
@@ -37414,6 +37659,16 @@ older than 72 hours is never zero crashes. Emit the explicit classes
 The privacy-suppressed class remains active from the cursor until a later
 non-empty instance supersedes it.
 
+Apple version, device and platform labels use the same `providerLabel` →
+`providerEvidence` boundary as Play samples (§20.1). HTTP(S) userinfo must be
+removed before these labels become group keys, breakdown evidence, frame or
+symptom text. VERIFY a valid synthetic TSV row through parsing, grouping and
+public group-alert JSONL/Markdown, retaining crash counts and useful release/
+device/platform context. This shared source bug does not prove Apple supplied
+credential-bearing labels or that any actual exposure occurred. The report
+still supplies aggregate counts rather than detailed crash stacks, and missing
+or privacy-suppressed evidence retains its existing unknown authority.
+
 Aggregate integration requires only the credential, the one-time ongoing
 request, and the monitor code. Fixing an aggregate crash usually requires an
 iOS app, SDK, or server-contract deployment; an OS/device boundary may instead
@@ -37480,6 +37735,17 @@ rather than being assigned to a site from adjacency or memory. Site-class
 attribution also requires at least one reachable configured client as a
 central-path control.
 
+Unit-state authority is separate from the SSH command's success. The generated
+reader records whether both `systemctl show` state reads exited successfully
+and returned one recognized ActiveState/SubState token. Failed commands,
+misleading nonempty stdout from a failed command, empty/multiline/malformed
+values and unreviewed state tokens are fixed `unknown`, never a stopped-unit
+witness. The parser requires that positive provenance before interpreting a
+unit state; legacy bodies without it remain unavailable. `NRestarts` is optional
+diagnostic metadata: unavailable or malformed counts are `unknown`, not zero,
+and do not erase an independently authoritative failed/stopped unit state.
+These checks add no command, retry, contact, timeout or permission change.
+
 HEALTHY: the VPN server is `active/running`; its status file is no more than 90
 seconds old (the live configuration uses OpenVPN's 60-second default status
 interval, plus 30 seconds of scheduler/write tolerance); every enabled
@@ -37490,8 +37756,14 @@ and ten minutes of observable dependent host probes before closure.
 
 BROKEN:
 
+- `vpn-server-unavailable` is an immediate WARN visibility finding when both
+  unit-state reads cannot be qualified. It preserves the originating §21.1
+  signal and leaves server/client health unknown; it does not diagnose an
+  outage from failed inspection. Raw command errors/output are not emitted.
 - `vpn-server-unhealthy` is an immediate page when the configured server unit
-  is not active/running. Check the exact process, EC2 instance/system checks,
+  is authoritatively not active/running. Valid stopped, failed and transitional
+  states retain the existing criterion; a transitional state alone does not
+  prove an absent process or outage mechanism. Check the exact process, EC2 instance/system checks,
   UDP/443 listener, journal, and network boundary before assigning every
   client independently.
 - `vpn-status-stale` after two cadences means the status writer is more than 90
@@ -37502,10 +37774,14 @@ BROKEN:
   can be the client process, host, WAN, route, or NAT path.
 - `vpn-site-session-loss` after two cadences is a page when a missing client
   and at least one other missing or current-but-unreachable configured client
-  map to the same current/recent public source. With the central server and an
-  unrelated reachable client healthy, this localizes the common boundary to
-  that offsite LAN, router/conntrack/NAT, WAN, or site-side OpenVPN path. It
-  does not prove which device failed.
+  map to the same current/recent public source and any configured overlay
+  control is reachable. This is a same-source loss correlation with a partial
+  central-path positive control. The control may share that source; it does
+  not automatically supply an unrelated-site witness or prove a failed
+  offsite LAN/router/NAT/WAN component. The alert retains the count of reachable
+  controls with a different current source group; missing comparable source
+  evidence remains unknown. Severity and the original session-loss symptom
+  are unchanged.
 - `vpn-client-data-path-loss` after two cadences warns when a current session
   exists but its exact overlay address does not answer the server-originated
   check. This separates control-session presence from host/tunnel forwarding.
@@ -37513,9 +37789,27 @@ BROKEN:
   unreachable client and at least one other current-but-unreachable or
   recently timed-out configured client map to the same source while another
   configured client remains reachable. This healthy control rules out a
-  server-wide tunnel failure and the monitor workstation, but the equality
-  still does not distinguish the site client processes, router state, NAT/WAN,
-  or hosts.
+  total server-wide tunnel failure for that observed path, but may be in the
+  same source group. The separately retained different-group control count
+  supplies only source separation, not the identity of a failed device. The
+  correlation still does not distinguish client processes, router state,
+  NAT/WAN or hosts; severity and the unreachable-client symptom are unchanged.
+
+False-positive qualifiers: a unit inspection failure can coincide with a real
+outage but cannot establish it. Existing `vpn-server-unhealthy` remains a
+visibility-class PAGE; that classification never repaired its former affirmative
+outage narrative or prevented all notifier raises. A same-source reachable
+client is valid positive evidence for its own central/tunnel path, not proof of
+an unrelated source or site-wide failure. Even a different-group control does
+not identify a failed host/router/NAT/WAN component.
+
+False-negative qualifiers: unavailable inspection is never healthy or a clear
+of existing findings. Newly introduced systemd tokens remain unknown until
+reviewed. Authoritative failed/failed and inactive/dead states retain PAGE1;
+status freshness, scope exclusions and cancellation retain their independent
+unknown semantics. Missing/recent-timeout grouping and source-separated controls
+do not complete a topology census or establish stable site membership. The
+source-only correction does not prove runtime incidence or production recovery.
 
 For every site-class alert, compare a path that deliberately bypasses OpenVPN.
 If Planetoid's active direct public SSH transfer continues increasing receive

@@ -19,6 +19,10 @@ const (
 	vpnStatusFreshness         = 90 * time.Second
 	vpnStatusFutureTolerance   = 30 * time.Second
 	vpnSessionCorrelationLimit = 2 * time.Hour
+	// Unknown/new service states remain unavailable until their semantics are
+	// reviewed. These fixed tokens are also the generated shell's allowlist.
+	vpnSessionActiveStates = "active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing"
+	vpnSessionSubStates    = "dead|condition|start-pre|start|start-post|running|exited|reload|reload-signal|reload-notify|stop|stop-watchdog|stop-sigterm|stop-sigkill|stop-post|final-watchdog|final-sigterm|final-sigkill|failed|auto-restart|auto-restart-queued|cleaning|dead-before-auto-restart|failed-before-auto-restart|dead-resources-pinned"
 )
 
 var vpnSessionNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -52,13 +56,14 @@ type vpnSessionClient struct {
 }
 
 type vpnSessionsObservation struct {
-	activeState string
-	subState    string
-	restarts    int64
-	statusMTime time.Time
-	clients     map[string]vpnSessionClient
-	reachable   map[string]bool
-	timeouts    map[string]vpnSessionTimeout
+	unitObserved bool
+	activeState  string
+	subState     string
+	restarts     string
+	statusMTime  time.Time
+	clients      map[string]vpnSessionClient
+	reachable    map[string]bool
+	timeouts     map[string]vpnSessionTimeout
 }
 
 func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -110,14 +115,28 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 
 	now := env.now().UTC()
+	if !observation.unitObserved {
+		return []finding{{
+			probeId: "network/vpn-sessions", tier: tierWarn,
+			class: "vpn-server-unavailable", target: server.name, sustain: 1,
+			symptom:   "Management VPN server unit inspection is unavailable",
+			mechanism: "Both systemctl state reads did not establish successful, recognized unit-state evidence. Inspection failure or missing provenance does not prove a stopped server, disconnected clients, or a remote-site outage.",
+			baseline:  "Both bounded systemctl state reads succeed and return one recognized ActiveState/SubState value before unit or client health is evaluated.",
+			observed:  fmt.Sprintf("unit_state_observed=false active_state=%s sub_state=%s nrestarts=%s", observation.activeState, observation.subState, observation.restarts),
+			evidence:  "Only fixed unit-state tokens and optional restart-count availability are retained; raw command output and errors are not emitted.",
+			action:    "Inspect the existing read-only unit-inspection path and permissions. Obtain authoritative unit state before assigning a VPN or site outage; preserve service and database generations.",
+			verify:    "The next ordinary observation qualifies both unit-state reads and then evaluates the unchanged status freshness and admitted client paths.",
+			playbook:  "SIGNALS.md §21.1",
+		}}, nil
+	}
 	if observation.activeState != "active" || observation.subState != "running" {
 		return []finding{{
 			probeId: "network/vpn-sessions", tier: tierPage,
 			class: "vpn-server-unhealthy", target: server.name, sustain: 1,
 			symptom:   fmt.Sprintf("management VPN server %s is %s/%s", server.name, observation.activeState, observation.subState),
-			mechanism: "The OpenVPN server unit does not own a running process. Client-session absence is therefore a server-side control-plane outage, not evidence that every remote site failed independently.",
+			mechanism: "Authoritative systemd state differs from the configured active/running baseline. This includes failed, stopped and transitional states; inspect the exact process before deciding whether it is absent or which control-plane operation failed. Client-session absence cannot independently identify every remote site as failed.",
 			baseline:  "The configured OpenVPN server unit remains active/running and publishes a status file within its 60-second configured/default interval plus 30 seconds of tolerance.",
-			observed:  fmt.Sprintf("active_state=%s sub_state=%s nrestarts=%d", observation.activeState, observation.subState, observation.restarts),
+			observed:  fmt.Sprintf("active_state=%s sub_state=%s nrestarts=%s", observation.activeState, observation.subState, observation.restarts),
 			evidence:  "The probe reads only systemd state and the redacted OpenVPN status contract on the configured VPN server; it does not export client public addresses, certificates, or keys.",
 			context:   "This management path carries control traffic. PostgreSQL and Redis backup payloads must continue using their dedicated direct SSH forwards and cannot be repaired by moving bulk traffic onto the VPN.",
 			action:    "Inspect the VPN server process, host checks, UDP/443 listener, journal, and current EC2/network boundary. Restore the existing service architecture; do not restart remote databases or reroute bulk backups merely because their control sessions disappeared.",
@@ -146,6 +165,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	missing := make([]*host, 0)
 	unreachable := make([]*host, 0)
 	reachableClients := 0
+	reachableByGroup := map[int]int{}
 	for _, client := range clients {
 		_, present := observation.clients[client.overlayIp]
 		reachable, reachabilityObserved := observation.reachable[client.overlayIp]
@@ -158,6 +178,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 		if reachable {
 			reachableClients++
+			reachableByGroup[observation.clients[client.overlayIp].group]++
 		} else {
 			unreachable = append(unreachable, client)
 		}
@@ -180,6 +201,12 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	for group := range affectedByGroup {
 		sort.Strings(affectedByGroup[group])
 	}
+	controlWitness := func(group int) string {
+		if reachableClients > reachableByGroup[group] {
+			return " A reachable configured control has a different observed source group; source separation is established without identifying a failed device."
+		}
+		return " No reachable control in a different source group is established."
+	}
 	for _, client := range unreachable {
 		session := observation.clients[client.overlayIp]
 		peers := affectedByGroup[session.group]
@@ -192,7 +219,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			class = "vpn-site-data-path-loss"
 			tier = tierPage
 			frame = "shared-public-source-data-path"
-			mechanism = "This current-but-unreachable session and at least one other missing or unreachable configured client map to one current/recent public source, while the VPN server can reach unrelated configured clients. That isolates a shared offsite client/router/NAT/WAN path rather than the central process or the monitor workstation."
+			mechanism = "This current-but-unreachable session and at least one other missing or unreachable configured client map to one current/recent public source, while at least one configured overlay control remains reachable. That is shared-source loss correlation with a partial central-path control, not by itself proof of an unrelated-source witness or a failed offsite LAN, router/NAT, WAN, or site-side VPN component." + controlWitness(session.group)
 		}
 		peerText := "none"
 		if len(peers) > 0 {
@@ -205,8 +232,8 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: mechanism,
 			baseline:  "Every enabled vpn-client has its exact overlay address in the fresh server snapshot and answers a bounded server-originated overlay reachability check.",
 			observed: fmt.Sprintf(
-				"host=%s overlay_address=%s session_present=true data_path_reachable=false reachable_controls=%d configured_clients=%d shared_public_source=%t correlated_affected_hosts=%s connected_since=%s server_restarts=%d",
-				client.name, client.overlayIp, reachableClients, configuredClientCount, sharedSite, peerText, session.connectedAt.Format(time.RFC3339), observation.restarts,
+				"host=%s overlay_address=%s session_present=true data_path_reachable=false reachable_controls=%d unrelated_reachable_controls=%d configured_clients=%d shared_public_source=%t correlated_affected_hosts=%s connected_since=%s server_restarts=%s",
+				client.name, client.overlayIp, reachableClients, reachableClients-reachableByGroup[session.group], configuredClientCount, sharedSite, peerText, session.connectedAt.Format(time.RFC3339), observation.restarts,
 			),
 			evidence: "The current status snapshot groups real-source equality only inside the VPN server and exports configured private overlay addresses plus configured host names; it never emits public sources, source ports, certificates, or unrelated identities. The server then probes each admitted configured overlay address directly.",
 			context:  "A CLIENT_LIST row proves a control session, not usable forwarding. Correlate the dedicated direct public backup path: if it also disappears, the failure is broader than OpenVPN; if it advances, keep the diagnosis at the tunnel data path. Bulk backups must never move onto the management VPN.",
@@ -231,6 +258,10 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			tier = tierPage
 			frame = "shared-public-source"
 		}
+		unrelatedControls := "unknown"
+		if recentVPNSessionTimeout(now, timeout) {
+			unrelatedControls = strconv.Itoa(reachableClients - reachableByGroup[timeout.group])
+		}
 		lastTimeout := "not-seen-in-two-hour-window"
 		if !timeout.at.IsZero() {
 			lastTimeout = timeout.at.Format(time.RFC3339)
@@ -241,7 +272,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 		mechanism := "The VPN server and its fresh status writer are healthy, but the configured virtual address is absent. That localizes the management failure to this client, its host, or the route/NAT path between it and the server."
 		if sharedSite {
-			mechanism = "This missing client and at least one other missing or unreachable configured client map to one current/recent public source while unrelated overlay controls remain healthy. That equality localizes the common boundary to their offsite LAN, router/NAT, WAN, or site-side OpenVPN reachability rather than the central VPN process or each application independently."
+			mechanism = "This missing client and at least one other missing or unreachable configured client map to one current/recent public source while at least one configured overlay control remains reachable. That is shared-source loss correlation with a partial central-path control, not by itself proof of an unrelated-source witness or a failed offsite LAN, router/NAT, WAN, or site-side VPN component." + controlWitness(timeout.group)
 		}
 		findings = append(findings, finding{
 			probeId: "network/vpn-sessions", tier: tier, class: class,
@@ -250,8 +281,8 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: mechanism,
 			baseline:  "Every enabled vpn-client host has its exact configured overlay address in the VPN server's fresh CLIENT_LIST snapshot.",
 			observed: fmt.Sprintf(
-				"missing_host=%s overlay_address=%s missing_clients=%d configured_clients=%d last_inactivity_timeout=%s shared_public_source=%t correlated_affected_hosts=%s server_restarts=%d",
-				client.name, client.overlayIp, len(missing), configuredClientCount, lastTimeout, sharedSite, peerText, observation.restarts,
+				"missing_host=%s overlay_address=%s missing_clients=%d configured_clients=%d last_inactivity_timeout=%s shared_public_source=%t correlated_affected_hosts=%s reachable_controls=%d unrelated_reachable_controls=%s server_restarts=%s",
+				client.name, client.overlayIp, len(missing), configuredClientCount, lastTimeout, sharedSite, peerText, reachableClients, unrelatedControls, observation.restarts,
 			),
 			evidence: "The current status and bounded two-hour journal are reduced through one source-address equality map inside the VPN host. Only configured virtual addresses and names in the same group are exported; the public source itself is never emitted.",
 			context:  "This proves management-session loss, not application death. Correlate a dedicated direct-path control: if Planetoid's public PostgreSQL/Redis SSH transfer also disappears, the fault is broader than OpenVPN; if that transfer advances, keep the diagnosis at the UDP/VPN path. Bulk backups must never move onto the management VPN.",
@@ -318,12 +349,20 @@ vpn_service=openvpn-server@server.service
 vpn_status=/var/log/openvpn/openvpn-status.log
 expected_names='%s'
 expected_addresses='%s'
-active_state=$(systemctl show "$vpn_service" -p ActiveState --value 2>/dev/null || true)
-sub_state=$(systemctl show "$vpn_service" -p SubState --value 2>/dev/null || true)
-restarts=$(systemctl show "$vpn_service" -p NRestarts --value 2>/dev/null || true)
-case "$active_state" in '') active_state=unknown ;; esac
-case "$sub_state" in '') sub_state=unknown ;; esac
-case "$restarts" in ''|*[!0-9]*) restarts=0 ;; esac
+unit_observed=true
+if active_state=$(systemctl show "$vpn_service" -p ActiveState --value 2>/dev/null); then
+  case "$active_state" in %s) ;; *) active_state=unknown; unit_observed=false ;; esac
+else active_state=unknown; unit_observed=false
+fi
+if sub_state=$(systemctl show "$vpn_service" -p SubState --value 2>/dev/null); then
+  case "$sub_state" in %s) ;; *) sub_state=unknown; unit_observed=false ;; esac
+else sub_state=unknown; unit_observed=false
+fi
+if restarts=$(systemctl show "$vpn_service" -p NRestarts --value 2>/dev/null); then
+  case "$restarts" in ''|*[!0-9]*) restarts=unknown ;; esac
+else restarts=unknown
+fi
+printf 'server_unit_observed %%s\n' "$unit_observed"
 printf 'server_active_state %%s\n' "$active_state"
 printf 'server_sub_state %%s\n' "$sub_state"
 printf 'server_restarts %%s\n' "$restarts"
@@ -382,7 +421,7 @@ for address in $expected_addresses; do
 	else
 		printf 'reach %%s false\n' "$address"
 	fi
-done`, vpnSessionsMarker, strings.Join(names, " "), strings.Join(addresses, " ")), nil
+done`, vpnSessionsMarker, strings.Join(names, " "), strings.Join(addresses, " "), vpnSessionActiveStates, vpnSessionSubStates), nil
 }
 
 func clientName(client *host) string {
@@ -394,6 +433,7 @@ func clientName(client *host) string {
 
 func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) {
 	observation := vpnSessionsObservation{
+		restarts:  "unknown",
 		clients:   map[string]vpnSessionClient{},
 		reachable: map[string]bool{},
 		timeouts:  map[string]vpnSessionTimeout{},
@@ -405,7 +445,7 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 			continue
 		}
 		switch fields[0] {
-		case "server_active_state", "server_sub_state", "server_restarts", "status_mtime_epoch":
+		case "server_unit_observed", "server_active_state", "server_sub_state", "server_restarts", "status_mtime_epoch":
 			if len(fields) != 2 {
 				return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid %s field count", lineNumber+1, fields[0])
 			}
@@ -414,16 +454,24 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 			}
 			seen[fields[0]] = true
 			switch fields[0] {
+			case "server_unit_observed":
+				if fields[1] != "true" && fields[1] != "false" {
+					return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid unit observation", lineNumber+1)
+				}
+				observation.unitObserved = fields[1] == "true"
 			case "server_active_state":
 				observation.activeState = fields[1]
 			case "server_sub_state":
 				observation.subState = fields[1]
 			case "server_restarts":
+				if fields[1] == "unknown" {
+					break
+				}
 				value, err := strconv.ParseInt(fields[1], 10, 64)
 				if err != nil || value < 0 {
-					return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid server_restarts", lineNumber+1)
+					break
 				}
-				observation.restarts = value
+				observation.restarts = strconv.FormatInt(value, 10)
 			case "status_mtime_epoch":
 				value, err := strconv.ParseInt(fields[1], 10, 64)
 				if err != nil || value < 0 {
@@ -473,6 +521,24 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 		if !seen[required] {
 			return vpnSessionsObservation{}, fmt.Errorf("missing %s", required)
 		}
+	}
+	// A legacy body has no command-success provenance. Even a claimed true
+	// marker cannot make unknown, malformed or newer unreviewed states healthy.
+	knownState := func(value, states string) bool {
+		for _, known := range strings.Split(states, "|") {
+			if value == known {
+				return true
+			}
+		}
+		return false
+	}
+	if !knownState(observation.activeState, vpnSessionActiveStates) {
+		observation.activeState = "unknown"
+		observation.unitObserved = false
+	}
+	if !knownState(observation.subState, vpnSessionSubStates) {
+		observation.subState = "unknown"
+		observation.unitObserved = false
 	}
 	return observation, nil
 }

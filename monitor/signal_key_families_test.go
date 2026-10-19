@@ -18,7 +18,7 @@ func TestKeyFamiliesSignalSyntheticKeyFamilyGrowth(t *testing.T) {
 			return "", nil
 		},
 		hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
-			return "30000 ckey_<id>", nil
+			return "30000 ckey_<id>\nfamily_source complete 30000\n", nil
 		},
 	}
 	settings := syntheticSettings(source)
@@ -65,7 +65,7 @@ func TestKeyFamiliesSignalAggregatesBinaryFamiliesBeforeAlerting(t *testing.T) {
 			return "", nil
 		},
 		hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
-			return "21000 bad\x01\xff<id>\n12000 bad\x02\xff<id>", nil
+			return "21000 bad\x01\xff<id>\n12000 bad\x02\xff<id>\nfamily_source complete 33000\n", nil
 		},
 	}
 	settings := syntheticSettings(source)

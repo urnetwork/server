@@ -107,7 +107,7 @@ func TestRedisKernelAuthorityRejectsIncompleteFrames(t *testing.T) {
 	}
 	for _, test := range cases {
 		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-			return test.output, nil
+			return "process_source complete 0\n" + test.output, nil
 		}}
 		settings := syntheticSettings(source)
 		alerts, err := NewRedisProcessSignal().Run(context.Background(), settings)

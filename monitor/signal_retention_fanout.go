@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -59,9 +60,26 @@ func (pgRetentionFanoutProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("retention fan-out query returned no rows")
 	}
-	active, oldest := atoiRow(rows[0], 0), atoiRow(rows[0], 1)
-	rowsPerCall := atoiRow(rows[0], 5)
-	advanceFailures, deadlineCleanupFailures := atoiRow(rows[0], 10), atoiRow(rows[0], 11)
+	// Activity and task aggregates repeat across the query's statistics partitions.
+	// Validate every partition before deciding health or retaining evidence.
+	var active, oldest, rowsPerCall, advanceFailures, deadlineCleanupFailures int64
+	statementMetrics := make([]string, 0, len(rows))
+	for i, row := range rows {
+		values, err := pgAggregateIntegers([]pgRow{row}, 12)
+		if err != nil {
+			return nil, err
+		}
+		if i == 0 {
+			active, oldest, advanceFailures, deadlineCleanupFailures = values[0], values[1], values[10], values[11]
+		} else if active != values[0] || oldest != values[1] || advanceFailures != values[10] || deadlineCleanupFailures != values[11] {
+			return nil, fmt.Errorf("invalid response for retention fan-out aggregate: inconsistent repeated counts")
+		}
+		if rowsPerCall < values[5] {
+			rowsPerCall = values[5]
+		}
+		statementMetrics = append(statementMetrics, fmt.Sprintf("calls=%d mean_ms=%d max_ms=%d rows_per_call=%d shared_hit=%d shared_read=%d dirtied=%d written=%d",
+			values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9]))
+	}
 	durableDeadlineEvidence := 0 < deadlineCleanupFailures && retentionFanoutRowsPerCallEvidence <= rowsPerCall
 	activeIncident := 0 < active && (2 <= active || 30 < oldest)
 	if !activeIncident && !durableDeadlineEvidence {
@@ -72,7 +90,7 @@ func (pgRetentionFanoutProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		symptom = fmt.Sprintf("payment retention query has %d active execution(s), oldest %ds", active, oldest)
 	}
 	if durableDeadlineEvidence && symptom == "" {
-		symptom = fmt.Sprintf("%d AdvancePayment row(s) retain the 120s connection-cleanup deadline signature while the legacy retention query averages %d rows/call", deadlineCleanupFailures, rowsPerCall)
+		symptom = fmt.Sprintf("%d AdvancePayment row(s) retain the 120s connection-cleanup deadline signature while the legacy retention query averages %d rows/call in at least one statistics partition", deadlineCleanupFailures, rowsPerCall)
 	} else if 0 < deadlineCleanupFailures {
 		symptom += fmt.Sprintf("; %d AdvancePayment row(s) retain the 120s connection-cleanup deadline signature", deadlineCleanupFailures)
 	}
@@ -82,8 +100,8 @@ func (pgRetentionFanoutProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		symptom:   symptom,
 		mechanism: "The deployed CompletePayment path still performs one synchronous UPDATE for every transfer_contract referenced by a payment's transfer_escrow_sweep rows. A payment with millions of contracts can therefore hit AdvancePayment's 120-second task deadline; cancellation closes the PostgreSQL connection and the cleanup error can obscure the expensive statement that consumed the deadline. The same write burst creates vacuum debt and delays unrelated close work.",
 		baseline:  "No legacy execution remains active beyond 30s, fewer than two overlap, and AdvancePayment has no new 120-second connection-cleanup failures attributable to completion retention.",
-		observed: fmt.Sprintf("active=%d oldest_s=%d calls=%s mean_ms=%s max_ms=%s rows_per_call=%s shared_hit=%s shared_read=%s dirtied=%s written=%s advance_failures=%d advance_deadline_cleanup_failures=%d",
-			active, oldest, rows[0].str(2), rows[0].str(3), rows[0].str(4), rows[0].str(5), rows[0].str(6), rows[0].str(7), rows[0].str(8), rows[0].str(9), advanceFailures, deadlineCleanupFailures),
+		observed: fmt.Sprintf("active=%d oldest_s=%d advance_failures=%d advance_deadline_cleanup_failures=%d statement_partitions=%d statement_metrics=[%s]",
+			active, oldest, advanceFailures, deadlineCleanupFailures, len(rows), strings.Join(statementMetrics, "; ")),
 		action:   "Deploy the CompletePayment path that commits processor completion and only sets contract_retention_pending. Let RemoveCompletedContracts advance contract_retention_cursor in bounded, committed keyset batches. Preserve the processor idempotency key; do not raise the global task deadline, manually replay payments, or kill an active payment without proving retry safety.",
 		verify:   "Query ID -3312164664690273449 disappears, no new AdvancePayment attempt reaches the 120-second cleanup signature, queued contract-retention cursors advance and drain, payment completion remains idempotent, and transfer_contract vacuum/close throughput recovers.",
 		playbook: "SIGNALS.md §2.10",

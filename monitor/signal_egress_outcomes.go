@@ -306,7 +306,7 @@ func egressCommonModeFinding(target string, snapshot egressOutcomeSnapshot, diag
 			"%d of %d currently eligible providers share the egress-probe failure class %s",
 			diagnosis.DominantCount, diagnosis.Eligible, diagnosis.DominantClass,
 		),
-		mechanism: "At least 20 providers have an observed outcome and one known failure class covers at least 90% of the complete current eligible population. The common boundary is therefore the shared prober/authentication/API path, not independent provider behavior. Unobserved and inconsistent providers remain in the denominator.",
+		mechanism: "At least 20 providers have an observed outcome and one known failure class covers at least 90% of the complete current eligible population. This identifies a shared failure pattern to investigate in the prober/authentication/API path; the aggregate does not identify a unique failed component or producer generation. Unobserved and inconsistent providers remain in the denominator.",
 		baseline:  "No known failure class covers 90% of the complete eligible Public-provider population, and at least 20 observed outcomes are required before attribution is allowed.",
 		observed:  egressOutcomeObserved(snapshot) + fmt.Sprintf(" dominant_failure=%s dominant_count=%d", diagnosis.DominantClass, diagnosis.DominantCount),
 		evidence:  "The query returns one fixed aggregate over active top-level connected valid Public providers. It normalizes failure classes inside PostgreSQL and excludes client IDs, raw failure text, locations, endpoints, credentials, and task IDs.",
@@ -327,7 +327,13 @@ func egressCommonModeFinding(target string, snapshot egressOutcomeSnapshot, diag
 func egressCommonModeAction(class string) string {
 	switch class {
 	case "no_consensus", "tunnel_failed", "contract_failed":
-		return "Inspect the persisted prober_identity singleton for complete client credential and mint state, the ProberBootstrap task, and the prober network's transfer balance first. Then verify bounded platform/API reachability and egress confinement from the executing Taskworkers. Do not inspect individual providers first, reveal the stored token, or introduce a legacy environment credential."
+		return "Producer generation is unknown from this aggregate; identify the executing Taskworker artifact and bounded same-attempt evidence first. " +
+			"For a confirmed disposable-shard generation, inspect BeginProberShard admission, the task/epoch/shard owner and deadline, ProberShardIdentity runtime credential/mint readiness, and that pass's private network funding; then check tunnel transport, platform/API reachability and egress confinement. " +
+			"ProberBootstrap only reaps expired shard accounts; cleanup success does not prove probe readiness, and an absent legacy singleton is expected. " +
+			"Only for confirmed legacy/in-flight singleton work, inspect prober_identity credential/mint state and that legacy network's balance. " +
+			"tunnel_failed is emitted by the current prober; no_consensus and contract_failed are retained legacy classes with no current emitter established here. " +
+			"Class alone does not identify generation or a credential cause. " +
+			"Never print credentials or introduce an environment credential."
 	case "locate_failed", "not_confident":
 		// retired with the vendor consensus (connect/GEOMAP.md §11.3); only
 		// attempts written before that release still carry them

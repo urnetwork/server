@@ -64,10 +64,13 @@ type connectionLiveFailuresOperation struct {
 	windowMin    float64
 	hasWindowMin bool
 	total        float64
+	hasTotal     bool
+	duplicate    bool
 }
 
 // Groups the evaluation by block operation. A sample that is malformed, stale
 // or negative makes the whole frame unobservable rather than a measured zero.
+// Incomplete or duplicate pairs exclude their operation, retaining complete peers.
 func parseConnectionLiveFailuresFrame(response mimirInstantResponse, now time.Time) ([]*connectionLiveFailuresOperation, string) {
 	operations := map[string]*connectionLiveFailuresOperation{}
 	for _, series := range response.Data.Result {
@@ -88,21 +91,32 @@ func parseConnectionLiveFailuresFrame(response mimirInstantResponse, now time.Ti
 		}
 		switch series.Metric["monitor_metric"] {
 		case "window_min":
+			state.duplicate = state.duplicate || state.hasWindowMin
 			state.windowMin, state.hasWindowMin = value, true
 		case "total":
-			state.total = value
+			state.duplicate = state.duplicate || state.hasTotal
+			state.total, state.hasTotal = value, true
 		default:
 			return nil, "unknown_metric_class"
 		}
 	}
 	ordered := []*connectionLiveFailuresOperation{}
+	visibilityReason := ""
 	for _, state := range operations {
-		ordered = append(ordered, state)
+		if state.duplicate {
+			visibilityReason = "duplicate_operation_metric"
+		} else if !state.hasWindowMin || !state.hasTotal {
+			if visibilityReason == "" {
+				visibilityReason = "incomplete_operation_pair"
+			}
+		} else {
+			ordered = append(ordered, state)
+		}
 	}
 	sort.Slice(ordered, func(i, j int) bool {
 		return ordered[i].name < ordered[j].name
 	})
-	return ordered, ""
+	return ordered, visibilityReason
 }
 
 // The operations' values, at most eight, most failures first.
@@ -144,30 +158,34 @@ func (connectionLiveFailuresProbe) check(ctx context.Context, env *probeEnv) ([]
 
 	target := env.cfg.env + "/connect-fleet"
 	operations, visibilityReason := parseConnectionLiveFailuresFrame(response, env.now().UTC())
+	findings := []finding{}
 	if visibilityReason != "" {
-		return []finding{{
+		findings = append(findings, finding{
 			probeId: "mimir/connection-live-failures", tier: tierWarn, class: "connection-live-failures-unobservable",
 			target: target, sustain: 2,
 			symptom:   "The Connect live failure counters returned samples that cannot be read.",
 			mechanism: "Without readable counters, a block whose sync reads or worker writes keep failing is indistinguishable from a healthy one.",
-			baseline:  "Every sample is labeled by host, block and operation, fresh, and non-negative.",
+			baseline:  "Every returned operation has exactly one fresh, non-negative window_min and total sample labeled by host, block and operation.",
 			observed:  "visibility_reason=" + visibilityReason + " metrics_gateway=" + gateway.name,
 			evidence:  "Only a fixed structural reason is exported; raw samples are discarded.",
 			context:   "An absent counter is not this class: §2.16a's unobservable class covers a Connect fleet that does not export its reconcile metrics.",
 			action:    "Check the Mimir query in SIGNALS.md §2.16b against the Connect scrape labels, then recheck.",
 			verify:    "The counters return readable samples for two cadences.",
 			playbook:  "SIGNALS.md §2.16b",
-		}}, nil
+		})
+	} else {
+		findings = append(findings, healthyFinding("mimir/connection-live-failures", tierWarn, "connection-live-failures-unobservable", target))
 	}
-
-	findings := []finding{healthyFinding("mimir/connection-live-failures", tierWarn, "connection-live-failures-unobservable", target)}
 	sustained := []*connectionLiveFailuresOperation{}
 	for _, state := range operations {
-		if state.hasWindowMin && 0 < state.windowMin && connectionLiveFailuresFloor <= state.total {
+		if 0 < state.windowMin && connectionLiveFailuresFloor <= state.total {
 			sustained = append(sustained, state)
 		}
 	}
 	if len(sustained) == 0 {
+		if visibilityReason != "" {
+			return findings, nil
+		}
 		return append(findings, healthyFinding("mimir/connection-live-failures", tierWarn, "connection-live-failures-sustained", target)), nil
 	}
 	return append(findings, finding{

@@ -577,7 +577,7 @@ func TestRedisProcessSignalTwoHostsReportsEachHost(t *testing.T) {
 		if host.Name == redisTestEdge6 {
 			return "", fmt.Errorf("ssh: connect to host: connection timed out")
 		}
-		return "kernel_oom Out of memory: Killed process 1234 (redis-server)\nkernel_source complete\n", nil
+		return "process_source complete 0\nkernel_oom Out of memory: Killed process 1234 (redis-server)\nkernel_source complete\n", nil
 	}}
 	alerts, err := NewRedisProcessSignal().Run(context.Background(), redisTwoHostSettings(source))
 	if err != nil {
@@ -614,8 +614,15 @@ func TestKeyFamiliesSignalTwoHostsScansFullestNodeOnItsHost(t *testing.T) {
 			return strings.Join(rows, "\n"), nil
 		},
 		hostTimeoutFn: func(host HostSettings, command string, _ time.Duration) (string, error) {
-			scans.add(host.Name + " " + strings.Fields(command)[5])
-			return "30000 ckey_<id>", nil
+			port := ""
+			for _, line := range strings.Split(command, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 5 && fields[0] == "timeout" && fields[2] == "redis-cli" && fields[3] == "-p" {
+					port = fields[4]
+				}
+			}
+			scans.add(host.Name + " " + port)
+			return "30000 ckey_<id>\nfamily_source complete 30000\n", nil
 		},
 	}
 	settings := redisTwoHostSettings(source)
@@ -884,7 +891,7 @@ func TestRedisSignalsTwoHostsJudgeTheReadableHostWhenOneIsUnreachable(t *testing
 					if !strings.Contains(command, "-p 6390 ") {
 						t.Errorf("key scan on %s was not the fullest readable node: %s", host.Name, command)
 					}
-					return "30000 ckey_<id>", nil
+					return "30000 ckey_<id>\nfamily_source complete 30000\n", nil
 				}
 			},
 			want: []wantAlert{
@@ -1112,7 +1119,7 @@ func TestKeyFamiliesSignalTwoHostsRecordsNoBaselineFromAPartialFleet(t *testing.
 					}), nil
 				},
 				hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
-					return "30000 ckey_<id>", nil
+					return "30000 ckey_<id>\nfamily_source complete 30000\n", nil
 				},
 			}
 			settings := redisTwoHostSettings(source)

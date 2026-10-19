@@ -79,7 +79,7 @@ exit "$(cat "$REDIS_USAGE_TEST_DIR/$2.status")"
 		},
 		hostTimeoutFn: func(h HostSettings, command string, _ time.Duration) (string, error) {
 			f.samples = append(f.samples, h.Name+" "+command)
-			return "30000 ckey_<id>", nil
+			return "30000 ckey_<id>\nfamily_source complete 30000\n", nil
 		},
 	}
 	f.settings = syntheticSettings(f.source)
