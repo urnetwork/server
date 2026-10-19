@@ -109,7 +109,7 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 	if intent == nil || intent.TargetRoundId != round.RoundId || intent.TargetEpoch != round.Epoch || intent.Generation != frozen.AutomationPolicy.SourceActivationGeneration || intent.SourceLockSha256 != frozen.AutomationPolicy.SourceLockSha256 {
 		return ErrConflict
 	}
-	if err := LoadCompetitionRuntimeManifest(frozen, intent); err != nil {
+	if err := LoadCompetitionRuntimeManifestContext(ctx, frozen, intent); err != nil {
 		return err
 	}
 	frozen.automationLease, frozen.automationRoundId = &request.Lease, round.RoundId

@@ -64,8 +64,21 @@ func competitionScopeDenied() *CompetitionError {
 // New replicas advertise optional capabilities without rewriting old round snapshots.
 func applyCompetitionDecisionDiscovery(result *InfoResult, round *roundRecord) {
 	if competitionRoundUsesV2(round) {
-		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(round)
 	}
+}
+
+// Discovery and replies preserve the frozen runtime contract instead of
+// downgrading a blob-required round to the historical filesystem capability.
+func competitionRoundApiCapability(round *roundRecord) string {
+	if round == nil {
+		return ""
+	}
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil || policy.AutomationPolicy == nil {
+		return ""
+	}
+	return policy.AutomationPolicy.RequiredApiCapability
 }
 
 // The public projection contains sanctioned explanations, never private review notes or token names.
@@ -153,7 +166,7 @@ func competitionAutomationError(err error) (int, *CompetitionError) {
 }
 
 // Resolves the store without acquiring another connection or falling back to v1 methods.
-func (self *Service) automationStore() (*Settings, competitionAutomationStore, int, *CompetitionError) {
+func (self *Service) automationStore(ctx context.Context) (*Settings, competitionAutomationStore, int, *CompetitionError) {
 	settings, err := self.Settings()
 	if err != nil {
 		return nil, nil, http.StatusServiceUnavailable, infrastructureError("configuration_unavailable", "competition configuration is not ready")
@@ -161,6 +174,9 @@ func (self *Service) automationStore() (*Settings, competitionAutomationStore, i
 	store, ok := self.store.(competitionAutomationStore)
 	if !ok {
 		return nil, nil, http.StatusServiceUnavailable, infrastructureError("capability_unavailable", "this replica does not support the v2 decision contract")
+	}
+	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+		return nil, nil, http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	return settings, store, http.StatusOK, nil
 }
@@ -177,7 +193,7 @@ func (self *Service) GetScoreV2(ctx context.Context, jobId server.Id, principal 
 
 // Reads a public projection only after the durable store and local embargo check agree.
 func (self *Service) AutomationResult(ctx context.Context, roundId server.Id) (*model.CompetitionV2RoundResult, int, *CompetitionError) {
-	settings, store, status, evalError := self.automationStore()
+	settings, store, status, evalError := self.automationStore(ctx)
 	if evalError != nil {
 		return nil, status, evalError
 	}
@@ -285,7 +301,7 @@ func CompetitionV2SealHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	settings, store, status, evalError := service.automationStore()
+	settings, store, status, evalError := service.automationStore(r.Context())
 	if evalError != nil {
 		writeCompetitionJson(w, status, evalError)
 		return
@@ -318,7 +334,7 @@ func CompetitionV2ReviewHandler(w http.ResponseWriter, r *http.Request) {
 		writeCompetitionJson(w, http.StatusBadRequest, evalError)
 		return
 	}
-	settings, store, status, evalError := service.automationStore()
+	settings, store, status, evalError := service.automationStore(r.Context())
 	if evalError != nil {
 		writeCompetitionJson(w, status, evalError)
 		return
@@ -399,7 +415,7 @@ func CompetitionV2EventsHandler(w http.ResponseWriter, r *http.Request) {
 		writeCompetitionJson(w, http.StatusBadRequest, evalError)
 		return
 	}
-	settings, store, status, evalError := service.automationStore()
+	settings, store, status, evalError := service.automationStore(r.Context())
 	if evalError != nil {
 		writeCompetitionJson(w, status, evalError)
 		return
@@ -434,7 +450,7 @@ func CompetitionV2ReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		writeCompetitionJson(w, http.StatusBadRequest, evalError)
 		return
 	}
-	settings, store, status, evalError := service.automationStore()
+	settings, store, status, evalError := service.automationStore(r.Context())
 	if evalError != nil {
 		writeCompetitionJson(w, status, evalError)
 		return

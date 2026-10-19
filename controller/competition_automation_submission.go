@@ -31,6 +31,9 @@ func (self *Service) PreflightV2(ctx context.Context, args ScoreArgs, principal 
 	if status, evalError := requireRoundDecisionContract(round, true); evalError != nil {
 		return nil, status, evalError
 	}
+	if err := requireCompetitionRoundRuntime(ctx, settings, self.store, round); err != nil {
+		return nil, http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 	if err != nil || policy.AutomationPolicy == nil {
 		return nil, http.StatusServiceUnavailable, infrastructureError("round_policy_mismatch", "round automation policy could not be authenticated")
@@ -54,7 +57,7 @@ func (self *Service) PreflightV2(ctx context.Context, args ScoreArgs, principal 
 	}
 	return &model.CompetitionV2SubmissionPreflight{
 		RoundId: args.RoundId, PatchSha256: patch.Sha256, BaseSourceLockSha256: policy.AutomationPolicy.SourceLockSha256,
-		DecisionMode: model.CompetitionDecisionModeV2, RequiredApiCapability: model.CompetitionAutomationCapability,
+		DecisionMode: model.CompetitionDecisionModeV2, RequiredApiCapability: policy.AutomationPolicy.RequiredApiCapability,
 		RewardEligible: eligible, IneligibilityReason: reason,
 	}, http.StatusOK, nil
 }

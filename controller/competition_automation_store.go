@@ -242,7 +242,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 
 // Loads all immutable records on the caller's transaction; private callers enforce their own scope.
 func automationResultInTx(ctx context.Context, tx server.PgTx, roundId server.Id) *model.CompetitionV2RoundResult {
-	result := &model.CompetitionV2RoundResult{DecisionMode: model.CompetitionDecisionModeV2, RequiredApiCapability: model.CompetitionAutomationCapability,
+	result := &model.CompetitionV2RoundResult{DecisionMode: model.CompetitionDecisionModeV2,
 		Decisions: []model.CompetitionRewardDecision{}, IntegrityReviews: []model.CompetitionIntegrityReviewResult{}, SettlementReceipts: []model.CompetitionSettlementReceipt{}, SettlementStatus: "pending"}
 	var content []byte
 	result.Incidents = automationIncidentsInTx(ctx, tx, roundId)
@@ -251,7 +251,14 @@ func automationResultInTx(ctx context.Context, tx server.PgTx, roundId server.Id
 			result.Invalidated = true
 		}
 	}
-	server.Raise(tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&content))
+	var policyJson []byte
+	server.Raise(tx.QueryRow(ctx, `SELECT s.seal_json,r.policy_json FROM competition_evaluation_seal s JOIN competition_round r USING(round_id) WHERE s.round_id=$1`, roundId).Scan(&content, &policyJson))
+	policy, policyErr := decodeRoundPolicySnapshot(policyJson)
+	server.Raise(policyErr)
+	if policy.AutomationPolicy == nil {
+		panic(ErrUnsupportedDecisionMode)
+	}
+	result.RequiredApiCapability = policy.AutomationPolicy.RequiredApiCapability
 	server.Raise(json.Unmarshal(content, &result.Seal))
 	result.Staging = result.Seal.Staging
 	rows, err := tx.Query(ctx, `SELECT decision_json FROM competition_reward_decision WHERE round_id=$1 ORDER BY revision`, roundId)

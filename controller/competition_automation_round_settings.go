@@ -43,5 +43,46 @@ func settingsForAutomationRound(ctx context.Context, settings *Settings, store S
 	if err != nil {
 		return nil, err
 	}
-	return settingsForFrozenRound(frozen, round)
+	frozen, err = settingsForFrozenRound(frozen, round)
+	if err != nil {
+		return nil, err
+	}
+	if frozen.AutomationPolicy.RequiredApiCapability == model.CompetitionRuntimeBlobCapability {
+		if err := LoadCompetitionRuntimeManifestContext(ctx, frozen, intent); err != nil {
+			return nil, err
+		}
+	}
+	return frozen, nil
+}
+
+// New-capability reads independently authenticate installation even when
+// admission is not involved. Historical contracts retain their prior behavior.
+func requireCompetitionRoundRuntime(ctx context.Context, settings *Settings, store Store, round *roundRecord) error {
+	if !competitionRoundUsesV2(round) {
+		return nil
+	}
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil {
+		return err
+	}
+	if policy.AutomationPolicy.RequiredApiCapability == model.CompetitionRuntimeBlobCapability {
+		_, err = settingsForAutomationRound(ctx, settings, store, round)
+	}
+	return err
+}
+
+// Season-wide projections require this runtime's current installed source;
+// one earlier API role receipt cannot stand in for a late-joining replica.
+func requireConfiguredCompetitionRuntime(ctx context.Context, settings *Settings, store Store) error {
+	if !settings.AutomationPolicy.Enabled || settings.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability {
+		return nil
+	}
+	round, err := competitionConfiguredCurrentRound(ctx, settings, store)
+	if err != nil {
+		return err
+	}
+	if round == nil {
+		return ErrReviewNotReady
+	}
+	return requireCompetitionRoundRuntime(ctx, settings, store, round)
 }

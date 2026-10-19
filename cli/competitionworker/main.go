@@ -1,3 +1,5 @@
+// The long-running worker and its early-return host probes retain signal
+// ownership until evaluator process groups have been canceled and joined.
 package main
 
 import (
@@ -5,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"syscall"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/urnetwork/server/controller"
 )
 
+// Dispatches exact-generation probes before starting ordinary worker services.
 func main() {
 	usage := `Secure one-epoch sim-latency competition evaluator worker.
 
@@ -66,9 +70,9 @@ Options:
 		if err != nil || generation < 1 || server.RequireEnv() != "main" {
 			panic("source readiness requires an exact positive generation and main environment")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := controller.AcknowledgeCompetitionSourceWorker(ctx, settings, generation, workerId); err != nil {
+		if err := runWorkerProbe(func(ctx context.Context) error {
+			return controller.AcknowledgeCompetitionSourceWorker(ctx, settings, generation, workerId)
+		}); err != nil {
 			panic(err)
 		}
 		return
@@ -89,7 +93,7 @@ Options:
 		if err != nil {
 			panic(err)
 		}
-		if err := worker.Preflight(context.Background()); err != nil {
+		if err := runWorkerProbe(worker.Preflight); err != nil {
 			panic(fmt.Errorf("competition worker preflight: %w", err))
 		}
 		return
@@ -113,4 +117,14 @@ Options:
 	if err != nil && !errors.Is(err, context.Canceled) {
 		panic(fmt.Errorf("competition worker: %w", err))
 	}
+}
+
+// A probe owns its cancellation through synchronous cleanup. Exiting directly
+// on a signal would orphan the self-check's separate evaluator process group.
+func runWorkerProbe(probe func(context.Context) error) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	return probe(ctx)
 }
