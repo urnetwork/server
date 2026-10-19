@@ -9738,6 +9738,26 @@ completed sum/count alone cannot describe calls still blocked. Join the exact
 process/source and scrape clock before comparing intervals. A request's model
 outcome and its HTTP delivery are still different observations.
 
+Initial GET failures additionally emit one fixed `provider-picker` failure log
+record from the existing model observation owner, including the active phase,
+total and final-phase elapsed residence, completion UTC, return/panic kind,
+finite typed cause and caller-context state. Error/panic text, caller identifiers,
+keys, SQL and payloads are never formatted. Bounded incomplete cause graphs are
+unknown; cancellation/deadline joined with an independent failure remains mixed.
+Observation failure cannot replace the original return or panic. Success emits
+no failure record and read/outcome counters keep their original semantics.
+The two Redis phases measure the initial document and eligibility-filter loader
+residence, including admission, command wait and decoding; they do not partition
+those waits or prove a Redis/PG outage. Source/container identity must come from
+the owning log stream and artifact attestation, not this event alone. Existing
+Done recovery may omit ErrorJson, so this event preserves a future canceled
+call's stage/elapsed/cause without changing router recovery. It cannot prove
+client abandonment versus give-up after dependency delay, HTTP delivery, or the
+cause of a historical event before rollout. Require one unambiguous affected
+attempt/ingress join before cancellation ownership attribution. No new metric
+labels, source request or background owner is introduced. API rollout and the
+normal post-boundary recovery windows remain required; no incident fix is claimed.
+
 Deterministic controls hold sixteen actual initial-picker filter pipelines at
 an explicit test-only barrier, then either release valid results or cancel the
 callers. They require the filter inflight gauge to hold all sixteen calls,

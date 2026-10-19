@@ -4794,7 +4794,7 @@ func GetProviderLocations(
 ) (result *FindLocationsResult, returnErr error) {
 	defer func() { providerPickerMetrics.observe("initial", result, returnErr) }()
 	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: "initial"}
-	defer observation.finish()
+	defer observation.finishInitial(session.Ctx, &returnErr)
 	observation.enter("caller_location")
 	rankMode := RankModeQuality
 
