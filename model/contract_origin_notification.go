@@ -61,13 +61,18 @@ type ContractOriginNotificationSettings struct {
 // once, so only an edge this owner never receives refuses an identical
 // request for up to the full 60s.
 //
-// Terminal refusals hold at most two generations of 32768, about 21 MiB. On
-// Main old sdks keep about 48k stale routes alive, retrying each every 5-6s
-// for hours, and an edge host's load balancer spreads a client's retries over
-// its 4-5 api processes. A process therefore holds roughly the 12k routes of
-// its host's clients and sees each about every 30s, which keeps that route's
-// refusal in the current generation. The hour matches the client state
-// refusal cache (session/state_refusal_cache.go).
+// Terminal refusals hold at most two generations of 131072, about 76 MiB at
+// about 300 bytes a refusal, and only while a storm fills them. Old sdks
+// retry each stale route every 5s for as long as they hold its return, and
+// each retry is a new control request that DNS can send to any edge host, so
+// every api process sees nearly every live route. On 2026-10-19 about 70k such
+// routes to retired prober windows were live, more than two generations of
+// 32768 hold: a process turned both over before most routes came back, about
+// two of three retries missed, and each miss read PostgreSQL twice, about 20k
+// reads a second. One generation now holds the 115k routes of the 10-12 peak.
+// An inactive client is never reactivated, so the timeout only bounds the cost
+// of a mistake. Six hours spans the hours an old sdk keeps retrying, which on
+// 10-19 barely decayed over four hours without new probes.
 func DefaultContractOriginNotificationSettings() ContractOriginNotificationSettings {
 	return ContractOriginNotificationSettings{
 		MaxWaiters:                    8192,
@@ -75,8 +80,8 @@ func DefaultContractOriginNotificationSettings() ContractOriginNotificationSetti
 		PublishWorkers:                2,
 		MaxRouteRejections:            16384,
 		RouteRejectionTimeout:         60 * time.Second,
-		TerminalRouteRejectionCount:   32768,
-		TerminalRouteRejectionTimeout: time.Hour,
+		TerminalRouteRejectionCount:   131072,
+		TerminalRouteRejectionTimeout: 6 * time.Hour,
 	}
 }
 

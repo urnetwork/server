@@ -481,6 +481,64 @@ func TestContractTerminalRouteRejectionClosedOwnerKeepsNothing(t *testing.T) {
 	})
 }
 
+// Every api process sees every live route of a stale-return storm: on
+// 2026-10-19 about 70,000 old-sdk routes to retired prober windows were
+// retried every 5s across 40 processes. With the old 32,768-refusal
+// generations, a process turned both generations over before a route came
+// back, so about two of three retries missed and read PostgreSQL again. The
+// default bound holds the storm, so after its first refusal no retry misses.
+func TestContractTerminalRouteRejectionHoldsAStaleReturnStorm(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
+		defer owner.Close()
+		const routeCount = 70000
+		sourceIds := make([]server.Id, routeCount)
+		destinationIds := make([]server.Id, routeCount)
+		rejection := testTerminalDestinationRejection()
+		for i := range routeCount {
+			sourceIds[i], destinationIds[i] = server.NewId(), server.NewId()
+			if !owner.RecordRouteRejection(sourceIds[i], destinationIds[i], false, rejection, nil) {
+				t.Fatal("terminal refusal was not stored")
+			}
+		}
+		// the retries arrive in the same rotation, each one a full storm apart
+		for pass := range 3 {
+			missCount := 0
+			for i := range routeCount {
+				if replayed, ok := owner.RouteRejection(sourceIds[i], destinationIds[i], false); !ok || replayed != rejection {
+					missCount += 1
+					owner.RecordRouteRejection(sourceIds[i], destinationIds[i], false, rejection, nil)
+				}
+			}
+			if missCount != 0 {
+				t.Fatalf("retry pass %d: %d of %d routes missed the terminal registry", pass, missCount, routeCount)
+			}
+		}
+	})
+}
+
+// An old sdk retries a route to a retired window for as long as it holds the
+// return, often hours: on 2026-10-19 the routes it held barely decayed over
+// four hours without new probes. One refusal answers those retries for hours,
+// not one, before the process reads PostgreSQL again.
+func TestContractTerminalRouteRejectionAnswersRetriesForHours(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		rejection := testTerminalDestinationRejection()
+		if !owner.RecordRouteRejection(sourceId, destinationId, false, rejection, nil) {
+			t.Fatal("terminal refusal was not stored")
+		}
+		time.Sleep(5 * time.Hour)
+		if replayed, ok := owner.RouteRejection(sourceId, destinationId, false); !ok || replayed != rejection {
+			t.Fatalf("retry five hours later replay = %+v, %t", replayed, ok)
+		}
+	})
+}
+
 // Old sdks retry a route without an origin every 5s, and a load balancer
 // spreads the retries so one api process sees the route only every 25-40s.
 // The ring keeps the refusal for 60s.
