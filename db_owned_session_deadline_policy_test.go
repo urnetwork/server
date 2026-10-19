@@ -1,5 +1,5 @@
-// The unchanged connection-error policy quarantines a deadline-class panic,
-// even when this synthetic callback never damaged the physical connection.
+// An acknowledged rollback preserves a healthy borrowed session and caller
+// custody while releasing only the failed scope's advisory-lock references.
 package server
 
 import (
@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// This exact control runs on the literal donor and the phase composition.
-// It distinguishes conservative discard from failed rollback or lost custody.
-func TestOwnedSessionCallbackDeadlineQuarantinesWhileRetainingCaller(t *testing.T) {
+// A deadline alone must not quarantine an idle session or replay business work.
+func TestOwnedSessionCallbackDeadlineRetainsHealthyCallerSession(t *testing.T) {
 	var networkError net.Error
 	if !errors.As(context.DeadlineExceeded, &networkError) || !networkError.Timeout() ||
 		!isConnectionError(context.DeadlineExceeded) || isConnectionError(errors.New("synthetic application refusal")) {
@@ -39,29 +38,30 @@ func TestOwnedSessionCallbackDeadlineQuarantinesWhileRetainingCaller(t *testing.
 			}, TxReadCommitted, OptNoRetry())
 		})
 		if failure != context.DeadlineExceeded || calls != 1 || posts != 0 || ctx.Err() != nil ||
-			conn.Conn().IsClosed() || conn.Conn().PgConn().TxStatus() != 'I' || session.Err() == nil ||
-			session.Err().Error() != "database ownership scope ended on an uncertain session" {
-			t.Fatal("deadline did not retain its original cause, open idle rollback and conservative quarantine", failure, session.Err())
+			conn.Conn().IsClosed() || conn.Conn().PgConn().TxStatus() != 'I' || session.Err() != nil {
+			t.Fatal("deadline did not retain its original cause and healthy idle session", failure, session.Err())
 		}
 		requireTxCommitSnapshot(t, &counter, 0, 0, 0)
 		requirePgOwnershipHeld(t, ctx, conn.Conn().PgConn().PID(), inherited)
-		requirePgOwnershipHeld(t, ctx, conn.Conn().PgConn().PID(), fresh)
 		Db(ctx, func(probe PgConn) {
 			defer releaseOwnedTransactionTestKeys(ctx, probe)
 			var rows int
-			var executionFree bool
+			var executionFree, freshFree bool
 			Raise(probe.QueryRow(ctx, `SELECT count(*) FROM owned_tx_effect`).Scan(&rows))
 			Raise(probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1::bigint)`, execution).Scan(&executionFree))
-			if rows != 0 || executionFree {
-				t.Fatal("deadline rollback left effects or released the caller's execution custody")
+			Raise(probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1::integer,$2::integer)`, fresh.first, fresh.second).Scan(&freshFree))
+			if rows != 0 || executionFree || !freshFree {
+				t.Fatal("deadline rollback left effects, lost caller custody or retained a scope-only reference")
 			}
 		}, OptNoRetry())
-		refused := captureDbErrorPanic(func() {
+		reused := captureDbErrorPanic(func() {
 			session.Tx(ctx, []PgOwnershipKey{inherited, fresh}, func(PgTx) { calls++ }, TxReadCommitted, OptNoRetry())
 		})
-		if refused != session.Err() || calls != 1 || posts != 0 {
-			t.Fatal("quarantine replayed business work or replaced its retained refusal", refused)
+		if reused != nil || session.Err() != nil || calls != 2 || posts != 0 {
+			t.Fatal("healthy session refused deliberate reuse or replayed business work", reused, session.Err())
 		}
+		requireTxCommitSnapshot(t, &counter, 0, 0, 0)
+		requirePgOwnershipHeld(t, ctx, conn.Conn().PgConn().PID(), inherited)
 		// Every callback and publication has already joined. Only the caller
 		// ends the retained ownership; the failing scope did not do so.
 		releaseOwnedTransactionTestKeys(ctx, conn)
@@ -76,6 +76,6 @@ func TestOwnedSessionCallbackDeadlineQuarantinesWhileRetainingCaller(t *testing.
 				t.Fatal("the caller's completed join did not release its retained custody")
 			}
 		}, OptNoRetry())
-		t.Log("deadline_is_connection_class=true rollback_effects_absent=true session_open_idle=true quarantine=true custody_retained_until_caller_join=true callback_replayed=false")
+		t.Log("deadline_is_connection_class=true rollback_effects_absent=true session_open_idle=true scope_references_released=true custody_retained_until_caller_join=true callback_replayed=false deliberate_reuse=true")
 	})
 }

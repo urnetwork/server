@@ -17484,6 +17484,14 @@ more in three hours. Authentication, provider availability, schema validation,
 budget exhaustion, and local persistence are separate discriminators; never
 advance a watermark merely to clear the alert.
 
+Apple status responses must contain only supported statuses before an
+entitlement decision: 1/4 are entitled and 2/3/5 are terminal. Missing or
+unsupported status values and null response members produce a status-leg
+error, preserve the paid entitlement and hold the store watermark. The
+subscription-details reader treats the same malformed response as unavailable,
+never as confirmed inactive. This local guard does not identify the cause of a
+historical Apple error or ended audit.
+
 False-positive and false-negative qualifiers: a stale source age proves that
 the store has not recorded a successful complete pass; it does not identify
 the failed stage. Provider listing may have succeeded while per-invoice credit
@@ -36573,6 +36581,15 @@ mutation followed from the probe.
 
 Probe: `association-files`
 
+HTTP status is classified before semantic content. A 429 or another non-200
+response remains a required-contract failure while the responding component,
+effective admission policy, and bundle contents remain unknown. Use bounded
+existing exact-route request/upstream evidence and the running artifact to
+choose the repair; nginx branding or a healthy sibling cannot identify the
+responder. A current 404 does not re-prove the historical staging defect below.
+Compare artifact ancestry and actual staged contents before a Web rollout.
+Invalid HTTP 200 metadata remains an independently observed content failure.
+
 The product clients declare `ur.io` as a platform-verified web origin. Android's
 release manifest uses an `android:autoVerify="true"` HTTPS intent filter for
 that host, so `/.well-known/assetlinks.json` is a functional ownership contract,
@@ -36617,11 +36634,12 @@ Grafana backend-EOF and taskworker payout classes, proving the new static-site
 probe did not disrupt standing-log coverage. Only after this gate did v152
 receive SIGTERM; v153 remained the sole watcher.
 
-The software fix is mmm/ur.io commit `72190198`: a reusable staging script
+The historical software fix is mmm/ur.io commit `72190198`: a reusable staging script
 enumerates every `dist` directory entry, including dot directories, refuses to
 merge into stale output, and is exercised by a deterministic synthetic test
-containing both platform files. Build and deploy the web service from that
-commit or later. Do not edit live containers, fabricate nginx fallback JSON,
+containing both platform files. Compare the running artifact first; deploy a
+Web correction when the actual missing/staging boundary requires it. A current
+artifact requires another discriminator. Do not edit live containers, fabricate nginx fallback JSON,
 or treat the requests as scanner noise.
 
 Verification requires both paths to return HTTP 200 `application/json` and
@@ -36633,6 +36651,17 @@ taskworker deployments cannot change these static image contents.
 ### 19.2 Transactional email assets
 
 Probe: `email-assets`
+
+Classify HTTP refusals before image content and retain the public/exact-edge
+controls separately. A 429 cannot prove a missing bundle or authorize a Web
+rollout or cache invalidation. Identify the responding component, upstream
+status, effective admission/route configuration, and current artifact from
+bounded existing evidence first. Healthy exact edges localize a public-path
+failure without proving that a cache caused it. Even an all-edge 404 needs a
+current route and artifact-content comparison before selecting a bundle repair;
+the historical release-order incidents below are candidate controls, not an
+automatic diagnosis. Keep genuine HTML/empty-image and transport failures
+distinct, with their existing thresholds and ownership.
 
 The shared email layout (`controller/email_templates/_layout.html`) embeds two
 absolute `https://ur.io/images/emails/...` wordmark images in every
@@ -36727,11 +36756,12 @@ crossed in production: newly rendered shared-layout emails can reference the
 18/18 missing image paths. The root-cause action remains the Mmm Web rollout
 containing `b4b229c5c`, not a sender rollback.
 
-This alert can cross from software into operations: any exact-edge semantic
-failure requires the Web image/config repair and full Web rollout. If every
-exact edge is healthy while only the public URL returns an HTTP error,
-ownership moves to DNS/TLS or a public cache, and a path-scoped invalidation is
-allowed only after that response proves the boundary. A transport-only failure
+This alert can cross from software into operations: an exact-edge semantic
+failure needs the owning responder and artifact identified before selecting
+the Web image/config repair. If every exact edge is healthy while only the
+public URL fails, investigate the public delivery path; a path-scoped cache
+invalidation requires evidence that the cache owns the failed response and its
+current origin is healthy. A transport-only failure
 instead needs IPv4/IPv6, resolver, TLS, selected-address, and exact-edge
 controls; it does not justify cache mutation. This signal does not require
 hardware.

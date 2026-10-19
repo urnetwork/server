@@ -668,6 +668,9 @@ func appleLookupSubscriptionState(ctx context.Context, originalTransactionId str
 // info's autoRenewStatus is the customer's auto-renew switch; a status of 1
 // with the switch off is "cancel at period end".
 func appleSubscriptionState(statuses *appleSubscriptionStatusesResponse) *subscriptionStoreState {
+	if validateAppleSubscriptionStatuses(statuses) != nil {
+		return nil
+	}
 	var transaction *appleLastTransaction
 	for _, group := range statuses.Data {
 		for _, lastTransaction := range group.LastTransactions {
