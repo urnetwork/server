@@ -25,6 +25,7 @@ const (
 
 var alertClassKinds = map[string]alertClassKind{
 	// unknown states
+	"account-message-sends-unobservable":               visibilityAlertClass,
 	"apple-crash-backlog":                              visibilityAlertClass,
 	"apple-crash-data-stale":                           visibilityAlertClass,
 	"apple-crash-data-unobservable":                    visibilityAlertClass,
@@ -152,6 +153,8 @@ var alertClassKinds = map[string]alertClassKind{
 
 	// measured states
 	"":                                                    incidentAlertClass,
+	"account-message-channel-degraded":                    incidentAlertClass,
+	"account-message-channel-down":                        incidentAlertClass,
 	"active-pileup":                                       incidentAlertClass,
 	"api-release-unqualified":                             incidentAlertClass,
 	"apple-crash-correction":                              incidentAlertClass,
