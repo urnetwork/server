@@ -26414,6 +26414,20 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
   `minio-bucket-quota`; it cannot name the bucket because the per-bucket API
   counters (`/minio/metrics/v3/bucket/api`) need `?buckets=` and are not
   scraped.
+  False-positive qualifier: two expected answers count as write 4xx while
+  nothing is refused. The API's create-only `PutIfAbsent` (`blob.go`, SN
+  attempt uploads in `startifact`) answers 412 `PreconditionFailed` whenever a
+  client re-uploads a content-addressed object that already exists, and MinIO's
+  own replication permission probes (`X-Minio-Source-Replication-Request`) get
+  400 `ReplicationPermissionCheck` from the object-locked `competition-replica`.
+  On 2026-10-19 a 30 s `mc admin trace --errors` on edge-5 attributed every
+  failed write to those two (about 16/s and 4/s, 11.7% of PutObject and about
+  all DeleteObject over 30 minutes) while `competition` and its replica held
+  the same 202 objects and no quota or capacity class fired. The bounded trace,
+  grouped by bucket, API, status and client, is the discriminator. False
+  negative: the counters carry no status or bucket, so a real refusal can hide
+  inside that floor until it raises the share; `minio-bucket-quota` and
+  `minio-drive-capacity` remain the direct controls.
 - `minio-metrics-unobservable`. Frame `drives`: no complete fresh drive family
   (missing, stale, a drive series count unequal to `minio_system_drive_count`,
   a missing health gauge, an online drive without coherent free/total, or a
