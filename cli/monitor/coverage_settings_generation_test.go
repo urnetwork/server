@@ -34,7 +34,8 @@ func TestMonitorCoverageOutputPreservesSettingsGeneration(t *testing.T) {
 			}
 			path := filepath.Join(t.TempDir(), "coverage.jsonl")
 			var alerts bytes.Buffer
-			err := runWithSettingsLoader([]string{"-once", "-include-signal", "settings-freshness", "-include-signal", "url-probe-coverage", "-url-probe-coverage-output", path}, &alerts, loader)
+			// the tier-0 vitals need a services host the synthetic inventory lacks
+			err := runWithSettingsLoader([]string{"-once", "-include-signal", "settings-freshness", "-include-signal", "url-probe-coverage", "-skip-tier-zero-vitals", "-url-probe-coverage-output", path}, &alerts, loader)
 			if err != nil || loads.Load() < 2 {
 				t.Fatal("CLI did not compare its freshly loaded generation")
 			}
