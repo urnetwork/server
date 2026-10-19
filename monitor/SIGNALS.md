@@ -34593,6 +34593,29 @@ restart, replace, or reset a progressing historical node solely because the
 public current runtime advanced. A lower public spec, or any
 chain/genesis/runtime name/EVM mismatch, remains `subtensor-identity`.
 
+The launcher unit is inventory, `launcher_unit` in the host's subtensor
+settings (a plain unit name; empty keeps the testnet archive's `subtensor`).
+False-positive qualifier: since the 2026-10-07 Finney publication
+(`xops/main/ansible/SUBTENSOR-MAINNET-CUTOVER.md`) snow serves its mainnet
+archive through `subtensor-mainnet.service`, and the publication run keeps
+`subtensor.service` stopped and disabled and the testnet light node retired;
+`/etc/subtensor/mainnet-published` records the published identity. An
+inventory still naming the testnet nodes pages `subtensor-gateway`
+(`subtensor=inactive`) and `subtensor-runtime-ahead` against the testnet
+reference for a healthy archive, as it did until 2026-10-19 while snow's
+archive answered runtime 479, transaction 1, EVM `0x3c4`, 40 peers and a head
+within one block of `entrypoint-finney`. Take the inventory from the
+publication record and an independent Finney read, never by restarting the
+retired unit, which would contend for the archive's P2P port. False-negative
+qualifier: snow's `subtensor-monitor` helper inspects only `subtensor` and
+`subtensor-lightnode`, and Fluent Bit still scrapes the retired testnet
+metrics ports, so the mainnet archive's container identity and §17.5
+convergence stay `cannot-observe` until Xops extends both; that is a coverage
+gap, not health. Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
+`TestSubtensorSignalNamesTheConfiguredLauncherWhenItStops`,
+`TestSubtensorSignalDefaultsToTheTestnetLauncherUnit` and
+`TestSubtensorSettingsRejectAnInvalidLauncherUnit`.
+
 On 2026-09-03, the public testfinney endpoint retained chain `Bittensor`,
 genesis `0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105`,
 runtime name `node-subtensor`, transaction version 1, and EVM chain ID `0x3b1`,

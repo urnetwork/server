@@ -80,6 +80,9 @@ type BackupHostSettings struct {
 // reference chain. The reference RPC is observational only; node traffic keeps
 // using the configured archive/lightnode gateways.
 type SubtensorHostSettings struct {
+	// The Compose launcher unit of the node this host serves; empty is the
+	// original testnet archive's subtensor.service.
+	LauncherUnit               string
 	PublicRPCURL               string
 	ExpectedChain              string
 	ExpectedGenesisHash        string

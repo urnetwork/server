@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ func (subtensorProbe) tier() string           { return tierWarn }
 func (subtensorProbe) cadence() time.Duration { return time.Minute }
 
 type subtensorScriptConfig struct {
+	LauncherUnit   string                  `json:"launcher_unit"`
 	OverlayAddress string                  `json:"overlay_address"`
 	PublicRPCURL   string                  `json:"public_rpc_url"`
 	Nodes          []SubtensorNodeSettings `json:"nodes"`
@@ -221,7 +223,23 @@ func (subtensorProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	return findings, nil
 }
 
+// The original testnet archive's oneshot Compose launcher. A host that serves
+// another node (snow's Finney archive since 2026-10-07) names its own.
+const subtensorDefaultLauncherUnit = "subtensor"
+
+var subtensorLauncherUnitRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+func subtensorLauncherUnit(settings *SubtensorHostSettings) string {
+	if settings == nil || settings.LauncherUnit == "" {
+		return subtensorDefaultLauncherUnit
+	}
+	return settings.LauncherUnit
+}
+
 func validateSubtensorSettings(settings *SubtensorHostSettings) error {
+	if settings != nil && settings.LauncherUnit != "" && !subtensorLauncherUnitRe.MatchString(settings.LauncherUnit) {
+		return fmt.Errorf("subtensor: invalid launcher unit %q", settings.LauncherUnit)
+	}
 	parsed, err := url.ParseRequestURI(strings.TrimSpace(settings.PublicRPCURL))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
 		return fmt.Errorf("subtensor: invalid public RPC URL")
@@ -261,6 +279,7 @@ func validateSubtensorSettings(settings *SubtensorHostSettings) error {
 
 func subtensorCommand(target *host) (string, error) {
 	config, err := json.Marshal(subtensorScriptConfig{
+		LauncherUnit:   subtensorLauncherUnit(target.subtensor),
 		OverlayAddress: target.overlayIp,
 		PublicRPCURL:   target.subtensor.PublicRPCURL,
 		Nodes:          target.subtensor.Nodes,
@@ -330,7 +349,7 @@ def inspect_container(node):
         return {"container_error": "%s: %s" % (type(error).__name__, error)}
 
 observation = {
-    "units": {unit: unit_state(unit) for unit in ("subtensor", "nginx", "openvpn@by-pre")},
+    "units": {unit: unit_state(unit) for unit in (config["launcher_unit"], "nginx", "openvpn@by-pre")},
     "overlay_present": False,
     "public": inspect_rpc(config["public_rpc_url"]),
     "nodes": [],
@@ -670,7 +689,8 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 	settings := target.subtensor
 	findings := []finding{}
 	unitProblems := []string{}
-	for _, unit := range []string{"subtensor", "nginx", "openvpn@by-pre"} {
+	launcherUnit := subtensorLauncherUnit(settings)
+	for _, unit := range []string{launcherUnit, "nginx", "openvpn@by-pre"} {
 		if observation.Units[unit] != "active" {
 			unitProblems = append(unitProblems, unit+"="+firstNonempty(observation.Units[unit], "missing"))
 		}
@@ -683,8 +703,8 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 			probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-gateway",
 			target: target.name, frame: "host", sustain: 2,
 			symptom:   "The Subtensor host lifecycle or overlay gateway identity is unavailable",
-			mechanism: "subtensor.service is only a oneshot launcher; the container, nginx, and the OpenVPN-owned bind address can fail independently after that launcher exits successfully.",
-			baseline:  "subtensor, nginx, and openvpn@by-pre are active and the configured overlay address is present on the host.",
+			mechanism: launcherUnit + ".service is only a oneshot launcher; the container, nginx, and the OpenVPN-owned bind address can fail independently after that launcher exits successfully.",
+			baseline:  launcherUnit + ", nginx, and openvpn@by-pre are active and the configured overlay address is present on the host.",
 			observed:  strings.Join(unitProblems, " "),
 			action:    "Restore the first failed lifecycle layer. For an absent overlay address, repair OpenVPN ownership before restarting nginx; do not treat active (exited) as node health.",
 			verify:    "Require all three units active, the exact overlay address present, and both gateway health/RPC paths successful.",
