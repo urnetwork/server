@@ -5324,6 +5324,38 @@ IDs per endpoint, ranked by lifetime execution time; output retains 30 totals.
 Blockers select the oldest 16 lock waiters and at most 16 blockers per waiter,
 in one final snapshot, not a recursive owner/payer census.
 
+Diagnostic practice learned on 2026-10-19: a one-column PostgreSQL JSON value
+can span physical lines, including whitespace emitted by composite `json_agg`
+arrays. A private one-point aggregate returned two complete JSON documents
+across six lines, while its decoder required exactly two lines and reported
+`aggregate_contract_unavailable` after joined native exit zero. Preserve that
+failed receipt; this is a disposable diagnostic framing defect, not evidence
+of database failure or a deployed monitor fix. A corrected projection must
+consume exactly two bounded JSON documents and require EOF, preserving duplicate
+key, closed schema, authority, count reconciliation and freshness checks.
+Qualify compact and multiline producer bytes plus malformed/third/trailing
+JSON before accepting a corrected offline interpretation. No new Main read
+is needed to diagnose this framing failure.
+
+All-backend state totals precede the sampler's selection cap; both source
+rankings put active groups first. A complete sample can therefore count idle
+transactions while retaining none of their age/wait detail. A one-point
+aggregate can fill that observation gap without SQL, backend/query IDs or
+caller identities, but does not establish persistence, harm or a TPS cause.
+A `statement_timestamp` reference can precede backend state/transaction changes
+observed while the view is collected. Retain explicit future/missing-clock
+counts: filtered nonnegative age maxima may cover only subsets, and transaction
+and state maxima may belong to different backends. Do not diagnose host clock
+skew from this flag or call transaction age continuous idle-state residence.
+
+False-positive qualifiers: occupancy, old transactions or Client waits alone
+do not establish blocking, maintenance/CPU harm, callers or pool-path failure.
+A joined direct read is not application/pooler/TPS recovery. False-negative
+qualifiers: one point can miss bursts/earlier locks; omitted detail, coarse waits,
+visibility limits and incomplete/clock-qualified output remain unknown. Preserve
+H1 external tuning ownership and Root coordination; none of this grants
+configuration changes, cancellation or restart authority.
+
 GOTCHA — a table family does not identify its caller. The October 3 23:04
 private receipt `5c5ddfa9` retained an active local client backend declaring
 `pg_dump` in `contract_close_access`: nine no-wait, two `Client:ClientWrite`
@@ -11124,9 +11156,34 @@ False-positive/negative qualifiers: equal counts do not prove OID/reset or
 collector identity. Sparse points miss brief stalls and two-minute rates smooth
 transitions; proximity to a restart does not establish causality. A current
 point without matched earlier workload, historical scope and build evidence
-cannot adjudicate work-per-request changes or reduced offered demand. No new
-StageA result, deployed reader, automatic closure rule or incident root cause
-is claimed; this section's coverage gap and recovery questions remain open.
+cannot adjudicate work-per-request changes or reduced offered demand. No
+deployed reader, automatic closure rule or incident root cause is claimed;
+this section's coverage gap and recovery questions remain open.
+
+The one qualified sparse historical request at 2026-10-19 09:58:58.649–
+09:58:59.963 UTC returned HTTP 200, 182/182 rows and 13/13 qualified points on
+the fixed 00:00–06:00 half-hour grid. Its published two-minute commit rate was
+50,219.06/s at 03:30 and 14,288.69/s at 04:00; later points were 9,576.33/s at
+04:30, 5,635.10/s at 05:00, 10,364.72/s at 05:30 and 26,334.39/s at 06:00. The
+coarse high-to-low bracket is therefore 03:30–04:00, not the exact event
+time. Retained native snapshots at 06:33 and both 05:56 SQL controls report
+postmaster start **04:12:44.511128 UTC**; the selected console's unit start is
+04:12:02. The recorded decline was already visible before that PostgreSQL
+restart, so the restart does not establish its initial trigger. Keep the date
+guard: the existing 03:57:28 query-wait burst is **October 18**, not evidence
+of an October 19 burst inside this bracket. H1 preserves external tuning
+ownership and older context, not a cause join.
+
+False-positive/negative qualifiers for this result: each qualified point
+checks its own full two-minute sample window, six series per counter and zero
+observed resets. It does not check continuous throughput or every reset in the
+30-minute gaps, identify DB OIDs or establish collector collection freshness.
+The after-restart points are observations, not a measured restart effect.
+Capacity/path pressure must be evaluated at matched points before attributing
+the difference to work-per-request efficiency; completed-handler counters do
+not establish offered arrivals. Pool admission/progress, busy servers, PG
+locks/IO/query-specific limits and historical workload/build scope remain
+unresolved. No current recovery, deployed reader or runtime action is implied.
 
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
