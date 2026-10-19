@@ -338,6 +338,15 @@ finding of this audit; belongs to the connect/sdk repos.
   `non_idempotent` KEPT for now (§6.2): the grace phase empties most of the
   race it covers, but a surfaced POST 502 is still unretried by clients, so
   it stays until the client-retry adoption data says otherwise.
+  DELTA (2026-10-19, warp 0c3b87e and 696a698): http_502 dropped too, giving
+  `error timeout http_503 non_idempotent`. In nginx http_502 matches a 502
+  the upstream itself sent, and lb→api has no proxy between them, so it
+  matched only application answers: the api answers 502 when a dependency
+  refused the work (a failed account-message send, an immutable upload
+  that failed its readback). With non_idempotent each such POST ran twice;
+  one password reset made two codes and two SMS sends. A drain never
+  needed it: the api answers neither 502 nor 503 while draining, and its
+  closed listener and cut keepalive connections reach nginx as `error`.
 - `warpctl/docker.go`: `IsError` regex `^(?i)error\s` → `^(?i)error(\s|:)`.
   AUDIT CORRECTION to §1.1/§2.1: the old regex missed the natural
   `collectStatus` formatting "error: ..." — an erroring status JSON would

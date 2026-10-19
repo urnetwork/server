@@ -38,7 +38,12 @@ adapter inbox binds this mode. Staging-only Git publication uses
 `sim-latency-staging`, and its source ledger lives separately at
 `config/main/sim-latency-staging.yml`. Do not replace the historical production
 ledger, add pins retroactively, or use production refs to bypass staging checks.
-The frozen graph includes all eleven required repositories, including `gvisor`.
+The new staging graph has exactly ten repositories: `server`, `connect`, `sdk`,
+`proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`.
+The retired `operator-proxy` repository must be absent; staging never discovers
+its remote, copies it, or builds it. Production's eleven-repository protocol and
+all historical locks remain unchanged. A frozen module graph that still requires
+the retired repository blocks staging rather than silently dropping a dependency.
 
 Staging retains the per-round nine-run control, nine candidate runs, FIFO,
 containment and every G1–G6 gate. It names the best placeable candidate without
@@ -60,7 +65,7 @@ it does not perform payment, emission, burn or clawback operations.
 Code support is not a deployment or qualification record. Before opening a test
 round, apply the additive staging migration after the original v2 migrations,
 deploy compatible API/worker code, configure the scoped credentials and qualified
-preparation adapter, and bootstrap a real eleven-repository staging checkpoint.
+preparation adapter, and bootstrap a real ten-repository staging checkpoint.
 Do not report the final Macrocosmos test as ready without its live round identity.
 
 An authenticated retrospective disqualification appends a new reward revision

@@ -55,6 +55,7 @@ type monitorYaml struct {
 			AddressFamilies  []string `yaml:"address_families"`
 		} `yaml:"proxy"`
 		Subtensor *struct {
+			LauncherUnit               string `yaml:"launcher_unit"`
 			PublicRPCURL               string `yaml:"public_rpc_url"`
 			ExpectedChain              string `yaml:"expected_chain"`
 			ExpectedGenesisHash        string `yaml:"expected_genesis_hash"`
@@ -185,6 +186,8 @@ type credentialRequirementSpec struct {
 	purpose  string
 	required bool
 	fields   []credentialFieldSpec
+	// parse reads a resource that is not YAML or JSON; nil uses ParseE.
+	parse func([]byte) (map[string]any, error)
 }
 
 // LoadSignalSettings loads production settings from the standard WARP_HOME
@@ -385,6 +388,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		h.Proxy = selectedProxyHostSettings(h.Proxy, proxyServiceConfigured, legacyProxy)
 		if configured.Subtensor != nil {
 			h.Subtensor = &SubtensorHostSettings{
+				LauncherUnit:               strings.TrimSpace(configured.Subtensor.LauncherUnit),
 				PublicRPCURL:               configured.Subtensor.PublicRPCURL,
 				ExpectedChain:              configured.Subtensor.ExpectedChain,
 				ExpectedGenesisHash:        configured.Subtensor.ExpectedGenesisHash,
@@ -837,11 +841,17 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			},
 		},
 		{
-			key: "account-email", resource: "aws.yml", purpose: "Transactional account email", required: required,
+			// The account message sender (SES, Pinpoint SMS) uses the AWS SDK
+			// default chain, as does the extender's Route 53 publish when
+			// extender.yml sets no static keys: the shared credentials file the
+			// containers read through /root/.aws, the vault's .aws. No sender
+			// reads aws.yml.
+			key: "account-email", resource: ".aws/credentials", purpose: "Transactional account email and SMS", required: required,
 			fields: []credentialFieldSpec{
-				field("aws.access_key_id", "aws", "access_key_id"),
-				field("aws.secret_access_key", "aws", "secret_access_key"),
+				field("default.aws_access_key_id", "default", "aws_access_key_id"),
+				field("default.aws_secret_access_key", "default", "aws_secret_access_key"),
 			},
+			parse: parseAwsSharedCredentials,
 		},
 		{
 			key: "product-updates", resource: "brevo.yml", purpose: "Product-update delivery and webhook authentication", required: required,
@@ -993,6 +1003,43 @@ func enabledAnalyticsCredentialFields() ([]credentialFieldSpec, error) {
 	return fields, nil
 }
 
+// Parses an AWS shared credentials file into profile -> key -> value. Blank
+// lines and # or ; comments are skipped; a key outside a profile, a header
+// without its bracket, a line without "=" or a repeated profile or key is
+// malformed, so a damaged file is never read as complete.
+func parseAwsSharedCredentials(content []byte) (map[string]any, error) {
+	profiles := map[string]any{}
+	var profile map[string]any
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if !strings.HasSuffix(line, "]") {
+				return nil, fmt.Errorf("aws shared credentials: unterminated profile header")
+			}
+			name := strings.TrimSpace(line[1 : len(line)-1])
+			if _, exists := profiles[name]; name == "" || exists {
+				return nil, fmt.Errorf("aws shared credentials: empty or repeated profile")
+			}
+			profile = map[string]any{}
+			profiles[name] = profile
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" || profile == nil {
+			return nil, fmt.Errorf("aws shared credentials: line outside a profile or without a value")
+		}
+		if _, exists := profile[key]; exists {
+			return nil, fmt.Errorf("aws shared credentials: repeated key")
+		}
+		profile[key] = strings.TrimSpace(value)
+	}
+	return profiles, nil
+}
+
 func inspectCredentialRequirement(spec credentialRequirementSpec) CredentialRequirement {
 	requirement := CredentialRequirement{
 		Key: spec.key, Resource: spec.resource, Purpose: spec.purpose, Required: spec.required,
@@ -1005,7 +1052,17 @@ func inspectCredentialRequirement(spec credentialRequirementSpec) CredentialRequ
 		return requirement
 	}
 	requirement.Present = true
-	values, err := resource.ParseE()
+	var values map[string]any
+	if spec.parse != nil {
+		content, readErr := resource.BytesE()
+		if readErr == nil {
+			values, err = spec.parse(content)
+		} else {
+			err = readErr
+		}
+	} else {
+		values, err = resource.ParseE()
+	}
 	if err != nil {
 		requirement.Malformed = true
 		return requirement

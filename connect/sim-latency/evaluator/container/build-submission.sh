@@ -113,6 +113,12 @@ else
         *) infrastructure_failure "production build cannot use a staging evaluator image" ;;
     esac
 fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
+if [ "$staging" = true ]; then
+    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
+fi
+readonly REPOSITORIES
+repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
 image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
 source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
@@ -152,7 +158,7 @@ source_identity="$source_root/.evaluation-source.json"
 jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
     --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
-    --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' \
+    --argjson repositories "$repository_names_json" \
     '. as $identity |
      .schema == 1 and .kind == "sim-latency-evaluation-source" and
      .temporary == true and .base_image_id == $base_image_id and
@@ -166,7 +172,7 @@ jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
         printf 'evaluation source identity does not match the base image\n' >&2
         exit 1
     }
-for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do
+for repository in "${REPOSITORIES[@]}"; do
     repository_root="$source_root/$repository"
     [ -d "$repository_root/.git" ] && [ ! -L "$repository_root" ] || {
         printf 'evaluation source repository is missing or unsafe: %s\n' "$repository" >&2

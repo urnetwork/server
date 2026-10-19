@@ -281,7 +281,7 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 	if !sourceModeMatches(settings, &intent) || intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.Generation < 1 || intent.TargetEpoch < 1 || intent.TargetEpoch > 6 || intent.TargetRoundId == (server.Id{}) || intent.PreparedAt.IsZero() || (!intent.OpensAt.IsZero() && intent.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(&intent)))) || !gitShaPattern.MatchString(intent.ManifestCommit) || !sha256Pattern.MatchString(intent.ManifestSha256) || !sha256Pattern.MatchString(intent.ThresholdEvidenceSha256) || !imageDigestPattern.MatchString(intent.EvaluatorImageDigest) || !sha256Pattern.MatchString(intent.HostQualificationSha256) {
 		return nil, ErrConflict
 	}
-	digest, err := model.CompetitionSourceLockDigest(intent.Commits)
+	digest, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
 	if err != nil || digest != intent.SourceLockSha256 {
 		return nil, ErrConflict
 	}

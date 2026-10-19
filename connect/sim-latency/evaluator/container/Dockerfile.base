@@ -45,24 +45,16 @@ ARG BASE_SHA
 ARG SOURCE_EPOCH
 ARG SOURCE_CONFIG_SHA256
 ARG SOURCE_LOCK_SHA256
-COPY source/server /workspace/server
-COPY source/connect /workspace/connect
-COPY source/proxy /workspace/proxy
-COPY source/sdk /workspace/sdk
-COPY source/glog /workspace/glog
-COPY source/goidenticons /workspace/goidenticons
-COPY source/userwireguard /workspace/userwireguard
-COPY source/sn /workspace/sn
-COPY source/operator-proxy /workspace/operator-proxy
-COPY source/warp /workspace/warp
-COPY source/gvisor /workspace/gvisor
+# The private builder copies exactly the mode-specific locked repositories.
+# Production retains operator-proxy; staging never creates or fetches it.
+COPY source/ /workspace/
 COPY source-lock.json /opt/urnetwork/source-lock.json
 COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
 COPY evaluator/entrypoint.sh /usr/local/libexec/competition-container
 COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run
 
 # Scorers run unprivileged against the root-owned built-in tree, while runners
-# see equivalent remapped read-only mounts. Trust only the exact eleven
+# see equivalent remapped read-only mounts. Trust only the exact locked
 # repositories authenticated by source-lock.json.
 RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && source_status="$(git -C /workspace/server status --porcelain --untracked-files=all)" \
@@ -77,7 +69,7 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/goidenticons \
     && git config --system --add safe.directory /workspace/userwireguard \
     && git config --system --add safe.directory /workspace/sn \
-    && git config --system --add safe.directory /workspace/operator-proxy \
+    && if [ -d /workspace/operator-proxy ]; then git config --system --add safe.directory /workspace/operator-proxy; fi \
     && git config --system --add safe.directory /workspace/warp \
     && git config --system --add safe.directory /workspace/gvisor \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \

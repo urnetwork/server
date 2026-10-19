@@ -2687,7 +2687,10 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`if [ "$staging" = true ]; then`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`readonly REPOSITORIES`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B "$source_branch" "$expected_commit"`,
 		`source_branch=sim-latency`,
@@ -2716,7 +2719,11 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$baseline_source_root"`,
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
-		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do`,
+		`for repository in "${REPOSITORIES[@]}"; do`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`if [ "$staging" = true ]; then`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`readonly REPOSITORIES`,
 		`rev-parse --verify HEAD:connect/sim-latency`,
 		`candidate changed the protected sim-latency source tree`,
 		`EVALUATION_SOURCE_DIR=$source`,
@@ -2734,11 +2741,16 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(
-		string(buildSubmissionBytes),
-		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do",
-	) {
-		t.Fatal("submission builder does not authenticate the complete source graph")
+	for _, required := range []string{
+		`for repository in "${REPOSITORIES[@]}"; do`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`if [ "$staging" = true ]; then`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`readonly REPOSITORIES`,
+	} {
+		if !strings.Contains(string(buildSubmissionBytes), required) {
+			t.Fatalf("submission builder source graph is missing %q", required)
+		}
 	}
 
 	composeBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/compose.yml")
@@ -2859,11 +2871,16 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(
-		string(buildBaseBytes),
-		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)",
-	) {
-		t.Fatal("evaluator base repository allowlist changed; re-audit config/vault exclusion")
+	for _, required := range []string{
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`if [ "$staging" = true ]; then`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`readonly REPOSITORIES`,
+		`for repository in "${REPOSITORIES[@]}"; do`,
+	} {
+		if !strings.Contains(string(buildBaseBytes), required) {
+			t.Fatalf("evaluator base mode-specific repository allowlist is missing %q", required)
+		}
 	}
 	dockerfileBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/Dockerfile.base")
 	if err != nil {

@@ -61,7 +61,7 @@ func newAutomationStagingApiFixture(t testing.TB) (*Settings, *automationStaging
 		EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: strings.Repeat("9", 64), Threshold: 0,
 		ActivatedAt: &now, State: "activated", Commits: map[string]string{},
 	}
-	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		intent.Commits[name] = strings.Repeat("c", 40)
 	}
 	var err error

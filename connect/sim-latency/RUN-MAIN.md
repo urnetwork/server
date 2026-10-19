@@ -4,10 +4,12 @@
 Legacy `run`/`approve`/`reject` commands retain their v1 review pause. Explicit
 v2 competitions use `supervise` below; never mix these progression paths.
 It drives the continuously deployed main API and one-shot worker while keeping
-the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
+the production evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
 `glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`—isolated
 in temporary clones. Production source is pinned on `sim-latency`; explicit v2
-staging uses only `sim-latency-staging` and its separate source manifest.
+staging uses only `sim-latency-staging` and its separate ten-repository source
+manifest, excluding the retired `operator-proxy`. Production's eleven-repository
+protocol and all historical records remain unchanged.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
@@ -44,7 +46,7 @@ After close and full authoritative drain, the v2 worker seals/elects. At the
 frozen source-choice deadline (zero extra review wait by default), a ready,
 separately authorized exact-source intent may be selected. Otherwise the
 supervisor stages `reviewed_source_carry_forward`, including when a provisional
-reward winner exists. It retains the approved source generation, eleven commits,
+reward winner exists. It retains the approved source generation, exact mode-specific commits,
 and threshold. It never calls `promote --no-winner` for an unshipped reward
 winner, fabricates approval, or uses that winner's variance recommendation.
 
@@ -107,15 +109,19 @@ Production remains a positive-margin seven-day round with its full 16-hour
 preparation gate and no staging timing fields. Stage timing and mode are bound
 into the activation and runtime envelope; changing them cannot resume old state.
 
-Prepare a NEW eleven-repository schema-2 baseline at
+Prepare a NEW ten-repository schema-2 staging baseline at
 `config/main/sim-latency-staging.yml` with top-level `staging: true`, branch
 `sim-latency-staging`, generation 0, an epoch-one mapping, and zero margins.
 It must not contain relabeled legacy `epochs`. Prospectively review the exact
 pins, policy, image, and qualification identities. Publish only authorized
-normal fast-forwards to the eleven staging refs; never update production
+normal fast-forwards to the ten staging refs; never contact the retired
+`operator-proxy` remote or update production
 `sim-latency` refs, force a ref, or rewrite the historical ten-repository
-checkpoint in `main/sim-latency.yml`. The old checkpoint/image is historical
-evidence, not qualification for a new eleven-repository staging activation.
+checkpoint in `main/sim-latency.yml`. New staging contains `server`, `connect`,
+`sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`.
+The historical ten-repository checkpoint included `operator-proxy` and lacked
+`gvisor`; equal counts do not make these identities interchangeable. The old
+checkpoint/image remains historical evidence, not qualification for new staging.
 
 After those distinct review/publication steps, these commands verify the frozen
 record and build its new evaluator. `source-record` verifies existing refs; it
@@ -175,7 +181,8 @@ source unchanged. Dedicated staging config publication preserves production
 manifest bytes, including unrelated production config advances. Mode, ref, or
 config-path mismatches fail closed on recovery before any push or adapter call.
 
-Publication uses private durable clones of all eleven repositories. It freezes
+Publication uses private durable clones of the exact source set: ten for explicit
+staging, eleven for production. It freezes
 expected/new refs and exact manifest bytes, records intent before any push,
 publishes source first and config last, and requires runtime readiness. Ordinary
 fast-forward pushes only; no forced update. Lost replies and partial pushes
@@ -214,7 +221,7 @@ a real host-readiness check, not the scoring baseline: the immutable R=9 scoring
 control is still established after creation using the fresh round workload.
 There is no second 16-hour delay. If a chosen promotion cannot
 use an authorized pre-commit fallback, it stays blocked rather than rewriting its
-intent. A failed promotion whose eleven remote refs all remain at their expected
+intent. A failed promotion whose complete mode-specific remote refs remain at their expected
 predecessors may be durably abandoned; the next activation attempt carries the
 incumbent, with fresh preparation and the original source-choice deadline. Any
 advanced ref or runtime receipt forbids this automatic fallback. Automatic
@@ -298,7 +305,7 @@ sim-latency stage-reviewed-source --review-id=REVIEW_ID \
   --build-sha256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
 ```
 
-This clones all eleven pinned repositories, applies the exact authenticated patch,
+This clones all mode-specific pinned repositories (ten staging, eleven production), applies the exact authenticated patch,
 checks its tree and protected runner, and invokes a separately qualified isolated
 build/test broker. It pushes nothing. The broker receives only an allowlisted
 environment (no inherited main, database, vault, Git-push or seed credentials),
@@ -347,14 +354,16 @@ and the Grafana alert route. Port-forward PostgreSQL and Redis to localhost when
 the worker is run from this host. Set an exact control-plane image identity in
 `WARP_IMAGE_DIGEST`; this is recorded per evaluation but is not a scoring input.
 
-Every epoch checkpoint in `config/main/sim-latency.yml` must list exactly these
+The following requirements describe production and the legacy staging-alias
+workflow, not explicit v2 staging. Every newly eligible production epoch
+checkpoint in `config/main/sim-latency.yml` must list exactly these
 eleven repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
 `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`. Each commit
 must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
-Before staging, each repository must also expose a `sim-latency-staging` branch
+Before legacy staging, each repository must also expose a `sim-latency-staging` branch
 whose head exactly equals its epoch-zero commit. The harness verifies all eleven
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
@@ -363,10 +372,12 @@ baseline source content and evaluator protocol. A reviewed evaluator repair is
 a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
-The frozen evaluator module graph requires `operator-proxy` and `warp` in addition
-to the earlier eight repositories, and `gvisor` in addition to those ten: server's
-`go.mod` replaces `gvisor.dev/gvisor` with the `../gvisor` sibling. Current tools
-reject incomplete checkpoints and source locks; they never infer a missing
+The historical production protocol retains `operator-proxy`, `warp`, and
+`gvisor`; server's `go.mod` replaces `gvisor.dev/gvisor` with the `../gvisor`
+sibling. The current staging module graph no longer requires `operator-proxy`,
+so explicit v2 staging requires exactly the other ten repositories, never a
+retired placeholder pin. Current tools reject mode-mismatched, extra, or
+incomplete checkpoints and source locks; they never infer a missing
 commit. Prepare a reviewed complete checkpoint, matching remote aliases, and a
 new evaluator image at the drained release boundary. Preserve old eight- and
 ten-repository images, locks, baseline artifacts, and round evidence as
@@ -378,11 +389,14 @@ the exact evaluated server commit's `go.mod`, never moving main. A newly frozen
 base that requires an unpinned local repository fails closed and requires a
 separately reviewed source-protocol/image expansion; it cannot borrow main's
 checkout. Current source loading, shell validators, image copies, and new epoch
-records require the exact eleven-repository set, including Warp and gvisor.
-Historical ten-repository locks and images remain unchanged evidence; the local
+records require the exact mode-specific set, including Warp and gvisor:
+production eleven, explicit staging ten without `operator-proxy`. Historical
+ten-repository locks and images remain unchanged evidence; the local
 gVisor fork must not be inserted into their source identities. Those checkpoints
 fail closed for new activations until a separately frozen and qualified
-eleven-repository checkpoint, matching config, and evaluator image are approved.
+mode-correct checkpoint, matching config, and evaluator image are approved.
+The legacy `staging-source-check` command rejects explicit v2 staging manifests;
+use `source-record --staging` for the separate v2 ledger.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 

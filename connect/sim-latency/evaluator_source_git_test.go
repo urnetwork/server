@@ -137,7 +137,7 @@ func runSourceGitBuilderFixtureForMode(t *testing.T, mode string, protectedPatch
 	t.Helper()
 	root := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range sourceRepositoryNames() {
+	for _, repository := range sourceRepositoryNamesForMode(staging) {
 		repositoryCommits[repository] = sourceTestRepository(t, root, repository)
 		if staging {
 			sourceTestGit(t, filepath.Join(root, repository), "branch", "-m", stagingEvaluationSourceBranch)
@@ -210,8 +210,9 @@ git() {
 }
 `
 	errorFunction := sourceGitScriptSection(t, "build-submission.sh", "infrastructure_failure() {\n", "\nusage() {")
+	repositoryPolicy := sourceGitScriptSection(t, "build-submission.sh", "REPOSITORIES=(", "\nbase_sha=")
 	buildSection := sourceGitScriptSection(t, "build-submission.sh", "source_identity=", "\nchmod 0600 \"$source_identity\"")
-	command := exec.Command("bash", "-c", prelude+errorFunction+buildSection+"\nprintf 'candidate source authenticated\\n'\n")
+	command := exec.Command("bash", "-c", prelude+errorFunction+repositoryPolicy+"\n"+buildSection+"\nprintf 'candidate source authenticated\\n'\n")
 	command.Env = append(os.Environ(), "SOURCE_TEST_ROOT="+root, "SOURCE_TEST_GIT="+gitPath,
 		"SOURCE_TEST_STAGING="+strconv.FormatBool(staging), "SOURCE_TEST_BRANCH="+sourceBranch(staging),
 		"SOURCE_TEST_BASE="+repositoryCommits["server"], "SOURCE_TEST_MODE="+mode)
@@ -298,28 +299,64 @@ emit_candidate_build_failure() { printf 'unexpected terminal submission failure\
 }
 
 // Empty stdout from a failed status command must never mean a clean checkout.
+// Run the real mode selection before the extracted function so both the first
+// and last source entries must be inspected before ownership can be sealed.
 func TestEvaluatorRefusesToSealSourceWhenGitStatusFails(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, ".evaluation-source.json"), []byte(`{"repositories":{"server":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command("bash", "-c", `set -Eeuo pipefail
+	repositoryPolicy := sourceGitScriptSection(t, "evaluator.sh", "REPOSITORIES=(", "\nround_id=")
+	const prelude = `set -Eeuo pipefail
 baseline_source_root="$SOURCE_TEST_ROOT"
 candidate_source_root=/synthetic/candidate
+staging="$SOURCE_TEST_STAGING"
+source_branch="$SOURCE_TEST_BRANCH"
 die() { printf '%s\n' "$*" >&2; exit 1; }
 git() {
+    local repository="${2##*/}"
     case "$3" in
-        symbolic-ref) printf 'sim-latency\n' ;;
+        symbolic-ref) printf '%s\n' "$source_branch" ;;
         rev-parse) printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
-        status) printf 'synthetic Git status failure\n' >&2; return 128 ;;
+        status)
+            printf '%s\n' "$repository" >> "$SOURCE_TEST_ROOT/status-repositories"
+            if [ "$repository" = "$SOURCE_TEST_FAIL_REPOSITORY" ]; then
+                printf 'synthetic Git status failure\n' >&2
+                return 128
+            fi
+            ;;
         *) exit 99 ;;
     esac
 }
 sudo() { printf 'unexpected source seal\n'; exit 99; }
-`+evaluatorShellFunction(t, "seal_evaluation_source")+"\nseal_evaluation_source \"$baseline_source_root\" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ''\n")
-	command.Env = append(os.Environ(), "SOURCE_TEST_ROOT="+root)
-	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "could not inspect temporary server source worktree") || strings.Contains(string(output), "unexpected source seal") {
-		t.Fatalf("failed Git status during sealing: %v: %s", err, output)
+`
+	for _, staging := range []bool{false, true} {
+		for _, failedRepository := range []string{"server", "gvisor"} {
+			root := t.TempDir()
+			commits := map[string]string{}
+			repositories := sourceRepositoryNamesForMode(staging)
+			for _, repository := range repositories {
+				commits[repository] = strings.Repeat("a", 40)
+			}
+			identity, err := json.Marshal(map[string]any{"repositories": commits})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".evaluation-source.json"), identity, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.CommandContext(t.Context(), "bash", "-c", prelude+repositoryPolicy+"\n"+evaluatorShellFunction(t, "seal_evaluation_source")+"\nseal_evaluation_source \"$baseline_source_root\" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ''\n")
+			command.Env = append(os.Environ(), "SOURCE_TEST_ROOT="+root, "SOURCE_TEST_STAGING="+strconv.FormatBool(staging),
+				"SOURCE_TEST_BRANCH="+sourceBranch(staging), "SOURCE_TEST_FAIL_REPOSITORY="+failedRepository)
+			output, err := command.CombinedOutput()
+			exitError, ok := err.(*exec.ExitError)
+			if !ok || exitError.ExitCode() != 1 || !strings.Contains(string(output), "synthetic Git status failure") ||
+				!strings.Contains(string(output), "could not inspect temporary "+failedRepository+" source worktree") || strings.Contains(string(output), "unexpected source seal") {
+				t.Fatalf("staging=%t failed=%s: Git status failure during sealing: %v: %s", staging, failedRepository, err, output)
+			}
+			if failedRepository == "server" {
+				repositories = repositories[:1]
+			}
+			inspected, err := os.ReadFile(filepath.Join(root, "status-repositories"))
+			if err != nil || string(inspected) != strings.Join(repositories, "\n")+"\n" {
+				t.Fatalf("staging=%t failed=%s: unexpected Git inspection sequence %q: %v", staging, failedRepository, inspected, err)
+			}
+		}
 	}
 }

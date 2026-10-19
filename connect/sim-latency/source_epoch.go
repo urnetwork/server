@@ -45,7 +45,7 @@ type sourceRepositories struct {
 	Goidenticons  sourceRepository `yaml:"goidenticons"`
 	Userwireguard sourceRepository `yaml:"userwireguard"`
 	Sn            sourceRepository `yaml:"sn"`
-	OperatorProxy sourceRepository `yaml:"operator-proxy"`
+	OperatorProxy sourceRepository `yaml:"operator-proxy,omitempty" json:",omitzero"`
 	Warp          sourceRepository `yaml:"warp"`
 	Gvisor        sourceRepository `yaml:"gvisor"`
 }
@@ -53,7 +53,13 @@ type sourceRepositories struct {
 // sourceRepositoryNames returns every repository copied into and built by the
 // evaluator. A fresh slice keeps callers from mutating the package policy.
 func sourceRepositoryNames() []string {
-	return []string{
+	return sourceRepositoryNamesForMode(false)
+}
+
+// Retains the historical production graph while new staging excludes the
+// retired operator-proxy repository entirely, including origin discovery.
+func sourceRepositoryNamesForMode(staging bool) []string {
+	names := []string{
 		"server",
 		"connect",
 		"sdk",
@@ -62,15 +68,21 @@ func sourceRepositoryNames() []string {
 		"goidenticons",
 		"userwireguard",
 		"sn",
-		"operator-proxy",
-		"warp",
-		"gvisor",
 	}
+	if !staging {
+		names = append(names, "operator-proxy")
+	}
+	return append(names, "warp", "gvisor")
 }
 
 // commits returns the complete evaluation-source identity for one epoch.
 func (self sourceRepositories) commits() map[string]string {
-	return map[string]string{
+	return self.commitsForMode(false)
+}
+
+// Builds the exact mode-specific lock map without an empty retired entry.
+func (self sourceRepositories) commitsForMode(staging bool) map[string]string {
+	commits := map[string]string{
 		"server":         self.Server.Commit,
 		"connect":        self.Connect.Commit,
 		"sdk":            self.Sdk.Commit,
@@ -83,6 +95,10 @@ func (self sourceRepositories) commits() map[string]string {
 		"warp":           self.Warp.Commit,
 		"gvisor":         self.Gvisor.Commit,
 	}
+	if staging {
+		delete(commits, "operator-proxy")
+	}
+	return commits
 }
 
 type sourceEpoch struct {
@@ -198,6 +214,25 @@ func decodeSourceManifest(manifestBytes []byte) (*sourceManifest, error) {
 			return nil, errors.New("decode source config: multiple yaml documents are not allowed")
 		}
 		return nil, fmt.Errorf("decode source config trailing data: %w", err)
+	}
+	if manifest.Staging {
+		// Presence itself is forbidden, including an empty retired pin that a
+		// zero-value typed field would otherwise silently discard.
+		var keys struct {
+			EvaluationSource struct {
+				Generations []struct {
+					Repositories map[string]yaml.Node `yaml:"repositories"`
+				} `yaml:"generations"`
+			} `yaml:"evaluation_source"`
+		}
+		if err := yaml.Unmarshal(manifestBytes, &keys); err != nil {
+			return nil, fmt.Errorf("decode staging source repository keys: %w", err)
+		}
+		for _, generation := range keys.EvaluationSource.Generations {
+			if _, present := generation.Repositories["operator-proxy"]; present {
+				return nil, errors.New("staging source cannot include retired operator-proxy")
+			}
+		}
 	}
 	if err := validateSourceManifest(manifest); err != nil {
 		return nil, err
@@ -389,6 +424,12 @@ func gitOutput(repositoryRoot string, args ...string) (string, error) {
 
 // loadEvaluatorSourceLock authenticates the source copied into an evaluator image.
 func loadEvaluatorSourceLock(path string) (*evaluatorSourceLock, error) {
+	return loadEvaluatorSourceLockForMode(path, false)
+}
+
+// The caller supplies mode from a validated manifest; key counts cannot grant
+// staging authority or reinterpret an existing production source lock.
+func loadEvaluatorSourceLockForMode(path string, staging bool) (*evaluatorSourceLock, error) {
 	lockBytes, err := readSourceFile(path)
 	if err != nil {
 		return nil, err
@@ -408,7 +449,7 @@ func loadEvaluatorSourceLock(path string) (*evaluatorSourceLock, error) {
 	if lock.DevelopmentSnapshot {
 		return nil, errors.New("development snapshot cannot be used for an epoch-bound evaluation")
 	}
-	repositoryNames := sourceRepositoryNames()
+	repositoryNames := sourceRepositoryNamesForMode(staging)
 	if len(lock.Repositories) != len(repositoryNames) {
 		return nil, errors.New("evaluator source lock must contain the complete repository set")
 	}
@@ -426,15 +467,15 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 	if err != nil {
 		return err
 	}
-	commits := epoch.Repositories.commits()
+	commits := epoch.Repositories.commitsForMode(manifest.Staging)
 	var sourceLock *evaluatorSourceLock
 	if sourceLockPath != "" {
-		sourceLock, err = loadEvaluatorSourceLock(sourceLockPath)
+		sourceLock, err = loadEvaluatorSourceLockForMode(sourceLockPath, manifest.Staging)
 		if err != nil {
 			return fmt.Errorf("load evaluator source lock: %w", err)
 		}
 	}
-	for _, repository := range sourceRepositoryNames() {
+	for _, repository := range sourceRepositoryNamesForMode(manifest.Staging) {
 		expectedCommit := commits[repository]
 		repositoryRoot := filepath.Join(repositoriesRoot, repository)
 		status, err := gitOutput(repositoryRoot, "status", "--porcelain=v1", "--untracked-files=all")
@@ -481,6 +522,11 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 
 // findRepositoriesRoot discovers the common parent of the complete source graph.
 func findRepositoriesRoot() (string, error) {
+	return findRepositoriesRootForMode(false)
+}
+
+// New staging workspaces do not need a checkout of the retired repository.
+func findRepositoriesRootForMode(staging bool) (string, error) {
 	if root := strings.TrimSpace(os.Getenv("SIM_LATENCY_REPOSITORIES_ROOT")); root != "" {
 		return filepath.Abs(root)
 	}
@@ -500,7 +546,7 @@ func findRepositoriesRoot() (string, error) {
 	candidates = append(candidates, "/workspace")
 	for _, candidate := range candidates {
 		complete := true
-		for _, repository := range sourceRepositoryNames() {
+		for _, repository := range sourceRepositoryNamesForMode(staging) {
 			if _, err := os.Stat(filepath.Join(candidate, repository)); err != nil {
 				complete = false
 				break
@@ -550,7 +596,7 @@ func configuredSourcePathsForMode(opts docopt.Opts, staging bool) (string, strin
 	repositoriesRoot := optString(opts, "--repos-root", "")
 	if repositoriesRoot == "" {
 		var err error
-		repositoriesRoot, err = findRepositoriesRoot()
+		repositoriesRoot, err = findRepositoriesRootForMode(staging)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -685,7 +731,7 @@ func runSourceRecord(opts docopt.Opts) {
 	}
 	ctx, cancel := signalContext()
 	defer cancel()
-	if err := verifyFrozenSourceGraph(ctx, filepath.Join(repositoriesRoot, "server"), epoch.Repositories.Server.Commit); err != nil {
+	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(repositoriesRoot, "server"), epoch.Repositories.Server.Commit, manifest.Staging); err != nil {
 		fatalf("source record measured dependency graph: %s", err)
 	}
 	result := sourceRecord{
@@ -694,7 +740,7 @@ func runSourceRecord(opts docopt.Opts) {
 		Epoch:                         epochNumber,
 		Branch:                        manifest.EvaluationSource.Branch,
 		SignificantImprovementPercent: epoch.SignificantImprovementPercent,
-		Repositories:                  epoch.Repositories.commits(),
+		Repositories:                  epoch.Repositories.commitsForMode(manifest.Staging),
 	}
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -703,7 +749,7 @@ func runSourceRecord(opts docopt.Opts) {
 	fmt.Printf("%s\n", encoded)
 }
 
-// runStagingSourceCheck proves that every pre-production source branch is an
+// runStagingSourceCheck proves that every legacy pre-production source branch is an
 // exact immutable alias of baseline epoch zero. It reads remote refs without
 // requiring or modifying any long-lived operator checkout.
 func runStagingSourceCheck(opts docopt.Opts) {

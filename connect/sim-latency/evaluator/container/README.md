@@ -24,12 +24,17 @@ edit, rename, copy, new file, deletion, mode change, or symlink attempt is a
 terminal invalid submission. Runtime source is mounted read-only, and the
 trusted baseline and scorer continue to execute from the pristine base image.
 
-For every evaluation attempt, `prepare-evaluation-source.sh` copies fresh
+For every production evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
 `sn`, `operator-proxy`, `warp`, and `gvisor` repositories out of that authenticated base
 image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
-changing any host repository checkout. Baseline and candidate have distinct
+changing any host repository checkout. Explicit v2 staging instead copies exactly
+the ten repositories above other than the retired `operator-proxy`, using only
+`sim-latency-staging` branches and a staging-authenticated image and source lock.
+The staging builder neither discovers nor contacts the retired remote. Existing
+production images and eleven-pin locks retain their original identity.
+Baseline and candidate have distinct
 trees; the builder applies the canonical patch only to the candidate tree.
 The selected tree is mounted read-only at `/workspace` in each runner and is
 removed before evidence is retained. This keeps continuously updated control

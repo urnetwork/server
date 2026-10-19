@@ -109,9 +109,14 @@ func sourceModuleGraphAtCommit(ctx context.Context, repositoryRoot, commit strin
 // Both fresh bootstrap and reviewed source staging use the measured commit,
 // with the same strict coverage rules as immutable source-record generation.
 func verifyFrozenSourceGraph(ctx context.Context, repositoryRoot, commit string) error {
+	return verifyFrozenSourceGraphForMode(ctx, repositoryRoot, commit, false)
+}
+
+// Audits the exact frozen module against its mode's allowed repositories.
+func verifyFrozenSourceGraphForMode(ctx context.Context, repositoryRoot, commit string, staging bool) error {
 	module, err := sourceModuleGraphAtCommit(ctx, repositoryRoot, commit)
 	if err != nil {
 		return err
 	}
-	return requireLocalSourceRepositoryCoverage(module, sourceRepositoryNames())
+	return requireLocalSourceRepositoryCoverage(module, sourceRepositoryNamesForMode(staging))
 }

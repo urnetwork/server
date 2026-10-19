@@ -97,7 +97,7 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 				settings.CompetitionId, policy.AutomationPolicy.SeasonId, policy.AutomationPolicy.SourceActivationGeneration).Scan(&intentJson))
 			var intent model.CompetitionSourceActivation
 			server.Raise(json.Unmarshal(intentJson, &intent))
-			lock, err := model.CompetitionSourceLockDigest(intent.Commits)
+			lock, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
 			server.Raise(err)
 			if intent.Staging != policy.AutomationPolicy.Staging || intent.TargetRoundId != roundId || lock != packet.Entry.BaseSourceLockSha256 || intent.Commits["server"] != packet.BaseSha ||
 				intent.SourceGeneration != policy.AutomationPolicy.SourceGeneration || intent.EvaluatorImageDigest != packet.EvaluatedImageDigest {

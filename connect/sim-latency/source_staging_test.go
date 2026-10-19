@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Builds a new independent eleven-repository baseline, not relabeled history.
+// Builds a new independent ten-repository staging baseline, not relabeled history.
 func stagingSourceTestManifest(t *testing.T) *sourceManifest {
 	t.Helper()
 	manifest := reviewedSourceTestManifest(t)
@@ -26,6 +27,13 @@ func stagingSourceTestManifest(t *testing.T) *sourceManifest {
 	manifest.EvaluationSource.Epochs = nil
 	manifest.EvaluationSource.Generations[0].SignificantImprovementPercent = 0
 	manifest.EvaluationSource.Rounds[0].SignificantImprovementPercent = 0
+	manifest.EvaluationSource.Generations[0].Repositories.OperatorProxy = sourceRepository{}
+	lockDigest, err := model.CompetitionSourceLockDigestForMode(manifest.EvaluationSource.Generations[0].Repositories.commitsForMode(true), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.EvaluationSource.Generations[0].SourceLockSha256 = lockDigest
+	manifest.EvaluationSource.Rounds[0].SourceLockSha256 = lockDigest
 	return manifest
 }
 
@@ -79,9 +87,9 @@ func TestStagingSourceManifestRejectsCrossModeAndHistoricalRelabeling(t *testing
 func TestStagingSourcePromotionRequiresApprovalAndKeepsZeroMargin(t *testing.T) {
 	manifest := stagingSourceTestManifest(t)
 	base := manifest.EvaluationSource.Generations[0]
-	commits := base.Repositories.commits()
+	commits := base.Repositories.commitsForMode(true)
 	commits["server"] = strings.Repeat("e", 40)
-	lockDigest, err := model.CompetitionSourceLockDigest(commits)
+	lockDigest, err := model.CompetitionSourceLockDigestForMode(commits, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +129,7 @@ func stagingSourceActivationFixture(t *testing.T) (*model.CompetitionSourceActiv
 	digest := sha256.Sum256(content)
 	intent := &model.CompetitionSourceActivation{Staging: true, StagingRoundWindowSeconds: 60, StagingPreparationSeconds: 0,
 		Manifest: content, ManifestSha256: hex.EncodeToString(digest[:]), SourceLockSha256: manifest.EvaluationSource.Generations[0].SourceLockSha256,
-		Commits: manifest.EvaluationSource.Generations[0].Repositories.commits()}
+		Commits: manifest.EvaluationSource.Generations[0].Repositories.commitsForMode(true)}
 	settings := &controller.Settings{AutomationPolicy: model.CompetitionAutomationPolicy{Enabled: true, Staging: true, StagingRoundWindowSeconds: 60}}
 	return intent, settings
 }
@@ -159,6 +167,12 @@ func TestStagingSourceRecoveryBindsPolicyManifestAndTiming(t *testing.T) {
 func TestStagingReviewedSourceChoiceRejectsCrossModeAndUnapprovedProof(t *testing.T) {
 	current, proposal, deadline := reviewedProposalFixture(t)
 	current.Staging, current.Threshold = true, 0
+	delete(current.Commits, "operator-proxy")
+	delete(proposal.Commits, "operator-proxy")
+	current.SourceLockSha256, _ = model.CompetitionSourceLockDigestForMode(current.Commits, true)
+	proposal.BaseSourceLockSha256 = current.SourceLockSha256
+	proposal.SourceLockSha256, _ = model.CompetitionSourceLockDigestForMode(proposal.Commits, true)
+	proposal.BuildReceipt.SourceLockSha256 = proposal.SourceLockSha256
 	proposal.Staging, proposal.BuildReceipt.Staging = true, true
 	proposal.Significance.TakeoverMarginPercent = 0
 	if chosen := selectReviewedSourceProposal([]reviewedSourceProposal{proposal}, current, deadline); chosen == nil {
@@ -186,6 +200,7 @@ func TestStagingSourcePublicationCannotTouchProductionRefs(t *testing.T) {
 	if err := reconcileSourcePublication(context.Background(), intent, backend); err == nil || len(backend.pushNames) != 0 {
 		t.Fatal("staging intent accepted production source refs")
 	}
+	intent.Refs = slices.DeleteFunc(intent.Refs, func(ref sourcePublicationRef) bool { return ref.Repository == "operator-proxy" })
 	for index := range intent.Refs {
 		if intent.Refs[index].Repository != "config" {
 			intent.Refs[index].Branch = stagingEvaluationSourceBranch

@@ -18,7 +18,7 @@ func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourc
 	if !sourceModeMatches(settings, intent) || intent.Environment != settings.AutomationPolicy.Environment || intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.State == "abandoned" || intent.TargetRoundId == (server.Id{}) {
 		return nil, ErrConflict
 	}
-	lock, err := model.CompetitionSourceLockDigest(intent.Commits)
+	lock, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
 	if err != nil || lock != intent.SourceLockSha256 || !imageDigestPattern.MatchString(intent.EvaluatorImageDigest) || !sha256Pattern.MatchString(intent.HostQualificationSha256) {
 		return nil, ErrConflict
 	}

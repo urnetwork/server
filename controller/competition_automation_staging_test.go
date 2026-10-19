@@ -15,7 +15,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Real publishers keep config on main while all eleven source repositories use the isolated staging branch.
+// Real publishers keep config on main while all ten source repositories use the isolated staging branch.
 func TestCompetitionAutomationStagingPublicationBranchesMatchRealProducer(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -30,10 +30,10 @@ func TestCompetitionAutomationStagingPublicationBranchesMatchRealProducer(t *tes
 			t.Fatal(err)
 		}
 		intent := competitionAutomationSourceIntent(t, fixture, result, 2)
-		if len(intent.Commits) != 11 || intent.GitRefs["config"].Branch != "main" {
+		if len(intent.Commits) != 10 || intent.GitRefs["config"].Branch != "main" {
 			t.Fatal("fixture does not match the real publication branch contract")
 		}
-		for _, repository := range []string{"config", "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
+		for _, repository := range []string{"config", "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 			wrong := intent
 			wrong.GitRefs = maps.Clone(intent.GitRefs)
 			ref := wrong.GitRefs[repository]

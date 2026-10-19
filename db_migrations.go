@@ -10500,4 +10500,7 @@ var migrations = []any{
 			DROP CONSTRAINT network_user_auth_wallet_pkey,
 			ADD CONSTRAINT network_user_auth_wallet_pkey PRIMARY KEY (user_id, blockchain);
 	`),
+
+	// 850: explicit staging source uses ten repositories; production keeps its historical eleven.
+	newSqlMigration(competitionAutomationStagingSourceGraphMigration),
 }

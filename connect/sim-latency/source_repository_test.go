@@ -37,6 +37,9 @@ func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
 	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, commit); err != nil {
 		t.Fatal(err)
 	}
+	if err := verifyFrozenSourceGraphForMode(context.Background(), serverRoot, commit, true); err != nil {
+		t.Fatalf("repository under test cannot use the retired staging graph: %v", err)
+	}
 }
 
 // Removing the operational-checkpoint dependency from the graph test must not
@@ -254,42 +257,39 @@ func TestSourceRepositoryCoverageRetainsSiblingLayoutBoundary(t *testing.T) {
 // Every independently deployed shell consumer must agree with the Go policy,
 // including both its iteration list and its exact-set JSON validator.
 func TestEvaluatorSourceToolsUseCompleteRepositorySet(t *testing.T) {
-	repositoryNames := sourceRepositoryNames()
-	repositoryList := strings.Join(repositoryNames, " ")
-	slices.Sort(repositoryNames)
-	policyPattern := regexp.MustCompile(`--argjson repositories '(\[[^'\n]+\])'`)
 	for _, fixture := range []struct {
 		path         string
-		iteration    string
 		validateJson bool
 	}{
-		{path: "evaluator/container/build-base.sh", iteration: "readonly REPOSITORIES=(" + repositoryList + ")", validateJson: true},
-		{path: "evaluator/container/prepare-evaluation-source.sh", iteration: "readonly REPOSITORIES=(" + repositoryList + ")", validateJson: true},
-		{path: "evaluator/container/build-submission.sh", iteration: "for repository in " + repositoryList + "; do", validateJson: true},
-		{path: "evaluator/container/evaluator.sh", iteration: "for repository in " + repositoryList + "; do", validateJson: false},
-		{path: "run-main.sh", iteration: "", validateJson: true},
+		{path: "evaluator/container/build-base.sh", validateJson: true},
+		{path: "evaluator/container/prepare-evaluation-source.sh", validateJson: true},
+		{path: "evaluator/container/build-submission.sh", validateJson: true},
+		{path: "evaluator/container/evaluator.sh", validateJson: false},
 	} {
 		scriptBytes, err := os.ReadFile(fixture.path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		script := string(scriptBytes)
-		if fixture.iteration != "" && strings.Count(script, fixture.iteration) != 1 {
+		if strings.Count(script, `for repository in "${REPOSITORIES[@]}"; do`) == 0 {
 			t.Errorf("%s does not iterate exactly the complete source set", fixture.path)
 		}
-		if fixture.validateJson {
-			matches := policyPattern.FindAllStringSubmatch(script, -1)
-			if len(matches) != 1 {
-				t.Fatalf("%s has %d repository validators, want 1", fixture.path, len(matches))
+		start := strings.Index(script, "\nREPOSITORIES=(")
+		end := strings.Index(script, "\nreadonly REPOSITORIES\n")
+		if start < 0 || end <= start {
+			t.Fatalf("%s lacks explicit mode-specific repository selection", fixture.path)
+		}
+		for _, staging := range []bool{false, true} {
+			command := exec.CommandContext(t.Context(), "bash", "-c", "set -Eeuo pipefail\n"+script[start:end]+"\nprintf '%s\\n' \"${REPOSITORIES[@]}\"\n")
+			command.Env = []string{"PATH=" + os.Getenv("PATH"), "staging=" + strconv.FormatBool(staging)}
+			output, err := command.CombinedOutput()
+			if err != nil || !slices.Equal(strings.Fields(string(output)), sourceRepositoryNamesForMode(staging)) {
+				t.Fatalf("%s staging=%t selected %q: %v", fixture.path, staging, output, err)
 			}
-			var policyRepositoryNames []string
-			if err := json.Unmarshal([]byte(matches[0][1]), &policyRepositoryNames); err != nil {
-				t.Fatal(err)
-			}
-			slices.Sort(policyRepositoryNames)
-			if !slices.Equal(policyRepositoryNames, repositoryNames) {
-				t.Errorf("%s validates %v, want %v", fixture.path, policyRepositoryNames, repositoryNames)
-			}
+		}
+		if fixture.validateJson && (!strings.Contains(script, `--argjson repositories "$repository_names_json"`) ||
+			!strings.Contains(script, `repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"`)) {
+			t.Errorf("%s JSON validation does not use its exact selected repository list", fixture.path)
 		}
 	}
 }
@@ -301,19 +301,13 @@ func TestEvaluatorBaseCopiesExactlyLockedRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	copyPattern := regexp.MustCompile(`(?m)^COPY source/([^\s]+) /workspace/([^\s]+)$`)
-	repositoryNames := []string{}
-	for _, match := range copyPattern.FindAllStringSubmatch(string(dockerfileBytes), -1) {
-		if match[1] != match[2] {
-			t.Errorf("image remaps source repository %s to %s", match[1], match[2])
-		}
-		repositoryNames = append(repositoryNames, match[1])
+	dockerfile := string(dockerfileBytes)
+	copyPattern := regexp.MustCompile(`(?m)^COPY source/.*$`)
+	if copies := copyPattern.FindAllString(dockerfile, -1); !slices.Equal(copies, []string{"COPY source/ /workspace/"}) {
+		t.Fatalf("image must copy only the builder's mode-specific source context: %v", copies)
 	}
-	slices.Sort(repositoryNames)
-	lockedRepositoryNames := sourceRepositoryNames()
-	slices.Sort(lockedRepositoryNames)
-	if !slices.Equal(repositoryNames, lockedRepositoryNames) {
-		t.Fatalf("image source repositories = %v, want %v", repositoryNames, lockedRepositoryNames)
+	if !strings.Contains(dockerfile, `if [ -d /workspace/operator-proxy ]; then git config --system --add safe.directory /workspace/operator-proxy; fi`) {
+		t.Fatal("retired repository trust is not conditional on production source presence")
 	}
 }
 
@@ -325,7 +319,7 @@ func TestEvaluatorBaseSourceLockPreservesAllCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(scriptBytes)
-	initializationStart := strings.Index(script, "\nreadonly REPOSITORIES=(")
+	initializationStart := strings.Index(script, "\nREPOSITORIES=(")
 	initializationEnd := strings.Index(script, "\n\nsource_record=")
 	collectionStart := strings.Index(script, "\nfor repository in \"${REPOSITORIES[@]}\"; do\n")
 	collectionEnd := strings.Index(script, "\nsource_lock_sha256=")
@@ -356,6 +350,7 @@ git() {
     [ "$1" != init ] || return 0
     [ "$1" = -C ] || return 91
     local repository="${2##*/}"
+    [ "$staging" != true ] || [ "$repository" != operator-proxy ] || return 95
     shift 2
     case "$1" in
         remote)
@@ -373,13 +368,21 @@ git() {
 }
 `
 	body := prelude + script[initializationStart:initializationEnd] + "\n" + script[collectionStart:collectionEnd] + "\nprintf '%s\\n' \"$base_sha\"\n"
-	for _, includeWorktree := range []bool{false, true} {
+	for _, mode := range []struct{ staging, includeWorktree bool }{
+		{staging: false, includeWorktree: false}, {staging: false, includeWorktree: true}, {staging: true, includeWorktree: false},
+	} {
+		includeWorktree := mode.includeWorktree
+		expectedCommits := maps.Clone(repositoryCommits)
+		if mode.staging {
+			delete(expectedCommits, "operator-proxy")
+		}
 		buildContext := t.TempDir()
 		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", body)
 		command.Env = []string{
 			"PATH=" + os.Getenv("PATH"), "LANG=C", "LC_ALL=C",
 			"WORKSPACE_ROOT=" + workspaceRoot, "build_context=" + buildContext,
 			"source_record=" + string(recordBytes), "include_worktree=" + strconv.FormatBool(includeWorktree),
+			"staging=" + strconv.FormatBool(mode.staging),
 		}
 		output, err := command.CombinedOutput()
 		if err != nil {
@@ -390,7 +393,7 @@ git() {
 		}
 		lockPath := filepath.Join(buildContext, "source-lock.json")
 		if !includeWorktree {
-			if _, err := loadEvaluatorSourceLock(lockPath); err != nil {
+			if _, err := loadEvaluatorSourceLockForMode(lockPath, mode.staging); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -402,8 +405,8 @@ git() {
 		if err := json.Unmarshal(lockBytes, &lock); err != nil {
 			t.Fatal(err)
 		}
-		if lock.Schema != 1 || lock.DevelopmentSnapshot != includeWorktree || !maps.Equal(lock.Repositories, repositoryCommits) {
-			t.Fatalf("include_worktree=%t: base source lock = %s, want commits %v", includeWorktree, lockBytes, repositoryCommits)
+		if lock.Schema != 1 || lock.DevelopmentSnapshot != includeWorktree || !maps.Equal(lock.Repositories, expectedCommits) {
+			t.Fatalf("staging=%t include_worktree=%t: base source lock = %s, want commits %v", mode.staging, includeWorktree, lockBytes, expectedCommits)
 		}
 	}
 }
@@ -533,6 +536,10 @@ case $1 in
                 cp "$SOURCE_TEST_IMAGE_ROOT/source-lock.json" "$3"
                 ;;
             synthetic-source-container:/workspace/*)
+                if [[ "$SOURCE_TEST_IMAGE_STAGING" == true && "$2" == */operator-proxy ]]; then
+                    printf 'retired staging repository was accessed\n' >&2
+                    exit 95
+                fi
                 cp -a "$SOURCE_TEST_IMAGE_ROOT/${2##*/}" "$3"
                 ;;
             *) exit 93 ;;
@@ -572,6 +579,7 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 	}{
 		{name: "complete"},
 		{name: "explicit-staging", staging: true, imageStage: true},
+		{name: "staging-retired-extra", staging: true, imageStage: true, extra: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "staging-rejects-production-image", staging: true, wantErr: "staging source requires an explicitly staging evaluator image"},
 		{name: "production-rejects-staging-image", imageStage: true, wantErr: "production source cannot use a staging evaluator image"},
 		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
@@ -585,6 +593,11 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		{name: "gvisor-mismatch", change: "gvisor", wantErr: "repository gvisor does not match the source lock"},
 	} {
 		lockedCommits := maps.Clone(repositoryCommits)
+		expectedCommits := maps.Clone(repositoryCommits)
+		if fixture.staging {
+			delete(lockedCommits, "operator-proxy")
+			delete(expectedCommits, "operator-proxy")
+		}
 		if fixture.omit != "" {
 			delete(lockedCommits, fixture.omit)
 		}
@@ -637,14 +650,14 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		if err := json.Unmarshal(output, &identity); err != nil {
 			t.Fatal(err)
 		}
-		if identity.Staging != fixture.staging || identity.Branch != sourceBranch(fixture.staging) || identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, repositoryCommits) {
-			t.Fatalf("prepared source identity = %+v, want image %s and repositories %v", identity, imageId, repositoryCommits)
+		if identity.Staging != fixture.staging || identity.Branch != sourceBranch(fixture.staging) || identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, expectedCommits) {
+			t.Fatalf("prepared source identity = %+v, want image %s and repositories %v", identity, imageId, expectedCommits)
 		}
 		moduleBytes, err := os.ReadFile(filepath.Join(destination, "connect", nestedModulePath))
 		if err != nil || string(moduleBytes) != nestedModule {
 			t.Fatalf("prepared nested module = %q, error = %v, want the locked repository's bytes", moduleBytes, err)
 		}
-		for _, repository := range sourceRepositoryNames() {
+		for _, repository := range sourceRepositoryNamesForMode(fixture.staging) {
 			preparedRoot := filepath.Join(destination, repository)
 			if branch := sourceTestGit(t, preparedRoot, "symbolic-ref", "--short", "HEAD"); branch != sourceBranch(fixture.staging) {
 				t.Errorf("prepared %s branch = %s", repository, branch)

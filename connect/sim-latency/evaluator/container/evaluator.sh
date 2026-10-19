@@ -277,6 +277,11 @@ if [ "$staging" = true ]; then
     source_branch=sim-latency-staging
     source_mode_args=(--staging)
 fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
+if [ "$staging" = true ]; then
+    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
+fi
+readonly REPOSITORIES
 round_id="$(jq -er '.round_id' "$request_path")"
 source_epoch="$(jq -er '.source_epoch' "$request_path")"
 attempt="$(jq -er '.attempt' "$request_path")"
@@ -707,7 +712,7 @@ seal_evaluation_source() {
     local root="$1" expected_server="$2" expected_patch="$3"
     [ "$root" = "$baseline_source_root" ] || [ "$root" = "$candidate_source_root" ] ||
         die "refusing to seal an unexpected source directory"
-    for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor; do
+    for repository in "${REPOSITORIES[@]}"; do
         local repository_root="$root/$repository"
         local expected_commit actual_branch actual_commit source_status
         expected_commit="$(jq -er --arg repository "$repository" \

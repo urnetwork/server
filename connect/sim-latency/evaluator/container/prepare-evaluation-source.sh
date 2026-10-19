@@ -9,8 +9,6 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
 
-readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
-
 base_image=""
 staging=false
 destination=""
@@ -100,6 +98,12 @@ else
         *) printf 'production source cannot use a staging evaluator image\n' >&2; exit 1 ;;
     esac
 fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
+if [ "$staging" = true ]; then
+    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
+fi
+readonly REPOSITORIES
+repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image_id")"
 base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image_id")"
 source_epoch="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-epoch"}}' "$base_image_id")"
@@ -126,7 +130,7 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
     printf 'evaluator source lock digest mismatch\n' >&2
     exit 1
 }
-jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp","gvisor"]' '
+jq -e --argjson repositories "$repository_names_json" '
     type == "object" and .schema == 1 and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and
