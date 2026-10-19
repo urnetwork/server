@@ -10957,6 +10957,64 @@ after 23:44 narrow the affected interval, but neither close the earlier
 trigger nor establish current health. This historical discriminator changes
 no automatic probe, cadence, threshold or runtime action.
 
+**Current-observation authority learned on 2026-10-19 (manual diagnostic
+practice; no new deployed reader or automatic closure rule):** exporter HTTP
+response time and a fresh published sample do not date the cached console
+reading behind them. Require the owning collector's last successful collection
+time for each pool before calling cached counts current; if it is unavailable,
+collection age stays unknown. Bind a sampler result to the present attempt's
+completed receipt, response hash, source interval and settings-generation
+checks. A copied prior receipt cannot establish that a new attempt completed.
+Direct PostgreSQL authentication or one successful console read establishes
+only that path and instant, not all-32 pool progress, sustained TPS or completed
+application work. The current triggering cause remains open; these controls do
+not change the §1.3b settings/owner or this section's coverage gap.
+
+A successful password-authenticated privilege invocation followed by a refused
+`sudo -n` command is an authentication-policy/cache boundary, not evidence of
+a database failure. Preserve valid collected siblings and mark the unattempted
+facts unknown. A native metric request receiving HTTP 429 establishes source
+admission failure. If its restricted response body and issuer were not retained,
+the reason remains unknown: do not assign query syntax, credentials, gateway
+limits, Mimir saturation or query size from the status or elapsed time alone,
+and do not retry blindly.
+
+For a cheap current throughput control, two fresh bounded read-only sessions
+can sample all-database commit and rollback counters about five seconds apart.
+Use exact integer deltas and measured source-clock elapsed; require the full
+same unique database-OID set, same postmaster, nondecreasing counters and
+unchanged reset tokens. A surviving intersection cannot certify the original
+scope. Missing `stats_reset` fields are invalid, but explicit SQL NULL has
+[source-defined semantics](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/utils/adt/pgstatfuncs.c#L1104):
+it represents a zero reset timestamp or no statistics entry. Newly allocated
+entries are [zero initialized](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/utils/activity/pgstat_shmem.c#L322),
+so unchanged explicit NULL tokens can accompany genuine counter progress.
+Report such a derivative separately from reset-continuity assurance: explicit
+resets record the current timestamp, while crash/statistics-restoration failure
+[can drop database entries](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/utils/activity/pgstat.c#L2044),
+which may be recreated with NULL. Same postmaster and nondecreasing values do
+not prove every drop/recreate reset excluded. A NULL/non-NULL transition or
+changed timestamp invalidates the paired derivative.
+
+False-positive qualifiers: this short published-counter derivative is not the
+dashboard's dynamically selected rate interval or proof of sustained capacity.
+Keep commit and rollback rates separate, as its transactions panel does, and
+record the selected host/database scope. PostgreSQL statistics
+[lag backend work and can be cached within a transaction](https://www.postgresql.org/docs/18/monitoring-stats.html#MONITORING-STATS-VIEWS);
+fresh sessions avoid the observer cache, not backend flush lag. Host CPU does
+not attribute PostgreSQL or query CPU; a one-console aggregate can hide another
+database pool's starvation. Low queue, unchanged timeouts or authentication
+success does not prove recovery or reduced incoming demand. Before accepting
+lower service demand, correlate request attempts/completions, cancellations,
+latency and useful completed work with the running service build and interval.
+
+False-negative qualifiers: unavailable collection age, privilege, current
+receipt, metric admission, database rows or fleet consoles cannot supply
+missing current facts. Short aggregate observations can miss brief stalls or
+individual saturated cores. Preserve the historical and current causal
+questions until their own missing evidence is obtained; this diagnostic
+practice authorizes no restart, tuning or production write.
+
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
