@@ -1,6 +1,23 @@
 // Orphan repair takes one endpoint fence for a bounded primary-key page. The
 // minute task rediscovers deferred rows; foreground owners never wait for a
 // cleanup that is itself waiting for another endpoint or connection row.
+//
+// Handler expiry deletes a handler only on evidence that its process ended,
+// not merely that its heartbeat stopped. A heartbeat is a database write, so
+// a failing database path stops the heartbeats of every live process at once:
+// on 2026-10-19 a pooler livelock held them off for three hours, expiry, which
+// still got through, deleted all 22 live handlers and retired their rows, and
+// each connect process then shut itself down on its next heartbeat, dropping
+// 74k providers. Every connect process also stamps its handler in the provider
+// liveness writer set in Redis every few seconds (provider_liveness_lease.go),
+// and the stamps kept coming throughout. So a stale handler whose process
+// still has a current stamp is kept, and one without is deleted. When the set
+// cannot vouch, because the read failed or no process stamped within the
+// window, the fleet decides: stale handlers are deleted only while at least as
+// many handlers still heartbeat, which holds for a dead process, a lost host
+// and a restarted fleet, but not for a heartbeat path that failed for all.
+// Deferral keeps a handler's rows connected; its heartbeat or the next round
+// settles it.
 package model
 
 import (
@@ -8,10 +25,51 @@ import (
 	"errors"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
 const networkClientHandlerRetirementPageSize = 64
+
+// The most stale handlers one expiry round judges. A fleet has a few dozen;
+// the rest wait for the next round.
+const networkClientHandlerExpiryCandidateLimit = 1024
+
+// The budget of expiry's read of the writer set. The round runs once a minute
+// off the request path, so it can wait longer than a FindProviders2 read.
+const networkClientHandlerStampReadTimeout = 2 * time.Second
+
+// Stale handlers by expiry's verdict, as its metric labels them.
+const (
+	// deleted, with their connection rows retired
+	networkClientHandlerExpiryExpired = "expired"
+	// kept: the process still stamps the writer set
+	networkClientHandlerExpiryDeferredStamped = "deferred_stamped"
+	// kept: the writer set could not vouch, and fewer handlers heartbeat than
+	// went stale
+	networkClientHandlerExpiryDeferredFleet = "deferred_fleet"
+)
+
+var networkClientHandlerExpiryCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_network_client_handler_expiry_total",
+	Help: "Connect handlers whose heartbeat was older than the expiry cutoff, by verdict: expired, deleted with their connection rows retired; deferred_stamped, kept because the process still stamps the provider liveness writer set; deferred_fleet, kept because the set could not vouch and fewer handlers heartbeat than went stale",
+}, []string{"verdict"})
+
+// Registers the expiry metric with the default registry, every verdict at zero.
+func init() {
+	prometheus.MustRegister(networkClientHandlerExpiryCounter)
+	for _, verdict := range []string{
+		networkClientHandlerExpiryExpired,
+		networkClientHandlerExpiryDeferredStamped,
+		networkClientHandlerExpiryDeferredFleet,
+	} {
+		networkClientHandlerExpiryCounter.WithLabelValues(verdict)
+	}
+}
 
 // The first 4096 clients, in order, that have an open row without a handler
 // row: the result of SELECT DISTINCT client_id ... WHERE c.connected AND NOT
@@ -72,14 +130,13 @@ const networkClientOrphanConnectionRetireSql = `UPDATE network_client_connection
  WHERE c.ctid=ANY($2::text[]::tid[])
  AND NOT EXISTS(SELECT 1 FROM network_client_handler h WHERE h.handler_id=c.handler_id LIMIT 1 OFFSET 0)`
 
-// Discover orphans without endpoint fences, then retire one bounded client page
-// per transaction. Busy endpoints and excess rows remain eligible next minute.
+// Expire the handlers that ended (see the file header), then discover orphans
+// without endpoint fences and retire one bounded client page per transaction.
+// Busy endpoints and excess rows remain eligible next minute.
 func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 	ctx = providerWorkSessionContext(ctx)
 	disconnectTime := server.NowUtc()
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_handler WHERE heartbeat_time < $1`, minTime.UTC()))
-	}, server.TxReadCommitted)
+	expireNetworkClientHandlers(ctx, minTime, readNetworkClientHandlerStamps)
 
 	// Handler deletion is not a complete orphan index: a connect may race that
 	// deletion, and old processes may have left connections without any handler.
@@ -171,4 +228,160 @@ func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, cli
 	}
 	server.RaisePgResult(tx.Exec(ctx, networkClientOrphanConnectionRetireSql, disconnectTime, ownedAddresses))
 	providerWorkRetainSessionEventsInTx(ctx, tx, clientId)
+}
+
+// Deletes the stale handlers judged ended (see the file header) and counts every
+// stale handler by verdict. readStamps returns the handlers whose process
+// stamped the writer set within the window, and whether the set could vouch at
+// all.
+func expireNetworkClientHandlers(
+	ctx context.Context,
+	minTime time.Time,
+	readStamps func(ctx context.Context, handlerIds []server.Id) (stampedHandlerIds map[server.Id]bool, stampsKnown bool),
+) {
+	var staleHandlerIds []server.Id
+	var freshCount int
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		staleHandlerIds = nil
+		rows, err := tx.Query(
+			ctx,
+			`SELECT handler_id FROM network_client_handler WHERE heartbeat_time < $1 ORDER BY heartbeat_time, handler_id LIMIT $2`,
+			minTime.UTC(),
+			networkClientHandlerExpiryCandidateLimit,
+		)
+		server.Raise(err)
+		defer rows.Close()
+		for rows.Next() {
+			var handlerId server.Id
+			server.Raise(rows.Scan(&handlerId))
+			staleHandlerIds = append(staleHandlerIds, handlerId)
+		}
+		rowErr := rows.Err()
+		rows.Close()
+		server.Raise(rowErr)
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT count(*) FROM network_client_handler WHERE heartbeat_time >= $1`,
+			minTime.UTC(),
+		).Scan(&freshCount))
+	}, server.TxReadCommitted)
+	if len(staleHandlerIds) == 0 {
+		return
+	}
+
+	// no database connection is held across the Redis read
+	stampedHandlerIds, stampsKnown := readStamps(ctx, staleHandlerIds)
+	expiredHandlerIds, deferredStampedCount, deferredFleetCount := selectExpiredNetworkClientHandlers(
+		staleHandlerIds,
+		freshCount,
+		stampedHandlerIds,
+		stampsKnown,
+	)
+	expiredCount := 0
+	if 0 < len(expiredHandlerIds) {
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// a handler that heartbeat since the read is no longer stale and stays
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_client_handler WHERE handler_id = ANY($1::uuid[]) AND heartbeat_time < $2`,
+				expiredHandlerIds,
+				minTime.UTC(),
+			))
+			expiredCount = int(tag.RowsAffected())
+		}, server.TxReadCommitted)
+	}
+	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryExpired).Add(float64(expiredCount))
+	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredStamped).Add(float64(deferredStampedCount))
+	networkClientHandlerExpiryCounter.WithLabelValues(networkClientHandlerExpiryDeferredFleet).Add(float64(deferredFleetCount))
+	if 0 < deferredStampedCount+deferredFleetCount {
+		glog.Infof(
+			"[nch]handler expiry kept %d of %d stale handlers (%d still stamp liveness, %d without fleet evidence, %d heartbeat)\n",
+			deferredStampedCount+deferredFleetCount,
+			len(staleHandlerIds),
+			deferredStampedCount,
+			deferredFleetCount,
+			freshCount,
+		)
+	}
+}
+
+// The stale handlers to delete, and how many are kept for each reason. While the
+// writer set can vouch (stampsKnown), a handler is kept if its process still
+// stamps (in stampedHandlerIds) and deleted if not. Otherwise every stale
+// handler is deleted while at least as many handlers still heartbeat
+// (freshCount), and every one is kept while fewer do.
+func selectExpiredNetworkClientHandlers(
+	staleHandlerIds []server.Id,
+	freshCount int,
+	stampedHandlerIds map[server.Id]bool,
+	stampsKnown bool,
+) (expiredHandlerIds []server.Id, deferredStampedCount int, deferredFleetCount int) {
+	if stampsKnown {
+		for _, handlerId := range staleHandlerIds {
+			if stampedHandlerIds[handlerId] {
+				deferredStampedCount += 1
+			} else {
+				expiredHandlerIds = append(expiredHandlerIds, handlerId)
+			}
+		}
+		return
+	}
+	if 0 < freshCount && len(staleHandlerIds) <= freshCount {
+		expiredHandlerIds = staleHandlerIds
+		return
+	}
+	deferredFleetCount = len(staleHandlerIds)
+	return
+}
+
+// The handlers whose process stamped the provider liveness writer set within its
+// window, judged as FindProviders2 judges writer coverage, and whether the set
+// could vouch at all: not when the read failed or ran past its budget, or when
+// no process stamped within the window.
+func readNetworkClientHandlerStamps(ctx context.Context, handlerIds []server.Id) (stampedHandlerIds map[server.Id]bool, stampsKnown bool) {
+	handlerMembers := make([]string, len(handlerIds))
+	for i, handlerId := range handlerIds {
+		handlerMembers[i] = handlerId.String()
+	}
+	var newestCmd *redis.ZSliceCmd
+	var stampCmd *redis.FloatSliceCmd
+	readErr := readProviderLivenessWithin(ctx, networkClientHandlerStampReadTimeout, func(readCtx context.Context, pipe redis.Pipeliner) {
+		newestCmd = pipe.ZRevRangeWithScores(readCtx, providerLivenessWritersKey, 0, 0)
+		stampCmd = pipe.ZMScore(readCtx, providerLivenessWritersKey, handlerMembers...)
+	})
+	if readErr != nil || providerLivenessZSliceFailed(newestCmd) || providerLivenessFloatSliceFailed(stampCmd) {
+		return nil, false
+	}
+	return judgeNetworkClientHandlerStamps(
+		handlerIds,
+		server.NowUtc().UnixMilli(),
+		providerLivenessNewestMillis(newestCmd),
+		providerLivenessStampMillis(stampCmd),
+	)
+}
+
+// The handlers stamped within the writer window at now, from the set's newest
+// stamp and each handler's stamp in handlerIds order, all in unix milliseconds,
+// zero for none, and whether the set vouches at all: not when it is stale
+// (judgeProviderLivenessStamps), or when the stamps do not answer every handler.
+func judgeNetworkClientHandlerStamps(
+	handlerIds []server.Id,
+	nowMillis int64,
+	newestMillis int64,
+	stampMillis []int64,
+) (stampedHandlerIds map[server.Id]bool, stampsKnown bool) {
+	if len(stampMillis) != len(handlerIds) {
+		return nil, false
+	}
+	current, ok := judgeProviderLivenessStamps(nowMillis, newestMillis, stampMillis, providerLivenessWriterWindow)
+	if !ok {
+		return nil, false
+	}
+	stampedHandlerIds = map[server.Id]bool{}
+	for i, handlerId := range handlerIds {
+		if current[i] {
+			stampedHandlerIds[handlerId] = true
+		}
+	}
+	return stampedHandlerIds, true
 }

@@ -10,6 +10,7 @@ import (
 	// "net"
 	"net/netip"
 	// "regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	// "strings"
@@ -4507,6 +4508,31 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 			return
 		}
 	})
+	return
+}
+
+// Whether the handler row exists, read once on the primary without retry. A
+// database failure is returned rather than raised, so a caller can count the
+// read as one the database did not answer; a programming fault still raises.
+func NetworkClientHandlerExists(ctx context.Context, handlerId server.Id) (exists bool, returnErr error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err, ok := r.(error)
+		if _, fault := r.(runtime.Error); fault || !ok {
+			panic(r)
+		}
+		exists, returnErr = false, err
+	}()
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`SELECT EXISTS(SELECT 1 FROM network_client_handler WHERE handler_id = $1)`,
+			handlerId,
+		).Scan(&exists))
+	}, server.OptReadOnly(), server.OptNoRetry())
 	return
 }
 
