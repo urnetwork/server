@@ -962,6 +962,28 @@ func TestSubtensorConvergenceGenerationRejectsUnsupportedContainerWithoutContact
 	}
 }
 
+// Snow's published Finney archive runs as subtensor-mainnet (xops
+// SUBTENSOR-MAINNET-CUTOVER.md). The probe asks the restricted helper for that
+// container and qualifies its generation like the testnet pair; before
+// 2026-10-19 it called the archive unsupported and never observed it.
+func TestSubtensorConvergenceGenerationQualifiesTheMainnetArchiveContainer(t *testing.T) {
+	now := time.Date(2099, 2, 3, 4, 5, 6, 0, time.UTC)
+	settings := subtensorConvergenceGenerationTestSettings(nil, now)
+	settings.Hosts[1].Subtensor.Nodes[0].ContainerName = "subtensor-mainnet"
+	payload := subtensorConvergenceGenerationTestPayload(t, now, settings, subtensorConvergenceGenerationTestHealthyFixture())
+	identity := subtensorConvergenceGenerationTestIdentity(t, now.Add(-2*time.Hour))
+	source, capture := subtensorConvergenceGenerationTestTransport(now, payload, func(HostSettings, string, int) string { return identity })
+	settings.Source = source
+	alerts, err := NewSubtensorConvergenceSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("the mainnet archive container was not qualified: alerts=%+v err=%v", alerts, err)
+	}
+	// once before and once after the pinned query, like the testnet pair
+	if capture.helperCallKVs[settings.Hosts[1].Name+"\x00subtensor-mainnet"] != 2 {
+		t.Fatalf("the helper did not bracket the mainnet archive's query: calls=%v", capture.helperCallKVs)
+	}
+}
+
 func TestSubtensorConvergenceGenerationPreservesPartialVisibilityOnMetricsFailure(t *testing.T) {
 	now := time.Date(2099, 2, 3, 4, 5, 6, 0, time.UTC)
 	for _, test := range []struct {

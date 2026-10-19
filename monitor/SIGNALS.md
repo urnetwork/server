@@ -34822,11 +34822,16 @@ archive answered runtime 479, transaction 1, EVM `0x3c4`, 40 peers and a head
 within one block of `entrypoint-finney`. Take the inventory from the
 publication record and an independent Finney read, never by restarting the
 retired unit, which would contend for the archive's P2P port. False-negative
-qualifier: snow's `subtensor-monitor` helper inspects only `subtensor` and
-`subtensor-lightnode`, and Fluent Bit still scrapes the retired testnet
-metrics ports, so the mainnet archive's container identity and §17.5
-convergence stay `cannot-observe` until Xops extends both; that is a coverage
-gap, not health. Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
+qualifier: until snow runs a `subtensor-monitor` helper and sudoers rule that
+accept `subtensor-mainnet` and Fluent Bit scrapes the archive's metrics port
+instead of the retired testnet ports, the mainnet archive's container identity
+and §17.5 convergence stay `cannot-observe`; that is a coverage gap, not
+health. Since 2026-10-19 the §17.5 probe asks the helper for the three
+containers it is written for (`subtensor`, `subtensor-lightnode`,
+`subtensor-mainnet`) and refuses any other name without contact
+(`TestSubtensorConvergenceGenerationQualifiesTheMainnetArchiveContainer`,
+`TestSubtensorConvergenceGenerationRejectsUnsupportedContainerWithoutContact`).
+Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
 `TestSubtensorSignalNamesTheConfiguredLauncherWhenItStops`,
 `TestSubtensorSignalDefaultsToTheTestnetLauncherUnit` and
 `TestSubtensorSettingsRejectAnInvalidLauncherUnit`.
