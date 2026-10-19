@@ -2897,6 +2897,29 @@ ownership proof. This record is diagnostic context, not another alert or a
 replacement for unchanged panic thresholds. The prefix receives no ignore rule;
 unexpected error-shaped text remains eligible for the normal novel detector.
 
+**2026-10-19 rendered-alert triage correction:** derive ownership, error type and
+SQLSTATE only from the typed `Evidence` → `sample:` fields (or their original
+structured alert fields). `Action`, `Context`, `Mechanism`, `Verify`, playbook
+text and the Evidence `meaning:` line are guidance, never observed error
+provenance. Searching a whole rendered alert for SQLSTATE or function names
+can import the generic SQLSTATE 25006/StampTopLevelClientContractTime advice
+into unrelated incidents. A retained audit of thirty blocks found no sample
+SQLSTATE; twenty-seven samples explicitly said unknown and two blocks had no
+sample. The earlier read-only-error associations were withdrawn; real panic
+rates remain observations with unresolved causes. Missing, duplicate,
+malformed or unrecognized samples stay unknown, never healthy. Keep aggregate
+and owner rates overlapping, preserve source hashes and field provenance, and
+require original error plus emitting artifact before selecting a causal fix.
+This corrects offline triage; monitor thresholds and Action guidance are
+unchanged. A field-aware private reducer passed ten hermetic synthetic controls;
+a separately qualified retained replay matched all thirty original hashes:
+twenty-seven typed samples, one unrecognized and two missing, with every
+SQLSTATE unknown. This is
+offline triage qualification, not a Main read or production repair. false_positive_qualifiers: guidance tokens and source-only
+possible mechanisms do not establish runtime errors. false_negative_qualifiers:
+scrubbing, unsupported sample grammar, absent samples and missing original
+errors can hide the discriminator; a null projection does not clear an alert.
+
 The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 200-byte prefix truncation; the owner discriminator now survives a long error
 body without retaining it. Ownership identifies a call and recovery boundary,
