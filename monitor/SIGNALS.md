@@ -23143,6 +23143,16 @@ whether that resource exists and parses, and sorted missing field names. Secret
 values and malformed parser input are discarded while settings are loaded and
 can never reach a monitor alert or state file.
 
+The `account-email` requirement reads the vault's `.aws/credentials`, the
+shared credentials file the containers see at `/root/.aws` and the AWS SDK's
+default chain loads for SES and Pinpoint SMS, and for the extender's Route 53
+publish when `extender.yml` sets no static keys (main sets none): the
+`[default]` profile's `aws_access_key_id` and `aws_secret_access_key`.
+False-negative qualifier (2026-10-19): until then it read `aws.yml`, which no
+sender loads; that file held keys AWS rejected as `InvalidClientTokenId` while
+the requirement stayed green. Presence still does not prove the keys work or
+that the account may send (§19.3).
+
 Historical rotation qualifier ([secret-rotation runbook, §2.2, §5 and dated
 readiness updates](../../factury/postmortem/2026-10-13-secret-rotation.md)):
 resource presence or a file `MATCH` does not prove that its consumer is enabled,
@@ -36913,6 +36923,13 @@ normally (1,868 API and 2,444 Taskworker sends). `vault/main/aws.yml` had not
 changed since 2023 and the Pinpoint SMS v2 sender has been in place since
 2026-04-16, so the refusal is an IAM policy state outside the repositories.
 The closure is an operator IAM change, not a software release.
+Correction (2026-10-19, later): the sender does not read `vault/main/aws.yml`
+(its keys are invalid); the containers' `/root/.aws` resolves to the vault's
+`.aws/credentials` (updated 2025-12-03), whose principal is the same IAM user.
+After the operator's policy change a dry-run `SendTextMessage` with those
+credentials passed IAM and was refused with `Access Denied` pointing at the
+account's SMS spend threshold, so SMS stays down until the account's monthly
+SMS spend limit is raised; Route 53 publishing recovered at 03:39Z.
 
 Implementation convention: SIGNALS.md §19.3 (`account-messages`) maps to
 `signal_account_messages.go` and `signal_account_messages_test.go`, registered
