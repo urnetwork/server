@@ -2525,8 +2525,8 @@ func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 	}
 }
 
-// The smoke must exercise the same epoch-specific margin embedded in the
-// immutable image instead of silently substituting a development threshold.
+// The smoke binds the immutable epoch margin to its authenticated source mode:
+// staging requires exact zero, while production remains strictly positive.
 func TestContainerSmokeUsesFrozenEpochMargin(t *testing.T) {
 	scriptBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/smoke-test.sh")
 	if err != nil {
@@ -2537,7 +2537,13 @@ func TestContainerSmokeUsesFrozenEpochMargin(t *testing.T) {
 		`base_source_epoch="$(jq -er '.source_epoch' <<<"$base_identity")"`,
 		`source-check --epoch "$base_source_epoch"`,
 		`--repos-root /workspace --json`,
-		`'.significant_improvement_percent / 100 | select(. > 0 and . <= 0.5)'`,
+		`jq -er --argjson staging "$staging"`,
+		`if $staging then .staging == true and .branch == "sim-latency-staging"`,
+		`else ((has("staging") | not) or .staging == false) and .branch == "sim-latency" end`,
+		`.significant_improvement_percent | select(type == "number")`,
+		`select(if $staging then . == 0 else . > 0 and . <= 50 end) | . / 100`,
+		`select(if $staging then . == 0 else . > 0 and . <= 0.5 end)`,
+		`if [ "$staging" = true ]; then takeover_margin=0.0; fi`,
 		`"APEX_EPOCH=$base_source_epoch"`,
 		`"APEX_TAKEOVER_MARGIN=$takeover_margin"`,
 	} {

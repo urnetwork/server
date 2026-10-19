@@ -17,10 +17,11 @@ readonly REDIS_IMAGE='redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82d
 
 original_args=("$@")
 base_image=""
+staging=false
 source_mode_args=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --staging) source_mode_args=(--staging) ;;
+        --staging) staging=true; source_mode_args=(--staging) ;;
         -*) printf 'usage: smoke-test.sh [IMAGE] [--staging]\n' >&2; exit 2 ;;
         *)
             [ -z "$base_image" ] || { printf 'usage: smoke-test.sh [IMAGE] [--staging]\n' >&2; exit 2; }
@@ -284,9 +285,18 @@ base_source_record="$(sudo -n docker run --rm \
     source-check --epoch "$base_source_epoch" \
     --source-config /opt/urnetwork/sim-latency.yml \
     --repos-root /workspace --json)"
-takeover_margin="$(jq -er \
-    '.significant_improvement_percent / 100 | select(. > 0 and . <= 0.5)' \
-    <<<"$base_source_record")"
+# Bind the margin to explicit mode and the authenticated source branch. Zero
+# is staging-only; production keeps its positive, at-most-fifty-percent rule.
+takeover_margin="$(jq -er --argjson staging "$staging" '
+    select(.schema == 1 and
+        (if $staging then .staging == true and .branch == "sim-latency-staging"
+         else ((has("staging") | not) or .staging == false) and .branch == "sim-latency" end)) |
+    .significant_improvement_percent | select(type == "number") |
+    select(if $staging then . == 0 else . > 0 and . <= 50 end) | . / 100 |
+    select(if $staging then . == 0 else . > 0 and . <= 0.5 end)
+    ' <<<"$base_source_record")"
+# The immutable official runner requires decimal text even for numeric zero.
+if [ "$staging" = true ]; then takeover_margin=0.0; fi
 
 sudo -n docker run --rm \
     --network none \
