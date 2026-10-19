@@ -60,6 +60,8 @@ var handlerRetirementCounter = prometheus.NewCounterVec(
 	[]string{"event"},
 )
 
+// Registers the retirement metric with the default registry, every event at
+// zero.
 func init() {
 	prometheus.MustRegister(handlerRetirementCounter)
 	for _, event := range []string{
