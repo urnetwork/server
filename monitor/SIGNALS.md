@@ -19589,7 +19589,12 @@ out.
 Outside 72 hours before the earliest start to the end of the watch after the
 latest the signal is otherwise quiet, whatever the gauges say. A part the
 verdict cannot read is `cannot-observe`, beside the findings the rest of it
-gives. No start series means the switch is set, true, false or unreadable,
+gives. For both readiness and the post-flip drop, a dashboard source-read
+start more than 30 seconds in the monitor's future is `cannot-observe`,
+never evidence that a bucket is ready, recovered, or fallen; this permits
+the same small cross-host clock skew as adjacent Mimir source checks.
+Independent fleet-disagreement findings still stand. No start series means
+the switch is set, true, false or unreadable,
 so no flip is scheduled and only the fleet's agreement is judged: the
 owner's postponement silences the rest, and a moved start moves its windows.
 When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
@@ -37690,11 +37695,14 @@ totals, its failure share, and the failed/attempted counts by sending job. No
 address, phone number, message or identity leaves Mimir.
 
 ACTION: read the failing service's `[aws]account <channel> send failed (<code>)`
-line for the SDK error code and fix the provider side. `AccessDeniedException`
-is an IAM policy that does not allow `ses:SendEmail` or
-`sms-voice:SendTextMessage` for the messaging user on the configured identity
-or origination number; `ThrottlingException` is a quota; a suspended identity
-or origination number refuses every call. Do not retry sends by hand or
+line for the SDK error code, then use the provider's original error details
+to distinguish the cause before changing provider settings.
+`AccessDeniedException` alone cannot distinguish an IAM policy denying
+`ses:SendEmail` or `sms-voice:SendTextMessage` from an SMS account spend
+threshold refusal. `ThrottlingException` reports throttling; a suspended
+identity or origination number can also refuse every call. The counters
+contain no original error details; missing details leave the cause unknown.
+Do not retry sends by hand or
 restart services for this alone: the credential and policy are read per call,
 so a policy fix applies to the next send. Verify with one successful send on
 the channel (`sent > 0`), then a real sign-in code arriving.
