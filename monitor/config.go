@@ -55,6 +55,7 @@ type monitorYaml struct {
 			AddressFamilies  []string `yaml:"address_families"`
 		} `yaml:"proxy"`
 		Subtensor *struct {
+			LauncherUnit               string `yaml:"launcher_unit"`
 			PublicRPCURL               string `yaml:"public_rpc_url"`
 			ExpectedChain              string `yaml:"expected_chain"`
 			ExpectedGenesisHash        string `yaml:"expected_genesis_hash"`
@@ -385,6 +386,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		h.Proxy = selectedProxyHostSettings(h.Proxy, proxyServiceConfigured, legacyProxy)
 		if configured.Subtensor != nil {
 			h.Subtensor = &SubtensorHostSettings{
+				LauncherUnit:               strings.TrimSpace(configured.Subtensor.LauncherUnit),
 				PublicRPCURL:               configured.Subtensor.PublicRPCURL,
 				ExpectedChain:              configured.Subtensor.ExpectedChain,
 				ExpectedGenesisHash:        configured.Subtensor.ExpectedGenesisHash,

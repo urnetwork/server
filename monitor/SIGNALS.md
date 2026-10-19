@@ -2807,6 +2807,20 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+False-positive qualifier for `novel`: the prober's per-provider egress-health
+result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit`
+(qualityprobe/prober), names in `failed=` the destinations one provider failed
+in a measurement that ran. It is the measurement working, judged by §2.19b
+`egress-site-pool` and §2.23 `egress-outcomes`, not an error of the emitting
+Taskworker, and it stays out of `novel` by its `ok=<n>/<n>` tally. The
+prober's `did not run` and `skipped` lines carry no tally and stay eligible.
+On 2026-10-18 these records were Main's top novel shape (46/min of 178/min
+across 21 shapes), so the alert's sample showed a provider's DNS timeout
+instead of the unclassified errors beside it. Controls:
+`TestEgressHealthResultRecordsStayOutOfNovel` (result records at three times
+the rate stay healthy) and `TestEgressHealthCheckThatDidNotRunRemainsNovel`
+(checks that did not run still alert).
+
 Task finalization remains a separate failure boundary from the function result.
 A recovered `task finalization failed` or `task completion batch remains
 unacknowledged` record can accompany an execution that returned successfully.
@@ -9737,6 +9751,26 @@ An inflight phase can locate a currently blocked call before it completes;
 completed sum/count alone cannot describe calls still blocked. Join the exact
 process/source and scrape clock before comparing intervals. A request's model
 outcome and its HTTP delivery are still different observations.
+
+Initial GET failures additionally emit one fixed `provider-picker` failure log
+record from the existing model observation owner, including the active phase,
+total and final-phase elapsed residence, completion UTC, return/panic kind,
+finite typed cause and caller-context state. Error/panic text, caller identifiers,
+keys, SQL and payloads are never formatted. Bounded incomplete cause graphs are
+unknown; cancellation/deadline joined with an independent failure remains mixed.
+Observation failure cannot replace the original return or panic. Success emits
+no failure record and read/outcome counters keep their original semantics.
+The two Redis phases measure the initial document and eligibility-filter loader
+residence, including admission, command wait and decoding; they do not partition
+those waits or prove a Redis/PG outage. Source/container identity must come from
+the owning log stream and artifact attestation, not this event alone. Existing
+Done recovery may omit ErrorJson, so this event preserves a future canceled
+call's stage/elapsed/cause without changing router recovery. It cannot prove
+client abandonment versus give-up after dependency delay, HTTP delivery, or the
+cause of a historical event before rollout. Require one unambiguous affected
+attempt/ingress join before cancellation ownership attribution. No new metric
+labels, source request or background owner is introduced. API rollout and the
+normal post-boundary recovery windows remain required; no incident fix is claimed.
 
 Deterministic controls hold sixteen actual initial-picker filter pipelines at
 an explicit test-only barrier, then either release valid results or cancel the
@@ -26414,6 +26448,20 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
   `minio-bucket-quota`; it cannot name the bucket because the per-bucket API
   counters (`/minio/metrics/v3/bucket/api`) need `?buckets=` and are not
   scraped.
+  False-positive qualifier: two expected answers count as write 4xx while
+  nothing is refused. The API's create-only `PutIfAbsent` (`blob.go`, SN
+  attempt uploads in `startifact`) answers 412 `PreconditionFailed` whenever a
+  client re-uploads a content-addressed object that already exists, and MinIO's
+  own replication permission probes (`X-Minio-Source-Replication-Request`) get
+  400 `ReplicationPermissionCheck` from the object-locked `competition-replica`.
+  On 2026-10-19 a 30 s `mc admin trace --errors` on edge-5 attributed every
+  failed write to those two (about 16/s and 4/s, 11.7% of PutObject and about
+  all DeleteObject over 30 minutes) while `competition` and its replica held
+  the same 202 objects and no quota or capacity class fired. The bounded trace,
+  grouped by bucket, API, status and client, is the discriminator. False
+  negative: the counters carry no status or bucket, so a real refusal can hide
+  inside that floor until it raises the share; `minio-bucket-quota` and
+  `minio-drive-capacity` remain the direct controls.
 - `minio-metrics-unobservable`. Frame `drives`: no complete fresh drive family
   (missing, stale, a drive series count unequal to `minio_system_drive_count`,
   a missing health gauge, an online drive without coherent free/total, or a
@@ -34558,6 +34606,29 @@ matches. Rebuild and promote the watcher when its inventory changes. Do not
 restart, replace, or reset a progressing historical node solely because the
 public current runtime advanced. A lower public spec, or any
 chain/genesis/runtime name/EVM mismatch, remains `subtensor-identity`.
+
+The launcher unit is inventory, `launcher_unit` in the host's subtensor
+settings (a plain unit name; empty keeps the testnet archive's `subtensor`).
+False-positive qualifier: since the 2026-10-07 Finney publication
+(`xops/main/ansible/SUBTENSOR-MAINNET-CUTOVER.md`) snow serves its mainnet
+archive through `subtensor-mainnet.service`, and the publication run keeps
+`subtensor.service` stopped and disabled and the testnet light node retired;
+`/etc/subtensor/mainnet-published` records the published identity. An
+inventory still naming the testnet nodes pages `subtensor-gateway`
+(`subtensor=inactive`) and `subtensor-runtime-ahead` against the testnet
+reference for a healthy archive, as it did until 2026-10-19 while snow's
+archive answered runtime 479, transaction 1, EVM `0x3c4`, 40 peers and a head
+within one block of `entrypoint-finney`. Take the inventory from the
+publication record and an independent Finney read, never by restarting the
+retired unit, which would contend for the archive's P2P port. False-negative
+qualifier: snow's `subtensor-monitor` helper inspects only `subtensor` and
+`subtensor-lightnode`, and Fluent Bit still scrapes the retired testnet
+metrics ports, so the mainnet archive's container identity and §17.5
+convergence stay `cannot-observe` until Xops extends both; that is a coverage
+gap, not health. Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
+`TestSubtensorSignalNamesTheConfiguredLauncherWhenItStops`,
+`TestSubtensorSignalDefaultsToTheTestnetLauncherUnit` and
+`TestSubtensorSettingsRejectAnInvalidLauncherUnit`.
 
 On 2026-09-03, the public testfinney endpoint retained chain `Bittensor`,
 genesis `0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105`,

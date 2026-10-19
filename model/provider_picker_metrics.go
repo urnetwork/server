@@ -17,9 +17,10 @@ type providerPickerMetricSet struct {
 	phaseInflight            *prometheus.GaugeVec
 	phases                   map[string]*providerPickerPhaseMetrics
 	now                      func() time.Time
+	failure                  func(providerPickerFailure)
 }
 
-// Fixed, exclusive model stages. Redis stages include their wrapper PING,
+// Fixed, exclusive model stages. Redis stages include wrapper admission,
 // command/pipeline wait and decoding; they do not claim Redis server CPU.
 var providerPickerPhases = []string{"caller_location", "initial_cache", "search_index", "location_cache", "filters", "format_result"}
 
@@ -38,6 +39,7 @@ func newProviderPickerMetricSet() *providerPickerMetricSet {
 		phaseInflight: prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_provider_picker_phase_inflight", Help: "Picker model calls currently in each fixed exclusive phase"}, []string{"surface", "phase"}),
 		phases:        map[string]*providerPickerPhaseMetrics{},
 		now:           time.Now,
+		failure:       logProviderPickerFailure,
 	}
 	for _, surface := range []string{"initial", "search", "direct"} {
 		for _, outcome := range []string{"nonempty", "empty", "error"} {
@@ -64,10 +66,12 @@ func init() {
 // One request owns this state. Finishing is idempotent so deferred cleanup
 // releases the final phase on a normal return, canceled read or panic.
 type providerPickerObservation struct {
-	metrics *providerPickerMetricSet
-	surface string
-	phase   *providerPickerPhaseMetrics
-	started time.Time
+	metrics        *providerPickerMetricSet
+	surface        string
+	phase          *providerPickerPhaseMetrics
+	started        time.Time
+	requestStarted time.Time
+	phaseName      string
 }
 
 func (self *providerPickerObservation) enter(phase string) {
@@ -76,6 +80,10 @@ func (self *providerPickerObservation) enter(phase string) {
 		return
 	}
 	self.finish()
+	if self.requestStarted.IsZero() {
+		self.requestStarted = self.metrics.now()
+	}
+	self.phaseName = phase
 	self.phase = next
 	self.started = self.metrics.now()
 	next.inflight.Inc()
