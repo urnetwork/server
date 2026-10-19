@@ -213,8 +213,12 @@ func newCompetitionQualificationProofFixture(t testing.TB) *competitionQualifica
 	fixture.result = evaluatorResult{Schema: 1, JobId: jobId.String(), Score: &ScoreResult{
 		ScoreSchema: ScoreSchema, RawScore: &raw, NormalizedScore: &normalized, Placeable: true,
 		Significance: &ScoreSignificance{Method: "one-sided-welch-t", Alpha: .05, ReplicateCount: 1, BaselineMeanRawScore: 100, CandidateMeanRawScore: 100},
-		Gates:        map[string]Gate{"synthetic-success": {Passed: true, Details: map[string]any{}}},
-		Diagnostics:  map[string]any{"baseline_sha256": baselineArtifact.Sha256, "baseline_takeover_eligible": false}},
+		Gates: map[string]Gate{
+			"G1_success": {Passed: true, Details: map[string]any{}}, "G2_volume": {Passed: true, Details: map[string]any{}},
+			"G3_path_integrity": {Passed: true, Details: map[string]any{}}, "G4_matchmaking": {Passed: true, Details: map[string]any{}},
+			"G5_stability": {Passed: true, Details: map[string]any{}}, "G6_resources": {Passed: true, Details: map[string]any{}},
+		},
+		Diagnostics: map[string]any{"baseline_sha256": baselineArtifact.Sha256, "baseline_takeover_eligible": false}},
 		Security: evaluationSecurity{TemplateDatabaseReset: true, RedisReset: true, CgroupContained: true, ResourceLimits: true, ManagementCpuReserved: true,
 			ManagementMemoryReserved: true, DefaultDenyNetwork: true, OfflineBuild: true, OfflineBuildResourceLimits: true, NoProductionSecrets: true, StructuralPatchCheck: true,
 			AccountingComplete: true, ResourceReportComplete: true, CleanupComplete: true, ImmutableReports: true, CgroupId: "synthetic-cgroup", TemplateDatabaseId: "synthetic-template", RedisGenerationId: "synthetic-redis"}}
@@ -244,6 +248,74 @@ func TestCompetitionHostQualificationAuthenticatesExactProbeEvidence(t *testing.
 	}
 }
 
+// The real scorer uses six mixed-case gate identifiers and can include
+// mixed-case diagnostic labels. Only those data maps receive the exception.
+func TestCompetitionHostQualificationAuthenticatesMixedCaseScorerData(t *testing.T) {
+	fixture := newCompetitionQualificationProofFixture(t)
+	fixture.result.Score.Gates["G4_matchmaking"].Details["SyntheticSamples"] = []any{map[string]any{"PoolP05": 4.0}}
+	fixture.result.Score.Diagnostics["SyntheticProbe"] = map[string]any{"RequestCount": 32.0}
+	scoreBytes, err := json.Marshal(fixture.result.Score)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.write(t, "score.json", scoreBytes)
+	fixture.publish(t)
+	if err := authenticateCompetitionQualification(fixture.directory, fixture.request, fixture.settings); err != nil {
+		t.Fatalf("real-shaped scorer maps were rejected: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(fixture.directory, "worker-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var control evaluatorResult
+	if err := decodeFailureEvidenceJson(content, &control); err == nil {
+		t.Fatal("qualification exception weakened the separate failure/control decoder")
+	}
+}
+
+// Allowing gate names never permits duplicate data keys, protocol aliases,
+// unknown typed fields, appended documents or unbounded diagnostic nesting.
+func TestCompetitionHostQualificationRejectsAmbiguousResultFields(t *testing.T) {
+	fixture := newCompetitionQualificationProofFixture(t)
+	content, err := os.ReadFile(filepath.Join(fixture.directory, "worker-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{name: "root alias", before: `"schema":`, after: `"Schema":`},
+		{name: "score alias", before: `"raw_score":`, after: `"Raw_Score":`},
+		{name: "significance alias", before: `"significance":`, after: `"Significance":`},
+		{name: "significance field alias", before: `"method":`, after: `"Method":`},
+		{name: "gate field alias", before: `"passed":true`, after: `"Passed":true`},
+		{name: "security alias", before: `"offline_build":`, after: `"Offline_Build":`},
+		{name: "artifact alias", before: `"artifacts":`, after: `"Artifacts":`},
+		{name: "duplicate gate name", before: `"G1_success":`, after: `"G1_success":{"passed":true,"details":{}},"G1_success":`},
+		{name: "duplicate typed key", before: `"passed":true`, after: `"passed":false,"passed":true`},
+		{name: "duplicate diagnostic key", before: `"details":{}`, after: `"details":{"Synthetic":1,"Synthetic":2}`},
+		{name: "unknown gate field", before: `"passed":true`, after: `"unknown":true,"passed":true`},
+		{name: "excessive diagnostic nesting", before: `"details":{}`, after: `"details":` + strings.Repeat(`{"Synthetic":`, 65) + `null` + strings.Repeat(`}`, 65)},
+	} {
+		changed := strings.Replace(string(content), sample.before, sample.after, 1)
+		if changed == string(content) {
+			t.Fatalf("%s mutation did not change the result", sample.name)
+		}
+		fixture.write(t, "worker-result.json", []byte(changed))
+		if err := authenticateCompetitionQualification(fixture.directory, fixture.request, fixture.settings); err == nil {
+			t.Fatalf("ambiguous %s result was accepted", sample.name)
+		}
+	}
+	for _, malformed := range [][]byte{append(bytes.Clone(content), []byte(`{}`)...), append(bytes.Clone(content), 0xff)} {
+		fixture.write(t, "worker-result.json", malformed)
+		if err := authenticateCompetitionQualification(fixture.directory, fixture.request, fixture.settings); err == nil {
+			t.Fatal("appended or invalid utf-8 result was accepted")
+		}
+	}
+}
+
 // Fresh outer hashes must not hide wrong-round completions, false cleanup,
 // source substitution, score disagreement or missing container evidence.
 func TestCompetitionHostQualificationRejectsAdjacentProofSubstitution(t *testing.T) {
@@ -259,7 +331,12 @@ func TestCompetitionHostQualificationRejectsAdjacentProofSubstitution(t *testing
 		{name: "security", mutate: func(f *competitionQualificationProofFixture) { f.result.Security.OfflineBuild = false }},
 		{name: "score mismatch", mutate: func(f *competitionQualificationProofFixture) { *f.result.Score.RawScore = 99 }},
 		{name: "score gate", mutate: func(f *competitionQualificationProofFixture) {
-			f.result.Score.Gates["synthetic-success"] = Gate{Passed: false}
+			f.result.Score.Gates["G1_success"] = Gate{Passed: false, Details: map[string]any{}}
+		}},
+		{name: "missing gate", mutate: func(f *competitionQualificationProofFixture) { delete(f.result.Score.Gates, "G6_resources") }},
+		{name: "substituted gate", mutate: func(f *competitionQualificationProofFixture) {
+			f.result.Score.Gates["synthetic-success"] = f.result.Score.Gates["G6_resources"]
+			delete(f.result.Score.Gates, "G6_resources")
 		}},
 		{name: "score margin", mutate: func(f *competitionQualificationProofFixture) { f.result.Score.Significance.TakeoverMarginPercent = 1 }},
 		{name: "baseline", mutate: func(f *competitionQualificationProofFixture) {

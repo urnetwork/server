@@ -32,6 +32,18 @@ type competitionPreparationTestState struct {
 	receipts  []model.CompetitionSourceReadiness
 }
 
+// A single adapter caller must never reach the network when a durable receipt
+// already settles the API step, including when that receipt is invalid.
+type competitionPreparationHttpTripwire struct {
+	calls int
+}
+
+// Records attempted transport without sending credentials or contacting a host.
+func (self *competitionPreparationHttpTripwire) RoundTrip(*http.Request) (*http.Response, error) {
+	self.calls++
+	return nil, errors.New("synthetic unexpected API request")
+}
+
 // Builds role-shaped synthetic evidence only inside private tests.
 func competitionPreparationTestReceipt(intent *model.CompetitionSourceActivation, role, actor, image string) model.CompetitionSourceReadiness {
 	return model.CompetitionSourceReadiness{Staging: intent.Staging, Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId,
@@ -140,6 +152,123 @@ func TestCompetitionPreparationAdapterOrdersIndependentEvidenceAndReplays(t *tes
 	replayed, err := adapter.run(context.Background(), request)
 	if err != nil || *replayed != *first || blobs.retainedWrites != 1 {
 		t.Fatalf("replay changed retained identity: %+v %v", replayed, err)
+	}
+}
+
+// The original authenticated API acknowledgment survives a failed host probe
+// and later API rollout; retry uses it without rewriting its pinned identity.
+func TestCompetitionPreparationAdapterReusesPersistedApiAfterQualificationFailure(t *testing.T) {
+	adapter, request, state, blobs := newCompetitionPreparationAdapterFixture(t)
+	runProgram := adapter.runProgram
+	failure := errors.New("synthetic initial host qualification failure")
+	adapter.runProgram = func(context.Context, string, string, any, []string) error { return failure }
+	if _, err := adapter.run(context.Background(), request); !errors.Is(err, failure) {
+		t.Fatalf("initial qualification did not stop at the controlled failure: %v", err)
+	}
+	state.stateLock.Lock()
+	original := append([]model.CompetitionSourceReadiness(nil), state.receipts...)
+	state.stateLock.Unlock()
+	if len(original) != 1 || original[0].Role != "api" || !sourcePreparationReceiptMatches(&request.Intent, original[0]) {
+		t.Fatal("first attempt did not persist its authenticated API acknowledgment")
+	}
+	transport := &competitionPreparationHttpTripwire{}
+	adapter.client = &http.Client{Transport: transport}
+	adapter.runProgram = runProgram
+	if result, err := adapter.run(context.Background(), request); err != nil || result == nil {
+		t.Fatalf("exact receipt retry failed: %v", err)
+	}
+	state.stateLock.Lock()
+	defer state.stateLock.Unlock()
+	if transport.calls != 0 || blobs.retainedWrites != 1 || !reflect.DeepEqual(state.events, []string{"api", "qualify", "worker"}) {
+		t.Fatalf("retry repeated API publication or skipped host evidence: calls=%d events=%v", transport.calls, state.events)
+	}
+	if len(state.receipts) != 2 || !reflect.DeepEqual(state.receipts[0], original[0]) || state.receipts[1].Role != "worker" {
+		t.Fatal("retry replaced immutable API evidence or fabricated worker completion")
+	}
+}
+
+// Foreign, incomplete, duplicate or differently pinned API rows are refused
+// before a network call or host command; retry cannot replace bad evidence.
+func TestCompetitionPreparationAdapterRejectsMismatchedPersistedApiReceipts(t *testing.T) {
+	adapter, request, state, _ := newCompetitionPreparationAdapterFixture(t)
+	transport := &competitionPreparationHttpTripwire{}
+	adapter.client = &http.Client{Transport: transport}
+	commands := 0
+	adapter.runProgram = func(context.Context, string, string, any, []string) error { commands++; return nil }
+	original := competitionPreparationTestReceipt(&request.Intent, "api", "synthetic-promoter", adapter.config.ApiImageDigest)
+	differentDigest := func(value string) string {
+		if value == strings.Repeat("a", len(value)) {
+			return strings.Repeat("b", len(value))
+		}
+		return strings.Repeat("a", len(value))
+	}
+	for _, sample := range []struct {
+		name   string
+		mutate func(*model.CompetitionSourceReadiness)
+	}{
+		{name: "environment", mutate: func(value *model.CompetitionSourceReadiness) { value.Environment = "synthetic-other-environment" }},
+		{name: "competition", mutate: func(value *model.CompetitionSourceReadiness) { value.CompetitionId = "synthetic-other-competition" }},
+		{name: "season", mutate: func(value *model.CompetitionSourceReadiness) { value.SeasonId = "synthetic-other-season" }},
+		{name: "mode", mutate: func(value *model.CompetitionSourceReadiness) { value.Staging = !value.Staging }},
+		{name: "generation", mutate: func(value *model.CompetitionSourceReadiness) { value.Generation++ }},
+		{name: "round", mutate: func(value *model.CompetitionSourceReadiness) { value.TargetRoundId = server.NewId() }},
+		{name: "manifest commit", mutate: func(value *model.CompetitionSourceReadiness) {
+			value.ManifestCommit = differentDigest(value.ManifestCommit)
+		}},
+		{name: "manifest digest", mutate: func(value *model.CompetitionSourceReadiness) {
+			value.ManifestSha256 = differentDigest(value.ManifestSha256)
+		}},
+		{name: "source lock", mutate: func(value *model.CompetitionSourceReadiness) {
+			value.SourceLockSha256 = differentDigest(value.SourceLockSha256)
+		}},
+		{name: "qualification", mutate: func(value *model.CompetitionSourceReadiness) {
+			value.QualificationSha256 = differentDigest(value.QualificationSha256)
+		}},
+		{name: "image", mutate: func(value *model.CompetitionSourceReadiness) { value.RuntimeImageDigest = testWorkerImageDigest() }},
+		{name: "actor", mutate: func(value *model.CompetitionSourceReadiness) { value.ActorId = "" }},
+		{name: "ready", mutate: func(value *model.CompetitionSourceReadiness) { value.Ready = false }},
+		{name: "duplicate", mutate: nil},
+	} {
+		changed := original
+		if sample.mutate != nil {
+			sample.mutate(&changed)
+			if reflect.DeepEqual(changed, original) {
+				t.Fatalf("%s mutation did not change the receipt", sample.name)
+			}
+		}
+		expected := []model.CompetitionSourceReadiness{changed}
+		if sample.mutate == nil {
+			expected = append(expected, original)
+		}
+		state.stateLock.Lock()
+		state.receipts = append([]model.CompetitionSourceReadiness(nil), expected...)
+		state.stateLock.Unlock()
+		if _, err := adapter.run(context.Background(), request); err == nil {
+			t.Fatalf("%s persisted API evidence was accepted", sample.name)
+		}
+		state.stateLock.Lock()
+		unchanged := reflect.DeepEqual(state.receipts, expected)
+		state.stateLock.Unlock()
+		if !unchanged || transport.calls != 0 || commands != 0 {
+			t.Fatalf("%s receipt was replaced or bypassed: calls=%d commands=%d", sample.name, transport.calls, commands)
+		}
+	}
+}
+
+// Store unavailability cannot be mistaken for absence and trigger replacement
+// of an immutable acknowledgment whose contents were never authenticated.
+func TestCompetitionPreparationAdapterReceiptReadFailureStopsBeforeApi(t *testing.T) {
+	adapter, request, _, _ := newCompetitionPreparationAdapterFixture(t)
+	transport := &competitionPreparationHttpTripwire{}
+	adapter.client = &http.Client{Transport: transport}
+	failure := errors.New("synthetic durable receipt read failure")
+	adapter.receipts = func(context.Context, *Settings, int64) ([]model.CompetitionSourceReadiness, error) {
+		return nil, failure
+	}
+	commands := 0
+	adapter.runProgram = func(context.Context, string, string, any, []string) error { commands++; return nil }
+	if _, err := adapter.run(context.Background(), request); !errors.Is(err, failure) || transport.calls != 0 || commands != 0 {
+		t.Fatalf("failed receipt read was bypassed: %v calls=%d commands=%d", err, transport.calls, commands)
 	}
 }
 
