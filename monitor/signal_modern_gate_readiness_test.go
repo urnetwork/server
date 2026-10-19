@@ -427,6 +427,127 @@ func TestModernGateReadinessNeedsCurrentCounts(t *testing.T) {
 	}
 }
 
+// A source read beyond the monitor's clock-skew allowance is unknown, even
+// when its counts would show readiness or a drop. Fleet findings survive.
+func TestModernGateReadinessSignalRejectsFutureCounts(t *testing.T) {
+	start := modernGateReadinessTestStart
+	before := start.Add(-time.Second)
+	for _, test := range []struct {
+		name         string
+		now          time.Time
+		modern       float64
+		bucket       float64
+		missingStart bool
+	}{
+		{name: "ready before the start", now: start.Add(-time.Hour), modern: 90, bucket: 100},
+		{name: "unready before the start", now: start.Add(-time.Hour), modern: 10, bucket: 100},
+		{name: "unchanged after the start", now: start.Add(time.Hour), modern: 90, bucket: 100},
+		{name: "fallen after the start", now: start.Add(time.Hour), modern: 10, bucket: 10},
+		{name: "disagreeing fleet before the start", now: start.Add(-time.Hour), modern: 90, bucket: 100, missingStart: true},
+	} {
+		processes := modernGateReadinessTestProcesses(4, test.now, !test.now.Before(start), &start)
+		if test.missingStart {
+			processes[0].start = nil
+		}
+		observation := modernGateReadinessTestObservation(test.now, test.modern, 100-test.modern, test.modern, 100-test.modern)
+		payloads := map[int64]string{
+			test.now.Unix(): modernGateReadinessTestPayload(t, test.now, processes, test.now.Add(31*time.Second), observation.shadow,
+				map[string]float64{model.RankModeQuality: test.bucket, model.RankModeSpeed: test.bucket}),
+			before.Unix(): modernGateReadinessTestPayload(t, before, nil, before, nil,
+				map[string]float64{model.RankModeQuality: 100, model.RankModeSpeed: 100}),
+		}
+		alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, test.now, payloads))
+		unknown, fleet := 0, 0
+		if err != nil {
+			// Without an independent finding, the signal returns its
+			// observation error for the monitor to classify as unknown.
+			if test.missingStart || len(alerts) != 0 || !strings.Contains(err.Error(), "future") {
+				t.Fatalf("%s: alerts %+v err %v", test.name, alerts, err)
+			}
+			unknown += 1
+		}
+		for _, alert := range alerts {
+			switch alert.Class {
+			case "cannot-observe":
+				unknown += 1
+				if !isVisibilityAlert(alert) {
+					t.Errorf("%s: future source read is not an explicit visibility failure: %+v", test.name, alert)
+				}
+			case "modern-gate-fleet-disagrees":
+				fleet += 1
+			default:
+				t.Errorf("%s: future counts produced %s", test.name, alert.Class)
+			}
+		}
+		wantFleet := 0
+		if test.missingStart {
+			wantFleet = 1
+		}
+		if unknown != 1 || fleet != wantFleet {
+			t.Errorf("%s: visibility=%d fleet=%d, want 1/%d; alerts=%+v", test.name, unknown, fleet, wantFleet, alerts)
+		}
+	}
+}
+
+// Modest source clock skew remains accepted; outside a verdict window or
+// after the kill switch the counts are not used, so their age stays irrelevant.
+func TestModernGateReadinessSignalPreservesClockSkewAndInactiveCounts(t *testing.T) {
+	start := modernGateReadinessTestStart
+	before := start.Add(-time.Second)
+	for _, test := range []struct {
+		name string
+		now  time.Time
+		skew time.Duration
+		on   bool
+	}{
+		{name: "current before the start", now: start.Add(-time.Hour)},
+		{name: "allowed skew before the start", now: start.Add(-time.Hour), skew: 30 * time.Second},
+		{name: "current after the start", now: start.Add(time.Hour), on: true},
+		{name: "allowed skew after the start", now: start.Add(time.Hour), skew: 30 * time.Second, on: true},
+		{name: "kill switch after the start", now: start.Add(time.Hour), skew: time.Hour},
+		{name: "before the warning window", now: start.Add(-73 * time.Hour), skew: time.Hour},
+		{name: "after the watch", now: start.Add(19 * time.Hour), skew: time.Hour, on: true},
+	} {
+		observation := modernGateReadinessTestObservation(test.now, 90, 10, 90, 10)
+		payloads := map[int64]string{
+			test.now.Unix(): modernGateReadinessTestPayload(t, test.now, modernGateReadinessTestProcesses(4, test.now, test.on, &start), test.now.Add(test.skew), observation.shadow, observation.buckets),
+			before.Unix():   modernGateReadinessTestPayload(t, before, nil, before, nil, observation.buckets),
+		}
+		alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, test.now, payloads))
+		if err != nil || len(alerts) != 0 {
+			t.Errorf("%s: alerts %+v err %v, want quiet", test.name, alerts, err)
+		}
+	}
+}
+
+// Non-finite and negative clock values stay observation errors at parsing,
+// before a source time can be converted into a readiness decision.
+func TestModernGateReadinessSignalRejectsInvalidCountTimes(t *testing.T) {
+	start := modernGateReadinessTestStart
+	now := start.Add(-time.Hour)
+	observation := modernGateReadinessTestObservation(now, 90, 10, 90, 10)
+	payload := modernGateReadinessTestPayload(t, now, modernGateReadinessTestProcesses(4, now, false, &start), now, observation.shadow, observation.buckets)
+	for _, value := range []string{"NaN", "+Inf", "-Inf", "-1"} {
+		var response mimirInstantResponse
+		if err := json.Unmarshal([]byte(payload), &response); err != nil {
+			t.Fatal(err)
+		}
+		for _, series := range response.Data.Result {
+			if series.Metric["monitor_modern_gate_part"] == "counts_started" {
+				series.Value[1] = json.RawMessage(strconv.Quote(value))
+			}
+		}
+		invalid, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alerts, err := modernGateReadinessTestSignal("").Run(context.Background(), modernGateReadinessTestSettings(t, now, map[int64]string{now.Unix(): string(invalid)}))
+		if err == nil || len(alerts) != 0 || !strings.Contains(err.Error(), "invalid sample") {
+			t.Errorf("%s: alerts %+v err %v, want an invalid-sample observation error", value, alerts, err)
+		}
+	}
+}
+
 // One taskworker process as Mimir holds it: when it started, and the gate
 // and the start it publishes, nil for none.
 type modernGateReadinessTestProcess struct {

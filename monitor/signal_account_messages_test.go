@@ -147,6 +147,31 @@ func TestAccountMessagesSignalSyntheticChannelDeliversNothing(t *testing.T) {
 	}
 }
 
+// The same provider denial code can describe an IAM policy or an SMS spend
+// restriction. Send counters contain neither code nor original error details.
+func TestAccountMessagesDownDoesNotAssignAccessDeniedCause(t *testing.T) {
+	for _, channel := range []string{"sms", "email"} {
+		alerts := runAccountMessagesFixture(t, []accountMessagesFixture{
+			{job: "api", channel: channel, result: "failed", value: 3},
+		})
+		alert := requireAlertClass(t, alerts, "account-message-channel-down")
+		if len(alerts) != 1 || alert.Frame != "channel="+channel || alert.Severity != SeverityPage || alert.Sustain != 2 {
+			t.Fatalf("%s: denial guidance changed the channel-down verdict: %+v", channel, alerts)
+		}
+		if strings.Contains(alert.Context, "AccessDeniedException is an IAM policy") {
+			t.Errorf("%s: a provider code alone was attributed to IAM: %s", channel, alert.Context)
+		}
+		for _, want := range []string{"AccessDeniedException alone does not identify the cause", "IAM policy", "SMS", "spend threshold"} {
+			if !strings.Contains(alert.Context, want) {
+				t.Errorf("%s: denial guidance lacks %q: %s", channel, want, alert.Context)
+			}
+		}
+		if !strings.Contains(alert.Action, "provider's original error details") {
+			t.Errorf("%s: provider changes lack the original refusal discriminator: %s", channel, alert.Action)
+		}
+	}
+}
+
 // Timeouts count as failures: a channel whose calls all time out is down.
 func TestAccountMessagesSignalSyntheticTimeoutsOnlyIsDown(t *testing.T) {
 	alerts := runAccountMessagesFixture(t, []accountMessagesFixture{
