@@ -237,10 +237,9 @@ active missing capability and must not be read as green.
 | 2.4b | Coverage gap | A free-space runway check for the database host's root filesystem is missing: `host-load` reads load, CPU and available memory only, and `vacuum-health` measures neither growth nor temp spill. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.6b | Coverage gap | A probe of the contract degradation valve state is missing: `open-contracts` and `contract-rate` show the close backlog and creation rate that drive it, not whether exhausted payers get free contracts or providers go unpaid. |
-| 2.11a | Coverage gap | A monitor reader of the PgBouncer pool exporter is missing: Grafana rules evaluate it, while `pgbouncer-stalls` checks listener admission and app-side 6432 write timeouts and `log-errors` counts queue-timeout lines. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 3.6a | Coverage gap | A per-channel sharded-subscriber census is missing: `redis-topology` checks membership and phantoms, and `redis-keyevents` checks keyspace-notification patterns, not SSUBSCRIBE channels. |
-| 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
+| 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
 | 5.4 | Runbook | `redis-memory`, `redis-buffers`, `redis-process`, `log-errors` |
@@ -250,7 +249,7 @@ active missing capability and must not be read as green.
 | 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
 | 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
-| 5.12 | Runbook | `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters and pool starvation come from §2.2b and §2.11a evidence outside the monitor |
+| 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters come from §2.2b evidence outside the monitor |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
@@ -703,6 +702,76 @@ fail closed, and the cleanup change does not establish complete legacy Redis
 coverage. Record exact writer adoption and actual publication/missing/error
 observations; neither waiting 60 minutes nor a healthy sample proves that every
 legacy member has valid evidence.
+
+### 1.1a Connected providers — the provider-supply collapse canary
+Probe: `provider-connections`
+
+Every Connect process exports `urnetwork_connect_provider_connections`, the
+providers connected to it. Their fleet sum is the supply every user's
+connection draws on. Read it through the loopback Mimir of a services host:
+
+```promql
+sum(urnetwork_connect_provider_connections{env="main"})                       # current
+max_over_time(sum(urnetwork_connect_provider_connections{env="main"})[5m:1m])  # best minute of the last five
+quantile_over_time(0.9, sum(urnetwork_connect_provider_connections{env="main"})[24h:5m]) # 24 h level
+```
+
+The probe also reads the 24 h point count, the newest sample's
+`timestamp()`, and the reporting process count now and at its 24 h maximum.
+The 24 h level is the 90th percentile of the sum at five-minute steps.
+
+- HEALTHY: the 5 minute best is at least half the 24 h level. In the week
+  to 2026-10-19 the sum ran 55k–77k: it stayed within about a third of any
+  24 h level, including a day at 55k against 74k. Providers reconnect
+  within about three minutes of a full restart (2,166 at 13:13Z → 58,144 at
+  13:17Z after the 2026-10-19 13:14Z PgBouncer fix, 72,599 at 13:25Z), so a
+  planned restart of every block keeps at least one minute of the five above
+  the line.
+- BROKEN (`provider-connections-collapse`, PAGE, sustain 1; the five minute
+  window is its sustain): the 5 minute best is below half the 24 h level.
+  An environment whose 24 h level is below 1,000 providers is too small to
+  judge and stays quiet.
+- UNKNOWN (`provider-connections-unobservable`, WARN visibility, two probes):
+  no series, a newest sample older than three minutes, under an hour (12
+  points) of 24 h history, or a malformed, negative, duplicated or unknown
+  tagged sample. A full Connect outage also leaves no series: §1.1's
+  PostgreSQL floor and Connect's accepted handshakes (§2.11a) separate it from
+  a Fluent Bit or Mimir fault.
+- False-positive qualifiers: a dying process keeps its last value for up to
+  Mimir's 5 minute lookback, so the sum lags a crash by that long; a rollout
+  that keeps half the providers away for five minutes is itself the outage.
+- False-negative qualifiers: a collapse that lasts longer than about 21 hours
+  lowers its own 24 h level and clears; a loss of less than half the
+  providers (one host's Connect blocks, for example) is not this page.
+- Action line: "read the Connect blocks' warp journals for `Deploy fail ...
+  not ready` and their /status (§13.4); if readiness fails on PostgreSQL
+  follow §2.11a and §5.12 and hold deploys and restarts, otherwise §5.1".
+
+Why this exists (2026-10-19): PgBouncer starvation (§2.11a) failed Connect's
+startup readiness (`error not ready: pg: timeout: context deadline
+exceeded`), warp polled `/status` for its window, logged `Deploy fail`,
+stopped and pruned the container and redeployed every two to three minutes,
+and the sum fell from 74.6k at 10:26Z to 1.76k at 11:46Z, reported by 6 of
+the usual 22 Connect processes (the `beta` blocks started before the onset and
+the few containers that happened to pass readiness). Nothing in the
+monitor read this gauge. §1.1 did not cover the sag: sampled PostgreSQL
+creation counts stayed far above its 1,000/min floor (41.9k at 09:40Z, 25.8k
+at 10:15Z, 13.5k at 11:00Z, 9.4k at 13:00Z), and its trailing-hour median
+followed the decline down. Replayed on the Mimir `urnetwork_contract_opened_total`
+proxy, its learned band met the three-minute rule only at 11:01–11:02Z
+(13.9k against a 30.0k median), an hour after onset and only for a watcher
+that had run long enough to hold an hour of local history.
+
+Backtest (read-only Mimir history): the rule over the per-minute sum from
+2026-10-12 16:13Z to 2026-10-19 13:55Z pages in seven runs and nowhere else:
+10-12 19:59–20:07 (the 2026-10-12 PgBouncer livelock), 10-13 08:14–08:23
+(the planned primary restart, §5.13), 10-19 04:02–04:03 and 04:55–05:06 (the
+early-morning pool starvation and the 05:01Z simultaneous edge reboot), and
+10:38–10:53 and 11:13–13:15. The probe's own query replayed at two-minute
+steps through the production parser pages 10:38–10:52 and 11:14–13:14. The
+24 h level is a 90th percentile, not the maximum, because the sum briefly
+overcounts around restarts and handoffs: it read 87k for four minutes at
+05:34Z against a 76k level.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`
@@ -10940,6 +11009,16 @@ loopback exporter (§2.11a). The monitor still does not read that exporter, so
 this requirement stays open for the monitor, and Grafana coverage does not
 turn monitor silence into a healthy pool reading.
 
+2026-10-19: the monitor now reads that exporter every minute as §2.11a
+`pgbouncer-pool-starvation` (`pgbouncer-pools-starved`,
+`pgbouncer-pool-starved-shard`, `pgbouncer-pools-unobservable`). It departs
+from the requirement above in one place: a fleet page does not need every
+enabled shard to be starved. Two or more pools starved for 30 s or past the
+5 s client deadline page, because on 2026-10-19 the patched pgbouncer@1 kept
+its servers while the other 31 starved and a healthy sibling serves only its
+own share. One such pool warns after two observations and pages after five
+minutes; established-server pressure stays this section's case.
+
 An authorized restart restored backend capacity immediately, but the earlier
 restart did not prevent this recurrence. Keep the incident open until every
 enabled shard has established capacity and paired response/assignment progress
@@ -10994,6 +11073,7 @@ still recorded no closed cause; do not assign it the October 12 mechanism by
 resemblance.
 
 ### 2.11a PgBouncer pool starvation — exporter, Grafana rules and corroboration
+Probe: `pgbouncer-pool-starvation`
 
 The 2026-10-12 livelock (§2.11) left most pools with queued clients and no
 server while PostgreSQL, the 6432 listener and every PgBouncer unit stayed up,
@@ -11086,12 +11166,116 @@ waiting, 0 maximum wait and at least 19 servers per pool.
 
 False-negative qualifiers: these are Grafana rules. The monitor's
 `pgbouncer-stalls` probe does not read the exporter, so monitor silence is not
-pool health. A console that stops answering drops its pool from the starved
+pool health (2026-10-19: `pgbouncer-pool-starvation` now does; see the monitor
+reader below). A console that stops answering drops its pool from the starved
 rule, where no data counts as OK, leaving only the two-minute exporter-down
 warning. Starvation shorter than one 15 s reading is invisible. During a full
 PostgreSQL stop the backends rule sees the held last value and stays quiet;
 use `accepted` handshakes and a direct 5432 read. A rule that routes to the
 broken email contact point notifies no one.
+
+**Monitor reader (2026-10-19).** `pgbouncer-pool-starvation` reads the
+exporter's series through the loopback Mimir of a services host every minute
+(alert id `mimir/pgbouncer-pool-starvation`): per instance `pgbouncer_up` and
+`timestamp(pgbouncer_up)`, and per pool the waiting-clients, servers, logins,
+maximum-wait and starved-seconds gauges, each tagged with `monitor_metric`. A
+starved pool is *old* when `pgbouncer_pool_starved_seconds >= 30` (two
+exporter readings) or `pgbouncer_pool_maxwait_seconds >= 5`, the services'
+ping and BEGIN deadline (`PgPingTimeout`, `PgBeginTimeout` in server
+`db.go`). A pool that is empty while its first login completes is neither.
+
+- `pgbouncer-pools-starved` (PAGE, sustain 1): two or more old starved pools.
+  Pools with servers do not clear it: nginx spreads new sessions over every
+  pool, so a healthy sibling serves only its own share.
+- `pgbouncer-pool-starved-shard` (WARN, sustain 2, PAGE after five
+  consecutive minutes): exactly one old starved pool; target
+  `<env>/<host>/pgbouncer@N`.
+- `pgbouncer-pools-unobservable` (WARN visibility, sustain 2): no exporter
+  series; a console that did not answer; an instance sample older than two
+  minutes; a pool missing a gauge; or a malformed, negative or unlabeled
+  sample. Pools that were read are still evaluated, so it accompanies rather
+  than replaces a page. Every console unanswered at once can be PgBouncer
+  frozen on its log writes (§5.12): corroborate before blaming the exporter.
+
+Not covered by the reader: queued clients behind busy servers stay §2.11's
+busy-server pressure and the Grafana queue-wait rule; a starvation shorter
+than one 15 s reading is invisible; and the exporter publishes no collection
+time, so a wedged exporter that keeps serving its last reading cannot be told
+from a steady fleet (Fluent Bit's sample time dates the scrape, not the
+console read). A planned PostgreSQL stop pages by definition (§5.13).
+
+Backtest (read-only Mimir history, 2026-10-19): the probe's own query,
+replayed at one-minute steps from 09:40Z to 13:30Z through the production
+parser, pages from 09:57Z (24 pools) through 13:14Z, is quiet only at 10:51Z
+(the brief recovery below), and is quiet again from 13:15Z. The same rule
+over Mimir's per-minute pool series since the exporter went live finds 26
+page runs from 2026-10-13 to 2026-10-19, almost all with 31 of 32 pools
+old-starved: 10-13 08:09–08:39 (the planned primary restart, §5.13), 10-13
+16:46–17:30, 10-16 14:54–15:34, 10-17 05:27–05:59, eleven runs on 10-18
+between 07:06 and 16:42, 10-18 18:58–19:36, 20:40–20:49 and 22:41–23:44,
+four runs on 10-19 between 02:34 and 05:32, and 09:57–13:14. Spot checks at
+10-16 15:10, 10-18 09:00 and 10-19 02:45 read 20 usable servers, 12–16k
+queued clients, a 10 s maximum wait and 168–274 backends. Connected
+providers stayed at 57k–76k through those earlier runs: running Connect
+processes keep their providers, and the provider collapse needed Connect to
+restart into a starvation, as it did on 10-19 (§1.1a).
+
+**2026-10-19 outage (09:57Z–13:15Z): what the monitor missed.** No probe saw
+it. `pgbouncer-stalls` (§2.11, WARN, five-minute cadence) found the 6432
+frontend accepting TCP throughout, and its client-write class matches only
+`pgproto3.writeError ... i/o timeout`; these failures were queue waits ended
+by the client's own deadline (`pg: timeout: context deadline exceeded`).
+`log-errors` class `pgbouncer-query-wait` needs `FATAL: query_wait_timeout` in
+service logs, but with the on-disk 10 s queue wait longer than the 5 s client
+deadline the client had hung up first, and that class exists only in the
+watch loop's standing tail. `contract-rate` (§1.1): sampled PostgreSQL
+creation stayed far above its 1,000/min floor, and its trailing-hour median
+followed the sag (§1.1a). `pg-capacity` measures slot exhaustion, and client
+backends fell (846 → 281), which reads as more headroom. Nothing read
+`urnetwork_connect_provider_connections` (now §1.1a). Grafana's
+`pgbouncer-pool-starved` condition held from about 09:57Z; whether Grafana
+evaluated and delivered it was not observed: Mimir holds no alert-state
+series and routing is UI-managed (warp `grafana/README.md`: the default
+receiver is the Slack webhook from vault `monitor.yml`, whose
+`alerts.slack_webhook_url` is set).
+
+Evidence (2026-10-19, UTC):
+
+- Onset 09:56→09:57: 24 of 32 pools starved within one minute; usable servers
+  590→159, waiting clients 0→6,444, `bringyour` backends 846→416. 10:12→10:13:
+  seven more (31 of 32); servers →20, waiting about 15k, backends →281.
+- Both onsets coincide with checkpoint completion: 09:57:16 wrote 1,285,588
+  buffers (write 269.5 s, sync 0.97 s); 10:12:15 wrote 1,378,976 buffers (sync
+  0.38 s). Statements of 2 s or more cluster around both, including 18–21 s
+  ones (09:55:54, 09:56:02, 09:56:28; 10:11:06, 10:11:18, 10:12:02, 10:12:27).
+  PostgreSQL logged 2,528 `incomplete message from client` lines in
+  09:55–09:58 and 794 in 10:11–10:14. This is the §2.2b trigger shape; the
+  trigger itself is not attributed here.
+- pgbouncer@1 runs a patched build
+  (`/opt/urnetwork/pgbouncer-waiter/f6a6ccec…/pgbouncer`, drop-in
+  `91-waiter1-524afdc88785935b-executable.conf`, installed 2026-10-10) and kept
+  20 servers throughout, while all 31 stock PgBouncer 1.26.0 instances
+  livelocked: production evidence for §2.11's source repair (read a paused
+  waiter's available input before assigning it a server). The 04:00Z frame
+  above has the same single survivor.
+- Every starved pool had servers again at 10:49:51–10:50:06 and starved
+  again from 10:51:21 to 10:52:36 (exporter journal) while Connect's warp
+  deploy loop retried: Connect `/status` answered
+  `error not ready: pg: timeout: context deadline exceeded`, warp logged
+  `Deploy fail ... not ready`, stopped and pruned the container, and
+  redeployed every two to three minutes (§5.12's amplifier).
+- The on-disk `query_wait_timeout` was still 10 on every instance: xops
+  `b50abca` (merged as `f5e5462`) persisting 4 s had not been applied.
+- The exporter's journal no longer held the 10:00–10:40 starvation lines
+  (local journal retention, §8.5b); the Mimir series did.
+- ACTION, under operator authorization: at 13:14:19–24 `SET
+  query_wait_timeout = 4` on the 31 starved consoles, pgbouncer@1 untouched,
+  no restart. Within 60 s every pool held 16–20 servers with 0 waiting. At
+  13:25: 630 servers, 0 waiting, backends 848, Connect accepted handshakes
+  105/s, connected providers 72.6k (2.1k before the change).
+- The runtime value is lost on any reload or restart until the persistent
+  4 s is applied, and a stock instance can livelock again on the next freeze
+  while its queue wait exceeds the client deadline.
 
 The 2026-10-18 21:59–23:59 UTC historical discriminator aligned the TPS
 boundary with pool-path progress. A bounded authenticated native Mimir read
@@ -22565,6 +22749,15 @@ Decision tree:
    90/s and `auth_dependency` near 30/s; backends are back at 710–770;
    providers are back at their pre-event level (§1.1, §2.7); then hold §2.11's
    ten-minute complete-window rule.
+
+2026-10-19 (09:57Z–13:15Z): the same livelock on 24, then 31, of 32 pools,
+with both onsets at checkpoint completion (§2.11a). Step 1's amplifier was
+Connect's warp deploy loop, and connected providers fell from 74.6k to 1.76k
+(§1.1a). Step 2 alone ended it: `SET query_wait_timeout = 4` on the 31
+starved consoles at 13:14:19–24Z refilled every pool within 60 s, with no
+restart. `pgbouncer-pool-starvation` (§2.11a) and `provider-connections`
+(§1.1a) now page this shape; before them the monitor read neither the pool
+exporter nor the provider gauge.
 
 ### 5.13 Planned primary restart — stop the Taskworker first
 Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
