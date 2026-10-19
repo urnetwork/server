@@ -1,8 +1,12 @@
 # V2 staging deployment
 
 This is a control-plane release, not a new evaluated source checkpoint. Preserve
-the ten-repository `sim-latency-staging` references, frozen config ledger, and
-evaluator image `sha256:8d1206bdc25ce758ad537a0f959e7b16dc2c7c5ffaca4c15636d9f364e0fea08`.
+the ten-repository `sim-latency-staging` references and frozen config ledger.
+The replacement staging scope uses evaluator image
+`sha256:27bda2a8877f3d1841d5868c198bcc1441fc2363c32ae4f3b5cc3cd817e1e5b4`.
+It adds only the corrected trusted entrypoint to the original evaluator image
+`sha256:8d1206bdc25ce758ad537a0f959e7b16dc2c7c5ffaca4c15636d9f364e0fea08`;
+the frozen source tree and simulator/scorer bytes are unchanged.
 The evaluated server remains `661759b163c9e4c473d63403734fdf4486bc25c5`.
 
 ## Operator deployment
@@ -79,7 +83,8 @@ Installed files and a measured host identity are not a passed qualification.
 Only after the operator rollout, bootstrap from an explicit pushed config-main
 commit whose ledger bytes match the frozen SHA-256
 `085dbd51908fe08d57ff7fb397aac7e85c2918511c25f89dd84fa3e363b5ad5d`.
-For this release that commit is `9dc76e83f7568c4ea4ab46fc6b830a0a932d8abf`;
+For the replacement staging scope that commit is
+`14229f9ef5a81aca3d5992a1d5ffdc8fe793b267`;
 the original snapshot was `587f764beaea20332493bd7e349d415ecc39edb5`.
 The published config ref must match the requested commit: do not move `main`
 backwards to the historical snapshot or alter the frozen ledger to accommodate
@@ -107,3 +112,22 @@ new season's real open staging round, `/competition/readyz` succeeds, scoped
 authentication works, and a safe submission proves receive → evaluate → reveal.
 Automatic provisional reward selection is not honesty approval, source approval,
 or payment. Staging settlement remains shadow-only.
+
+## Replacement-scope status (2026-10-19)
+
+The original scope `sim-latency-v2-staging-20261019` remains held, with its failed
+bootstrap evidence preserved. Do not replace its immutable intent or readiness
+receipt. The replacement scope is `sim-latency-v2-staging-20261019-r2`, using
+separate root-owned state under `/var/lib/urnetwork/competition-v2-staging-r2`.
+
+The replacement config and scoped vault credentials have been deployed and
+verified through the live API. Migration 851 and the runtime-blob guard are live.
+Bootstrap completed against the published config commit above. The reserved
+round is `01a15630-5f90-8b15-19e3-74ce7177cb50`; it is **not open**.
+
+The first real host-readiness probe completed both simulations, passed G1–G6,
+and reported successful containment and cleanup. A subsequent qualification
+check failed before worker acknowledgment or activation. The supervisor was
+stopped to prevent repeated probes while this is diagnosed. Successful simulator
+output alone is not host qualification; do not announce admission until the
+remaining qualification checks pass and the API advertises an open round.
