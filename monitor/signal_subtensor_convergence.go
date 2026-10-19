@@ -123,6 +123,15 @@ func (err *subtensorConvergenceInsufficientHistoryError) Error() string {
 	return fmt.Sprintf("subtensor convergence: %s/%s has %.0f one-hour samples, want at least %d", err.target.host, err.target.job, err.got, subtensorConvergenceMinSamples)
 }
 
+// The containers snow's restricted subtensor-monitor helper (and its sudoers
+// rule) accepts: the testnet pair and the published Finney archive. Any other
+// name is refused here without contact.
+var subtensorHelperContainers = map[string]bool{
+	"subtensor":           true,
+	"subtensor-lightnode": true,
+	"subtensor-mainnet":   true,
+}
+
 func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergenceTarget, error) {
 	targets := map[string]subtensorConvergenceTarget{}
 	for _, configuredHost := range hosts {
@@ -470,7 +479,7 @@ func observeSubtensorConvergenceGenerations(ctx context.Context, env *probeEnv, 
 					observation.state = "deadline"
 				} else if target.containerName == "" {
 					observation.state = "missing-container"
-				} else if target.containerName != "subtensor" && target.containerName != "subtensor-lightnode" {
+				} else if !subtensorHelperContainers[target.containerName] {
 					observation.state = "unsupported-container"
 				} else if configured := hostKVs[target.host]; configured != nil {
 					commandCtx, cancel := context.WithTimeout(ctx, subtensorConvergenceGenerationCallTimeout)

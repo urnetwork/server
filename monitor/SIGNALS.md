@@ -23819,6 +23819,19 @@ behavior is unsafe after an account holds wallets on two chains. Follow that
 published rollout contract; the monitor does not authorize a migration,
 restart, or service rollback. Failed catalog reads remain unknown.
 
+Version 850 keys the competition source repository graph to the explicit
+staging flag: ten repositories for staging and the historical eleven, with
+`operator-proxy`, for production. Its artifact requires the exact body and
+metadata of the new immutable `competition_v2_source_graph_valid(jsonb,
+boolean)` and of the replacement `competition_v2_source_mode(jsonb)` and
+`competition_v2_source_authorized(jsonb, text, text, text)` bodies that call
+it. Version 847's two replaced bodies stay mandatory through 849 and stop at
+850, where this contract takes ownership. The 2026-10-19 gate failure at head
+850 (one artifact incompatible in every native schema control, and no 850
+contract in the coverage controls) was this missing append, a local validator
+failure rather than an observation of Main's schema. This check does not
+establish that Main applied 850.
+
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
 permits retirement with unchanged, previously retained excluded proof. The
@@ -34866,11 +34879,16 @@ archive answered runtime 479, transaction 1, EVM `0x3c4`, 40 peers and a head
 within one block of `entrypoint-finney`. Take the inventory from the
 publication record and an independent Finney read, never by restarting the
 retired unit, which would contend for the archive's P2P port. False-negative
-qualifier: snow's `subtensor-monitor` helper inspects only `subtensor` and
-`subtensor-lightnode`, and Fluent Bit still scrapes the retired testnet
-metrics ports, so the mainnet archive's container identity and §17.5
-convergence stay `cannot-observe` until Xops extends both; that is a coverage
-gap, not health. Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
+qualifier: until snow runs a `subtensor-monitor` helper and sudoers rule that
+accept `subtensor-mainnet` and Fluent Bit scrapes the archive's metrics port
+instead of the retired testnet ports, the mainnet archive's container identity
+and §17.5 convergence stay `cannot-observe`; that is a coverage gap, not
+health. Since 2026-10-19 the §17.5 probe asks the helper for the three
+containers it is written for (`subtensor`, `subtensor-lightnode`,
+`subtensor-mainnet`) and refuses any other name without contact
+(`TestSubtensorConvergenceGenerationQualifiesTheMainnetArchiveContainer`,
+`TestSubtensorConvergenceGenerationRejectsUnsupportedContainerWithoutContact`).
+Controls: `TestSubtensorSignalChecksTheConfiguredLauncherUnit`,
 `TestSubtensorSignalNamesTheConfiguredLauncherWhenItStops`,
 `TestSubtensorSignalDefaultsToTheTestnetLauncherUnit` and
 `TestSubtensorSettingsRejectAnInvalidLauncherUnit`.
