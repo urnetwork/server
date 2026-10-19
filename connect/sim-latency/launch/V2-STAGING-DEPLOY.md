@@ -1,8 +1,12 @@
 # V2 staging deployment
 
 This is a control-plane release, not a new evaluated source checkpoint. Preserve
-the ten-repository `sim-latency-staging` references, frozen config ledger, and
-evaluator image `sha256:8d1206bdc25ce758ad537a0f959e7b16dc2c7c5ffaca4c15636d9f364e0fea08`.
+the ten-repository `sim-latency-staging` references and frozen config ledger.
+The replacement staging scope uses evaluator image
+`sha256:27bda2a8877f3d1841d5868c198bcc1441fc2363c32ae4f3b5cc3cd817e1e5b4`.
+It adds only the corrected trusted entrypoint to the original evaluator image
+`sha256:8d1206bdc25ce758ad537a0f959e7b16dc2c7c5ffaca4c15636d9f364e0fea08`;
+the frozen source tree and simulator/scorer bytes are unchanged.
 The evaluated server remains `661759b163c9e4c473d63403734fdf4486bc25c5`.
 
 ## Operator deployment
@@ -79,7 +83,8 @@ Installed files and a measured host identity are not a passed qualification.
 Only after the operator rollout, bootstrap from an explicit pushed config-main
 commit whose ledger bytes match the frozen SHA-256
 `085dbd51908fe08d57ff7fb397aac7e85c2918511c25f89dd84fa3e363b5ad5d`.
-For this release that commit is `9dc76e83f7568c4ea4ab46fc6b830a0a932d8abf`;
+For the replacement staging scope that commit is
+`14229f9ef5a81aca3d5992a1d5ffdc8fe793b267`;
 the original snapshot was `587f764beaea20332493bd7e349d415ecc39edb5`.
 The published config ref must match the requested commit: do not move `main`
 backwards to the historical snapshot or alter the frozen ledger to accommodate
@@ -107,3 +112,46 @@ new season's real open staging round, `/competition/readyz` succeeds, scoped
 authentication works, and a safe submission proves receive → evaluate → reveal.
 Automatic provisional reward selection is not honesty approval, source approval,
 or payment. Staging settlement remains shadow-only.
+
+## Replacement-scope status (2026-10-19)
+
+The original scope `sim-latency-v2-staging-20261019` remains held, with its failed
+bootstrap evidence preserved. Do not replace its immutable intent or readiness
+receipt. The replacement scope is `sim-latency-v2-staging-20261019-r2`, using
+separate root-owned state under `/var/lib/urnetwork/competition-v2-staging-r2`.
+
+The replacement config (`14229f9`) and scoped vault credentials (`dd39358`)
+have been deployed and verified through the live API. Migration 851 and the
+runtime-blob guard are live. Bootstrap completed against the published config
+commit above. Round `01a15630-5f90-8b15-19e3-74ce7177cb50` is **open**:
+
+- staging epoch 1 of the replacement six-round season;
+- opens `2026-10-19T22:40:05.671124Z`;
+- closes `2026-10-21T22:40:05.671124Z`;
+- decision mode `provisional_reward_v2`, zero fee and zero takeover margin;
+- nine scoring replicates; the separate qualification probe does not replace
+  the round's authenticated scoring baseline.
+
+The first completed probe exposed a trusted qualifier decoder defect: real
+scorer gate identifiers such as `G1_success` were rejected as noncanonical keys.
+Server `858a067fa3413ca1fdf89fc1de9b197167925019` fixes this with narrowly
+scoped scorer-data decoding, exact G1–G6 requirements, and deterministic
+regressions. It also resumes the exact genuine persisted API acknowledgment
+after a later API rollout, without changing immutable evidence. Independent
+focused tests passed 31/31 normally and 31/31 with the race detector; a read-only
+replay authenticated the original preserved probe without altering state.
+
+The fixed host-side `competitionprepare` and `competitionqualify` are installed
+root-owned under `/usr/local/libexec/urnetwork/competition-qualification-858a067fa`.
+A fresh real probe then completed, authenticated its artifacts, retained evidence
+in MinIO, promoted containment and exact-round rebaseline checks, and obtained
+the independent worker acknowledgment. The supervisor activated source and
+created the round through its normal fenced state machine. At 22:40 UTC,
+`/competition/info` advertised the open round and authenticated
+`/competition/readyz` returned `ready: true` with every check passing.
+
+`competition-v2-staging.service` is enabled and running with its durable
+supervisor and worker. The source checkpoint, simulator/scorer bytes and
+evaluator image did not change during the qualifier fix. Admission readiness
+does not establish the full public submission → evaluation → automatic winner
+→ next-round lifecycle; that remains the purpose of Macrocosmos's staging test.
