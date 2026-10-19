@@ -180,6 +180,8 @@ func (self redisKeyEventProbe) check(ctx context.Context, env *probeEnv) ([]find
 // Preserve each inner exit and validate replies before reducing them on the
 // Redis host. redis-cli renders CLIENT LIST verbatim, so only successful empty
 // output means zero subscribers. Raw client rows and error bodies stay local.
+// The reducers are portable awk: the one true awk (macOS, the BSDs) rejects an
+// unparenthesized comparison inside print, which mawk and gawk accept.
 func collectRedisKeyEventNodes(ctx context.Context, env *probeEnv, nodeHost *host) ([]redisKeyEventNode, error) {
 	ports, validPorts := redisClusterPorts(nodeHost.redisNodePorts())
 	if !validPorts {
@@ -207,7 +209,7 @@ for p in ` + strings.Join(portTexts, " ") + `; do
     NR == 1 { if ($0 != "notify-keyspace-events") invalid = 1; next }
     NR == 2 { if ($0 !~ /^[AKEg$lshzxetdmnoca]*$/) invalid = 1; flags = $0; next }
     { invalid = 1 }
-    END { if (invalid || NR != 2) exit 1; print flags == "" ? "-" : flags }
+    END { if (invalid || NR != 2) exit 1; print (flags == "" ? "-" : flags) }
   ') || { printf 'invalid Redis key-events CONFIG reply\n' >&2; exit 1; }
   count=$({ timeout -k 1s 3s redis-cli -2 --raw -h 127.0.0.1 -p "$p" CLIENT LIST TYPE pubsub 2>/dev/null
     result=$?
