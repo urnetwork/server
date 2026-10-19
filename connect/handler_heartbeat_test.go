@@ -2,7 +2,8 @@
 // round over a scripted store: a retired process holds its transports while
 // the database does not answer, restarts its confirmation on every unanswered
 // read, spreads its shutdown over the jitter, resumes if the row is back, and
-// shuts down whenever its loop ends.
+// shuts down whenever its loop ends. Each test reads the shutdown where it
+// shows: the store counts the calls the connect router's cancel would take.
 package connect
 
 import (
@@ -17,12 +18,14 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// The error a heartbeat returns for a handler row that expiry deleted.
 var errHandlerHeartbeatTestGone = errors.New("Handler does not exist.")
 
+// The error of a read the database did not answer.
 var errHandlerHeartbeatTestUnanswered = errors.New("timeout: context deadline exceeded")
 
-// A scripted store: heartbeat and readExists answer from their queues, the
-// last answer repeating.
+// A scripted store and shutdown: heartbeat and readExists answer from their
+// queues, the last answer repeating, and shutdown counts its calls.
 type handlerHeartbeatTestStore struct {
 	heartbeatErrs       []error
 	heartbeatPanics     []bool
@@ -30,9 +33,13 @@ type handlerHeartbeatTestStore struct {
 	existsErrs          []error
 	heartbeatCallCount  int
 	readExistsCallCount int
-	readDeadlines       []time.Duration
+	// each read's deadline, zero for none
+	readDeadlines []time.Time
+	shutdownCount int
 }
 
+// The next scripted heartbeat: a raise where heartbeatPanics says so, else the
+// next error.
 func (self *handlerHeartbeatTestStore) heartbeat(ctx context.Context, handlerId server.Id) error {
 	n := self.heartbeatCallCount
 	self.heartbeatCallCount += 1
@@ -42,17 +49,22 @@ func (self *handlerHeartbeatTestStore) heartbeat(ctx context.Context, handlerId 
 	return self.heartbeatErrs[min(n, len(self.heartbeatErrs)-1)]
 }
 
+// The next scripted confirmation read. Records the read's deadline.
 func (self *handlerHeartbeatTestStore) readExists(ctx context.Context, handlerId server.Id) (bool, error) {
 	n := self.readExistsCallCount
 	self.readExistsCallCount += 1
-	if deadline, ok := ctx.Deadline(); ok {
-		self.readDeadlines = append(self.readDeadlines, time.Until(deadline))
-	} else {
-		self.readDeadlines = append(self.readDeadlines, -1)
-	}
+	deadline, _ := ctx.Deadline()
+	self.readDeadlines = append(self.readDeadlines, deadline)
 	return self.existsAnswers[min(n, len(self.existsAnswers)-1)], self.existsErrs[min(n, len(self.existsErrs)-1)]
 }
 
+// Counts a shutdown of the process.
+func (self *handlerHeartbeatTestStore) shutdown() {
+	self.shutdownCount += 1
+}
+
+// Three confirmations, each read bounded by two seconds, and a thirty second
+// jitter; rounds are driven directly, so the interval only paces a loop.
 func handlerHeartbeatTestSettings() *HandlerHeartbeatSettings {
 	return &HandlerHeartbeatSettings{
 		HeartbeatInterval:       time.Millisecond,
@@ -62,7 +74,8 @@ func handlerHeartbeatTestSettings() *HandlerHeartbeatSettings {
 	}
 }
 
-func newHandlerHeartbeatForTest(store *handlerHeartbeatTestStore, jitter time.Duration, shutdown func()) *handlerHeartbeat {
+// A heartbeat over store whose jitter is always jitter, within the setting.
+func newHandlerHeartbeatForTest(store *handlerHeartbeatTestStore, jitter time.Duration) *handlerHeartbeat {
 	return newHandlerHeartbeatWithStore(
 		context.Background(),
 		server.NewId(),
@@ -72,17 +85,18 @@ func newHandlerHeartbeatForTest(store *handlerHeartbeatTestStore, jitter time.Du
 		func(maxDelay time.Duration) time.Duration {
 			return min(jitter, maxDelay)
 		},
-		shutdown,
+		store.shutdown,
 	)
 }
 
+// The retirement metric's count for event.
 func handlerRetirementCount(event string) float64 {
 	return testutil.ToFloat64(handlerRetirementCounter.WithLabelValues(event))
 }
 
 // The 2026-10-19 shape: expiry deleted the handler while the database path was
 // failing, and a heartbeat got through. The process must keep its transports
-// for as long as the database does not answer, and shut down only after three
+// for as long as the database does not answer, and shut down once three
 // answered reads still find the row gone.
 func TestHandlerHeartbeatHoldsARetiredProcessWhileTheDatabaseDoesNotAnswer(t *testing.T) {
 	store := &handlerHeartbeatTestStore{
@@ -90,16 +104,18 @@ func TestHandlerHeartbeatHoldsARetiredProcessWhileTheDatabaseDoesNotAnswer(t *te
 		existsAnswers: []bool{false},
 		existsErrs:    []error{errHandlerHeartbeatTestUnanswered},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 0, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 0)
 	detectedBefore := handlerRetirementCount(handlerRetirementDetected)
 	unansweredBefore := handlerRetirementCount(handlerRetirementUnanswered)
 	now := time.Unix(1_800_000_000, 0)
 
-	if heartbeat.round(now) {
+	heartbeat.round(now)
+	if store.shutdownCount != 0 {
 		t.Fatal("the heartbeat that found the handler row gone shut the process down at once")
 	}
 	for i := range 100 {
-		if heartbeat.round(now.Add(time.Duration(i+1) * 5 * time.Second)) {
+		heartbeat.round(now.Add(time.Duration(i+1) * 5 * time.Second))
+		if store.shutdownCount != 0 {
 			t.Fatalf("round %d shut the process down while the database did not answer", i+1)
 		}
 	}
@@ -118,11 +134,18 @@ func TestHandlerHeartbeatHoldsARetiredProcessWhileTheDatabaseDoesNotAnswer(t *te
 	store.readExistsCallCount = 0
 	shutdownBefore := handlerRetirementCount(handlerRetirementShutdown)
 	recovered := now.Add(time.Hour)
-	if heartbeat.round(recovered) || heartbeat.round(recovered.Add(5*time.Second)) {
+	heartbeat.round(recovered)
+	heartbeat.round(recovered.Add(5 * time.Second))
+	if store.shutdownCount != 0 {
 		t.Fatal("the process shut down before three answered reads")
 	}
-	if !heartbeat.round(recovered.Add(10 * time.Second)) {
-		t.Fatal("three answered reads found the row gone and the process did not shut down")
+	heartbeat.round(recovered.Add(10 * time.Second))
+	if store.shutdownCount != 1 {
+		t.Fatalf("three answered reads found the row gone and the process shut down %d times, want once", store.shutdownCount)
+	}
+	heartbeat.round(recovered.Add(15 * time.Second))
+	if store.shutdownCount != 1 || store.readExistsCallCount != 3 {
+		t.Fatal("a round after the shutdown read or shut down again")
 	}
 	if got := handlerRetirementCount(handlerRetirementShutdown) - shutdownBefore; got != 1 {
 		t.Fatalf("counted %v shutdowns, want 1", got)
@@ -136,18 +159,15 @@ func TestHandlerHeartbeatRestartsTheConfirmationOnAnUnansweredRead(t *testing.T)
 		existsAnswers: []bool{false},
 		existsErrs:    []error{nil, nil, errHandlerHeartbeatTestUnanswered, nil, nil, nil},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 0, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 0)
 	now := time.Unix(1_800_000_000, 0)
 
-	shutdowns := []bool{}
-	for i := range 7 {
-		shutdowns = append(shutdowns, heartbeat.round(now.Add(time.Duration(i)*5*time.Second)))
-	}
 	// detect, answered, answered, unanswered, answered, answered, answered
-	want := []bool{false, false, false, false, false, false, true}
-	for i := range want {
-		if shutdowns[i] != want[i] {
-			t.Fatalf("round %d shut down %t, want %t (rounds %v)", i, shutdowns[i], want[i], shutdowns)
+	wantShutdownCounts := []int{0, 0, 0, 0, 0, 0, 1}
+	for i, wantShutdownCount := range wantShutdownCounts {
+		heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second))
+		if store.shutdownCount != wantShutdownCount {
+			t.Fatalf("after round %d the process shut down %d times, want %d", i, store.shutdownCount, wantShutdownCount)
 		}
 	}
 }
@@ -160,33 +180,40 @@ func TestHandlerHeartbeatSpreadsTheShutdownOverTheJitter(t *testing.T) {
 		existsAnswers: []bool{false},
 		existsErrs:    []error{nil},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 20*time.Second, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 20*time.Second)
 	now := time.Unix(1_800_000_000, 0)
 
 	heartbeat.round(now)
 	heartbeat.round(now.Add(5 * time.Second))
 	heartbeat.round(now.Add(10 * time.Second))
 	confirmed := now.Add(15 * time.Second)
-	if heartbeat.round(confirmed) {
+	heartbeat.round(confirmed)
+	if store.shutdownCount != 0 {
 		t.Fatal("the process shut down without waiting its jitter")
 	}
-	if heartbeat.round(confirmed.Add(19 * time.Second)) {
+	heartbeat.round(confirmed.Add(19 * time.Second))
+	if store.shutdownCount != 0 {
 		t.Fatal("the process shut down before its jitter elapsed")
 	}
 
 	store.existsErrs = []error{errHandlerHeartbeatTestUnanswered}
 	store.readExistsCallCount = 0
-	if heartbeat.round(confirmed.Add(20 * time.Second)) {
+	heartbeat.round(confirmed.Add(20 * time.Second))
+	if store.shutdownCount != 0 {
 		t.Fatal("the process shut down on an unanswered read")
 	}
 	store.existsErrs = []error{nil}
 	store.readExistsCallCount = 0
 	restarted := confirmed.Add(25 * time.Second)
-	if heartbeat.round(restarted) || heartbeat.round(restarted.Add(5*time.Second)) || heartbeat.round(restarted.Add(10*time.Second)) {
+	heartbeat.round(restarted)
+	heartbeat.round(restarted.Add(5 * time.Second))
+	heartbeat.round(restarted.Add(10 * time.Second))
+	if store.shutdownCount != 0 {
 		t.Fatal("the process shut down before a new confirmation and its jitter")
 	}
-	if !heartbeat.round(restarted.Add(30 * time.Second)) {
-		t.Fatal("the process did not shut down after a new confirmation and its jitter")
+	heartbeat.round(restarted.Add(30 * time.Second))
+	if store.shutdownCount != 1 {
+		t.Fatalf("after a new confirmation and its jitter the process shut down %d times, want once", store.shutdownCount)
 	}
 }
 
@@ -197,12 +224,13 @@ func TestHandlerHeartbeatResumesWhenTheRowIsBack(t *testing.T) {
 		existsAnswers: []bool{true},
 		existsErrs:    []error{nil},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 0, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 0)
 	restoredBefore := handlerRetirementCount(handlerRetirementRestored)
 	now := time.Unix(1_800_000_000, 0)
 
 	for i := range 6 {
-		if heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second)) {
+		heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second))
+		if store.shutdownCount != 0 {
 			t.Fatalf("round %d shut the process down although its row is back", i)
 		}
 	}
@@ -218,7 +246,8 @@ func TestHandlerHeartbeatResumesWhenTheRowIsBack(t *testing.T) {
 }
 
 // A raised heartbeat failure is transient: the process neither retires nor
-// shuts down, and heartbeats again next round.
+// shuts down, and heartbeats again next round. The code before the fix did
+// the same; this pins it.
 func TestHandlerHeartbeatRetriesARaisedHeartbeat(t *testing.T) {
 	store := &handlerHeartbeatTestStore{
 		heartbeatErrs:   []error{nil},
@@ -226,58 +255,68 @@ func TestHandlerHeartbeatRetriesARaisedHeartbeat(t *testing.T) {
 		existsAnswers:   []bool{false},
 		existsErrs:      []error{nil},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 0, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 0)
 	now := time.Unix(1_800_000_000, 0)
 
 	for i := range 3 {
-		if heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second)) {
-			t.Fatalf("round %d shut the process down on a raised heartbeat", i)
-		}
+		heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second))
 	}
-	if heartbeat.retired || store.readExistsCallCount != 0 {
-		t.Fatal("a raised heartbeat retired the handler")
+	if store.shutdownCount != 0 || heartbeat.retired || store.readExistsCallCount != 0 {
+		t.Fatal("a raised heartbeat retired the handler or shut the process down")
 	}
 	if store.heartbeatCallCount != 3 {
 		t.Fatalf("heartbeat %d times, want 3", store.heartbeatCallCount)
 	}
 }
 
-// Each confirmation read is bounded by the confirmation timeout.
+// Each confirmation read is bounded by the confirmation timeout: its deadline
+// lies the timeout after some instant within its round.
 func TestHandlerHeartbeatBoundsEachConfirmationRead(t *testing.T) {
 	store := &handlerHeartbeatTestStore{
 		heartbeatErrs: []error{errHandlerHeartbeatTestGone},
 		existsAnswers: []bool{false},
 		existsErrs:    []error{errHandlerHeartbeatTestUnanswered},
 	}
-	heartbeat := newHandlerHeartbeatForTest(store, 0, func() {})
+	heartbeat := newHandlerHeartbeatForTest(store, 0)
+	timeout := handlerHeartbeatTestSettings().ConfirmationTimeout
 	now := time.Unix(1_800_000_000, 0)
 
-	for i := range 4 {
-		heartbeat.round(now.Add(time.Duration(i) * 5 * time.Second))
-	}
-	if len(store.readDeadlines) != 3 {
-		t.Fatalf("read %d times, want 3", len(store.readDeadlines))
-	}
-	for i, remaining := range store.readDeadlines {
-		if remaining <= 0 || handlerHeartbeatTestSettings().ConfirmationTimeout < remaining {
-			t.Fatalf("read %d had %v left, want a deadline within the confirmation timeout", i, remaining)
+	// the first round detects the retirement and reads nothing
+	heartbeat.round(now)
+	for i := range 3 {
+		before := time.Now()
+		heartbeat.round(now.Add(time.Duration(i+1) * 5 * time.Second))
+		after := time.Now()
+		if len(store.readDeadlines) != i+1 {
+			t.Fatalf("round %d left %d reads, want %d", i+1, len(store.readDeadlines), i+1)
+		}
+		deadline := store.readDeadlines[i]
+		if deadline.IsZero() || deadline.Before(before.Add(timeout)) || after.Add(timeout).Before(deadline) {
+			t.Fatalf("read %d has deadline %v, want within [%v, %v]", i, deadline, before.Add(timeout), after.Add(timeout))
 		}
 	}
 }
 
-// The loop shuts the process down when its context ends, and when a round
-// confirms the retirement.
+// The loop shuts the process down when its context ends, and a confirming
+// round ends the loop through the shutdown, as the connect router's cancel
+// does.
 func TestHandlerHeartbeatLoopShutsDownWhenItEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	shutdown := make(chan struct{})
+	store := &handlerHeartbeatTestStore{
+		heartbeatErrs: []error{nil},
+		existsAnswers: []bool{true},
+		existsErrs:    []error{nil},
+	}
 	heartbeat := newHandlerHeartbeatWithStore(
 		ctx,
 		server.NewId(),
 		handlerHeartbeatTestSettings(),
-		func(ctx context.Context, handlerId server.Id) error { return nil },
-		func(ctx context.Context, handlerId server.Id) (bool, error) { return true, nil },
-		func(maxDelay time.Duration) time.Duration { return 0 },
-		func() { close(shutdown) },
+		store.heartbeat,
+		store.readExists,
+		func(maxDelay time.Duration) time.Duration {
+			return 0
+		},
+		store.shutdown,
 	)
 	done := make(chan struct{})
 	go func() {
@@ -290,35 +329,43 @@ func TestHandlerHeartbeatLoopShutsDownWhenItEnds(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the loop did not end with its context")
 	}
-	select {
-	case <-shutdown:
-	default:
-		t.Fatal("the loop ended without shutting the process down")
+	if store.shutdownCount != 1 {
+		t.Fatalf("the loop ended and shut the process down %d times, want once", store.shutdownCount)
 	}
 
-	confirmedShutdown := make(chan struct{})
-	store := &handlerHeartbeatTestStore{
+	processCtx, processCancel := context.WithCancel(context.Background())
+	defer processCancel()
+	retiredStore := &handlerHeartbeatTestStore{
 		heartbeatErrs: []error{errHandlerHeartbeatTestGone},
 		existsAnswers: []bool{false},
 		existsErrs:    []error{nil},
 	}
-	confirmed := newHandlerHeartbeatWithStore(
-		context.Background(),
+	retired := newHandlerHeartbeatWithStore(
+		processCtx,
 		server.NewId(),
 		handlerHeartbeatTestSettings(),
-		store.heartbeat,
-		store.readExists,
-		func(maxDelay time.Duration) time.Duration { return 0 },
-		func() { close(confirmedShutdown) },
+		retiredStore.heartbeat,
+		retiredStore.readExists,
+		func(maxDelay time.Duration) time.Duration {
+			return 0
+		},
+		func() {
+			retiredStore.shutdown()
+			processCancel()
+		},
 	)
-	go confirmed.run()
+	retiredDone := make(chan struct{})
+	go func() {
+		defer close(retiredDone)
+		retired.run()
+	}()
 	select {
-	case <-confirmedShutdown:
+	case <-retiredDone:
 	case <-time.After(10 * time.Second):
-		t.Fatal("a confirmed retirement did not shut the process down")
+		t.Fatal("a confirmed retirement did not end the loop")
 	}
-	if store.readExistsCallCount != 3 {
-		t.Fatalf("shut down after %d confirmation reads, want 3", store.readExistsCallCount)
+	if retiredStore.readExistsCallCount != 3 || retiredStore.shutdownCount < 1 {
+		t.Fatalf("the loop ended after %d confirmation reads and %d shutdowns, want 3 reads and a shutdown", retiredStore.readExistsCallCount, retiredStore.shutdownCount)
 	}
 }
 
@@ -361,8 +408,10 @@ func TestHandlerHeartbeatFallsBackToTheDefaultSettings(t *testing.T) {
 			settings,
 			store.heartbeat,
 			store.readExists,
-			func(maxDelay time.Duration) time.Duration { return 0 },
-			func() {},
+			func(maxDelay time.Duration) time.Duration {
+				return 0
+			},
+			store.shutdown,
 		)
 		if *heartbeat.settings != *DefaultHandlerHeartbeatSettings() {
 			t.Errorf("settings %+v fell back to %+v, want the defaults", settings, *heartbeat.settings)

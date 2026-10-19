@@ -69,6 +69,7 @@ func handlerExpiryTestStamp(ctx context.Context, t testing.TB, handlers []handle
 	}
 }
 
+// Whether the handler row exists, read on the primary.
 func handlerExpiryTestRowExists(ctx context.Context, handlerId server.Id) (exists bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(

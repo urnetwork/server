@@ -59,6 +59,7 @@ var networkClientHandlerExpiryCounter = prometheus.NewCounterVec(prometheus.Coun
 	Help: "Connect handlers whose heartbeat was older than the expiry cutoff, by verdict: expired, deleted with their connection rows retired; deferred_stamped, kept because the process still stamps the provider liveness writer set; deferred_fleet, kept because the set could not vouch and fewer handlers heartbeat than went stale",
 }, []string{"verdict"})
 
+// Registers the expiry metric with the default registry, every verdict at zero.
 func init() {
 	prometheus.MustRegister(networkClientHandlerExpiryCounter)
 	for _, verdict := range []string{
@@ -230,13 +231,13 @@ func retireNetworkClientHandlerPageInTx(ctx context.Context, tx server.PgTx, cli
 }
 
 // Deletes the stale handlers judged ended (see the file header) and counts every
-// stale handler by verdict. readStamps says, for each handler, whether its
-// process stamped the writer set within the window, and whether the set could
-// vouch at all.
+// stale handler by verdict. readStamps returns the handlers whose process
+// stamped the writer set within the window, and whether the set could vouch at
+// all.
 func expireNetworkClientHandlers(
 	ctx context.Context,
 	minTime time.Time,
-	readStamps func(ctx context.Context, handlerIds []server.Id) (current []bool, ok bool),
+	readStamps func(ctx context.Context, handlerIds []server.Id) (stampedHandlerIds map[server.Id]bool, stampsKnown bool),
 ) {
 	var staleHandlerIds []server.Id
 	var freshCount int
@@ -269,12 +270,12 @@ func expireNetworkClientHandlers(
 	}
 
 	// no database connection is held across the Redis read
-	stampsCurrent, stampsOk := readStamps(ctx, staleHandlerIds)
+	stampedHandlerIds, stampsKnown := readStamps(ctx, staleHandlerIds)
 	expiredHandlerIds, deferredStampedCount, deferredFleetCount := selectExpiredNetworkClientHandlers(
 		staleHandlerIds,
 		freshCount,
-		stampsCurrent,
-		stampsOk,
+		stampedHandlerIds,
+		stampsKnown,
 	)
 	expiredCount := 0
 	if 0 < len(expiredHandlerIds) {
@@ -305,19 +306,19 @@ func expireNetworkClientHandlers(
 }
 
 // The stale handlers to delete, and how many are kept for each reason. While the
-// writer set can vouch (stampsOk), a handler is kept if its process still
-// stamps (stampsCurrent, in staleHandlerIds order) and deleted if not.
-// Otherwise every stale handler is deleted while at least as many handlers
-// still heartbeat (freshCount), and every one is kept while fewer do.
+// writer set can vouch (stampsKnown), a handler is kept if its process still
+// stamps (in stampedHandlerIds) and deleted if not. Otherwise every stale
+// handler is deleted while at least as many handlers still heartbeat
+// (freshCount), and every one is kept while fewer do.
 func selectExpiredNetworkClientHandlers(
 	staleHandlerIds []server.Id,
 	freshCount int,
-	stampsCurrent []bool,
-	stampsOk bool,
+	stampedHandlerIds map[server.Id]bool,
+	stampsKnown bool,
 ) (expiredHandlerIds []server.Id, deferredStampedCount int, deferredFleetCount int) {
-	if stampsOk && len(stampsCurrent) == len(staleHandlerIds) {
-		for i, handlerId := range staleHandlerIds {
-			if stampsCurrent[i] {
+	if stampsKnown {
+		for _, handlerId := range staleHandlerIds {
+			if stampedHandlerIds[handlerId] {
 				deferredStampedCount += 1
 			} else {
 				expiredHandlerIds = append(expiredHandlerIds, handlerId)
@@ -333,11 +334,11 @@ func selectExpiredNetworkClientHandlers(
 	return
 }
 
-// Whether each handler's process stamped the provider liveness writer set within
-// its window, judged as FindProviders2 judges writer coverage, and whether the
-// set could vouch at all: not when the read failed or ran past its budget, or
-// when no process stamped within the window.
-func readNetworkClientHandlerStamps(ctx context.Context, handlerIds []server.Id) (current []bool, ok bool) {
+// The handlers whose process stamped the provider liveness writer set within its
+// window, judged as FindProviders2 judges writer coverage, and whether the set
+// could vouch at all: not when the read failed or ran past its budget, or when
+// no process stamped within the window.
+func readNetworkClientHandlerStamps(ctx context.Context, handlerIds []server.Id) (stampedHandlerIds map[server.Id]bool, stampsKnown bool) {
 	handlerMembers := make([]string, len(handlerIds))
 	for i, handlerId := range handlerIds {
 		handlerMembers[i] = handlerId.String()
@@ -351,10 +352,36 @@ func readNetworkClientHandlerStamps(ctx context.Context, handlerIds []server.Id)
 	if readErr != nil || providerLivenessZSliceFailed(newestCmd) || providerLivenessFloatSliceFailed(stampCmd) {
 		return nil, false
 	}
-	return judgeProviderLivenessStamps(
+	return judgeNetworkClientHandlerStamps(
+		handlerIds,
 		server.NowUtc().UnixMilli(),
 		providerLivenessNewestMillis(newestCmd),
 		providerLivenessStampMillis(stampCmd),
-		providerLivenessWriterWindow,
 	)
+}
+
+// The handlers stamped within the writer window at now, from the set's newest
+// stamp and each handler's stamp in handlerIds order, all in unix milliseconds,
+// zero for none, and whether the set vouches at all: not when it is stale
+// (judgeProviderLivenessStamps), or when the stamps do not answer every handler.
+func judgeNetworkClientHandlerStamps(
+	handlerIds []server.Id,
+	nowMillis int64,
+	newestMillis int64,
+	stampMillis []int64,
+) (stampedHandlerIds map[server.Id]bool, stampsKnown bool) {
+	if len(stampMillis) != len(handlerIds) {
+		return nil, false
+	}
+	current, ok := judgeProviderLivenessStamps(nowMillis, newestMillis, stampMillis, providerLivenessWriterWindow)
+	if !ok {
+		return nil, false
+	}
+	stampedHandlerIds = map[server.Id]bool{}
+	for i, handlerId := range handlerIds {
+		if current[i] {
+			stampedHandlerIds[handlerId] = true
+		}
+	}
+	return stampedHandlerIds, true
 }

@@ -111,10 +111,13 @@ type handlerHeartbeat struct {
 	confirmationCount int
 	// zero until the last confirmation picks it
 	shutdownTime time.Time
+	// set by the round that confirms the retirement and shuts the process down
+	confirmed bool
 }
 
-// Starts the heartbeat loop for handlerId, which ends with ctx or calls
-// shutdown once a retirement is confirmed.
+// Starts the heartbeat loop for handlerId, which runs until ctx ends. shutdown
+// is called by the round that confirms a retirement, and when the loop ends;
+// the connect router passes its cancel, so either ends the process.
 func newHandlerHeartbeat(
 	ctx context.Context,
 	handlerId server.Id,
@@ -165,9 +168,9 @@ func newHandlerHeartbeatWithStore(
 	}
 }
 
-// One round every interval until ctx ends or a round confirms the retirement.
-// Whatever ends the loop shuts the process down: a process whose heartbeat
-// stopped would otherwise keep serving under a handler that expiry retires.
+// One round every interval until ctx ends. Whatever ends the loop shuts the
+// process down: a process whose heartbeat stopped would otherwise keep serving
+// under a handler that expiry retires.
 func (self *handlerHeartbeat) run() {
 	defer self.shutdown()
 	for {
@@ -176,32 +179,33 @@ func (self *handlerHeartbeat) run() {
 			return
 		case <-time.After(self.settings.HeartbeatInterval):
 		}
-		if self.round(time.Now()) {
-			return
-		}
+		self.round(time.Now())
 	}
 }
 
-// One heartbeat, or once retired one confirmation read, at now. Returns
-// whether the process shuts down.
-func (self *handlerHeartbeat) round(now time.Time) bool {
+// One heartbeat, or once retired one confirmation read, at now. The round that
+// confirms the retirement shuts the process down; rounds after it do nothing.
+func (self *handlerHeartbeat) round(now time.Time) {
+	if self.confirmed {
+		return
+	}
 	if !self.retired {
 		var err error
 		if recovered := server.HandleError(func() {
 			err = self.heartbeat(self.ctx, self.handlerId)
 		}); recovered != nil {
 			// a raised failure is transient, such as database load: try again
-			return false
+			return
 		}
 		if err == nil {
-			return false
+			return
 		}
 		self.retired = true
 		self.confirmationCount = 0
 		self.shutdownTime = time.Time{}
 		handlerRetirementCounter.WithLabelValues(handlerRetirementDetected).Inc()
 		glog.Infof("[c]handler retired by handler expiry; holding transports until the database confirms (%s)\n", err)
-		return false
+		return
 	}
 
 	exists, err := func() (bool, error) {
@@ -214,7 +218,7 @@ func (self *handlerHeartbeat) round(now time.Time) bool {
 		self.confirmationCount = 0
 		self.shutdownTime = time.Time{}
 		handlerRetirementCounter.WithLabelValues(handlerRetirementUnanswered).Inc()
-		return false
+		return
 	}
 	if exists {
 		self.retired = false
@@ -222,19 +226,20 @@ func (self *handlerHeartbeat) round(now time.Time) bool {
 		self.shutdownTime = time.Time{}
 		handlerRetirementCounter.WithLabelValues(handlerRetirementRestored).Inc()
 		glog.Infof("[c]handler row is back; heartbeats resume\n")
-		return false
+		return
 	}
 	self.confirmationCount += 1
 	if self.confirmationCount < self.settings.RetirementConfirmations {
-		return false
+		return
 	}
 	if self.shutdownTime.IsZero() {
 		self.shutdownTime = now.Add(self.jitter(self.settings.ShutdownJitter))
 	}
 	if now.Before(self.shutdownTime) {
-		return false
+		return
 	}
+	self.confirmed = true
 	handlerRetirementCounter.WithLabelValues(handlerRetirementShutdown).Inc()
 	glog.Infof("[c]handler retirement confirmed by %d answered reads; shutting down so the providers register again\n", self.confirmationCount)
-	return true
+	self.shutdown()
 }
