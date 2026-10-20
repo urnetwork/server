@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ type hostLoadMetrics struct {
 	ioWait               float64
 	memoryAvailableRatio float64
 	mask                 uint8
+	invalid              bool
 }
 
 func hostLoadQuery(environment string) string {
@@ -118,142 +120,194 @@ func (hostLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, error
 		expected[configured.name] = true
 	}
 	now := env.now().UTC()
-	byHost := map[string]*hostLoadMetrics{}
+	metricBits := map[string]uint8{
+		"load1":                  hostLoadMetricLoad,
+		"cores":                  hostLoadMetricCores,
+		"cpu_execution":          hostLoadMetricCPUExecution,
+		"io_wait":                hostLoadMetricIOWait,
+		"memory_available_ratio": hostLoadMetricMemoryAvailable,
+	}
+	byHost := map[string]map[string]*hostLoadMetrics{}
 	for _, series := range response.Data.Result {
 		host := series.Metric["host"]
 		if !expected[host] {
 			continue
 		}
+		metric := series.Metric["monitor_metric"]
+		bit := metricBits[metric]
+		if bit == 0 {
+			continue
+		}
+		// The query preserves exporter labels; Fluent Bit need not supply instance.
+		// Only the metric name and the I/O-wait expression's mode are not identity.
+		sourceLabels := make(map[string]string, len(series.Metric))
+		for name, value := range series.Metric {
+			if name == "__name__" || name == "monitor_metric" ||
+				(name == "mode" && metric == "io_wait" && value == "iowait") {
+				continue
+			}
+			sourceLabels[name] = value
+		}
+		// String maps always marshal and have deterministic, unambiguous key order.
+		sourceJson, _ := json.Marshal(sourceLabels)
+		sourceKey := string(sourceJson)
+		sources := byHost[host]
+		if sources == nil {
+			sources = map[string]*hostLoadMetrics{}
+			byHost[host] = sources
+		}
+		metrics := sources[sourceKey]
+		if metrics == nil {
+			metrics = &hostLoadMetrics{}
+			sources[sourceKey] = metrics
+		}
+		if series.Metric["env"] != env.cfg.env || series.Metric["job"] != "node" || metrics.mask&bit != 0 {
+			metrics.invalid = true
+			continue
+		}
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil {
-			return nil, fmt.Errorf("host load: parse fixed metric sample: %w", err)
+			metrics.invalid = true
+			continue
 		}
 		age := now.Sub(observedAt)
 		if age > hostLoadFreshness || age < -30*time.Second {
+			metrics.invalid = true
 			continue
 		}
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			return nil, fmt.Errorf("host load: fixed metric value is invalid")
+			metrics.invalid = true
+			continue
 		}
-		metrics := byHost[host]
-		if metrics == nil {
-			metrics = &hostLoadMetrics{}
-			byHost[host] = metrics
+		if bit&(hostLoadMetricCPUExecution|hostLoadMetricIOWait|hostLoadMetricMemoryAvailable) != 0 && value > 1.01 {
+			metrics.invalid = true
+			continue
 		}
-		switch series.Metric["monitor_metric"] {
+		switch metric {
 		case "load1":
 			metrics.load1 = value
-			metrics.mask |= hostLoadMetricLoad
 		case "cores":
 			metrics.cores = value
-			metrics.mask |= hostLoadMetricCores
 		case "cpu_execution":
-			if value > 1.01 {
-				return nil, fmt.Errorf("host load: CPU execution ratio is invalid")
-			}
 			metrics.cpuExecution = value
-			metrics.mask |= hostLoadMetricCPUExecution
 		case "io_wait":
-			if value > 1.01 {
-				return nil, fmt.Errorf("host load: I/O wait ratio is invalid")
-			}
 			metrics.ioWait = value
-			metrics.mask |= hostLoadMetricIOWait
 		case "memory_available_ratio":
-			if value > 1.01 {
-				return nil, fmt.Errorf("host load: memory available ratio is invalid")
-			}
 			metrics.memoryAvailableRatio = value
-			metrics.mask |= hostLoadMetricMemoryAvailable
 		}
+		metrics.mask |= bit
 	}
 
 	findings := make([]finding, 0, len(expected)*4)
 	for _, configured := range env.cfg.hosts {
 		target := configured.name
-		metrics := byHost[target]
-		if metrics == nil || metrics.mask != hostLoadMetricAll || metrics.cores < 1 {
-			available := uint8(0)
-			if metrics != nil {
+		sources := byHost[target]
+		completeSourceKeys := make([]string, 0, len(sources))
+		available := uint8(0)
+		invalidSources := 0
+		for sourceKey, metrics := range sources {
+			if len(sources) == 1 {
 				available = metrics.mask
 			}
+			if metrics.invalid {
+				invalidSources++
+			} else if metrics.mask == hostLoadMetricAll && metrics.cores >= 1 {
+				completeSourceKeys = append(completeSourceKeys, sourceKey)
+			}
+		}
+		sort.Strings(completeSourceKeys)
+		complete := len(sources) == 1 && len(completeSourceKeys) == 1
+		if !complete {
 			findings = append(findings, finding{
 				probeId: "host/runtime-saturation", tier: tierWarn,
 				class: "host-metrics-missing", target: target, sustain: 2, pageSustain: 3,
-				symptom:   "An enabled inventory host has no complete fresh node-runtime observation.",
-				mechanism: "A stopped node exporter, broken telemetry path, or unreachable host removed required load/capacity data. Missing series are unknown host state, not a healthy zero.",
-				baseline:  "Every enabled inventory host exports fresh load1, CPU count, five-minute busy and I/O-wait ratios, and available-memory ratio at the one-minute cadence.",
-				observed:  fmt.Sprintf("available_metric_mask=%02x required_metric_mask=%02x freshness_limit_s=%d", available, hostLoadMetricAll, int(hostLoadFreshness/time.Second)),
-				evidence:  "The bounded Mimir response was joined only to enabled inventory names; raw labels from unknown series were discarded. Query gateway=" + gateway.name + ".",
-				action:    "Check the target's direct SSH reachability, node exporter, fluent-bit/remote-write path, and current service health. Treat a simultaneously unreachable host as the incident; do not suppress it or infer green from siblings.",
-				verify:    "Two consecutive runs contain the complete fresh metric family for this exact enabled host.",
-				playbook:  "SIGNALS.md §8.14",
-			})
-			continue
-		}
-		findings = append(findings, healthyFinding("host/runtime-saturation", tierWarn, "host-metrics-missing", target))
-
-		normalizedLoad := metrics.load1 / metrics.cores
-		observed := fmt.Sprintf(
-			"load1=%.2f logical_cpu_count=%.0f normalized_load1=%.3f cpu_execution_ratio_5m=%.4f io_wait_ratio_5m=%.4f memory_available_ratio=%.4f",
-			metrics.load1,
-			metrics.cores,
-			normalizedLoad,
-			metrics.cpuExecution,
-			metrics.ioWait,
-			metrics.memoryAvailableRatio,
-		)
-		if metrics.cpuExecution >= hostLoadCPUExecutionRatio && normalizedLoad >= hostLoadNormalizedRunnableRatio {
-			findings = append(findings, finding{
-				probeId: "host/runtime-saturation", tier: tierPage,
-				class: "host-cpu-saturation", target: target, sustain: 2,
-				symptom:   "The host has sustained CPU saturation with runnable work queued beyond its logical CPU capacity.",
-				mechanism: "Runnable work exceeds the host's execution capacity while CPU idle time is exhausted. Service callbacks, allocation/GC churn, deployment overlap, or hostile traffic can make an otherwise reachable host stop serving work promptly.",
-				baseline:  fmt.Sprintf("cpu_execution_ratio_5m < %.2f or normalized_load1 < %.2f", hostLoadCPUExecutionRatio, hostLoadNormalizedRunnableRatio),
-				observed:  observed,
-				evidence:  "Fresh node-exporter samples were evaluated through the loopback Mimir gateway " + gateway.name + "; no process command line or unbounded label was retained.",
-				context:   "This is a capacity symptom, not its owner. Correlate §8.15 before changing limits. A legitimate sustained workload may require more hardware; a runaway process or overlapping retired generation requires a software or operational correction.",
-				action:    "Identify the per-service and per-process CPU, allocation, goroutine, and RSS owners. Preserve bounded evidence. If an old draining generation is proven stuck and its replacement is ready, retire only that generation serially and verify service health; do not reboot the host to erase the cause.",
-				verify:    "Two consecutive runs show CPU execution or normalized load below the alert band with public and internal service health intact.",
+				symptom:   "An enabled inventory host has no unambiguous complete fresh node-runtime observation.",
+				mechanism: "A stopped exporter, broken telemetry path, unreachable host, or conflicting publisher identity made required load/capacity data unavailable. Partial, duplicate, or invalid series are unknown host state, not a healthy zero.",
+				baseline:  "Every enabled inventory host exports exactly one complete fresh load1, CPU count, five-minute CPU execution and I/O-wait ratios, and available-memory ratio family from the same source at the one-minute cadence.",
+				observed:  fmt.Sprintf("source_count=%d complete_source_count=%d invalid_source_count=%d available_metric_mask=%02x required_metric_mask=%02x freshness_limit_s=%d", len(sources), len(completeSourceKeys), invalidSources, available, hostLoadMetricAll, int(hostLoadFreshness/time.Second)),
+				evidence:  "The bounded Mimir response was joined to enabled inventory names while keeping each publisher's labels together; raw publisher labels were not retained in the finding. Query gateway=" + gateway.name + ".",
+				action:    "Check the target's direct SSH reachability, node exporter, fluent-bit/remote-write path, publisher identity, and current service health. Treat a simultaneously unreachable host as the incident; do not suppress it or infer green from siblings.",
+				verify:    "Two consecutive runs contain exactly one complete fresh metric family for this exact enabled host, with no duplicate or invalid contribution.",
 				playbook:  "SIGNALS.md §8.14",
 			})
 		} else {
-			findings = append(findings, healthyFinding("host/runtime-saturation", tierPage, "host-cpu-saturation", target))
+			findings = append(findings, healthyFinding("host/runtime-saturation", tierWarn, "host-metrics-missing", target))
 		}
-
-		if metrics.ioWait >= hostLoadIOWaitRatio && normalizedLoad >= hostLoadNormalizedRunnableRatio {
-			findings = append(findings, finding{
-				probeId: "host/runtime-saturation", tier: tierPage,
-				class: "host-io-saturation", target: target, sustain: 2,
-				symptom:   "The host load is saturated by tasks waiting on I/O.",
-				mechanism: "A storage, filesystem, network-block-device, or writeback stall is keeping tasks runnable or blocked without useful CPU progress.",
-				baseline:  fmt.Sprintf("io_wait_ratio_5m < %.2f or normalized_load1 < %.2f", hostLoadIOWaitRatio, hostLoadNormalizedRunnableRatio),
-				observed:  observed,
-				evidence:  "Fresh aggregate CPU-mode and load gauges were used; this probe does not infer a device from the aggregate alone.",
-				action:    "Inspect bounded per-device latency, queue depth, filesystem errors, and the owning service before mutation. Isolate a failed removable device when proven; do not restart unrelated services or call CPU load an I/O fault.",
-				verify:    "Two consecutive runs show I/O wait or normalized load below the alert band and the implicated device path completes reads and writes normally.",
-				playbook:  "SIGNALS.md §8.14",
-			})
-		} else {
-			findings = append(findings, healthyFinding("host/runtime-saturation", tierPage, "host-io-saturation", target))
+		// Complete sources can prove a positive even when host coverage is unknown.
+		// Only a unique complete source can clear an existing saturation finding.
+		reportedClasses := map[string]bool{}
+		appendSaturation := func(f finding) {
+			if (f.healthy && !complete) || reportedClasses[f.class] {
+				return
+			}
+			reportedClasses[f.class] = true
+			findings = append(findings, f)
 		}
+		for _, sourceKey := range completeSourceKeys {
+			metrics := sources[sourceKey]
 
-		if metrics.memoryAvailableRatio <= hostLoadMemoryAvailableWarnRatio {
-			findings = append(findings, finding{
-				probeId: "host/runtime-saturation", tier: tierWarn,
-				class: "host-memory-pressure", target: target, sustain: 2, pageSustain: 5,
-				symptom:   "The host has little memory available for new workload or kernel buffers.",
-				mechanism: "Anonymous allocations, retained service state, unreclaimable kernel memory, or an undersized host can force reclaim and eventually OOM-kill a service.",
-				baseline:  fmt.Sprintf("memory_available_ratio > %.2f", hostLoadMemoryAvailableWarnRatio),
-				observed:  observed,
-				evidence:  "MemAvailable was divided by MemTotal from the same node-exporter target; filesystem cache was not misclassified as unavailable memory.",
-				context:   "If per-client memory is already within its software ceiling and legitimate active-client demand reaches host capacity, recovery requires traffic reduction or additional hardware. Software optimization remains required when retained state exceeds the designed ceiling.",
-				action:    "Correlate §8.15 and service-specific memory probes, then distinguish active-client capacity from leaked or retired state. Do not add swap or reboot merely to hide an unbounded owner.",
-				verify:    "Two consecutive runs restore more than the minimum available-memory ratio without OOM or service-health regressions.",
-				playbook:  "SIGNALS.md §8.14",
-			})
-		} else {
-			findings = append(findings, healthyFinding("host/runtime-saturation", tierWarn, "host-memory-pressure", target))
+			normalizedLoad := metrics.load1 / metrics.cores
+			observed := fmt.Sprintf(
+				"load1=%.2f logical_cpu_count=%.0f normalized_load1=%.3f cpu_execution_ratio_5m=%.4f io_wait_ratio_5m=%.4f memory_available_ratio=%.4f",
+				metrics.load1,
+				metrics.cores,
+				normalizedLoad,
+				metrics.cpuExecution,
+				metrics.ioWait,
+				metrics.memoryAvailableRatio,
+			)
+			if metrics.cpuExecution >= hostLoadCPUExecutionRatio && normalizedLoad >= hostLoadNormalizedRunnableRatio {
+				appendSaturation(finding{
+					probeId: "host/runtime-saturation", tier: tierPage,
+					class: "host-cpu-saturation", target: target, sustain: 2,
+					symptom:   "The host has sustained CPU saturation with runnable work queued beyond its logical CPU capacity.",
+					mechanism: "Runnable work exceeds the host's execution capacity while CPU idle time is exhausted. Service callbacks, allocation/GC churn, deployment overlap, or hostile traffic can make an otherwise reachable host stop serving work promptly.",
+					baseline:  fmt.Sprintf("cpu_execution_ratio_5m < %.2f or normalized_load1 < %.2f", hostLoadCPUExecutionRatio, hostLoadNormalizedRunnableRatio),
+					observed:  observed,
+					evidence:  "Fresh node-exporter samples were evaluated through the loopback Mimir gateway " + gateway.name + "; no process command line or unbounded label was retained.",
+					context:   "This is a capacity symptom, not its owner. Correlate §8.15 before changing limits. A legitimate sustained workload may require more hardware; a runaway process or overlapping retired generation requires a software or operational correction.",
+					action:    "Identify the per-service and per-process CPU, allocation, goroutine, and RSS owners. Preserve bounded evidence. If an old draining generation is proven stuck and its replacement is ready, retire only that generation serially and verify service health; do not reboot the host to erase the cause.",
+					verify:    "Two consecutive runs show CPU execution or normalized load below the alert band with public and internal service health intact.",
+					playbook:  "SIGNALS.md §8.14",
+				})
+			} else {
+				appendSaturation(healthyFinding("host/runtime-saturation", tierPage, "host-cpu-saturation", target))
+			}
+
+			if metrics.ioWait >= hostLoadIOWaitRatio && normalizedLoad >= hostLoadNormalizedRunnableRatio {
+				appendSaturation(finding{
+					probeId: "host/runtime-saturation", tier: tierPage,
+					class: "host-io-saturation", target: target, sustain: 2,
+					symptom:   "The host load is saturated by tasks waiting on I/O.",
+					mechanism: "A storage, filesystem, network-block-device, or writeback stall is keeping tasks runnable or blocked without useful CPU progress.",
+					baseline:  fmt.Sprintf("io_wait_ratio_5m < %.2f or normalized_load1 < %.2f", hostLoadIOWaitRatio, hostLoadNormalizedRunnableRatio),
+					observed:  observed,
+					evidence:  "Fresh aggregate CPU-mode and load gauges were used; this probe does not infer a device from the aggregate alone.",
+					action:    "Inspect bounded per-device latency, queue depth, filesystem errors, and the owning service before mutation. Isolate a failed removable device when proven; do not restart unrelated services or call CPU load an I/O fault.",
+					verify:    "Two consecutive runs show I/O wait or normalized load below the alert band and the implicated device path completes reads and writes normally.",
+					playbook:  "SIGNALS.md §8.14",
+				})
+			} else {
+				appendSaturation(healthyFinding("host/runtime-saturation", tierPage, "host-io-saturation", target))
+			}
+
+			if metrics.memoryAvailableRatio <= hostLoadMemoryAvailableWarnRatio {
+				appendSaturation(finding{
+					probeId: "host/runtime-saturation", tier: tierWarn,
+					class: "host-memory-pressure", target: target, sustain: 2, pageSustain: 5,
+					symptom:   "The host has little memory available for new workload or kernel buffers.",
+					mechanism: "Anonymous allocations, retained service state, unreclaimable kernel memory, or an undersized host can force reclaim and eventually OOM-kill a service.",
+					baseline:  fmt.Sprintf("memory_available_ratio > %.2f", hostLoadMemoryAvailableWarnRatio),
+					observed:  observed,
+					evidence:  "MemAvailable was divided by MemTotal from the same node-exporter target; filesystem cache was not misclassified as unavailable memory.",
+					context:   "If per-client memory is already within its software ceiling and legitimate active-client demand reaches host capacity, recovery requires traffic reduction or additional hardware. Software optimization remains required when retained state exceeds the designed ceiling.",
+					action:    "Correlate §8.15 and service-specific memory probes, then distinguish active-client capacity from leaked or retired state. Do not add swap or reboot merely to hide an unbounded owner.",
+					verify:    "Two consecutive runs restore more than the minimum available-memory ratio without OOM or service-health regressions.",
+					playbook:  "SIGNALS.md §8.14",
+				})
+			} else {
+				appendSaturation(healthyFinding("host/runtime-saturation", tierWarn, "host-memory-pressure", target))
+			}
 		}
 	}
 	return findings, nil

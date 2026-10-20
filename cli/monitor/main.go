@@ -85,7 +85,18 @@ func run(args []string, stdout io.Writer) error {
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
 
-func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) (resultErr error) {
+func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) error {
+	return runWithSettingsAndSshAdmission(args, stdout, loadSettings, configureSharedSshAdmission)
+}
+
+func configureSharedSshAdmission(ctx context.Context, settings servermonitor.SignalSettings, directory string, once bool) (servermonitor.SignalSettings, error) {
+	if once {
+		return settings.WithSharedSshDiagnosticAdmission(ctx, directory)
+	}
+	return settings.WithSharedSshAdmission(ctx, directory)
+}
+
+func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error)) (resultErr error) {
 	opts, err := parseMonitorOptions(args)
 	if err != nil {
 		return err
@@ -172,7 +183,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	}
 	if opts.sshAdmissionDirectory != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		settings, err = settings.WithSharedSshAdmission(ctx, opts.sshAdmissionDirectory)
+		settings, err = configureAdmission(ctx, settings, opts.sshAdmissionDirectory, opts.once)
 		cancel()
 		if err != nil {
 			return err
@@ -312,8 +323,8 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
 	}
-	if opts.sshAdmissionDirectory != "" && (opts.once || opts.listSignals) {
-		return monitorOptions{}, errors.New("monitor: shared SSH admission requires continuous mode")
+	if opts.sshAdmissionDirectory != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: shared SSH admission is unavailable in signal-list mode")
 	}
 	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
 		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")

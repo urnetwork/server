@@ -1,0 +1,95 @@
+// Executes exact production PromQL against raw synthetic points in pinned Mimir.
+package provider_score_read_errors_test
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/promqltest"
+	"github.com/prometheus/prometheus/util/teststorage"
+)
+
+// Writes the actual engine matrices; expected values remain in the Server test.
+func TestProviderScoreReadNativeMatrices(t *testing.T) {
+	requestPath, outputPath := os.Getenv("MONITOR_SCORE_READ_ENGINE_REQUEST"), os.Getenv("MONITOR_SCORE_READ_ENGINE_OUTPUT")
+	if requestPath == "" || outputPath == "" {
+		t.Fatal("MONITOR_SCORE_READ_ENGINE_REQUEST and MONITOR_SCORE_READ_ENGINE_OUTPUT are required")
+	}
+	encoded, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Query string `json:"query"`
+		Cases []struct {
+			Name       string `json:"name"`
+			Evaluation int64  `json:"evaluation"`
+			Series     []struct {
+				Labels map[string]string `json:"labels"`
+				Points []struct {
+					Seconds int64   `json:"seconds"`
+					Value   float64 `json:"value"`
+				} `json:"points"`
+			} `json:"series"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(encoded, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Query == "" || len(request.Cases) == 0 {
+		t.Fatal("exact query and raw source cases are required")
+	}
+	ctx := context.Background()
+	engine := promqltest.NewTestEngine(t, false, 5*time.Minute, 1_000_000)
+	responses := map[string]json.RawMessage{}
+	for _, c := range request.Cases {
+		store := teststorage.New(t)
+		appender := store.Appender(ctx)
+		for _, series := range c.Series {
+			for _, point := range series.Points {
+				if _, err := appender.Append(0, labels.FromMap(series.Labels), point.Seconds*1000, point.Value); err != nil {
+					t.Fatalf("%s: append raw point: %v", c.Name, err)
+				}
+			}
+		}
+		if err := appender.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		query, err := engine.NewInstantQuery(ctx, store, promql.NewPrometheusQueryOpts(false, 5*time.Minute), request.Query, time.Unix(c.Evaluation, 0))
+		if err != nil {
+			t.Fatalf("%s: construct exact query: %v", c.Name, err)
+		}
+		result := query.Exec(ctx)
+		matrix, err := result.Matrix()
+		if err != nil || len(result.Warnings) != 0 {
+			t.Fatalf("%s: native query failed or returned incomplete evidence: %v", c.Name, err)
+		}
+		response, err := json.Marshal(map[string]any{
+			"status": "success",
+			"data":   map[string]any{"resultType": "matrix", "result": matrix},
+		})
+		query.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := responses[c.Name]; exists {
+			t.Fatal("duplicate native case")
+		}
+		responses[c.Name] = response
+		if err := store.Close(); err != nil {
+			t.Fatalf("%s: close native sample storage: %v", c.Name, err)
+		}
+	}
+	encoded, err = json.Marshal(responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+}

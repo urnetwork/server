@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -44,6 +42,7 @@ type workerChurnMetrics struct {
 	cpuRate   float64
 	allocRate float64
 	mask      uint8
+	samples   workerMetricSamples
 }
 
 func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -52,10 +51,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		return nil, fmt.Errorf("worker churn: no services host in inventory for the loopback Mimir query")
 	}
 
-	query := strings.Join([]string{
-		fmt.Sprintf(`label_replace(rate(process_cpu_seconds_total{env=%s,job="taskworker"}[1m]),"monitor_rate","cpu","job",".*")`, strconv.Quote(env.cfg.env)),
-		fmt.Sprintf(`label_replace(rate(go_memstats_alloc_bytes_total{env=%s,job="taskworker"}[1m]),"monitor_rate","alloc","job",".*")`, strconv.Quote(env.cfg.env)),
-	}, " or ")
+	query := workerRatesQuery(env.cfg.env, "1m", false)
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(query)
 	out, metricHost, err := shellFirstServiceGateway(
 		ctx,
@@ -70,66 +66,56 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 
 	var response mimirInstantResponse
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
-		return nil, fmt.Errorf("worker churn: decode Mimir response: %w", err)
+		return nil, fmt.Errorf("worker churn: invalid Mimir response")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
-		return nil, fmt.Errorf(
-			"worker churn: Mimir status=%q result_type=%q error=%q",
-			response.Status,
-			response.Data.ResultType,
-			response.Error,
-		)
+		return nil, fmt.Errorf("worker churn: Mimir response was not a successful vector")
 	}
 
 	now := env.now().UTC()
 	workers := map[string]*workerChurnMetrics{}
+	bounded := len(response.Warnings) == 0
 	for _, series := range response.Data.Result {
-		observedAt, value, err := mimirInstantValue(series.Value)
-		if err != nil {
-			return nil, fmt.Errorf("worker churn: parse %s rate: %w", series.Metric["monitor_rate"], err)
-		}
-		age := now.Sub(observedAt)
-		if age > workerChurnFreshness || age < -30*time.Second {
+		kind := series.Metric["monitor_rate"]
+		if kind != "cpu" && kind != "alloc" && kind != "cpu_source_time" && kind != "alloc_source_time" {
+			// Returned evidence outside the issued family schema cannot
+			// disappear into an apparently complete quiet fleet.
+			bounded = false
 			continue
 		}
-		host := series.Metric["host"]
-		if host == "" {
+		if !workerMetricIdentity(series.Metric, env.cfg.env) {
+			bounded = false
 			continue
 		}
-		block := series.Metric["block"]
-		instance := series.Metric["instance"]
-		key := host + "\x00" + block + "\x00" + instance
+		host, block, instance := series.Metric["host"], series.Metric["block"], series.Metric["instance"]
+		key := workerScorePhaseKey(host, block, instance)
 		worker := workers[key]
 		if worker == nil {
-			worker = &workerChurnMetrics{host: host, block: block, instance: instance}
+			worker = &workerChurnMetrics{host: host, block: block, instance: instance, samples: workerMetricSamples{}}
 			workers[key] = worker
 		}
-		switch series.Metric["monitor_rate"] {
-		case "cpu":
-			worker.cpuRate = value
-			worker.mask |= workerRateCPU
-		case "alloc":
-			worker.allocRate = value
-			worker.mask |= workerRateAlloc
-		}
+		worker.samples.observe(kind, series.Value, now)
 	}
 
-	pairedWorkers := make([]*workerChurnMetrics, 0, len(workers))
 	cpuRates := make([]float64, 0, len(workers))
 	allocRates := make([]float64, 0, len(workers))
+	incomplete := 0
 	for _, worker := range workers {
-		if worker.mask&(workerRateCPU|workerRateAlloc) != workerRateCPU|workerRateAlloc {
-			continue
+		if value, valid := worker.samples.qualified("cpu"); valid {
+			worker.cpuRate, worker.mask = value, worker.mask|workerRateCPU
+			cpuRates = append(cpuRates, value)
 		}
-		pairedWorkers = append(pairedWorkers, worker)
-		cpuRates = append(cpuRates, worker.cpuRate)
-		allocRates = append(allocRates, worker.allocRate)
+		if value, valid := worker.samples.qualified("alloc"); valid {
+			worker.allocRate, worker.mask = value, worker.mask|workerRateAlloc
+			allocRates = append(allocRates, value)
+		}
+		if worker.mask != workerRateCPU|workerRateAlloc {
+			incomplete++
+		}
 	}
-	if len(pairedWorkers) == 0 {
-		return nil, fmt.Errorf("worker churn: Mimir returned no fresh paired taskworker CPU/allocation rates")
-	}
-	cpuMedian := medianFloat64(cpuRates)
-	allocMedian := medianFloat64(allocRates)
+	cpuMedian := workerMedianBounds(cpuRates, len(workers), bounded)
+	allocMedian := workerMedianBounds(allocRates, len(workers), bounded)
+	indeterminate := 0
 
 	findings := []finding{}
 	activeLog := ""
@@ -143,13 +129,25 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	phaseObservations := map[string]workerScorePhaseObservation{}
 	var phaseObservationsErr error
 	phaseObservationsLoaded := false
-	for _, worker := range pairedWorkers {
-		cpuRatio := safeRatio(worker.cpuRate, cpuMedian)
-		allocRatio := safeRatio(worker.allocRate, allocMedian)
-		if worker.cpuRate < workerChurnCPUCores ||
-			worker.allocRate < workerChurnAllocBytesRate ||
-			cpuRatio < workerChurnFleetRatio ||
-			allocRatio < workerChurnFleetRatio {
+	for _, worker := range workers {
+		if worker.mask != workerRateCPU|workerRateAlloc {
+			continue
+		}
+		target := worker.host + "/" + worker.block
+		// A below-absolute guard is independently healthy. Relative guards
+		// use median bounds; omitted siblings must not lower the baseline.
+		healthy := worker.cpuRate < workerChurnCPUCores || worker.allocRate < workerChurnAllocBytesRate ||
+			worker.cpuRate/workerChurnFleetRatio < cpuMedian.lower ||
+			worker.allocRate/workerChurnFleetRatio < allocMedian.lower
+		if healthy {
+			observed := healthyFinding("runtime/worker-cpu-allocation-churn", tierWarn, "worker-cpu-allocation-churn", target)
+			observed.frame = worker.instance
+			findings = append(findings, observed)
+			continue
+		}
+		if worker.cpuRate/workerChurnFleetRatio < cpuMedian.upper ||
+			worker.allocRate/workerChurnFleetRatio < allocMedian.upper {
+			indeterminate++
 			continue
 		}
 
@@ -175,24 +173,18 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			}
 		}
 
-		target := worker.host
-		if worker.block != "" {
-			target += "/" + worker.block
-		}
 		observed := fmt.Sprintf(
-			"cpu_cores_1m=%.3f fleet_samples=%d fleet_median_cpu_cores_1m=%.3f cpu_ratio_1m=%.1f alloc_bytes_per_s_1m=%.0f alloc_mib_per_s_1m=%.2f fleet_median_alloc_bytes_per_s_1m=%.0f alloc_ratio_1m=%.1f block=%s instance=%s metrics_gateway=%s",
-			worker.cpuRate,
-			len(pairedWorkers),
-			cpuMedian,
-			cpuRatio,
-			worker.allocRate,
-			worker.allocRate/float64(1<<20),
-			allocMedian,
-			allocRatio,
-			worker.block,
-			worker.instance,
-			metricHost.name,
+			"cpu_cores_1m=%.3f fleet_samples=%d %s cpu_ratio_1m=%s alloc_bytes_per_s_1m=%.0f alloc_mib_per_s_1m=%.2f %s alloc_ratio_1m=%s block=%s instance=%s metrics_gateway=%s",
+			worker.cpuRate, len(workers),
+			cpuMedian.summary("fleet_median_cpu_cores_1m", "%.3f"), workerMetricRatio(worker.cpuRate, cpuMedian.upper),
+			worker.allocRate, worker.allocRate/float64(1024*1024),
+			allocMedian.summary("fleet_median_alloc_bytes_per_s_1m", "%.0f"), workerMetricRatio(worker.allocRate, allocMedian.upper),
+			worker.block, worker.instance, metricHost.name,
 		)
+		if !cpuMedian.complete || !allocMedian.complete {
+			observed += " fleet_baseline=bounded_partial ratios=lower_bounds"
+		}
+
 		if activeSummary != "" {
 			observed += fmt.Sprintf(
 				" active_task_count=%d active_tasks=%s active_log_source=%s",
@@ -251,7 +243,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			}
 		}
 
-		evidence := "One-minute rates come from the taskworker process metrics pushed to Mimir, grouped by exact host/block/runtime instance and compared with the fresh paired fleet median. Two consecutive probe failures provide a two-minute sustain guard. Recent eval-active heartbeats are joined on host/block."
+		evidence := "One-minute rates come from the taskworker process metrics pushed to Mimir, grouped by exact host/block/runtime instance and compared with the returned fleet median. Missing scalar values retain their runtime and can establish skew only against the greatest possible median; partial ratios are lower bounds. Each rate has its own fresh underlying counter timestamp. Two consecutive probe failures provide a two-minute sustain guard. Recent eval-active heartbeats are joined on host/block."
 		if activeLogErr != nil {
 			evidence += fmt.Sprintf(" The task-lifecycle lookup was degraded (error_class=%s).", classifyObservationError(activeLogErr))
 		} else if activeSummary == "" {
@@ -288,9 +280,14 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			playbook: "SIGNALS.md 2.12a",
 		})
 	}
-	if len(findings) == 0 {
-		return []finding{healthyFinding("runtime/worker-cpu-allocation-churn", tierWarn, "worker-cpu-allocation-churn", "taskworker-fleet")}, nil
+	if len(workers) == 0 || incomplete > 0 || indeterminate > 0 || !bounded {
+		findings = append(findings, workerMetricCoverage("taskworker-fleet/churn-metrics", len(workers), incomplete, indeterminate, bounded))
 	}
-	sort.Slice(findings, func(i, j int) bool { return findings[i].target < findings[j].target })
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].target != findings[j].target {
+			return findings[i].target < findings[j].target
+		}
+		return findings[i].frame < findings[j].frame
+	})
 	return findings, nil
 }

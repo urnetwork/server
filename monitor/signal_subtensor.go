@@ -62,10 +62,11 @@ type subtensorScriptConfig struct {
 }
 
 type subtensorObservation struct {
-	Units          map[string]string          `json:"units"`
-	OverlayPresent bool                       `json:"overlay_present"`
-	Public         subtensorRPCObservation    `json:"public"`
-	Nodes          []subtensorNodeObservation `json:"nodes"`
+	Units             map[string]string          `json:"units"`
+	OverlayUnobserved bool                       `json:"overlay_unobserved,omitempty"`
+	OverlayPresent    bool                       `json:"overlay_present"`
+	Public            subtensorRPCObservation    `json:"public"`
+	Nodes             []subtensorNodeObservation `json:"nodes"`
 }
 
 type subtensorRPCObservation struct {
@@ -290,7 +291,8 @@ func subtensorCommand(target *host) (string, error) {
 	return "# " + subtensorMarker + "\nSUBTENSOR_MONITOR_CONFIG=" + shellSingleQuote(string(config)) + " python3 - <<'PY'\n" + subtensorScript + "\nPY", nil
 }
 
-const subtensorScript = `import json
+const subtensorScript = `import ipaddress
+import json
 import os
 import subprocess
 import time
@@ -328,8 +330,18 @@ def inspect_rpc(url):
     return result
 
 def unit_state(unit):
-    run = subprocess.run(["systemctl", "is-active", unit], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    return run.stdout.strip() or "unknown"
+    try:
+        run = subprocess.run(["systemctl", "is-active", unit], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        state = run.stdout.strip()
+        if run.returncode == 4 and state == "unknown":
+            return "missing"
+        if (run.returncode == 0 and state in ("active", "reloading", "refreshing")) or (
+            run.returncode == 3 and state in ("inactive", "failed", "activating", "deactivating", "maintenance")
+        ):
+            return state
+    except Exception:
+        pass
+    return "unobserved"
 
 def inspect_container(node):
     name = node.get("ContainerName", "")
@@ -356,14 +368,23 @@ observation = {
 }
 
 try:
-    addresses = json.loads(subprocess.check_output(["ip", "-j", "address", "show"], text=True))
+    addresses = json.loads(subprocess.check_output(["ip", "-j", "address", "show"], text=True, stderr=subprocess.DEVNULL))
+    if not isinstance(addresses, list):
+        raise ValueError("invalid address census")
+    for interface in addresses:
+        if not isinstance(interface, dict) or not isinstance(interface.get("addr_info"), list):
+            raise ValueError("invalid interface record")
+        for address in interface["addr_info"]:
+            if not isinstance(address, dict) or not isinstance(address.get("local"), str):
+                raise ValueError("invalid address record")
+            ipaddress.ip_address(address["local"])
     observation["overlay_present"] = any(
-        address.get("local") == config["overlay_address"]
+        address["local"] == config["overlay_address"]
         for interface in addresses
-        for address in interface.get("addr_info", [])
+        for address in interface["addr_info"]
     )
 except Exception:
-    observation["overlay_present"] = False
+    observation["overlay_unobserved"] = True
 
 for node in config["nodes"]:
     direct_url = "http://127.0.0.1:%d" % node["RPCPort"]
@@ -691,11 +712,17 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 	unitProblems := []string{}
 	launcherUnit := subtensorLauncherUnit(settings)
 	for _, unit := range []string{launcherUnit, "nginx", "openvpn@by-pre"} {
-		if observation.Units[unit] != "active" {
-			unitProblems = append(unitProblems, unit+"="+firstNonempty(observation.Units[unit], "missing"))
+		switch observation.Units[unit] {
+		case "active":
+		case "missing", "inactive", "failed", "activating", "deactivating", "maintenance", "reloading", "refreshing":
+			unitProblems = append(unitProblems, unit+"="+observation.Units[unit])
+		default:
+			findings = append(findings, cannotObserveFinding(target.name+"/subtensor-unit/"+unit, fmt.Errorf("subtensor: unit state inspection is unobserved")))
 		}
 	}
-	if !observation.OverlayPresent {
+	if observation.OverlayUnobserved {
+		findings = append(findings, cannotObserveFinding(target.name+"/subtensor-overlay", fmt.Errorf("subtensor: overlay address inspection is unobserved")))
+	} else if !observation.OverlayPresent {
 		unitProblems = append(unitProblems, "overlay-address=absent")
 	}
 	if len(unitProblems) > 0 {

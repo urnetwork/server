@@ -719,3 +719,136 @@ func grafanaNodeFixture(sample grafanaNodeSample) string {
 		sample.oomKills, sample.oomAfterNDiscEpoch,
 	)
 }
+
+// Execute each real producer inspection with failed empty, misleading positive,
+// and diagnostic stdout. A completed awk is not native enumeration authority.
+func TestGrafanaNodeNativeInspectionFailuresRemainUnknown(t *testing.T) {
+	for _, test := range []struct{ tool, target, positive string }{
+		{tool: "systemctl", target: "unit", positive: "warp-synthetic-grafana-a-g1.service loaded active running fixture"},
+		{tool: "ip", target: "address", positive: "2: fixture inet 192.0.2.10/24 scope global fixture"},
+		{tool: "networkctl", target: "networkd", positive: "2 fixture ether failed"},
+	} {
+		for _, output := range []string{"", test.positive, "synthetic-private-inspection-error"} {
+			for _, status := range []int{1, 127, 137} {
+				settings, attempts, calls := grafanaNodeCommandTestSettings(t)
+				trace := filepath.Join(filepath.Dir(attempts), "inspection-trace")
+				grafanaNodeFixtureTool(t, attempts, test.tool, "printf 'called\\n' > "+shellSingleQuote(trace)+"\nprintf '%s\\n' "+shellSingleQuote(output)+"\nexit "+fmt.Sprint(status))
+				alerts, err := NewGrafanaNodeSignal().Run(context.Background(), settings)
+				if err != nil || *calls != 1 {
+					t.Fatal("synthetic generated producer failed")
+				}
+				if content, err := os.ReadFile(trace); err != nil || string(content) != "called\n" {
+					t.Fatal("synthetic native inspection did not run")
+				}
+				found := false
+				for _, alert := range alerts {
+					found = found || alert.Class == "cannot-observe" && alert.Target == "grafana.example.test/grafana-"+test.target
+					if alert.Class != "cannot-observe" {
+						t.Errorf("%s status=%d: failed inspection became a concrete breach", test.tool, status)
+					}
+					if strings.Contains(alert.Markdown(), "synthetic-private-inspection-error") {
+						t.Error("native diagnostic escaped fixed visibility reason")
+					}
+				}
+				if !found {
+					t.Errorf("%s status=%d: missing native inspection visibility", test.tool, status)
+				}
+			}
+		}
+	}
+}
+
+// Successful empty native output means real unit/address absence or zero links.
+func TestGrafanaNodeNativeSuccessfulEmptyInspectionKeepsMeaning(t *testing.T) {
+	for _, test := range []struct{ tool, class string }{
+		{tool: "systemctl", class: "grafana-node-unit"},
+		{tool: "ip", class: "grafana-lan-identity"},
+		{tool: "networkctl"},
+	} {
+		settings, attempts, _ := grafanaNodeCommandTestSettings(t)
+		grafanaNodeFixtureTool(t, attempts, test.tool, "exit 0")
+		alerts, err := NewGrafanaNodeSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.class == "" {
+			if len(alerts) != 0 {
+				t.Fatal("successful zero failed links became unknown")
+			}
+		} else {
+			requireAlertClass(t, alerts, test.class)
+		}
+	}
+}
+
+// A failed host inspection cannot hide another independently measured breach.
+func TestGrafanaNodeNativeInspectionUnknownPreservesIndependentPositive(t *testing.T) {
+	for _, tool := range []string{"systemctl", "ip", "networkctl"} {
+		settings, attempts, _ := grafanaNodeCommandTestSettings(t)
+		grafanaNodeFixtureTool(t, attempts, tool, "exit 1")
+		class := "grafana-node-query"
+		if tool == "ip" {
+			grafanaNodeFixtureTool(t, attempts, "networkctl", "printf '2 fixture ether failed\\n'")
+			class = "grafana-networkd-link"
+		} else {
+			grafanaNodeFixtureTool(t, attempts, "curl", "printf '503 0.001\\n'")
+		}
+		alerts, err := NewGrafanaNodeSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, "cannot-observe")
+		requireAlertClass(t, alerts, class)
+	}
+}
+
+// Out-of-contract sentinels remain malformed rather than measured zero.
+func TestGrafanaNodeInspectionSentinelsRejectInvalidFrames(t *testing.T) {
+	for _, field := range []string{"unit_active", "lan_present", "network_failed_links"} {
+		raw := grafanaNodeFixture(healthyGrafanaNodeSample())
+		lines := strings.Split(raw, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, field+" ") {
+				lines[i] = field + " -2"
+			}
+		}
+		alerts, err := NewGrafanaNodeSignal().Run(context.Background(), grafanaNodeObservationTestSettings(strings.Join(lines, "\n")))
+		if err != nil || len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
+			t.Fatal("malformed native inspection frame became a breach or healthy")
+		}
+	}
+}
+
+// Drive the actual notification absence reducer, with no sender or network.
+func assertNativeInspectionPreservesIncident(t *testing.T, signal Signal, alerts Alerts, class, target string) {
+	t.Helper()
+	prior := Alert{SignalNumber: signal.Number(), SignalKey: signal.Key(), SignalID: signal.ID(), Class: class, Target: target, Severity: SeverityPage, Sustain: 2}
+	for _, held := range []bool{false, true} {
+		notifier := &SlackAlertNotifier{settings: SlackAlertNotifierSettings{ClearAfterCompleteRuns: 2}, keyIncidents: map[string]*slackIncident{}, signalKeyCompleteRuns: map[string]int{}}
+		now := time.Date(2099, 4, 5, 6, 7, 8, 0, time.UTC)
+		notifier.observeWithLock(now, signal.Key(), SignalExecution{Alerts: Alerts{prior}})
+		for i := 0; i < 3; i++ {
+			execution := SignalExecution{Alerts: alerts}
+			if held {
+				execution = SignalExecution{HeldAlerts: alerts}
+			}
+			notifier.observeWithLock(now, signal.Key(), execution)
+		}
+		incident := notifier.keyIncidents[slackIncidentKey(prior)]
+		if incident == nil || incident.signalKeyAbsentRuns[signal.Key()] != 0 {
+			t.Fatal("failed native inspection advanced incident absence")
+		}
+	}
+}
+
+// The baseline's failed empty networkctl list looks healthy at this consumer.
+func TestGrafanaNodeNativeInspectionUnknownCannotClearPriorIncident(t *testing.T) {
+	settings, attempts, _ := grafanaNodeCommandTestSettings(t)
+	grafanaNodeFixtureTool(t, attempts, "networkctl", "exit 1")
+	signal := NewGrafanaNodeSignal()
+	alerts, err := signal.Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNativeInspectionPreservesIncident(t, signal, alerts, "grafana-networkd-link", "grafana.example.test")
+}

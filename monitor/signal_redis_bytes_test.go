@@ -32,10 +32,10 @@ func TestRedisBytesSignalSyntheticScorePayloadDominance(t *testing.T) {
 			}
 		},
 		redisFn: func(_ HostSettings, port int, args ...string) (string, error) {
-			if port != 6379 || strings.Join(args, " ") != "-c --raw GET client_score_alias_v1_ready" {
+			if port != 6379 || strings.Join(args, " ") != "-c --json GET client_score_alias_v1_ready" {
 				t.Fatalf("unexpected score-alias marker read on %d: %v", port, args)
 			}
-			return "", nil
+			return "null", nil
 		},
 	}
 
@@ -57,7 +57,7 @@ func TestRedisBytesSignalSyntheticScorePayloadDominance(t *testing.T) {
 	}
 }
 
-func TestRedisBytesSignalReadyAliasSchemaWaitsForLegacyExpiry(t *testing.T) {
+func TestRedisBytesSignalReadyAliasSchemaRequiresWriterAndExpiryAuthority(t *testing.T) {
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			switch {
@@ -71,10 +71,10 @@ func TestRedisBytesSignalReadyAliasSchemaWaitsForLegacyExpiry(t *testing.T) {
 			}
 		},
 		redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
-			if strings.Join(args, " ") != "-c --raw GET client_score_alias_v1_ready" {
+			if strings.Join(args, " ") != "-c --json GET client_score_alias_v1_ready" {
 				t.Fatalf("unexpected score-alias marker read: %v", args)
 			}
-			return "1", nil
+			return `"1"`, nil
 		},
 	}
 
@@ -86,17 +86,19 @@ func TestRedisBytesSignalReadyAliasSchemaWaitsForLegacyExpiry(t *testing.T) {
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"alias_schema_ready=true",
-		"ready marker proves the compatibility export completed",
-		"legacy duplicate payloads inside their normal five-hour TTL",
-		"software fix is already active",
-		"Do not redeploy it",
+		"some writer previously completed a compatibility export",
+		"alias_publication_time=unknown score_exporter_capability=unverified",
+		"If the alias-aware writer remains active and publication is less than five hours old",
+		"A retained marker can outlive a writer rollback",
 		"client score alias schema ready",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("ready-alias drain alert missing %q:\n%s", want, markdown)
 		}
 	}
-	if strings.Contains(alert.Action, "Deploy the alias-aware score cache") {
+	if strings.Contains(alert.Markdown(), "software fix is already active") ||
+		strings.Contains(alert.Markdown(), "continuing dominance now measures legacy duplicate payloads") ||
+		strings.Contains(alert.Action, "Deploy the alias-aware score cache") {
 		t.Fatalf("ready alias schema prescribed an already-deployed fix: %s", alert.Action)
 	}
 }

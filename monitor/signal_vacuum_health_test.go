@@ -77,7 +77,7 @@ func TestVacuumHealthSignalSyntheticDeadTuples(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireAlertClass(t, alerts, "dead-tuples")
-	if len(alerts) != 1 || !strings.Contains(alerts[0].Evidence, "application=pg_dump") ||
+	if len(alerts) != 1 || !strings.Contains(alerts[0].Evidence, "application=withheld query=withheld") ||
 		!strings.Contains(alerts[0].Evidence, "backend_xmin=490000000") ||
 		!strings.Contains(alerts[0].Evidence, "vacuum phase=vacuuming indexes age_s=3570") ||
 		!strings.Contains(alerts[0].Evidence, "heap_scanned=23781003/23781003") ||

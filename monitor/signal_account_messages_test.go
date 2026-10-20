@@ -31,7 +31,8 @@ type accountMessagesFixture struct {
 	value   float64
 }
 
-// A Mimir vector for the probe's query, sampled at sampledAt.
+// Reducer-only fixtures supply derived outcomes and their explicit companions.
+// The separate native-engine gate derives them from independent raw samples.
 func accountMessagesFixtureJSON(t testing.TB, sampledAt time.Time, fixtures []accountMessagesFixture) string {
 	t.Helper()
 	result := []map[string]any{}
@@ -42,10 +43,24 @@ func accountMessagesFixtureJSON(t testing.TB, sampledAt time.Time, fixtures []ac
 				delete(metric, key)
 			}
 		}
-		result = append(result, map[string]any{
-			"metric": metric,
-			"value":  []any{float64(sampledAt.Unix()), fmt.Sprintf("%g", fixture.value)},
-		})
+		for _, part := range []struct {
+			name  string
+			value float64
+		}{
+			{name: "increase", value: fixture.value},
+			{name: "min_samples", value: 2},
+			{name: "source_timestamp", value: float64(sampledAt.Unix())},
+		} {
+			labels := map[string]string{}
+			for name, value := range metric {
+				labels[name] = value
+			}
+			labels["monitor_account_part"] = part.name
+			result = append(result, map[string]any{
+				"metric": labels,
+				"value":  []any{float64(sampledAt.Unix()), fmt.Sprintf("%g", part.value)},
+			})
+		}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"status": "success",
@@ -68,6 +83,10 @@ func runAccountMessagesPayload(t *testing.T, payload string) Alerts {
 			"urnetwork_account_message_sends_total",
 			"sum+by+%28job%2Cchannel%2Cresult%29",
 			"%5B24h%5D",
+			"timestamp%28",
+			"count_over_time%28",
+			"monitor_account_part",
+			"&time=",
 			"%22synthetic%22",
 			"127.0.0.1:3100/prometheus/api/v1/query",
 		} {
@@ -151,8 +170,15 @@ func TestAccountMessagesSignalSyntheticChannelDeliversNothing(t *testing.T) {
 // restriction. Send counters contain neither code nor original error details.
 func TestAccountMessagesDownDoesNotAssignAccessDeniedCause(t *testing.T) {
 	for _, channel := range []string{"sms", "email"} {
+		// The one-alert assertion needs independent fresh sibling evidence.
+		// Missing sibling coverage retains its separate unknown-state controls.
+		siblingChannel := "email"
+		if channel == "email" {
+			siblingChannel = "sms"
+		}
 		alerts := runAccountMessagesFixture(t, []accountMessagesFixture{
 			{job: "api", channel: channel, result: "failed", value: 3},
+			{job: "api", channel: siblingChannel, result: "sent", value: 1},
 		})
 		alert := requireAlertClass(t, alerts, "account-message-channel-down")
 		if len(alerts) != 1 || alert.Frame != "channel="+channel || alert.Severity != SeverityPage || alert.Sustain != 2 {
@@ -214,6 +240,7 @@ func TestAccountMessagesSignalSyntheticDegradedShareWarns(t *testing.T) {
 		{job: "api", channel: "email", result: "sent", value: 60},
 		{job: "api", channel: "email", result: "failed", value: 15},
 		{job: "taskworker", channel: "email", result: "timeout", value: 5},
+		{job: "api", channel: "sms", result: "sent", value: 0},
 	})
 	alert := requireAlertClass(t, alerts, "account-message-channel-degraded")
 	if alert.Severity != SeverityWarn || alert.Frame != "channel=email" {
@@ -232,6 +259,7 @@ func TestAccountMessagesSignalSyntheticDegradedShareWarns(t *testing.T) {
 // Just under the share does not warn.
 func TestAccountMessagesSignalSyntheticDegradedShareEdge(t *testing.T) {
 	alerts := runAccountMessagesFixture(t, []accountMessagesFixture{
+		{job: "api", channel: "sms", result: "sent", value: 0},
 		{job: "api", channel: "email", result: "sent", value: 61},
 		{job: "api", channel: "email", result: "failed", value: 20},
 	})
@@ -258,10 +286,10 @@ func TestAccountMessagesSignalSyntheticUnreadableFrameIsUnobservable(t *testing.
 		{reason: "unknown_channel_or_result", payload: accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
 			{job: "api", channel: "sms", result: "bounced", value: 4},
 		})},
-		{reason: "invalid_or_stale_metric", payload: accountMessagesFixtureJSON(t, stale, []accountMessagesFixture{
+		{reason: "incomplete_channel_evidence", payload: accountMessagesFixtureJSON(t, stale, []accountMessagesFixture{
 			{job: "api", channel: "sms", result: "failed", value: 40},
 		})},
-		{reason: "invalid_or_stale_metric", payload: accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+		{reason: "incomplete_channel_evidence", payload: accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
 			{job: "api", channel: "email", result: "sent", value: -1},
 		})},
 	}
@@ -278,15 +306,14 @@ func TestAccountMessagesSignalSyntheticUnreadableFrameIsUnobservable(t *testing.
 	}
 }
 
-// A channel with no series had no send of any result since its processes
-// started, so it cannot be failing; the other channel's series prove the
-// counter is exported.
-func TestAccountMessagesSignalSyntheticChannelWithoutSeriesIsQuiet(t *testing.T) {
+// Lazy channel labels do not prove zero attempts or publisher completeness.
+func TestAccountMessagesSignalSyntheticChannelWithoutSeriesIsUnknown(t *testing.T) {
 	alerts := runAccountMessagesFixture(t, []accountMessagesFixture{
 		{job: "api", channel: "email", result: "sent", value: 12},
 	})
-	if len(alerts) != 0 {
-		t.Fatalf("a channel without sends alerted: %+v", alerts)
+	alert := requireAlertClass(t, alerts, "account-message-sends-unobservable")
+	if len(alerts) != 1 || !strings.Contains(alert.Observed, "channel=sms range_status=no_series source_freshness=unknown") {
+		t.Fatalf("missing channel must stay unknown: %+v", alerts)
 	}
 }
 
@@ -303,5 +330,203 @@ func TestAccountMessagesSignalSyntheticFailedQueryIsProbeFailure(t *testing.T) {
 	alerts, err := signal.Run(context.Background(), settings)
 	if err == nil || !strings.Contains(err.Error(), "not a successful vector") || len(alerts) != 0 {
 		t.Fatalf("failed query = %+v, %v; want a probe failure", alerts, err)
+	}
+}
+
+// Changes only the supplied response, without computing PromQL in the fixture.
+func mutateAccountMessagesPayload(t testing.TB, payload string, mutate func(*mimirInstantResponse)) string {
+	t.Helper()
+	var response mimirInstantResponse
+	if err := json.Unmarshal([]byte(payload), &response); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&response)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+// The outer evaluation clock stays current while every raw source clock is old.
+func TestAccountMessagesSignalHistoricalSuccessCannotHideUnknownSource(t *testing.T) {
+	payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+		{job: "api", channel: "email", result: "sent", value: 20},
+		{job: "api", channel: "sms", result: "sent", value: 20},
+	})
+	payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+		for i := range response.Data.Result {
+			series := &response.Data.Result[i]
+			if series.Metric["monitor_account_part"] == "source_timestamp" {
+				series.Value[1] = json.RawMessage(fmt.Sprintf(`"%d"`, accountMessagesTestNow.Add(-10*time.Minute).Unix()))
+			}
+		}
+	})
+	alerts := runAccountMessagesPayload(t, payload)
+	alert := requireAlertClass(t, alerts, "account-message-sends-unobservable")
+	if len(alerts) != 1 || strings.Count(alert.Observed, "range_status=complete source_freshness=unknown") != 2 {
+		t.Fatalf("historical success hid unknown raw sources: %+v", alerts)
+	}
+}
+
+// Unknown freshness does not erase independently readable historical failures.
+func TestAccountMessagesSignalHistoricalFailureSurvivesUnknownSource(t *testing.T) {
+	payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+		{job: "api", channel: "email", result: "sent", value: 20},
+		{job: "api", channel: "sms", result: "failed", value: 4},
+	})
+	payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+		for i := range response.Data.Result {
+			series := &response.Data.Result[i]
+			if series.Metric["channel"] == "sms" && series.Metric["monitor_account_part"] == "source_timestamp" {
+				series.Value[1] = json.RawMessage(`"0"`)
+			}
+		}
+	})
+	alerts := runAccountMessagesPayload(t, payload)
+	requireAlertClass(t, alerts, "account-message-sends-unobservable")
+	page := requireAlertClass(t, alerts, "account-message-channel-down")
+	if len(alerts) != 2 || page.Frame != "channel=sms" || !strings.Contains(page.Observed, "source_freshness=unknown") ||
+		!strings.Contains(page.Mechanism, "Historical outcomes alone do not establish a current refusal") {
+		t.Fatalf("historical failure lost or attributed to current delivery: %+v", alerts)
+	}
+}
+
+// A one-point SMS series has no increase; it cannot borrow email's coverage.
+func TestAccountMessagesSignalSparseChannelPreservesIndependentFailure(t *testing.T) {
+	payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+		{job: "api", channel: "email", result: "failed", value: 4},
+		{job: "api", channel: "sms", result: "sent", value: 0},
+	})
+	payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+		kept := response.Data.Result[:0:0]
+		for _, series := range response.Data.Result {
+			if series.Metric["channel"] == "sms" {
+				if series.Metric["monitor_account_part"] == "increase" {
+					continue
+				}
+				if series.Metric["monitor_account_part"] == "min_samples" {
+					series.Value[1] = json.RawMessage(`"1"`)
+				}
+			}
+			kept = append(kept, series)
+		}
+		response.Data.Result = kept
+	})
+	alerts := runAccountMessagesPayload(t, payload)
+	unknown := requireAlertClass(t, alerts, "account-message-sends-unobservable")
+	page := requireAlertClass(t, alerts, "account-message-channel-down")
+	if len(alerts) != 2 || page.Frame != "channel=email" ||
+		!strings.Contains(unknown.Observed, "channel=sms range_status=incomplete") {
+		t.Fatalf("sparse channel manufactured coverage or erased email failure: %+v", alerts)
+	}
+}
+
+// A malformed or absent source companion leaves outcomes usable, not fresh.
+func TestAccountMessagesSignalSourceCompanionFailurePreservesHistory(t *testing.T) {
+	for _, mode := range []string{"missing", "malformed", "duplicate"} {
+		payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+			{job: "api", channel: "email", result: "sent", value: 20},
+			{job: "api", channel: "sms", result: "failed", value: 4},
+		})
+		payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+			kept := response.Data.Result[:0:0]
+			for _, series := range response.Data.Result {
+				if series.Metric["channel"] == "sms" && series.Metric["monitor_account_part"] == "source_timestamp" {
+					if mode == "missing" {
+						continue
+					}
+					if mode == "malformed" {
+						series.Value[1] = json.RawMessage(`"synthetic-source-secret"`)
+					}
+					if mode == "duplicate" {
+						kept = append(kept, series)
+					}
+				}
+				kept = append(kept, series)
+			}
+			response.Data.Result = kept
+		})
+		alerts := runAccountMessagesPayload(t, payload)
+		requireAlertClass(t, alerts, "account-message-sends-unobservable")
+		page := requireAlertClass(t, alerts, "account-message-channel-down")
+		if !strings.Contains(page.Observed, "source_freshness=unknown") {
+			t.Fatalf("%s: invalid source companion qualified freshness", mode)
+		}
+		encoded, err := json.Marshal(alerts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var markdown strings.Builder
+		if err := WriteAlertsMarkdown(&markdown, alerts); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded)+markdown.String(), "synthetic-source-secret") {
+			t.Fatalf("%s: rejected source value escaped into the alert", mode)
+		}
+	}
+}
+
+// Freshness endpoints use raw values, independently of current evaluation time.
+func TestAccountMessagesSignalRawClockBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		age   time.Duration
+		fresh bool
+	}{
+		{age: 5 * time.Minute, fresh: true},
+		{age: 5*time.Minute + time.Second, fresh: false},
+		{age: -30 * time.Second, fresh: true},
+		{age: -31 * time.Second, fresh: false},
+	} {
+		payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+			{job: "api", channel: "email", result: "sent", value: 20},
+			{job: "api", channel: "sms", result: "sent", value: 20},
+		})
+		payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+			for i := range response.Data.Result {
+				series := &response.Data.Result[i]
+				if series.Metric["monitor_account_part"] == "source_timestamp" {
+					series.Value[1] = json.RawMessage(fmt.Sprintf(`"%d"`, accountMessagesTestNow.Add(-c.age).Unix()))
+				}
+			}
+		})
+		alerts := runAccountMessagesPayload(t, payload)
+		if c.fresh && len(alerts) != 0 {
+			t.Fatalf("age %s: fresh clock alerted: %+v", c.age, alerts)
+		}
+		if !c.fresh {
+			requireAlertClass(t, alerts, "account-message-sends-unobservable")
+		}
+	}
+}
+
+// Only publisher-owned bounded job labels may be rendered as attribution.
+func TestAccountMessagesSignalRejectsPrivateLabelsWithoutDisclosure(t *testing.T) {
+	for _, mode := range []string{"job", "extra_label"} {
+		payload := accountMessagesFixtureJSON(t, accountMessagesTestNow, []accountMessagesFixture{
+			{job: "api", channel: "email", result: "failed", value: 4},
+		})
+		payload = mutateAccountMessagesPayload(t, payload, func(response *mimirInstantResponse) {
+			for i := range response.Data.Result {
+				if mode == "job" {
+					response.Data.Result[i].Metric["job"] = "synthetic-private-recipient@example.invalid"
+				} else {
+					response.Data.Result[i].Metric["instance"] = "synthetic-private-process"
+				}
+			}
+		})
+		alerts := runAccountMessagesPayload(t, payload)
+		requireAlertClass(t, alerts, "account-message-sends-unobservable")
+		encoded, err := json.Marshal(alerts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var markdown strings.Builder
+		if err := WriteAlertsMarkdown(&markdown, alerts); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded)+markdown.String(), "synthetic-private-") {
+			t.Fatalf("%s: private label reached alert output", mode)
+		}
 	}
 }

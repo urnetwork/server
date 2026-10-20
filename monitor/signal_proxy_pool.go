@@ -65,6 +65,7 @@ type proxyPoolMetrics struct {
 	large         float64
 	outstanding   float64
 	availableMask uint8
+	startRepeated bool
 	sourceMask    uint8
 	capacityAt    float64
 	retainedAt    float64
@@ -209,6 +210,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			process.rss = value
 			process.availableMask |= proxyPoolMetricRSS
 		case "process_start_time_seconds":
+			process.startRepeated = process.startRepeated || process.availableMask&proxyPoolMetricStart != 0
 			process.start = value
 			process.availableMask |= proxyPoolMetricStart
 		case "urnetwork_message_pool_capacity_bytes":
@@ -229,11 +231,8 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		}
 	}
 
-	current, err := newestProxyPoolProcesses(processes)
-	if err != nil {
-		return nil, err
-	}
-	if len(current) == 0 {
+	current, generationGaps := newestProxyPoolProcesses(now, processes)
+	if len(current) == 0 && len(generationGaps) == 0 {
 		return nil, fmt.Errorf("proxy pool: Mimir returned no actual-scrape-fresh proxy process samples")
 	}
 	sort.Slice(current, func(i, j int) bool { return proxyPoolLabel(current[i]) < proxyPoolLabel(current[j]) })
@@ -275,7 +274,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		}
 	}
 
-	findings := []finding{}
+	findings := proxyProcessGenerationFindings("runtime/proxy-message-pool-capacity", "SIGNALS.md §14.7a", metricHost.name, len(current), generationGaps)
 	if len(missing) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
@@ -367,34 +366,16 @@ func proxyPoolSameScrape(process *proxyPoolMetrics) bool {
 		process.capacityAt == process.outstandingAt
 }
 
-func newestProxyPoolProcesses(processes map[string]*proxyPoolMetrics) ([]*proxyPoolMetrics, error) {
-	newest := map[string]*proxyPoolMetrics{}
-	for _, process := range processes {
-		if process.availableMask&proxyPoolMetricRSS == 0 || process.rss <= 0 {
-			continue
+// Selects generation authority before requiring complete owner telemetry.
+func newestProxyPoolProcesses(now time.Time, processes map[string]*proxyPoolMetrics) ([]*proxyPoolMetrics, []proxyProcessGenerationGap) {
+	return newestProxyProcesses(now, processes, func(process *proxyPoolMetrics) proxyProcessGeneration {
+		return proxyProcessGeneration{
+			host: process.host, block: process.block, instance: process.instance, current: true, requireRss: true,
+			start: process.start, startPresent: process.availableMask&proxyPoolMetricStart != 0,
+			startRepeated: process.startRepeated,
+			rss:           process.rss, rssPresent: process.availableMask&proxyPoolMetricRSS != 0,
 		}
-		if process.availableMask&proxyPoolMetricStart == 0 {
-			return nil, fmt.Errorf(
-				"proxy pool: fresh RSS identity %s omitted process_start_time_seconds",
-				proxyPoolLabel(process),
-			)
-		}
-		slot := process.host + "\x00" + process.block
-		if process.block == "" {
-			// A missing block label cannot safely collapse unrelated processes.
-			slot += "\x00" + process.instance
-		}
-		previous := newest[slot]
-		if previous == nil || process.start > previous.start ||
-			(process.start == previous.start && process.instance > previous.instance) {
-			newest[slot] = process
-		}
-	}
-	current := make([]*proxyPoolMetrics, 0, len(newest))
-	for _, process := range newest {
-		current = append(current, process)
-	}
-	return current, nil
+	})
 }
 
 func proxyPoolLabel(process *proxyPoolMetrics) string {

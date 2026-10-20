@@ -9,25 +9,32 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 const closeRetryPrivateText = "synthetic-private-close-error password=fixture-only 192.0.2.73"
 
-// Exercise the registered public signal without another log or metric read.
+// A live parent keeps a failed late source as component visibility. The public
+// canceled-owner controls retain source-error identity for an ended parent.
 func closeRetryContextAlerts(t *testing.T, rows []Row, queryError error) Alerts {
 	t.Helper()
-	failureReads := 0
+	queryMarkers := []string{"UpdateClientLocations", "WITH history AS", "WITH failures AS"}
+	queryReads := 0
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
-			switch {
-			case strings.Contains(query, "UpdateClientLocations"):
+			if queryReads >= len(queryMarkers) || !strings.Contains(query, queryMarkers[queryReads]) {
+				t.Error("retry context changed source order or read past the owning failure summary")
+				return nil, errors.New("synthetic unexpected task query")
+			}
+			queryReads++
+			switch queryReads {
+			case 1:
 				return []Row{{"12"}}, nil
-			case strings.Contains(query, "WITH failures AS"):
-				failureReads++
-				return rows, queryError
-			default:
+			case 2:
 				return nil, nil
+			default:
+				return rows, queryError
 			}
 		},
 		localFn: func(string, ...string) (string, error) {
@@ -36,10 +43,10 @@ func closeRetryContextAlerts(t *testing.T, rows []Row, queryError error) Alerts 
 		},
 	}
 	alerts, err := NewWithSignals(syntheticSettings(source), NewTaskCanariesSignal()).Run(context.Background())
-	if queryError == nil && err != nil || queryError != nil && !errors.Is(err, queryError) {
-		t.Fatal("retry context changed the owning query error")
+	if err != nil {
+		t.Fatal("live-parent retry observation returned a top-level source error")
 	}
-	if failureReads != 1 {
+	if queryReads != len(queryMarkers) {
 		t.Fatal("retry context changed the owning read count")
 	}
 	return alerts
@@ -152,27 +159,111 @@ func TestTaskCanariesCloseRetryMixedCauseStaysMixed(t *testing.T) {
 	}
 }
 
-// Unreadable task state is visibility loss, not a financial recovery event.
+// Neither an empty failed response nor partial rows with an error establish
+// task state. The failed component keeps a fixed, private, unobservable identity.
 func TestTaskCanariesCloseRetryUnavailableEvidenceControl(t *testing.T) {
-	alerts := closeRetryContextAlerts(t, nil, errors.New(closeRetryPrivateText))
-	alert := requireAlertClass(t, alerts, "cannot-observe")
-	if alert.Severity != SeverityWarn || !strings.Contains(alert.Observed, "error_class=") {
-		t.Fatal("unreadable retry state lost its fixed-class visibility warning")
+	for _, partialRows := range []bool{false, true} {
+		var rows []Row
+		if partialRows {
+			rows = []Row{{"CloseExpiredContracts", "1", "1", "0", "17", "901",
+				closeRetryPrivateText, "1800", "1", "other=1"}}
+		}
+		alerts := closeRetryContextAlerts(t, rows, errors.New("permission denied: "+closeRetryPrivateText))
+		if len(alerts) != 1 {
+			t.Fatal("unavailable retry query fabricated task state or lost its visibility warning")
+		}
+		alert := requireTaskPartialUnknown(t, NewTaskCanariesSignal(), alerts, "task-failures", observationErrorClassAccessDenied)
+		encoded, err := json.Marshal(alert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var jsonl bytes.Buffer
+		if err := alerts.WriteJSONL(&jsonl); err != nil {
+			t.Fatal(err)
+		}
+		for _, rendered := range []string{alert.Markdown(), string(encoded), jsonl.String()} {
+			for _, forbidden := range []string{"synthetic-private-close-error", "fixture-only", "192.0.2.73"} {
+				if strings.Contains(rendered, forbidden) {
+					t.Error("unavailable retry query exposed a private synthetic error")
+				}
+			}
+		}
 	}
-	requireAlertOmits(t, alert, closeRetryPrivateText, "fixture-only", "192.0.2.73")
-	for _, other := range alerts {
-		if other.Class == "task-parked" {
-			t.Error("unavailable query fabricated an observed task state")
+}
+
+// A held or delivered component unknown cannot consume a recovery observation.
+// Explicit run-loop ticks and completed notifier handling establish the ordering.
+func TestTaskCanariesCloseRetryUnavailableEvidenceDoesNotClearIncident(t *testing.T) {
+	var run atomic.Int32
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return nil, nil
+			case strings.Contains(query, "WITH failures AS"):
+				rows := []Row{{"CloseExpiredContracts", "1", "1", "0", "17", "901",
+					closeRetryPrivateText, "1800", "1", "other=1"}}
+				if run.Load() == 0 {
+					return rows, nil
+				}
+				if 2 <= run.Load() && run.Load() < 5 {
+					return rows, errors.New("permission denied: " + closeRetryPrivateText)
+				}
+				return nil, nil
+			default:
+				t.Error("retry recovery added an unexpected query")
+				return nil, errors.New("synthetic unexpected task query")
+			}
+		},
+		localFn: func(string, ...string) (string, error) {
+			t.Error("retry recovery added an unauthorized auxiliary observation")
+			return "", errors.New("synthetic unexpected local read")
+		},
+	}
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifierSettings := harness.settings(webhookUrl)
+	notifierSettings.ClearAfterCompleteRuns = 2
+	notifier := NewSlackAlertNotifier(notifierSettings)
+	t.Cleanup(func() { closeSlackNotifier(t, notifier) })
+	signal := NewTaskCanariesSignal()
+	postSignalRunsThroughTheGate(t, signal, syntheticSettings(source), 5, func(i int) {
+		// One complete empty run precedes the first held unknown: treating
+		// that unknown as complete would clear the established warning now.
+		if i == 3 {
+			requireTaskPartialIncident(t, notifier, "pg/task-parked", "task-parked", "pg-1", true)
+			requireTaskPartialIncident(t, notifier, "monitor/visibility", "cannot-observe", "pg-1/task-failures", false)
+		}
+		run.Store(int32(i))
+	}, notifier)
+	requireTaskPartialIncident(t, notifier, "pg/task-parked", "task-parked", "pg-1", true)
+	requireTaskPartialIncident(t, notifier, "monitor/visibility", "cannot-observe", "pg-1/task-failures", true)
+	postSignalRunsThroughTheGate(t, signal, syntheticSettings(source), 2, func(i int) { run.Store(int32(i + 5)) }, notifier)
+	requireTaskPartialIncident(t, notifier, "pg/task-parked", "task-parked", "pg-1", false)
+	requireTaskPartialIncident(t, notifier, "monitor/visibility", "cannot-observe", "pg-1/task-failures", false)
+	closeSlackNotifier(t, notifier)
+	texts := webhook.posted()
+	if countSlackPosts(texts, "[WARN] raised", "pg/task-parked · task-parked · pg-1") != 1 ||
+		countSlackPosts(texts, "[CLEARED]", "pg/task-parked · task-parked · pg-1") != 1 ||
+		countSlackPosts(texts, "[WARN] raised", "monitor/visibility · cannot-observe · pg-1/task-failures") != 1 ||
+		countSlackPosts(texts, "[CLEARED]", "monitor/visibility · cannot-observe · pg-1/task-failures") != 1 {
+		t.Fatal("unavailable retry evidence changed incident ownership, visibility sustain or complete recovery")
+	}
+	for _, text := range texts {
+		for _, forbidden := range []string{"synthetic-private-close-error", "fixture-only", "192.0.2.73"} {
+			if strings.Contains(text, forbidden) {
+				t.Error("retry notifier exposed a private synthetic error")
+			}
 		}
 	}
 }
 
 // A valid empty failing-family result stays healthy; the wording is not a new alert.
 func TestTaskCanariesCloseRetryHealthyFamilyControl(t *testing.T) {
-	for _, alert := range closeRetryContextAlerts(t, nil, nil) {
-		if alert.Class == "task-parked" || strings.Contains(alert.Context, "cumulative stored retry count") {
-			t.Error("retry context manufactured a task failure from a valid empty family")
-		}
+	if len(closeRetryContextAlerts(t, nil, nil)) != 0 {
+		t.Error("retry context manufactured an alert from a complete healthy observation")
 	}
 }
 

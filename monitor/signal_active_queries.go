@@ -23,8 +23,8 @@ func concurrentReindexQuery(sample string) bool {
 }
 
 func expectedConcurrentReindex(sample string, oldestSeconds int) bool {
-	return concurrentReindexQuery(sample) &&
-		time.Duration(oldestSeconds)*time.Second < concurrentReindexActiveGrace
+	return concurrentReindexQuery(sample) && 0 <= oldestSeconds &&
+		oldestSeconds < int(concurrentReindexActiveGrace/time.Second)
 }
 
 func legacyPayoutSubsidyRangeQuery(sample string) bool {
@@ -69,10 +69,22 @@ func (pgActiveQueryProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		return nil, err
 	}
 	findings := []finding{}
+	queryIdCounts := map[string]int{}
 	for _, row := range rows {
-		activeCount := atoi(row.str(1))
-		oldestSeconds := atoi(row.str(2))
-		historicalMeanSeconds := atoi(row.str(4))
+		queryIdCounts[row.str(0)]++
+	}
+	incomplete := len(rows) > 10
+	for _, row := range rows {
+		activeCount, activeOk := pgGroupedInteger(row.str(1), 64, 1)
+		oldest, oldestOk := pgGroupedInteger(row.str(2), 32, 120)
+		historicalMean, historyOk := pgGroupedInteger(row.str(4), 32, 0)
+		if len(row) != 5 || len(rows) > 10 || !pgGroupedQueryId(row.str(0)) ||
+			queryIdCounts[row.str(0)] != 1 || !activeOk || !oldestOk || !historyOk || row.str(3) == "" {
+			incomplete = true
+			continue
+		}
+		oldestSeconds := int(oldest)
+		historicalMeanSeconds := int(historicalMean)
 		legacyPayoutRange := legacyPayoutSubsidyRangeQuery(row.str(3))
 		if expectedConcurrentReindex(row.str(3), oldestSeconds) {
 			// DbMaintenance explicitly gives each background CONCURRENTLY
@@ -88,7 +100,7 @@ func (pgActiveQueryProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		// for 877s. Alert when the shape is new, exceeds twice its completed
 		// mean, or piles up concurrently; pg/active-pileup independently pages
 		// the whole-backend saturation case.
-		if !legacyPayoutRange && activeCount < 5 && historicalMeanSeconds > 0 && oldestSeconds <= 2*historicalMeanSeconds {
+		if !legacyPayoutRange && activeCount < 5 && historicalMeanSeconds > 0 && oldest <= 2*historicalMean {
 			continue
 		}
 		alert := finding{
@@ -115,6 +127,9 @@ func (pgActiveQueryProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			alert.playbook = "SIGNALS.md §2.1 and §5.7"
 		}
 		findings = append(findings, alert)
+	}
+	if incomplete {
+		findings = append(findings, pgGroupedCoverageFinding(target, "active-query-groups"))
 	}
 	if len(findings) == 0 {
 		findings = append(findings, healthyFinding("pg/persistent-active-query", tierWarn, "persistent-active-query", target))

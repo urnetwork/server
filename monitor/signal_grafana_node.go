@@ -33,6 +33,9 @@ func (grafanaNodeProbe) cadence() time.Duration { return time.Minute }
 
 type grafanaNodeSample struct {
 	unitActive                     bool
+	unitUnobserved                 bool
+	lanUnobserved                  bool
+	networkUnobserved              bool
 	lanPresent                     bool
 	networkFailedLinks             int64
 	schedulerTCP                   bool
@@ -162,6 +165,18 @@ func (grafanaNodeProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			findings = append(findings, cannotObserveFinding(result.host.name+"/grafana-node", result.err))
 			continue
 		}
+		for _, inspection := range []struct {
+			unobserved bool
+			name       string
+		}{
+			{unobserved: result.sample.unitUnobserved, name: "unit"},
+			{unobserved: result.sample.lanUnobserved, name: "address"},
+			{unobserved: result.sample.networkUnobserved, name: "networkd"},
+		} {
+			if inspection.unobserved {
+				findings = append(findings, cannotObserveFinding(result.host.name+"/grafana-"+inspection.name, fmt.Errorf("grafana node: %s inspection is unobserved", inspection.name)))
+			}
+		}
 		if result.schedulerScopeErr != nil {
 			findings = append(findings, cannotObserveFinding(result.host.name+"/grafana-scheduler-lan", result.schedulerScopeErr))
 		} else if result.sample.schedulerUnobserved {
@@ -245,17 +260,27 @@ open')
   esac
 }
 
-unit_active=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$grafana_unit_pattern" 2>/dev/null |
-  awk '$1 ~ /[.]service$/ {n++} END {if (n > 0) print 1; else print 0}')
-
-lan_present=0
-if ip -4 -o address show scope global 2>/dev/null |
-     awk -v expected="$expected_lan_address" '{split($4, address, "/"); if (address[1] == expected) found=1} END {exit !found}'; then
-  lan_present=1
+unit_active=-1
+if unit_rows=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$grafana_unit_pattern" 2>/dev/null); then
+  if unit_result=$(printf '%s\n' "$unit_rows" | awk '$1 ~ /[.]service$/ {n++} END {if (n > 0) print 1; else print 0}'); then
+    unit_active=$unit_result
+  fi
 fi
 
-network_failed_links=$(networkctl list --no-legend --no-pager 2>/dev/null |
-  awk '$NF == "failed" {n++} END {print n+0}')
+lan_present=-1
+if address_rows=$(ip -4 -o address show scope global 2>/dev/null); then
+  if address_result=$(printf '%s\n' "$address_rows" |
+       awk -v expected="$expected_lan_address" '{split($4, address, "/"); if (address[1] == expected) found=1} END {print found+0}'); then
+    lan_present=$address_result
+  fi
+fi
+
+network_failed_links=-1
+if network_rows=$(networkctl list --no-legend --no-pager 2>/dev/null); then
+  if network_result=$(printf '%s\n' "$network_rows" | awk '$NF == "failed" {n++} END {print n+0}'); then
+    network_failed_links=$network_result
+  fi
+fi
 
 scheduler_tcp=-1
 if [ "$scheduler_check_allowed" -eq 1 ] && [ "$lan_present" -eq 1 ]; then
@@ -381,6 +406,14 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 			}
 			sample.schedulerTCP = value
 		case "unit_active", "lan_present", "query_observed":
+			if raw == "-1" && key != "query_observed" {
+				if key == "unit_active" {
+					sample.unitUnobserved = true
+				} else {
+					sample.lanUnobserved = true
+				}
+				continue
+			}
 			value, err := parseGrafanaNodeBool(raw)
 			if err != nil {
 				return sample, fmt.Errorf("grafana node line %d: %s: %w", lineNumber+1, key, err)
@@ -419,8 +452,14 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 			} else {
 				sample.queryHTTP = value
 			}
-		case "network_failed_links",
-			"networkd_ndisc_timeouts", "networkd_ndisc_last_epoch",
+		case "network_failed_links":
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value < -1 {
+				return sample, fmt.Errorf("grafana node: invalid network inspection")
+			}
+			sample.networkFailedLinks = value
+			sample.networkUnobserved = value == -1
+		case "networkd_ndisc_timeouts", "networkd_ndisc_last_epoch",
 			"memory_pressure_events", "memory_pressure_before_ndisc_epoch", "memory_pressure_after_ndisc_epoch",
 			"oom_kills", "oom_after_ndisc_epoch":
 			value, err := strconv.ParseInt(raw, 10, 64)
@@ -428,8 +467,6 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 				return sample, fmt.Errorf("grafana node line %d: invalid %s %q", lineNumber+1, key, raw)
 			}
 			switch key {
-			case "network_failed_links":
-				sample.networkFailedLinks = value
 			case "networkd_ndisc_timeouts":
 				sample.networkdNDiscTimeouts = value
 			case "networkd_ndisc_last_epoch":
@@ -497,9 +534,20 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 	if sample.queryUnobserved {
 		queryHttpObserved, queryExitObserved, queryTimeObserved = "unobservable", "unobservable", "unobservable"
 	}
+	unitObserved, lanObserved := strconv.FormatBool(sample.unitActive), strconv.FormatBool(sample.lanPresent)
+	networkObserved := strconv.FormatInt(sample.networkFailedLinks, 10)
+	if sample.unitUnobserved {
+		unitObserved = "unobservable"
+	}
+	if sample.lanUnobserved {
+		lanObserved = "unobservable"
+	}
+	if sample.networkUnobserved {
+		networkObserved = "unobservable"
+	}
 	observed := fmt.Sprintf(
-		"expected_lan_address=%s unit_active=%t lan_present=%t network_failed_links=%d scheduler_tcp=%s database_tcp=%d database_protocol=%d query_http=%s query_exit=%s query_seconds=%s networkd_ndisc_timeouts_72h=%d networkd_ndisc_last_epoch=%d memory_pressure_events_72h=%d memory_pressure_before_ndisc_epoch=%d memory_pressure_after_ndisc_epoch=%d oom_kills_72h=%d oom_after_ndisc_epoch=%d",
-		expectedLAN, sample.unitActive, sample.lanPresent, sample.networkFailedLinks,
+		"expected_lan_address=%s unit_active=%s lan_present=%s network_failed_links=%s scheduler_tcp=%s database_tcp=%d database_protocol=%d query_http=%s query_exit=%s query_seconds=%s networkd_ndisc_timeouts_72h=%d networkd_ndisc_last_epoch=%d memory_pressure_events_72h=%d memory_pressure_before_ndisc_epoch=%d memory_pressure_after_ndisc_epoch=%d oom_kills_72h=%d oom_after_ndisc_epoch=%d",
+		expectedLAN, unitObserved, lanObserved, networkObserved,
 		schedulerObserved, sample.databaseTCP, sample.databaseProtocol, queryHttpObserved, queryExitObserved,
 		queryTimeObserved, sample.networkdNDiscTimeouts, sample.networkdNDiscLastEpoch,
 		sample.memoryPressureEvents, sample.memoryPressureBeforeNDiscEpoch, sample.memoryPressureAfterNDiscEpoch,
@@ -518,7 +566,7 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 		playbook: "SIGNALS.md §11.17a",
 	}
 
-	if !sample.lanPresent {
+	if !sample.lanUnobserved && !sample.lanPresent {
 		base.class = "grafana-lan-identity"
 		base.symptom = fmt.Sprintf("%s does not own Grafana's configured LAN address %s", hostName, expectedLAN)
 		base.mechanism = "Grafana, Loki, and Mimir advertise and dial the host's configured LAN identity. The address is absent even though the service unit can remain active and listeners can retain a non-local bind, so local ring RPC, metrics ingestion, PostgreSQL-backed alert evaluation, and direct queries fail together."
@@ -543,15 +591,22 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 		base.class = "grafana-networkd-link"
 		base.symptom = fmt.Sprintf("%s owns Grafana's LAN address but networkd still reports %d failed link(s)", hostName, sample.networkFailedLinks)
 		base.mechanism = "The address is currently present, but at least one networkd-managed link remains failed. An ad-hoc address add or a retained kernel address can temporarily restore traffic without repairing declarative ownership, so the LAN identity can disappear again on reconfiguration or reboot."
+		if sample.lanUnobserved {
+			base.symptom = fmt.Sprintf("%s networkd reports %d failed link(s) while LAN identity is unobserved", hostName, sample.networkFailedLinks)
+			base.mechanism = "A completed networkd inspection proves failed links. The independent LAN address inspection did not complete, so address presence and any relation to the Grafana service path remain unknown."
+		}
 		base.context = "Identify the failed link before attributing it to the Grafana service path. A failed unrelated link is configuration drift; a failed service LAN link means address presence alone is not recovery."
 		base.action = "Inspect `networkctl list` and the failed link's status, then repair and activate its approved netplan/systemd-networkd configuration. Do not clear this state with only an ad-hoc `ip address add` or a Grafana restart."
 		base.verify = "networkctl reports zero failed links, the configured LAN address survives a managed reconfiguration, both local TCP paths connect, and vector(1) returns HTTP 200 for three consecutive probes."
 		return &base
 	}
-	if !sample.unitActive {
+	if !sample.unitUnobserved && !sample.unitActive {
 		base.class = "grafana-node-unit"
 		base.symptom = fmt.Sprintf("%s Grafana unit is not active", hostName)
 		base.mechanism = "The host owns its LAN identity, but the active host-service placement has no running Grafana parent. Public health may be served by another host and hide this replica loss."
+		if sample.lanUnobserved {
+			base.mechanism = "A completed unit census found no running Grafana parent. LAN address inspection is unobserved; this does not prove address presence or absence."
+		}
 		base.context = "Treat the unit state as a deployment/worker failure only after preserving its last readiness and child-exit records."
 		base.action = "Inspect the Grafana unit's last deployment/readiness failure and child exit, repair that root cause, then start the corrected generation. Do not force an unready DNAT target."
 		base.verify = "The unit remains active, its child status is ready, both local TCP paths connect, and vector(1) returns HTTP 200 for three consecutive probes."
@@ -588,7 +643,9 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 		base.class = "grafana-node-query"
 		base.symptom = fmt.Sprintf("%s local Mimir query path does not answer a trivial query", hostName)
 		base.mechanism = "The host owns its LAN identity and the direct TCP prerequisites pass, but its query frontend did not return HTTP 200 within the four-second boundary. This isolates a local query scheduler/frontend failure that public health through another Grafana host can conceal."
-		if sample.schedulerUnobserved || sample.databaseTCP == -1 {
+		if sample.unitUnobserved || sample.lanUnobserved || sample.networkUnobserved {
+			base.mechanism = "The observed local query did not return HTTP 200 within the four-second boundary, but at least one host inspection is unobserved. The query outcome remains valid; it does not prove host identity, unit or networkd health, or isolate a scheduler/frontend cause."
+		} else if sample.schedulerUnobserved || sample.databaseTCP == -1 {
 			base.mechanism = "The observed local query did not return HTTP 200 within the four-second boundary, but at least one direct TCP prerequisite is unobserved. The query outcome remains valid; it does not prove those prerequisites passed or isolate a scheduler/frontend cause."
 		} else if sample.databaseTCP == 1 && sample.databaseProtocol == -1 {
 			base.mechanism = "The direct TCP connections opened, but the PostgreSQL protocol prerequisite is unobserved. The local query outcome remains valid; unknown protocol completion is not unknown TCP reachability and does not isolate a scheduler/frontend cause."

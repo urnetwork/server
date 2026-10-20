@@ -86,6 +86,9 @@ func pgbouncerStarvationFixtureJson(t testing.TB, now time.Time, fixtures []pgbo
 			sample(fixture, "max_wait", "app", *fixture.maxWait)
 		}
 		sample(fixture, "starved_seconds", "app", fixture.starvedSeconds)
+		for _, metric := range []string{"waiting", "servers", "logins", "max_wait", "starved_seconds"} {
+			sample(fixture, metric+"_sample_time", "app", float64(now.Add(-fixture.sampleAge).Add(-12*time.Second).UnixMilli())/1000)
+		}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"status": "success",
@@ -121,11 +124,9 @@ func runPgBouncerStarvationPayload(t *testing.T, now time.Time, payload string) 
 				return "", fmt.Errorf("pgbouncer pool starvation query missing %q: %s", want, command)
 			}
 		}
-		return payload, nil
+		return pgbouncerStarvationResponseForQuery(t, payload, command), nil
 	}}
-	settings := syntheticSettings(source)
-	settings.Now = func() time.Time { return now }
-	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+	settings := pgbouncerStarvationSettings(t, now, source, 32)
 	alerts, err := signal.Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +255,7 @@ func TestPgBouncerPoolStarvationSignalOneOldPoolWarnsThenPages(t *testing.T) {
 	if alert.Severity != SeverityWarn || alert.Sustain != 2 || alert.PageSustain != 5 || alert.Target != "synthetic/db-1/pgbouncer@7" {
 		t.Fatalf("wrong shard starvation identity: %+v", alert)
 	}
-	if !strings.Contains(alert.Markdown(), "PgBouncer pool db-1/pgbouncer@7 (app) has had 205 queued clients and no server for 3600 s; its oldest client has waited 10 s") {
+	if !strings.Contains(alert.Markdown(), "PgBouncer pool db-1/pgbouncer@7 has had 205 queued clients and no server for 3600 s; its oldest client has waited 10 s") {
 		t.Fatalf("shard starvation has the wrong symptom:\n%s", alert.Markdown())
 	}
 	if count := requireAlertClassCount(alerts, "pgbouncer-pools-starved"); count != 0 {
@@ -345,10 +346,11 @@ func TestPgBouncerPoolStarvationSignalIncompletePoolIsUnknown(t *testing.T) {
 	}
 }
 
-// Malformed samples make the whole frame unknown rather than a measured zero.
+// A frame containing only malformed samples is unknown rather than measured zero.
 func TestPgBouncerPoolStarvationSignalMalformedSamplesAreUnobservable(t *testing.T) {
 	now := time.Date(2026, 10, 19, 10, 30, 0, 0, time.UTC)
 	vector := func(labels map[string]string, value string) string {
+		labels["env"], labels["job"] = "synthetic", "pgbouncer"
 		payload, err := json.Marshal(map[string]any{
 			"status": "success",
 			"data": map[string]any{"resultType": "vector", "result": []map[string]any{{
@@ -373,7 +375,7 @@ func TestPgBouncerPoolStarvationSignalMalformedSamplesAreUnobservable(t *testing
 	} {
 		alerts := runPgBouncerStarvationPayload(t, now, vector(c.labels, c.value))
 		alert := requireAlertClass(t, alerts, "pgbouncer-pools-unobservable")
-		if !strings.Contains(alert.Markdown(), "visibility_reason="+c.reason) {
+		if !strings.Contains(alert.Observed, c.reason) {
 			t.Errorf("%v %s: unobservable reason is not %s:\n%s", c.labels, c.value, c.reason, alert.Markdown())
 		}
 	}

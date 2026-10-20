@@ -135,8 +135,8 @@ func TestWaitEventsOneShotHealthyAndIncompleteEvidence(t *testing.T) {
 	} {
 		source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return test.rows, nil }}
 		alerts, err := NewWithSignals(syntheticSettings(source), NewWaitEventsSignal()).Run(context.Background())
-		if (err != nil) != test.wantErr {
-			t.Fatalf("%s error = %v, want error=%t", test.name, err, test.wantErr)
+		if err != nil {
+			t.Fatalf("%s lost explicit partial coverage: %v", test.name, err)
 		}
 		if !test.wantErr && len(alerts) != 0 {
 			t.Fatalf("healthy observation emitted alerts: %+v", alerts)
@@ -284,10 +284,7 @@ func TestWaitEventsSignalDoesNotRenderMalformedClientAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown := requireAlertClass(t, alerts, "wait-event-cluster").Markdown()
-	if !strings.Contains(markdown, "client_owner=unmapped-service-client") {
-		t.Fatalf("wait-event alert omitted malformed-address fallback: %s", markdown)
-	}
+	markdown := requireAlertClass(t, alerts, "cannot-observe").Markdown()
 	if strings.Contains(markdown, malformedAddress) {
 		t.Fatalf("wait-event alert leaked malformed client address: %s", markdown)
 	}
@@ -298,12 +295,13 @@ func TestWaitEventsSignalMalformedRowDoesNotEchoAddress(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return []Row{{"IO", "DataFileRead", "1", "71", address}}, nil
 	}}
-	_, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
-	if err == nil {
-		t.Fatal("malformed wait-event row was accepted")
+	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal("malformed wait-event row lost its explicit coverage finding")
 	}
-	if strings.Contains(err.Error(), address) {
-		t.Fatalf("malformed wait-event error leaked client address: %v", err)
+	alert := requireAlertClass(t, alerts, "cannot-observe")
+	if strings.Contains(alert.Markdown(), address) {
+		t.Fatal("malformed wait-event finding leaked client address")
 	}
 }
 

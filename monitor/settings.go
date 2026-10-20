@@ -34,6 +34,10 @@ type HostSettings struct {
 	SSHUser     string
 	SSHKeyPaths []string
 
+	// PgBouncerInstances declares indexes 1 through this count on a pg-primary
+	// host. Zero or a negative count leaves the pool census unknown.
+	PgBouncerInstances int
+
 	RedisEntryPort int
 	RedisNodePorts []int
 	// RedisExpectedReplicas arms SIGNALS.md §3.6 replica-cover. Zero is a
@@ -404,6 +408,9 @@ type SignalSettings struct {
 	// alerts; an empty value keeps missing or disabled configuration distinct
 	// from a deployment that legitimately finalized epoch zero.
 	STDeploymentKey string
+	// ContractDegradationConfig is strict desired degraded.yml authority,
+	// separate from deployed consumer configuration and its cached decisions.
+	ContractDegradationConfig ContractDegradationConfigStatus
 
 	SSHUser     string
 	SSHDevUser  string
@@ -699,44 +706,45 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
-		env:                     settings.Environment,
-		publicDomain:            settings.PublicDomain,
-		websiteDomain:           settings.WebsiteDomain,
-		managerHostname:         settings.ManagerHostname,
-		logServices:             append([]string(nil), settings.LogServices...),
-		logServiceBlocks:        cloneLogServiceBlocks(settings.LogServiceBlocks),
-		logServiceHosts:         cloneLogServiceBlocks(settings.LogServiceHosts),
-		proxyPathExpectedHosts:  settings.ProxyPathExpectedHosts,
-		verificationEnabled:     settings.VerificationEnabled,
-		stConfigStatus:          settings.STConfigStatus.normalized(),
-		stDeploymentKey:         settings.STDeploymentKey,
-		sshUser:                 settings.SSHUser,
-		sshDevUser:              settings.SSHDevUser,
-		sshKeyPaths:             append([]string(nil), settings.SSHKeyPaths...),
-		addressMode:             string(settings.AddressMode),
-		pgPort:                  settings.PostgreSQL.Port,
-		pgbouncerPort:           settings.PostgreSQL.PgBouncerPort,
-		pgUser:                  settings.PostgreSQL.User,
-		pgPassword:              settings.PostgreSQL.Password,
-		pgDb:                    settings.PostgreSQL.Database,
-		grafanaAdminPassword:    settings.Grafana.AdminPassword,
-		mimirQueryDomain:        settings.Grafana.QueryDomain,
-		mimirQueryUsername:      settings.Grafana.QueryUsername,
-		mimirQueryPassword:      settings.Grafana.QueryPassword,
-		sourceIPv4URL:           settings.SourceAttribution.IPv4URL,
-		sourceIPv6URL:           settings.SourceAttribution.IPv6URL,
-		expectedSourceIPv4:      settings.SourceAttribution.ExpectedIPv4,
-		expectedSourceIPv6:      settings.SourceAttribution.ExpectedIPv6,
-		dnsAliases:              cloneDNSAliasSettings(settings.DNSAliases),
-		mimirPublishers:         cloneMimirPublisherSettings(settings.MimirPublishers),
-		apiReleaseProof:         cloneAPIReleaseProofSettings(settings.APIReleaseProof),
-		pgQuerySampleUntil:      settings.PGQuerySampleUntil,
-		pgQuerySampleContinuous: settings.PGQuerySampleContinuous,
-		publicUdp:               clonePublicUdpSettings(settings.PublicUdp),
-		stateDir:                settings.StateDir,
-		sharedSshAdmission:      settings.sharedSshAdmission,
-		sshConnectTimeout:       settings.SSHConnectTimeout,
-		commandTimeout:          settings.CommandTimeout,
+		env:                       settings.Environment,
+		publicDomain:              settings.PublicDomain,
+		websiteDomain:             settings.WebsiteDomain,
+		managerHostname:           settings.ManagerHostname,
+		logServices:               append([]string(nil), settings.LogServices...),
+		logServiceBlocks:          cloneLogServiceBlocks(settings.LogServiceBlocks),
+		logServiceHosts:           cloneLogServiceBlocks(settings.LogServiceHosts),
+		proxyPathExpectedHosts:    settings.ProxyPathExpectedHosts,
+		verificationEnabled:       settings.VerificationEnabled,
+		stConfigStatus:            settings.STConfigStatus.normalized(),
+		stDeploymentKey:           settings.STDeploymentKey,
+		contractDegradationConfig: settings.ContractDegradationConfig.normalized(),
+		sshUser:                   settings.SSHUser,
+		sshDevUser:                settings.SSHDevUser,
+		sshKeyPaths:               append([]string(nil), settings.SSHKeyPaths...),
+		addressMode:               string(settings.AddressMode),
+		pgPort:                    settings.PostgreSQL.Port,
+		pgbouncerPort:             settings.PostgreSQL.PgBouncerPort,
+		pgUser:                    settings.PostgreSQL.User,
+		pgPassword:                settings.PostgreSQL.Password,
+		pgDb:                      settings.PostgreSQL.Database,
+		grafanaAdminPassword:      settings.Grafana.AdminPassword,
+		mimirQueryDomain:          settings.Grafana.QueryDomain,
+		mimirQueryUsername:        settings.Grafana.QueryUsername,
+		mimirQueryPassword:        settings.Grafana.QueryPassword,
+		sourceIPv4URL:             settings.SourceAttribution.IPv4URL,
+		sourceIPv6URL:             settings.SourceAttribution.IPv6URL,
+		expectedSourceIPv4:        settings.SourceAttribution.ExpectedIPv4,
+		expectedSourceIPv6:        settings.SourceAttribution.ExpectedIPv6,
+		dnsAliases:                cloneDNSAliasSettings(settings.DNSAliases),
+		mimirPublishers:           cloneMimirPublisherSettings(settings.MimirPublishers),
+		apiReleaseProof:           cloneAPIReleaseProofSettings(settings.APIReleaseProof),
+		pgQuerySampleUntil:        settings.PGQuerySampleUntil,
+		pgQuerySampleContinuous:   settings.PGQuerySampleContinuous,
+		publicUdp:                 clonePublicUdpSettings(settings.PublicUdp),
+		stateDir:                  settings.StateDir,
+		sharedSshAdmission:        settings.sharedSshAdmission,
+		sshConnectTimeout:         settings.SSHConnectTimeout,
+		commandTimeout:            settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands
@@ -770,6 +778,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			roles:                 append([]string(nil), configured.Roles...),
 			sshUser:               configured.SSHUser,
 			sshKeyPaths:           append([]string(nil), configured.SSHKeyPaths...),
+			pgbouncerInstances:    configured.PgBouncerInstances,
 			redisEntryPort:        configured.RedisEntryPort,
 			redisExpectedReplicas: configured.RedisExpectedReplicas,
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
@@ -828,6 +837,7 @@ func hostSettingsFromHost(h *host) HostSettings {
 		Roles:                 append([]string(nil), h.roles...),
 		SSHUser:               h.sshUser,
 		SSHKeyPaths:           append([]string(nil), h.sshKeyPaths...),
+		PgBouncerInstances:    h.pgbouncerInstances,
 		RedisEntryPort:        h.redisEntryPort,
 		RedisNodePorts:        h.redisNodePorts(),
 		RedisExpectedReplicas: h.redisExpectedReplicas,

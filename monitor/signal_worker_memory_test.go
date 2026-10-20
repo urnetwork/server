@@ -42,14 +42,26 @@ func workerMetricsFixtureJSON(t *testing.T, now time.Time, workers ...workerMetr
 		for name, value := range metrics {
 			result = append(result, map[string]any{
 				"metric": map[string]string{
-					"__name__": name,
-					"env":      "synthetic",
-					"job":      "taskworker",
-					"host":     worker.host,
-					"block":    worker.block,
-					"instance": worker.instance,
+					"__name__":              name,
+					"monitor_memory_metric": name,
+					"env":                   "synthetic",
+					"job":                   "taskworker",
+					"host":                  worker.host,
+					"block":                 worker.block,
+					"instance":              worker.instance,
 				},
 				"value": []any{float64(now.Add(-worker.age).Unix()), fmt.Sprintf("%.0f", value)},
+			})
+			result = append(result, map[string]any{
+				"metric": map[string]string{
+					"monitor_memory_source": name,
+					"env":                   "synthetic",
+					"job":                   "taskworker",
+					"host":                  worker.host,
+					"block":                 worker.block,
+					"instance":              worker.instance,
+				},
+				"value": []any{float64(now.Unix()), fmt.Sprintf("%d", now.Add(-worker.age).Unix())},
 			})
 		}
 	}
@@ -65,13 +77,30 @@ func workerMetricsFixtureJSON(t *testing.T, now time.Time, workers ...workerMetr
 
 func workerRatesFixtureJSON(t *testing.T, now time.Time, workers ...workerMetricFixture) string {
 	t.Helper()
+	return workerRateFamiliesFixtureJSON(t, now, true, workers...)
+}
+
+// Churn's query returns only CPU/allocation and their source clocks.
+func workerChurnRatesFixtureJSON(t *testing.T, now time.Time, workers ...workerMetricFixture) string {
+	t.Helper()
+	return workerRateFamiliesFixtureJSON(t, now, false, workers...)
+}
+
+func workerRateFamiliesFixtureJSON(t *testing.T, now time.Time, includeGc bool, workers ...workerMetricFixture) string {
+	t.Helper()
 	result := []any{}
 	for _, worker := range workers {
 		rates := map[string]float64{
-			"cpu":      worker.cpuRate,
-			"alloc":    worker.allocRate,
-			"gc":       worker.gcRate,
-			"gc_pause": worker.gcPauseRate,
+			"cpu":   worker.cpuRate,
+			"alloc": worker.allocRate,
+		}
+		kinds := []string{"cpu", "alloc"}
+		if includeGc {
+			rates["gc"], rates["gc_pause"] = worker.gcRate, worker.gcPauseRate
+			kinds = append(kinds, "gc", "gc_pause")
+		}
+		for _, kind := range kinds {
+			rates[kind+"_source_time"] = float64(now.Add(-worker.age).Unix())
 		}
 		for name, value := range rates {
 			result = append(result, map[string]any{
@@ -132,10 +161,10 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 			return payload, nil
 		},
 		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
-			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --json GET "+redisScoreAliasReadyKey {
 				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
 			}
-			return redisScoreAliasReadyValue, nil
+			return `"1"`, nil
 		},
 		localFn: func(name string, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
@@ -278,8 +307,8 @@ func TestWorkerMemoryGlobalAliasMarkerDoesNotAttestOutlierArtifact(t *testing.T)
 		name, marker, state, mechanism string
 		err                            error
 	}{
-		{"prior writer completed", redisScoreAliasReadyValue, "true", "some writer previously completed a compatibility pass", nil},
-		{"no marker", "", "false", "does not identify this worker's artifact", nil},
+		{"prior writer completed", `"1"`, "true", "some writer previously completed a compatibility pass", nil},
+		{"no marker", "null", "false", "does not identify this worker's artifact", nil},
 		{"marker unavailable", "", "unknown", "Neither marker state nor exact exporter capability is established", errors.New("synthetic marker unavailable")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,7 +325,7 @@ func TestWorkerMemoryGlobalAliasMarkerDoesNotAttestOutlierArtifact(t *testing.T)
 					return metrics, nil
 				},
 				redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
-					if strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+					if strings.Join(args, " ") != "-c --json GET "+redisScoreAliasReadyKey {
 						t.Fatal("unexpected marker operation")
 					}
 					return tc.marker, tc.err
@@ -364,8 +393,8 @@ func TestWorkerMemorySignalSyntheticIgnoresStaleAndInBandWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("in-band workers or stale old generation alerted: %+v", alerts)
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !alerts[0].unobservable {
+		t.Fatalf("stale runtime was measured or its coverage disappeared: %+v", alerts)
 	}
 }
 
@@ -495,6 +524,9 @@ func testWorkerOptionalLifecycleErrorPrivacy(t *testing.T, newSignal func() Sign
 	}
 	heapPayload := workerMetricsFixtureJSON(t, now, workers...)
 	ratePayload := workerRatesFixtureJSON(t, now, workers...)
+	if class == "worker-cpu-allocation-churn" {
+		ratePayload = workerChurnRatesFixtureJSON(t, now, workers...)
+	}
 	journal := fmt.Sprintf(
 		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":%q,"CONTAINER_TAG":"warp|synthetic|taskworker|g2","CONTAINER_ID":"hot","_HOSTNAME":"edge-3"}`,
 		now.Add(-5*time.Second).Format(time.RFC3339Nano),

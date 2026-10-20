@@ -86,20 +86,28 @@ func pgbouncerPoolStarvationQuery(environment string) string {
 	}
 	sort.Strings(metrics)
 	for _, metric := range metrics {
-		parts = append(parts, tag(pgbouncerStarvationPoolMetrics[metric]+selector, metric))
+		expression := pgbouncerStarvationPoolMetrics[metric] + selector
+		parts = append(parts, tag(expression, metric), tag("timestamp("+expression+")", metric+"_sample_time"))
 	}
 	return strings.Join(parts, " or ")
 }
 
 // One pool as the exporter last read it.
 type pgbouncerStarvationPool struct {
-	instance string
-	database string
-	values   map[string]float64
+	instance  string
+	values    map[string]float64
+	publisher string
+	invalid   bool
 }
 
 func (self *pgbouncerStarvationPool) complete() bool {
+	if self.invalid {
+		return false
+	}
 	for metric := range pgbouncerStarvationPoolMetrics {
+		if _, ok := self.values[metric+"_sample_time"]; !ok {
+			return false
+		}
 		if _, ok := self.values[metric]; !ok {
 			return false
 		}
@@ -125,6 +133,8 @@ type pgbouncerStarvationInstance struct {
 	sampleTime    float64
 	hasSampleTime bool
 	databasePools map[string]*pgbouncerStarvationPool
+	publisher     string
+	invalid       bool
 }
 
 // The evaluated frame. Unknown instances could not be read; their pools are
@@ -135,61 +145,160 @@ type pgbouncerStarvationFrame struct {
 	unanswered []string
 	stale      []string
 	incomplete []string
+	reasons    []string
 }
 
-// Groups the evaluation by instance and pool. A sample that is malformed,
-// negative or without its labels makes the whole frame unobservable rather
-// than a measured zero; a console that did not answer, a stale instance and
-// a pool missing a gauge leave only that instance unknown.
-func parsePgBouncerStarvationFrame(response mimirInstantResponse, now time.Time) (*pgbouncerStarvationFrame, string) {
+// Keeps console and database-pool authority separate. A bad pool leaves only
+// that pool unknown; unassignable rows withhold complete coverage without
+// discarding independent complete tuples. Every metric joins one publisher
+// and one scrape epoch; duplicate fields never select a winner by row order.
+func parsePgBouncerStarvationFrame(response mimirInstantResponse, now time.Time, environment string, databaseName string, hosts []*host) *pgbouncerStarvationFrame {
+	frame := &pgbouncerStarvationFrame{}
+	reasonSet := map[string]bool{}
+	if databaseName == "" {
+		reasonSet["database_inventory_missing"] = true
+	}
+	nameHosts := map[string]*host{}
+	hostIndexes := map[string]map[int]bool{}
+	for _, h := range hosts {
+		if _, exists := nameHosts[h.name]; exists {
+			reasonSet["invalid_instance_inventory"] = true
+			nameHosts[h.name] = nil
+			continue
+		}
+		nameHosts[h.name] = h
+		hostIndexes[h.name] = map[int]bool{}
+		if h.pgbouncerInstances <= 0 {
+			reasonSet["instance_census_unconfigured"] = true
+		}
+	}
+	if len(nameHosts) == 0 {
+		reasonSet["instance_inventory_missing"] = true
+	}
 	nameInstances := map[string]*pgbouncerStarvationInstance{}
-	instance := func(host string, index string) *pgbouncerStarvationInstance {
-		name := host + "/pgbouncer@" + index
-		state, ok := nameInstances[name]
-		if !ok {
+	for _, series := range response.Data.Result {
+		hostName, indexText := series.Metric["host"], series.Metric["pgbouncer"]
+		if hostName == "" || indexText == "" {
+			reasonSet["unlabeled_series"] = true
+			continue
+		}
+		h, knownHost := nameHosts[hostName]
+		index, indexErr := strconv.Atoi(indexText)
+		if !knownHost || h == nil || indexErr != nil || index <= 0 || strconv.Itoa(index) != indexText ||
+			(0 < h.pgbouncerInstances && h.pgbouncerInstances < index) {
+			reasonSet["unrecognized_instance"] = true
+			continue
+		}
+		if series.Metric["env"] != environment || series.Metric["job"] != "pgbouncer" {
+			reasonSet["source_identity_mismatch"] = true
+			continue
+		}
+		hostIndexes[hostName][index] = true
+		name := h.name + "/pgbouncer@" + strconv.Itoa(index)
+		state, exists := nameInstances[name]
+		if !exists {
 			state = &pgbouncerStarvationInstance{name: name, databasePools: map[string]*pgbouncerStarvationPool{}}
 			nameInstances[name] = state
 		}
-		return state
-	}
-	for _, series := range response.Data.Result {
-		host, index := series.Metric["host"], series.Metric["pgbouncer"]
-		if host == "" || index == "" {
-			return nil, "unlabeled_series"
+		metric := series.Metric["monitor_metric"]
+		poolMetric := strings.TrimSuffix(metric, "_sample_time")
+		_, knownPoolMetric := pgbouncerStarvationPoolMetrics[poolMetric]
+		if metric != "up" && metric != "sample_time" && !knownPoolMetric {
+			reasonSet["unknown_metric_class"] = true
+			continue
+		}
+		// These dimensions name the publisher, including any extra source
+		// labels. Database names and source labels remain private join keys.
+		publisherLabels := map[string]string{}
+		for label, value := range series.Metric {
+			if label != "__name__" && label != "monitor_metric" && label != "database" {
+				publisherLabels[label] = value
+			}
+		}
+		publisherJson, _ := json.Marshal(publisherLabels)
+		publisher := string(publisherJson)
+		var pool *pgbouncerStarvationPool
+		if knownPoolMetric {
+			database := series.Metric["database"]
+			if database == "" {
+				reasonSet["unlabeled_series"] = true
+				continue
+			}
+			if databaseName == "" || database != databaseName {
+				reasonSet["unrecognized_database"] = true
+				continue
+			}
+			pool = state.databasePools[database]
+			if pool == nil {
+				pool = &pgbouncerStarvationPool{instance: state.name, values: map[string]float64{}, publisher: publisher}
+				state.databasePools[database] = pool
+			}
+			if pool.publisher != publisher {
+				pool.invalid = true
+				reasonSet["ambiguous_publisher"] = true
+			}
+			if _, duplicate := pool.values[metric]; duplicate {
+				pool.invalid = true
+				reasonSet["duplicate_metric"] = true
+			}
+		} else {
+			if state.publisher == "" {
+				state.publisher = publisher
+			} else if state.publisher != publisher {
+				state.invalid = true
+				reasonSet["ambiguous_publisher"] = true
+			}
+			if (metric == "up" && state.hasUp) || (metric == "sample_time" && state.hasSampleTime) {
+				state.invalid = true
+				reasonSet["duplicate_metric"] = true
+			}
 		}
 		observedAt, value, err := mimirInstantValue(series.Value)
-		if err != nil || now.Sub(observedAt) > pgbouncerStarvationFreshness || now.Sub(observedAt) < -30*time.Second ||
-			math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			return nil, "invalid_metric"
+		valid := err == nil && now.Sub(observedAt) <= pgbouncerStarvationFreshness && now.Sub(observedAt) >= -30*time.Second &&
+			!math.IsNaN(value) && !math.IsInf(value, 0) && 0 <= value
+		if metric == "up" {
+			valid = valid && (value == 0 || value == 1)
+		} else if metric == "waiting" || metric == "servers" || metric == "logins" {
+			// Counts must be exactly representable nonnegative integers.
+			valid = valid && math.Trunc(value) == value && value <= 9007199254740991
 		}
-		state := instance(host, index)
-		metric := series.Metric["monitor_metric"]
+		expectedName := "pgbouncer_up"
+		if knownPoolMetric {
+			expectedName = pgbouncerStarvationPoolMetrics[poolMetric]
+		}
+		if sourceName := series.Metric["__name__"]; sourceName != "" && sourceName != expectedName {
+			valid = false
+		}
+		if !knownPoolMetric && series.Metric["database"] != "" {
+			valid = false
+		}
+		if !valid {
+			reasonSet["invalid_metric"] = true
+			if pool != nil {
+				pool.invalid = true
+			} else {
+				state.invalid = true
+			}
+		}
 		switch metric {
 		case "up":
 			state.up, state.hasUp = value, true
 		case "sample_time":
 			state.sampleTime, state.hasSampleTime = value, true
 		default:
-			if _, ok := pgbouncerStarvationPoolMetrics[metric]; !ok {
-				return nil, "unknown_metric_class"
-			}
-			database := series.Metric["database"]
-			if database == "" {
-				return nil, "unlabeled_series"
-			}
-			pool, ok := state.databasePools[database]
-			if !ok {
-				pool = &pgbouncerStarvationPool{instance: state.name, database: database, values: map[string]float64{}}
-				state.databasePools[database] = pool
-			}
 			pool.values[metric] = value
 		}
 	}
-	if len(nameInstances) == 0 {
-		return nil, "exporter_series_missing"
+	if len(response.Data.Result) == 0 {
+		reasonSet["exporter_series_missing"] = true
 	}
-
-	frame := &pgbouncerStarvationFrame{}
+	// Compare counts inside the declared range. This uses memory bounded by
+	// the response, never by a possibly large configured instance count.
+	for name, h := range nameHosts {
+		if h != nil && 0 < h.pgbouncerInstances && len(hostIndexes[name]) != h.pgbouncerInstances {
+			reasonSet["missing_instances"] = true
+		}
+	}
 	for _, state := range nameInstances {
 		frame.instances = append(frame.instances, state)
 	}
@@ -197,11 +306,13 @@ func parsePgBouncerStarvationFrame(response mimirInstantResponse, now time.Time)
 		return pgbouncerStarvationInstanceLess(frame.instances[i].name, frame.instances[j].name)
 	})
 	for _, state := range frame.instances {
-		sampledAt := time.Unix(0, int64(state.sampleTime*float64(time.Second)))
+		// Compare finite seconds before conversion to time.Duration, which
+		// could wrap an otherwise malformed source timestamp.
+		sampleAge := float64(now.Unix()) + float64(now.Nanosecond())/float64(time.Second) - state.sampleTime
 		switch {
-		case !state.hasUp || !state.hasSampleTime:
+		case state.invalid || !state.hasUp || !state.hasSampleTime:
 			frame.incomplete = append(frame.incomplete, state.name)
-		case pgbouncerStarvationFreshness < now.Sub(sampledAt) || now.Sub(sampledAt) < -30*time.Second:
+		case pgbouncerStarvationFreshness.Seconds() < sampleAge || sampleAge < -30:
 			frame.stale = append(frame.stale, state.name)
 		case state.up != 1:
 			frame.unanswered = append(frame.unanswered, state.name)
@@ -213,23 +324,35 @@ func parsePgBouncerStarvationFrame(response mimirInstantResponse, now time.Time)
 				databases = append(databases, database)
 			}
 			sort.Strings(databases)
-			pools := []*pgbouncerStarvationPool{}
+			incomplete := false
 			for _, database := range databases {
 				pool := state.databasePools[database]
-				if !pool.complete() {
-					pools = nil
-					break
+				if pool.publisher != state.publisher {
+					pool.invalid = true
+					reasonSet["ambiguous_publisher"] = true
 				}
-				pools = append(pools, pool)
+				for metric := range pgbouncerStarvationPoolMetrics {
+					if sampledAt, exists := pool.values[metric+"_sample_time"]; exists && sampledAt != state.sampleTime {
+						pool.invalid = true
+						reasonSet["incoherent_sample_time"] = true
+					}
+				}
+				if !pool.complete() {
+					incomplete = true
+					continue
+				}
+				frame.pools = append(frame.pools, pool)
 			}
-			if pools == nil {
+			if incomplete {
 				frame.incomplete = append(frame.incomplete, state.name)
-				continue
 			}
-			frame.pools = append(frame.pools, pools...)
 		}
 	}
-	return frame, ""
+	for reason := range reasonSet {
+		frame.reasons = append(frame.reasons, reason)
+	}
+	sort.Strings(frame.reasons)
+	return frame
 }
 
 // Orders "host/pgbouncer@N" by host, then by numeric N.
@@ -296,7 +419,10 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 	if err != nil {
 		return nil, fmt.Errorf("pgbouncer pool starvation: query Mimir: %w", err)
 	}
-	var response mimirInstantResponse
+	var response struct {
+		mimirInstantResponse
+		Warnings json.RawMessage `json:"warnings"`
+	}
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
 		return nil, fmt.Errorf("pgbouncer pool starvation: decode Mimir response: %w", err)
 	}
@@ -311,19 +437,22 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 			probeId: probeId, tier: tierWarn, class: "pgbouncer-pools-unobservable",
 			target: target, sustain: 2,
 			symptom:   "The PgBouncer pool exporter's series cannot establish every pool's state.",
-			mechanism: "pgbouncer-pool-exporter reads SHOW POOLS from every instance's admin console every 15 s and serves the last reading; Fluent Bit ships it to Mimir. A console that did not answer, a stale or missing series, or a pool without all its gauges leaves that pool unknown: it may be starved.",
-			baseline:  "Every instance's console answers (pgbouncer_up 1), every series is under two minutes old, and every pool has all its gauges.",
+			mechanism: "pgbouncer-pool-exporter reads SHOW POOLS from every instance's admin console every 15 s and serves the last reading; Fluent Bit ships it to Mimir. A console that did not answer, stale, missing, duplicate or incoherent series, an unconfigured instance census, or a pool without all its gauges leaves coverage unknown: it may be starved.",
+			baseline:  "Every configured pg-primary host declares pgbouncer_instances; indexes 1 through that count answer (pgbouncer_up 1), and each instance has the configured PostgreSQL database pool with unique gauges from the same publisher and fresh scrape epoch.",
 			observed:  observed + " metrics_gateway=" + gateway.name,
-			evidence:  "Only fixed structural reasons and pool indexes are exported; raw samples are discarded.",
+			evidence:  "Only fixed structural reasons, inventory host names and canonical pool indexes are exported; database and publisher labels are private join keys.",
 			context:   "Pools that were read are still evaluated: a proven starvation pages beside this. When every console stops answering at once PgBouncer itself may be frozen on its log writes by a storage stall (§5.12), so corroborate with PostgreSQL client backends and Connect accepted handshakes (§2.11a) before treating it as an exporter or Fluent Bit fault.",
 			action:    "Check `systemctl status pgbouncer-pool-exporter` and its journal on the database host, then Fluent Bit's pgbouncer input, then read one console directly as in §2.11a.",
 			verify:    "Every console answers with fresh series for two cadences.",
 			playbook:  "SIGNALS.md §2.11a",
 		}
 	}
-	frame, visibilityReason := parsePgBouncerStarvationFrame(response, env.now().UTC())
-	if visibilityReason != "" {
-		return []finding{unobservable("visibility_reason=" + visibilityReason)}, nil
+	frame := parsePgBouncerStarvationFrame(response.mimirInstantResponse, env.now().UTC(), env.cfg.env, env.cfg.pgDb, env.cfg.hostsWithRole("pg-primary"))
+	if len(response.Warnings) != 0 {
+		var warnings []json.RawMessage
+		if err := json.Unmarshal(response.Warnings, &warnings); err != nil || len(warnings) != 0 {
+			frame.reasons = append(frame.reasons, "query_warnings")
+		}
 	}
 
 	oldPools := []*pgbouncerStarvationPool{}
@@ -334,8 +463,9 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 	}
 	observed := pgbouncerStarvationObserved(frame, oldPools)
 	findings := []finding{}
-	if 0 < len(frame.unanswered)+len(frame.stale)+len(frame.incomplete) {
-		reasons := []string{}
+	coverageComplete := len(frame.reasons)+len(frame.unanswered)+len(frame.stale)+len(frame.incomplete) == 0
+	if !coverageComplete {
+		reasons := append([]string(nil), frame.reasons...)
 		for _, reason := range []struct {
 			name      string
 			instances []string
@@ -353,9 +483,9 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 		findings = append(findings, healthyFinding(probeId, tierWarn, "pgbouncer-pools-unobservable", target))
 	}
 
-	mechanism := "PgBouncer 1.26 opens one server login at a time per pool and hands each new server to the oldest queued client without reading that client's socket. A 2-7 s whole-database freeze expires the services' 5 s ping and BEGIN deadline, they hang up, and while query_wait_timeout is longer than that budget the oldest queued client has always already gone: each new server is closed at once and the pool never refills (§2.11). PostgreSQL, the 6432 listener and every unit stay up, and direct 5432 logins work."
+	mechanism := "This observation proves queued clients with no usable server, not the trigger or running PgBouncer version. The historical stock-PgBouncer failure assigned each new server to an already disconnected queued client, closing the server again and preventing refill (§2.11a). A database pause can expose that defect while PostgreSQL, the listener and units remain up; the first outage trigger was not established, and starvation recurred with the 4 s queue timeout already set."
 	contextText := "Nginx spreads new sessions over every pool, so a pool with servers serves only its own share and does not clear this: on 2026-10-19 the patched pgbouncer@1 kept 20 servers while 31 stock pools starved, Connect failed its startup readiness, and connected providers fell from 76k to 1.8k (§1.1a). Connect and API check readiness once, so restarting them during starvation loops and adds connections."
-	action := "Follow §5.12: hold deploys and restarts. Under operator authorization run `SET query_wait_timeout = 4` on each starved instance's admin console (§2.11a); it ended the 2026-10-12 recurrence and the 2026-10-19 outage within a minute, with no restart. Restart an instance only if that fails, after recording its SHOW POOLS and SHOW SERVERS. Do not restart PostgreSQL. Then find the trigger in the duration log and checkpoints (§2.2b)."
+	action := "Follow §5.12: hold deploys and restarts and coordinate with the existing PgBouncer repair owner. Compare each running instance with the owning source repair 5594f22 before attributing this symptom to stock behavior or proposing a rollout. Under operator authorization, `SET query_wait_timeout = 4` was a historical temporary mitigation (§2.11a); recurrence with 4 s already set means it does not establish durable recovery. Record SHOW POOLS and SHOW SERVERS before any authorized instance intervention. Do not restart PostgreSQL. Corroborate the trigger in the duration log and checkpoints (§2.2b)."
 	verify := "Every pool holds servers with no queued client for ten minutes, PostgreSQL client backends return to 710-770, and Connect accepted handshakes and connected providers return to their prior level (§2.11a, §1.1a)."
 	evidence := "A Mimir instant query of the pool exporter's per-instance series (job=\"pgbouncer\"); the starvation age is pgbouncer_pool_starved_seconds and the oldest wait pgbouncer_pool_maxwait_seconds. No client, address or query leaves the database host."
 	switch {
@@ -376,16 +506,20 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 			verify:    verify,
 			playbook:  "SIGNALS.md §5.12 and §2.11a",
 		})
-		findings = append(findings, healthyFinding(probeId, tierWarn, "pgbouncer-pool-starved-shard", target))
+		if coverageComplete {
+			findings = append(findings, healthyFinding(probeId, tierWarn, "pgbouncer-pool-starved-shard", target))
+		}
 	case len(oldPools) == 1:
 		pool := oldPools[0]
-		findings = append(findings, healthyFinding(probeId, tierPage, "pgbouncer-pools-starved", target))
+		if coverageComplete {
+			findings = append(findings, healthyFinding(probeId, tierPage, "pgbouncer-pools-starved", target))
+		}
 		findings = append(findings, finding{
 			probeId: probeId, tier: tierWarn, class: "pgbouncer-pool-starved-shard",
 			target: env.cfg.env + "/" + pool.instance, sustain: 2, pageSustain: pgbouncerStarvationShardPageSustain,
 			symptom: fmt.Sprintf(
-				"PgBouncer pool %s (%s) has had %.0f queued clients and no server for %.0f s; its oldest client has waited %.0f s",
-				pool.instance, pool.database, pool.values["waiting"], pool.values["starved_seconds"], pool.values["max_wait"],
+				"PgBouncer pool %s has had %.0f queued clients and no server for %.0f s; its oldest client has waited %.0f s",
+				pool.instance, pool.values["waiting"], pool.values["starved_seconds"], pool.values["max_wait"],
 			),
 			mechanism: mechanism + " One starved pool fails its share of new sessions; the livelock spreads to more pools when the next freeze comes.",
 			baseline:  "Every pool holds servers; a pool is empty only while its first login completes.",
@@ -397,10 +531,12 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 			playbook:  "SIGNALS.md §2.11a",
 		})
 	default:
-		findings = append(findings,
-			healthyFinding(probeId, tierPage, "pgbouncer-pools-starved", target),
-			healthyFinding(probeId, tierWarn, "pgbouncer-pool-starved-shard", target),
-		)
+		if coverageComplete {
+			findings = append(findings,
+				healthyFinding(probeId, tierPage, "pgbouncer-pools-starved", target),
+				healthyFinding(probeId, tierWarn, "pgbouncer-pool-starved-shard", target),
+			)
+		}
 	}
 	return findings, nil
 }

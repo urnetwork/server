@@ -92,6 +92,14 @@ type serviceLoadResidentSample struct {
 	invalid bool
 }
 
+// One fresh node publisher may supply host capacity. Repeated or invalid
+// contributions cannot choose a CPU threshold or erase independent pressure.
+type serviceLoadHostCoreSample struct {
+	cores   float64
+	count   int
+	invalid bool
+}
+
 func serviceLoadServicePattern(services []string) string {
 	unique := map[string]bool{}
 	for _, service := range services {
@@ -280,29 +288,44 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	callbackWorkerSamples := map[string]*serviceLoadResidentSample{}
 	forwardWorkerSamples := map[string]*serviceLoadResidentSample{}
 	forwardIdleWatcherSamples := map[string]*serviceLoadResidentSample{}
-	hostCores := map[string]float64{}
+	hostCoreSamples := map[string]*serviceLoadHostCoreSample{}
 	invalidSeries := 0
 	for _, series := range response.Data.Result {
 		metric := series.Metric["monitor_metric"]
+		host := series.Metric["host"]
 		residentMetric := metric == "resident_clients" || metric == "resident_callback_workers" || metric == "resident_forward_workers" || metric == "resident_forward_idle_watchers"
 		observedAt, value, err := mimirInstantValue(series.Value)
+		age := now.Sub(observedAt)
+		if metric == "host_cores" {
+			if !expectedHosts[host] {
+				continue
+			}
+			sample := hostCoreSamples[host]
+			if sample == nil {
+				sample = &serviceLoadHostCoreSample{}
+				hostCoreSamples[host] = sample
+			}
+			sample.count++
+			if sample.count == 1 {
+				sample.cores = value
+			}
+			// The query retains every publisher dimension. A second row is
+			// ambiguous even if the publishers or their core counts agree.
+			sample.invalid = sample.invalid || err != nil || math.IsNaN(value) || math.IsInf(value, 0) ||
+				value < 1 || math.Trunc(value) != value || value > 9_007_199_254_740_991 ||
+				age > serviceLoadFreshness || age < -30*time.Second ||
+				series.Metric["env"] != env.cfg.env || series.Metric["job"] != "node"
+			continue
+		}
 		if err != nil && !residentMetric {
 			return nil, fmt.Errorf("service load: parse fixed metric sample: %w", err)
 		}
-		age := now.Sub(observedAt)
 		if err == nil && (age > serviceLoadFreshness || age < -30*time.Second) {
 			continue
 		}
 		invalidValue := err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0
 		if invalidValue && !residentMetric {
 			return nil, fmt.Errorf("service load: fixed metric value is invalid")
-		}
-		host := series.Metric["host"]
-		if metric == "host_cores" {
-			if expectedHosts[host] && value >= 1 {
-				hostCores[host] = value
-			}
-			continue
 		}
 		service := series.Metric["service"]
 		if service == "" {
@@ -415,10 +438,45 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	findings = append(findings, serviceLoadConnectResidentCostFinding(processes, expectedServices["connect"]))
 
 	overlaps := map[string]int{}
+	processHosts := map[string]bool{}
 	for _, process := range processes {
+		processHosts[process.host] = true
 		if process.mask&serviceLoadMetricRSS != 0 {
 			overlaps[process.host+"\x00"+process.service+"\x00"+process.block]++
 		}
+	}
+	hostCores := map[string]float64{}
+	for _, configured := range env.cfg.hosts {
+		if !processHosts[configured.name] {
+			continue
+		}
+		sample := hostCoreSamples[configured.name]
+		if sample != nil && sample.count == 1 && !sample.invalid {
+			hostCores[configured.name] = sample.cores
+			findings = append(findings, healthyFinding("runtime/service-runaway", tierWarn, "service-runtime-metrics-incomplete", configured.name))
+			continue
+		}
+		capacityStatus := "missing"
+		sampleCount := 0
+		if sample != nil {
+			sampleCount = sample.count
+			capacityStatus = "invalid"
+			if sample.count > 1 {
+				capacityStatus = "ambiguous"
+			}
+		}
+		findings = append(findings, finding{
+			probeId: "runtime/service-runaway", tier: tierWarn,
+			class: "service-runtime-metrics-incomplete", target: configured.name, sustain: 2,
+			symptom:   "A managed-service host has no unambiguous fresh CPU-capacity observation.",
+			mechanism: "Missing, duplicate, stale, or invalid node-exporter capacity cannot select a host-relative CPU threshold. Process pressure that does not depend on this denominator remains independently observable.",
+			baseline:  "Each observed process host has exactly one fresh finite positive integer node CPU count with matching environment and node job labels.",
+			observed:  fmt.Sprintf("host_capacity_status=%s host_core_samples=%d freshness_limit_s=%d", capacityStatus, sampleCount, int(serviceLoadFreshness/time.Second)),
+			evidence:  "Node publisher dimensions remain distinct in the query; only contribution counts and fixed validity status are retained. Query gateway=" + gateway.name + ".",
+			action:    "Check the host's node exporter, publisher labels, and remote-write coverage. Preserve independently proven runtime findings and existing incident ownership while restoring one coherent capacity source.",
+			verify:    "Two consecutive runs observe exactly one valid fresh node CPU count for this enabled process host.",
+			playbook:  "SIGNALS.md §8.15",
+		})
 	}
 	ordered := make([]string, 0, len(processes))
 	for key := range processes {
@@ -445,12 +503,18 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 		findings = append(findings, healthyFinding("runtime/service-runaway", tierWarn, "service-runtime-metrics-incomplete", target))
 
-		cores := hostCores[process.host]
-		if cores < 1 {
+		cores, capacityKnown := hostCores[process.host]
+		capacityObservation := fmt.Sprintf("host_logical_cpus=%.0f host_capacity_status=valid", cores)
+		if !capacityKnown {
+			// A CPU positive at the policy maximum needs no host denominator.
+			// The calculation below is a threshold bound, not measured capacity.
 			cores = serviceLoadMaximumCPUCoreRate / serviceLoadHostCPUFraction
+			capacityObservation = fmt.Sprintf("host_logical_cpus=unknown host_capacity_status=unobservable cpu_threshold_upper_bound_cores=%.2f", serviceLoadMaximumCPUCoreRate)
 		}
 		if !serviceLoadRunaway(process, cores) {
-			findings = append(findings, healthyFinding("runtime/service-runaway", tierPage, "service-runtime-runaway", target))
+			if capacityKnown {
+				findings = append(findings, healthyFinding("runtime/service-runaway", tierPage, "service-runtime-runaway", target))
+			}
 			continue
 		}
 		processAge := math.Max(0, float64(now.Unix())-process.start)
@@ -481,7 +545,7 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: "A large live process combined with multi-core CPU, extreme allocation, or hundreds of thousands of goroutines creates scheduler and garbage-collector pressure. During a rollout, an old generation can amplify the same load while its replacement accepts work.",
 			baseline:  fmt.Sprintf("rss_bytes < %.0f or cpu_cores_5m < %.2f, goroutines < %.0f, and alloc_bytes_per_s_5m < %.0f; hard ceilings rss_bytes < %.0f, goroutines < %.0f, alloc_bytes_per_s_5m < %.0f", serviceLoadRSSFloorBytes, serviceLoadCPUThreshold(cores), serviceLoadGoroutineFloor, serviceLoadAllocationFloor, serviceLoadRSSHardBytes, serviceLoadGoroutineHard, serviceLoadAllocationHard),
 			observed: fmt.Sprintf(
-				"rss_bytes=%.0f heap_bytes=%.0f heap_objects=%.0f goroutines=%.0f cpu_cores_5m=%.3f alloc_bytes_per_s_5m=%.0f gc_cycles_per_s_5m=%.4f process_age_s=%.0f host_logical_cpus=%.0f same_block_generations=%d",
+				"rss_bytes=%.0f heap_bytes=%.0f heap_objects=%.0f goroutines=%.0f cpu_cores_5m=%.3f alloc_bytes_per_s_5m=%.0f gc_cycles_per_s_5m=%.4f process_age_s=%.0f %s same_block_generations=%d",
 				process.rss,
 				process.heap,
 				process.objects,
@@ -490,7 +554,7 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				process.allocation,
 				process.gc,
 				processAge,
-				cores,
+				capacityObservation,
 				overlaps[blockKey],
 			) + observedCapability,
 			evidence: "Fresh runtime gauges and five-minute counter rates were joined on the exact host/service/block/instance identity through gateway " + gateway.name + ". Draining generations remain visible by design.",

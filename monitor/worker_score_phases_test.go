@@ -176,6 +176,9 @@ func TestWorkerScorePhaseEvidencePreservesRealAlerts(t *testing.T) {
 							}
 							return workerScorePhaseSourceFilteredFixture(t, now, command, mode), nil
 						case strings.Contains(command, "monitor_rate"):
+							if probe.class == "worker-cpu-allocation-churn" {
+								return workerChurnRatesFixtureJSON(t, now, workers...), nil
+							}
 							return workerRatesFixtureJSON(t, now, workers...), nil
 						default:
 							return workerMetricsFixtureJSON(t, now, workers...), nil
@@ -184,7 +187,7 @@ func TestWorkerScorePhaseEvidencePreservesRealAlerts(t *testing.T) {
 					localFn: func(string, ...string) (string, error) {
 						return "[worker-hot][taskworker][g2][cid:runtime-hot][I][2026-09-16T11:58:25Z][task.go:1938][01a0530b-0e6a-9c14-6694-11a165f3c27b]eval active(101s) synthetic/taskworker/work.UpdateClientScores({})", nil
 					},
-					redisFn: func(HostSettings, int, ...string) (string, error) { return redisScoreAliasReadyValue, nil },
+					redisFn: func(HostSettings, int, ...string) (string, error) { return `"1"`, nil },
 				}
 				alerts, err := probe.newSignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
 				if err != nil {
@@ -315,6 +318,9 @@ func TestWorkerScorePhaseQueryCostBoundary(t *testing.T) {
 							return workerScorePhaseFixtureJSON(t, now, "worker-hot", "g2", "runtime-hot", true), nil
 						}
 						if strings.Contains(command, "monitor_rate") {
+							if newSignal().Key() == "worker-churn" {
+								return workerChurnRatesFixtureJSON(t, now, workers...), nil
+							}
 							return workerRatesFixtureJSON(t, now, workers...), nil
 						}
 						return workerMetricsFixtureJSON(t, now, workers...), nil
