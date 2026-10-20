@@ -40920,6 +40920,16 @@ does not need release, financial, user, or write permissions. The probe obtains
 short-lived OAuth tokens and never copies the service-account document into an
 alert or its cursor.
 
+Shared Apple/Play report reads and query POSTs retain at most three attempts.
+For an accepted nonnegative integer `Retry-After`, cap seconds at 30 before
+converting to a duration; multiplying a large accepted 64-bit integer first can
+wrap negative and turn the intended backoff into an immediate wait. HTTP-date
+and invalid-header fallback handling retain their existing policy, and every
+wait remains cancellable by its parent. Public errors withhold raw header and
+response-body text, signed URLs and credentials. This arithmetic correction
+does not establish an extreme provider header, a retry flood, current provider
+failure or recovery; a finite attempt cap alone does not prove correct backoff.
+
 Every 30 minutes, query DAILY `crashRate`, `userPerceivedCrashRate`, and
 `distinctUsers` through the provider's advertised freshness boundary, then
 search crash-only ErrorIssues across a rolling 48-hour UTC interval ending at
@@ -41011,6 +41021,11 @@ request. The probe signs a fresh ES256 JWT for API reads (`kid`, `iss`,
 `aud=appstoreconnect-v1`, 15-minute lifetime). It deliberately uses a separate
 unauthenticated HTTP client for each short-lived segment URL, so the App Store
 Connect bearer token is never forwarded to Apple's storage host.
+
+Both Apple clients use the shared bounded `Retry-After` arithmetic in §20.1,
+including the unauthenticated segment download client. The 30-second wait cap,
+parent cancellation, three-attempt limit and credential separation remain
+independent of report replacement and crash classification.
 
 Every six hours, find the active ongoing request, the report whose name begins
 with `App Crashes`, and every DAILY instance in the seven-day processing
