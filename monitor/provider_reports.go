@@ -268,7 +268,9 @@ func providerRetryableStatus(status int) bool {
 func providerRetryDelay(value string, fallback time.Duration) time.Duration {
 	value = strings.TrimSpace(value)
 	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-		return min(time.Duration(seconds)*time.Second, providerRetryMaximum)
+		// Cap seconds before conversion: an accepted int may overflow Duration.
+		seconds = min(seconds, int(providerRetryMaximum/time.Second))
+		return time.Duration(seconds) * time.Second
 	}
 	if when, err := http.ParseTime(value); err == nil {
 		return min(max(time.Until(when), 0), providerRetryMaximum)
