@@ -584,6 +584,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
  AND i.indexprs IS NULL AND i.indpred IS NULL)`),
 	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery),
 	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery),
+	migrationCurrentSuffix(852, "device last-connected app version columns",
+		snMainnetMigrationColumns("device",
+			snMainnetMigrationColumn{name: "client_version", kind: "character varying(64)"},
+			snMainnetMigrationColumn{name: "client_version_time", kind: "timestamp without time zone"})),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
