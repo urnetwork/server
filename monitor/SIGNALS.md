@@ -9988,12 +9988,26 @@ no-completion sentinel remains a real PAGE. The five-minute cadence and sustain
 1 remain unchanged: exactly 90 minutes is healthy, over 90 minutes through
 exactly three hours is WARN, and over three hours or the sentinel is PAGE.
 A successful empty optional lifecycle log does not erase an observed stale
-gap or invent an active task.
+gap or invent an active task. A failed or partial optional lifecycle read
+retains the independent stale-completion finding and adds `cannot-observe`
+with frame `selection-lifecycle`, even when a valid heartbeat survives the
+partial read. Public evidence exports only the fixed `active_log_error_class`;
+raw source errors, malformed journal metadata and durable task identifiers
+must not enter Alert fields, Markdown, JSON, JSONL or notifier messages.
+A clean gateway or journal read remains observable, including an empty log.
+A healthy required age skips the optional read entirely. Parent cancellation
+keeps the existing private source error chain and interrupted-run semantics.
 
 False-positive qualifier: an invalid required age cannot establish a stale
 publication, missing completion or active rebuild. False-negative qualifier:
 invalid-to-zero conversion must not certify freshness or resolve an existing
 incident; optional lifecycle evidence cannot qualify a missing required age.
+A synthetic malformed-tag canary proves a potential public error path, not a
+production disclosure. Approved executor host/generation/container context is
+not raw error text. Conversely, retaining one valid heartbeat does not prove a
+complete fleet read; omitted records must remain visible and cannot certify
+recovery. Returning optional findings normally does not preserve the source
+error after reduction; this probe adds no new public error API or raw carrier.
 
 Two freshness reads:
 ```sql
@@ -10420,6 +10434,20 @@ healthy state can be catalog-audited. Real findings are the distinct
 `provider-count-effective-empty` PAGE and `provider-count-small-list` WARN
 classes below. Do not interpret absence of either real finding as healthy when
 the metric is unavailable: the probe returns an explicit observation error.
+
+A successful Mimir response with nonempty `warnings` or `infos` is also
+unqualified: return a fixed observation error before reducing any cohort.
+These annotations do not prove a provider failure, but the aggregate has no
+independent completeness witness for omitted result bands or cohorts, so neither
+quiet ratios nor apparent positive ratios from that response establish a product
+verdict. The public signal adapter emits no healthy Alert; the monitor converts
+the error to a visibility warning and the incomplete execution supplies no
+incident recovery credit. Missing, null or empty annotation arrays retain the
+ordinary behavior, including intentionally quiet traffic below 20 responses.
+Unannotated, otherwise valid independent cohorts retain their existing findings.
+Raw annotation text never enters the error or Alert. This gate does not change
+the PAGE/WARN thresholds or establish complete native process/window coverage;
+unannotated omissions and affected-request supply remain separate limitations.
 
 `provider-count-direct-unclassified` is a separate evidence-unknown WARN, never
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
@@ -16850,6 +16878,16 @@ without a request delta are also unobservable: even cross-family scrape
 interleaving must not manufacture a coherent admission event. The observer keeps
 only these warmup clocks in memory and warms up after its own restart. Missing
 either native side cannot be repaired with the preceding observer invocation.
+An ended owning context returns its lifecycle error with no findings and cannot
+seed or replace the observer's warmup clocks. Check the owner before source
+entry, after source return, and under the reduction lock before state commit.
+A source returning cancellation while its parent remains live is still an
+unavailable-source warning; it does not end that parent. Interrupted source
+causes remain inspectable through error identity, without private error text.
+A live incomplete process bundle still retains independently confirmed failures.
+These guarantees cover scoped and unscoped public `Run`; adapter filtering alone
+cannot undo observer state. Healthy findings are filtered from public Alerts,
+so the healthy control is a successful complete run with no visibility warning.
 Discovery of entirely absent processes remains owned by provenance
 and scrape-continuity probes; this probe does not infer fleet completeness from
 the surviving Mimir series.
@@ -17201,7 +17239,12 @@ preseeded label domains, post-call timing/error identity, and nil-health no-op.
 `signal_egress_admission_source_failure_test.go` separately pins typed admission
 and lifecycle causes, native SSH status authority, joined gateway errors,
 successful overflow, private-text exclusion, parser/healthy gateway controls,
-and failure-before-warmup behavior.
+and failure-before-warmup behavior. `signal_egress_admission_lifecycle_test.go`
+pins actual parent cancellation with a late valid native body, cancellation in
+the clock callback and while a reduction lock is held, unchanged observer state,
+no source entry for an ended owner, continued live-owner source diagnostics,
+private source-cause exclusion, and independent live partial failure/healthy
+controls.
 Formal Go execution remains subject to the repository's toolchain/license gate;
 formatting or package metadata checks do not substitute for executing these tests.
 
@@ -17484,6 +17527,23 @@ not attest indexes, defaults, constraints, a running writer or full migration
 coherence; nullable partition-catalog checks retain their existing semantics.
 Review §8.9 and exact deployed artifacts; this is not permission to migrate
 merely to make the monitor green.
+
+Aggregate authority: both published-table medians must be finite. PostgreSQL
+`real` columns permit nonfinite values, and float syntax alone does not establish
+usable measurements. A nonfinite residual or reputation median is a probe error,
+with no dependent healthy sentinel; the existing probe-error path retains
+observation failure. The aggregate reader still fails as a whole, as for a
+malformed row, so it does not salvage other findings from that invocation.
+Finite values, exact threshold equality, zero reputation and the empty-table
+`-1` medians retain their existing semantics and thresholds. False-positive
+qualifier: this validation establishes unusable aggregate evidence, not a faulty
+solver, a current stored-data occurrence or a low finite reputation. False-negative
+qualifier: a nonfinite reputation can bypass the low-reputation comparison and
+clear its class; a nonfinite residual is currently unused by that comparison,
+but must not authorize a complete table observation. Invalid input cannot clear
+an existing finding. These aggregate checks do not attest every stored row:
+a finite percentile does not prove all contributing values are finite. Unknown
+Redis history still permits independently proved finite table violations.
 
 Schema-ticket recovery means the physical preflight is ready and dependent
 PostgreSQL queries returned validly. It clears only schema readiness:
@@ -19400,9 +19460,27 @@ Implementation convention: `signal_capability_probe.go` (probe
 `taskworker/capability-probe`) implements `capability-probe-stalled` and
 `capability-probe-disabled-pass` from fleet aggregates in Mimir, read
 against the desired `capability_probe.yml` and `provider.yml`; while the
-config switches the probe off, both are healthy. The other classes are
-dashboard reads of the series above, and a probe for them belongs in the
-same file with the class names here.
+config switches the probe off, both are healthy. Query evaluation timestamps
+must remain within five minutes of the monitor clock. Independently, the
+`last_pass` and `oldest_start` timestamp payloads must be finite, nonnegative
+and no later than the monitor clock; exactly now is valid and zero means
+absent. There is no supported payload clock-lead allowance. An invalid or
+future payload, including a huge finite timestamp, makes stall age
+`cannot-observe`, while independently observed disabled passes still alert.
+Neither a fresh evaluation timestamp nor a future payload proves a recent pass.
+
+False-positive qualifiers: clock skew can cause unknown age without proving
+a failed clock, stalled chain or outage. Ordinary thirty-minute startup grace
+does not prove a stalled chain; exactly thirty minutes remains
+healthy and exactly six hours remains WARN. Desired-off skips this observation.
+False-negative qualifiers: the six-hour maximum retains a future pass until
+it expires or the monitor clock catches up; rejecting it establishes unknown
+age, not a real stall or recovery. An accepted aggregate pass does not prove
+every taskworker generation is configured correctly or provider evidence is
+complete. No runtime payload skew is established by these source controls.
+
+The other classes are dashboard reads of the series above, and a probe for
+them belongs in the same file with the class names here.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

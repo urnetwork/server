@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -400,9 +401,17 @@ func queryDerivedLocationsTable(ctx context.Context, env *probeEnv, settings *De
 	if err != nil {
 		return derivedLocationsTable{}, fmt.Errorf("derived-location table median residual: %w", err)
 	}
+	// PostgreSQL real admits nonfinite values; parsing alone does not make
+	// an aggregate authoritative for threshold comparisons. Keep -1 for empty tables.
+	if math.IsNaN(medianResidualKm) || math.IsInf(medianResidualKm, 0) {
+		return derivedLocationsTable{}, fmt.Errorf("derived-location table median residual: nonfinite aggregate")
+	}
 	medianReputation, err := strconv.ParseFloat(row.str(5), 64)
 	if err != nil {
 		return derivedLocationsTable{}, fmt.Errorf("derived-location table median reputation: %w", err)
+	}
+	if math.IsNaN(medianReputation) || math.IsInf(medianReputation, 0) {
+		return derivedLocationsTable{}, fmt.Errorf("derived-location table median reputation: nonfinite aggregate")
 	}
 	return derivedLocationsTable{
 		published:            integers[0],
