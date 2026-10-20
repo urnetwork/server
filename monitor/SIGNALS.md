@@ -26397,6 +26397,26 @@ websocket connections and probes only.
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 
+Owning-parent completion: an already-ended `Run` enters no source. If a parent
+ends before successful artifact/catalog reduction returns, late valid rows
+cannot certify schema health: a healthy-only result returns the parent's
+lifecycle error. Returned source errors retain parent/source error identity
+without rendering private source text through the combined lifecycle error.
+This is an owning migrations guard, not a shared adapter change. Independently
+established drift/behind findings and schema-authority unknowns remain available
+on unscoped public `Run`; interrupted mixed results contain no healthy sentinel.
+The scoped adapter retains its existing cancellation verdict and findings policy.
+A returned source cancellation with a live parent is still a source error; it
+does not itself end the parent. Synthetic public controls in
+`signal_migrations_parent_completion_test.go` pin exact one-artifact/one-catalog
+reads at the coherent current head, identical valid final rows after actual
+parent cancellation, source-entry refusal, source error identity/privacy,
+scoped behavior, and live/interrupted positive and unknown controls.
+These are public API completion guarantees, not proof of a production late-row
+occurrence or notifier recovery: the run loop checks its context independently
+before invoking its handler. Healthy findings are filtered from public Alerts,
+so a normal coherent-head run is checked as zero alerts and nil error.
+
 Live-schema authority ends at this monitor's compiled
 `server.MigrationCount()`. When the successful database head is newer, report
 `cannot-observe` at WARN after two consecutive one-minute observations even
