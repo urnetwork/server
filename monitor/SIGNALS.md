@@ -41060,6 +41060,23 @@ diagnostic metadata: unavailable or malformed counts are `unknown`, not zero,
 and do not erase an independently authoritative failed/stopped unit state.
 These checks add no command, retry, contact, timeout or permission change.
 
+Producer completeness is distinct from metadata freshness and the final shell
+pipeline status. The generated POSIX reader records fixed terminal success or
+failure markers independently for the status-file `cat` and bounded journal
+read, then reduces both through the existing shared source-equality map. An
+upstream nonzero exit after empty output or a valid prefix cannot borrow the
+success of `awk` or later pings. Status producer failure leaves membership and
+absence unknown; optional journal failure discards its partial timeout rows and
+adds visibility unknown while retaining complete current membership, admitted
+path failures and authoritative unit-state findings. Neither failure may render
+raw producer errors, public sources or unrelated identities. A legacy body
+without completion provenance is unavailable. Successful capture does not prove
+an atomic status-writer snapshot or reconstruct missing historical journal data.
+Generated-command public controls in
+`signal_vpn_sessions_producer_test.go` distinguish these failures from complete
+healthy, complete empty/missing membership, current path-loss and failed-unit
+controls. No production producer failure or management-route cause is inferred.
+
 HEALTHY: the VPN server is `active/running`; its status file is no more than 90
 seconds old (the live configuration uses OpenVPN's 60-second default status
 interval, plus 30 seconds of scheduler/write tolerance); every enabled
@@ -41080,6 +41097,13 @@ BROKEN:
   prove an absent process or outage mechanism. Check the exact process, EC2 instance/system checks,
   UDP/443 listener, journal, and network boundary before assigning every
   client independently.
+- `vpn-status-unavailable` is an immediate WARN visibility finding when fresh
+  status metadata lacks a successful complete status producer. Do not infer
+  absent clients or healthy membership from a readable prefix or empty output.
+- `vpn-session-history-unavailable` is an immediate WARN visibility finding
+  when the independent bounded journal read is incomplete. Current complete
+  membership and path findings remain valid; recent timeout/source attribution
+  stays unknown and cannot clear a previous incident.
 - `vpn-status-stale` after two cadences means the status writer is more than 90
   seconds old or in the future. An old row is UNKNOWN, not evidence that its
   client remains connected.
