@@ -21477,6 +21477,15 @@ the deployed redis; the client-buffer total is `mem_clients_normal` +
 The shared §3.1 observation contract requires both client-memory components;
 an absent component is unavailable attribution, not zero clients. Valid zero
 client bytes and absent optional keyspace/error diagnostics remain healthy.
+Shared INFO callback lifetime: if the parent has ended when a census callback
+returns, discard that census before recording fleet medians or changing the
+enabled buffer battery latch. Preserve the parent cancellation and any returned
+source-error cause privately; source text must not enter the public error. A
+live partial census still preserves independently measured node breaches and
+its explicit observation gap. Connections reuse these medians with shared
+batteries disabled. This callback-return guard is not an atomic rollback of
+state committed while the parent was live, and establishes no current Main
+incidence; native SSH already checks the parent after transport returns.
 THE decisive discriminator for "why is this node growing": dataset growth =
 keys (find the family, 3.3); client-buffer growth = output buffers, i.e.
 pubsub/slow consumers (observed 41–49G RES driven by subscriber buffers
