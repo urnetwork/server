@@ -100,7 +100,7 @@ func validateReviewedSourceBuild(receipt reviewedSourceBuildReceipt, reviewId se
 func validateReviewedSourceBuildForMode(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool) error {
 	if receipt.Schema != 1 || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
 		!receipt.Passed || !receipt.Offline || !receipt.NoMainCredentials || !receipt.ReadOnlySource || receipt.SandboxId == "" ||
-		receipt.TestModel != "gpt-6-sol" || receipt.TestReasoning != "medium" ||
+		receipt.TestModel != "gpt-6.1-sol" || receipt.TestReasoning != "low" ||
 		!strings.HasPrefix(receipt.EvaluatorImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(receipt.EvaluatorImageDigest, "sha256:")) ||
 		!validSha256(receipt.HostQualificationSha256) || !validSha256(receipt.ContainmentSha256) || !validSha256(receipt.TestEvidenceSha256) {
 		return errors.New("reviewed source requires exact independent isolated build/test and containment evidence")

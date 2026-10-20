@@ -14,20 +14,21 @@ Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
 
-Use Sol (`gpt-6-sol`) with medium reasoning for all test execution,
+Use Sol 6.1 (`gpt-6.1-sol`) with low reasoning for all test execution,
 including preflight, submission validation, post-promotion smoke tests, and
-reruns. A test failure or suspected flake must be handed to Astra (`gpt-6-astra`)
+reruns. A test failure or suspected flake must be handed to Sol 6.1 (`gpt-6.1-sol`)
 with max reasoning to diagnose the root cause, implement the correction, and add
-a deterministic regression test. Sol medium then reruns the affected test and
-required suite; do not accept an Astra-run test as the independent completion
-result.
+a deterministic regression test. A separate Sol 6.1 low agent then reruns the
+affected test and required suite; do not accept a debugging agent's test run as
+the independent completion result.
 
-Astra with max reasoning owns code evaluation, each winning-submission honesty
+Sol 6.1 with max reasoning owns code evaluation, each winning-submission honesty
 and safety code review, the approve/reject decision, every winner promotion,
 and all source or config merge/push operations. It must review the exact
-materialized patch and score evidence before invoking this harness. Sol must
-not approve candidates, merge branches, or push source/config refs. These roles
-apply to all six epochs and must survive an agent handoff.
+materialized patch and score evidence before invoking this harness. The
+low-reasoning test agent must not approve candidates, merge branches, or push
+source/config refs. These roles apply to all six epochs and must survive an
+agent handoff.
 
 Legacy v1 candidate honesty review and source promotion apply only to production.
 Legacy staging automatically names the highest-ranked placeable candidate passing
@@ -126,7 +127,7 @@ checkpoint/image remains historical evidence, not qualification for new staging.
 After those distinct review/publication steps, these commands verify the frozen
 record and build its new evaluator. `source-record` verifies existing refs; it
 does not freeze, publish, or approve them. The new builder pins Go 1.27.2 and
-marks the image explicitly as staging. Sol medium executes all build/test and
+marks the image explicitly as staging. Sol 6.1 low executes all build/test and
 qualification steps; a successful image build alone is not runtime readiness.
 
 ```sh
@@ -277,8 +278,8 @@ promotion proposal and therefore uses carry-forward, while missing preparation
 blocks opening a round.
 
 Source-promoter, reviewer, scheduler, submitter and settlement authority stay
-separate. Astra max still owns source review/promotion and source/config merges;
-independent Sol medium owns tests. Unattended operation grants no review authority.
+separate. Sol 6.1 max still owns source review/promotion and source/config merges;
+independent Sol 6.1 low owns tests. Unattended operation grants no review authority.
 Before approving anything, the trusted main-environment reviewer can materialize
 the exact sealed patch and original archived score bytes without an existing review:
 
@@ -296,7 +297,7 @@ actual finding, explicit dispositions, public reasons and private-evidence
 digest before submitting with `review-v2`. The template includes exact evidence
 identities and expected revision but is deliberately invalid until real review
 is complete; it never supplies passing findings. After a
-genuine separate source approval, Astra may prepare a proposal ahead of the deadline:
+genuine separate source approval, Sol 6.1 max may prepare a proposal ahead of the deadline:
 
 ```sh
 sim-latency stage-reviewed-source --review-id=REVIEW_ID \
@@ -315,7 +316,7 @@ inside the existing offline evaluator/Docker containment boundary, never ordinar
 host `go test`, and must not expose source-origin credentials or host Git config.
 Its strict receipt binds review/patch/full-source identities, rebuilt evaluator
 image, qualification, containment proof, independent test-evidence digest, and
-Sol-medium test ownership. Missing or failed isolation evidence does not produce
+Sol 6.1 low test ownership. Missing or failed isolation evidence does not produce
 a selectable proposal. The trusted completion time cannot be backdated.
 
 At the deadline the supervisor selects a still-approved, unchanged-base,
@@ -339,11 +340,11 @@ The authenticated principal supplies reviewer identity; the controller computes
 replacements from the original sealed ranking. Keep legacy `epoch-review` commands
 for v1. V2 review does not require an operator token or acquire `RUN-MAIN.lock`;
 it remains available while the supervisor runs. Supervision uses its fenced
-database lease, and review uses API idempotency/revision guards. Sol-medium
+database lease, and review uses API idempotency/revision guards. Sol 6.1 low
 verification must cover carry-forward margin/generation mapping,
 review-independent progression, exact blob/patch binding, partial-push/lost-receipt
 recovery, drift/revocation, failed readiness, fencing, crash after round creation,
-and the six-epoch limit. Astra max diagnoses/fixes failures, then Sol medium reruns.
+and the six-epoch limit. Sol 6.1 max diagnoses/fixes failures, then Sol 6.1 low reruns.
 The schema-2 source-lock reader needs separate evaluator release qualification.
 
 ## Before starting
@@ -473,8 +474,8 @@ Test the exact frozen source, not only the operator's `main` checkout. The
 branch omitted a database fix already present in the qualified baseline and
 on `main`. Pulling the API/worker cannot repair such an evaluator.
 
-For the approved epoch-5 repair, Astra max owns the source pull/merge and release
-review; Sol medium owns independent regression and image validation. Require
+For the approved epoch-5 repair, Sol 6.1 max owns the source pull/merge and release
+review; Sol 6.1 low owns independent regression and image validation. Require
 the relevant tests to exist and pass in the image build, review all eleven
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
@@ -484,11 +485,11 @@ to create that next round against the old pin. Preserve every historical
 round's policy and outcomes, and require a fresh production rebaseline before
 public launch.
 
-Before qualifying the repaired evaluator, Sol medium must independently
+Before qualifying the repaired evaluator, Sol 6.1 low must independently
 exercise the deterministic regressions for process-group cancellation,
 retained-evidence memory budgeting, PostgreSQL/Redis failure detection, terminal
 candidate exits, typed cancellation classification, and durable failed-attempt
-archival. Astra max reviews both the fixes and their red/green evidence. Keep
+archival. Sol 6.1 max reviews both the fixes and their red/green evidence. Keep
 the existing G5/G6 thresholds and replicate counts; these are correctness and
 containment repairs, not statistical relaxations. Recreate the containment
 record for the new evidence-memory boundary instead of reusing the prior host

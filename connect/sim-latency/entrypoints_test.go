@@ -149,15 +149,15 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	runbook := strings.Join(strings.Fields(string(seasonRunbook)), " ")
 	for _, required := range []string{
 		"Mandatory candidate review",
-		"Use Sol (`gpt-6-sol`) with medium reasoning for all test execution",
-		"failure or suspected flake must be handed to Astra (`gpt-6-astra`) with max reasoning to diagnose the root cause, implement the correction, and add a deterministic regression test",
-		"Sol medium then reruns the affected test and required suite",
-		"do not accept an Astra-run test as the independent completion result",
-		"Astra with max reasoning owns code evaluation, each winning-submission honesty and safety code review, the approve/reject decision",
+		"Use Sol 6.1 (`gpt-6.1-sol`) with low reasoning for all test execution",
+		"failure or suspected flake must be handed to Sol 6.1 (`gpt-6.1-sol`) with max reasoning to diagnose the root cause, implement the correction, and add a deterministic regression test",
+		"A separate Sol 6.1 low agent then reruns the affected test and required suite",
+		"do not accept a debugging agent's test run as the independent completion result",
+		"Sol 6.1 with max reasoning owns code evaluation, each winning-submission honesty and safety code review, the approve/reject decision",
 		"every winner promotion, and all source or config merge/push operations",
-		"Sol must not approve candidates, merge branches, or push source/config refs",
-		"Astra max owns the source pull/merge and release review; Sol medium owns independent regression and image validation",
-		"Before qualifying the repaired evaluator, Sol medium must independently exercise the deterministic regressions",
+		"The low-reasoning test agent must not approve candidates, merge branches, or push source/config refs",
+		"Sol 6.1 max owns the source pull/merge and release review; Sol 6.1 low owns independent regression and image validation",
+		"Before qualifying the repaired evaluator, Sol 6.1 low must independently exercise the deterministic regressions",
 		"fabricated measurements",
 		"status 20",
 		"mode-0700 temporary directory",
@@ -168,9 +168,12 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		}
 	}
 	for _, stale := range []string{
+		"gpt-6-sol",
+		"gpt-6-astra",
+		"Astra",
+		"Sol medium",
 		"Terra max",
 		"Use Terra (`gpt-5.6-terra`) with max reasoning",
-		// The runbook moved test execution from Terra medium to Sol medium.
 		"Use Terra (`gpt-5.6-terra`) with medium reasoning",
 		"Terra medium",
 		"Terra must not",
@@ -186,11 +189,47 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	// Keep current release instructions aligned without rewriting historical
 	// model identities in the incident's captured validation evidence.
 	incident := strings.Join(strings.Fields(string(incidentRunbook)), " ")
-	if !strings.Contains(incident, "Have Sol medium verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Astra max reviews the repair and merges") {
+	if !strings.Contains(incident, "Have an independent Sol 6.1 low agent verify that the tests reproduce the pre-fix behavior and pass on the repaired source; Sol 6.1 max reviews the repair and merges") {
 		t.Error("STAGING-4-G5-INCIDENT.md is missing the current release-review model roles")
 	}
-	if strings.Contains(incident, "Have Terra medium verify") {
-		t.Error("STAGING-4-G5-INCIDENT.md retains the superseded Terra medium release-review role")
+	for _, stale := range []string{"Have Terra medium verify", "Have Sol medium verify", "Astra max reviews the repair and merges"} {
+		if strings.Contains(incident, stale) {
+			t.Errorf("STAGING-4-G5-INCIDENT.md retains superseded release-review role %q", stale)
+		}
+	}
+}
+
+// Active automation policy must retain the same review/test role split as
+// the main handoff, without changing historical captured validation records.
+func TestActiveHarnessDocumentationUsesSol61Roles(t *testing.T) {
+	cases := []struct {
+		path     string
+		required []string
+	}{
+		{path: "AUTOMATION.md", required: []string{
+			"Sol 6.1 (`gpt-6.1-sol`) with max reasoning owns code evaluation, honesty/safety review, debugging, correction, promotion, and source/config merges",
+			"an independent Sol 6.1 low agent executes tests",
+		}},
+		{path: "FINAL-AUTOMATE.md", required: []string{
+			"runbook's Sol 6.1 (`gpt-6.1-sol`) max review/promotion and independent Sol 6.1 low test ownership",
+		}},
+	}
+	for _, c := range cases {
+		content, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documentation := strings.Join(strings.Fields(string(content)), " ")
+		for _, required := range c.required {
+			if !strings.Contains(documentation, required) {
+				t.Errorf("%s is missing agent handoff contract %q", c.path, required)
+			}
+		}
+		for _, stale := range []string{"gpt-6-sol", "gpt-6-astra", "gpt-5.6-terra", "Astra max", "Astra-max", "Sol medium", "Sol-medium", "Terra max", "Terra medium"} {
+			if strings.Contains(documentation, stale) {
+				t.Errorf("%s retains superseded agent handoff contract %q", c.path, stale)
+			}
+		}
 	}
 }
 
