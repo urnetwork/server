@@ -184,6 +184,100 @@ func TestParseMonitorOptionsAcceptsRepeatableIncludesAndJSONL(t *testing.T) {
 	}
 }
 
+// A focused run executes the signals it names plus the tier-0 vitals, in
+// registry order. Before, -include-signal ran only the named signals, and the
+// focused verification at 10:17Z on 2026-10-19 came back clean twenty minutes
+// into a pool livelock that went on to disconnect nearly every provider.
+func TestFocusedRunAlwaysIncludesTierZeroVitals(t *testing.T) {
+	opts, err := parseMonitorOptions([]string{"-include-signal", "edge-ipv6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals, err := selectSignals(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := map[string]bool{"edge-ipv6": true}
+	for _, key := range servermonitor.TierZeroVitalSignalKeys {
+		wantKeys[key] = true
+	}
+	registryIndexes := map[string]int{}
+	for i, signal := range servermonitor.NewSignals() {
+		registryIndexes[signal.Key()] = i
+	}
+	selectedKeys := []string{}
+	for i, signal := range signals {
+		selectedKeys = append(selectedKeys, signal.Key())
+		if 0 < i && registryIndexes[signals[i-1].Key()] > registryIndexes[signal.Key()] {
+			t.Fatalf("focused selection %v is not in registry order", selectedKeys)
+		}
+	}
+	if len(selectedKeys) != len(wantKeys) {
+		t.Fatalf("focused selection %v, want edge-ipv6 and the tier-0 vitals %v", selectedKeys, servermonitor.TierZeroVitalSignalKeys)
+	}
+	for _, key := range selectedKeys {
+		if !wantKeys[key] {
+			t.Fatalf("focused selection %v includes unrequested %q", selectedKeys, key)
+		}
+	}
+}
+
+// The diagnostic -skip-tier-zero-vitals runs only the named signals, and only a
+// focused run accepts it.
+func TestSkipTierZeroVitalsIsAFocusedDiagnosticOnly(t *testing.T) {
+	opts, err := parseMonitorOptions([]string{"-include-signal", "edge-ipv6", "-skip-tier-zero-vitals"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals, err := selectSignals(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].Key() != "edge-ipv6" {
+		t.Fatalf("diagnostic focused run selected %d signals, want edge-ipv6 alone", len(signals))
+	}
+	for _, args := range [][]string{
+		{"-skip-tier-zero-vitals"},
+		{"-exclude-signal", "edge-ipv6", "-skip-tier-zero-vitals"},
+	} {
+		if _, err := parseMonitorOptions(args); err == nil || !strings.Contains(err.Error(), "applies only to -include-signal runs") {
+			t.Errorf("%v: error %v, want the focused-only rejection", args, err)
+		}
+	}
+}
+
+// Full and excluding runs select as before: every signal but the excluded.
+func TestUnfocusedRunSelectionIsUnchanged(t *testing.T) {
+	registeredCount := len(servermonitor.NewSignals())
+	opts, err := parseMonitorOptions(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals, err := selectSignals(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != registeredCount {
+		t.Fatalf("full run selected %d of %d signals", len(signals), registeredCount)
+	}
+	opts, err = parseMonitorOptions([]string{"-exclude-signal", "provider-connections"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals, err = selectSignals(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != registeredCount-1 {
+		t.Fatalf("excluding run selected %d of %d signals", len(signals), registeredCount)
+	}
+	for _, signal := range signals {
+		if signal.Key() == "provider-connections" {
+			t.Fatal("excluding run kept provider-connections")
+		}
+	}
+}
+
 func TestRunRejectsIncludeAndExcludeBeforeLoadingSettings(t *testing.T) {
 	loadCalls := 0
 	loader := func() (servermonitor.SignalSettings, error) {

@@ -23573,7 +23573,17 @@ Probe: `journal-buffer`
 
 The edge journal is a short recovery buffer, not the durable log store. Fluent
 Bit continuously moves Warp logs to Loki, and local retention is intentionally
-one hour regardless of host uptime. The effective contract is:
+one hour regardless of host uptime. Until xops `journal-evidence-runner-loki`,
+"Warp logs" meant the service containers only: the warp runner units'
+deploy, drain and readiness lines stayed in this buffer, and on 2026-10-19 the
+decisions behind a connect redeploy loop had rotated out before anyone read
+them. Runner lines now ship too, as their own streams (`service="warp-runner"`,
+`block="<service>-<block>"`; `warpctl logs main warp-runner connect-g1`), and
+warp `512dec9` logs a runner's polled versions only on the first poll, on a
+change and every five minutes instead of twice per five-second poll. 48 hours
+of local journal would cost about 390 GB per edge at the 2026-10-19 rate
+(8 GiB an hour, mostly the `lb` and `connect` containers already in Loki), so
+the buffer stays one hour. The effective contract is:
 
 ```ini
 [Journal]
@@ -32490,6 +32500,10 @@ sudo docker image inspect <image-id> | jq -r '.[0].Created'
 sudo journalctl --utc -u 'warp-main-proxy-*' --since=-10m \
   | grep -E 'Latest version|Polled latest versions'
 ```
+Since warp `512dec9` each runner logs its polled versions on the first poll, on
+every change and otherwise every five minutes, so a ten-minute window still
+holds at least one line per block; the same lines are in Loki as
+`warpctl logs main warp-runner proxy-g1 --since=10m --query='Polled latest versions'`.
 Compare the tag and image creation time with the release containing the fix,
 not merely with the container start time; a reboot can restart an old image.
 If every controller repeatedly polls the old version as `Latest`, the rollout

@@ -56,7 +56,8 @@ func TestAPIReleaseProofCLIUsesCapturedExpectation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err := runWithSettingsLoader([]string{"-once", "-include-signal", "api-release-proof", "-api-release-proof", path}, &out,
+	// the tier-0 vitals need a services host the synthetic inventory lacks
+	err := runWithSettingsLoader([]string{"-once", "-include-signal", "api-release-proof", "-skip-tier-zero-vitals", "-api-release-proof", path}, &out,
 		func() (servermonitor.SignalSettings, error) {
 			if err := os.WriteFile(path, []byte("invalid edited policy"), 0600); err != nil {
 				t.Fatal(err)
