@@ -21865,6 +21865,16 @@ small, or churn-dominated sample is `detail_status=unavailable`, not evidence
 of zero persistent keys; mixed family deltas remain
 `detail_status=ambiguous` and cannot authorize a family-specific cleanup.
 
+The reader requires all 59 ordered fields and rejects every numeric counter
+outside 0–5,000 before performing any sums or churn multiplication. The fixed
+nine-family/four-category shape then prevents signed-integer wraparound;
+conservation still must hold within every family, header and total column.
+An impossible conserved or overflow-shaped detail frame remains unavailable
+and cannot select a family-specific maintenance action. Its rejection preserves
+the independently measured aggregate skew and adds observation-loss visibility;
+it is neither a zero cohort nor a complete recovery. The minimum 1,000 samples,
+ten-percent missing-key ceiling and attribution thresholds are unchanged.
+
 At 19:58:57Z on 2026-09-03, before the Redis deployment boundary, port 6393
 owned the same 512 slots as every sibling but held 2,844,893 non-expiring keys,
 589,704 (26.15%) above the fleet median. It was not a memory-pressure outlier:
