@@ -21386,6 +21386,16 @@ keeps the same producer, sample, transport and fixture budgets; a synthetic
 native read-invocation budget distinguishes the excessive loop work without
 using elapsed time as its causal assertion.
 
+Completion also requires the chunk loop to end at end of input (`read`
+status 1). Fixed-size `read -N` needs Bash 4.1 or later, which the Linux
+Redis hosts provide. An older Bash, such as macOS `/bin/bash` 3.2, rejects the
+option with status 2 without consuming the stream; that is unknown, never an
+empty complete scan. Formerly, when every producer exited before the rejected
+read, the validator published `family_source complete 0` and the probe
+reported a healthy empty histogram. The native qualifications that expect
+completion run on Linux only; a synthetic Bash-environment `read` that
+rejects `-N` covers the unknown outcome on every platform.
+
 The shell normalization is not itself a safe persistence boundary. A key from
 an unknown schema can contain non-UTF-8 bytes, printable identifiers, or a
 shape longer than an alert field. Before logging, baselining, or alerting, the
