@@ -98,8 +98,14 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 				t.Fatal("fair accounting page lost its failing durable task")
 			}
 			stored, storedError, errorCount, currentMetadata, delay := readCloseRetryTask(t, ctx, id)
-			if storedError == "" || errorCount != attempt+1 || currentMetadata != metadata || delay < time.Minute || 5*time.Minute <= delay {
-				t.Fatal("fair retry changed failure evidence, task identity or accounting cadence")
+			// A pending lane handoff continues at the bounded 2–4s cadence;
+			// only the completed pass idles for 1–5min (403fe6362).
+			low, high := 2*time.Second, 4*time.Second
+			if attempt == 1 {
+				low, high = time.Minute, 5*time.Minute
+			}
+			if storedError == "" || errorCount != attempt+1 || currentMetadata != metadata || delay < low || high <= delay {
+				t.Fatal("fair retry changed failure evidence, task identity or accounting cadence", delay)
 			}
 			if attempt == 0 {
 				if stored.Sweep == nil || !stored.Sweep.HistoricalNext || stored.Sweep.HistoricalDone ||
