@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +332,123 @@ func TestRedisGrantPostWaitExpiryRefusesAndCompensates(t *testing.T) {
 			t.Fatal("post-wait expiry changed existing reservation or kept refused bytes", got)
 		}
 		requireRedisRefusalOnlyContract(t, ctx, f, neighbor.ContractId)
+	})
+}
+
+// Reads every finite internal-prober selection outcome counter.
+func redisSelectionProberOutcomes(t testing.TB) map[string]float64 {
+	t.Helper()
+	outcomes := map[string]float64{}
+	for _, result := range []string{"selected_first", "selected_extended", "fallback", "error"} {
+		var metric dto.Metric
+		if err := proberGrantSelectionResults.WithLabelValues(result).Write(&metric); err != nil {
+			t.Fatal(err)
+		}
+		outcomes[result] = metric.GetCounter().GetValue()
+	}
+	return outcomes
+}
+
+// Fails only the extended preferred window, after the first window has
+// identified the internal prober.
+type redisSelectionExtendedFaultTx struct {
+	server.PgTx
+	fault error
+}
+
+// Refuses the extended window query; every other query reaches the transaction.
+func (self *redisSelectionExtendedFaultTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if sql == proberGrantExtendedSql {
+		return nil, self.fault
+	}
+	return self.PgTx.Query(ctx, sql, args...)
+}
+
+// Native admission records the legacy allocator's internal-prober outcomes:
+// the first and extended preferred windows, the keyset fallback, and a failure
+// after the prober was identified. An ordinary payer records none.
+func TestRedisGrantSelectionRecordsProberOutcomes(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		requireOutcome := func(name string, before map[string]float64, want string) {
+			t.Helper()
+			after := redisSelectionProberOutcomes(t)
+			for result, value := range after {
+				delta := value - before[result]
+				if result == want && delta != 1 || result != want && delta != 0 {
+					t.Fatalf("%s: selection outcome %s changed by %v, want one %q", name, result, delta, want)
+				}
+			}
+		}
+
+		ordinary := newEscrowSelectionTestClients(t, ctx)
+		redisSelectionTestGrants(t, ctx, ordinary, 2, 4096, true)
+		before := redisSelectionProberOutcomes(t)
+		if escrow, err := ordinary.create(ctx, 1024, false); err != nil || escrow == nil {
+			t.Fatal("ordinary payer allocation failed", err)
+		}
+		requireOutcome("ordinary payer", before, "")
+
+		first := newEscrowSelectionTestClients(t, ctx)
+		setDynamicProberIdentityForTest(t, ctx, first)
+		firstIds := redisSelectionTestGrants(t, ctx, first, 4, 4096, true)
+		before = redisSelectionProberOutcomes(t)
+		escrow, err := first.create(ctx, 1024, false)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || !slices.Contains(firstIds, escrow.Balances[0].BalanceId) {
+			t.Fatal("first preferred window did not fund the prober", escrow, err)
+		}
+		requireOutcome("first window", before, "selected_first")
+
+		extended := newEscrowSelectionTestClients(t, ctx)
+		setDynamicProberIdentityForTest(t, ctx, extended)
+		older := redisSelectionTestGrants(t, ctx, extended, 1, 4096, true)
+		redisSelectionTestGrants(t, ctx, extended, proberGrantFirstCount, 4096, false)
+		// The first window reads the newest grants; place the preferred one after it.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_time=start_time-INTERVAL '1 minute' WHERE balance_id=$1`, older[0]))
+		})
+		before = redisSelectionProberOutcomes(t)
+		escrow, err = extended.create(ctx, 1024, false)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != older[0] {
+			t.Fatal("extended preferred window did not fund the prober", escrow, err)
+		}
+		requireOutcome("extended window", before, "selected_extended")
+
+		fallback := newEscrowSelectionTestClients(t, ctx)
+		setDynamicProberIdentityForTest(t, ctx, fallback)
+		fallbackIds := redisSelectionTestGrants(t, ctx, fallback, 2, 4096, false)
+		before = redisSelectionProberOutcomes(t)
+		escrow, err = fallback.create(ctx, 1024, false)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != fallbackIds[0] {
+			t.Fatal("keyset fallback did not fund the prober from its earliest grant", escrow, err)
+		}
+		requireOutcome("keyset fallback", before, "fallback")
+
+		failed := newEscrowSelectionTestClients(t, ctx)
+		setDynamicProberIdentityForTest(t, ctx, failed)
+		redisSelectionTestGrants(t, ctx, failed, proberGrantFirstCount, 4096, false)
+		fault := errors.New("synthetic extended window failure")
+		before = redisSelectionProberOutcomes(t)
+		var failure error
+		if value := server.HandleError(func() {
+			_, failure = runRedisContractAdmission(ctx, func(owned context.Context) (*TransferEscrow, error) {
+				var escrow *TransferEscrow
+				var err error
+				server.Tx(owned, func(tx server.PgTx) {
+					escrow, _, err = createTransferEscrowInTx(owned, &redisSelectionExtendedFaultTx{PgTx: tx, fault: fault},
+						failed.payerNetworkId, failed.payerId, failed.providerNetworkId, failed.providerId, failed.payerNetworkId, 1024, nil)
+				}, server.TxReadCommitted, server.OptNoRetry())
+				return escrow, err
+			})
+		}); value != nil {
+			failure, _ = value.(error)
+		}
+		if !errors.Is(failure, fault) {
+			t.Fatal("extended window failure was not returned", failure)
+		}
+		requireOutcome("extended window failure", before, "error")
 	})
 }
 

@@ -344,6 +344,10 @@ func TestPrivateProviderLoadedSelectedGrant(t *testing.T) {
 				for _, stored := range created {
 					want -= model.ByteCount(stored.TransferByteCount)
 				}
+				// Settled reservations stay with their durable debit owner until it runs.
+				if released := privateFlushGrantDebits(t, ctx, f.owner.BalanceId); released != len(created) {
+					t.Fatalf("debit owner released %d settled reservations, want %d", released, len(created))
+				}
 				privateLoadAssertAccounting(t, ctx, f, want)
 				t.Logf("pool=%d history=%d settled=%d concurrent_created=%d elapsed=%s combined_counters=%v exact_reserved=%d", settings.pool, settings.history, len(created), len(created), time.Since(began), after, want)
 			}()

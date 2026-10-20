@@ -98,8 +98,14 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 				t.Fatal("fair accounting page lost its failing durable task")
 			}
 			stored, storedError, errorCount, currentMetadata, delay := readCloseRetryTask(t, ctx, id)
-			if storedError == "" || errorCount != attempt+1 || currentMetadata != metadata || delay < time.Minute || 5*time.Minute <= delay {
-				t.Fatal("fair retry changed failure evidence, task identity or accounting cadence")
+			// A pending lane handoff continues at the bounded 2–4s cadence;
+			// only the completed pass idles for 1–5min (403fe6362).
+			low, high := 2*time.Second, 4*time.Second
+			if attempt == 1 {
+				low, high = time.Minute, 5*time.Minute
+			}
+			if storedError == "" || errorCount != attempt+1 || currentMetadata != metadata || delay < low || high <= delay {
+				t.Fatal("fair retry changed failure evidence, task identity or accounting cadence", delay)
 			}
 			if attempt == 0 {
 				if stored.Sweep == nil || !stored.Sweep.HistoricalNext || stored.Sweep.HistoricalDone ||
@@ -107,6 +113,8 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 					!reflect.DeepEqual(stored.Sweep.Historical, legacy) || !reflect.DeepEqual(stored.Cursor, legacy) {
 					t.Fatal("accounting retry lost the post-epoch to historical lane handoff")
 				}
+				// The settled origin keeps its reservation until its debit owner runs.
+				drainCloseRetryOriginDebits(t, ctx, recent)
 				recent.requireAccounting(t, ctx)
 				if _, closed := model.GetContractClose(ctx, historical.originId); closed {
 					t.Fatal("post-epoch page unexpectedly consumed historical work")
@@ -115,6 +123,7 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 				t.Fatal("both completed lanes failed to reset the same rejected task")
 			}
 		}
+		drainCloseRetryOriginDebits(t, ctx, historical)
 		historical.requireAccounting(t, ctx)
 		recent.requireAccounting(t, ctx)
 	})

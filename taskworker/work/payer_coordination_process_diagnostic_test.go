@@ -374,6 +374,12 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 					t.Fatalf("independent process did not return: decode=%v private_diagnostics=%s", err, child.diagnostics)
 				}
 				t.Logf("independent_processes history=10001 operation=%s local_pool=1 remote_pool=16 local=%d/%d elapsed=%s errors=%v remote=%d/%d elapsed=%s local_counters=%v remote_counters=%v activity=%v", command, local.Completed, local.Failed, local.Elapsed, local.Errors, remote.Completed, remote.Failed, remote.Elapsed, local.Counters, remote.Counters, observe())
+				if command == "settle" {
+					// Settled reservations stay with their durable debit owner until it runs.
+					if released := privateFlushGrantDebits(t, ctx, f.owner.BalanceId); released != remote.Completed {
+						t.Fatalf("debit owner released %d settled reservations, want %d", released, remote.Completed)
+					}
+				}
 				privateLoadObserveAccounting(t, ctx, f)
 				if local.Completed != 64 || local.Failed != 0 || remote.Completed != 64 || remote.Failed != 0 {
 					t.Fatalf("independent process finite operation failed: local=%d/%d remote=%d/%d", local.Completed, local.Failed, remote.Completed, remote.Failed)
