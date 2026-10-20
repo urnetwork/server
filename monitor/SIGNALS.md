@@ -10089,6 +10089,20 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   bounded heap alone as success.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
+
+Redis source-visibility warnings retain only fixed read phases (eligibility,
+family-before, facet, legacy, family-after; cache-precheck means no cache read), child-context state and bounded
+returned-error classifications. Typed local SSH-admission acquire/release
+markers remain visible even when returned-deadline classification wins. They
+do not establish whether a native process spawned or remote contact occurred,
+or the ordering of failures. A source-returned deadline while the child is
+live differs from an expired qualification child. These fields identify the
+probe read boundary, not a native SSH phase or a Redis service fault; error
+classes are bounded classifier hints, not typed-cause proof. Parent lifecycle
+cancellation still returns without findings. No keys, addresses, payloads or
+error text are rendered, and unknown observations cannot clear independent
+eligibility or empty-market findings. The shared 60-second budget, command
+sequence, cache schema and finding identities remain unchanged.
 Probe: `selection-population`
 
 The automated PostgreSQL source requires exactly one twelve-column row: nine

@@ -24,7 +24,11 @@ func NewSelectionPopulationSignal() Signal {
 	return &signalAdapter{number: "2.9", key: "selection-population", name: "Provider-selection population", probe: pgSelectionPopulationProbe{}}
 }
 
-type pgSelectionPopulationProbe struct{}
+// The optional factory is private to deterministic qualification-lifecycle tests.
+// Ordinary probes always retain the fixed shared sixty-second child budget.
+type pgSelectionPopulationProbe struct {
+	redisQualificationContext func(context.Context) (context.Context, context.CancelFunc)
+}
 
 func (pgSelectionPopulationProbe) id() string             { return "pg/selection-empty" }
 func (pgSelectionPopulationProbe) tier() string           { return tierPage }
@@ -151,7 +155,13 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 	forcedKey := fmt.Sprintf("{cs_1_q_%s_%s}c_l", caller, targetLocation)
 	// The existing rollout markers and count documents share one bounded
 	// qualification deadline, not a fresh full timeout for every Redis read.
-	redisCtx, cancelRedis := context.WithTimeout(ctx, selectionPopulationRedisQualificationTimeout)
+	newRedisContext := self.redisQualificationContext
+	if newRedisContext == nil {
+		newRedisContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(parent, selectionPopulationRedisQualificationTimeout)
+		}
+	}
+	redisCtx, cancelRedis := newRedisContext(ctx)
 	defer cancelRedis()
 	eligibilityMarker, eligibilityErr := env.runner.redis(
 		redisCtx, redisHost, redisHost.redisEntryPort,
@@ -161,6 +171,10 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		return nil, ctx.Err()
 	}
 	eligibilityKnown := eligibilityErr == nil && redisCtx.Err() == nil
+	eligibilityFailureDetails := ""
+	if !eligibilityKnown {
+		eligibilityFailureDetails = providerPopulationRedisFailureDetails(redisCtx, "eligibility", eligibilityErr)
+	}
 	eligibilityReady := eligibilityKnown && strings.TrimSpace(eligibilityMarker) == providerEligibilityReadyValue
 	eligibilityState := "unavailable"
 	if eligibilityKnown {
@@ -169,18 +183,22 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 	// Prefer any present disjoint facet representation; only absent facets
 	// and an absent family marker permit the available legacy pair.
 	cache := func() providerPopulationCacheObservation {
-		unknown := providerPopulationCacheObservation{state: "source-unobservable"}
+		unknown := func(phase string, err error) providerPopulationCacheObservation {
+			return providerPopulationCacheObservation{
+				state:          "source-unobservable",
+				failureDetails: providerPopulationRedisFailureDetails(redisCtx, phase, err),
+			}
+		}
 		if redisCtx.Err() != nil {
-			return unknown
+			return unknown("cache-precheck", nil)
 		}
 		before, err := env.runner.redis(redisCtx, redisHost, redisHost.redisEntryPort, "-c", "--raw", "GET", selectionPopulationFamilyReadyKey)
 		if err != nil || redisCtx.Err() != nil {
-			return unknown
+			return unknown("family-before", err)
 		}
 		before = strings.TrimSpace(before)
 		if before != "" && before != selectionPopulationFamilyReadyValue {
-			unknown.state = "marker-invalid"
-			return unknown
+			return providerPopulationCacheObservation{state: "marker-invalid"}
 		}
 		observation := providerPopulationCacheObservation{schema: "family-facets"}
 		present := 0
@@ -193,7 +211,7 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 			for _, facet := range []string{"d", "4", "6"} {
 				raw, readErr := env.runner.redisRaw(redisCtx, redisHost, redisHost.redisEntryPort, "-c", "--raw", "GET", key+"_"+facet)
 				if readErr != nil || redisCtx.Err() != nil {
-					return unknown
+					return unknown("facet", readErr)
 				}
 				if providerCountPayloadMissing([]byte(raw)) {
 					incomplete = true
@@ -231,7 +249,7 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 				}
 				raw, readErr := env.runner.redisRaw(redisCtx, redisHost, redisHost.redisEntryPort, "-c", "--raw", "GET", key)
 				if readErr != nil || redisCtx.Err() != nil {
-					return unknown
+					return unknown("legacy", readErr)
 				}
 				if providerCountPayloadMissing([]byte(raw)) {
 					observation.state = "cache-missing"
@@ -253,7 +271,7 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		}
 		after, err := env.runner.redis(redisCtx, redisHost, redisHost.redisEntryPort, "-c", "--raw", "GET", selectionPopulationFamilyReadyKey)
 		if err != nil || redisCtx.Err() != nil {
-			return unknown
+			return unknown("family-after", err)
 		}
 		after = strings.TrimSpace(after)
 		if after != "" && after != selectionPopulationFamilyReadyValue {
@@ -312,11 +330,15 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		visibility := providerPopulationVisibilityFinding(pgTarget(env), "eligibility-marker-unobservable")
 		visibility.frame = "eligibility-observation"
 		visibility.symptom = "The monitor could not observe the provider-eligibility export marker"
-		visibility.observed = fmt.Sprintf("eligibility_marker_known=false cache_population_known=%t raw_payload_rendered=false", cache.state == "")
+		visibility.observed = fmt.Sprintf("eligibility_marker_known=false cache_population_known=%t raw_payload_rendered=false %s", cache.state == "", eligibilityFailureDetails)
 		findings = append(findings, visibility)
 	}
 	if cache.state != "" {
-		findings = append(findings, providerPopulationVisibilityFinding(pgTarget(env), cache.state))
+		visibility := providerPopulationVisibilityFinding(pgTarget(env), cache.state)
+		if cache.failureDetails != "" {
+			visibility.observed += " " + cache.failureDetails
+		}
+		findings = append(findings, visibility)
 		return findings, nil
 	}
 	if eligible <= 1000 || normalCount > 0 {
@@ -349,12 +371,36 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 
 // Retains only qualified aggregate counts and fixed observation states.
 type providerPopulationCacheObservation struct {
-	normalCount int
-	forcedCount int
-	normalBytes int
-	forcedBytes int
-	schema      string
-	state       string
+	failureDetails string
+	normalCount    int
+	forcedCount    int
+	normalBytes    int
+	forcedBytes    int
+	schema         string
+	state          string
+}
+
+// Fixed projection distinguishes owner expiry from a source-returned context
+// error. Error classes are bounded hints, never native phase or service proof.
+func providerPopulationRedisFailureDetails(ctx context.Context, phase string, err error) string {
+	childState := "live"
+	childErr := ctx.Err()
+	if childErr == context.DeadlineExceeded {
+		childState = "deadline"
+	} else if childErr == context.Canceled {
+		childState = "canceled"
+	}
+	returnedContext := "none"
+	if errors.Is(err, context.DeadlineExceeded) {
+		returnedContext = "deadline"
+	} else if errors.Is(err, context.Canceled) {
+		returnedContext = "canceled"
+	}
+	details := fmt.Sprintf("redis_read_phase=%s redis_child_state=%s redis_returned_context=%s redis_error_class=%s", phase, childState, returnedContext, classifyObservationError(err))
+	if phases := sshAdmissionFailurePhases(err); phases != "" {
+		details += " redis_ssh_admission_failures=" + phases
+	}
+	return details
 }
 
 // Missing raw GET replies are not complete zero-count documents.
