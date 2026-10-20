@@ -22392,6 +22392,12 @@ unmeasured latency maximum as zero. A restored complete sweep is the coverage
 control; taskworker progress and score freshness still require their own
 measurements. The deterministic controls exercise the emitted shell with fake
 native sources, framed parser inputs, and public alert identities and privacy.
+Each encoded body stays on its record row with either encoder: GNU
+`base64 -w 0` emits no newline, while the BSD encoder (macOS) appends one,
+which formerly split every row into a `cannot-observe` gap. The collector
+deletes encoder newlines and reports one pipefail status for the encoder
+group, so GNU output and statuses are unchanged; a control appends that
+newline on every platform.
 
 The reliability pipeline is the standing top redis load: announce-path
 `HINCRBY client_reliability_stats.<block>` (observed ~7,500/s on one node)
