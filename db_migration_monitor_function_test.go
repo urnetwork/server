@@ -39,7 +39,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			}
 		}
 
-		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, server.MigrationCount()} {
+		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, 720, 721, 841, 842, 843, 844, 845, 846, 847, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {
 				check(tx, version, nil)
@@ -50,10 +50,14 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 
 			baselineMissing := []int{676}
 			appendOnlyMissing := []int{676}
-			if version >= 721 {
-				// Staging approvals share the same append-only guard from
-				// their published version; renaming it damages both owners.
-				appendOnlyMissing = append(appendOnlyMissing, 721)
+			// Staging approvals, sealed evaluation custody, holds/incidents,
+			// and source abandonment share the baseline's append-only guard.
+			// Its rename must report every published dependent artifact, while
+			// historical heads must not report dependencies introduced later.
+			for _, dependencyVersion := range []int{721, 842, 843, 845} {
+				if version >= dependencyVersion {
+					appendOnlyMissing = append(appendOnlyMissing, dependencyVersion)
+				}
 			}
 			var reviewMissing []int
 			if version == 677 {
