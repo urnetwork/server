@@ -5246,7 +5246,20 @@ cannot become an attributed SQL failure. The finite envelope itself is capped
 at1KiB and validated for exact fields/enums before persistence. No raw exception
 or stderr fragment is retained, including unclassified failures.
 
-An attempted receipt also retains optional `transport_observation` facts from
+may retain private `writer_generation` metadata copied
+from the configured shared SSH admission owner's existing native-derived
+snapshot: watcher or diagnostic role, boot/PID/start ticks, service invocation
+and cgroup identity. It is attached locally after source parsing and covered
+by the immutable receipt hash; continuous-state schema and cadence are unchanged.
+A separate reader may correlate the complete tuple and role with its independently
+bound watcher authority. This is declared generation correlation, not an
+authenticated or physical file-writer proof, SSH grant proof, or remote ownership.
+A diagnostic names its own owner, never the watcher whose queue it joins.
+Missing, legacy or unsupported metadata leaves generation attribution unknown
+without discarding valid source findings. Post-start clocks alone remain
+insufficient. These private identities must not enter alerts or stream labels.
+
+An attempted receipt An attempted receipt also retains optional `transport_observation` facts from
 the owning SSH lifecycle. The last local stage distinguishes transport
 preflight, host admission, shared admission, native start and a started child;
 an unobserved adapter stays unknown. `spawn` separates not-attempted,
