@@ -155,3 +155,44 @@ supervisor and worker. The source checkpoint, simulator/scorer bytes and
 evaluator image did not change during the qualifier fix. Admission readiness
 does not establish the full public submission → evaluation → automatic winner
 → next-round lifecycle; that remains the purpose of Macrocosmos's staging test.
+
+## Submission smoke test (2026-10-20)
+
+A comment-only patch against the frozen allowlisted source was submitted with
+the staging submitter credential through `POST /competition/v2/score`:
+
+- job `01a156f4-ca18-fdd9-d38a-989bb4213cf8`;
+- patch SHA-256 `9fff33e81806f838940500dc75302fd5140fde0cdff4e13585fa946355a5508f`;
+- acceptance HTTP 202, polling HTTP 200, exact duplicate HTTP 202 with
+  `cache_hit: true` and the same job (no second queue entry).
+
+The legacy `/competition/score` intentionally returns
+`unsupported_decision_mode` for this v2 round. Submit through the v2 endpoint and
+poll the returned `status_url`; do not construct a legacy polling URL.
+
+The smoke test exposed two control-path defects: Claim still selected only the
+older filesystem capability, while expected open-round seal polling emitted
+panic stacks until capped diagnostic pipes killed the supervised worker.
+Fix `2c6be2668` binds Claim to the exact declared supported capability, returns
+ordinary not-ready polling without panic recovery, and continuously drains
+bounded diagnostic streams without accepting truncated machine output.
+Deterministic private-fixture tests passed 5/5 normally and with race detection;
+launcher tests passed 9/9 normally and with race detection. Astra reviewed the
+merged tree `3eaf2bc08`, and its separate launcher smoke also passed 9/9.
+
+Clean native controls are installed root-owned under
+`/usr/local/libexec/urnetwork/competition-control-3eaf2bc08`. The worker bytes
+match its loaded OCI image
+`sha256:4d5dc0a7ffea4295f5852838c9dec131be3e5417f7bd228d795528cf998b66a8`.
+Its archive SHA-256 is
+`8b96ac9a0b347660b0f18ab09fc1d82aabad6a46d23d706d82b3e96d39e22d62`,
+retained in MinIO version `5a20e261-660d-4741-9df9-cc0fd08850bb` with
+COMPLIANCE retention through 2028-01-01 and exact-version readback verified.
+The existing activation receipts and frozen evaluation image/source are unchanged.
+
+At `2026-10-20T01:53:22.920815Z`, the queued job was claimed and public polling
+changed to `evaluation_status: running` with this actual new worker digest.
+The isolated baseline PostgreSQL/Redis containers started, and `/readyz`
+continued to pass all checks. Full scoring was **still pending** when this
+record was written: acceptance, cache reuse, polling and real worker pickup
+are proven, not yet the complete scoring/reveal/winner/next-round lifecycle.
