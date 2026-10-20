@@ -21,7 +21,7 @@ services, like the other server packages.
 
 The final environment is defined by the source-epoch ledger at
 `config/main/sim-latency.yml`, the evaluator configuration in
-`config/competition.yml`, and the authenticated same-round baseline manifest.
+`config/main/competition.yml`, and the authenticated same-round baseline manifest.
 The initial calibrated values are:
 
 | Item | Final value |
@@ -67,11 +67,116 @@ See:
 - [`../../controller/competition_controller.go`](../../controller/competition_controller.go)
   and [`../../model/competition_model.go`](../../model/competition_model.go)
   for the API/worker implementation; and
-- [`../../../sn/api/competition.yml`](../../../sn/api/competition.yml) for the
+- [`sn/api/competition.yml`](https://github.com/urfoundation/sn/blob/main/api/competition.yml) for the
   public competition API.
 
 Superseded plans, workstation campaigns, preliminary reports, and their helper
 programs are retained only under [`old/`](old/README.md).
+
+## Macrocosmos integration: v2 contract
+
+The public OpenAPI snapshot is
+[`sn/api/competition.yml`](https://github.com/urfoundation/sn/blob/main/api/competition.yml). Select the API
+contract from `GET /competition/info`, not from an environment name or a zero
+takeover margin. The selected `active_round` (production) or `staging_round`
+advertises its immutable `decision_mode` and `required_api_capability`. V2
+requires `decision_mode: provisional_reward_v2` and support for the exact
+advertised capability: `competition.reward.v2` (provisioned filesystem runtime)
+or `competition.reward.v2.runtime-blob.v1` (authenticated retained runtime
+manifest). Both mode/capability fields absent identify the legacy v1 contract; an
+unsupported or incomplete explicit contract must not silently fall back to v1.
+
+| Purpose | V2 path and behavior |
+|---|---|
+| Discover a round | `GET /competition/info`; retain the selected round's `round_id` and frozen contract |
+| Screen before a production fee | `POST /competition/v2/score/preflight`; checks the canonical patch and known repeat-reward exclusion, but does not admit or reserve a job |
+| Submit | `POST /competition/v2/score`; submitter bearer token and the usual `round_id`/canonical `patch` body; `202` returns `job_id`, `status_url`, and the frozen contract |
+| Poll an owned job | `GET /competition/v2/score/{jobId}`; persist and follow the accepted `status_url` exactly, with the owning submitter credential |
+| Reconcile public results | `GET /competition/v2/rounds/{roundId}/result`; `GET /competition/v2/rounds/{roundId}/decisions` returns the same complete result and ordered history |
+| Reconcile settlement events | `GET /competition/v2/events?after_cursor=...`; separately scoped settlement credential, durable cursor, at-least-once delivery; acknowledge exact events with `POST /competition/v2/receipts` |
+
+For an explicitly v2 round, `POST /competition/score` and the legacy
+`GET /competition/score/{jobId}` return `409 unsupported_decision_mode` for an
+otherwise valid authorized request. That conflict is expected, not a reason to
+retry the legacy endpoint. Conversely, v2 score URLs reject a v1 round. Legacy
+operator credentials do not acquire v2 submitter or review/settlement authority.
+
+Closing admission does not stop accepted work. Publication requires admission
+close, complete authoritative drain, an immutable evaluation seal, and reveal:
+`seal.publication_at` is the later of sealing time and the frozen `reveal_at`.
+Before publication, terminal success/failure polling remains `state: completed`
+with no score or private error text; `evaluation_status` and the allowlisted,
+message-free `evaluation_failure` expose only safe evaluator lifecycle signals.
+The public round-result/history endpoints return `409 round_not_published` until
+that boundary, then return a `no-store` projection. A provisional reward can be
+published without a completed honesty review.
+
+V2 rounds do not populate `GET /competition/leaderboard`, including when
+`include_staging=true`. That endpoint retains legacy finalized v1 winners and
+their `honesty_review` projection. For v2, use the versioned round result/history
+and, with the appropriate credential, the reward event feed. Discovery does not
+turn `winner_job_id` into a v2 winner field: reconcile
+`provisional_reward_winner`, `reward_revision`, and `decisions` instead.
+
+The result's `decisions` array (Go `Decisions`) is ordered by contiguous
+one-based `revision`. Revision 1 is `elect` or `no_winner`; later revisions
+append `previous_decision_sha256`, `superseded_revision`, and the previous
+recipient when present. Scores, original completion timestamps, sealed ranks,
+and eligibility evidence never change. A review reselects from that original
+ranking after disqualifications/restorations; it appends a reward revision only
+if the recipient changes. Approving the same recipient or deferring only its
+source does not create another reward entitlement.
+
+| `decisions[].action` | Meaning |
+|---|---|
+| `elect` | Initial provisional recipient selected; `selected_job_id` is non-null |
+| `replace` | A later revision selects a recipient, including restoration after a no-winner revision |
+| `no_winner` | No eligible recipient remains; `selected_job_id` is null |
+| `invalidated` | An evaluation-integrity incident terminally invalidates the sealed evaluation; recipient and settlement anchor are null, with no later reward revision permitted |
+
+The complete, case-sensitive `decisions[].reason_code` set is:
+
+| Reason | Meaning |
+|---|---|
+| `first_eligible` | First eligible, non-disqualified entry in the original ranking |
+| `no_submissions` | Empty terminal inventory |
+| `no_gate_passing_candidate` | No qualifying gate-passing/placeable candidate |
+| `no_significant_improvement` | A placeable, non-gate-failing entry exists, but no eligible improvement remains |
+| `no_new_reward_entitlement` | No eligible entry remains and the sealed inventory contains a prospectively excluded exact repeat identity |
+| `all_eligible_disqualified` | Originally eligible entries exist, but all are disqualified |
+| `EVALUATION_INTEGRITY_INCIDENT` | The reason for `invalidated`; it is not candidate dishonesty |
+
+`first_eligible` accompanies `elect`/`replace`; the five other lowercase reasons
+accompany `no_winner`. Exhausted eligible candidates take precedence over a
+repeat exclusion, then over insufficient improvement or failing gates. These
+decision reasons are distinct from `seal.entries[].ineligibility_reason` and
+the uppercase review `reason_codes`. Unknown future actions, reasons, or states
+must fail loudly: quarantine them and alert for explicit reconciliation, never
+default to no winner, approval, or settlement.
+
+| Result field | Complete value set and scope |
+|---|---|
+| `integrity_review` | `not_reviewed`, `approved`, `disqualified`, `not_applicable`; only reviews of the current provisional recipient count, restoration projects as `approved`, and no recipient means `not_applicable` |
+| `source_approval` | `pending`, `approved`, `rejected`, `deferred`, `not_applicable`; belongs to the current recipient, not the separately selected incumbent in `source_decision`; reward restoration alone does not restore rejected source approval |
+| `settlement_status` | `pending`, `received`, `applied`, `confirmed`, `rejected`; summarizes receipts for the current reward revision only, with precedence `confirmed` > `applied` > `rejected` > `received` > `pending` |
+
+These states are independent: a provisional recipient is not an integrity
+approval, source activation, or payment. `received` acknowledges delivery only;
+`applied`/`confirmed` are externally asserted accounting claims. The
+`effective_settlement_anchor` is the selected job's original authenticated
+`completed_at`, not a transfer time or a burn formula. Historical receipts
+remain visible after replacement but do not settle the new revision. A receipt
+or invalidation does not establish that a prior transfer can be reversed.
+
+Explicit v2 staging is fee-free, freezes a zero takeover margin, elects the best
+gate-passing nine-replicate entry without a significance requirement, and marks
+the seal/result/decisions `staging: true` with `settlement_mode: shadow`. It does
+not automatically approve source or move funds. Staging receipts permit only
+`received` or `rejected`, with no accounting application or chain transaction;
+therefore staging `settlement_status` is limited to `pending`, `received`, or
+`rejected`. The manual legacy review and staging flows below do not apply to
+explicit v2 rounds; v2 review/source authority uses the separately scoped
+automation contract described in [`RUN-MAIN.md`](RUN-MAIN.md).
 
 ## Score and statistical significance
 
@@ -115,8 +220,10 @@ This is part of the immutable evaluation result, not a post-hoc leaderboard
 calculation.
 
 Production epoch 1 begins from source epoch 0's calibrated 16.1% requirement.
-Production statistical eligibility places a submission into the ranked
-honesty-review queue; it does not by itself make the submission a winner.
+Under legacy v1, production statistical eligibility places a submission into
+the ranked honesty-review queue; it does not by itself make the submission a
+winner. V2 instead publishes the provisional reward and independent approval
+states described above.
 When an epoch has an approved
 winner, its authenticated `score.json` sets the next source epoch's
 percentage to the scorer's recommendation, which never weakens the incumbent
@@ -125,6 +232,10 @@ candidate is rejected as dishonest, the epoch has no winner and both the
 source commits and percentage carry forward unchanged.
 
 ## Epoch source identity and promotion
+
+The source graph applies to both contracts. The manual `epoch-review` and
+`promote` sequence below is the legacy v1 workflow; explicit v2 uses separately
+recorded review, source intent, readiness, and activation authority.
 
 The complete local-module graph that can affect the measured product is frozen
 by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
@@ -192,6 +303,9 @@ performs the same validation without publishing. The next evaluator image and
 round baseline are built only after the new source epoch is active.
 
 ## Competition lifecycle
+
+This section describes legacy v1 finalization and staging. Explicit v2 uses the
+seal, reveal, provisional reward, and independent review states above.
 
 Before production epoch 1, operators can run a staging era containing any
 number of sequential staging epochs numbered from zero. Each staging epoch

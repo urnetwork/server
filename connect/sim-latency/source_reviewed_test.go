@@ -53,7 +53,7 @@ func reviewedProposalFixture(t *testing.T) (*model.CompetitionSourceActivation, 
 	patchDigest := strings.Repeat("c", 64)
 	receipt := reviewedSourceBuildReceipt{Schema: 1, ReviewId: reviewId, PatchSha256: patchDigest, SourceLockSha256: lockDigest,
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("d", 64), HostQualificationSha256: strings.Repeat("e", 64), ContainmentSha256: strings.Repeat("f", 64), TestEvidenceSha256: strings.Repeat("1", 64),
-		SandboxId: "synthetic-isolated-build", Offline: true, NoMainCredentials: true, ReadOnlySource: true, Passed: true, TestModel: "gpt-6-sol", TestReasoning: "medium"}
+		SandboxId: "synthetic-isolated-build", Offline: true, NoMainCredentials: true, ReadOnlySource: true, Passed: true, TestModel: "gpt-6.1-sol", TestReasoning: "low"}
 	proposal := reviewedSourceProposal{Schema: 2, ReviewId: reviewId, JobId: server.NewId(), SubmittedAt: deadline.Add(-24 * time.Hour), ReviewDecisionDigest: strings.Repeat("2", 64), ReviewedAt: deadline.Add(-2 * time.Hour), ReadyAt: deadline.Add(-time.Hour),
 		BaseSourceLockSha256: current.SourceLockSha256, SourceLockSha256: lockDigest, Commits: commits, PatchSha256: patchDigest, RawScore: 80, Significance: validSourceSignificance(), BuildReceipt: receipt}
 	return current, proposal, deadline
@@ -138,6 +138,38 @@ func TestReviewedSourceBuildRequiresIndependentContainedEvidence(t *testing.T) {
 		mutate(&receipt)
 		if err := validateReviewedSourceBuild(receipt, proposal.ReviewId, proposal.PatchSha256, proposal.SourceLockSha256); err == nil {
 			t.Fatalf("unsafe build receipt %d accepted", index)
+		}
+	}
+}
+
+// Both modes require the current low-reasoning test role; a debug/review run
+// using the same model cannot substitute for independent completion evidence.
+func TestReviewedSourceBuildRequiresSol61LowTestAgent(t *testing.T) {
+	_, proposal, _ := reviewedProposalFixture(t)
+	cases := []struct {
+		model     string
+		reasoning string
+		accepted  bool
+	}{
+		{model: "gpt-6.1-sol", reasoning: "low", accepted: true},
+		{model: "gpt-6.1-sol", reasoning: "medium", accepted: false},
+		{model: "gpt-6.1-sol", reasoning: "high", accepted: false},
+		{model: "gpt-6.1-sol", reasoning: "max", accepted: false},
+		{model: "gpt-6-sol", reasoning: "medium", accepted: false},
+		{model: "gpt-6-sol", reasoning: "low", accepted: false},
+		{model: "gpt-6-astra", reasoning: "max", accepted: false},
+		{model: "gpt-6-astra", reasoning: "low", accepted: false},
+		{model: "", reasoning: "low", accepted: false},
+		{model: "gpt-6.1-sol", reasoning: "", accepted: false},
+	}
+	for _, staging := range []bool{false, true} {
+		for _, c := range cases {
+			receipt := proposal.BuildReceipt
+			receipt.Staging, receipt.TestModel, receipt.TestReasoning = staging, c.model, c.reasoning
+			err := validateReviewedSourceBuildForMode(receipt, proposal.ReviewId, proposal.PatchSha256, proposal.SourceLockSha256, staging)
+			if (err == nil) != c.accepted {
+				t.Errorf("staging=%t model=%q reasoning=%q accepted=%t, want %t: %v", staging, c.model, c.reasoning, err == nil, c.accepted, err)
+			}
 		}
 	}
 }
