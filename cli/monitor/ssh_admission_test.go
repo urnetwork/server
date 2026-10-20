@@ -11,7 +11,6 @@ func TestParseSharedSshAdmissionPreservesCadence(t *testing.T) {
 		t.Fatal("shared SSH flag changed continuous PG or cadence")
 	}
 	for _, args := range [][]string{
-		{"-ssh-admission-dir", "/synthetic/private/ssh", "-once"},
 		{"-ssh-admission-dir", "/synthetic/private/ssh", "-list-signals"},
 		{"-ssh-admission-dir", "/synthetic/private/ssh", "-pg-query-sample-continuous", "-min-probe-cadence", "1m"},
 	} {

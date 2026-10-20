@@ -13,7 +13,7 @@ func validateApexAdmissionContract(competitionId string, round RoundResult, enab
 	if round.DecisionMode == "" && round.RequiredApiCapability == "" {
 		return nil
 	}
-	if round.DecisionMode != model.CompetitionDecisionModeV2 || round.RequiredApiCapability != model.CompetitionAutomationCapability ||
+	if round.DecisionMode != model.CompetitionDecisionModeV2 || !model.SupportsCompetitionAutomationCapability(round.RequiredApiCapability) ||
 		enabledCompetitionId == "" || competitionId != enabledCompetitionId {
 		return errors.New("Apex submission requires explicit support for this competition's v2 decision contract")
 	}

@@ -38,6 +38,9 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		closeDurationIncidentLookback,
 		5000,
 	)
+	if interrupted := pgGroupedInterruptedSourceError(ctx, activeLogErr); interrupted != nil {
+		return nil, interrupted
+	}
 	active := parseTaskActiveRun(activeLog, "CloseExpiredContracts")
 	terminal := parseTaskTerminalRunAtLeast(activeLog, "CloseExpiredContracts", closeDurationLimit)
 	retryActive := parseTaskActiveRunForID(activeLog, "CloseExpiredContracts", terminal.taskID)
@@ -80,8 +83,12 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		   OR task_id = %s
 		ORDER BY completed_unix_s DESC;
 	`, activeTaskIDLiteral, terminalTaskIDLiteral))
-	if err != nil {
-		return nil, err
+	if interrupted := pgGroupedInterruptedSourceError(ctx, err); interrupted != nil {
+		return nil, interrupted
+	}
+	completionQueryErr := err
+	if completionQueryErr != nil {
+		rows = nil
 	}
 
 	type completion struct {
@@ -98,12 +105,23 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	hasActiveCompletion := false
 	terminalCompletion := completion{}
 	hasTerminalCompletion := false
+	completionCounts := map[string]int{}
 	for _, row := range rows {
+		completionCounts[row.str(0)]++
+	}
+	completionCoverageComplete := completionQueryErr == nil && len(rows) <= 4
+	findings := []finding{}
+	for _, row := range rows {
+		duration, age, clock, ok := pgGroupedCompletionValues(row, 0, 2, 3, 4)
+		if len(row) != 5 || len(rows) > 4 || row.str(1) != "completed" || !ok || completionCounts[row.str(0)] != 1 {
+			completionCoverageComplete = false
+			continue
+		}
 		candidate := completion{
 			taskID:          row.str(0),
-			durationSeconds: atoi(row.str(2)),
-			ageSeconds:      atoi(row.str(3)),
-			unixSeconds:     atoi64(row.str(4)),
+			durationSeconds: duration,
+			ageSeconds:      age,
+			unixSeconds:     clock,
 		}
 		if !hasLatestCompletion || latestCompletion.unixSeconds < candidate.unixSeconds {
 			latestCompletion = candidate
@@ -124,6 +142,13 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			terminalCompletion = candidate
 			hasTerminalCompletion = true
 		}
+	}
+	if completionQueryErr != nil {
+		issue := cannotObserveFinding(target, completionQueryErr)
+		issue.frame = "close-completions"
+		findings = append(findings, issue)
+	} else if !completionCoverageComplete {
+		findings = append(findings, pgGroupedCoverageFinding(target, "close-completions"))
 	}
 	completionForHeartbeat := latestCompletion
 	hasCompletionForHeartbeat := hasLatestCompletion
@@ -156,7 +181,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		!terminal.observedAt.IsZero() &&
 		!active.observedAt.IsZero() &&
 		terminal.observedAt.Before(active.observedAt)
-	if active.seconds >= int(closeDurationLimit/time.Second) &&
+	if completionCoverageComplete && active.seconds >= int(closeDurationLimit/time.Second) &&
 		!activeAttemptEnded &&
 		!completionSupersedesHeartbeat {
 		phase = "active"
@@ -176,10 +201,13 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		durationSeconds = completedOverrun.durationSeconds
 		ageSeconds = completedOverrun.ageSeconds
 	} else if activeLogErr != nil {
-		return nil, fmt.Errorf("read active CloseExpiredContracts task logs: %w", activeLogErr)
+		findings = append(findings, cannotObserveFinding(target, activeLogErr))
 	}
 
 	if phase == "" {
+		if len(findings) != 0 {
+			return findings, nil
+		}
 		return []finding{healthyFinding(
 			"pg/close-duration-overrun",
 			tierWarn,
@@ -292,7 +320,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	if activeLogSource == "host-journal-fallback" {
 		logEvidence += " The fleet log gateway was unavailable, so the task lifecycle came from bounded taskworker journals on the configured service hosts."
 	}
-	return []finding{{
+	findings = append(findings, finding{
 		probeId: "pg/close-duration-overrun", tier: tierWarn,
 		class: "close-duration-overrun", target: target, frame: "CloseExpiredContracts", sustain: 1,
 		symptom: fmt.Sprintf(
@@ -309,5 +337,6 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		action:    "Retain the independent 25,000-row scan caps on generations that already have them; roll out that existing correction only where executor provenance proves the older per-scan limit. A merged selection above 25,000 does not prove an older artifact. Keep the bounded retention queue active, then let independently verified scheduled closes and autovacuum drain confirmed debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
 		verify:    "Verify the executor's independent scan caps are at most 25,000 and their deduplicated union at most 50,000. Every active generation keeps close checkpoints below 120s, no exact-1,800s timeout recurs, and the older-than-five/30-minute open-contract buckets fall on consecutive samples. Prompt retries or verified sibling progress do not clear unresolved financial failure warnings.",
 		playbook:  "SIGNALS.md §1.2, §2.6 and §2.10",
-	}}, nil
+	})
+	return findings, nil
 }

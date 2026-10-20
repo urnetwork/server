@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -143,7 +142,7 @@ func TestParseRedisRateCoverageFailsClosedOnAmbiguousPartitions(t *testing.T) {
 		`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"monitor_check":"commands_raw"},"value":[1,"1.5"]}]}}`,
 	}
 	for _, fixture := range fixtures {
-		if _, err := parseRedisRateCoverage(fixture, 3); err == nil {
+		if _, err := parseRedisRateCoverage(fixture, "synthetic", redisRatesExpectedTestSources()); err == nil {
 			t.Errorf("ambiguous Redis rate coverage parsed successfully: %s", fixture)
 		}
 	}
@@ -172,32 +171,86 @@ func redisRatesSyntheticSettings(t *testing.T, mimirResponse string) (SignalSett
 	}}
 	settings := syntheticSettings(source)
 	settings.PublicDomain = "example.com"
-	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+	settings.Hosts = []HostSettings{
+		{Name: "redis-a.example", Roles: []string{"redis-cluster"}, RedisEntryPort: 16999, RedisNodePorts: []int{17001, 17002}},
+		{Name: "redis-b.example", Roles: []string{"redis-cluster"}, RedisNodePorts: []int{17003}},
+		{Name: "metrics-1", Roles: []string{"services"}},
+	}
 	return settings, &observedQuery
 }
 
-func redisRatesMimirFixture(raw, oneMinute, fiveMinutes int) string {
-	result := []map[string]any{}
+// Synthetic publisher labels match the configured two-host, three-node
+// topology without using live inventory names, addresses or node ports.
+func redisRatesTestSources() []redisRateSource {
+	return []redisRateSource{
+		{host: "redis-a.example", node: "17001"},
+		{host: "redis-a.example", node: "17002"},
+		{host: "redis-b.example", node: "17003"},
+	}
+}
+
+// The parser receives the expected identities independently of the response.
+func redisRatesExpectedTestSources() map[redisRateSource]bool {
+	sources := map[redisRateSource]bool{}
+	for _, source := range redisRatesTestSources() {
+		sources[source] = true
+	}
+	return sources
+}
+
+// A grouped source sample or the label-free zero partition marker.
+type redisRatesFixtureRow struct {
+	Metric map[string]string `json:"metric"`
+	Value  []any             `json:"value"`
+}
+
+// Every requested partition has a zero marker even when it has no sources.
+func redisRatesMimirRows(raw, oneMinute, fiveMinutes int, sources []redisRateSource) []redisRatesFixtureRow {
+	rows := []redisRatesFixtureRow{}
 	for _, metric := range redisRateMetrics {
-		for window, count := range map[string]int{
-			"raw": raw,
-			"1m":  oneMinute,
-			"5m":  fiveMinutes,
+		for _, window := range []struct {
+			name  string
+			count int
+		}{
+			{name: "raw", count: raw},
+			{name: "1m", count: oneMinute},
+			{name: "5m", count: fiveMinutes},
 		} {
-			result = append(result, map[string]any{
-				"metric": map[string]string{"monitor_check": metric.short + "_" + window},
-				"value":  []any{1788774000, strconv.Itoa(count)},
+			check := metric.short + "_" + window.name
+			rows = append(rows, redisRatesFixtureRow{
+				Metric: map[string]string{"monitor_check": check},
+				Value:  []any{1788774000, "0"},
 			})
+			for _, source := range sources[:window.count] {
+				rows = append(rows, redisRatesFixtureRow{
+					Metric: map[string]string{
+						"monitor_check": check, "env": "synthetic", "job": "redis",
+						"host": source.host, "node": source.node,
+					},
+					Value: []any{1788774000, "1"},
+				})
+			}
 		}
 	}
+	return rows
+}
+
+// Warning payloads are deliberately available to verify their public omission.
+func redisRatesMimirResponse(rows []redisRatesFixtureRow, warnings []string) string {
 	body, err := json.Marshal(map[string]any{
-		"status": "success",
-		"data":   map[string]any{"resultType": "vector", "result": result},
+		"status": "success", "warnings": warnings,
+		"data": map[string]any{"resultType": "vector", "result": rows},
 	})
 	if err != nil {
 		panic(err)
 	}
 	return string(body)
+}
+
+// Existing signal controls retain their aggregate expectations while the
+// response now carries the independently configured source identities.
+func redisRatesMimirFixture(raw, oneMinute, fiveMinutes int) string {
+	return redisRatesMimirResponse(redisRatesMimirRows(raw, oneMinute, fiveMinutes, redisRatesTestSources()), nil)
 }
 
 func newRedisRatesGrafanaServer(

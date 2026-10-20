@@ -3310,6 +3310,12 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		evalError.Readiness = &result
 		return result, evalError
 	}
+	if round == nil && settings.AutomationPolicy.Enabled && settings.AutomationPolicy.RequiredApiCapability == model.CompetitionRuntimeBlobCapability {
+		result.Checks["frozen_source_activation"] = false
+		evalError := infrastructureError("source_not_ready", "no activated runtime source round is installed")
+		evalError.Readiness = &result
+		return result, evalError
+	}
 	if competitionRoundUsesV2(round) {
 		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
 		if err != nil {
@@ -3430,6 +3436,9 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
+	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	result := settings.PublicInfo()
 	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
 		round, loadErr := competitionConfiguredCurrentRound(ctx, settings, self.store)
@@ -3437,7 +3446,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 			return nil, infrastructureError("storage_unavailable", "the configured automated staging season is unavailable")
 		}
 		if round != nil {
-			view, revealErr := self.roundView(round)
+			view, revealErr := self.roundViewContext(ctx, round)
 			if revealErr != nil {
 				return nil, revealErr
 			}
@@ -3453,7 +3462,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		return nil, infrastructureError("storage_unavailable", "competition round storage is unavailable")
 	}
 	if round != nil {
-		view, revealErr := self.roundView(round)
+		view, revealErr := self.roundViewContext(ctx, round)
 		if revealErr != nil {
 			return nil, revealErr
 		}
@@ -3467,7 +3476,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		return nil, infrastructureError("storage_unavailable", "competition staging-round storage is unavailable")
 	}
 	if stagingRound != nil {
-		view, revealErr := self.roundView(stagingRound)
+		view, revealErr := self.roundViewContext(ctx, stagingRound)
 		if revealErr != nil {
 			return nil, revealErr
 		}
@@ -3653,6 +3662,9 @@ func (self *Service) Leaderboards(ctx context.Context, includeStaging bool) (*Se
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
+	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	result, err := self.store.Leaderboards(ctx, settings, includeStaging)
 	if err != nil {
 		return nil, infrastructureError("storage_unavailable", "competition leaderboard storage is unavailable")
@@ -3749,7 +3761,7 @@ func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreA
 	}
 	if v2 {
 		result.StatusUrl = "/competition/v2/score/" + job.JobId.String()
-		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(round)
 	}
 	if hit {
 		metricOutcome = "cache_hit"
@@ -3782,9 +3794,12 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	if v2 && (principal == nil || principal.Role != "submitter") {
 		return nil, http.StatusForbidden, competitionScopeDenied()
 	}
+	if err := requireCompetitionRoundRuntime(ctx, settings, self.store, &job.Round); err != nil {
+		return nil, http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	result := scoreJobView(job, principal, server.NowUtc())
 	if v2 {
-		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(&job.Round)
 	}
 	return &result, 200, nil
 }
@@ -3804,6 +3819,9 @@ func (self *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([
 	if round.Canceled || !roundPublished(round, server.NowUtc()) {
 		return nil, "", 409, submissionError("round_not_revealed", "round workload is unavailable until post-review epoch finalization")
 	}
+	if err := requireCompetitionRoundRuntime(ctx, settings, self.store, round); err != nil {
+		return nil, "", http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	providers, err := readRoundWorkload(ctx, settings, round)
 	if err != nil {
 		return nil, "", 503, infrastructureError("round_workload_unavailable", "committed round workload failed authentication")
@@ -3812,9 +3830,17 @@ func (self *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([
 }
 
 func (self *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionError) {
+	return self.roundViewContext(context.Background(), round)
+}
+
+// Every newly capable replica verifies installation before projecting a round.
+func (self *Service) roundViewContext(ctx context.Context, round *roundRecord) (*RoundResult, *CompetitionError) {
+	if err := requireCompetitionRoundRuntime(ctx, self.settings, self.store, round); err != nil {
+		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
+	}
 	view := round.RoundResult
 	if competitionRoundUsesV2(round) {
-		view.DecisionMode, view.RequiredApiCapability = model.CompetitionDecisionModeV2, model.CompetitionAutomationCapability
+		view.DecisionMode, view.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(round)
 		view.WinnerJobId, view.FinalizedAt = nil, nil
 		if roundPublished(round, server.NowUtc()) {
 			view.Status = "sealed"
@@ -5780,6 +5806,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	if _, identityErr := validateRuntimeImageDigest(workerImageDigest); identityErr != nil {
 		return nil, identityErr
 	}
+	if settings.AutomationPolicy.Enabled && !model.SupportsCompetitionAutomationCapability(settings.AutomationPolicy.RequiredApiCapability) {
+		return nil, ErrUnsupportedDecisionMode
+	}
 	now := self.nowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
 
@@ -5866,7 +5895,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				  AND ($7::uuid IS NULL OR r.round_id=$7)
 				ORDER BY j.submitted_at, j.job_id
 				LIMIT 1 FOR UPDATE OF j SKIP LOCKED
-			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, model.CompetitionAutomationCapability, optionalAutomationRoundId(settings), settings.AutomationPolicy.Staging)
+			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, settings.AutomationPolicy.RequiredApiCapability, optionalAutomationRoundId(settings), settings.AutomationPolicy.Staging)
 			var scanErr error
 			job, scanErr = scanJob(row, true, self.nowUtc())
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -6506,6 +6535,9 @@ func newWorkerWithImageDigest(
 }
 
 func (self *Worker) Run(ctx context.Context) error {
+	if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
+		return err
+	}
 	hostCheck, err := self.preflight(ctx)
 	if err != nil {
 		return err
@@ -6516,6 +6548,9 @@ func (self *Worker) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 
 	for {
+		if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
+			return err
+		}
 		finished, err := self.finishEpoch(ctx)
 		if err != nil {
 			return fmt.Errorf("finish competition epoch: %w", err)
@@ -7668,7 +7703,7 @@ func validateApexAdapterState(state *apexAdapterState) error {
 	lastSequence := uint64(0)
 	for _, record := range state.Records {
 		if record.DecisionMode != "" || record.RequiredApiCapability != "" || record.CompetitionId != "" {
-			if record.DecisionMode != model.CompetitionDecisionModeV2 || record.RequiredApiCapability != model.CompetitionAutomationCapability ||
+			if record.DecisionMode != model.CompetitionDecisionModeV2 || !model.SupportsCompetitionAutomationCapability(record.RequiredApiCapability) ||
 				!tokenNamePattern.MatchString(record.CompetitionId) || record.Winner || record.HonestyReview != "" {
 				return errors.New("Apex adapter state contains an invalid v2 contract or fabricated legacy approval")
 			}

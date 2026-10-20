@@ -583,6 +583,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
  AND pg_get_indexdef(i.indexrelid)='CREATE UNIQUE INDEX network_user_auth_wallet_pkey ON public.network_user_auth_wallet USING btree (user_id, blockchain)'
  AND i.indexprs IS NULL AND i.indpred IS NULL)`),
 	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery),
+	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

@@ -302,7 +302,7 @@ var competitionMigration847ArtifactQuery = "(" +
 	snMainnetMigrationFunction("competition_v2_seal_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2SealGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_source_abandonment_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2SourceAbandonmentGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_receipt_identity_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2ReceiptIdentityGuardBody) + " AND " +
-	snMainnetMigrationFunction("competition_v2_round_insert_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2RoundInsertGuardBody) + " AND " +
+	migrationCompetitionBefore(851, snMainnetMigrationFunction("competition_v2_round_insert_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2RoundInsertGuardBody)) + " AND " +
 	snMainnetMigrationFunction("competition_v2_readiness_mode_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2ReadinessModeGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_pointer_mode_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2PointerModeGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_decision_mode_guard()", "trigger", "plpgsql", "v", false, competitionMigration847CompetitionV2DecisionModeGuardBody) + " AND " +

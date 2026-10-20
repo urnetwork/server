@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -12,7 +13,8 @@ import (
 	"time"
 )
 
-// SIGNALS.md §14.5 maps to signal_proxy_path.go and signal_proxy_path_test.go.
+// SIGNALS.md §14.5 maps to this file, signal_proxy_path_test.go, and
+// signal_proxy_path_authority_test.go.
 // Dynamic proxy allocations are discovered from each running container on
 // every pass; SignalSettings contains only stable host/public-route identity.
 func NewProxyPathSignal() Signal {
@@ -52,7 +54,8 @@ func (proxyPublicPathProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			routeFinding, routeErr := evaluateProxyRouteState(ctx, env, target, families)
 			if routeErr != nil {
 				findings = append(findings, cannotObserveFinding(target.name+"/policy-routing", routeErr))
-			} else if routeFinding != nil {
+			}
+			if routeFinding != nil {
 				findings = append(findings, *routeFinding)
 			}
 		}
@@ -60,7 +63,8 @@ func (proxyPublicPathProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		upgradeFinding, upgradeErr := evaluateEdgeAutoUpgrades(ctx, env, target)
 		if upgradeErr != nil {
 			findings = append(findings, cannotObserveFinding(target.name+"/apt-policy", upgradeErr))
-		} else if upgradeFinding != nil {
+		}
+		if upgradeFinding != nil {
 			findings = append(findings, *upgradeFinding)
 		}
 	}
@@ -392,6 +396,9 @@ func runProxyHandshakeTask(ctx context.Context, env *probeEnv, target *host, tas
 
 const proxyRouteMarker = "monitor-signal-14.5-policy-route"
 
+// Preserve each producer's completion before reducing its output. A known
+// deficit survives a sibling observation failure, but unknown clocks cannot
+// establish the restart ordering required for this finding.
 func evaluateProxyRouteState(ctx context.Context, env *probeEnv, target *host, families []string) (*finding, error) {
 	unit := target.proxy.LoadBalancerUnit
 	if unit == "" {
@@ -399,56 +406,108 @@ func evaluateProxyRouteState(ctx context.Context, env *probeEnv, target *host, f
 	}
 	table := target.proxy.RoutingTable
 	command := fmt.Sprintf(`# %s
-networkd_start=$(systemctl show systemd-networkd.service -p ActiveEnterTimestampMonotonic --value 2>/dev/null)
-lb_start=$(systemctl show %s -p ActiveEnterTimestampMonotonic --value 2>/dev/null)
-v4_routes=$(ip -4 route show table %d 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l)
-v6_routes=$(ip -6 route show table %d 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l)
-v4_rules=$(ip -4 rule show 2>/dev/null | grep -Ec 'lookup[[:space:]]+%d([[:space:]]|$)' || true)
-v6_rules=$(ip -6 rule show 2>/dev/null | grep -Ec 'lookup[[:space:]]+%d([[:space:]]|$)' || true)
-printf 'networkd_start=%%s\nlb_start=%%s\nv4_routes=%%s\nv6_routes=%%s\nv4_rules=%%s\nv6_rules=%%s\n' "$networkd_start" "$lb_start" "$v4_routes" "$v6_routes" "$v4_rules" "$v6_rules"`,
-		proxyRouteMarker, shellSingleQuote(unit), table, table, table, table)
+export LC_ALL=C
+proxy_clock() {
+  value=$(systemctl show "$2" -p ActiveEnterTimestampMonotonic --value 2>/dev/null)
+  status=$?
+  case "$value" in ''|*[!0-9]*) value=invalid ;; esac
+  printf '%%s=%%s|%%s\n' "$1" "$status" "$value"
+}
+proxy_clock networkd_start systemd-networkd.service
+proxy_clock lb_start %s
+for family in 4 6; do
+  routes=$(ip "-$family" route show table %d 2>/dev/null)
+  status=$?
+  count=invalid
+  if [ "$status" -eq 0 ]; then
+    count=$(awk 'NF { count++ } END { print count+0 }' 2>/dev/null <<EOF
+$routes
+EOF
+    )
+    status=$?
+  fi
+  case "$count" in ''|*[!0-9]*) count=invalid ;; esac
+  printf 'v%%s_routes=%%s|%%s\n' "$family" "$status" "$count"
+  rules=$(ip "-$family" rule show 2>/dev/null)
+  status=$?
+  count=invalid
+  if [ "$status" -eq 0 ]; then
+    count=$(awk -v table=%d '{ for (i=1; i<NF; i++) if ($i == "lookup" && $(i+1) == table) { count++; break } } END { print count+0 }' 2>/dev/null <<EOF
+$rules
+EOF
+    )
+    status=$?
+  fi
+  case "$count" in ''|*[!0-9]*) count=invalid ;; esac
+  printf 'v%%s_rules=%%s|%%s\n' "$family" "$status" "$count"
+done
+printf 'complete=proxy-route-v1\n'`,
+		proxyRouteMarker, shellSingleQuote(unit), table, table)
 	out, err := env.runner.shell(ctx, target, command)
 	if err != nil {
 		return nil, err
 	}
-	values := parseKeyValueLines(out)
-	networkdStart, networkdErr := strconv.ParseInt(values["networkd_start"], 10, 64)
-	lbStart, lbErr := strconv.ParseInt(values["lb_start"], 10, 64)
-	if networkdErr != nil || lbErr != nil || networkdStart <= 0 || lbStart <= 0 {
-		return nil, fmt.Errorf("invalid networkd/LB clocks in %q", strings.TrimSpace(out))
+	keys := []string{"networkd_start", "lb_start", "v4_routes", "v6_routes", "v4_rules", "v6_rules"}
+	values, frameErr := parseProxyNativeFrame(out, "proxy-route-v1", keys)
+	observationErrors := []error{frameErr}
+	numbers := map[string]uint64{}
+	observed := []string{}
+	for _, key := range keys {
+		if strings.HasPrefix(key, "v4_") && !familyEnabled(families, "ipv4") ||
+			strings.HasPrefix(key, "v6_") && !familyEnabled(families, "ipv6") {
+			continue
+		}
+		status, value, resultErr := proxyNativeResult(values, key)
+		number, numberOk := proxyNativeUint(value)
+		switch {
+		case resultErr != nil:
+			observationErrors = append(observationErrors, resultErr)
+		case status != 0:
+			observationErrors = append(observationErrors, fmt.Errorf("proxy routing %s: exit status %d", key, status))
+		case !numberOk || (key == "networkd_start" || key == "lb_start") && number == 0:
+			observationErrors = append(observationErrors, fmt.Errorf("invalid response: proxy routing %s", key))
+		default:
+			numbers[key] = number
+			observed = append(observed, fmt.Sprintf("%s=%d", key, number))
+			continue
+		}
+		observed = append(observed, key+"=unknown")
 	}
-	if networkdStart <= lbStart {
-		return nil, nil
+	observationErr := errors.Join(observationErrors...)
+	networkdStart, networkdKnown := numbers["networkd_start"]
+	lbStart, lbKnown := numbers["lb_start"]
+	if !networkdKnown || !lbKnown || networkdStart <= lbStart {
+		return nil, observationErr
 	}
 
 	missing := []string{}
-	if atoi(values["v4_routes"]) == 0 && familyEnabled(families, "ipv4") {
-		missing = append(missing, "IPv4 table routes")
-	}
-	if atoi(values["v4_rules"]) == 0 && familyEnabled(families, "ipv4") {
-		missing = append(missing, "IPv4 source/fwmark rules")
-	}
-	if atoi(values["v6_routes"]) == 0 && familyEnabled(families, "ipv6") {
-		missing = append(missing, "IPv6 table routes")
-	}
-	if atoi(values["v6_rules"]) == 0 && familyEnabled(families, "ipv6") {
-		missing = append(missing, "IPv6 source/fwmark rules")
+	for _, field := range []struct {
+		key, description string
+	}{
+		{key: "v4_routes", description: "IPv4 table routes"},
+		{key: "v4_rules", description: "IPv4 source/fwmark rules"},
+		{key: "v6_routes", description: "IPv6 table routes"},
+		{key: "v6_rules", description: "IPv6 source/fwmark rules"},
+	} {
+		if count, known := numbers[field.key]; known && count == 0 {
+			missing = append(missing, field.description)
+		}
 	}
 	if len(missing) == 0 {
-		return nil, nil
+		return nil, observationErr
 	}
 	return &finding{
 		probeId: "host/policy-route-drift", tier: tierWarn,
 		class: "policy-route-drift", target: target.name, frame: target.proxy.PublicInterface, sustain: 1,
 		symptom:   fmt.Sprintf("systemd-networkd restarted after %s's transparent LB and owned routing state is missing", target.name),
-		mechanism: "A later networkd activation removed Warp's public source-policy routes/rules while the LB process remained up; public SYNs can arrive and SYN-ACKs leave through the LAN default route.",
+		mechanism: "A later networkd activation precedes the observed absence of Warp's public source-policy routes/rules while the LB process remained up; public SYNs can arrive and SYN-ACKs leave through the LAN default route. The clocks and empty routing results do not alone prove which actor removed that state.",
 		baseline:  fmt.Sprintf("routing table %d retains non-empty routes and source/fwmark lookup rules for every enabled family, or the transparent LB starts after networkd and reconciles them", table),
-		observed:  fmt.Sprintf("networkd_start=%d lb_start=%d %s", networkdStart, lbStart, strings.TrimSpace(out)),
+		observed:  strings.Join(observed, " "),
 		evidence:  "missing: " + strings.Join(missing, ", "),
 		action:    "Run source-aware route-get and packet-capture proofs, then restore the persistent Warp-owned table/rules; do not lower the public main-table metric as a workaround.",
 		verify:    "Require both families' owned table/rules, correct source-aware route selection, and successful public SOCKS/HTTP/HTTPS protocol handshakes.",
 		playbook:  "SIGNALS.md §14.5",
-	}, nil
+	}, observationErr
 }
 
 const edgeAutoUpgradeMarker = "monitor-signal-14.5-auto-upgrades"
@@ -461,43 +520,151 @@ var aptUnits = []string{
 	"unattended-upgrades.service",
 }
 
+// Read only the owned APT key, without evaluating config as shell code. Read
+// UnitFileState through show so every accepted property has successful native
+// completion; is-enabled's nonzero state results do not certify completion.
 func evaluateEdgeAutoUpgrades(ctx context.Context, env *probeEnv, target *host) (*finding, error) {
 	command := `# ` + edgeAutoUpgradeMarker + `
-periodic=$(apt-config dump 2>/dev/null | awk -F'"' '$1 ~ /^APT::Periodic::Enable / {print $2; exit}')
-printf 'periodic_enable=%s\n' "${periodic:-unset}"
+export LC_ALL=C
+periodic=$(apt-config shell monitor_periodic APT::Periodic::Enable 2>/dev/null)
+status=$?
+case "$periodic" in
+  '') periodic=unset ;;
+  "monitor_periodic='"*"'")
+    periodic=${periodic#monitor_periodic=\'}
+    periodic=${periodic%\'}
+    case "$periodic" in ''|*[!0-9]*) periodic=invalid ;; esac ;;
+  *) periodic=invalid ;;
+esac
+printf 'periodic_enable=%s|%s\n' "$status" "$periodic"
 for unit in apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service; do
-  state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
-  printf '%s=%s\n' "$unit" "${state:-unknown}"
-done`
+  state=$(systemctl show "$unit" -p UnitFileState --value 2>/dev/null)
+  status=$?
+  case "$state" in
+    enabled|enabled-runtime|linked|linked-runtime|masked|masked-runtime|static|disabled) ;;
+    *) state=invalid ;;
+  esac
+  printf '%s=%s|%s\n' "$unit" "$status" "$state"
+done
+printf 'complete=apt-policy-v2\n'`
 	out, err := env.runner.shell(ctx, target, command)
 	if err != nil {
 		return nil, err
 	}
-	values := parseKeyValueLines(out)
+	keys := append([]string{"periodic_enable"}, aptUnits...)
+	values, frameErr := parseProxyNativeFrame(out, "apt-policy-v2", keys)
+	observationErrors := []error{frameErr}
 	drift := []string{}
-	if values["periodic_enable"] != "0" {
-		drift = append(drift, "APT::Periodic::Enable="+firstNonempty(values["periodic_enable"], "missing"))
-	}
-	for _, unit := range aptUnits {
-		if !strings.HasPrefix(values[unit], "masked") {
-			drift = append(drift, unit+"="+firstNonempty(values[unit], "missing"))
+	observed := []string{}
+	for _, key := range keys {
+		status, value, resultErr := proxyNativeResult(values, key)
+		if resultErr != nil {
+			observationErrors = append(observationErrors, resultErr)
+			observed = append(observed, key+"=unknown")
+			continue
+		}
+		known, compliant := false, false
+		if key == "periodic_enable" {
+			_, numeric := proxyNativeUint(value)
+			known = status == 0 && (value == "unset" || numeric)
+			compliant = value == "0"
+		} else {
+			switch value {
+			case "enabled", "enabled-runtime", "linked", "linked-runtime", "masked", "masked-runtime", "static", "disabled":
+				known = status == 0
+			}
+			compliant = value == "masked" || value == "masked-runtime"
+		}
+		if !known {
+			if status != 0 {
+				observationErrors = append(observationErrors, fmt.Errorf("APT policy %s: exit status %d without a valid result", key, status))
+			} else {
+				observationErrors = append(observationErrors, fmt.Errorf("invalid response: APT policy %s", key))
+			}
+			observed = append(observed, key+"=unknown")
+			continue
+		}
+		if key == "periodic_enable" && value != "0" && value != "unset" {
+			value = "other-numeric"
+		}
+		observed = append(observed, key+"="+value)
+		if !compliant {
+			drift = append(drift, key+"="+value)
 		}
 	}
+	observationErr := errors.Join(observationErrors...)
 	if len(drift) == 0 {
-		return nil, nil
+		return nil, observationErr
 	}
 	return &finding{
 		probeId: "host/edge-auto-upgrades", tier: tierWarn,
 		class: "edge-auto-upgrades", target: target.name, sustain: 1,
-		symptom:   fmt.Sprintf("%s can run unattended APT work that restarts network services outside a controlled maintenance window", target.name),
-		mechanism: "APT periodic configuration or systemd masks drifted, allowing apt-daily/unattended-upgrades to restart networkd after Warp installed transparent-LB policy routing.",
+		symptom:   fmt.Sprintf("%s does not match the disabled periodic APT and masked unit policy", target.name),
+		mechanism: "An authoritative APT periodic setting or unit state differs from the required edge policy. Unmasked units may permit unattended maintenance, but these configuration results do not prove that APT ran or that networkd restarted. An absent or unreadable unit property remains unknown.",
 		baseline:  "APT::Periodic::Enable is exactly 0 and apt-daily*, apt-daily-upgrade*, and unattended-upgrades.service are masked on every configured edge.",
-		observed:  strings.TrimSpace(out),
+		observed:  strings.Join(observed, " "),
 		evidence:  "drift: " + strings.Join(drift, ", "),
 		action:    "Disable both APT periodic execution layers and schedule OS/security updates in a controlled window with proxy return-path verification afterward.",
-		verify:    "Rerun apt-config and systemctl is-enabled, require the documented disabled/masked shape, then repeat source-aware public protocol probes.",
+		verify:    "Rerun apt-config and systemctl show -p UnitFileState --value, require the documented disabled/masked shape, then repeat source-aware public protocol probes.",
 		playbook:  "SIGNALS.md §14.5",
-	}, nil
+	}, observationErr
+}
+
+// Require the completion trailer before accepting any rows. Duplicates and
+// missing keys invalidate only their own observation; unrelated known fields
+// remain usable. Raw fields and diagnostics never enter an error or finding.
+func parseProxyNativeFrame(out string, marker string, keys []string) (map[string]string, error) {
+	values := map[string]string{}
+	if len(out) > 4096 || !strings.HasSuffix(out, "\ncomplete="+marker+"\n") {
+		return values, fmt.Errorf("invalid response: incomplete proxy native frame")
+	}
+	rows := strings.Split(strings.TrimSuffix(out, "complete="+marker+"\n"), "\n")
+	allowed := map[string]bool{}
+	for _, key := range keys {
+		allowed[key] = true
+	}
+	seen := map[string]bool{}
+	var frameErr error
+	for _, row := range rows[:len(rows)-1] {
+		key, value, ok := strings.Cut(row, "=")
+		if !ok || !allowed[key] {
+			frameErr = fmt.Errorf("invalid response: unexpected proxy native field")
+			continue
+		}
+		if seen[key] {
+			delete(values, key)
+			frameErr = fmt.Errorf("invalid response: duplicate proxy native field")
+			continue
+		}
+		seen[key] = true
+		values[key] = value
+	}
+	return values, frameErr
+}
+
+// Decode only a bounded native exit code paired with one fixed-domain value.
+func proxyNativeResult(values map[string]string, key string) (int, string, error) {
+	status, value, ok := strings.Cut(values[key], "|")
+	code, numeric := proxyNativeUint(status)
+	if !ok || !numeric || code > 255 || value == "" || strings.ContainsAny(value, "|\r\n") {
+		return 0, "", fmt.Errorf("invalid response: proxy native %s", key)
+	}
+	return int(code), value, nil
+}
+
+// Decimal syntax excludes signs, whitespace and overflow, including malformed
+// counts that the old permissive atoi reduced to a measured zero.
+func proxyNativeUint(value string) (uint64, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	number, err := strconv.ParseUint(value, 10, 64)
+	return number, err == nil
 }
 
 func normalizedAddressFamilies(configured []string) ([]string, error) {

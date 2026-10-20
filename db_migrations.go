@@ -10503,4 +10503,7 @@ var migrations = []any{
 
 	// 850: explicit staging source uses ten repositories; production keeps its historical eleven.
 	newSqlMigration(competitionAutomationStagingSourceGraphMigration),
+
+	// 851: explicit runtime-blob consumers independently authenticate retained source envelopes.
+	newSqlMigration(competitionAutomationRuntimeBlobMigration),
 }

@@ -121,7 +121,7 @@ func TestPaymentPlanReliabilityChunksMatchSingleStatement(t *testing.T) {
 		var reference []paymentPlanReliabilityScoreRow
 		value := server.HandleError(func() {
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {
-				UpdateNetworkReliabilityScoresInTx(tx, ctx, start, end, false)
+				UpdateNetworkReliabilityScoresInTx(tx, ctx, start, end, false, nil)
 				reference = readPaymentPlanReliabilityScores(t, ctx, tx)
 				panic(rollback)
 			}, server.TxReadCommitted, server.OptNoRetry())

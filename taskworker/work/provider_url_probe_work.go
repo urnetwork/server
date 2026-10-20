@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/ingest"
 	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Authentication is independently useful even when a local load failure left
@@ -60,6 +61,15 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 	// Each pass judges its own turns; no window outlives the pass or is shared
 	// with another shard's.
 	pass.urlCommonMode = newProviderUrlProbeCommonMode(args.ShardIndex, args.ShardCount)
+	// One owner holds every turn's closed tunnel while its derived client
+	// acknowledges the provider's late returns (providertunnel.Retirements),
+	// so a turn returns its worker once its tunnel's flows end, about 10s
+	// before its derived client is revoked. A turn is a run of one provider,
+	// so a run's own owner would hold the worker for that wait. The pass joins
+	// them before it returns, inside its prober shard.
+	retirements := providertunnel.NewRetirements(2 * execution.Full.Concurrency)
+	defer retirements.Close()
+	pass.fullOptions.TunnelConfig.Retirements = retirements
 	startedAt := time.Now()
 	result, runErr := pass.drainUrlProbes(ctx, &execution, pins, pool, observation)
 	urlProbePassSeconds.Observe(time.Since(startedAt).Seconds())

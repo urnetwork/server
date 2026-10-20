@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	CompetitionDecisionModeV2       = "provisional_reward_v2"
-	CompetitionAutomationCapability = "competition.reward.v2"
-	CompetitionElectionRule         = "raw_latency_g1_g6_welch_v1"
+	CompetitionDecisionModeV2        = "provisional_reward_v2"
+	CompetitionAutomationCapability  = "competition.reward.v2"
+	CompetitionRuntimeBlobCapability = "competition.reward.v2.runtime-blob.v1"
+	CompetitionElectionRule          = "raw_latency_g1_g6_welch_v1"
 )
 
 var competitionAutomationSha256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -53,7 +54,7 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 	if !policy.Enabled {
 		return nil
 	}
-	if policy.Version != 2 || policy.ElectionRule != CompetitionElectionRule || policy.RequiredApiCapability != CompetitionAutomationCapability {
+	if policy.Version != 2 || policy.ElectionRule != CompetitionElectionRule || !SupportsCompetitionAutomationCapability(policy.RequiredApiCapability) {
 		return errors.New("unsupported automation contract")
 	}
 	if !competitionAutomationScope.MatchString(policy.Environment) || !competitionAutomationScope.MatchString(policy.SeasonId) {
@@ -82,6 +83,12 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 		return errors.New("automation source or policy approval identity is invalid")
 	}
 	return nil
+}
+
+// Both contracts preserve v2 reward semantics; the blob contract additionally
+// requires independent exact-envelope authentication by every runtime.
+func SupportsCompetitionAutomationCapability(capability string) bool {
+	return capability == CompetitionAutomationCapability || capability == CompetitionRuntimeBlobCapability
 }
 
 // Stable json encoding supplies content identities; a digest alone is not a signature or approval.

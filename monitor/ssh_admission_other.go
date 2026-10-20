@@ -13,6 +13,10 @@ func newSharedSshAdmission(context.Context, string, []string) (sshAdmissionBacke
 	return nil, errors.New("shared SSH admission requires Linux")
 }
 
+func newSharedSshDiagnosticAdmission(context.Context, string, []string) (sshAdmissionBackend, error) {
+	return nil, errors.New("shared SSH admission requires Linux")
+}
+
 func RunSshAdmissionLease(context.Context, string, io.Reader, io.Writer) error {
 	return errors.New("shared SSH admission requires Linux")
 }

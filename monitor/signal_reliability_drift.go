@@ -20,8 +20,92 @@ const (
 // owns bootstrap/empty-state visibility; at scale, fewer than one passing row
 // per thousand scored rows is conservatively unusable provider diversity.
 func reliabilityGateEffectivelyEmpty(scoreRows int, passingRows int) bool {
-	return scoreRows >= reliabilityDriftMinimumRows &&
-		int64(passingRows)*reliabilityDriftPassingDenominator < int64(scoreRows)
+	minimumPassing := scoreRows / reliabilityDriftPassingDenominator
+	if scoreRows%reliabilityDriftPassingDenominator != 0 {
+		minimumPassing++
+	}
+	return scoreRows >= reliabilityDriftMinimumRows && passingRows < minimumPassing
+}
+
+// Retain the validated diagnostic row alongside the fields that select a
+// product finding. The LEFT JOIN's absent window is the sole nullable domain.
+type reliabilityDriftObservation struct {
+	row                        pgRow
+	classificationVersion      int
+	scoreRows                  int
+	passingRows                int
+	maxWeight                  float64
+	medianWeight               float64
+	writeTokenPresent          bool
+	classificationGuardPresent bool
+}
+
+// Validate every selected field and relationships enforced by this one SQL
+// snapshot, without imposing a unit upper bound on genuinely skewed weights.
+func parseReliabilityDriftObservation(rows []pgRow) (reliabilityDriftObservation, error) {
+	observation := reliabilityDriftObservation{}
+	row, err := pgAggregateRow(rows, 17)
+	if err != nil {
+		return observation, err
+	}
+	var counts [17]int64
+	for _, column := range []int{0, 4, 5, 10, 12, 13, 14} {
+		bits := 64
+		if column == 0 {
+			bits = 32
+		} else if column == 4 || column == 5 {
+			bits = strconv.IntSize
+		}
+		counts[column], err = providerPgInteger(row.str(column), bits, 0)
+		if err != nil {
+			return observation, err
+		}
+	}
+	var numbers [17]float64
+	for _, column := range []int{6, 7, 8, 9, 11} {
+		numbers[column], err = providerPgFloat(row.str(column))
+		if err != nil {
+			return observation, err
+		}
+	}
+	if observation.writeTokenPresent, err = providerPgBool(row.str(15)); err != nil {
+		return observation, err
+	}
+	if observation.classificationGuardPresent, err = providerPgBool(row.str(16)); err != nil {
+		return observation, err
+	}
+	if counts[5] > counts[4] || numbers[7] > numbers[6] || numbers[9] > numbers[8] ||
+		counts[4] == 0 && (numbers[6] != 0 || numbers[7] != 0) ||
+		counts[4] > 0 && (counts[5] > 0) != (numbers[6] >= reliabilityDriftMinimumWeight) ||
+		counts[4] > 0 && counts[4] == counts[5] && numbers[7] < reliabilityDriftMinimumWeight ||
+		counts[10] == 0 && numbers[11] != 0 || counts[12] > counts[10] || counts[13] > counts[10] {
+		return observation, fmt.Errorf("invalid response for provider PostgreSQL reliability relationships")
+	}
+	missingWindow := row[1] == "" && row[2] == "" && row[3] == ""
+	if missingWindow {
+		if counts[0] != 0 || observation.writeTokenPresent ||
+			counts[10] != 0 || numbers[11] != 0 || counts[12] != 0 || counts[13] != 0 || counts[14] != 0 {
+			return observation, fmt.Errorf("invalid response for provider PostgreSQL absent reliability window")
+		}
+	} else {
+		for _, column := range []int{1, 2, 3} {
+			counts[column], err = providerPgInteger(row.str(column), 64, 0)
+			if err != nil {
+				return observation, err
+			}
+		}
+		if counts[1] > counts[2] || counts[3] > counts[2] ||
+			counts[10] > counts[2]-counts[1] || counts[14] > counts[2]-counts[1] {
+			return observation, fmt.Errorf("invalid response for provider PostgreSQL reliability window relationships")
+		}
+	}
+	observation.row = row
+	observation.classificationVersion = int(counts[0])
+	observation.scoreRows = int(counts[4])
+	observation.passingRows = int(counts[5])
+	observation.maxWeight = numbers[6]
+	observation.medianWeight = numbers[7]
+	return observation, nil
 }
 
 // Signal reliability-drift implements SIGNALS.md §2.15. It checks the
@@ -167,18 +251,16 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) != 1 || len(rows[0]) < 17 {
-		return nil, fmt.Errorf("reliability drift query returned %d malformed rows", len(rows))
+	observation, err := parseReliabilityDriftObservation(rows)
+	if err != nil {
+		return nil, err
 	}
-
-	row := rows[0]
-	classificationVersion := atoiRow(row, 0)
-	scoreRows := atoiRow(row, 4)
-	passingRows := atoiRow(row, 5)
-	maxWeight := atof(row.str(6))
-	medianWeight := atof(row.str(7))
-	writeTokenPresent := row.str(15) == "t" || row.str(15) == "true"
-	classificationGuardPresent := row.str(16) == "t" || row.str(16) == "true"
+	row := observation.row
+	classificationVersion := observation.classificationVersion
+	scoreRows, passingRows := observation.scoreRows, observation.passingRows
+	maxWeight, medianWeight := observation.maxWeight, observation.medianWeight
+	writeTokenPresent := observation.writeTokenPresent
+	classificationGuardPresent := observation.classificationGuardPresent
 	if classificationVersion >= reliabilityDriftClassificationVersion &&
 		writeTokenPresent &&
 		classificationGuardPresent &&

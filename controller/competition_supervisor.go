@@ -3,16 +3,12 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -118,6 +114,8 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 // The trusted deployment adapter installs this exact envelope on every
 // participating runtime. It contains no token, workload, patch, or seed.
 type CompetitionRuntimeManifest struct {
+	RequiredApiCapability     string    `json:"required_api_capability,omitempty"`
+	IntentSha256              string    `json:"intent_sha256,omitempty"`
 	Staging                   bool      `json:"staging,omitempty"`
 	StagingRoundWindowSeconds int       `json:"staging_round_window_seconds,omitempty"`
 	StagingPreparationSeconds int       `json:"staging_preparation_seconds,omitempty"`
@@ -137,54 +135,7 @@ type CompetitionRuntimeManifest struct {
 // Authenticates installed runtime content instead of accepting a caller's
 // readiness boolean. Missing installation is an explicit source-not-ready gate.
 func LoadCompetitionRuntimeManifest(settings *Settings, intent *model.CompetitionSourceActivation) error {
-	if !sourceModeMatches(settings, intent) ||
-		intent.Environment != settings.AutomationPolicy.Environment ||
-		intent.CompetitionId != settings.CompetitionId || intent.SeasonId != settings.AutomationPolicy.SeasonId || intent.TargetRoundId == (server.Id{}) {
-		return errors.New("source_not_ready: runtime manifest scope is invalid")
-	}
-	directory := os.Getenv("SIM_LATENCY_RUNTIME_MANIFEST_DIRECTORY")
-	if !filepath.IsAbs(directory) {
-		return errors.New("source_not_ready: exact runtime manifest installer is not configured")
-	}
-	directoryInfo, err := os.Lstat(directory)
-	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 || directoryInfo.Mode().Perm()&0o022 != 0 {
-		return errors.New("source_not_ready: runtime manifest directory is unsafe")
-	}
-	path := filepath.Join(directory, fmt.Sprintf("generation-%d.json", intent.Generation))
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() <= 0 || info.Size() > 2*1024*1024 {
-		return errors.New("source_not_ready: exact runtime manifest is absent or unsafe")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil || !os.SameFile(info, openedInfo) {
-		return errors.New("source_not_ready: runtime manifest changed while opening")
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, 2*1024*1024+1))
-	decoder.DisallowUnknownFields()
-	var installed CompetitionRuntimeManifest
-	if err := decoder.Decode(&installed); err != nil {
-		return err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("source_not_ready: runtime manifest has trailing content")
-	}
-	digest := sha256.Sum256(installed.Manifest)
-	lockDigest, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
-	if err != nil || lockDigest != intent.SourceLockSha256 ||
-		installed.Staging != intent.Staging || installed.StagingRoundWindowSeconds != intent.StagingRoundWindowSeconds || installed.StagingPreparationSeconds != intent.StagingPreparationSeconds ||
-		installed.Environment != intent.Environment || installed.CompetitionId != intent.CompetitionId || installed.SeasonId != intent.SeasonId ||
-		installed.Generation != intent.Generation || installed.TargetRoundId != intent.TargetRoundId || installed.ManifestCommit != intent.ManifestCommit ||
-		installed.ManifestSha256 != intent.ManifestSha256 || hex.EncodeToString(digest[:]) != intent.ManifestSha256 ||
-		!bytes.Equal(installed.Manifest, intent.Manifest) || installed.SourceLockSha256 != intent.SourceLockSha256 ||
-		installed.EvaluatorImageDigest != intent.EvaluatorImageDigest || installed.HostQualificationSha256 != intent.HostQualificationSha256 {
-		return errors.New("source_not_ready: installed runtime manifest does not match the immutable source intent")
-	}
-	return nil
+	return LoadCompetitionRuntimeManifestContext(context.Background(), settings, intent)
 }
 
 // Carries only authenticated durable state; the live reward winner is never a

@@ -122,9 +122,12 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 	if !settings.AutomationPolicy.Enabled {
 		return nil, ErrAutomationDisabled
 	}
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			// Open admission and a draining FIFO are ordinary polling states,
+			// not panics that should emit an unexpected-error stack each poll.
+			result, stateErr = nil, nil
 			round, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
 			var existing []byte
@@ -139,12 +142,14 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			now := self.nowUtc()
 			if round.Canceled || now.Before(round.ClosesAt) {
-				panic(ErrReviewNotReady)
+				stateErr = ErrReviewNotReady
+				return
 			}
 			var active int
 			server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM competition_job WHERE round_id=$1 AND state IN ('queued','running')`, roundId).Scan(&active))
 			if active != 0 {
-				panic(ErrReviewNotReady)
+				stateErr = ErrReviewNotReady
+				return
 			}
 			seal := model.CompetitionEvaluationSeal{Staging: round.Staging, RoundId: roundId, Environment: policy.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: policy.AutomationPolicy.SeasonId,
 				Epoch: round.Epoch, SealedAt: now, PublicationAt: now, TerminalCounts: map[string]int{}, Entries: []model.CompetitionSealedEntry{}}
@@ -237,12 +242,15 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			result = automationResultInTx(ctx, tx, roundId)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 
 // Loads all immutable records on the caller's transaction; private callers enforce their own scope.
 func automationResultInTx(ctx context.Context, tx server.PgTx, roundId server.Id) *model.CompetitionV2RoundResult {
-	result := &model.CompetitionV2RoundResult{DecisionMode: model.CompetitionDecisionModeV2, RequiredApiCapability: model.CompetitionAutomationCapability,
+	result := &model.CompetitionV2RoundResult{DecisionMode: model.CompetitionDecisionModeV2,
 		Decisions: []model.CompetitionRewardDecision{}, IntegrityReviews: []model.CompetitionIntegrityReviewResult{}, SettlementReceipts: []model.CompetitionSettlementReceipt{}, SettlementStatus: "pending"}
 	var content []byte
 	result.Incidents = automationIncidentsInTx(ctx, tx, roundId)
@@ -251,7 +259,14 @@ func automationResultInTx(ctx context.Context, tx server.PgTx, roundId server.Id
 			result.Invalidated = true
 		}
 	}
-	server.Raise(tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&content))
+	var policyJson []byte
+	server.Raise(tx.QueryRow(ctx, `SELECT s.seal_json,r.policy_json FROM competition_evaluation_seal s JOIN competition_round r USING(round_id) WHERE s.round_id=$1`, roundId).Scan(&content, &policyJson))
+	policy, policyErr := decodeRoundPolicySnapshot(policyJson)
+	server.Raise(policyErr)
+	if policy.AutomationPolicy == nil {
+		panic(ErrUnsupportedDecisionMode)
+	}
+	result.RequiredApiCapability = policy.AutomationPolicy.RequiredApiCapability
 	server.Raise(json.Unmarshal(content, &result.Seal))
 	result.Staging = result.Seal.Staging
 	rows, err := tx.Query(ctx, `SELECT decision_json FROM competition_reward_decision WHERE round_id=$1 ORDER BY revision`, roundId)

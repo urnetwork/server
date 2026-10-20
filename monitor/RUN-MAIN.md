@@ -364,6 +364,11 @@ After required full coverage, use focused reruns by
 repeating `-include-signal` with a key, number, or probe ID. Include and exclude
 selectors are mutually exclusive; empty, unknown, or ambiguous includes fail
 closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
+A focused run always runs the tier-0 vitals as well
+(`monitor.TierZeroVitalSignalKeys`: `pgbouncer-pool-starvation`,
+`provider-connections` and `connection-orphans`), so a rerun of the signals
+under change cannot come back clean while the database path or the provider
+fleet is down. See "Tier-0 vitals in every verification".
 
 ```sh
 PATH="$monitor_snapshot_warpctl_dir:$PATH" WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
@@ -785,6 +790,19 @@ in that accounting. Do not reset either deadline or renew a reservation to
 extend work. The option changes no read, SQL, owner-service or SSH capacity
 limit. Ordinary finite readers keep the default invocation. A failed grant is
 a local refusal, not Main contact.
+
+A source-qualified `-once -ssh-admission-dir PRIVATE_DIRECTORY` joins the
+existing live watcher's diagnostic queue instead of registering another
+watcher. It must run in its own finite `KillMode=control-group` owner service
+with the exact effective inventory, settings, native Warpctl and source proofs.
+Each command retains the shared global four/host two limits, one-diagnostic
+fairness and joined release. Missing, dead, replaced or mismatched watcher
+authority refuses locally before transport. Signal-list mode remains settings-
+free and refuses the shared-admission flag. Preserve a prior local CLI refusal
+as non-contact evidence; do not drop admission or reinterpret it as Main health.
+Qualify the CLI, attachment/replacement, concurrent admission and release paths
+before retrying a failed diagnostic. Existing cadence and external repair holds
+still apply; this is no permission to create another watcher or bypass budgets.
 
 The long-operation helper may be a separately pinned compatible build while
 the watcher remains on its exact current binary. Keep the request's watcher
@@ -1410,7 +1428,9 @@ claim a fix is deployed from a human version label alone. Prove:
 5. prerequisite migrations, resident worker restarts, router changes, or
    capacity changes are complete; and
 6. the monitor's full signal-specific verification window begins after the
-   last relevant target converges.
+   last relevant target converges; and
+7. the tier-0 vitals hold before the first rollout step, between every block
+   and after the last (see "Tier-0 vitals in every verification").
 
 Re-run the direct discriminator as well as the monitor signal. Require the
 healthy control to remain healthy and check for displaced failure modes. A
@@ -1431,6 +1451,41 @@ interrupted, state what is ready, what must be deployed, and the earliest valid
 verification time. Schedule the check automatically when the operator has
 already given a time boundary; do not require another signal merely to begin a
 read-only verification.
+
+## Tier-0 vitals in every verification
+
+Every production verification proves the tier-0 vitals as well as the signals
+under change: focused or full, before a rollout, between its blocks and after
+it. On 2026-10-19 the pass-2 focused verification at 10:17Z ran only the
+signals under change and came back clean, twenty minutes into a PgBouncer pool
+livelock that went on to disconnect nearly every provider. Nobody looked at
+the pools or the providers until the owner reported the outage about two and a
+half hours later.
+
+- Focused runs include the tier-0 signals automatically: `-include-signal`
+  adds `pgbouncer-pool-starvation` (SIGNALS §2.11a), `provider-connections`
+  (§1.1a) and `connection-orphans` (§2.16). A run that reports any of them
+  unobservable is not a verification. `-skip-tier-zero-vitals` exists for
+  diagnosing one signal against a synthetic or partial inventory; like
+  `-exclude-signal`, a run with it never verifies production.
+- Between rollout blocks, and before calling a deploy verified, also read the
+  vitals directly:
+  - pools: `sum(pgbouncer_pool_clients_waiting)` and
+    `sum(pgbouncer_pool_starved)` are 0, and all 32 `pgbouncer_up` series are
+    fresh;
+  - providers: `urnetwork_connect_provider_connections` summed over each
+    connect block's newest process is within its recent range. While a block
+    drains, its old and new processes both report, so a plain sum double
+    counts;
+  - handlers: `network_client_handler` has no row whose heartbeat is older than
+    120 s outside a deploy's drain, and
+    `urnetwork_network_client_handler_expiry_total{verdict=~"deferred_.*"}` is
+    not rising (§2.16).
+- Read Mimir two minutes behind now. The newest samples are partial while
+  scrapes catch up, and a partial sample reads as a loss.
+- A config release with the default `--config_restart=yes` restarts every
+  block at once. Let that settle, one process per block and no new process
+  starts for several minutes, before the next rollout block.
 
 ## Checkpoints and continuous cadence
 

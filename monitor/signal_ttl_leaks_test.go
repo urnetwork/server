@@ -8,7 +8,7 @@ import (
 
 func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
-		if strings.Contains(command, "INFO keyspace") && strings.Contains(command, "avg=$7") {
+		if strings.Contains(command, "INFO keyspace") && strings.Contains(command, "redis_keyspace_info") {
 			return "6380 6574864 4938147 508792685310180\n6381 6450000 4820000 908000000000000\n6382 100 90 86400000", nil
 		}
 		if strings.Contains(command, "EVAL_RO") && strings.Contains(command, "base64 -d") && strings.Contains(command, "-p 6381") {
@@ -70,7 +70,7 @@ func TestTTLLeaksSignalSyntheticUnknownFamilyDoesNotPrescribeStreamCleanup(t *te
 
 func TestTTLLeaksSignalSyntheticAnnualEscrowTTLIsHealthy(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "6380 1000 900 25920000000", nil // 300 days
+		return "6380 1000 900 25920000000\n6381 0 0 0\n6382 0 0 0", nil // 300 days
 	}}
 	alerts, err := NewTTLLeaksSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {

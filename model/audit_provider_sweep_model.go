@@ -21,7 +21,9 @@ import (
 //
 //   - SweepProviderAuditEvents: periodic state diff. A provider is online when
 //     it is an active top-level client with a ProvideModePublic provide key and
-//     a connected connection owned by a fresh handler. The sweep diffs that
+//     a connected connection owned by a live handler: a fresh heartbeat, or a
+//     stale handler judged live (network_client_handler_liveness.go), so a
+//     failing heartbeat path is not every provider going offline. The sweep diffs that
 //     live set against
 //     audit_provider_state (the last emitted state per device) and appends
 //     online/offline transition events with the client's real geo
@@ -150,6 +152,8 @@ type providerAuditState struct {
 // seed mechanism exists. Runs are idempotent: a run with no state change
 // emits nothing.
 func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCount int) {
+	// judged before the transaction: the judgement reads Redis
+	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx retries
 		onlineCount = 0
@@ -185,7 +189,8 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 				network_client_connection.connected
 			INNER JOIN network_client_handler ON
 				network_client_handler.handler_id = network_client_connection.handler_id AND
-				network_client_handler.heartbeat_time >= @minHandlerHeartbeatTime
+				(network_client_handler.heartbeat_time >= @minHandlerHeartbeatTime OR
+					network_client_handler.handler_id = ANY(@liveStaleHandlerIds::uuid[]))
 			LEFT JOIN network_client_location ON
 				network_client_location.connection_id = network_client_connection.connection_id
 			LEFT JOIN location city_location ON
@@ -205,6 +210,7 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 			`,
 			server.PgNamedArgs{
 				"minHandlerHeartbeatTime": minHandlerHeartbeatTime,
+				"liveStaleHandlerIds":     liveStaleHandlerIds,
 				"provideModePublic":       ProvideModePublic,
 			},
 		)

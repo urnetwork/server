@@ -521,7 +521,7 @@ func calculateReliabilityPayoutInTx(
 	var shift int64
 	if inlineScores {
 		// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
-		UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false, nil)
 		shift = reliabilityRollupBlockShift(ctx, tx, maxBlock)
 	} else {
 		var ok bool

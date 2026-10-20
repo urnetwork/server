@@ -22,6 +22,11 @@ func newCompetitionAutomationFixture(t testing.TB) *competitionRankingFixture {
 
 // Each mode creates its own prospective source and immutable round; no policy is rewritten.
 func newCompetitionAutomationFixtureWithMode(t testing.TB, staging bool) *competitionRankingFixture {
+	return newCompetitionAutomationFixtureWithCapability(t, staging, model.CompetitionAutomationCapability)
+}
+
+// Runtime transport is frozen prospectively, before source and round creation.
+func newCompetitionAutomationFixtureWithCapability(t testing.TB, staging bool, capability string) *competitionRankingFixture {
 	t.Helper()
 	fixture := &competitionRankingFixture{settings: validSettings(), now: server.NowUtc().Truncate(time.Second)}
 	fixture.settings.CompetitionId = "synthetic-automation-" + server.NewId().String()
@@ -31,7 +36,7 @@ func newCompetitionAutomationFixtureWithMode(t testing.TB, staging bool) *compet
 	fixture.settings.SeasonEndsAt = fixture.now.Add(90 * 24 * time.Hour)
 	fixture.settings.RetainUntil = fixture.settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
 	fixture.settings.AutomationPolicy = model.CompetitionAutomationPolicy{Enabled: true, Version: 2, Environment: "synthetic-stage", SeasonId: "synthetic-season", ElectionRule: model.CompetitionElectionRule,
-		ReviewCriteriaVersion: "synthetic-criteria-v1", SettlementPolicyVersion: "synthetic-settlement-v1", BurnPolicyVersion: "synthetic-burn-v1", RepeatRewardPolicy: "exclude_exact_identity", SettlementMode: "shadow", RequiredApiCapability: model.CompetitionAutomationCapability,
+		ReviewCriteriaVersion: "synthetic-criteria-v1", SettlementPolicyVersion: "synthetic-settlement-v1", BurnPolicyVersion: "synthetic-burn-v1", RepeatRewardPolicy: "exclude_exact_identity", SettlementMode: "shadow", RequiredApiCapability: capability,
 		PolicyApprovalSha256: strings.Repeat("a", 64), SourceLockSha256: strings.Repeat("b", 64), SourceGeneration: 0, SourceActivationGeneration: 1}
 	window, preparation := 7*24*time.Hour, 16*time.Hour
 	if staging {

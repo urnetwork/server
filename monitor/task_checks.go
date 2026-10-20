@@ -1,5 +1,6 @@
 // Shared task-system collection and evaluation used by task-canaries and
-// task-health.
+// task-health. Component failures also preserve completed taskworker drain
+// observations without changing the shared Signal adapter.
 package monitor
 
 import (
@@ -632,6 +633,17 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		playbook
 }
 
+// A live run preserves completed task observations when a later source fails.
+// An ended owner keeps the original cause for the adapter's context verdict.
+func taskObservationUnavailable(ctx context.Context, findings []finding, target, component string, err error) ([]finding, error) {
+	if ctx.Err() != nil {
+		return findings, err
+	}
+	unknown := cannotObserveFinding(target+"/"+component, err)
+	unknown.context = "Earlier completed task observations remain valid. Collection stopped at this component; subsequent components were not observed, so this run cannot clear absent task findings."
+	return append(findings, unknown), nil
+}
+
 // taskCanaryProbe is SIGNALS.md 1.2: the cheapest end-to-end redis probes.
 // UpdateClientLocations runs ~every 30s and writes redis across many slots; if
 // redis is sick anywhere on the write path it errors within a minute. It also
@@ -722,7 +734,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		ORDER BY p.overdue_s DESC LIMIT 50;
 	`)
 	if err != nil {
-		return findings, err
+		return taskObservationUnavailable(ctx, findings, target, "task-overdue", err)
 	}
 	var dbMaintenanceEvidence pgRow
 	for _, r := range overdueRows {
@@ -731,7 +743,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		maintenanceRows, maintenanceErr := env.runner.pg(ctx, dbMaintenanceProgressQuery)
 		if maintenanceErr != nil {
-			return findings, maintenanceErr
+			return taskObservationUnavailable(ctx, findings, target, "task-maintenance", maintenanceErr)
 		}
 		if len(maintenanceRows) > 0 {
 			dbMaintenanceEvidence = maintenanceRows[0]
@@ -923,7 +935,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	// claim heartbeat is still fresh.
 	failRows, err := env.runner.pg(ctx, taskFailureSummarySQL)
 	if err != nil {
-		return findings, err
+		return taskObservationUnavailable(ctx, findings, target, "task-failures", err)
 	}
 	for _, r := range failRows {
 		task := r.str(0)

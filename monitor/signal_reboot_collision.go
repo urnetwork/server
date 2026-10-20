@@ -28,12 +28,15 @@ const (
 	rebootCollisionRecentBoot     = 20 * time.Minute
 	rebootCollisionTaskLimit      = 2 * time.Minute
 	rebootCollisionCommandTimeout = 12 * time.Second
+	rebootCollisionJournalLimit   = 5000
+	rebootCollisionCauseLimit     = 20
 )
 
 const (
 	rebootPreviousEndMarker = "monitor_previous_boot_end_json"
 	rebootCauseMarker       = "monitor_reboot_cause"
 	rebootTaskLogsMarker    = "monitor_task_logs"
+	rebootCompleteMarker    = "monitor_reboot_complete"
 )
 
 func (rebootCollisionProbe) id() string             { return "host/reboot-collision" }
@@ -55,6 +58,7 @@ type rebootCollisionObservation struct {
 	previousBootEnd  time.Time
 	scheduledRestart bool
 	restartEvidence  string
+	restartError     error
 	tasks            []rebootCollisionTask
 }
 
@@ -68,6 +72,8 @@ func rebootCollisionCommand(environment string) (string, error) {
 	if !taskworkerJournalTokenRe.MatchString(environment) {
 		return "", fmt.Errorf("reboot collision: unsafe environment %q", environment)
 	}
+	// Avoid grep-specific empty-result status ambiguity. Read only the
+	// bounded taskworker tags, without grep; only status zero can prove absence.
 	return fmt.Sprintf(`boot_epoch=$(awk '$1 == "btime" {print $2}' /proc/stat)
 now_epoch=$(date +%%s)
 printf 'monitor_boot_epoch=%%s\n' "$boot_epoch"
@@ -77,101 +83,187 @@ fi
 boot_age=$((now_epoch - boot_epoch))
 printf 'monitor_boot_age_s=%%s\n' "$boot_age"
 if [ "$boot_age" -gt %d ]; then
+  printf '%s\n'
   exit 0
 fi
 printf '%s\n'
-journalctl --no-pager -b -1 -o json -n 1 2>/dev/null || true
+journal_status=0
+journalctl --no-pager -b -1 -o json -n 1 2>/dev/null || journal_status=$?
+printf '\n%s_status=%%s\n' "$journal_status"
 printf '%s\n'
-journalctl --no-pager -b -1 -u by-restart.service --since '30 minutes ago' -n 20 -o cat 2>/dev/null || true
+journal_status=0
+journalctl --no-pager -b -1 -u by-restart.service --since '30 minutes ago' -n %d -o json 2>/dev/null || journal_status=$?
+printf '\n%s_status=%%s\n' "$journal_status"
 printf '%s\n'
-journalctl --no-pager -b -1 -o json --since '30 minutes ago' -n 5000 \
+journal_status=0
+journalctl --no-pager -b -1 -o json --since '30 minutes ago' -n %d \
   -t 'warp|%s|taskworker|g1' -t 'warp|%s|taskworker|g2' \
-  --grep='eval (active|done|error)' 2>/dev/null || true`,
+  2>/dev/null || journal_status=$?
+printf '\n%s_status=%%s\n' "$journal_status"
+printf '%s\n'`,
 		int(rebootCollisionRecentBoot/time.Second),
+		rebootCompleteMarker,
+		rebootPreviousEndMarker,
 		rebootPreviousEndMarker,
 		rebootCauseMarker,
+		rebootCollisionCauseLimit+1,
+		rebootCauseMarker,
 		rebootTaskLogsMarker,
+		rebootCollisionJournalLimit+1,
 		environment,
 		environment,
+		rebootTaskLogsMarker,
+		rebootCompleteMarker,
 	), nil
 }
 
+// Require ordered section completion before an empty or partial journal can
+// establish absence. Cause attribution is independent of collision evidence.
 func parseRebootCollisionObservation(target *host, raw string) (rebootCollisionObservation, error) {
 	observation := rebootCollisionObservation{host: target}
-	section := "meta"
-	previousEndJSON := ""
-	causeLines := []string{}
-	taskLogLines := []string{}
+	journalSections := []struct {
+		marker string
+		lines  []string
+		status int
+	}{
+		{marker: rebootPreviousEndMarker},
+		{marker: rebootCauseMarker},
+		{marker: rebootTaskLogsMarker},
+	}
+	journalIndex := -1
+	sectionComplete := true
+	complete, bootEpochSeen, bootAgeSeen := false, false, false
+	invalidFrame := func() error {
+		return fmt.Errorf("%s: incomplete or invalid reboot observation framing", target.name)
+	}
 	for _, rawLine := range strings.Split(raw, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
 		}
-		switch line {
-		case rebootPreviousEndMarker:
-			section = "previous-end"
-			continue
-		case rebootCauseMarker:
-			section = "cause"
-			continue
-		case rebootTaskLogsMarker:
-			section = "task-logs"
+		if complete {
+			return observation, invalidFrame()
+		}
+		if line == rebootCompleteMarker {
+			if !sectionComplete {
+				return observation, invalidFrame()
+			}
+			complete = true
 			continue
 		}
-		switch section {
-		case "meta":
-			key, value, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
+		if next := journalIndex + 1; next < len(journalSections) && line == journalSections[next].marker {
+			if !sectionComplete || !bootEpochSeen || !bootAgeSeen {
+				return observation, invalidFrame()
 			}
-			seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-			if err != nil {
-				return observation, fmt.Errorf("%s: parse %s: %w", target.name, key, err)
+			journalIndex = next
+			sectionComplete = false
+			continue
+		}
+		key, value, hasValue := strings.Cut(line, "=")
+		if 0 <= journalIndex {
+			if sectionComplete {
+				return observation, invalidFrame()
 			}
-			switch key {
-			case "monitor_boot_epoch":
-				observation.bootAt = time.Unix(seconds, 0)
-			case "monitor_boot_age_s":
-				observation.bootAge = time.Duration(seconds) * time.Second
+			section := &journalSections[journalIndex]
+			if key == section.marker+"_status" && hasValue {
+				status, err := strconv.Atoi(value)
+				if err != nil || status < 0 || 255 < status {
+					return observation, invalidFrame()
+				}
+				section.status = status
+				sectionComplete = true
+			} else {
+				section.lines = append(section.lines, line)
 			}
-		case "previous-end":
-			if previousEndJSON == "" {
-				previousEndJSON = line
+			continue
+		}
+		seconds, err := strconv.ParseInt(value, 10, 64)
+		if !hasValue || err != nil || seconds < 0 {
+			return observation, invalidFrame()
+		}
+		switch key {
+		case "monitor_boot_epoch":
+			if bootEpochSeen || seconds == 0 {
+				return observation, invalidFrame()
 			}
-		case "cause":
-			causeLines = append(causeLines, line)
-		case "task-logs":
-			taskLogLines = append(taskLogLines, line)
+			bootEpochSeen = true
+			observation.bootAt = time.Unix(seconds, 0)
+		case "monitor_boot_age_s":
+			if bootAgeSeen || int64(time.Duration(seconds)*time.Second/time.Second) != seconds {
+				return observation, invalidFrame()
+			}
+			bootAgeSeen = true
+			observation.bootAge = time.Duration(seconds) * time.Second
+		default:
+			return observation, invalidFrame()
 		}
 	}
-	if observation.bootAt.IsZero() {
-		return observation, fmt.Errorf("%s: reboot battery returned no boot epoch", target.name)
+	if !complete || !bootEpochSeen || !bootAgeSeen {
+		return observation, invalidFrame()
 	}
 	if rebootCollisionRecentBoot < observation.bootAge {
+		if journalIndex != -1 {
+			return observation, invalidFrame()
+		}
 		return observation, nil
 	}
-	if previousEndJSON == "" {
-		return observation, fmt.Errorf("%s: recent boot has no readable previous-boot boundary", target.name)
+	if journalIndex != len(journalSections)-1 || !sectionComplete {
+		return observation, invalidFrame()
+	}
+	previousEnd := journalSections[0]
+	if previousEnd.status != 0 || len(previousEnd.lines) != 1 {
+		return observation, fmt.Errorf("%s: recent boot has no complete previous-boot boundary", target.name)
 	}
 	previousEndEntry := taskworkerJournalEntry{}
-	if err := json.Unmarshal([]byte(previousEndJSON), &previousEndEntry); err != nil {
-		return observation, fmt.Errorf("%s: decode previous-boot boundary: %w", target.name, err)
+	if err := json.Unmarshal([]byte(previousEnd.lines[0]), &previousEndEntry); err != nil {
+		return observation, fmt.Errorf("%s: invalid previous-boot boundary", target.name)
 	}
 	previousBootEnd, err := taskworkerJournalObservedAt(previousEndEntry)
 	if err != nil {
-		return observation, fmt.Errorf("%s: parse previous-boot boundary: %w", target.name, err)
+		return observation, fmt.Errorf("%s: invalid previous-boot boundary timestamp", target.name)
 	}
 	observation.previousBootEnd = previousBootEnd
-	observation.restartEvidence = strings.Join(causeLines, "\n")
-	observation.scheduledRestart = strings.Contains(
-		strings.ToLower(observation.restartEvidence),
-		"scheduled reboot service",
-	)
 
-	normalized, err := normalizeTaskworkerJournal(strings.Join(taskLogLines, "\n"), target.name)
-	if err != nil {
-		return observation, fmt.Errorf("%s: normalize previous taskworker journal: %w", target.name, err)
+	taskJournal := journalSections[2]
+	if taskJournal.status != 0 {
+		return observation, fmt.Errorf("%s: previous taskworker journal failed (status=%d)", target.name, taskJournal.status)
 	}
+	// The extra record proves saturation without a retry or an unbounded read.
+	if rebootCollisionJournalLimit < len(taskJournal.lines) {
+		return observation, fmt.Errorf("%s: previous taskworker journal exceeded record limit", target.name)
+	}
+	normalized, err := normalizeTaskworkerJournal(strings.Join(taskJournal.lines, "\n"), target.name)
+	if err != nil {
+		return observation, fmt.Errorf("%s: previous taskworker journal contains invalid or incomplete records", target.name)
+	}
+
+	causeJournal := journalSections[1]
+	if causeJournal.status != 0 || rebootCollisionCauseLimit < len(causeJournal.lines) {
+		observation.restartError = fmt.Errorf("%s: previous reboot cause journal is incomplete", target.name)
+	} else {
+		for _, line := range causeJournal.lines {
+			entry := taskworkerJournalEntry{}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil || strings.TrimSpace(entry.Message) == "" {
+				observation.restartError = fmt.Errorf("%s: previous reboot cause journal contains invalid or incomplete records", target.name)
+				break
+			}
+			if strings.Contains(strings.ToLower(entry.Message), "scheduled reboot service") {
+				observation.scheduledRestart = true
+			}
+		}
+	}
+	// Raw unit messages can contain unrelated private data. Publish only the
+	// fixed attribution, and never trust a valid prefix of a failed cause read.
+	switch {
+	case observation.restartError != nil:
+		observation.scheduledRestart = false
+		observation.restartEvidence = "Previous-boot reboot source is unavailable."
+	case observation.scheduledRestart:
+		observation.restartEvidence = "Scheduled Reboot Service observed in the previous-boot unit journal."
+	default:
+		observation.restartEvidence = "No scheduled reboot service marker in the complete previous-boot unit journal."
+	}
+
 	for _, generation := range []string{"g1", "g2"} {
 		for _, run := range parseExecutorActiveTasks(normalized, target.name, generation, previousBootEnd) {
 			if run.seconds < int(rebootCollisionTaskLimit/time.Second) {
@@ -303,6 +395,9 @@ func (rebootCollisionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			continue
 		}
 		observation := result.observation
+		if observation.restartError != nil {
+			findings = append(findings, cannotObserveFinding(result.host.name+"/reboot-cause", observation.restartError))
+		}
 		interrupted := []rebootCollisionTask{}
 		for _, task := range observation.tasks {
 			if !completed[task.taskID] {
@@ -310,6 +405,9 @@ func (rebootCollisionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			}
 		}
 		if len(interrupted) == 0 {
+			if observation.restartError != nil {
+				continue
+			}
 			findings = append(findings, healthyFinding(
 				"host/reboot-collision",
 				tierWarn,

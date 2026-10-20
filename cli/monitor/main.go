@@ -30,14 +30,17 @@ const (
 )
 
 type monitorOptions struct {
-	once                    bool
-	listSignals             bool
-	mode                    string
-	format                  string
-	output                  string
-	keys                    stringFlags
-	includedSignals         stringFlags
-	excludedSignals         stringFlags
+	once            bool
+	listSignals     bool
+	mode            string
+	format          string
+	output          string
+	keys            stringFlags
+	includedSignals stringFlags
+	excludedSignals stringFlags
+	// diagnostic: a focused run without the tier-0 vitals, which cannot
+	// verify production (RUN-MAIN.md, "Tier-0 vitals in every verification")
+	skipTierZeroVitals      bool
 	excludedHosts           stringFlags
 	excludedEdgeIPv6Hosts   stringFlags
 	minimumProbeCadence     time.Duration
@@ -82,7 +85,18 @@ func run(args []string, stdout io.Writer) error {
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
 
-func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) (resultErr error) {
+func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) error {
+	return runWithSettingsAndSshAdmission(args, stdout, loadSettings, configureSharedSshAdmission)
+}
+
+func configureSharedSshAdmission(ctx context.Context, settings servermonitor.SignalSettings, directory string, once bool) (servermonitor.SignalSettings, error) {
+	if once {
+		return settings.WithSharedSshDiagnosticAdmission(ctx, directory)
+	}
+	return settings.WithSharedSshAdmission(ctx, directory)
+}
+
+func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error)) (resultErr error) {
 	opts, err := parseMonitorOptions(args)
 	if err != nil {
 		return err
@@ -102,15 +116,10 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 			return errors.New("monitor: invalid -pg-query-sample-until clock")
 		}
 	}
-	signals := servermonitor.NewSignals()
 	if opts.listSignals {
-		return writeSignalList(stdout, signals)
+		return writeSignalList(stdout, servermonitor.NewSignals())
 	}
-	if len(opts.includedSignals) > 0 {
-		signals, err = servermonitor.IncludeSignals(signals, opts.includedSignals...)
-	} else {
-		signals, err = servermonitor.ExcludeSignals(signals, opts.excludedSignals...)
-	}
+	signals, err := selectSignals(opts)
 	if err != nil {
 		return err
 	}
@@ -174,7 +183,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	}
 	if opts.sshAdmissionDirectory != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		settings, err = settings.WithSharedSshAdmission(ctx, opts.sshAdmissionDirectory)
+		settings, err = configureAdmission(ctx, settings, opts.sshAdmissionDirectory, opts.once)
 		cancel()
 		if err != nil {
 			return err
@@ -303,18 +312,19 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
 	flags.BoolVar(&opts.slackAlerts, "slack-alerts", true, "in continuous mode, post one Slack message per alert transition to vault monitor.yml alerts.slack_webhook_url (empty disables)")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
-	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
+	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated; the tier-0 vitals always run too")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
+	flags.BoolVar(&opts.skipTierZeroVitals, "skip-tier-zero-vitals", false, "diagnostic: run only the included signals, without the tier-0 vitals; such a run cannot verify production")
 	flags.Var(&opts.excludedHosts, "exclude-host", "exact inventory host whose observation should be paused; may be repeated")
 	flags.Var(&opts.excludedEdgeIPv6Hosts, "exclude-edge-ipv6-host", "host whose exact public IPv6 paths should be paused; may be repeated")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-min-probe-cadence DURATION] [-format markdown|jsonl] [-include-signal IDENTIFIER | -exclude-signal IDENTIFIER]")
+		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-min-probe-cadence DURATION] [-format markdown|jsonl] [-include-signal IDENTIFIER [-skip-tier-zero-vitals] | -exclude-signal IDENTIFIER]")
 	}
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
 	}
-	if opts.sshAdmissionDirectory != "" && (opts.once || opts.listSignals) {
-		return monitorOptions{}, errors.New("monitor: shared SSH admission requires continuous mode")
+	if opts.sshAdmissionDirectory != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: shared SSH admission is unavailable in signal-list mode")
 	}
 	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
 		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")
@@ -340,6 +350,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	if len(opts.includedSignals) > 0 && len(opts.excludedSignals) > 0 {
 		return monitorOptions{}, errors.New("monitor: -include-signal and -exclude-signal are mutually exclusive")
 	}
+	if opts.skipTierZeroVitals && len(opts.includedSignals) == 0 {
+		return monitorOptions{}, errors.New("monitor: -skip-tier-zero-vitals applies only to -include-signal runs")
+	}
 	if opts.format != alertFormatMarkdown && opts.format != alertFormatJSONL {
 		return monitorOptions{}, fmt.Errorf("monitor: format %q is not supported; use markdown or jsonl", opts.format)
 	}
@@ -364,6 +377,21 @@ func openAlertOutput(stdout io.Writer, path string) (io.Writer, func() error, er
 		return nil, nil, fmt.Errorf("monitor: open output %q: %w", path, err)
 	}
 	return file, file.Close, nil
+}
+
+// The signals a run executes: a focused run's named signals plus the tier-0
+// vitals (servermonitor.IncludeSignalsWithTierZeroVitals), unless the
+// diagnostic -skip-tier-zero-vitals leaves them out; otherwise every
+// registered signal but the excluded ones.
+func selectSignals(opts monitorOptions) ([]servermonitor.Signal, error) {
+	signals := servermonitor.NewSignals()
+	if 0 < len(opts.includedSignals) {
+		if opts.skipTierZeroVitals {
+			return servermonitor.IncludeSignals(signals, opts.includedSignals...)
+		}
+		return servermonitor.IncludeSignalsWithTierZeroVitals(signals, opts.includedSignals...)
+	}
+	return servermonitor.ExcludeSignals(signals, opts.excludedSignals...)
 }
 
 func writeSignalList(w io.Writer, signals []servermonitor.Signal) error {

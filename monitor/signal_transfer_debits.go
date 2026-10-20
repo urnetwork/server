@@ -38,6 +38,7 @@ type transferDebitObservation struct {
 	scheduled, leased bool
 }
 
+// One complete matrix shares the materialized source clock; only -1 means empty.
 func parseTransferDebits(rows []pgRow, now time.Time) ([]transferDebitObservation, error) {
 	invalid := fmt.Errorf("debit backlog observation is incomplete or invalid")
 	if len(rows) != 16 {
@@ -45,12 +46,18 @@ func parseTransferDebits(rows []pgRow, now time.Time) ([]transferDebitObservatio
 	}
 	seen := map[int]bool{}
 	result := make([]transferDebitObservation, 0, 16)
-	for _, row := range rows {
+	var sourceClock float64
+	for i, row := range rows {
 		if len(row) != 6 {
 			return nil, invalid
 		}
 		observed, err := strconv.ParseFloat(row.str(0), 64)
 		if err != nil || math.IsNaN(observed) || math.IsInf(observed, 0) || math.Abs(float64(now.UnixNano())/1e9-observed) > 30 {
+			return nil, invalid
+		}
+		if i == 0 {
+			sourceClock = observed
+		} else if observed != sourceClock {
 			return nil, invalid
 		}
 		shard, err := strconv.Atoi(row.str(1))
@@ -60,7 +67,7 @@ func parseTransferDebits(rows []pgRow, now time.Time) ([]transferDebitObservatio
 		seen[shard] = true
 		pending, e1 := strconv.ParseFloat(row.str(2), 64)
 		release, e2 := strconv.ParseFloat(row.str(3), 64)
-		if e1 != nil || e2 != nil || math.IsNaN(pending) || math.IsNaN(release) || math.IsInf(pending, 0) || math.IsInf(release, 0) || pending < -1 || release < -1 {
+		if e1 != nil || e2 != nil || math.IsNaN(pending) || math.IsNaN(release) || math.IsInf(pending, 0) || math.IsInf(release, 0) || pending < 0 && pending != -1 || release < 0 && release != -1 {
 			return nil, invalid
 		}
 		if row.str(4) != "t" && row.str(4) != "f" || row.str(5) != "t" && row.str(5) != "f" {
@@ -81,8 +88,8 @@ func (p transferDebitProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return nil, fmt.Errorf("debit schema observation is incomplete")
 	}
 	head, err := strconv.Atoi(rows[0].str(0))
-	if err != nil {
-		return nil, fmt.Errorf("debit schema head is invalid")
+	if err != nil || head < 0 || rows[0].str(1) != "t" && rows[0].str(1) != "f" {
+		return nil, fmt.Errorf("debit schema observation is invalid")
 	}
 	if head < 758 {
 		return nil, nil
@@ -114,7 +121,7 @@ func (p transferDebitProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				baseline:  "WARN at 60s and PAGE at 300s; design escalation bands, not measured Main capacity. Empty=-1.",
 				mechanism: "Pending records await grouped PostgreSQL debit; redis_release records already committed and await reservation release/cleanup. A task lease does not prove a live owner.",
 				action:    "Check the partition cursor and actual task owner, bounded SQL waits, Redis release errors and worker image. Retain journal rows; do not release reservations or delete debt manually.",
-				verify:    "Observe renewed successful worker completions and oldest age below 60s, with all 16 partitions and current source clock visible.", playbook: "SIGNALS.md §2.5a"})
+				verify:    "Observe renewed successful worker completions and oldest age below 60s, with all 16 partitions sharing one current source clock.", playbook: "SIGNALS.md §2.5a"})
 		}
 		findings = append(findings, finding{probeId: p.id(), tier: tierWarn, class: "debit-worker-missing", target: pgTarget(env), frame: fmt.Sprintf("partition-%d", o.shard), healthy: o.scheduled, sustain: 2,
 			symptom: "An asynchronous debit partition has no scheduled recovery task.", observed: fmt.Sprintf("partition=%d scheduled=%t", o.shard, o.scheduled), baseline: "16 distinct scheduled keys; two observations exclude a brief completion/post transition.",

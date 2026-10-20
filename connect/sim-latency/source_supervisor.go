@@ -41,7 +41,7 @@ type sourceSupervisorRuntime struct {
 
 // Runs a bounded, cancellation-aware trusted integration without a shell.
 func runSourceSupervisorCommand(ctx context.Context, path, expectedDigest string, request any) error {
-	_, err := runSourceSupervisorProgram(ctx, path, expectedDigest, request, nil)
+	_, err := runSourceSupervisorProcess(ctx, path, expectedDigest, request, nil, nil, false)
 	return err
 }
 
@@ -54,6 +54,20 @@ func runSourceSupervisorProgram(ctx context.Context, path, expectedDigest string
 // Arguments are fixed trusted protocol selectors, never strings from a review
 // or candidate. SIGTERM gives the worker time to join containment cleanup.
 func runSourceSupervisorProgramArguments(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string) ([]byte, error) {
+	return runSourceSupervisorProcess(ctx, path, expectedDigest, request, environment, arguments, true)
+}
+
+// The worker returns status, not a machine document. Both of its log streams
+// must remain drained for the full epoch, independently of retained log bounds.
+func runSourceSupervisorWorkerCommand(ctx context.Context, path, expectedDigest string, request controller.CompetitionSupervisorWorkerRequest) error {
+	_, err := runSourceSupervisorProcess(ctx, path, expectedDigest, request, nil, []string{"--supervisor-request"}, false)
+	return err
+}
+
+// Output capture is bounded without closing a live child's pipes. Only a
+// caller expecting a machine document treats stdout truncation as failure;
+// diagnostics never become protocol authority or enter a durable public error.
+func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string, machineOutput bool) ([]byte, error) {
 	if !filepath.IsAbs(path) || !validSha256(expectedDigest) {
 		return nil, errors.New("pinned automation integration is not configured")
 	}
@@ -80,13 +94,34 @@ func runSourceSupervisorProgramArguments(ctx context.Context, path, expectedDige
 	command.WaitDelay = 30 * time.Second
 	command.Env = environment
 	command.Stdin = bytes.NewReader(requestBytes)
-	output := &sourceBoundedWriter{limit: 1024 * 1024}
+	output := &sourceSupervisorOutput{limit: 1024 * 1024}
+	diagnostics := &sourceSupervisorOutput{limit: 64 * 1024}
 	command.Stdout = output
-	command.Stderr = &sourceBoundedWriter{limit: 64 * 1024}
+	command.Stderr = diagnostics
 	if err := command.Run(); err != nil {
-		return nil, fmt.Errorf("trusted automation integration failed: %w", err)
+		return nil, fmt.Errorf("trusted automation integration failed: %w (stdout_truncated=%t stderr_truncated=%t)", err, output.exceeded, diagnostics.exceeded)
+	}
+	if machineOutput && output.exceeded {
+		return nil, errors.New("trusted automation integration output exceeds its bound")
 	}
 	return output.content, nil
+}
+
+// Each stream has one os/exec copy goroutine; the parent reads only after Wait
+// joins it. Discarding excess bytes must not produce SIGPIPE in a trusted child.
+type sourceSupervisorOutput struct {
+	limit    int
+	content  []byte
+	exceeded bool
+}
+
+// Retains a bounded prefix but acknowledges every byte so draining continues.
+func (self *sourceSupervisorOutput) Write(content []byte) (int, error) {
+	remaining := max(0, self.limit-len(self.content))
+	retained := min(remaining, len(content))
+	self.content = append(self.content, content[:retained]...)
+	self.exceeded = self.exceeded || retained < len(content)
+	return len(content), nil
 }
 
 // Loads only the already reviewed pointer and stages an explicit source-only
@@ -515,8 +550,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 	driver := &controller.PostgresCompetitionSupervisorDriver{Settings: settings, Store: store, Hooks: controller.CompetitionSupervisorHooks{
 		ChooseSource: runtime.chooseSource, PublishSource: runtime.publishSource, PrepareSource: runtime.prepareSource, FallbackSource: runtime.fallbackSource,
 		RunWorker: func(ctx context.Context, lease model.CompetitionSupervisorLease, round model.CompetitionRoundResult) error {
-			_, err := runSourceSupervisorProgramArguments(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease}, nil, []string{"--supervisor-request"})
-			return err
+			return runSourceSupervisorWorkerCommand(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease})
 		},
 	}}
 	supervisor := &controller.CompetitionSupervisor{Enabled: true, OwnerId: optString(opts, "--owner-id", ""), Driver: driver}

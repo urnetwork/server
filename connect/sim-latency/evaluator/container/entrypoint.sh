@@ -23,7 +23,31 @@ attest_job_services() {
     local address
 
     for resource in pg.yml redis.yml; do
-        authority="$(sed -n -E 's/^authority:[[:space:]]*"?([^"[:space:]]*)"?[[:space:]]*$/\1/p' "$vault_dir/$resource")"
+        authority="$(awk '
+            /^[[:space:]]*authority[[:space:]]*:/ {
+                count++
+                value=$0
+                sub(/^[[:space:]]*authority[[:space:]]*:[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+            }
+            END { if (count != 1) exit 1; print value }
+        ' "$vault_dir/$resource")" || {
+            printf 'competition-container: %s needs one host:port authority\n' "$resource" >&2
+            return 1
+        }
+        if [[ "$authority" == \"*\" ]]; then
+            authority="${authority:1:${#authority}-2}"
+        fi
+        # Resolve only the two explicit Compose-owned hostname placeholders.
+        # Values remain data and must pass the same host/port gate as literals.
+        case "$resource:$authority" in
+            'pg.yml:{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:'*)
+                authority="${BRINGYOUR_POSTGRES_HOSTNAME-}:${authority#'{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:'}"
+                ;;
+            'redis.yml:{{ env:BRINGYOUR_REDIS_HOSTNAME }}:'*)
+                authority="${BRINGYOUR_REDIS_HOSTNAME-}:${authority#'{{ env:BRINGYOUR_REDIS_HOSTNAME }}:'}"
+                ;;
+        esac
         if [[ ! "$authority" =~ ^([A-Za-z0-9][A-Za-z0-9.-]*):([1-9][0-9]{0,4})$ ]] || (( BASH_REMATCH[2] > 65535 )); then
             printf 'competition-container: %s needs one host:port authority\n' "$resource" >&2
             return 1

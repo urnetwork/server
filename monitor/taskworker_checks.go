@@ -95,14 +95,14 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		  AND greatest(run_at, release_time) <= now();
 	`)
 	if err != nil {
-		return findings, err
+		return taskObservationUnavailable(ctx, findings, target, "task-due-lag", err)
 	}
 	if len(lagRows) != 1 || len(lagRows[0]) != 1 {
-		return findings, fmt.Errorf("invalid task due-lag observation: expected one integer cell")
+		return taskObservationUnavailable(ctx, findings, target, "task-due-lag", fmt.Errorf("invalid response for task due-lag observation: expected one integer cell"))
 	}
 	dueLagSeconds, err := strconv.ParseInt(lagRows[0].str(0), 10, 32)
 	if err != nil || dueLagSeconds < 0 {
-		return findings, fmt.Errorf("invalid task due-lag observation: expected a non-negative integer")
+		return taskObservationUnavailable(ctx, findings, target, "task-due-lag", fmt.Errorf("invalid response for task due-lag observation: expected a non-negative integer"))
 	}
 	if dueLagSeconds > 180 {
 		findings = append(findings, finding{
@@ -129,7 +129,7 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		ORDER BY reschedule_error_count DESC LIMIT 5;
 	`)
 	if err != nil {
-		return findings, err
+		return taskObservationUnavailable(ctx, findings, target, "task-target-missing", err)
 	}
 	if len(missingRows) > 0 {
 		lines := []string{}

@@ -453,7 +453,7 @@ func TestTTLLeaksSignalTwoHostsSamplesResidueWhereItRuns(t *testing.T) {
 		switch {
 		case strings.Contains(command, "INFO keyspace"):
 			ports := host.RedisNodePorts
-			if !strings.Contains(command, fmt.Sprintf("seq %d %d", ports[0], ports[len(ports)-1])) {
+			if !strings.Contains(command, "for p in "+redisTestJoinPorts(ports)+"; do") {
 				t.Errorf("TTL census on %s did not cover its own nodes: %s", host.Name, command)
 			}
 			rows := []string{}
@@ -547,15 +547,13 @@ func TestReliabilityPipelineSignalTwoHostsSamplesEachHostsNodes(t *testing.T) {
 			!strings.Contains(command, "for p in "+redisTestJoinPorts(ports)+"; do") {
 			t.Errorf("reliability sample on %s did not use its own nodes: %s", host.Name, command)
 		}
-		var output strings.Builder
-		for _, port := range ports {
+		return redisReliabilityTestFrame(ports, "9", func(port int) string {
 			latency := "0.1 1.0 0.3 98"
 			if port == 6420 {
 				latency = "0.1 20.0 14.2 98"
 			}
-			fmt.Fprintf(&output, "%d\t9\t%s\n", port, latency)
-		}
-		return output.String(), nil
+			return latency
+		}), nil
 	}}
 	alerts, err := NewReliabilityPipelineSignal().Run(context.Background(), redisTwoHostSettings(source))
 	if err != nil {
@@ -639,32 +637,46 @@ func TestKeyFamiliesSignalTwoHostsScansFullestNodeOnItsHost(t *testing.T) {
 	}
 }
 
+// Identity coverage spans both configured hosts, even when their cardinality
+// exceeds the small parser fixture. The missing-host case keeps 32 valid nodes.
 func TestRedisRatesSignalTwoHostsExpectsEveryNode(t *testing.T) {
+	firstPorts := redisTestPortRange(17001, 17016)
+	secondPorts := redisTestPortRange(18001, 18032)
+	sources := []redisRateSource{}
+	for _, port := range secondPorts {
+		sources = append(sources, redisRateSource{host: "redis-second.example", node: strconv.Itoa(port)})
+	}
+	for _, port := range firstPorts {
+		sources = append(sources, redisRateSource{host: "redis-first.example", node: strconv.Itoa(port)})
+	}
 	for _, test := range []struct {
 		name   string
 		series int
 		alerts int
 	}{
-		{name: "all 48 nodes", series: 48},
-		{name: "edge-6 only", series: 32, alerts: 1},
+		{name: "all configured nodes", series: 48},
+		{name: "second host only", series: 32, alerts: 1},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			server, _ := newRedisRatesGrafanaServer(t, "test", "5m", "5m", 200, "")
-			defer server.Close()
-			settings, _ := redisRatesSyntheticSettings(t, redisRatesMimirFixture(test.series, 0, test.series))
-			settings.Grafana.AdminPassword = "test"
-			settings.Hosts = []HostSettings{settings.Hosts[0], redisTestEdge5Host(), redisTestEdge6Host(), settings.Hosts[2]}
-			alerts, err := newRedisRatesSignal(server.Client(), server.URL).Run(context.Background(), settings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(alerts) != test.alerts {
-				t.Fatalf("alerts = %+v, want %d", alerts, test.alerts)
-			}
-			if test.alerts != 0 && !strings.Contains(requireAlertClass(t, alerts, "redis-rate-source-coverage").Markdown(), "expected_nodes=48") {
-				t.Fatalf("coverage alert does not expect all 48 nodes: %+v", alerts)
-			}
-		})
+		server, _ := newRedisRatesGrafanaServer(t, "test", "5m", "5m", 200, "")
+		defer server.Close()
+		response := redisRatesMimirResponse(redisRatesMimirRows(test.series, 0, test.series, sources), nil)
+		settings, _ := redisRatesSyntheticSettings(t, response)
+		settings.Grafana.AdminPassword = "test"
+		settings.Hosts = []HostSettings{
+			{Name: "redis-first.example", Roles: []string{"redis-cluster"}, RedisNodePorts: firstPorts},
+			{Name: "redis-second.example", Roles: []string{"redis-cluster"}, RedisEntryPort: 16999, RedisNodePorts: secondPorts},
+			{Name: "metrics-1", Roles: []string{"services"}},
+		}
+		alerts, err := newRedisRatesSignal(server.Client(), server.URL).Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if len(alerts) != test.alerts {
+			t.Fatalf("%s: alert count = %d, want %d", test.name, len(alerts), test.alerts)
+		}
+		if test.alerts != 0 && !strings.Contains(requireAlertClass(t, alerts, "redis-rate-source-coverage").Observed, "expected_nodes=48") {
+			t.Fatalf("%s: coverage alert does not expect all configured nodes", test.name)
+		}
 	}
 }
 
@@ -787,12 +799,12 @@ func TestRedisSignalsTwoHostsJudgeTheReadableHostWhenOneIsUnreachable(t *testing
 		}), nil
 	}
 	reliability := func(host HostSettings, command string) (string, error) {
-		return redisTestRows(host, func(port int) string {
+		return redisReliabilityTestFrame(host.RedisNodePorts, "9", func(port int) string {
 			latency := "0.1 1.0 0.3 98"
 			if redisTestSick(port) {
 				latency = "0.1 20.0 14.2 98"
 			}
-			return fmt.Sprintf("%d\t9\t%s", port, latency)
+			return latency
 		}), nil
 	}
 	keyspace := func(host HostSettings, command string) (string, error) {
@@ -878,7 +890,7 @@ func TestRedisSignalsTwoHostsJudgeTheReadableHostWhenOneIsUnreachable(t *testing
 			name: "non-expiring skew, edge-5 unreachable", signal: NewRedisNonexpiringSignal(),
 			down: redisTestEdge5, observation: "keyspace-census", hostFn: keyspace,
 			want: []wantAlert{
-				{class: "nonexpiring-key-skew", target: redisTestEdge6 + ":6390", observed: "observed_masters=32 unobserved_hosts=" + redisTestEdge5},
+				{class: "cannot-observe", target: redisTestEdge5 + "/keyspace-census", observed: "observed_masters=32 configured_masters=48 fleet_median=unknown"},
 			},
 		},
 		{
@@ -945,6 +957,9 @@ func TestRedisSignalsTwoHostsJudgeTheReadableHostWhenOneIsUnreachable(t *testing
 				}
 			}
 			for _, alert := range alerts {
+				if test.signal.Key() == "redis-nonexpiring" && alert.Class == "nonexpiring-key-skew" {
+					t.Fatal("an incomplete fleet acquired relative nonexpiring-skew authority")
+				}
 				if strings.HasPrefix(alert.Target, test.down+":") {
 					t.Fatalf("an unread node produced an alert: %+v", alert)
 				}
@@ -1021,7 +1036,7 @@ func TestRedisProbesTwoHostsWithholdClusterHealthWhileAHostIsUnread(t *testing.T
 		case strings.Contains(command, "notify-keyspace-events"):
 			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d KE 12", port) }), nil
 		case strings.Contains(command, "SCARD client_reliability_stats_blocks"):
-			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d\t3\t0.1 1.0 0.3 98", port) }), nil
+			return redisReliabilityTestFrame(host.RedisNodePorts, "3", func(int) string { return "0.1 1.0 0.3 98" }), nil
 		case strings.Contains(command, "CLUSTER NODES"):
 			return redisTestRows(host, func(port int) string { return fmt.Sprintf("%d 4810000 2555000 512", port) }), nil
 		case strings.Contains(command, "INFO keyspace"):

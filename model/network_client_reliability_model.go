@@ -1675,11 +1675,16 @@ func UpdateNetworkReliabilityRunningCheckpointed(ctx context.Context, maxTime ti
 
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
+	// judged before the transaction: the judgement reads Redis
+	var liveStaleHandlerIds []server.Id
+	if complete {
+		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		if complete {
 			maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
 			minTime := maxTime.Add(-maxLookback)
-			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 		}
 
 		// advance the running per-(client, lookback) sums to this window, then
@@ -1837,15 +1842,22 @@ func GetAllClientReliabilityScores(ctx context.Context) (lookbackClientScores ma
 }
 
 func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+	// judged before the transaction: the judgement reads Redis
+	var liveStaleHandlerIds []server.Id
+	if complete {
+		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete)
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }
 
 // this should run on payout to compute the latest
-func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+// complete also updates the location reliabilities, with liveStaleHandlerIds
+// judged before the transaction (UpdateClientLocationReliabilitiesInTx).
+func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool, liveStaleHandlerIds []server.Id) {
 	if complete {
-		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}
 
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -2272,8 +2284,13 @@ func ReliabilityBlockCountPerBucket() int {
 }
 
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+	// judged before the transaction: the judgement reads Redis
+	var liveStaleHandlerIds []server.Id
+	if complete {
+		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete, liveStaleHandlerIds)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -2408,16 +2425,23 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, maxTime time.Time, l
 }
 
 func UpdateNetworkReliabilityWindowScores(ctx context.Context, maxTime time.Time, complete bool) {
+	// judged before the transaction: the judgement reads Redis
+	var liveStaleHandlerIds []server.Id
+	if complete {
+		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }
 
-func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, complete bool) {
+// complete also updates the location reliabilities, with liveStaleHandlerIds
+// judged before the transaction (UpdateClientLocationReliabilitiesInTx).
+func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, complete bool, liveStaleHandlerIds []server.Id) {
 	minTime := maxTime.Add(-NetworkWindowLookback)
 
 	if complete {
-		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}
 
 	// advance the running per-(client, network-window) sums, then aggregate the
@@ -2872,14 +2896,19 @@ func sampleMeanByteCount(m map[ByteCount]int) ByteCount {
 }
 
 func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, maxTime time.Time) {
+	// judged before the transaction: the judgement reads Redis
+	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }
 
 // this should be called regularly
 // a valid client will have one connected location and one connected address hash
-func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
+// A connection is connected while its handler heartbeat within two heartbeat
+// timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
+// before the transaction (network_client_handler_liveness.go).
+func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
 	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
 	server.Raise(policyErr)
 	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -2925,7 +2954,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		INNER JOIN network_client_handler ON
 			network_client_handler.handler_id = network_client_connection.handler_id AND
-			network_client_handler.heartbeat_time >= $1
+			(network_client_handler.heartbeat_time >= $1 OR network_client_handler.handler_id = ANY($3::uuid[]))
 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
@@ -2941,6 +2970,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		`,
 		minHandlerHeartbeatTime,
 		requireSubscriber,
+		nonNilHandlerIds(liveStaleHandlerIds),
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {

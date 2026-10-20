@@ -7,7 +7,7 @@ import (
 
 func TestRedisProcessSignalSyntheticRedisCPU(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "redis 1234 250.5 9000000 4000000\nprocess_source complete 1\nkernel_source complete\n", nil
+		return redisProcessCpuRow(1234, "250.5") + "process_source complete 1\nkernel_source complete\n", nil
 	}}
 	alerts, err := NewRedisProcessSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {

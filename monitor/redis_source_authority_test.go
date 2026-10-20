@@ -24,46 +24,25 @@ import (
 func TestRedisProcessAuthorityNativeCensus(t *testing.T) {
 	cases := []struct {
 		name        string
-		rows        string
-		status      int
-		kernel      string
+		fixture     redisProcessCpuFixture
 		wantUnknown bool
 		wantCpu     bool
 		wantOom     bool
 	}{
 		{name: "complete empty"},
-		{name: "complete unrelated process", rows: "4242 0.0 100 50 synthetic-worker\n"},
-		{name: "complete spaced command", rows: "4242 0.0 100 50 synthetic worker name\n"},
-		{name: "cpu boundary", rows: "4242 200.0 100 50 redis-server\n"},
-		{name: "cpu positive", rows: "4242 200.1 100 50 redis-server\n", wantCpu: true},
-		{name: "failed empty", status: 1, wantUnknown: true},
-		{name: "unavailable", status: 127, wantUnknown: true},
-		{name: "timeout", status: 124, wantUnknown: true},
-		{name: "failed partial", rows: "4242 250.0 100 50 redis-server\n", status: 1, wantUnknown: true},
-		{name: "malformed cpu", rows: "4242 synthetic-private-diagnostic 100 50 redis-server\n", wantUnknown: true},
-		{name: "malformed unrelated process", rows: "synthetic-private-diagnostic\n", wantUnknown: true},
-		{name: "kernel survives failed census", status: 1, kernel: "Out of memory: Killed process 4242 (redis-server)\n", wantUnknown: true, wantOom: true},
+		{name: "complete unrelated process", fixture: redisProcessCpuFixture{before: map[string]string{"4242": redisProcessCpuStat(4242, "synthetic-worker", 100, 0, 0)}}},
+		{name: "complete spaced command", fixture: redisProcessCpuFixture{before: map[string]string{"4242": redisProcessCpuStat(4242, "synthetic worker name", 100, 0, 0)}}},
+		{name: "cpu boundary", fixture: redisProcessCpuSingleFixture("200", 0, 200)},
+		{name: "cpu positive", fixture: redisProcessCpuSingleFixture("201", 0, 201), wantCpu: true},
+		{name: "failed empty", fixture: redisProcessCpuFixture{processStatus: 1}, wantUnknown: true},
+		{name: "failed partial", fixture: redisProcessCpuFixture{processStatus: 1, processPrefix: redisProcessCpuRow(4242, "250")}, wantUnknown: true},
+		{name: "unavailable", fixture: redisProcessCpuFixture{processStatus: 127}, wantUnknown: true},
+		{name: "timeout", fixture: redisProcessCpuFixture{processStatus: 124}, wantUnknown: true},
+		{name: "malformed source", fixture: redisProcessCpuFixture{before: map[string]string{"4242": "synthetic-private-diagnostic\n"}}, wantUnknown: true},
+		{name: "kernel survives failed census", fixture: redisProcessCpuFixture{processStatus: 1, kernel: "Out of memory: Killed process 4242 (redis-server)\n"}, wantUnknown: true, wantOom: true},
 	}
 	for _, test := range cases {
-		directory := t.TempDir()
-		for name, script := range map[string]string{
-			"ps":    "#!/bin/sh\nprintf '%s' \"$AUTHORITY_PROCESS_ROWS\"\nprintf '%s\\n' synthetic-private-diagnostic >&2\nexit \"$AUTHORITY_PROCESS_STATUS\"\n",
-			"dmesg": "#!/bin/sh\nprintf '%s' \"$AUTHORITY_KERNEL_ROWS\"\n",
-		} {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-		}
-		source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cmd := redisAuthorityNativeCommand(ctx, command)
-			cmd.Env = []string{"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C", "AUTHORITY_PROCESS_ROWS=" + test.rows, fmt.Sprintf("AUTHORITY_PROCESS_STATUS=%d", test.status), "AUTHORITY_KERNEL_ROWS=" + test.kernel}
-			output, err := cmd.Output()
-			redisAuthorityKillNativeGroup(cmd)
-			return string(output), err
-		}}
-		settings := syntheticSettings(source)
+		settings, _, _ := redisProcessCpuNativeFixture(t, test.fixture)
 		alerts, err := NewRedisProcessSignal().Run(context.Background(), settings)
 		if err != nil {
 			t.Fatalf("%s: %v", test.name, err)
@@ -109,20 +88,28 @@ func TestRedisProcessAuthorityNativeCensus(t *testing.T) {
 // Successful transport must not convert bad source numbers or truncated census
 // frames into zero CPU; kernel authority remains independent.
 func TestRedisProcessAuthorityRejectsIncompleteCensus(t *testing.T) {
+	row := redisProcessCpuRow(4242, "250")
+	complete := "process_source complete 1\n"
 	cases := []string{
-		"", "redis 4242 250 100 50\n", "process_source complete 1\n",
-		"redis 4242 NaN 100 50\nprocess_source complete 1\n",
-		"redis 4242 +Inf 100 50\nprocess_source complete 1\n",
-		"redis 4242 -1 100 50\nprocess_source complete 1\n",
-		"redis 4242 250 bad 50\nprocess_source complete 1\n",
-		"redis 0 250 100 50\nprocess_source complete 1\n",
-		"redis 4242 250 100\nprocess_source complete 1\n",
-		"redis 4242 250 100 50 extra\nprocess_source complete 1\n",
-		"redis 4242 250 100 50\nredis 4242 250 100 50\nprocess_source complete 2\n",
+		"", row, complete,
+		redisProcessCpuRow(4242, "NaN") + complete,
+		redisProcessCpuRow(4242, "+Inf") + complete,
+		redisProcessCpuRow(4242, "-1") + complete,
+		strings.Replace(row, " 9000000 ", " bad ", 1) + complete,
+		redisProcessCpuRow(0, "250") + complete,
+		strings.Replace(row, " 1000000000", "", 1) + complete,
+		strings.TrimSuffix(row, "\n") + " extra\n" + complete,
+		strings.Replace(row, redisProcessCpuTestGeneration, "invalid", 1) + complete,
+		strings.Replace(row, redisProcessCpuTestGeneration, strings.Repeat("g", 64), 1) + complete,
+		strings.Replace(row, " 1000000000", " 0", 1) + complete,
+		strings.Replace(row, " 1000000000", " 999999999", 1) + complete,
+		strings.Replace(row, " 1000000000", " 3000000001", 1) + complete,
+		row + row + "process_source complete 2\n",
 		"process_source complete 0\nprocess_source complete 0\n",
-		"process_source complete 0\nredis 4242 250 100 50\n",
-		"redis 4242 250 100 50\nprocess_source unavailable\n",
+		"process_source complete 0\n" + row,
+		row + "process_source unavailable\n",
 	}
+
 	for index, output := range cases {
 		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return output + "kernel_source complete\n", nil }}
 		alerts, err := NewRedisProcessSignal().Run(context.Background(), syntheticSettings(source))

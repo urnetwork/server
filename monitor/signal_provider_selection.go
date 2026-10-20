@@ -156,12 +156,16 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		}
 		fields[field] = value
 	}
+	bySlot := map[string]int{}
 	pairedSlots := map[string]int{}
 	fresh := func(value float64, boundary time.Time) bool {
 		age := float64(boundary.Unix()) - value
 		return value > 0 && -30 <= age && age <= 90
 	}
 	for key, process := range processes {
+		// Pair eligibility cannot hide another returned generation in this slot.
+		slot := key.host + "\x00" + key.block
+		bySlot[slot]++
 		fields := process.fields
 		schema := fields["now_schema"]
 		if len(fields) != 8 || (schema != 1 && schema != 2) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
@@ -185,7 +189,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		if !valid {
 			continue
 		}
-		pairedSlots[key.host+"\x00"+key.block]++
+		pairedSlots[slot]++
 		evidence.paired++
 		if schema == 2 {
 			evidence.shapePaired++
@@ -194,11 +198,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			evidence.counts[outcome] += values["count"]
 		}
 	}
-	evidence.complete = 0 < evidence.expected && len(pairedSlots) == evidence.expected
-	for _, count := range pairedSlots {
-		if count != 1 {
-			evidence.complete = false
-		}
+	evidence.complete = 0 < evidence.expected
+	for slot, allowed := range scope.slots {
+		evidence.complete = evidence.complete && allowed && bySlot[slot] == 1 && pairedSlots[slot] == 1
 	}
 	if evidence.complete {
 		evidence.reason = "complete"
@@ -253,7 +255,7 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
 			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 1 retains zero-reason authority; schema 2 is required for small-list and exclusion-source attribution. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
-			baseline:  "One fresh same-generation schema-1 or schema-2 process per inventory-enabled API host/block, plus valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
+			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1 or schema-2 window and valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
 			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.shapePaired, evidence.expected, reason),
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
 			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",

@@ -169,20 +169,37 @@ func parseProxyDeviceTargetResponse(out string, now time.Time, expected map[stri
 }
 
 func assessProxyDeviceTargets(processes map[string]*proxyDeviceTargetProcess, expected map[string]string, now time.Time) []finding {
+	selected, generationGaps := newestProxyProcesses(now, processes, func(process *proxyDeviceTargetProcess) proxyProcessGeneration {
+		_, expectedSlot := expected[process.host+"\x00"+process.block]
+		start, hasStart := process.values["process_start_time_seconds"]
+		source, hasSource := process.sources["process_start_time_seconds"]
+		reason := ""
+		switch {
+		case !hasSource:
+			reason = "missing-process-start-source"
+		case source.Before(now.Add(-proxyDeviceTargetFreshness)) || source.After(now.Add(30*time.Second)):
+			reason = "invalid-process-start-source"
+		case start > float64(source.UnixNano())/1e9:
+			reason = "start-after-source-time"
+		}
+		return proxyProcessGeneration{
+			host: process.host, block: process.block, instance: process.instance, current: expectedSlot,
+			start: start, startPresent: hasStart, startReason: reason,
+		}
+	})
 	current := map[string]*proxyDeviceTargetProcess{}
-	for _, process := range processes {
-		start, ok := proxyDeviceTargetValue(process, proxyDeviceTargetMetrics[0], now)
-		if !ok || !proxyDeviceTargetFinitePositive(start) || start > float64(now.Add(30*time.Second).Unix()) {
-			continue
-		}
-		slot := process.host + "\x00" + process.block
-		prior := current[slot]
-		if prior == nil || start > prior.values[proxyDeviceTargetMetrics[0]] || start == prior.values[proxyDeviceTargetMetrics[0]] && process.instance > prior.instance {
-			current[slot] = process
-		}
+	for _, process := range selected {
+		current[process.host+"\x00"+process.block] = process
+	}
+	unknownSlots := map[string]bool{}
+	for _, gap := range generationGaps {
+		unknownSlots[gap.slot] = true
 	}
 	missing, invalid, pressure, shared := []string{}, []string{}, []string{}, []string{}
 	for slot, label := range expected {
+		if unknownSlots[slot] {
+			continue
+		}
 		process := current[slot]
 		if process == nil {
 			missing = append(missing, label+"[no-current-process]")
@@ -218,7 +235,7 @@ func assessProxyDeviceTargets(processes map[string]*proxyDeviceTargetProcess, ex
 	sort.Strings(invalid)
 	sort.Strings(pressure)
 	sort.Strings(shared)
-	findings := []finding{}
+	findings := proxyProcessGenerationFindings("runtime/proxy-device-target", "SIGNALS.md §14.7d", "proxy-fleet", len(selected), generationGaps)
 	if len(missing) > 0 {
 		findings = append(findings, proxyDeviceTargetFinding("proxy-device-target-unobservable", "proxy-fleet", "Fresh per-device target telemetry is incomplete", strings.Join(missing, ";")))
 	}

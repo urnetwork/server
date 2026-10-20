@@ -159,13 +159,16 @@ func (self *baselineStore) compactWithLock(metric string, samples []baselineSamp
 }
 
 // trailingWindow returns the sample values for metric within [now-d, now].
+// Retain future entries in the store after a clock rollback, but do not let
+// them qualify the current sample count or median until the clock catches up.
 func (self *baselineStore) trailingWindow(metric string, d time.Duration) []float64 {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	cutoff := time.Now().Add(-d)
+	now := time.Now()
+	cutoff := now.Add(-d)
 	vs := []float64{}
 	for _, s := range self.metricSamples[metric] {
-		if !s.at.Before(cutoff) {
+		if !s.at.Before(cutoff) && !s.at.After(now) {
 			vs = append(vs, s.v)
 		}
 	}

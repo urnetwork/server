@@ -17,7 +17,7 @@ type connectionReconcileFixtureBlock struct {
 	retired     float64
 	okPasses    float64
 	errorPasses float64
-	// emitted only when positive
+	// The family is emitted as a pair when either counter is positive.
 	failedRetires float64
 	busyRetires   float64
 }
@@ -39,10 +39,8 @@ func connectionReconcileFixtureJSON(t testing.TB, now time.Time, blocks []connec
 		sample(block.host, block.block, "retired", block.retired)
 		sample(block.host, block.block, "ok_passes", block.okPasses)
 		sample(block.host, block.block, "error_passes", block.errorPasses)
-		if 0 < block.failedRetires {
+		if 0 < block.failedRetires || 0 < block.busyRetires {
 			sample(block.host, block.block, "failed_retires", block.failedRetires)
-		}
-		if 0 < block.busyRetires {
 			sample(block.host, block.block, "busy_retires", block.busyRetires)
 		}
 	}

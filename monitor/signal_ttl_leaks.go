@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -135,14 +136,14 @@ func (redisTTLLeaksProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		// One SSH round trip per host obtains the local DB key count,
 		// expiring-key count, and Redis' average TTL in milliseconds for every
 		// node.
-		hostOut, err := env.runner.shell(ctx, nodeHost, fmt.Sprintf(`for p in $(seq %d %d); do
-  k=$(timeout 3 redis-cli -p $p INFO keyspace 2>/dev/null | tr -d '\r')
-  [ -z "$k" ] && { echo "$p unreachable"; continue; }
-  echo "$p $(echo "$k" | awk -F'[:,=]' '
-    BEGIN{keys=0;expires=0;avg=0}
-    /^db0:/{keys=$3; expires=$5; avg=$7}
-    END{print keys" "expires" "avg}')"
-done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
+		portNames := make([]string, len(hostPorts))
+		for i, port := range hostPorts {
+			portNames[i] = strconv.Itoa(port)
+		}
+		hostOut, err := env.runner.shell(ctx, nodeHost, redisKeyspaceInfoShell+fmt.Sprintf(`for p in %s; do
+  redis_keyspace_info || { echo "$p unreachable"; continue; }
+  echo "$p $stats"
+done`, strings.Join(portNames, " ")))
 		if err != nil {
 			failures = append(failures, redisHostFailure{host: nodeHost, err: err})
 			continue
@@ -155,7 +156,6 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 
 	findings := []finding{}
 	parsed := 0
-	unreachable := []string{}
 	type hostUnreachable struct {
 		host  *host
 		ports []string
@@ -171,45 +171,36 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 	}
 	affected := []residueNode{}
 	for _, census := range censuses {
-		hostUnreachablePorts := []string{}
-		for _, line := range strings.Split(strings.TrimSpace(census.out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 2 && fields[1] == "unreachable" {
-				unreachable = append(unreachable, fields[0])
-				hostUnreachablePorts = append(hostUnreachablePorts, fields[0])
-				continue
-			}
-			if len(fields) < 4 {
-				continue
-			}
-			port := atoi(fields[0])
-			keys := atoi64(fields[1])
-			expires := atoi64(fields[2])
-			averageTTLMillis := atoi64(fields[3])
-			if port == 0 {
-				continue
-			}
+		nodes, complete := parseRedisTtlNodes(census.out, census.host.redisNodePorts())
+		for _, node := range nodes {
 			parsed++
-			if limitMillis < averageTTLMillis {
-				affected = append(affected, residueNode{
-					host:             census.host,
-					port:             port,
-					keys:             keys,
-					expires:          expires,
-					averageTTLMillis: averageTTLMillis,
-				})
+			if limitMillis < node.averageTtlMillis {
+				affected = append(affected, residueNode{host: census.host, port: node.port, keys: node.keys, expires: node.expires, averageTTLMillis: node.averageTtlMillis})
 			}
 		}
-		if len(hostUnreachablePorts) > 0 {
-			unreachableHosts = append(unreachableHosts, hostUnreachable{host: census.host, ports: hostUnreachablePorts})
+		if !complete {
+			validPorts := map[int]bool{}
+			for _, node := range nodes {
+				validPorts[node.port] = true
+			}
+			portNames := []string{}
+			for _, port := range census.host.redisNodePorts() {
+				if !validPorts[port] {
+					portNames = append(portNames, strconv.Itoa(port))
+				}
+			}
+			// An unexpected row can invalidate scope even if all expected rows exist.
+			if len(portNames) == 0 {
+				for _, port := range census.host.redisNodePorts() {
+					portNames = append(portNames, strconv.Itoa(port))
+				}
+			}
+			unreachableHosts = append(unreachableHosts, hostUnreachable{host: census.host, ports: portNames})
 		}
-	}
-	if parsed == 0 {
-		return nil, fmt.Errorf("no Redis keyspace INFO parsed (unreachable: %s)", strings.Join(unreachable, ","))
 	}
 	if len(affected) == 0 {
 		// an unread host's nodes may hold the residue
-		if len(failures) == 0 {
+		if len(failures) == 0 && len(unreachableHosts) == 0 {
 			findings = append(findings, healthyFinding("redis/ttl-leaks", tierWarn, "ttl-leaks", h.name))
 		}
 	} else {
@@ -241,14 +232,19 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 			observed += " " + redisUnobservedHosts(failures)
 			symptom += redisPartialSymptom(failures)
 		}
+		if len(unreachableHosts) > 0 {
+			observed += " census_complete=false"
+			symptom += "; the maximum covers only valid observed nodes"
+		}
 		mechanism := "One or more expiring Redis key families have TTLs far beyond any intentional retention window. A fixed writer does not repair the persistent expiry metadata already stored in the keyspace."
 		evidence := "INFO keyspace independently shows the impossible-TTL residue across ports " + strings.Join(affectedPorts, ",") + "."
 		action := "Run a bounded, binary-safe PTTL attribution before changing data. Repair the identified writer and cleanup scope; do not raise maxmemory to conceal effectively immortal residue."
+		verify := "Every configured node's average TTL returns to at most two years, and a complete binary-safe raw-integer PTTL sample validates the affected family's TTL contract. Verify dataset capacity independently with redis-bytes and redis-memory."
 		context := "INFO keyspace is read-only and aggregate. The attribution sample runs SCAN and raw-integer PTTL inside Redis through EVAL_RO, so binary keys never cross a shell variable and multi-century TTLs never overflow a Go time.Duration."
 		attribution, attributionErr := sampleRedisTTLAttribution(ctx, env, maxTTLNode.host, maxTTLNode.port)
 		if attributionErr != nil {
 			observed += " sample_status=unavailable"
-			context += " The bounded sample was unavailable during this tick: " + attributionErr.Error()
+			context += " The bounded sample was unavailable during this tick; no key-family attribution is established."
 		} else {
 			observed += fmt.Sprintf(
 				" sample_port=%d sample_examined=%d sample_suspect=%d sample_legacy_contracts=%d sample_legacy_ids=%d sample_current_contracts=%d sample_current_ids=%d sample_other=%d sample_suspect_bytes=%d sample_max_suspect_bytes=%d sample_max_pttl_ms=%d sample_max_family=%s",
@@ -266,6 +262,7 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 				}
 				mechanism += " An intermediate cleanup then read PTTL through go-redis's time.Duration result; converting Redis milliseconds beyond roughly 290 years can overflow and misclassify a leaked key below the 8-hour repair threshold."
 				mechanism += fmt.Sprintf(" The bounded sample measured %d bytes across those suspect keys; this proves the expiry defect but does not make it the capacity root cause.", attribution.suspectBytes)
+				verify = "The cleanup artifact is attributable to an intentional local checkout containing current-main server commit d8e34003; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory."
 				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Build bringyourctl from an intentional local server checkout containing current-main commit d8e34003 and prove expire-leaked-ttls reads PTTL as raw integer milliseconds; record any participating diff and do not run an older typed-duration cleanup artifact. With explicit maintenance authority, run that binary-safe cleanup across legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
 			}
 		}
@@ -274,12 +271,12 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 			class: "ttl-leaks", target: h.name, frame: "duration-as-seconds", sustain: 1,
 			symptom:   symptom,
 			mechanism: mechanism,
-			baseline:  "Every node's average TTL stays below two years; the longest intentional Redis exception is an annual net-escrow balance plus 30 days.",
+			baseline:  "Every node's average TTL stays at most two years; the longest intentional Redis exception is an annual net-escrow balance plus 30 days.",
 			observed:  observed,
 			evidence:  evidence,
 			context:   context + " TTL and MEMORY USAGE answer different questions: this signal proves invalid expiry metadata; redis-bytes attributes capacity.",
 			action:    action,
-			verify:    "The cleanup artifact is attributable to an intentional local checkout containing current-main server commit d8e34003; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory.",
+			verify:    verify,
 			playbook:  "SIGNALS.md §3.3a, §3.3b, and §4",
 		})
 	}
@@ -289,12 +286,13 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 		findings = append(findings, finding{
 			probeId: "redis/ttl-leaks", tier: tierWarn,
 			class: "cannot-observe", target: hostUnreachable.host.name, frame: strings.Join(unreachable, ","), sustain: 2,
-			symptom:  fmt.Sprintf("TTL distribution unavailable from Redis port(s) %s", strings.Join(unreachable, ",")),
-			baseline: "INFO keyspace returns from every configured Redis node.",
-			observed: "unreachable_ports=" + strings.Join(unreachable, ","),
-			action:   "Restore access to the listed nodes, then rerun ttl-leaks.",
-			verify:   "Every node returns keys, expires, and avg_ttl.",
-			playbook: "SIGNALS.md §1.4",
+			symptom:   fmt.Sprintf("TTL census incomplete for configured Redis port(s) %s", strings.Join(unreachable, ",")),
+			mechanism: "A native INFO command failed, its keyspace frame was invalid, or the configured-port census was incomplete; the missing state is unknown rather than healthy zero.",
+			baseline:  "Every configured Redis node returns one successful, valid INFO keyspace observation.",
+			observed:  "census_incomplete_configured_ports=" + strings.Join(unreachable, ","),
+			action:    "Check native INFO success, permissions, and keyspace response shape for the configured nodes; restore complete valid observations and rerun ttl-leaks.",
+			verify:    "Every configured port returns exactly once with valid keyspace counts and average TTL, including a successful empty database.",
+			playbook:  "SIGNALS.md §1.4",
 		})
 	}
 	for _, failure := range failures {
@@ -303,6 +301,8 @@ done`, hostPorts[0], hostPorts[len(hostPorts)-1]))
 	return findings, nil
 }
 
+// Validate the complete fixed aggregate before it can identify a key family.
+// Raw transport errors and unknown labels never become alert text.
 func sampleRedisTTLAttribution(ctx context.Context, env *probeEnv, h *host, port int) (redisTTLAttribution, error) {
 	encodedScript := base64.StdEncoding.EncodeToString([]byte(redisTTLAttributionLua))
 	command := fmt.Sprintf(
@@ -313,27 +313,78 @@ func sampleRedisTTLAttribution(ctx context.Context, env *probeEnv, h *host, port
 	)
 	out, err := env.runner.shell(ctx, h, command)
 	if err != nil {
-		return redisTTLAttribution{}, err
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution command failed")
 	}
 	fields := strings.Fields(out)
 	if len(fields) != 11 {
-		return redisTTLAttribution{}, fmt.Errorf("expected 11 attribution fields, got %d", len(fields))
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned an invalid aggregate shape")
+	}
+	values := [10]int64{}
+	for index, field := range fields[:10] {
+		value, err := strconv.ParseInt(field, 10, 64)
+		minimum := int64(0)
+		if index == 9 {
+			// The Lua maximum starts at -1 when no sampled key has a TTL.
+			minimum = -1
+		}
+		if err != nil || value < minimum {
+			return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned an invalid numeric aggregate")
+		}
+		values[index] = value
 	}
 	attribution := redisTTLAttribution{
-		seen:             atoi64(fields[0]),
-		suspect:          atoi64(fields[1]),
-		legacyContracts:  atoi64(fields[2]),
-		legacyIDs:        atoi64(fields[3]),
-		currentContracts: atoi64(fields[4]),
-		currentIDs:       atoi64(fields[5]),
-		other:            atoi64(fields[6]),
-		suspectBytes:     atoi64(fields[7]),
-		maxSuspectBytes:  atoi64(fields[8]),
-		maxPTTLMillis:    atoi64(fields[9]),
+		seen:             values[0],
+		suspect:          values[1],
+		legacyContracts:  values[2],
+		legacyIDs:        values[3],
+		currentContracts: values[4],
+		currentIDs:       values[5],
+		other:            values[6],
+		suspectBytes:     values[7],
+		maxSuspectBytes:  values[8],
+		maxPTTLMillis:    values[9],
 		maxFamily:        fields[10],
 	}
-	if attribution.seen <= 0 {
-		return redisTTLAttribution{}, fmt.Errorf("attribution sample examined no keys")
+	if attribution.seen <= 0 || attribution.suspect > attribution.seen {
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned inconsistent sample counts")
+	}
+	remaining := attribution.suspect
+	for _, count := range values[2:7] {
+		if count > remaining {
+			return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned inconsistent family counts")
+		}
+		remaining -= count
+	}
+	if remaining != 0 || attribution.maxSuspectBytes > attribution.suspectBytes ||
+		(attribution.suspectBytes > 0 && attribution.maxSuspectBytes == 0) ||
+		(attribution.suspect == 0 && attribution.suspectBytes != 0) ||
+		(attribution.maxSuspectBytes > 0 && (attribution.suspectBytes-1)/attribution.maxSuspectBytes >= attribution.suspect) {
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned inconsistent aggregates")
+	}
+	maxFamilySuspect := int64(0)
+	switch attribution.maxFamily {
+	case "none":
+		if attribution.maxPTTLMillis != -1 {
+			return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned an inconsistent maximum family")
+		}
+	case "legacy-contracts":
+		maxFamilySuspect = attribution.legacyContracts
+	case "legacy-ids":
+		maxFamilySuspect = attribution.legacyIDs
+	case "current-contracts":
+		maxFamilySuspect = attribution.currentContracts
+	case "current-ids":
+		maxFamilySuspect = attribution.currentIDs
+	case "other":
+		maxFamilySuspect = attribution.other
+	default:
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned an invalid family label")
+	}
+	limitMillis := (120 * 24 * time.Hour).Milliseconds()
+	if (attribution.maxPTTLMillis == -1 && attribution.maxFamily != "none") ||
+		(attribution.suspect == 0 && attribution.maxPTTLMillis > limitMillis) ||
+		(attribution.suspect > 0 && (attribution.maxPTTLMillis <= limitMillis || maxFamilySuspect == 0)) {
+		return redisTTLAttribution{}, fmt.Errorf("bounded Redis TTL attribution returned inconsistent TTL aggregates")
 	}
 	return attribution, nil
 }

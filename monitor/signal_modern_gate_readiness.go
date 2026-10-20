@@ -62,6 +62,8 @@ const (
 	modernGateReadinessMaxShare = 0.5
 	// the oldest dashboard counts the shadow is judged on
 	modernGateReadinessMaxCountsAge = 30 * time.Minute
+	// allow the same cross-host clock skew as other Mimir source reads
+	modernGateReadinessMaxFutureSkew = 30 * time.Second
 	// how long a taskworker process runs before the fleet's agreement is
 	// judged on it: its stats collector registers the gate at its first
 	// refresh, a minute or two after the start, and a drained process's
@@ -434,6 +436,13 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 	switch {
 	case now.Before(start.Add(-modernGateReadinessWarnLead)):
 		// only an earlier start opens the window this early
+	case observation.countsStarted.UnixMilli() <= 0 && (now.Before(start) || settled.onEvery):
+		// The snapshot owner requires a positive source start, even after the flip.
+		unobserved = errors.Join(unobserved, fmt.Errorf("modern gate readiness: the dashboard counts have no valid source start (urnetwork_stats_provider_egress_source_started_seconds), so the counts cannot be judged"))
+	case observation.countsStarted.After(now.Add(modernGateReadinessMaxFutureSkew)) && (now.Before(start) || settled.onEvery):
+		// Counts cannot establish readiness or a post-flip drop when the
+		// source claims a read that has not happened yet.
+		unobserved = errors.Join(unobserved, fmt.Errorf("modern gate readiness: the dashboard counts start more than %s in the future (urnetwork_stats_provider_egress_source_started_seconds), so the counts cannot be judged", modernGateReadinessMaxFutureSkew))
 	case now.Before(start):
 		if observation.countsStarted.IsZero() || modernGateReadinessMaxCountsAge < now.Sub(observation.countsStarted) {
 			unobserved = fmt.Errorf("modern gate readiness: the dashboard counts are older than %s (urnetwork_stats_provider_egress_source_started_seconds), so the shadow cannot be judged", modernGateReadinessMaxCountsAge)
@@ -510,7 +519,7 @@ func modernGateNotReadyFinding(bucket string, outcomes map[string]float64, admit
 		mechanism: "With quality_speed_requires_modern_provider absent from provider.yml, every pass from the start takes a provider whose capability-probe evidence is not modern (not_post_quantum, no_resizable_windows, no_evidence or stale_evidence) out of Quality and Speed under not_modern, keeping it Online. The shadow gauge counts exactly those providers at every dashboard refresh, whether or not the gate is on. no_evidence dominates while the capability probe (server/capprobe) is switched off, as it ships, or has not swept the eligible providers.",
 		baseline:  "From 72 hours before the start, at most half of each native bucket's admitted providers lack modern evidence. WARN from 72 hours before the start, PAGE from 24 hours before; exactly half does not fire.",
 		observed:  fmt.Sprintf("bucket=%s admitted=%.0f modern=%.0f removed=%.0f removed_share=%.3f %s start=%s lead=%s", bucket, admitted, outcomes[model.ProviderModernOutcomeModern], removed, share, modernGateReadinessOutcomesText(outcomes), start.Format(time.RFC3339), start.Sub(now).Round(time.Minute)),
-		evidence:  "max by (bucket, outcome) of urnetwork_stats_provider_modern_gate_shadow from the shared dashboard snapshot every taskworker publishes, with urnetwork_stats_provider_modern_gate_start_seconds from the taskworkers' own provider.yml; counts no older than 30 minutes by urnetwork_stats_provider_egress_source_started_seconds.",
+		evidence:  "max by (bucket, outcome) of urnetwork_stats_provider_modern_gate_shadow from the shared dashboard snapshot every taskworker publishes, with urnetwork_stats_provider_modern_gate_start_seconds from the taskworkers' own provider.yml; counts no older than 30 minutes and no more than 30 seconds in the future by urnetwork_stats_provider_egress_source_started_seconds.",
 		context:   "The gate is bucket membership only: probes, explicit client ids and force_minimum still reach a provider it takes out, and a Quality or Speed answer borrows from Online once both native buckets run short (§2.19b backfill sustained). The dashboard counts cover connected valid public providers, the population of the score export's Online pool.",
 		action:    "Decide before the start. To postpone, " + modernGateReadinessOverrides + ". To let it flip, make the evidence cover the buckets first: switch the capability probe on (`enabled: true` in capability_probe.yml, a config release and a taskworker restart, server/capprobe/README.md) and let it sweep the eligible providers until no_evidence is small, then confirm the remaining not-modern providers are understood.",
 		verify:    "The shadow's not-modern share is at most half in both buckets on two consecutive reads, or the start gauge disappears (the switch is set) or moves the start beyond 72 hours.",
@@ -590,7 +599,7 @@ func modernGateFlipDropFinding(bucket string, before float64, after float64, out
 		mechanism: "From the start every pass takes a provider whose capability-probe evidence is not modern out of Quality and Speed under not_modern. The dashboard counts flip at the start, and the next score export publishes the smaller buckets that FindProviders2 answers from; users of the bucket are served by the remaining providers, then by backfill from Online.",
 		baseline:  "Until 18:00 UTC on the start's day, and at least an hour after the start, each native bucket keeps at least half the providers it had in the last sample before the start. A bucket that recovers, or a gate turned off everywhere, clears it.",
 		observed:  fmt.Sprintf("bucket=%s before=%.0f now=%.0f fell_share=%.3f shadow: %s start=%s since=%s", bucket, before, after, share, modernGateReadinessOutcomesText(outcomes), start.Format(time.RFC3339), now.Sub(start).Round(time.Minute)),
-		evidence:  "sum by (bucket) (max by (bucket, index) (urnetwork_stats_provider_egress_index)) at a second before the start and now, from counts whose source read started after the start; the shadow names the outcomes the gate takes out.",
+		evidence:  "sum by (bucket) (max by (bucket, index) (urnetwork_stats_provider_egress_index)) at a second before the start and now, from counts whose source read started at or after the start and no more than 30 seconds in the future; the shadow names the outcomes the gate takes out.",
 		context:   "A drop that the shadow does not explain (not-modern outcomes well below the drop) has another cause, such as a URL probe outage (§2.19, §2.23); the gate is then not the thing to turn off.",
 		action:    "If the shadow explains the drop, turn the gate off: " + modernGateReadinessOverrides + ". Then repair the capability evidence (no_evidence, stale_evidence) before turning it on again.",
 		verify:    "The next score export after the config release and restart restores the bucket (urnetwork_stats_provider_excluded{reason=\"not_modern\"} returns to zero), and §2.19b backfill subsides.",

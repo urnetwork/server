@@ -617,7 +617,7 @@ func applyApexRewardReview(review model.CompetitionIntegrityReviewResult, disqua
 // Verifies the immutable ranking using the same production eligibility specification.
 // Integrity findings can change the current reward revision, never the sealed measurements.
 func ValidateApexV2RoundResult(result model.CompetitionV2RoundResult, scope ApexRewardScope, now time.Time) error {
-	if result.DecisionMode != model.CompetitionDecisionModeV2 || result.RequiredApiCapability != model.CompetitionAutomationCapability ||
+	if result.DecisionMode != model.CompetitionDecisionModeV2 || !model.SupportsCompetitionAutomationCapability(result.RequiredApiCapability) ||
 		result.Staging != scope.Staging || result.Seal.Staging != scope.Staging ||
 		result.Seal.Environment != scope.Environment || result.Seal.CompetitionId != scope.CompetitionId || result.Seal.SeasonId != scope.SeasonId ||
 		result.Seal.PublicationAt.IsZero() || now.Before(result.Seal.PublicationAt) || len(result.Decisions) == 0 || result.RewardRevision != len(result.Decisions) {

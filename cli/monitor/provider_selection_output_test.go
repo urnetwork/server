@@ -86,7 +86,8 @@ func TestMonitorProviderSelectionOutputAppendsEveryState(t *testing.T) {
 			return settings, nil
 		}
 		var alerts bytes.Buffer
-		if err := runWithSettingsLoader([]string{"-once", "-include-signal", "provider-selection", "-provider-selection-output", path}, &alerts, loader); err != nil {
+		// the synthetic source serves the provider-selection probe alone, not the tier-0 vitals
+		if err := runWithSettingsLoader([]string{"-once", "-include-signal", "provider-selection", "-skip-tier-zero-vitals", "-provider-selection-output", path}, &alerts, loader); err != nil {
 			t.Fatal(err)
 		}
 		wantCalls := 1

@@ -29,6 +29,7 @@ func TestSelectionFreshnessAggregateSentinelAndBands(t *testing.T) {
 		{gap: "5401", severity: SeverityWarn},
 		{gap: "10800", severity: SeverityWarn},
 		{gap: "10801", severity: SeverityPage},
+		{gap: "2147483647", severity: SeverityPage},
 		{gap: "-1", severity: SeverityPage},
 	} {
 		t.Run(test.gap, func(t *testing.T) {
@@ -108,5 +109,41 @@ func TestSelectionFreshnessSignalExplainsLiveReclaimedExport(t *testing.T) {
 	requireAlertOmits(t, requireAlertClass(t, alerts, "selection-stale"), taskID)
 	if strings.Contains(markdown, "roll out the streaming, bounded-batch score exporter on every taskworker generation") {
 		t.Fatalf("live score-recovery diagnosis retained a stale rollout prescription:\n%s", markdown)
+	}
+}
+
+// Invalid ages are unavailable before optional lifecycle evidence is consulted.
+func TestSelectionFreshnessAuthorityRejectsMalformedAge(t *testing.T) {
+	for _, test := range []struct{ name, value string }{
+		{"private text", aggregatePrivateCell}, {"null", ""}, {"blank", " "},
+		{"fraction", "0.9"}, {"integral decimal", "5401.0"}, {"negative nonsentinel", "-2"},
+		{"not a number", "NaN"}, {"infinity", "Inf"}, {"negative infinity", "-Inf"},
+		{"sql integer overflow", "2147483648"}, {"integer overflow", "9223372036854775808"},
+		{"exponent", "6e3"}, {"leading plus", "+5401"}, {"hexadecimal", "0x1519"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requiredReads, lifecycleReads := 0, 0
+			source := &syntheticSource{
+				postgresFn: func(query string) ([]Row, error) {
+					if !strings.Contains(query, selectionFreshnessAggregateFixture().queryMarker) ||
+						!strings.Contains(query, "coalesce(round(extract(epoch FROM now()-max(run_end_time)))::int, -1)") {
+						t.Fatal("age authority control did not reach its actual signed SQL aggregate")
+					}
+					requiredReads++
+					return []Row{{test.value}}, nil
+				},
+				localFn:       func(string, ...string) (string, error) { lifecycleReads++; return "", nil },
+				hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) { lifecycleReads++; return "", nil },
+			}
+			signal := NewSelectionFreshnessSignal()
+			alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+			if err == nil {
+				t.Error("malformed selection age established a product judgment")
+			}
+			requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+			if requiredReads != 1 || lifecycleReads != 0 {
+				t.Error("malformed required age triggered optional lifecycle observation")
+			}
+		})
 	}
 }

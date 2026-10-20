@@ -109,6 +109,10 @@ func TestQualityRequiresSubscriberAcrossNativeForceAndNamed(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_handler SET heartbeat_time=$2 WHERE handler_id=$1`, handler, server.NowUtc().Add(-3*NetworkClientHandlerHeartbeatTimeout)))
 		})
+		// another live process stamps, so the writer set vouches and the
+		// expired generation, which does not stamp, is an ended process
+		// (network_client_handler_liveness.go)
+		liveStaleTestVouchingHandler(ctx, t)
 		// A prior refusal may remain for at most one second from its read start.
 		// Advance the cache clock; no real sleep or positive-cache bypass.
 		cacheClock.Add(subscriberNegativeTTL.Nanoseconds())

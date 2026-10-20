@@ -58,7 +58,7 @@ func CompetitionV2SourceReadinessHandler(w http.ResponseWriter, r *http.Request)
 		writeCompetitionJson(w, http.StatusForbidden, competitionScopeDenied())
 		return
 	}
-	if service.apiImageIdentityErr != nil || !imageDigestPattern.MatchString(service.apiImageDigest) || LoadCompetitionRuntimeManifest(settings, intent) != nil {
+	if service.apiImageIdentityErr != nil || !imageDigestPattern.MatchString(service.apiImageDigest) || LoadCompetitionRuntimeManifestContext(r.Context(), settings, intent) != nil {
 		writeCompetitionJson(w, http.StatusConflict, submissionError("source_not_ready", "the exact approved source manifest is not installed and verified on this API runtime"))
 		return
 	}
@@ -75,5 +75,7 @@ func CompetitionV2SourceReadinessHandler(w http.ResponseWriter, r *http.Request)
 		writeCompetitionJson(w, status, evalError)
 		return
 	}
+	w.Header().Set("X-Competition-Api-Capability", settings.AutomationPolicy.RequiredApiCapability)
+	w.Header().Set("Cache-Control", "no-store")
 	writeCompetitionJson(w, http.StatusOK, receipt)
 }

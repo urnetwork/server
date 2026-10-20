@@ -37,13 +37,20 @@ func sourcePreparationReceiptsMatch(intent *model.CompetitionSourceActivation, r
 	}
 	roles := map[string]bool{}
 	for _, receipt := range receipts {
-		if (receipt.Role != "api" && receipt.Role != "worker") || roles[receipt.Role] || !receipt.Ready || receipt.Staging != intent.Staging || receipt.Environment != intent.Environment || receipt.CompetitionId != intent.CompetitionId || receipt.SeasonId != intent.SeasonId || receipt.Generation != intent.Generation || receipt.TargetRoundId != intent.TargetRoundId ||
-			receipt.ManifestCommit != intent.ManifestCommit || receipt.ManifestSha256 != intent.ManifestSha256 || receipt.SourceLockSha256 != intent.SourceLockSha256 || receipt.QualificationSha256 != intent.HostQualificationSha256 || !imageDigestPattern.MatchString(receipt.RuntimeImageDigest) || !tokenNamePattern.MatchString(receipt.ActorId) {
+		if roles[receipt.Role] || !sourcePreparationReceiptMatches(intent, receipt) {
 			return ErrReviewNotReady
 		}
 		roles[receipt.Role] = true
 	}
 	return nil
+}
+
+// Single-role validation does not fabricate the absent role to reuse quorum
+// validation. Both roles must still be independently persisted before activation.
+func sourcePreparationReceiptMatches(intent *model.CompetitionSourceActivation, receipt model.CompetitionSourceReadiness) bool {
+	return intent != nil && intent.TargetRoundId != (server.Id{}) && (receipt.Role == "api" || receipt.Role == "worker") && receipt.Ready &&
+		receipt.Staging == intent.Staging && receipt.Environment == intent.Environment && receipt.CompetitionId == intent.CompetitionId && receipt.SeasonId == intent.SeasonId && receipt.Generation == intent.Generation && receipt.TargetRoundId == intent.TargetRoundId &&
+		receipt.ManifestCommit == intent.ManifestCommit && receipt.ManifestSha256 == intent.ManifestSha256 && receipt.SourceLockSha256 == intent.SourceLockSha256 && receipt.QualificationSha256 == intent.HostQualificationSha256 && imageDigestPattern.MatchString(receipt.RuntimeImageDigest) && tokenNamePattern.MatchString(receipt.ActorId)
 }
 
 // A containment-ready host without this exact reserved-round marker cannot
@@ -62,10 +69,20 @@ func (self PostgresStore) SourcePreparationReady(ctx context.Context, settings *
 	if intent.State == "abandoned" {
 		return ErrConflict
 	}
+	receipts, err := self.sourcePreparationReceipts(ctx, settings, generation)
+	if err != nil {
+		return err
+	}
+	return sourcePreparationReceiptsMatch(intent, receipts)
+}
+
+// Reads the original independently recorded role identities after external
+// preparation has completed. No database connection spans external work.
+func (self PostgresStore) sourcePreparationReceipts(ctx context.Context, settings *Settings, generation int64) ([]model.CompetitionSourceReadiness, error) {
 	receipts := []model.CompetitionSourceReadiness{}
-	err = captureDatabaseError(func() {
+	err := captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, err := conn.Query(ctx, `SELECT receipt_json FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4`, intent.Environment, intent.CompetitionId, intent.SeasonId, intent.Generation)
+			rows, err := conn.Query(ctx, `SELECT receipt_json FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, generation)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var content []byte
@@ -77,10 +94,7 @@ func (self PostgresStore) SourcePreparationReady(ctx context.Context, settings *
 			})
 		})
 	})
-	if err != nil {
-		return err
-	}
-	return sourcePreparationReceiptsMatch(intent, receipts)
+	return receipts, err
 }
 
 // The concrete worker derives its own readiness from installed configuration,
@@ -99,7 +113,7 @@ func AcknowledgeCompetitionSourceWorker(ctx context.Context, settings *Settings,
 	if err != nil {
 		return err
 	}
-	if err := LoadCompetitionRuntimeManifest(settings, intent); err != nil {
+	if err := LoadCompetitionRuntimeManifestContext(ctx, settings, intent); err != nil {
 		return err
 	}
 	worker, err := NewWorker(settings, store, CommandEvaluator{}, workerId)

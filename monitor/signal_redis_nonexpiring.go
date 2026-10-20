@@ -187,10 +187,8 @@ func (self redisNonexpiringProbe) cadence() time.Duration { return 15 * time.Min
 
 // Preserve exact fleet skew even when detailed attribution is unavailable.
 func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	// The fleet census spans every redis-cluster host; the healthy result is
-	// reported on the entry host and an outlier on the host that runs it. A
-	// host whose census fails is reported and the other hosts' masters are
-	// judged against their own median, which is then partial.
+	// Every configured master is part of the median. Missing hosts leave that
+	// comparison unknown even when the surviving subset has apparent outliers.
 	h := env.cfg.redisEntryHost()
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
@@ -212,20 +210,18 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if len(failures) == len(nodeHosts) {
 		return nil, redisHostFailuresError(failures)
 	}
-	if len(nodes) < 3 {
-		return nil, fmt.Errorf("need at least three observed Redis masters for a fleet skew baseline")
-	}
 	visibility := []finding{}
 	for _, failure := range failures {
-		visibility = append(visibility, redisHostCannotObserveFinding(failure, "keyspace-census"))
+		unknown := redisHostCannotObserveFinding(failure, "keyspace-census")
+		unknown.observed += fmt.Sprintf(" observed_masters=%d configured_masters=%d fleet_median=unknown", len(nodes), len(env.cfg.redisAllNodePorts()))
+		visibility = append(visibility, unknown)
+	}
+	if len(failures) > 0 {
+		return visibility, nil
 	}
 
 	medianDensity, outliers := redisNonexpiringOutliers(nodes)
 	if len(outliers) == 0 {
-		// an unread host's masters may be the outliers
-		if len(failures) > 0 {
-			return visibility, nil
-		}
 		return []finding{healthyFinding("redis/nonexpiring-skew", tierWarn, "nonexpiring-key-skew", h.name)}, nil
 	}
 
@@ -247,11 +243,6 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 		fmt.Sprintf("material_outlier_nodes=%d", len(outliers)),
 		fmt.Sprintf("control_port=%d", control.port),
 	}
-	if len(failures) > 0 {
-		// the fleet median covers only the read hosts' masters
-		observedParts = append(observedParts, fmt.Sprintf("observed_masters=%d", len(nodes)), redisUnobservedHosts(failures))
-	}
-
 	candidateSample, candidateErr := sampleRedisPersistentFamilies(ctx, env, worstHost, worst.node.port)
 	controlSample, controlErr := sampleRedisPersistentFamilies(ctx, env, env.cfg.redisNodeHostOrEntry(control.port), control.port)
 	if candidateErr == nil && controlErr == nil {
@@ -297,10 +288,6 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 		"Redis port %d retains %s the fleet-median non-expiring keys per slot, with about %d excess keys",
 		worst.node.port, redisNonexpiringRatioText(worst.ratio), worst.estimatedExcess,
 	)
-	if len(failures) > 0 {
-		symptom += redisPartialSymptom(failures)
-		context += " The census omits the masters of an unread host (see its visibility finding), so the fleet median and outlier set are partial."
-	}
 	skewFinding := finding{
 		probeId: "redis/nonexpiring-skew", tier: tierWarn,
 		class: "nonexpiring-key-skew", target: target, sustain: 1,
@@ -317,40 +304,82 @@ func (self redisNonexpiringProbe) check(ctx context.Context, env *probeEnv) ([]f
 	return append([]finding{skewFinding}, visibility...), nil
 }
 
+// Retain original source identity without publishing private command text.
+// Fixed diagnostic spellings preserve the existing classifier's precedence
+// even when several configured hosts return joined errors.
+type redisKeyspaceCensusCommandError struct {
+	hostName string
+	cause    error
+}
+
+func (self *redisKeyspaceCensusCommandError) Error() string {
+	diagnostic := "source unavailable"
+	switch classifyObservationError(self.cause) {
+	case observationErrorClassTimeout:
+		diagnostic = "timeout"
+	case observationErrorClassCanceled:
+		diagnostic = "context canceled"
+	case observationErrorClassUnreachable:
+		diagnostic = "unreachable"
+	case observationErrorClassCounterReset:
+		diagnostic = "monotonic counter decreased"
+	case observationErrorClassContractMismatch:
+		diagnostic = "source contract mismatch"
+	case observationErrorClassStateUnavailable:
+		diagnostic = "durable state unavailable"
+	case observationErrorClassAdmissionUnavailable:
+		diagnostic = "local shared SSH admission unavailable"
+	case observationErrorClassBoundExceeded:
+		diagnostic = "identity bound exceeded"
+	case observationErrorClassInvalidResponse:
+		diagnostic = "invalid response"
+	case observationErrorClassMetricUnavailable:
+		diagnostic = "metric unavailable"
+	case observationErrorClassAccessDenied:
+		diagnostic = "access denied"
+	case observationErrorClassCommandFailed:
+		diagnostic = "command returned a failed exit status"
+	case observationErrorClassSSHExit255:
+		diagnostic = "SSH command returned exit status 255"
+	}
+	return fmt.Sprintf("Redis keyspace census command failed on configured host %s: %s", self.hostName, diagnostic)
+}
+
+// Lifecycle, native status, admission and scope reducers keep the actual cause.
+func (self *redisKeyspaceCensusCommandError) Unwrap() error { return self.cause }
+
 // Keep topology and key counts on the Redis host; return numeric aggregates.
 func collectRedisKeyspaceNodes(ctx context.Context, env *probeEnv, h *host, ports []int) ([]redisKeyspaceNode, error) {
 	portNames := make([]string, len(ports))
 	for index, port := range ports {
 		portNames[index] = strconv.Itoa(port)
 	}
-	command := fmt.Sprintf(`for p in %s; do
-  info=$(timeout 3 redis-cli -p "$p" --raw INFO keyspace 2>/dev/null | tr -d '\r')
-  [ -z "$info" ] && { echo "$p unreachable"; continue; }
-  stats=$(printf '%%s\n' "$info" | awk -F: '
-    BEGIN{keys=0;expires=0}
-    /^db0:/{split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=v[2];else if(v[1]=="expires")expires=v[2]}}
-    END{print keys" "expires}')
-  slots=$(timeout 3 redis-cli -p "$p" --raw CLUSTER NODES 2>/dev/null | tr -d '\r' | awk '
-    index(","$3",",",myself,") {
-      for(i=9;i<=NF;i++) {
-        if($i ~ /^[0-9]+-[0-9]+$/) {split($i,a,"-");slots+=a[2]-a[1]+1}
-        else if($i ~ /^[0-9]+$/) {slots++}
-      }
-    }
-    END{print slots+0}')
-  echo "$p $stats $slots"
+	command := redisKeyspaceInfoShell + redisNonexpiringSlotsShell + fmt.Sprintf(`for p in %s; do
+  redis_keyspace_info || { echo "$p unreachable"; continue; }
+  slots=$(redis_keyspace_slots) || { echo "$p unreachable"; continue; }
+  set -- $stats
+  echo "$p $1 $2 $slots"
 done`, strings.Join(portNames, " "))
 	out, err := env.runner.shell(ctx, h, command)
 	if err != nil {
-		return nil, fmt.Errorf("Redis keyspace census command failed: %w", err)
+		if hostScopeOnlyError(err) {
+			return nil, err
+		}
+		return nil, &redisKeyspaceCensusCommandError{hostName: h.name, cause: err}
 	}
 	return parseRedisKeyspaceNodes(out, ports)
 }
 
 // Fail closed on partial, duplicate, or internally inconsistent census rows.
 func parseRedisKeyspaceNodes(out string, expectedPorts []int) ([]redisKeyspaceNode, error) {
+	if len(expectedPorts) == 0 || len(out) > 128*len(expectedPorts) {
+		return nil, fmt.Errorf("Redis keyspace census has an invalid aggregate bound")
+	}
 	expected := make(map[int]bool, len(expectedPorts))
 	for _, port := range expectedPorts {
+		if port <= 0 || port > 65535 || expected[port] {
+			return nil, fmt.Errorf("Redis keyspace census has an invalid configured master set")
+		}
 		expected[port] = true
 	}
 	seen := make(map[int]bool, len(expectedPorts))
@@ -378,7 +407,7 @@ func parseRedisKeyspaceNodes(out string, expectedPorts []int) ([]redisKeyspaceNo
 		if !expected[port] || seen[port] {
 			return nil, fmt.Errorf("Redis keyspace census returned an unexpected or duplicate master")
 		}
-		if values[1] < 0 || values[2] < 0 || values[1] < values[2] || values[3] <= 0 {
+		if values[1] < 0 || values[2] < 0 || values[1] < values[2] || values[3] <= 0 || values[3] > 16384 {
 			return nil, fmt.Errorf("Redis keyspace census returned inconsistent key or slot aggregates")
 		}
 		seen[port] = true

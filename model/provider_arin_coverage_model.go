@@ -22,8 +22,12 @@ type ProviderArinClassificationCoverage struct {
 
 // All live public top-level provider connections must have an actual lookup
 // against the canary's selected database epoch and after its rollout boundary.
+// A live connection's handler heartbeat within two heartbeat timeouts or is a
+// stale handler judged live (network_client_handler_liveness.go).
 func GetProviderArinClassificationCoverage(ctx context.Context, expectedBuildEpoch int64, minLookupAt time.Time) ProviderArinClassificationCoverage {
 	coverage := ProviderArinClassificationCoverage{}
+	// judged before the connection: the judgement reads Redis
+	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `WITH connections AS (
 			SELECT connection.client_id,
@@ -34,13 +38,13 @@ func GetProviderArinClassificationCoverage(ctx context.Context, expectedBuildEpo
 			JOIN network_client_handler AS handler ON handler.handler_id=connection.handler_id
 			LEFT JOIN network_client_location AS location ON location.connection_id=connection.connection_id
 			WHERE connection.connected AND client.active AND client.source_client_id IS NULL
-			AND handler.heartbeat_time >= $3
+			AND (handler.heartbeat_time >= $3 OR handler.handler_id = ANY($5::uuid[]))
 			AND EXISTS(SELECT 1 FROM provide_key WHERE provide_key.client_id=client.client_id AND provide_mode=$4)
 		), providers AS (SELECT client_id,BOOL_AND(selected) AS selected FROM connections GROUP BY client_id)
 		SELECT COUNT(*),COUNT(*) FILTER(WHERE selected),COUNT(*) FILTER(WHERE NOT evaluated),
 			COUNT(*) FILTER(WHERE evaluated AND NOT selected),
 			(SELECT COUNT(*) FROM providers),(SELECT COUNT(*) FROM providers WHERE selected)
-		FROM connections`, expectedBuildEpoch, minLookupAt.UTC(), server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), ProvideModePublic)
+		FROM connections`, expectedBuildEpoch, minLookupAt.UTC(), server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), ProvideModePublic, liveStaleHandlerIds)
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
 				server.Raise(rows.Scan(&coverage.Connections, &coverage.ClassifiedConnections, &coverage.UnclassifiedConnections,

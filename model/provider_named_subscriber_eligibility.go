@@ -40,13 +40,16 @@ func getProviderNamedSubscriberExclusions(ctx context.Context, clientIds []serve
 	if len(pending) == 0 {
 		return offline, risky, nil
 	}
+	// judged before the database connection is taken: the judgement reads
+	// Redis (network_client_handler_liveness.go)
+	liveStaleHandlerIds := defaultLiveStaleNetworkClientHandlers.get(ctx)
 	// Candidate chunks bound both the query and result size.
 	const chunkSize = providerQualityValidationBatchSize
 	server.Db(ctx, func(conn server.PgConn) {
 		for start := 0; start < len(pending); start += chunkSize {
 			chunk := pending[start:min(start+chunkSize, len(pending))]
 			observeSubscriberEligibilityEvent("sql_batch", 1)
-			rows, err := conn.Query(ctx, providerNamedSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
+			rows, err := conn.Query(ctx, providerNamedSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), liveStaleHandlerIds)
 			if err != nil {
 				returnErr = err
 				return
@@ -81,9 +84,9 @@ func getProviderNamedSubscriberExclusions(ctx context.Context, clientIds []serve
 }
 
 // No live connection, or ARIN risk on a live one; ARIN quality verification is
-// not read. The live relation (connected, on a handler with a current
-// heartbeat) is the native Quality read's, text for text
-// (TestNamedSubscriberQueryKeepsTheQualityLiveRelation). An unclassified live
+// not read. The live relation (connected, on a handler with a current heartbeat
+// or a stale handler judged live, $3) is the native Quality read's, text for
+// text (TestNamedSubscriberQueryKeepsTheQualityLiveRelation). An unclassified live
 // connection is not a risk here, as in the arin_risk column of that read.
 const providerNamedSubscriberExclusionsSql = `
 	WITH candidates AS MATERIALIZED (
@@ -96,7 +99,7 @@ const providerNamedSubscriberExclusionsSql = `
 		SELECT connections.client_id, connections.connection_id
 		FROM connections
 		JOIN network_client_handler AS handler ON handler.handler_id = connections.handler_id
-			AND handler.heartbeat_time >= $2
+			AND (handler.heartbeat_time >= $2 OR handler.handler_id = ANY($3::uuid[]))
 	)
 	SELECT candidates.client_id, bool_or(COALESCE(location.arin_risk, false)) AS arin_risk
 	FROM candidates
