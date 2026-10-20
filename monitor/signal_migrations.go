@@ -450,7 +450,36 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	name: "legacy settlement missing-payer registration index", requiredVersion: 793, rowColumn: 204,
 }), migrationCurrentSuffixArtifacts()...)
 
-func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (migrationsProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		contextErr := ctx.Err()
+		if contextErr == nil {
+			return
+		}
+		if resultErr != nil {
+			if resultErr != contextErr {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+			return
+		}
+		// An ended owner cannot certify schema health from late successful
+		// rows. Retain independently established faults and unknowns; the
+		// public scoped adapter keeps its existing lifecycle policy.
+		retained := result[:0]
+		for _, finding := range result {
+			if !finding.healthy {
+				retained = append(retained, finding)
+			}
+		}
+		result = retained
+		if len(result) == 0 {
+			result = nil
+			resultErr = contextErr
+		}
+	}()
 	// Every artifact is queried before its version is checked. Nullable catalog
 	// lookups keep future or missing functions from aborting schema inspection;
 	// an existence conjunct cannot protect a strict regprocedure cast.
