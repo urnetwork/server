@@ -328,6 +328,15 @@ func dnsRecursiveFindings(result dnsAliasResult, authorityState dnsAuthorityStat
 		)
 		return []finding{visibility}
 	}
+	if authorityState != dnsAuthorityExact {
+		// Public adapters omit healthy findings. Real visibility keeps recursive
+		// state unknown both below and after its sustain gate.
+		visibility.symptom = fmt.Sprintf("Recursive %s state for %s is unknown while its authoritative baseline is not exact.", frame, target)
+		visibility.mechanism = "A readable recursive response cannot establish an independent recursive verdict while authoritative state is wrong or incomplete. Suppress downstream drift without treating the missing verdict as recovery."
+		visibility.observed = fmt.Sprintf("record_type=%s expected_family_present=%t authoritative_state_exact=false recursive_response_observed=true", frame, len(result.target.expected) > 0)
+		visibility.action = "Restore and verify the exact authoritative RRset, then repeat this recursive hostname/family observation. Retain prior recursive incidents until that complete comparison is available."
+		return []finding{visibility}
+	}
 	findings := []finding{healthyFinding(
 		"synthetic/dns-aliases", tierWarn, "dns-recursive-unobservable", target,
 	)}
@@ -337,12 +346,6 @@ func dnsRecursiveFindings(result dnsAliasResult, authorityState dnsAuthorityStat
 	observedPresent := len(addresses) > 0
 	missing, unexpected := dnsSetDelta(result.target.expected, addresses)
 	healthyFamily := response.ResponseCode == DNSResponseSuccess && missing == 0 && unexpected == 0
-	if authorityState != dnsAuthorityExact {
-		// Authoritative state is the earlier causal boundary. Preserve any open
-		// recursive ticket as unknown: neither a cached healthy answer nor a
-		// downstream drift may resolve or duplicate it from this sample.
-		return findings
-	}
 	if healthyFamily {
 		healthy := healthyFinding("synthetic/dns-aliases", tierWarn, "dns-recursive-answer-family", target)
 		healthy.frame = frame
