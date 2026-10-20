@@ -408,6 +408,10 @@ type SignalSettings struct {
 	// alerts; an empty value keeps missing or disabled configuration distinct
 	// from a deployment that legitimately finalized epoch zero.
 	STDeploymentKey string
+
+	// Independently enrolled historical payout objects; missing inputs stay unknown.
+	SubnetArtifacts *SubnetArtifactSettings
+
 	// ContractDegradationConfig is strict desired degraded.yml authority,
 	// separate from deployed consumer configuration and its cached decisions.
 	ContractDegradationConfig ContractDegradationConfigStatus
@@ -500,6 +504,7 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 
 func (s SignalSettings) withDefaults() SignalSettings {
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
+	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
@@ -701,7 +706,14 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 			queryClient = unavailableMimirQuerySource{}
 		}
 	}
-	return &probeEnv{cfg: cfg, runner: transport, baseline: baseline, now: settings.Now, mimirQueryClient: queryClient}, nil
+	var artifactClient grafanaHTTPClient
+	if settings.Source != nil {
+		artifactClient, _ = settings.Source.(grafanaHTTPClient)
+		if artifactClient == nil {
+			artifactClient = unavailableSubnetArtifactClient{}
+		}
+	}
+	return &probeEnv{cfg: cfg, runner: transport, baseline: baseline, now: settings.Now, mimirQueryClient: queryClient, subnetArtifactClient: artifactClient}, nil
 }
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
@@ -717,6 +729,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		verificationEnabled:       settings.VerificationEnabled,
 		stConfigStatus:            settings.STConfigStatus.normalized(),
 		stDeploymentKey:           settings.STDeploymentKey,
+		subnetArtifacts:           cloneSubnetArtifactSettings(settings.SubnetArtifacts),
 		contractDegradationConfig: settings.ContractDegradationConfig.normalized(),
 		sshUser:                   settings.SSHUser,
 		sshDevUser:                settings.SSHDevUser,
@@ -751,6 +764,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	}
 	if settings.SettingsGenerationCheck != nil {
 		startup := settings
+		startup.SubnetArtifacts = cloneSubnetArtifactSettings(settings.SubnetArtifacts)
 		startup.Routers = cloneRouterSettings(settings.Routers)
 		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)
 		cfg.routerGenerationCheck = func(ctx context.Context) (bool, error) {

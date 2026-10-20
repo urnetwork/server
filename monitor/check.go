@@ -22,6 +22,7 @@ type probeEnv struct {
 	cfg                          *monitorConfig
 	runner                       probeRunner
 	mimirQueryClient             grafanaHTTPClient
+	subnetArtifactClient         grafanaHTTPClient
 	baseline                     *baselineStore
 	now                          func() time.Time
 	urlProbeCoverageObservation  *UrlProbeCoverageObservation

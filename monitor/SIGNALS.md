@@ -5292,6 +5292,31 @@ Deterministic controls attribute separately forced settings, durable-write,
 lock, host/shared-admission and command-ready delays, preserve healthy and
 canceled lifecycle outcomes, and keep partial/invalid/absent evidence unknown.
 
+New PG receipts also optionally include `shared_admission_detail` from the
+actual shared-store acquisition. Fixed aggregates retain call/error counts,
+first entry, last return and total elapsed nanoseconds for claim recovery,
+lock-file opening/permissions/flock polling, state decoding/validation plus
+owner checks/pruning/grant selection, the existing wait after a non-grant,
+publication encoding/no-op comparison/durable replacement, and local claim
+tracking. Recovery contains its own update subphases; these spans overlap
+and must not be added. Publication counters distinguish unchanged state from
+successful rename and directory fsync, independently of a later publication
+acknowledgement error. Decision/grant counters count `state.grant` evaluations,
+not successful acquisition returns or commands started. Fixed acquire outcomes
+separate returned grant, error, cancellation and deadline; claim disposition
+separates untracked, forgotten unpublished, returned reservation and cleanup
+success/error. A returned reservation proves only acquisition return.
+Missing detail or an unentered phase remains unknown, including injected,
+legacy and non-PG paths. Invalid-clock totals/offsets remain unknown and must
+be interpreted with `local_phase_timing.clock_status`; earlier valid offsets
+are retained. A non-grant wait does not identify the reason selection declined
+that request, and elapsed spans include descheduling: they prove neither a
+blocking syscall, contention, remote work nor the historical delay's cause.
+This bounded projection persists no owner identities, hosts, tokens, paths or
+raw errors and changes no caps, thresholds, deadlines, cadence, queue protocol,
+claim accounting or native lifecycle. Acquisition detail remains unchanged by
+later release; missing internal release diagnostics are not healthy zero.
+
 Remote progress uses ordered fixed records matched to this attempt's private
 stdin nonce. Version 1's two records remain supported with an unknown frame
 count: `remote_started` proves validated reader input and `database_identity`
@@ -40960,9 +40985,11 @@ Status (2026-09-13): **required monitoring specification; the registered
 `subnet-coverage` sentinel makes missing coverage visible, but the nine subnet
 correctness families are not implemented or qualified**. Existing §17
 `subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
-or settlement correctness. The `subnet-*` identifiers below, other than the
-sentinel's `subnet-monitor-coverage`, remain reserved alert classes rather than
-metric names. Implement each family with its source adapter, deterministic
+or settlement correctness. The fixed-object availability slice in §22.8a is registered separately and
+does not satisfy a full family. Other `subnet-*` correctness identifiers below,
+except the sentinel's `subnet-monitor-coverage` and this slice's
+`subnet-history-availability`, remain reserved alert classes rather than metric
+names. Implement each family with its source adapter, deterministic
 tests and registry entry before claiming automated coverage. Until then, a
 deployed subnet requiring that family has an explicit alert, never a green
 result from an absent metric.
@@ -41238,6 +41265,63 @@ Activation attribution is not the parked validator effort bounty.
 `FINAL.md` and its independently replayed on-chain evidence are the acceptance
 baseline, not perpetual health certificates. Continue checking new epochs and
 the availability of that historical evidence after the simulator stops.
+
+### 22.8a Enrolled payout artifact availability — partial reader
+Probe: `subnet-artifacts`
+
+`signal_subnet_artifacts.go` implements current retrieval of up to four
+independently enrolled immutable payout objects through both configured HTTPS
+API origins, using the actual public `GET /sn/artifact?hash=sha256:...` handler.
+This is a partial §22.8 component. The full-family coverage sentinel remains
+**0/9**; no chain inclusion, complete paged index, accepted tampering,
+all-copy loss, independent storage, retention census, or secretless audit replay
+is inferred from these reads. Two API names may use the same MinIO or cache.
+
+The optional `subnet_artifacts` mapping in `monitor.yml` is the release owner's
+trusted expectation, with schema `urnetwork-monitor-subnet-artifacts-v1`,
+canonical UTC `review_from` / `review_until`, exactly two bare HTTPS `origins`,
+and one through four `objects`. Each object supplies `content_hash`,
+`wire_sha256`, `deployment_id`, `chain_id`, `genesis_hash`, `netuid`,
+`coordinator`, `settlement_vault`, `epoch`, `no_id`, `policy_hash`, `signer`,
+`start_number`, `start_hash`, `end_number`, `end_hash`, and `payout_root`.
+Hashes and addresses use lowercase hex; wire SHA256 has no prefix. The protocol
+content hash is the existing unsigned canonical artifact hash, while
+`wire_sha256` pins the complete original signed HTTP bytes. These values must
+come from independently reviewed release evidence, never the response under
+observation. This code supplies no production enrollment or endpoint values.
+
+The source reads serially with one 60-second run owner, a five-second limit per
+request, 16 KiB HTTP headers and 1 MiB payload before decoding. There are no
+redirects, environment proxies, automatic decompression, cookies, retries or
+additional RPC calls. Existing probe admission and host exclusions apply.
+An injected source must implement the existing narrow HTTP `Do` contract and
+honor its request context; absent support is unknown, with no native fallback.
+The current settings generation and review window are checked before contact
+and after each completed read. Cancellation after either authority clock read
+or at any probe return withholds all findings, preserving the already-read
+source cause. A canceled parent always stops the census. With a live parent,
+only the actual owned read context reaching its deadline permits joined
+cleanup cancellation to remain one unknown origin and preserves the healthy
+sibling. A source-claimed deadline with a live read owner cannot excuse a
+joined cancellation; that source cancellation stops before the next contact.
+
+Every successful response is canonical JSON with the original ETag and exact
+wire hash, passes `payoutartifact.DecodeWithContext` signature and full payout
+reconstruction, and matches every independent expected domain and boundary.
+Old correctly enrolled objects remain valid historical evidence: their
+`created_at` is not a collection freshness clock. A complete native read at the
+current settings generation establishes only current public availability of
+that enrolled object. Disabling new subnet work does not dispose of history.
+
+Missing, invalid, expired or stale expectations raise an immediate visibility
+WARN and make no remote request. A missing, partial, over-budget, malformed,
+wrong-signer/domain, unreconstructable or unavailable origin raises
+`subnet-history-availability`, WARN with Sustain=2, for that object/origin.
+All such findings are unknown and never automatically escalate to PAGE. A
+later successful read can resolve this availability gap; it cannot resolve an
+independently proved historical correctness incident. Proving all backing
+copies lost, accepted artifact fraud, chain commitment or a protocol deadline
+requires the remaining §22.8 and §22.10 readers and their retained evidence.
 
 ### 22.9 Process correctness, resources, and adversarial noise
 
