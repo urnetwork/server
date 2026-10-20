@@ -80,6 +80,9 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 
 	// Retain only the bounded histogram in the shell. A streaming validator
 	// counts newlines in fixed chunks and distinguishes cap completion from early EOF.
+	// Only a read loop that ends at end of input (status 1) completes: Bash
+	// before 4.1 rejects read -N with status 2 without consuming the stream,
+	// which is unknown rather than an empty complete scan.
 	scan := fmt.Sprintf(`/bin/bash <<'REDIS_FAMILY'
 export LC_ALL=C
 if observation=$(
@@ -91,12 +94,13 @@ if observation=$(
  last=
  newline="
 "
- while IFS= read -r -N 16384 chunk || [[ -n "$chunk" ]]; do
+ while IFS= read -r -N 16384 chunk; chunk_status=$?; (( chunk_status == 0 )) || [[ -n "$chunk" ]]; do
   printf "%%s" "$chunk" || exit 1
   without_newlines=${chunk//$newline/}
   count=$((count + ${#chunk} - ${#without_newlines}))
   last=${chunk: -1}
  done
+ (( chunk_status == 1 )) || exit 3
  [[ -z "$last" || "$last" == "$newline" ]] || exit 2
  printf "family_source complete %%d\n" "$count" >&3 || exit 1
  if (( count == %d )); then exit 42; fi

@@ -60,9 +60,12 @@ func (redisReliabilityLoadProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		}
 		// Preserve raw bytes through encoding and capture both pipeline statuses.
 		// The child trailer distinguishes native exit 124 from the sampling timeout.
+		// GNU base64 -w 0 emits no newline, but the BSD encoder appends one that
+		// would split the record row. The encoder group deletes it and, under
+		// pipefail, reports one status for both commands.
 		out, err := env.runner.shell(ctx, nodeHost, fmt.Sprintf(`/bin/bash -o pipefail <<'REDIS_RELIABILITY'
 printf 'blocks\t'
-timeout 2 redis-cli -c --raw -p %d SCARD client_reliability_stats_blocks 2>/dev/null | base64 -w 0 2>/dev/null
+timeout 2 redis-cli -c --raw -p %d SCARD client_reliability_stats_blocks 2>/dev/null | { base64 -w 0 | tr -d '\n'; } 2>/dev/null
 source_statuses=("${PIPESTATUS[@]}")
 printf '\t%%s\t%%s\n' "${source_statuses[0]}" "${source_statuses[1]}"
 for p in %s; do
@@ -71,7 +74,7 @@ for p in %s; do
     if redis-cli --raw -p "$1" --latency 2>/dev/null; then source_status=0; else source_status=$?; fi
     printf "\nreliability_exit=%%s\n" "$source_status"
     exit "$source_status"
-  ' sh "$p" 2>/dev/null | base64 -w 0 2>/dev/null
+  ' sh "$p" 2>/dev/null | { base64 -w 0 | tr -d '\n'; } 2>/dev/null
   source_statuses=("${PIPESTATUS[@]}")
   printf '\t%%s\t%%s\n' "${source_statuses[0]}" "${source_statuses[1]}"
 done

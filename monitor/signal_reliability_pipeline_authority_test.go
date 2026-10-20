@@ -84,8 +84,10 @@ type redisReliabilityNativeCase struct {
 	latencyStatus  int
 	cutoff         bool
 	encodingFailed bool
-	blocksNul      bool
-	latencyNul     bool
+	// Append the trailing newline that BSD base64 -w 0 emits and GNU omits.
+	encodingNewline bool
+	blocksNul       bool
+	latencyNul      bool
 }
 
 // Execute the exact generated command with fake binaries that accept both the
@@ -139,7 +141,12 @@ exec "$@"
 `
 	scripts := map[string]string{"redis-cli": redisScript, "timeout": timeoutScript}
 	if test.encodingFailed {
-		scripts["base64"] = "#!/bin/sh\nprintf OQ==\nexit 1\n"
+		// Drain first: an encoder exiting unread races its source into SIGPIPE,
+		// which would decide the verdict instead of the encoder's own status.
+		scripts["base64"] = "#!/bin/sh\ncat >/dev/null\nprintf OQ==\nexit 1\n"
+	}
+	if test.encodingNewline {
+		scripts["base64"] = "#!/bin/sh\n/usr/bin/base64 \"$@\" || exit\nprintf '\\n'\n"
 	}
 	for name, script := range scripts {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
@@ -260,6 +267,23 @@ func TestReliabilityPipelineAuthorityNativeHealthyAndThresholds(t *testing.T) {
 		{blocks: "6", latency: "0 20 10.1 98", targets: []string{"redis-reliability.example", "redis-reliability.example:6382"}},
 	} {
 		alerts := redisReliabilityNativeAlerts(t, redisReliabilityNativeCase{blocks: test.blocks, latency: test.latency})
+		redisReliabilityRequireAlerts(t, alerts, false, test.targets...)
+	}
+}
+
+// The shim gives every platform the BSD encoder's trailing newline, which
+// macOS base64 emits natively. A healthy and a doubly positive observation
+// keep their exact verdicts, so no encoder newline can split a record row.
+func TestReliabilityPipelineAuthorityNativeEncoderNewlineKeepsFraming(t *testing.T) {
+	for _, test := range []struct {
+		blocks  string
+		latency string
+		targets []string
+	}{
+		{blocks: "0", latency: "0 0 0 1"},
+		{blocks: "6", latency: "0 20 10.1 98", targets: []string{"redis-reliability.example", "redis-reliability.example:6382"}},
+	} {
+		alerts := redisReliabilityNativeAlerts(t, redisReliabilityNativeCase{blocks: test.blocks, latency: test.latency, encodingNewline: true})
 		redisReliabilityRequireAlerts(t, alerts, false, test.targets...)
 	}
 }

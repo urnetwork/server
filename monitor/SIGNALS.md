@@ -21237,6 +21237,8 @@ For each master: `INFO memory` → used_memory, maxmemory, pct.
   sustain 2); they cannot clear a capacity page or erase valid node thresholds.
   A failed host collector cannot acquire authority from a later successful
   INFO command. An incomplete node census still prevents aggregate judgment.
+  Native qualification supplies synthetic meminfo text: the test machine's
+  own `/proc/meminfo` is not fixture data, and macOS has none.
   Scope host-capacity findings and their observation gaps to `redis-memory`;
   host RAM is not an input to `redis-buffers` or `redis-connections`. Their
   shared node-INFO gaps still propagate and their independently measured
@@ -21383,6 +21385,16 @@ at a chunk boundary and a fragment ending at a chunk boundary. Qualification
 keeps the same producer, sample, transport and fixture budgets; a synthetic
 native read-invocation budget distinguishes the excessive loop work without
 using elapsed time as its causal assertion.
+
+Completion also requires the chunk loop to end at end of input (`read`
+status 1). Fixed-size `read -N` needs Bash 4.1 or later, which the Linux
+Redis hosts provide. An older Bash, such as macOS `/bin/bash` 3.2, rejects the
+option with status 2 without consuming the stream; that is unknown, never an
+empty complete scan. Formerly, when every producer exited before the rejected
+read, the validator published `family_source complete 0` and the probe
+reported a healthy empty histogram. The native qualifications that expect
+completion run on Linux only; a synthetic Bash-environment `read` that
+rejects `-N` covers the unknown outcome on every platform.
 
 The shell normalization is not itself a safe persistence boundary. A key from
 an unknown schema can contain non-UTF-8 bytes, printable identifiers, or a
@@ -22380,6 +22392,12 @@ unmeasured latency maximum as zero. A restored complete sweep is the coverage
 control; taskworker progress and score freshness still require their own
 measurements. The deterministic controls exercise the emitted shell with fake
 native sources, framed parser inputs, and public alert identities and privacy.
+Each encoded body stays on its record row with either encoder: GNU
+`base64 -w 0` emits no newline, while the BSD encoder (macOS) appends one,
+which formerly split every row into a `cannot-observe` gap. The collector
+deletes encoder newlines and reports one pipefail status for the encoder
+group, so GNU output and statuses are unchanged; a control appends that
+newline on every platform.
 
 The reliability pipeline is the standing top redis load: announce-path
 `HINCRBY client_reliability_stats.<block>` (observed ~7,500/s on one node)
