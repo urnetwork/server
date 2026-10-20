@@ -107,7 +107,7 @@ func parseOriginWaitFrame(response mimirInstantResponse, now time.Time) (originW
 	}
 	if !seenRequests || len(frame.lookup) != len(originWaitSources) ||
 		len(frame.wake) != len(originWakeSources) || len(frame.notification) != len(originNotificationEvents) {
-		return originWaitFrame{}, "incomplete_metric_family"
+		return frame, "incomplete_metric_family"
 	}
 	if frame.requests == 0 {
 		for _, rate := range frame.lookup {
@@ -143,7 +143,7 @@ func (originWaitProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	frame, visibilityReason := parseOriginWaitFrame(response, env.now().UTC())
 	target := env.cfg.env + "/api-fleet"
 	if visibilityReason != "" {
-		return []finding{{
+		findings := []finding{{
 			probeId: "mimir/origin-wait", tier: tierWarn, class: "origin-wait-unobservable",
 			target: target, sustain: 2,
 			symptom:   "The companion-origin wait and notification path lacks a complete fresh metric family.",
@@ -155,7 +155,18 @@ func (originWaitProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			action:    "Converge instrumented artifacts and metrics ingestion, then recheck the complete fixed-cardinality family without treating absence as zero.",
 			verify:    "Every source-fresh family remains complete for two cadences after exact artifact convergence.",
 			playbook:  "SIGNALS.md §2.17a",
-		}}, nil
+		}}
+		// Notification loss has its own absolute rate and no request/lookup
+		// denominator. Retain it only from its complete, validated family.
+		if visibilityReason == "incomplete_metric_family" && len(frame.notification) == len(originNotificationEvents) {
+			loss := originNotificationLossFinding(frame.notification, target, gateway.name)
+			if !loss.healthy {
+				loss.observed += " notification_family=complete other_metric_families=incomplete"
+				loss.context += " The notification family is independently complete; other wait metrics are unknown. This does not establish complete native process or artifact coverage."
+				findings = append(findings, loss)
+			}
+		}
+		return findings, nil
 	}
 	findings := []finding{healthyFinding("mimir/origin-wait", tierWarn, "origin-wait-unobservable", target)}
 	lookupRate := 0.0
@@ -185,28 +196,33 @@ func (originWaitProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	} else {
 		findings = append(findings, healthyFinding("mimir/origin-wait", tierWarn, "origin-wait-db-amplification", target))
 	}
-	lossPerMinute := 60 * (frame.notification["queue_full"] + frame.notification["publish_failed"] +
-		frame.notification["subscription_failed"] + frame.notification["registration_declined"] +
-		frame.notification["invalid_message"])
+	findings = append(findings, originNotificationLossFinding(frame.notification, target, gateway.name))
+	return findings, nil
+}
+
+// Complete notification counters supply an absolute loss rate independently
+// of lookup, wake and completed-request metrics. Callers own family authority.
+func originNotificationLossFinding(notification map[string]float64, target, metricHost string) finding {
+	lossPerMinute := 60 * (notification["queue_full"] + notification["publish_failed"] +
+		notification["subscription_failed"] + notification["registration_declined"] +
+		notification["invalid_message"])
 	if lossPerMinute >= 1 {
-		findings = append(findings, finding{
+		return finding{
 			probeId: "mimir/origin-wait", tier: tierWarn, class: "origin-notification-loss",
 			target: target, sustain: 2,
 			symptom:   "Contract-origin notifications are being dropped, rejected, or disconnected.",
 			mechanism: "Event loss forces waiting requests onto bounded PostgreSQL fallback reads; it cannot change committed contract correctness but can restore the former database-load multiplier.",
 			baseline:  "Queue-full, publish-failed, subscription-failed, registration-declined, and invalid-message rates remain below one event/minute combined.",
 			observed: fmt.Sprintf("loss_events_per_minute=%.1f queue_full_per_minute=%.1f publish_failed_per_minute=%.1f subscription_failed_per_minute=%.1f registration_declined_per_minute=%.1f invalid_message_per_minute=%.1f metrics_gateway=%s",
-				lossPerMinute, 60*frame.notification["queue_full"], 60*frame.notification["publish_failed"],
-				60*frame.notification["subscription_failed"], 60*frame.notification["registration_declined"],
-				60*frame.notification["invalid_message"], gateway.name),
+				lossPerMinute, 60*notification["queue_full"], 60*notification["publish_failed"],
+				60*notification["subscription_failed"], 60*notification["registration_declined"],
+				60*notification["invalid_message"], metricHost),
 			evidence: "Fixed event classes from source-fresh Redis notification counters; no channel payload, pair hash, or identity is exported.",
 			context:  "A transient reconnect can be recovered by subscribe-ack recheck and deadline fallback; this alert is a performance and visibility boundary, not proof of lost contracts. Owner-closed during normal drain and unowned test/non-router callers are not counted as delivery loss.",
 			action:   "Inspect exact Redis client health, publisher queue pressure, owner lifecycle, and mixed artifact versions. Preserve the bounded PostgreSQL fallback; do not disable the origin race wait or increase Redis connections per request.",
 			verify:   "Loss rate returns below one/minute and event wakeups occur under real origin races while PostgreSQL retry amplification falls for two five-minute windows.",
 			playbook: "SIGNALS.md §2.17a",
-		})
-	} else {
-		findings = append(findings, healthyFinding("mimir/origin-wait", tierWarn, "origin-notification-loss", target))
+		}
 	}
-	return findings, nil
+	return healthyFinding("mimir/origin-wait", tierWarn, "origin-notification-loss", target)
 }

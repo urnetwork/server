@@ -14547,6 +14547,19 @@ are `origin-wait-unobservable`, not zero retries or healthy Redis delivery.
 Running API/Connect artifact convergence is a separate source-completeness
 gate: a complete metric family from only some instances can undercount.
 
+A structurally valid response whose complete fixed notification family reaches
+its existing loss threshold retains `origin-notification-loss` beside
+`origin-wait-unobservable` when an unrelated lookup, wake or request family is
+missing. Notification loss is an absolute rate; it does not borrow their
+request denominator. The retained finding names notification-family completeness
+and keeps native process/artifact coverage conditional. A missing notification
+child, malformed/stale/duplicate cell or invalid label cannot use this exception.
+No partial response emits a healthy sentinel or establishes database-amplification
+or incident recovery authority. Below-threshold notification data beside missing
+wait metrics stays unknown. The query still rates each process counter before
+summing, with the existing raw-source freshness selector; the aggregate vector
+does not attest native counter resets, process epochs or complete fleet coverage.
+
 `origin-wait-db-amplification` WARNs after two one-minute cadences if fallback
 and deadline lookups exceed 500/min and total authoritative lookups average at
 least three per completed companion request. This is a database-work signal,
@@ -14582,7 +14595,7 @@ an exact LWLock subtype. Those remain separate production discriminators.
 
 `origin-notification-loss` WARNs after two one-minute cadences when the sum of
 `queue_full`, `publish_failed`, `subscription_failed`,
-`registration_declined`, and `invalid_message` exceeds one/minute. A missed
+`registration_declined`, and `invalid_message` is one or more/minute. A missed
 advisory notification forces bounded PostgreSQL fallback but must not change
 the committed contract result. `owner_closed` during orderly drain and
 `unowned` non-router/test callers are not loss by themselves. `subscribed`,
