@@ -13,6 +13,8 @@ func TestDataOnlyProbeSettingsAreExplicit(t *testing.T) {
 		want.ProviderProbe = false
 		want.DataOnlyProviderProbe = enabled
 		want.FixedDestinationRetryMin = 0
+		allowDirect := false
+		want.OverrideAllowDirect = &allowDirect
 		if reflect.ValueOf(got.SecurityPolicyGenerator).Pointer() != reflect.ValueOf(want.SecurityPolicyGenerator).Pointer() {
 			t.Fatal("security generator changed")
 		}
