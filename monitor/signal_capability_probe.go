@@ -122,6 +122,8 @@ type capabilityProbeObservation struct {
 	disabledRunning  float64
 	// the newest pass finished in the lookback, zero for none
 	lastPass time.Time
+	// An invalid or future payload cannot establish stall age.
+	payloadClockInvalid bool
 	// running taskworkers exporting the probe's series
 	exporting int
 	// the oldest running taskworker's start, zero for none in Mimir
@@ -181,6 +183,12 @@ func (self capabilityProbeProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	if err != nil {
 		return []finding{cannotObserveFinding("capability-probe/metrics", err)}, nil
 	}
+	if observation.payloadClockInvalid {
+		return []finding{
+			capabilityProbeDisabledPassFinding(observation),
+			cannotObserveFinding("capability-probe/metrics", errors.New("taskworker timestamp payload does not establish a supported age")),
+		}, nil
+	}
 	if observation.oldestStart.IsZero() {
 		return []finding{cannotObserveFinding("capability-probe/metrics", errors.New("Mimir holds no running taskworker process series"))}, nil
 	}
@@ -212,11 +220,22 @@ func parseCapabilityProbeObservation(output string, now time.Time) (capabilityPr
 		if err != nil {
 			return observation, fmt.Errorf("parse series %q: %w", name, err)
 		}
-		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		if name != "last_pass" && name != "oldest_start" && (math.IsNaN(value) || math.IsInf(value, 0) || value < 0) {
 			return observation, fmt.Errorf("series %q has an invalid value", name)
 		}
 		if skew := now.Sub(evaluatedAt); skew < -capabilityProbeEvaluationSkew || capabilityProbeEvaluationSkew < skew {
 			return observation, fmt.Errorf("series %q was evaluated %s from the monitor's clock", name, skew.Round(time.Second))
+		}
+		// Validate payload seconds before conversion, independently of the
+		// query evaluation clock. A huge finite value must not wrap to an
+		// apparently supported time. There is no payload clock-lead contract;
+		// exactly now is valid, any future payload leaves age unknown.
+		// Preserve independent disabled counts.
+		if name == "last_pass" || name == "oldest_start" {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || float64(now.Unix())+float64(now.Nanosecond())/float64(time.Second) < value {
+				observation.payloadClockInvalid = true
+				continue
+			}
 		}
 		unixTime := func() time.Time {
 			if value == 0 {

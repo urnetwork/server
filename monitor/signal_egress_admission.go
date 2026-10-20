@@ -135,10 +135,28 @@ func egressAdmissionQuery(environment string) string {
 }
 
 // Source failures and overflow return fixed text, never remote bodies or labels.
-func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if contextErr := ctx.Err(); contextErr != nil {
+			result = nil
+			if resultErr == nil || resultErr == contextErr {
+				resultErr = contextErr
+			} else {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+		}
+	}()
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(egressAdmissionQuery(env.cfg.env))
 	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
 		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(egressAdmissionResponseMax)+" '"+queryUrl+"'")
+	// A returned body cannot outlive the owner, even when the source ignores
+	// cancellation. Preserve a returned source cause without rendering it.
+	if ctx.Err() != nil {
+		return nil, err
+	}
 	if err != nil {
 		unobservable := egressAdmissionUnobservable("bounded-source-unavailable", 0, 0)
 		unobservable.observed += " " + observationFailureDetails(err, classifyObservationError(err))
@@ -153,7 +171,7 @@ func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if err != nil {
 		return []finding{egressAdmissionUnobservable("invalid-source-response", 0, 0)}, nil
 	}
-	return self.observe(env.now(), processes), nil
+	return self.observe(ctx, env.now(), processes)
 }
 
 // Rejects incomplete, duplicate, unknown-label-domain, or source-stale bundles
@@ -307,9 +325,14 @@ func (self *egressAdmissionProcess) snapshot(job string, now time.Time) (egressA
 
 // Preserves confirmed failures from stable complete processes even if another
 // process is unobservable. Overlapping generations never supply a joined delta.
-func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdmissionIdentity]*egressAdmissionPair) []finding {
+func (self *egressAdmissionProbe) observe(ctx context.Context, now time.Time, processes map[egressAdmissionIdentity]*egressAdmissionPair) ([]finding, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	// Cancellation while waiting for a concurrent reduction cannot grant
+	// this invocation process-generation or warmup authority.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	current := map[egressAdmissionIdentity]egressAdmissionObservation{}
 	blockCounts := map[egressAdmissionIdentity]int{}
 	previousBlockCounts := map[egressAdmissionIdentity]int{}
@@ -363,6 +386,11 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 		for key, value := range snapshot.counters {
 			deltas[key] += value - previous.counters[key]
 		}
+	}
+	// Commit only a live observation. Findings and all candidate state above
+	// are local until this owner check, under the same reduction lock.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if now.After(self.observedAt) {
 		self.previous, self.observedAt = current, now
@@ -453,7 +481,7 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 			findings[i].context = egressAdmissionIntervalScope
 		}
 	}
-	return findings
+	return findings, nil
 }
 
 // Fixed evidence describes a visibility boundary, never a healthy rollout or a

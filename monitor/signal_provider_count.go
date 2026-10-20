@@ -168,12 +168,20 @@ func providerCountFinding(cohort providerCountCohort, total, zero, small float64
 }
 
 func parseProviderCountCohorts(raw string, now time.Time) ([]providerCountCohort, error) {
-	var response mimirInstantResponse
+	var response struct {
+		mimirInstantResponse
+		Infos []string `json:"infos"`
+	}
 	if err := json.Unmarshal([]byte(raw), &response); err != nil {
 		return nil, fmt.Errorf("provider count: decode Mimir response: %w", err)
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
 		return nil, fmt.Errorf("provider count: Mimir status=%q result_type=%q error=%q", response.Status, response.Data.ResultType, response.Error)
+	}
+	// These aggregate ratios need the whole response, including their
+	// denominators. An annotation leaves every returned cohort unqualified.
+	if len(response.Warnings) != 0 || len(response.Infos) != 0 {
+		return nil, fmt.Errorf("provider count: invalid response annotations")
 	}
 	if len(response.Data.Result) == 0 {
 		return nil, fmt.Errorf("provider count: outcome metric is absent")

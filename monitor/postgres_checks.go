@@ -525,6 +525,12 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			5*time.Minute,
 			1000,
 		)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if activeLogErr != nil {
+				return nil, &signalContextError{contextErr: contextErr, sourceErr: activeLogErr}
+			}
+			return nil, contextErr
+		}
 		active := parseTaskActiveRun(activeLog, "UpdateClientScores")
 		tier := tierWarn
 		if gapS > 3*60*60 || gapS < 0 {
@@ -559,10 +565,15 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			context = "If reboot-collision correlates this same durable attempt, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
 			action = "Let the live attempt finish. Retain the streaming, bounded-batch score exporter on generations that already have it and roll it out only where version or code evidence says it is absent. If an uninterrupted bounded-export run still exceeds 60 minutes, profile and checkpoint the remaining full-map load and caller-location fan-out. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
 			verify = "This exact claimed attempt reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
-		} else if activeLogErr != nil {
-			evidence += " Task lifecycle lookup failed: " + activeLogErr.Error()
 		}
-		return []finding{{
+		if activeLogErr != nil {
+			// The optional journal error may contain private record metadata.
+			// A retained heartbeat still proves activity during a partial read,
+			// but cannot establish complete lifecycle visibility.
+			observed += " active_log_error_class=" + classifyObservationError(activeLogErr)
+			evidence += " Task lifecycle visibility is incomplete; private source details are omitted."
+		}
+		findings := []finding{{
 			probeId: "pg/selection-stale", tier: tier,
 			class: "selection-stale", target: target, sustain: 1,
 			symptom: fmt.Sprintf("UpdateClientScores last completed %dm ago (healthy: back-to-back runs, gap < ~60m)",
@@ -575,7 +586,14 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			action:    action,
 			verify:    verify,
 			playbook:  "SIGNALS.md §2.8, §2.12, and §2.13",
-		}}, nil
+		}}
+		if activeLogErr != nil {
+			visibility := cannotObserveFinding(target, activeLogErr)
+			visibility.frame = "selection-lifecycle"
+			visibility.playbook = "SIGNALS.md §2.8"
+			findings = append(findings, visibility)
+		}
+		return findings, nil
 	}
 	return []finding{healthyFinding("pg/selection-stale", tierWarn, "selection-stale", target)}, nil
 }

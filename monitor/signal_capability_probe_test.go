@@ -166,6 +166,8 @@ func TestCapabilityProbeSignalAlertsOnAStalledChain(t *testing.T) {
 		// "" for healthy
 		tier string
 	}{
+		{name: "exactly thirty minutes", lastPass: 30 * time.Minute, exporting: 4, oldestStart: 3 * time.Hour},
+		{name: "thirty minutes and a second", lastPass: 30*time.Minute + time.Second, exporting: 4, oldestStart: 3 * time.Hour, tier: tierWarn},
 		{name: "passed recently", lastPass: 10 * time.Minute, exporting: 4, oldestStart: 3 * time.Hour},
 		{name: "no pass for 45 minutes", lastPass: 45 * time.Minute, exporting: 4, oldestStart: 3 * time.Hour, tier: tierWarn},
 		{name: "no pass for three hours, gate off", lastPass: 3 * time.Hour, exporting: 4, oldestStart: 5 * time.Hour, tier: tierWarn},
@@ -331,6 +333,161 @@ func TestCapabilityProbeSignalReportsWhatItCannotObserve(t *testing.T) {
 		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, c.desiredErr, c.response, c.mimirErr)
 		if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
 			t.Errorf("%s: alerts %+v, want one cannot-observe", c.name, alerts)
+		}
+	}
+}
+
+// Evaluation stamps are fresh in every fixture. Unsupported payload clocks
+// cannot borrow that authority, even when the other age reference is valid.
+func TestCapabilityProbeSignalInvalidPayloadIsUnknown(t *testing.T) {
+	nan, _ := strconv.ParseFloat("NaN", 64)
+	positiveInfinity, _ := strconv.ParseFloat("+Inf", 64)
+	negativeInfinity, _ := strconv.ParseFloat("-Inf", 64)
+	for _, c := range []struct {
+		name      string
+		field     string
+		value     float64
+		omitOther bool
+	}{
+		{name: "future pass", field: "last_pass", value: capabilityProbeTestUnix(-time.Second)},
+		{name: "future start", field: "oldest_start", value: capabilityProbeTestUnix(-time.Second)},
+		{name: "negative pass", field: "last_pass", value: -1},
+		{name: "negative start", field: "oldest_start", value: -1},
+		{name: "nonfinite pass", field: "last_pass", value: nan},
+		{name: "positive infinite start", field: "oldest_start", value: positiveInfinity},
+		{name: "negative infinite pass", field: "last_pass", value: negativeInfinity},
+		{name: "conversion-bound pass", field: "last_pass", value: 9223372036854775808.0},
+		{name: "conversion-bound start", field: "oldest_start", value: 9223372036854775808.0},
+		{name: "large future pass", field: "last_pass", value: 1e300},
+		{name: "large future start", field: "oldest_start", value: 1e300},
+		{name: "future pass without process", field: "last_pass", value: capabilityProbeTestUnix(-time.Hour), omitOther: true},
+		{name: "future start without pass", field: "oldest_start", value: capabilityProbeTestUnix(-time.Hour), omitOther: true},
+	} {
+		values := map[string]float64{
+			"last_pass":    capabilityProbeTestUnix(time.Minute),
+			"oldest_start": capabilityProbeTestUnix(3 * time.Hour),
+			"exporting":    4,
+		}
+		if c.omitOther {
+			delete(values, "last_pass")
+			delete(values, "oldest_start")
+		}
+		values[c.field] = c.value
+		response := capabilityProbeMimirFixture(t, values)
+		response = strings.ReplaceAll(response, `"metric":{`, `"metric":{"synthetic_private_label":"synthetic-private-sentinel",`)
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, response, nil)
+		if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
+			t.Errorf("%s: unsupported payload must emit one visibility alert", c.name)
+			continue
+		}
+		alert := requireAlertClass(t, alerts, "cannot-observe")
+		if alert.Target != "capability-probe/metrics" || alert.Severity != SeverityWarn {
+			t.Errorf("%s: unexpected visibility identity or severity", c.name)
+		}
+		privateValues := []string{"synthetic_private_label", "synthetic-private-sentinel", `"value":`}
+		if 10000 < c.value {
+			privateValues = append(privateValues, strconv.FormatFloat(c.value, 'f', -1, 64))
+		}
+		for _, private := range privateValues {
+			if strings.Contains(alerts.Markdown(), private) {
+				t.Errorf("%s: visibility rendered a remote label or timestamp payload", c.name)
+			}
+		}
+	}
+}
+
+func TestCapabilityProbeSignalFuturePayloadPreservesDisabledPass(t *testing.T) {
+	for _, c := range []struct {
+		field string
+		value float64
+	}{
+		{field: "last_pass", value: capabilityProbeTestUnix(-time.Hour)},
+		{field: "oldest_start", value: capabilityProbeTestUnix(-time.Hour)},
+		{field: "last_pass", value: -1},
+		{field: "oldest_start", value: 1e300},
+	} {
+		values := map[string]float64{
+			"last_pass":        capabilityProbeTestUnix(time.Minute),
+			"oldest_start":     capabilityProbeTestUnix(3 * time.Hour),
+			"disabled_running": 1,
+		}
+		values[c.field] = c.value
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, values), nil)
+		if len(alerts) != 2 {
+			t.Fatalf("%s: unsupported clock must preserve independent disabled-pass evidence and visibility", c.field)
+		}
+		requireAlertClass(t, alerts, "capability-probe-disabled-pass")
+		requireAlertClass(t, alerts, "cannot-observe")
+	}
+}
+
+// The public adapter omits healthy findings; recovery is no visibility alert,
+// not a fabricated healthy alert. Missing and zero pass payloads retain grace.
+func TestCapabilityProbeSignalPayloadClockEqualityAndRecovery(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		values map[string]float64
+	}{
+		{name: "pass exactly now", values: map[string]float64{"last_pass": capabilityProbeTestUnix(0), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}},
+		{name: "start exactly now", values: map[string]float64{"oldest_start": capabilityProbeTestUnix(0)}},
+		{name: "no pass in startup grace", values: map[string]float64{"oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
+		{name: "zero pass in startup grace", values: map[string]float64{"last_pass": 0, "oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
+	} {
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, c.values), nil)
+		if len(alerts) != 0 {
+			t.Errorf("%s: supported clock or startup grace emitted an alert", c.name)
+		}
+	}
+	values := map[string]float64{"last_pass": capabilityProbeTestUnix(-time.Hour), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}
+	alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, values), nil)
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
+		t.Fatal("future pass did not establish unknown before correction")
+	}
+	values["last_pass"] = capabilityProbeTestUnix(time.Minute)
+	alerts, _ = runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, values), nil)
+	if len(alerts) != 0 {
+		t.Fatal("corrected recent pass retained visibility or emitted a failure")
+	}
+	values["last_pass"] = capabilityProbeTestUnix(45 * time.Minute)
+	alerts, _ = runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, values), nil)
+	if len(alerts) != 1 || alerts[0].Class != "capability-probe-stalled" {
+		t.Fatal("corrected old pass did not recover ordinary stall detection")
+	}
+}
+
+func TestCapabilityProbeSignalDesiredOffSkipsFuturePayload(t *testing.T) {
+	alerts, query := runCapabilityProbeSignal(t, capabilityProbeDesired{}, nil, capabilityProbeMimirFixture(t, map[string]float64{"last_pass": capabilityProbeTestUnix(-time.Hour)}), nil)
+	if len(alerts) != 0 || query != "" {
+		t.Fatal("desired-off observation queried metrics or alerted")
+	}
+}
+
+// The evaluation clock remains a separate authority. Its existing inclusive
+// five-minute bound does not grant a lead allowance to timestamp payloads.
+func TestCapabilityProbeSignalEvaluationClockBoundRemainsIndependent(t *testing.T) {
+	for _, c := range []struct {
+		shift   time.Duration
+		unknown bool
+	}{
+		{shift: -5 * time.Minute},
+		{shift: 5 * time.Minute},
+		{shift: -5*time.Minute - time.Second, unknown: true},
+		{shift: 5*time.Minute + time.Second, unknown: true},
+	} {
+		response := capabilityProbeMimirFixture(t, map[string]float64{
+			"last_pass":    capabilityProbeTestUnix(time.Minute),
+			"oldest_start": capabilityProbeTestUnix(3 * time.Hour),
+		})
+		response = strings.ReplaceAll(response,
+			"["+strconv.FormatInt(capabilityProbeTestNow.Unix(), 10)+",",
+			"["+strconv.FormatInt(capabilityProbeTestNow.Add(c.shift).Unix(), 10)+",")
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, response, nil)
+		if c.unknown {
+			if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
+				t.Errorf("evaluation shift %s: stale evaluation must remain unknown", c.shift)
+			}
+		} else if len(alerts) != 0 {
+			t.Errorf("evaluation shift %s: inclusive evaluation bound changed", c.shift)
 		}
 	}
 }
