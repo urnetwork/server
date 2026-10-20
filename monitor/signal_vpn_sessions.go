@@ -56,14 +56,16 @@ type vpnSessionClient struct {
 }
 
 type vpnSessionsObservation struct {
-	unitObserved bool
-	activeState  string
-	subState     string
-	restarts     string
-	statusMTime  time.Time
-	clients      map[string]vpnSessionClient
-	reachable    map[string]bool
-	timeouts     map[string]vpnSessionTimeout
+	unitObserved    bool
+	activeState     string
+	subState        string
+	restarts        string
+	statusMTime     time.Time
+	statusObserved  bool
+	journalObserved bool
+	clients         map[string]vpnSessionClient
+	reachable       map[string]bool
+	timeouts        map[string]vpnSessionTimeout
 }
 
 func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -162,6 +164,10 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}}, nil
 	}
 
+	if !observation.statusObserved {
+		return []finding{vpnSessionsProducerUnavailable(server.name, "status")}, nil
+	}
+
 	missing := make([]*host, 0)
 	unreachable := make([]*host, 0)
 	reachableClients := 0
@@ -185,6 +191,9 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 
 	findings := make([]finding, 0, len(missing)+len(unreachable))
+	if !observation.journalObserved {
+		findings = append(findings, vpnSessionsProducerUnavailable(server.name, "journal"))
+	}
 	affectedByGroup := map[int][]string{}
 	for _, client := range unreachable {
 		group := observation.clients[client.overlayIp].group
@@ -294,6 +303,28 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	return findings, nil
 }
 
+// Capture completion is independent from fresh metadata, unit state and ICMP.
+func vpnSessionsProducerUnavailable(serverName, producer string) finding {
+	class := "vpn-status-unavailable"
+	symptom := "Management VPN status census is unavailable"
+	mechanism := "The status-file producer did not complete successfully. Fresh mtime or a valid prefix cannot prove a complete client census; missing rows and session health remain unknown."
+	if producer == "journal" {
+		class = "vpn-session-history-unavailable"
+		symptom = "Management VPN timeout history is unavailable"
+		mechanism = "The bounded journal producer did not complete successfully. Partial timeout rows cannot establish recent source-group attribution. Independently complete current sessions and their admitted path checks retain their findings."
+	}
+	return finding{
+		probeId: "network/vpn-sessions", tier: tierWarn, class: class, target: serverName, sustain: 1,
+		symptom: symptom, mechanism: mechanism,
+		baseline: "The selected producer exits successfully and its terminal completion marker reaches the redacted reducer before its evidence supplies absence, attribution or health.",
+		observed: "producer=" + producer + " capture_complete=false",
+		evidence: "Only fixed producer-completion flags are exported; status and journal bodies, command errors, public sources and unrelated identities remain private.",
+		action:   "Inspect the existing read-only producer and status publication path. Preserve authoritative unit/current-session findings and the intended management VPN route; keep bulk backup payloads on their dedicated direct SSH path.",
+		verify:   "The next ordinary read completes the selected producer. Then require the existing fresh-session, admitted path and recovery windows; unavailable history is not healthy absence.",
+		playbook: "SIGNALS.md §21.1",
+	}
+}
+
 func vpnSessionScopeClient(ctx context.Context, scoped *hostScopeRunner, client *host) error {
 	if err := scoped.guardHost(ctx, client); err != nil {
 		return err
@@ -374,9 +405,17 @@ status_mtime=$(sudo -n stat -c '%%Y' "$vpn_status" 2>/dev/null || true)
 case "$status_mtime" in ''|*[!0-9]*) status_mtime=0 ;; esac
 printf 'status_mtime_epoch %%s\n' "$status_mtime"
 	{
-		sudo -n cat "$vpn_status"
+		if sudo -n cat "$vpn_status" 2>/dev/null; then
+			printf '\n%%s\n' '---monitor-status-complete---'
+		else
+			printf '\n%%s\n' '---monitor-status-failed---'
+		fi
 		printf '%%s\n' '---monitor-journal---'
-		sudo -n journalctl -u "$vpn_service" --since "2 hours ago" --no-pager -o short-unix 2>/dev/null
+		if sudo -n journalctl -u "$vpn_service" --since "2 hours ago" --no-pager -o short-unix 2>/dev/null; then
+			printf '\n%%s\n' '---monitor-journal-complete---'
+		else
+			printf '\n%%s\n' '---monitor-journal-failed---'
+		fi
 	} | awk -v wanted_names="$expected_names" -v wanted_addresses="$expected_addresses" '
   BEGIN {
 	address_count=split(wanted_addresses, addresses, " ")
@@ -384,6 +423,10 @@ printf 'status_mtime_epoch %%s\n' "$status_mtime"
 	name_count=split(wanted_names, names, " ")
 	for (i=1; i<=name_count; i++) expected_name[names[i]]=1
   }
+	$0=="---monitor-status-complete---" { status_complete++; next }
+	$0=="---monitor-status-failed---" { status_failed++; next }
+	$0=="---monitor-journal-complete---" { journal_complete++; next }
+	$0=="---monitor-journal-failed---" { journal_failed++; next }
 	$0=="---monitor-journal---" { journal=1; next }
 	!journal {
 		field_count=split($0, row, ",")
@@ -413,6 +456,10 @@ printf 'status_mtime_epoch %%s\n' "$status_mtime"
 		sub(/[.][0-9]+$/, "", epoch)
 		if (epoch !~ /^[0-9]+$/) next
 		print "timeout", client, epoch, source_group[source]
+  }
+  END {
+    print "status_observed", (status_complete==1 && status_failed==0 ? "true" : "false")
+    print "journal_observed", (journal_complete==1 && journal_failed==0 ? "true" : "false")
   }
 '
 for address in $expected_addresses; do
@@ -479,6 +526,19 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 				}
 				observation.statusMTime = time.Unix(value, 0).UTC()
 			}
+		case "status_observed", "journal_observed":
+			if len(fields) != 2 || (fields[1] != "true" && fields[1] != "false") {
+				return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid producer completion", lineNumber+1)
+			}
+			if seen[fields[0]] {
+				return vpnSessionsObservation{}, fmt.Errorf("line %d: duplicate producer completion", lineNumber+1)
+			}
+			seen[fields[0]] = true
+			if fields[0] == "status_observed" {
+				observation.statusObserved = fields[1] == "true"
+			} else {
+				observation.journalObserved = fields[1] == "true"
+			}
 		case "client":
 			if len(fields) != 4 || net.ParseIP(fields[1]) == nil {
 				return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid client row", lineNumber+1)
@@ -539,6 +599,11 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 	if !knownState(observation.subState, vpnSessionSubStates) {
 		observation.subState = "unknown"
 		observation.unitObserved = false
+	}
+	// Failed or legacy optional history cannot lend a partial timeout prefix
+	// to current membership or shared-source attribution.
+	if !observation.journalObserved {
+		observation.timeouts = map[string]vpnSessionTimeout{}
 	}
 	return observation, nil
 }

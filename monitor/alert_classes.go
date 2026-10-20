@@ -162,6 +162,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"vpn-server-unhealthy":                             visibilityAlertClass,
 	"vpn-server-unavailable":                           visibilityAlertClass,
 	"vpn-status-stale":                                 visibilityAlertClass,
+	"vpn-status-unavailable":                           visibilityAlertClass,
+	"vpn-session-history-unavailable":                  visibilityAlertClass,
 	"web-email-assets-transport":                       visibilityAlertClass,
 	"worker-scheduler-unobservable":                    visibilityAlertClass,
 
