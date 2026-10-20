@@ -45,7 +45,21 @@ type workerChurnMetrics struct {
 	samples   workerMetricSamples
 }
 
-func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+// Own cancellation even when an alternate source ignores its context.
+func (workerChurnProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if contextErr := ctx.Err(); contextErr != nil {
+			result = nil
+			if resultErr == nil || resultErr == contextErr {
+				resultErr = contextErr
+			} else {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+		}
+	}()
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("worker churn: no services host in inventory for the loopback Mimir query")
@@ -60,6 +74,9 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		nil,
 		"curl -fsS --max-time 15 '"+queryURL+"'",
 	)
+	if ctx.Err() != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("worker churn: query Mimir through service gateways: %w", err)
 	}
@@ -73,6 +90,9 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 
 	now := env.now().UTC()
+	if ctx.Err() != nil {
+		return nil, nil
+	}
 	workers := map[string]*workerChurnMetrics{}
 	bounded := len(response.Warnings) == 0
 	for _, series := range response.Data.Result {
@@ -153,12 +173,18 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 
 		if !activeLogLoaded {
 			activeLog, activeLogSource, activeLogErr = readTaskLifecycleLog(ctx, env, "eval", 2*time.Minute, 5000)
+			if ctx.Err() != nil {
+				return nil, activeLogErr
+			}
 			activeLogLoaded = true
 			// The gateway timeout and journal fallback can outlive the metric
 			// query by more than the parser's future-skew allowance. Refresh the
 			// comparison clock after collection so fresh fallback lines remain
 			// attributable to this exact executor.
 			activeLogObservedAt = env.now().UTC()
+			if ctx.Err() != nil {
+				return nil, activeLogErr
+			}
 		}
 		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, activeLogObservedAt)
 		activeSummary := formatExecutorActiveTasks(activeTasks, 8)
@@ -203,12 +229,18 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			action = "First verify the exact outlier Taskworker artifact and score-exporter capability; the global alias marker cannot attest this process or its current code path. If the artifact is caller-oriented, deploy the target-oriented UpdateClientScores fanout and alias-aware cache. If target-oriented capability is independently proven, retain the process through terminal and collection boundaries and profile recurring source-load, target-map, gob-encode, or cache-write work before changing it. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
 			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the executor returns below the CPU/allocation guards for two consecutive probes after terminal/collection boundaries without selection loss or Redis capacity pressure. A global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
+				if ctx.Err() != nil {
+					return nil, aliasesReadyErr
+				}
 				aliasesReadyLoaded = true
 				redisHost := env.cfg.redisEntryHost()
 				if redisHost == nil {
 					aliasesReadyErr = fmt.Errorf("no redis-cluster host in inventory")
 				} else {
 					aliasesReady, aliasesReadyErr = redisScoreAliasesReady(ctx, env, redisHost)
+					if ctx.Err() != nil {
+						return nil, aliasesReadyErr
+					}
 				}
 			}
 			switch {
@@ -224,8 +256,14 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, and the global alias-schema marker is absent. This may be a pending or incomplete compatibility pass, legacy writers, or missing cache state; it does not identify this worker's artifact. Score export is a correlated allocation candidate, not established ownership of the process allocation."
 			}
 			if !phaseObservationsLoaded {
+				if ctx.Err() != nil {
+					return nil, phaseObservationsErr
+				}
 				phaseObservationsLoaded = true
 				phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
+				if ctx.Err() != nil {
+					return nil, phaseObservationsErr
+				}
 			}
 			phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
 			if phaseObservationsErr != nil || !phaseReady {

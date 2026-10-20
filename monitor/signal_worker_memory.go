@@ -72,7 +72,21 @@ const (
 	workerRateAll = workerRateCPU | workerRateAlloc | workerRateGC | workerRateGCPause
 )
 
-func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+// Own cancellation even when an alternate source ignores its context.
+func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if contextErr := ctx.Err(); contextErr != nil {
+			result = nil
+			if resultErr == nil || resultErr == contextErr {
+				resultErr = contextErr
+			} else {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+		}
+	}()
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("worker memory: no services host in inventory for the loopback Mimir query")
@@ -107,6 +121,9 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		nil,
 		"curl -fsS --max-time 15 '"+queryURL+"'",
 	)
+	if ctx.Err() != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("worker memory: query Mimir through service gateways: %w", err)
 	}
@@ -120,6 +137,9 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	}
 
 	now := env.now().UTC()
+	if ctx.Err() != nil {
+		return nil, nil
+	}
 	workers := map[string]*workerRuntimeMetrics{}
 	bounded := len(response.Warnings) == 0
 	for _, series := range response.Data.Result {
@@ -195,6 +215,9 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		metricHost,
 		"curl -fsS --max-time 15 '"+rateURL+"'",
 	)
+	if ctx.Err() != nil {
+		return nil, rateErr
+	}
 	if rateErr == nil {
 		var rateResponse mimirInstantResponse
 		if err := json.Unmarshal([]byte(rateOut), &rateResponse); err != nil {
@@ -287,12 +310,18 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				2*time.Minute,
 				5000,
 			)
+			if ctx.Err() != nil {
+				return nil, activeLogErr
+			}
 			activeLogLoaded = true
 			// A degraded fleet gateway can spend tens of seconds before the
 			// host-journal fallback returns. Compare those returned heartbeat
 			// timestamps with the clock after collection, not the older metric
 			// query clock, or genuinely fresh lines appear to be in the future.
 			activeLogObservedAt = env.now().UTC()
+			if ctx.Err() != nil {
+				return nil, activeLogErr
+			}
 		}
 
 		processAge := "unknown"
@@ -362,12 +391,18 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			action = "First verify the exact outlier Taskworker artifact and score-exporter capability; the global alias marker cannot attest this process or its current code path. If the artifact is caller-oriented, deploy the target-oriented UpdateClientScores fanout and alias-aware cache. If target-oriented capability is independently proven, let the current score run cross its terminal boundary and observe the next collection; recurring crossings then require phase-local allocation evidence before bounding provider maps or encoding concurrency. Preserve bounded streaming; do not restart or raise the memory limit to erase the evidence."
 			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the affected executor returns below the heap guards after terminal/collection boundaries. Verify sparse score bytes after the legacy TTL, populated selections, and no Redis capacity error; a global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
+				if ctx.Err() != nil {
+					return nil, aliasesReadyErr
+				}
 				aliasesReadyLoaded = true
 				redisHost := env.cfg.redisEntryHost()
 				if redisHost == nil {
 					aliasesReadyErr = fmt.Errorf("no redis-cluster host in inventory")
 				} else {
 					aliasesReady, aliasesReadyErr = redisScoreAliasesReady(ctx, env, redisHost)
+					if ctx.Err() != nil {
+						return nil, aliasesReadyErr
+					}
 				}
 			}
 			switch {
@@ -386,8 +421,14 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			// global marker nor the independent churn thresholds gate this read.
 			// Load once per check, then match every outlier's exact generation.
 			if !phaseObservationsLoaded {
+				if ctx.Err() != nil {
+					return nil, phaseObservationsErr
+				}
 				phaseObservationsLoaded = true
 				phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
+				if ctx.Err() != nil {
+					return nil, phaseObservationsErr
+				}
 			}
 			phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
 			if phaseObservationsErr != nil || !phaseReady {
