@@ -62,5 +62,5 @@ func observationFailureDetails(err error, errorClass string) string {
 	if phases := sshAdmissionFailurePhases(err); phases != "" {
 		details += " ssh_admission_failures=" + phases
 	}
-	return details
+	return details + observationBoundaryDetails(err)
 }
