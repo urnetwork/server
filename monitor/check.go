@@ -27,6 +27,7 @@ type probeEnv struct {
 	now                          func() time.Time
 	urlProbeCoverageObservation  *UrlProbeCoverageObservation
 	providerSelectionObservation *ProviderSelectionObservation
+	pgSampleCompletion           *pgSampleCompletedCollection
 }
 
 // probeRunner is the internal transport shape used by the named probes.
