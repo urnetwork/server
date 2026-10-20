@@ -14896,6 +14896,28 @@ the old one-second drain would have left. `urnetwork_provider_tunnel_retirements
 should be about the probe rate × 11 s. `_backpressure_total` and
 `_errors_total` should be near zero.
 
+By 12:50Z on 10-20, eight hours after the deploy, the `egress_prober` rate had
+fallen from 4,625/s to 3,843/s with probes at 41–56/s. Before the 10-19 outage
+reconnected every provider, it had held at 11,100–16,800/s for days.
+
+The `destination_owner=other` partition has its own background, mostly the
+same cohort as the prober's: a non-companion request, an absent role, and
+`rejected/public/active_top/inactive_derived`. Its destinations are derived
+clients outside the prober network. Like `source_owner=other`, the label does
+not say which apps or services own them. Measured with
+
+```promql
+sum(rate(urnetwork_connect_inactive_destination_details_total{
+  destination_owner="other",destination_lifecycle="inactive_derived",
+  request_companion="false"}[10m]))
+```
+
+it held at about 1,150–1,650/s from 10-16 to 10-19, apart from a partial
+reconnect on 10-18. It fell to near zero in the 10-19 outage and was back to
+1,540/s by 12:50Z on 10-20. A rise after a mass reconnect is this background
+regrowing, not a new leak. Look for a new producer only when it goes above
+that range.
+
 Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 `signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
 tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
