@@ -232,8 +232,8 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
-| 2.2b | Coverage gap | A duration-log freeze detector is missing: `wait-events` and `pg-query-sample` sample far more slowly than a 2–7 s stall, and `host-load` reads five-minute I/O wait. |
-| 2.4a | Coverage gap | Detection of canceled autovacuum passes and of anti-wraparound age is missing: `vacuum-health` reports dead tuples, current vacuum progress and the MVCC horizon, not relfrozenxid age or a discarded pass. |
+| 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
+| 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
@@ -246,7 +246,7 @@ active missing capability and must not be read as green.
 | 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
 | 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
-| 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters come from §2.2b evidence outside the monitor |
+| 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
@@ -6520,34 +6520,36 @@ the sibling target/marker diagnostic to explain why a full anchor exists and
 must never infer the predecessor's phase from a cleanup error.
 
 ### 2.2b Whole-database freezes — release clusters in the duration log
+Probe: `pg-freeze`
 
-A whole-database freeze stalls every writer for seconds and then releases them
-together. PostgreSQL logs each statement of at least 1 s when it ends
-(`log_min_duration_statement` 1 s), so a freeze appears as hundreds of slow
-statements whose end times fall within milliseconds of each other. On edge-2
-the log is `/var/log/postgresql/postgresql-18-main.log`, readable by `by`
-through the `adm` group. Mimir's 15-second samples miss sub-second bursts, so
-freeze detection must come from this log, not from Mimir.
+A whole-database freeze can stall unrelated writers for seconds and release
+many at once. With `log_min_duration_statement` at 1 s, native duration records
+can reveal slow operations whose end times fall within milliseconds. The
+historical incident analysis used `/var/log/postgresql/postgresql-18-main.log`
+and a private reducer (`freeze_report.py`); Mimir's 15-second samples did not
+capture these short bursts.
 
-Reduce on the host, read-only. The reduction prints only timestamps and
-durations, never statement text:
+That historical plaintext reduction is not native-event authority for this
+monitor. PostgreSQL message/SQL continuation escaping does not protect raw
+startup identity fields in `log_line_prefix`: physical timestamp-looking rows
+can be produced by prefix text. `pg-freeze` therefore admits only primary PG18
+JSON records from the existing JSON destination, with the source-location and
+writer checks below. No plaintext fallback is allowed.
 
-```bash
-tail -c 40000000 /var/log/postgresql/postgresql-18-main.log \
-  | awk '{ if (match($0, /LOG:  duration: [0-9.]+ ms/)) print $1, $2, "UTC [0] " substr($0, RSTART, RLENGTH) }'
-```
+The cluster rule remains: sort qualified native duration records by end time,
+chain gaps at most 100 ms, and report each chain's first end time, size and
+median duration. Native extended-protocol Parse, Bind and Execute operations
+can have separate duration records; a record is not necessarily one distinct
+SQL statement or transaction.
 
-Cluster the reduced lines off-host: sort by end time, chain lines whose gaps
-are at most 100 ms, keep chains of at least N statements, and report each
-chain's first end time, size and median duration. The incident's reducer was a
-private script (`freeze_report.py`), not a checked-in tool; this rule is its
-whole contract.
-
-- MEASURES: a freeze cluster is N or more statements of 1 s or more whose end
-  times are chained within 100 ms; its length is their median duration.
-  N = 250 is a freeze; N = 100 and N = 50 count smaller events.
-- ALERT (proposed; no probe or rule implements it): any freeze of 3 s or more,
-  or two or more of 2 s or more within 15 minutes.
+- MEASURES: a freeze cluster is N or more native duration records of 1 s or
+  more whose end times are chained within 100 ms; its length is their median duration.
+  N = 250 qualifies the proposed cluster rule; N = 100 and N = 50 count smaller events.
+- ALERT (`pg-freeze-clusters`; proposed monitor policy, now implemented by
+  `pg-freeze`): WARN,
+  sustain 1, at the normal 15-minute cadence for any witnessed cluster with
+  median at least 3 s, or two with medians at least 2 s within 15 minutes.
+  There is no independent PAGE policy for this observed-log symptom.
 - REFERENCE: on 10-12 there were 12–38 freezes an hour, with 3 s or more at
   13:24, 16:18, 16:34 (7.2 s), 17:40, 19:06, 19:11, 19:28, 19:36 and 21:10Z;
   the 19:36Z and 21:10Z freezes started the PgBouncer livelocks (§2.11a). With
@@ -6561,6 +6563,111 @@ whole contract.
   heavy vacuum load (10-13 01:28–02:10Z: up to 20 clusters of 100 or more per
   15 minutes, the longest 1.9 s, no pool collapse) and are not alerts by
   themselves.
+
+**Bounded structured-log authority.** Before operational use, the intended
+PG18 cluster must already have `logging_collector = on`, `log_destination`
+including `jsonlog`, `log_error_verbosity = verbose`, UTC log timestamps,
+English messages, UTF-8 JSON, and unsampled native duration logging for all
+operations of at least 1 s (`log_min_duration_statement` from 0 through 1000 ms).
+These are source prerequisites, not changes performed by this probe. Existing
+owned configuration does not establish that Main has this JSON/verbose source;
+no configuration, restart or route change is included in this implementation.
+
+The reader authenticates the selected `pg-primary` inventory host before
+opening `/var/lib/postgresql/18/main/current_logfiles`. It reads at most 8192
+metadata bytes, accepts one unambiguous `jsonlog` entry, preserves spaces in
+its filename, and resolves relative paths under that fixed PGDATA. It does not
+scan directories or guess a log filename. Missing, malformed, duplicate,
+unreadable or unsupported discovery returns a fixed unknown. The fixed cluster
+path and administrator-controlled path ancestry are trusted source premises;
+metadata and selected log must be regular nonsymlink leaves, owned by that
+cluster directory's owner and not writable by group or others. Metadata bytes,
+file identity and destination changes are checked around the observation.
+
+The fixed Python program reads at most 40,000,000 bytes from one selected file,
+under a 20-second native timeout (two-second kill grace), a 25-second transport
+timeout and a 30-second signal budget. It decodes complete LF-terminated JSON
+objects once, rejecting duplicate keys before dictionary collapse, noninteger
+numeric values, malformed primary fields and duplicated/reordered writer line
+identities. Each complete physical record is limited to 1 MiB and each JSON
+object to 64 fields; an oversized record is unknown membership, never skipped
+to obtain a median or recovery. These parser resource limits leave the 40 MB
+file cap and numerical incident thresholds unchanged. Every admitted record has UTC millisecond time, a positive integer
+PID and line number, a consistent session ID/start time, primary severity,
+message/backend type and existing verbose source location. PG18 serializes all
+debug levels as the canonical `DEBUG` severity; `DEBUG1` through `DEBUG5` are
+not writer values. Native duration members require `LOG`, `client backend`, omitted ordinary-success `state_code`,
+`file_name = postgres.c`, a positive integer source line, and one of
+`exec_simple_query`, `exec_parse_message`, `exec_bind_message` or
+`exec_execute_message`. Exact source-line equality across patch builds is not
+required. This contract assumes the qualified PG18 writer/server build and
+trusted file ownership; it does not authenticate privileged server extensions
+or operating-system modifications.
+
+Only the primary `message` is inspected for the duration prefix. User/database,
+SQL, detail, context and JSON-looking message substrings are never reparsed as
+records. An identified `pl_exec.c` / `exec_stmt_raise` application `RAISE LOG`
+is excluded from native duration membership. Unknown duration-shaped emitters,
+missing verbose metadata, malformed records or wrong writer identity leave
+membership unknown and cannot be discarded to raise or lower a median. JSON
+framing alone is insufficient native-emitter evidence.
+
+The wire uses a distinct structured-source version and exports only UTC end
+timestamps, integer durations, unique byte positions and fixed framing. SQL,
+user/database names, process/session identity, source paths, log lines and raw
+errors remain private. The projection is capped at 100,000 duration rows and
+8 MiB. These caps are visibility boundaries, not alert thresholds or permission
+to enlarge the budget.
+
+The reducer preserves the exact 100 ms chain, N=250 and median thresholds.
+Identical timestamp/duration observations count separately when their writer
+identities and byte positions are distinct. A positive cluster requires real
+native duration records more than 100 ms before and after it in the observed
+snapshot; EOF or source time is not a following-operation boundary. The first
+end timestamp dates the cluster and the 15-minute cutoff is inclusive. A
+partial cluster's median is not a lower bound. An unparsed record, row cap,
+partial final line or changed captured snapshot cannot manufacture a median.
+A stable closed interior cluster may still WARN beside a chronological capped
+tail or a subsequently changed destination/index. Full captured rows with
+nonchronological timestamps may be sorted for positives but cannot establish
+chronological window coverage; a nonchronological capped tail cannot establish
+complete membership.
+
+`pg-freeze-unobservable` (WARN, sustain 1) holds recovery for missing or ambiguous
+inventory, wrong host, unavailable JSON/verbose source, failed source, malformed
+or duplicated framing/identity/positions, changed boot/file/index, short read,
+rotation, byte/row/output caps, incomplete records, invalid/future clocks,
+nonchronological records, or an uncovered window. Source clocks must be within
+30 seconds of the monitor and agree with bounded monotonic elapsed time. Every
+unresolved first or last native-duration chain intersecting the window stays
+unknown, even when its observed count or median is small: missing members can
+change either value. Parent cancellation observed after the source read or
+completion-clock parsing returns cancellation with no verdict. Unknown may
+accompany independently complete positives and cannot resolve a prior incident.
+
+A quiet observed window requires the whole selected file to fit the unchanged
+40 MB budget, stable complete file/index reads, complete qualified chronological
+records beginning at or before the cutoff, matching boot and fresh source
+clocks, no other uncertainty, and no unresolved edge intersecting the window.
+With real following-record boundaries, any recent final native duration leaves
+such an edge; complete quiet/recovery is available only when no native duration
+of at least 1 s lies in the current window. Older rows may remain. Empty or
+unframed files cannot prove the span. A capped tail always leaves absence
+unknown even when its oldest returned line predates the cutoff. If 40 MB cannot
+span the normal 15-minute workload, that limitation remains visible.
+
+This is authority over an observed append-only structured log snapshot. It does
+not prove every backend event was flushed, continuously enabled logging,
+current logger liveness, or the deployed source/configuration. Runtime source
+qualification and collector resource measurements require separate authorized
+work. A release cluster can also follow heavy work or a relation-lock queue;
+it does not establish a whole-database freeze, unrelated-query impact or a
+storage cause. Native operations below one second, delayed logs, unavailable
+JSON/verbose metadata, unsupported locale/build, rotation and caps can hide
+clusters. These false-positive/false-negative limits remain explicit. Public
+signal, parser, origin, threshold, membership, privacy, cancellation and
+cadence/notifier controls are required; authored controls are not execution or
+Main qualification.
 
 Mechanism, observed live on 10-12:
 
@@ -7015,9 +7122,15 @@ LIMIT 10;
 - HEALTHY: big-table passes complete and `last_autovacuum` advances; no
   cancellation outside deliberate maintenance; every table stays under
   `autovacuum_freeze_max_age`, or its anti-wraparound pass is advancing.
-- ALERT (proposed; no probe implements it): a cancellation that discards a
-  big table's pass in its index or late heap phase, or a table past
-  `autovacuum_freeze_max_age` with no advancing anti-wraparound pass.
+- CANCELLATION ALERT (proposed; not implemented): a cancellation that
+  discards a big table's pass in its index or late heap phase. The bare log
+  line proves an observed cancellation, not the discarded work or its cost;
+  require authoritative relation/pass and at-cancellation phase context.
+  Generic big-table size, late-heap cutoff and deliberate-maintenance
+  authority remain explicit policy/source gaps.
+- AGE RISK: `pg-freeze-age` (§2.4d) implements the separately approved
+  configured-age risk warning. It does not infer a stalled pass from
+  unchanged counters, identify a cancellation, or complete this section.
 
 False-positive qualifier: canceling an autovacuum is ordinary PostgreSQL
 behavior when a conflicting lock queues, and a cancellation on a small table
@@ -7029,10 +7142,20 @@ table looks like ordinary progress unless `heap_blks_scanned` is compared
 across samples, and `last_autovacuum` moves only on completion. The log line is
 the authority; an unreadable or rotated log leaves cancellations unknown.
 
-ACTION: a `SKIP_LOCKED` fix for the maintenance statements is in preparation.
-Until it ships, let a progressing anti-wraparound vacuum finish (§2.4) and do
-not start manual `VACUUM`, `ANALYZE` or `REINDEX` on a table whose autovacuum
-is deep into a pass.
+Observed cancellation now has the narrower `pg-autovacuum-cancel` reader
+(§2.4e): WARN on exact structured PG18 cancellation records from a qualified
+JSON source, without attributing a maintenance fault or discarded work. Its quiet verdict covers only the
+bounded observed file. Generic big-table size, late-heap cutoff, exact
+relation/pass and completion joins, deliberate-maintenance intent and lost-work
+quantity remain missing. This section is still a coverage gap; the new
+observation does not implement its proposed harmful-cancellation policy.
+
+ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
+`pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
+work behind autovacuum. Source presence does not attest the deployed
+Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
+Let independently progressing anti-wraparound work finish (§2.4); do not
+start conflicting maintenance or cancel a pass from this catalog history.
 
 ### 2.4b Database disk runway — growth, temp spill and WAL
 Probe: `pg-disk-space`
@@ -7142,6 +7265,190 @@ The two independent signal keys give the notifier separate completion scopes:
 unknown `pg-disk-runway` does not prevent measured `pg-disk-space` recovery;
 unavailable floor telemetry still prevents clearing an earlier floor incident.
 Storage additions, retention changes and workload changes remain owner actions.
+
+### 2.4d Configured freeze-age risk
+Probe: `pg-freeze-age`
+
+This is the bounded age-risk portion of §2.4a. Observed cancellation records
+use the separate conditional reader in §2.4e; relation/pass correlation at
+cancellation, generic big-table classification, late-heap lost work and
+deliberate-maintenance attribution remain missing.
+`vacuum-health` (§2.4) keeps its existing debt-only trigger, five-minute cadence,
+MVCC context and privacy boundary.
+
+- WARN `pg-freeze-age-risk`: a relation's measured `age(relfrozenxid)` is
+  strictly above its effective `autovacuum_freeze_max_age`, and positive
+  advancement in the same identified anti-wraparound pass is unconfirmed.
+  The approved cadence is 15 minutes with sustain 2; one-shot runs expose
+  the observation without claiming recurrence. Equality is in band.
+  The effective limit is the smaller of the server setting and a declared
+  relation override. No dead-tuple threshold or reindex size policy substitutes
+  for this setting. The nonnegative configured `vacuum_failsafe_age` is numeric context,
+  not proof that failsafe mode has activated, and has no new severity threshold.
+- SOURCE: one bounded direct PostgreSQL query on the unique configured
+  `pg-primary`, with matching source hostname, primary recovery role and a
+  source clock within the existing 30-second primary-reader tolerance. Read
+  every `pg_class` ordinary/TOAST relation (`r`/`t`) in the configured database.
+  A fixed eighteen-cell header/row/trailer protocol carries the total census,
+  database and postmaster generation, actual integer age/limit fields and
+  typed progress. At most 4,096 relation rows are emitted. Missing/duplicate
+  rows, an absent trailer, a count mismatch, over-cap census, bad domains or
+  source failure yield `pg-freeze-age-unobservable`, never healthy from a
+  top-ten or other subset. This is not coverage of other databases,
+  MultiXact age, replicas or every PostgreSQL storage kind.
+- ADVANCEMENT: require two fresh complete observations of the same primary,
+  database, postmaster, relation, backend PID/backend start and query start.
+  Generation timestamps preserve source microseconds, and progress rows join
+  both database and relation OIDs. The autovacuum backend's server-generated activity must identify the
+  anti-wraparound mode; unavailable or unsupported mode remains unconfirmed.
+  Within an unchanged phase, require a strict increase in its valid heap-scan,
+  heap-vacuum or per-index work counter without counter regression. A strict
+  increase in completed index-vacuum cycles also proves work across a phase
+  transition. Phase name changes alone, equal counters, a new pass, resets,
+  missing version fields or a disappeared pass do not prove advancement.
+  Version-missing counters use an unknown sentinel, not zero. A source gap
+  resets the comparison. Comparison spans at most one cadence plus the two
+  source-clock tolerances (16 minutes); a longer interval starts a new baseline.
+- LIFECYCLE: cancellation observed immediately after source-frame validation,
+  including completion-clock cancellation on a malformed, stale or over-cap
+  frame, returns the context cause without publishing findings. It resets the
+  progress comparison and retains previously observed risk targets; a canceled
+  execution supplies no recovery evidence. Those same invalid frames with a live
+  parent retain their fixed visibility findings.
+- RECOVERY: a complete source must observe the risk relation at or below its
+  current limit, or positively establish the same-pass advancement above.
+  A missing previously warned relation stays unknown; absence never silently
+  resolves it, even after a single healthy reading. Progress and previously
+  risky target state are bounded to 4,096 relations per signal instance;
+  tracked targets remain for the instance lifetime so a later disappearance
+  cannot finish absence-based recovery. Legitimate relation removal can thus
+  leave explicit visibility uncertainty; tracking overflow also remains unknown.
+  This in-memory state does not establish continuity across process restarts.
+  A visibility finding protects the signal's existing tickets through the
+  actual cadence/notifier path. Inventory or source errors do not affect the
+  independent `vacuum-health` findings.
+- PUBLIC DATA: SQL reduces backend activity to fixed mode/phase enums and
+  numeric IDs/counters before returning. Relation names, SQL/application text,
+  arbitrary source/error strings and credentials are not public evidence.
+  Each relation has a stable host/database-OID/relation-OID target so the
+  notifier cannot merge unrelated relations by omitting the frame.
+
+False-positive qualifier: this is a configured-age risk warning, not proof of
+stalled work, failed freezing, cancellation, wraparound emergency or user
+impact. A long index phase can perform useful work while its exposed counters
+remain unchanged; warmup and a missing mode/field can leave real progress
+unconfirmed. Activity or completion timestamps that advance beyond the
+source statement timestamp during collection leave the census unknown; the
+reader conservatively rejects that mixed-time snapshot. Do not cancel that
+vacuum, change freeze settings, queue conflicting maintenance or restart the
+primary from this warning.
+False-negative qualifier: an increase proves work only between the matched
+observations, not continuous progress, completion or future safety. Frozen age
+and progress have separate authority; a completed pass or advanced
+`last_autovacuum` alone does not establish an in-band age. Caps, unreadable
+sources remain unknown, and unsupported fields cannot prove advancement.
+No cancellation or current Main
+incident is established by these synthetic source contracts.
+
+ACTION: have the existing PostgreSQL owner verify the effective settings,
+source scope and current pass. Let independently progressing work finish and
+use §2.4 for the separate writer/horizon/debt investigation. VERIFY fresh
+complete below-limit age or positively observed same-pass advancement, and
+retain explicit §2.4a gaps until their source and policy contracts are supplied.
+
+### 2.4e Observed autovacuum cancellation records
+Probe: `pg-autovacuum-cancel`
+
+This is the observation-only part of §2.4a. Every fifteen minutes, one bounded
+read of the single enabled inventory `pg-primary` host observes structured
+PG18 cancellation records. A hostname guard runs before any source opens.
+The fixed cluster `/var/lib/postgresql/18/main/current_logfiles` must name
+exactly one `jsonlog` destination. Relative paths resolve under that cluster;
+spaces in the selected path are preserved. There is no plaintext fallback,
+filename guess, directory scan, SQL query or configuration change. Missing
+JSON configuration or source is explicitly unknown; this reader does not
+establish that Main currently has a supported JSON source.
+
+- WARN `pg-autovacuum-cancel-observed`, sustain one: at least one complete
+  JSON record has primary `backend_type="autovacuum worker"`,
+  `error_severity="ERROR"`, `state_code="57014"` and
+  `message="canceling autovacuum task"` in the inclusive preceding
+  fifteen-minute source-clock window. Timestamp, positive integer PID,
+  session ID/start and increasing process line number must match the pinned
+  PG18 writer schema. A client-generated message cannot replace worker type.
+  Counts are lower bounds on recorded messages, not unique passes or work lost.
+- Each LF-terminated physical object is decoded once. Duplicate keys, nested
+  shapes, missing/conflicting required fields, noninteger JSON numerics and
+  unsupported timestamp forms are rejected. Escaped newlines or JSON-looking
+  text inside user, database, message, SQL, detail or context remain strings;
+  they cannot create another record or override primary fields. Plaintext
+  worker-looking lines are unsupported input and never supply event authority.
+- WARN `pg-autovacuum-cancel-unobservable`, sustain two: missing/ambiguous or
+  excluded/disabled primary, failed transport, unavailable or unqualified
+  index/file, unsupported schema/locale, stale/changed clocks or boot,
+  changed file snapshot, incomplete history, rotation, caps, malformed records
+  or partial lines. Missing evidence never supplies healthy recovery. A
+  separate valid object remains an observation beside coverage gaps, including
+  a changed index/path after a stable read; changed descriptor identity/content
+  or invalid wire rows invalidate the snapshot's event authority.
+- QUIET: a fresh, stable, full regular JSON-file snapshot begins at or before
+  the window cutoff, contains complete chronological qualified records with no
+  coverage flags, and has no qualifying current record. This certifies only
+  the bounded observed file and exact English-message predicate. Empty and
+  recent-only files are unknown. EOF/source time does not prove live logging,
+  continuous historical settings, complete worker emission/flushing, or the
+  completion of a previous pass. An unchanged old index mtime alone is not a
+  source defect: the before/after index identity and contents bind this read.
+
+The trusted cluster directory, index and selected file have the same owner;
+the directory and regular leaves must not be group/world writable. Index/file
+leaf opens refuse symlinks and nonregular files. Administrator-controlled path
+ancestry and trusted PostgreSQL/extension code remain explicit premises, not
+cryptographic authentication. The before/after index bytes/identity and file
+metadata bind the selected snapshot; a JSON shape alone does not authenticate
+an arbitrary user-writable file. Version 2 framing rejects prior plaintext
+collector receipts.
+
+The collector reads at most 8 KiB of index and 40,000,000 log bytes. Complete
+records are bounded to 1 MiB and 64 fields, with at most 100,000 projected
+records/process sessions and 8 MiB of output. There are 20 seconds of native
+execution plus a two-second kill grace, 25 seconds transport, and 30 seconds
+total signal budget. Source freshness is bounded to 30 seconds and wall/monotonic
+collection deltas must agree within one second. Rotation/copytruncate,
+concurrent writes or a busy log can prevent complete observation; no unbounded
+retry, rotated-file traversal or inferred zero extends these bounds.
+
+Privacy: log bodies, SQL, database/user/relation/process identity, source paths,
+file/boot incarnations and raw errors do not enter alerts, Markdown or JSON.
+The private projection carries only numeric offsets/times and bounded framing;
+public observations retain fixed reasons and aggregate record counts.
+
+False-positive qualifier: a real structured cancellation can be ordinary lock
+conflict or deliberate maintenance; a small replacement pass can complete
+normally. This warning asserts neither harm nor faulty maintenance. The
+format/locale contract is the reviewed PG18 UTC/English writer; this file reader
+does not independently attest the deployed build, runtime or historical
+configuration. False-negative qualifier: missing/rotated/capped history,
+unflushed records, unsupported schema/locale, unseen worker events, fatal
+termination and cancellations under another message remain outside this
+predicate. The full big-table, late-phase, intent, same-pass completion/reset
+and lost-work attribution policy remains missing in §2.4a. No thresholds for
+those unresolved properties are inferred from this count.
+
+The primary predicate and string separation follow PostgreSQL 18's
+[worker cancellation emitter](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/tcop/postgres.c),
+[JSON writer](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/utils/error/jsonlog.c),
+[string escaping](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/utils/adt/json.c)
+and [current-log metadata writer](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/postmaster/syslogger.c).
+These source pins establish the reader contract, not native execution or Main
+source availability.
+
+ACTION: correlate owned relation/pass and completion evidence before diagnosing
+repeated work or changing maintenance. Let progressing work finish. Missing
+JSON requires a separate owner decision; do not enable logging or change
+permissions from this observation. Two complete quiet observed-file windows
+can clear this event finding through the existing notifier; neither quiet logs
+nor a replacement pass alone proves recovery of an unobserved historical cause.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
