@@ -399,6 +399,9 @@ func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 }
 
 func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	hosts := env.cfg.redisSweepHosts()
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
@@ -457,6 +460,14 @@ for p in %s; do
     END{if(invalid || !seen["used_memory"] || !seen["maxmemory"] || !seen["used_memory_dataset"] || !seen["mem_clients_normal"] || !seen["mem_clients_slaves"] || !seen["connected_clients"])print "unreachable";else print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
 done`, strings.Join(portNames, " "))
 		out, err := env.runner.shell(ctx, h, script)
+		// A completed callback does not extend its parent lifetime. Reject its
+		// census before it can update medians or re-arm a healthy-row battery.
+		if contextErr := ctx.Err(); contextErr != nil {
+			if err != nil && err != contextErr {
+				return nil, &signalContextError{contextErr: contextErr, sourceErr: err}
+			}
+			return nil, contextErr
+		}
 		if err != nil {
 			failedHosts = append(failedHosts, failedHost{host: h, err: err})
 			continue
