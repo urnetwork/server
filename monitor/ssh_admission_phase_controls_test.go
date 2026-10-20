@@ -74,5 +74,5 @@ func TestSshAdmissionPhaseCancellationRetainsActualBoundary(t *testing.T) {
 	if calls != 1 || !errors.Is(nextErr, context.Canceled) {
 		t.Fatal("pre-canceled control reached acquisition")
 	}
-	requireSshAdmissionPhaseVisibility(t, nextErr, observationErrorClassCanceled, "")
+	requireSshAdmissionPhaseVisibility(t, nextErr, observationErrorClassCanceled, "", "transport-preflight/not-attempted")
 }
