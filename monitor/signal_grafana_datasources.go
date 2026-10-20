@@ -58,6 +58,9 @@ type grafanaDatasourceQuerySample struct {
 }
 
 func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	environment := strings.TrimSpace(env.cfg.env)
 	domain := strings.TrimSpace(env.cfg.publicDomain)
 	if environment == "" || domain == "" {
@@ -78,6 +81,9 @@ func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]fi
 
 	findings := make([]finding, 0, 2*len(requiredGrafanaDatasourceQueries))
 	for _, spec := range requiredGrafanaDatasourceQueries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		sample, err := queryGrafanaDatasource(
 			ctx,
 			client,
@@ -85,6 +91,9 @@ func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			env.cfg.grafanaAdminPassword,
 			spec,
 		)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
 		target := hostname + "/" + spec.uid
 		if err != nil {
 			findings = append(findings, cannotObserveFinding(target, err))
@@ -228,17 +237,20 @@ func evaluateGrafanaDatasourceQuery(target string, spec grafanaDatasourceQuerySp
 		}
 	}
 
+	// A failed query names a symptom but cannot prove plugin execution.
+	// Keep its visibility through the cadence gate so absence cannot clear
+	// an earlier plugin incident before a successful control.
 	return []finding{
-		pluginHealthy,
 		{
-			probeId: "observability/grafana-datasources", tier: tierWarn,
+			unobservable: true,
+			probeId:      "observability/grafana-datasources", tier: tierWarn,
 			class: "grafana-datasource-query", target: target, frame: spec.uid, sustain: 2,
 			symptom:   fmt.Sprintf("Grafana's provisioned %s datasource query is failing", spec.uid),
 			mechanism: "The authenticated Grafana query boundary did not return a successful datasource result. This path includes Grafana authentication, plugin execution, the provisioned datasource URL, and the backend query. Status and a fixed error class describe the observed failure; upstream response and error text are omitted.",
 			baseline:  "Grafana /api/ds/query returns HTTP 200 and a successful result for both warp-mimir and warp-loki on every probe.",
 			observed:  observed,
 			evidence:  "bounded Grafana response summary: " + observed,
-			context:   "A green /api/health or successful direct backend request does not clear this finding because both bypass the dashboard datasource boundary.",
+			context:   "A failed HTTP or result envelope does not prove plugin registration, so this finding also keeps plugin execution unknown. A green /api/health or successful direct backend request does not clear this finding because both bypass the dashboard datasource boundary.",
 			action:    fmt.Sprintf("Inspect the %s status and error class with same-window privacy-reviewed Grafana evidence, then identify and repair the failed plugin, provisioned URL, or backend path. Do not recreate a correct datasource row or suppress the query error before identifying the failed layer.", spec.uid),
 			verify:    fmt.Sprintf("%s returns a successful result through Grafana /api/ds/query on two consecutive probes and the deploy-readiness datasource check passes on every active Grafana block.", spec.uid),
 			playbook:  "SIGNALS.md §11.15 and §11.9",
