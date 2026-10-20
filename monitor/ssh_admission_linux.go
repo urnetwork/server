@@ -128,6 +128,16 @@ func (self *sharedSshAdmission) acquire(ctx context.Context, host string) (func(
 	return self.store.acquire(ctx, self.owner, self.owner.Identity, sshAdmissionWatch, []string{host})
 }
 
+// Copy the retained native-derived watcher identity; no fresh identity read.
+func (self *sharedSshAdmission) pgSampleWriterGeneration() pgSampleWriterGeneration {
+	return pgSampleWriterGeneration{Schema: 1, Role: sshAdmissionWatch, Owner: self.owner}
+}
+
+// A diagnostic is the local writer even when its lease names a watcher.
+func (self *sharedSshDiagnosticAdmission) pgSampleWriterGeneration() pgSampleWriterGeneration {
+	return pgSampleWriterGeneration{Schema: 1, Role: sshAdmissionDiagnostic, Owner: self.owner}
+}
+
 func newSshAdmissionStore(directory, bootId string) (*sshAdmissionStore, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return nil, errors.New("SSH admission directory must be absolute")
