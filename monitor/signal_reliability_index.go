@@ -68,10 +68,23 @@ const reliabilityIndexCatalogQuery = `
 		COALESCE((SELECT definition FROM desired_index), ''),
 		(SELECT count(*) FROM table_partitions),
 		(SELECT count(*) FROM attached_children),
-		(SELECT count(*) FROM attached_children WHERE NOT indisvalid);
+		(SELECT count(*) FROM attached_children WHERE NOT indisvalid),
+        CASE
+            WHEN EXISTS (SELECT 1 FROM table_state WHERE relkind='p') THEN 'partitioned'
+            WHEN EXISTS (SELECT 1 FROM table_state WHERE relkind='r') THEN 'plain'
+            WHEN EXISTS (SELECT 1 FROM table_state) THEN 'unsupported'
+            WHEN EXISTS (
+                SELECT 1 FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                WHERE c.relname='client_reliability' AND n.nspname<>'public'
+                  AND c.relkind IN ('r','p')
+            ) THEN 'wrong-schema'
+            ELSE 'absent'
+        END;
 `
 
 type reliabilityIndexState struct {
+	tableStatus       string
 	partitioned       bool
 	oldExists         bool
 	desiredExists     bool
@@ -83,8 +96,8 @@ type reliabilityIndexState struct {
 }
 
 func parseReliabilityIndexState(row pgRow) (reliabilityIndexState, error) {
-	if len(row) != 8 {
-		return reliabilityIndexState{}, fmt.Errorf("reliability index query returned %d columns, want 8", len(row))
+	if len(row) != 9 {
+		return reliabilityIndexState{}, fmt.Errorf("reliability index query returned %d columns, want 9", len(row))
 	}
 	parseBool := func(column int, name string) (bool, error) {
 		value, err := strconv.ParseBool(row.str(column))
@@ -101,7 +114,12 @@ func parseReliabilityIndexState(row pgRow) (reliabilityIndexState, error) {
 		return value, nil
 	}
 
-	state := reliabilityIndexState{desiredDefinition: row.str(4)}
+	state := reliabilityIndexState{desiredDefinition: row.str(4), tableStatus: row.str(8)}
+	switch state.tableStatus {
+	case "partitioned", "plain", "unsupported", "wrong-schema", "absent":
+	default:
+		return reliabilityIndexState{}, fmt.Errorf("invalid reliability relation status")
+	}
 	var err error
 	if state.partitioned, err = parseBool(0, "partitioned"); err != nil {
 		return reliabilityIndexState{}, err
@@ -123,6 +141,9 @@ func parseReliabilityIndexState(row pgRow) (reliabilityIndexState, error) {
 	}
 	if state.invalidChildren, err = parseCount(7, "invalid child index"); err != nil {
 		return reliabilityIndexState{}, err
+	}
+	if state.partitioned != (state.tableStatus == "partitioned") {
+		return reliabilityIndexState{}, fmt.Errorf("inconsistent reliability relation status")
 	}
 	return state, nil
 }
@@ -178,6 +199,21 @@ func (reliabilityIndexProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	}
 
 	target := pgTarget(env)
+	if state.tableStatus != "partitioned" {
+		issue := cannotObserveFinding(target, fmt.Errorf("invalid response: reliability index scope unavailable"))
+		issue.frame = "table=client_reliability"
+		issue.symptom = "The post-cutover reliability-index contract is unobserved"
+		issue.observed = "relation_status=" + state.tableStatus + " post_cutover_index_observed=false"
+		issue.mechanism = "The required public relation is absent, has another schema or kind, or is the ordinary pre-cutover table. None observes the partitioned index contract or proves recovery of an earlier drift."
+		if state.tableStatus == "plain" {
+			issue.symptom = "The reliability-index probe observes an ordinary pre-cutover table outside its physical scope"
+			issue.mechanism = "The documented pre-cutover plain table is not covering-index drift; the partition cutover builds its index separately. This snapshot does not establish that a previous post-cutover incident recovered, or authorize a cutover."
+		}
+		issue.action = "Confirm the intended database/schema and cutover state from the owning schema and operational record. Preserve any existing index incident; this scope observation does not authorize migrations, builds, drops or a service restart."
+		issue.verify = "Observe the partitioned physical contract before clearing a previous drift. A legitimate pre-cutover scope decision remains separate from index recovery."
+		issue.playbook = "SIGNALS.md §8.10"
+		return []finding{issue}, nil
+	}
 	reason := state.driftReason()
 	if reason == "" {
 		return []finding{healthyFinding("pg/reliability-index", tierWarn, "reliability-index-drift", target)}, nil
