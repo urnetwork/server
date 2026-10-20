@@ -112,6 +112,13 @@ func TestSimulationHandlersRestoreAndMaintainProviderEligibility(t *testing.T) {
 		writeMatureReliabilityScores(ctx, server.NowUtc(), 13*time.Hour, reliabilities)
 		assertReliabilityConnected("registered", true)
 		assertProviderCount("registered", 1)
+		// Another live process stamps the provider liveness writer set, so the
+		// set vouches and this handler, which never stamps, reads as ended once
+		// its heartbeat is stale. Alone and unvouched, a stale handler is judged
+		// live (model/network_client_handler_liveness.go).
+		if err := model.PublishProviderLivenessWriter(ctx, server.NewId()); err != nil {
+			t.Fatal(err)
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `UPDATE network_client_handler SET heartbeat_time = $2 WHERE handler_id = $1`,
 				self.handlerIds[0], server.NowUtc().Add(-3*model.NetworkClientHandlerHeartbeatTimeout)))
