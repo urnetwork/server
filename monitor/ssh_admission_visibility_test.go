@@ -21,8 +21,11 @@ func (self *sshAdmissionPhaseFixture) acquire(ctx context.Context, host string) 
 }
 
 // Exercise both real visibility reducers, including stable identity and privacy.
-func requireSshAdmissionPhaseVisibility(t *testing.T, err error, errorClass, phases string) {
+func requireSshAdmissionPhaseVisibility(t *testing.T, err error, errorClass, phases string, executionBoundaries ...string) {
 	t.Helper()
+	if len(executionBoundaries) > 1 {
+		t.Fatal("admission control requires at most one exact execution-boundary set")
+	}
 	settings := syntheticSettings(&syntheticSource{})
 	signal := NewProviderCountSignal()
 	whole := visibilityAlert(settings, signal, err)
@@ -31,6 +34,9 @@ func requireSshAdmissionPhaseVisibility(t *testing.T, err error, errorClass, pha
 	wantObserved := "error_class=" + errorClass
 	if phases != "" {
 		wantObserved += " ssh_admission_failures=" + phases
+	}
+	if len(executionBoundaries) == 1 {
+		wantObserved += " execution_boundaries=" + executionBoundaries[0]
 	}
 	for _, alert := range []Alert{whole, partial} {
 		if alert.Observed != wantObserved {

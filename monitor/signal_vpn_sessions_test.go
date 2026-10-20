@@ -321,6 +321,13 @@ func vpnSessionTestSettings(t *testing.T, now time.Time, output string) SignalSe
 	if !strings.Contains(output, "server_unit_observed ") {
 		output = "server_unit_observed true\n" + output
 	}
+	// These pre-reduced fixtures represent completed authoritative producers.
+	if !strings.Contains(output, "status_observed ") {
+		output = "status_observed true\n" + output
+	}
+	if !strings.Contains(output, "journal_observed ") {
+		output = "journal_observed true\n" + output
+	}
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "server.example.test" || host.SSHUser != "ubuntu" || len(host.SSHKeyPaths) != 1 || host.SSHKeyPaths[0] != "/keys/vpn" {
 			return "", fmt.Errorf("unexpected VPN host settings: %+v", host)

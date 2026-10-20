@@ -5246,7 +5246,20 @@ cannot become an attributed SQL failure. The finite envelope itself is capped
 at1KiB and validated for exact fields/enums before persistence. No raw exception
 or stderr fragment is retained, including unclassified failures.
 
-An attempted receipt also retains optional `transport_observation` facts from
+may retain private `writer_generation` metadata copied
+from the configured shared SSH admission owner's existing native-derived
+snapshot: watcher or diagnostic role, boot/PID/start ticks, service invocation
+and cgroup identity. It is attached locally after source parsing and covered
+by the immutable receipt hash; continuous-state schema and cadence are unchanged.
+A separate reader may correlate the complete tuple and role with its independently
+bound watcher authority. This is declared generation correlation, not an
+authenticated or physical file-writer proof, SSH grant proof, or remote ownership.
+A diagnostic names its own owner, never the watcher whose queue it joins.
+Missing, legacy or unsupported metadata leaves generation attribution unknown
+without discarding valid source findings. Post-start clocks alone remain
+insufficient. These private identities must not enter alerts or stream labels.
+
+An attempted receipt An attempted receipt also retains optional `transport_observation` facts from
 the owning SSH lifecycle. The last local stage distinguishes transport
 preflight, host admission, shared admission, native start and a started child;
 an unobserved adapter stays unknown. `spawn` separates not-attempted,
@@ -20601,6 +20614,22 @@ sample fails closed from `contract-hmac-incompatible` PAGE to
 `contract-hmac-readiness` WARN. That class reassignment is not a severity
 downgrade of one Alert identity, does not prove receiver recovery, and cannot
 retroactively negate an earlier behaviorally confirmed incompatibility.
+
+The readiness WARN retains its existing identity, severity and sustain, but
+marks this run unobservable for incompatible-incident recovery. Its fixed
+`incompatible_recovery_observable=false` qualifier states the boundary: legacy
+claims remain, and the current controls do not establish compatibility. The
+ordinary notifier therefore gives neither held nor emitted readiness samples
+absent-run clear credit for a prior incompatible PAGE. No prior incident is
+invented from readiness alone. Two later complete no-legacy samples can clear
+the monitor incident through the existing notifier gate; that operational clear
+does not replace the security/availability and runtime closure evidence below.
+Deterministic composed controls retain the PAGE through consecutive degraded
+compatible controls, schema/source/parse failures and a requalified PAGE, keep
+the readiness WARN independent, and clear only after two complete no-legacy
+runs. Public render and cancellation controls retain privacy and lifecycle
+boundaries. These local controls are not Main recovery evidence.
+
 Diagnose the compatible-cohort degradation as a separate boundary while
 retaining the prior HMAC incident until its full closure gate passes. This
 prevents a shared capacity or reachability regression from hiding an already
@@ -33320,6 +33349,22 @@ sustained; ownership and progress require independent evidence) and
 `pg/task-target-missing` (`Target not found`
 past 100 retries = beyond any overlap, a missing registration) — both in
 `signal_task_convergence.go`, 60s cadence.
+The missing-target finding represents the aggregate nonempty result, with one
+stable identity per PostgreSQL target and no task-family frame. The top-ranked
+family and retry count are evidence; switching rank between two persistent
+failures must not restart its two-run sustain. Two consecutive complete
+positive reads therefore qualify even when their highest-count families differ.
+A failed read remains `cannot-observe` and cannot establish recovery; a later
+independent source failure still preserves already completed due-lag findings.
+- FALSE-POSITIVE QUALIFIER: a repeated count over 100 establishes the configured
+  retry condition, not independent proof that deployment overlap has ended or
+  that the current worker registry is missing the target. Confirm exact fleet
+  generations and target admission before assigning that cause.
+- FALSE-NEGATIVE QUALIFIER: the query returns at most five examples. Rank or
+  top-five membership changes do not prove recovery of any omitted task family;
+  examples are not a complete affected-task inventory. This aggregate alert
+  establishes presence of qualifying work, not per-family clearance. Its
+  identity must remain stable while any qualifying example is observed.
 Within ~1min of a taskworker deploy completing:
 - oldest-due lag returns to ~0:
 ```sql
@@ -39274,7 +39319,20 @@ This known readiness state is not a probe execution error: a one-shot retains
 the warning and can complete. Stale/incomplete total-point snapshot findings
 remain independent; no operator-readiness healthy sentinel or ST fallback is
 emitted. Preflight read errors or malformed rows still fail closed as
-observation errors.
+observation errors. While the parent is live, a valid complete snapshot that
+already establishes `points-leaderboard-stale` retains that warning if the later
+schema or operator-source read/parse fails. This owning partial result also
+returns a separate `cannot-observe` WARN at the fixed target
+`points-readiness/operator-schema` or `points-readiness/operator-source`;
+its unobservable marker prevents healthy/recovery inference for the signal,
+even while below Sustain. It is returned without a fatal signal error because
+the public adapter discards findings on error. No operator health or failed
+layer's product conclusion is emitted. A fresh snapshot with no established
+positive retains the existing fatal observation-error contract. An ended
+parent, failed original snapshot read, or malformed original snapshot cannot
+publish a stale positive or healthy result; known snapshot absence retains
+its existing unavailable warning. Source-local cancellation/deadline errors
+with a live parent are dependency failures, not proof the parent ended.
 
 When the preflight passes, a third single-output-row, command-deadline-bounded
 query uses a UTC-normalized database clock and the owning model's calendar constants.
@@ -39405,7 +39463,13 @@ Sunday boundaries, exact rollup eligibility, incomplete and missing payment
 links, asynchronous snapshot/source handoffs, observation failures, stale and
 incomplete snapshots, absent/present/malformed schema preflights, one-shot
 completion with a readiness warning, and genuine internal/calendar
-contradictions once the operator schema is observable.
+contradictions once the operator schema is observable. The independent-positive
+controls in `signal_points_partial_test.go` cover stale/future snapshots crossed
+with later read/parse failures, exact dependency stopping points, public
+one-shot/execution-loop held results, actual parent cancellation, private-cell
+and source-error rendering, and no incident clear until complete recovery.
+These controls do not establish a production incidence or repair the external
+points product's writer, rollout, accounting or task boundaries.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
@@ -41037,6 +41101,23 @@ diagnostic metadata: unavailable or malformed counts are `unknown`, not zero,
 and do not erase an independently authoritative failed/stopped unit state.
 These checks add no command, retry, contact, timeout or permission change.
 
+Producer completeness is distinct from metadata freshness and the final shell
+pipeline status. The generated POSIX reader records fixed terminal success or
+failure markers independently for the status-file `cat` and bounded journal
+read, then reduces both through the existing shared source-equality map. An
+upstream nonzero exit after empty output or a valid prefix cannot borrow the
+success of `awk` or later pings. Status producer failure leaves membership and
+absence unknown; optional journal failure discards its partial timeout rows and
+adds visibility unknown while retaining complete current membership, admitted
+path failures and authoritative unit-state findings. Neither failure may render
+raw producer errors, public sources or unrelated identities. A legacy body
+without completion provenance is unavailable. Successful capture does not prove
+an atomic status-writer snapshot or reconstruct missing historical journal data.
+Generated-command public controls in
+`signal_vpn_sessions_producer_test.go` distinguish these failures from complete
+healthy, complete empty/missing membership, current path-loss and failed-unit
+controls. No production producer failure or management-route cause is inferred.
+
 HEALTHY: the VPN server is `active/running`; its status file is no more than 90
 seconds old (the live configuration uses OpenVPN's 60-second default status
 interval, plus 30 seconds of scheduler/write tolerance); every enabled
@@ -41057,6 +41138,13 @@ BROKEN:
   prove an absent process or outage mechanism. Check the exact process, EC2 instance/system checks,
   UDP/443 listener, journal, and network boundary before assigning every
   client independently.
+- `vpn-status-unavailable` is an immediate WARN visibility finding when fresh
+  status metadata lacks a successful complete status producer. Do not infer
+  absent clients or healthy membership from a readable prefix or empty output.
+- `vpn-session-history-unavailable` is an immediate WARN visibility finding
+  when the independent bounded journal read is incomplete. Current complete
+  membership and path findings remain valid; recent timeout/source attribution
+  stays unknown and cannot clear a previous incident.
 - `vpn-status-stale` after two cadences means the status writer is more than 90
   seconds old or in the future. An old row is UNKNOWN, not evidence that its
   client remains connected.

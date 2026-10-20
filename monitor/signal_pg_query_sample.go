@@ -289,6 +289,7 @@ type pgQuerySampleReceipt struct {
 	privateQueryIds           map[string]string
 
 	TransportObservation *pgSampleTransportReceipt `json:"transport_observation,omitempty"`
+	WriterGeneration     *pgSampleWriterGeneration `json:"writer_generation,omitempty"`
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -871,6 +872,8 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 	}
 	r.FinishedAt = env.now().UTC()
+	// Local provenance is attached after the remote projection replaces r.
+	r.WriterGeneration = pgSampleWriterGenerationFor(env.cfg.sharedSshAdmission)
 	raw, privateSql, err := pgSampleEncodeReceipts(&r)
 	if err != nil {
 		return nil, errors.New("monitor: bounded PG sample receipt exceeds bound")

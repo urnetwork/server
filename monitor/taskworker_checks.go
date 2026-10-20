@@ -138,7 +138,9 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		}
 		findings = append(findings, finding{
 			probeId: "pg/task-target-missing", tier: tierWarn,
-			class: "task-target-missing", target: target, frame: missingRows[0].str(0), sustain: 2,
+			// This finding reports the aggregate condition, not its top-ranked
+			// example. Ranking changes must not reset its consecutive-run gate.
+			class: "task-target-missing", target: target, sustain: 2,
 			symptom:  fmt.Sprintf("%d task(s) erroring `Target not found` past 100 retries — beyond any deploy overlap; a task type shipped without its target registration", len(missingRows)),
 			baseline: "target-not-found is normal only during a deploy overlap (version skew, flat ~16s retry); it must clear once the fleet settles on one build (12.4)",
 			observed: fmt.Sprintf("tasks=%d top_errors=%s", len(missingRows), missingRows[0].str(1)),
