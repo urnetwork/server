@@ -73,7 +73,21 @@ func workerCapQuery(environment string) string {
 	return strings.Join(parts, " or ")
 }
 
-func (workerCapProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+// The probe owns cancellation even when an alternate source ignores its ctx.
+func (workerCapProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if contextErr := ctx.Err(); contextErr != nil {
+			result = nil
+			if resultErr == nil || resultErr == contextErr {
+				resultErr = contextErr
+			} else {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+		}
+	}()
 	hosts := env.cfg.hostsWithRole("services")
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("worker cap: no services host in inventory")
@@ -81,6 +95,9 @@ func (workerCapProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(workerCapQuery(env.cfg.env))
 	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
 		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'")
+	if ctx.Err() != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("worker cap: query Mimir: %w", err)
 	}

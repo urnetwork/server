@@ -12574,6 +12574,11 @@ capacity clearance or current recovery follows from this historical result.
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
+An ended parent refuses source entry. If the owner ends during collection,
+optional enrichment or reduction, publish no findings and retain independent
+source errors privately. A live owner still keeps base heap findings when
+optional enrichment is unavailable; lifecycle and partial-source rules differ.
+
 Query the pushed Go runtime metrics through any services host's loopback Mimir
 front and compare fresh taskworker processes, keeping host, block, and runtime
 instance identity:
@@ -12911,6 +12916,10 @@ or exact-process artifact provenance.
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
 
+As with worker-memory and worker-cap, an ended parent refuses source entry;
+ending during any source/enrichment or reduction discards findings and retains
+independent source errors privately. Live-parent partial positives stay valid.
+
 Query paired one-minute process rates through a services host's loopback
 Mimir front, retaining exact host, block, and runtime instance identity:
 
@@ -13190,6 +13199,14 @@ Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 
 ### 2.12b Taskworker scheduler capacity — process cap is not host headroom
 Probe: `worker-cap`
+
+An already-ended parent refuses the worker-cap source callback. If that parent
+ends during observation or reduction, publish neither pressure nor partial
+visibility/healthy findings. Retain any independently returned source error in
+the private error chain without replacing the parent's lifecycle verdict.
+A live parent still preserves complete sibling pressure and incomplete-runtime
+visibility independently. This is an alternate-source lifecycle guard, not
+evidence that a canceled native SSH command ran or that Main was affected.
 
 Join source-fresh `rate(process_cpu_seconds_total[5m])`,
 `go_sched_gomaxprocs_threads`, and `go_goroutines` by the **same**
