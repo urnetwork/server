@@ -33320,6 +33320,22 @@ sustained; ownership and progress require independent evidence) and
 `pg/task-target-missing` (`Target not found`
 past 100 retries = beyond any overlap, a missing registration) — both in
 `signal_task_convergence.go`, 60s cadence.
+The missing-target finding represents the aggregate nonempty result, with one
+stable identity per PostgreSQL target and no task-family frame. The top-ranked
+family and retry count are evidence; switching rank between two persistent
+failures must not restart its two-run sustain. Two consecutive complete
+positive reads therefore qualify even when their highest-count families differ.
+A failed read remains `cannot-observe` and cannot establish recovery; a later
+independent source failure still preserves already completed due-lag findings.
+- FALSE-POSITIVE QUALIFIER: a repeated count over 100 establishes the configured
+  retry condition, not independent proof that deployment overlap has ended or
+  that the current worker registry is missing the target. Confirm exact fleet
+  generations and target admission before assigning that cause.
+- FALSE-NEGATIVE QUALIFIER: the query returns at most five examples. Rank or
+  top-five membership changes do not prove recovery of any omitted task family;
+  examples are not a complete affected-task inventory. This aggregate alert
+  establishes presence of qualifying work, not per-family clearance. Its
+  identity must remain stable while any qualifying example is observed.
 Within ~1min of a taskworker deploy completing:
 - oldest-due lag returns to ~0:
 ```sql
