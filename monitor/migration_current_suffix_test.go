@@ -203,6 +203,14 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert DROP COLUMN deliver_time`},
 		{"required measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET NOT NULL`},
 		{"invented measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET DEFAULT now()`},
+		{name: "missing device client version", version: 852, sql: `ALTER TABLE device DROP COLUMN client_version`},
+		{name: "missing device client version time", version: 852, sql: `ALTER TABLE device DROP COLUMN client_version_time`},
+		{name: "device client version widened", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version TYPE varchar(65)`},
+		{name: "device client version time has a timezone", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time TYPE timestamp with time zone`},
+		{name: "required device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET NOT NULL`},
+		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
+		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
+		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -312,4 +320,51 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 			}
 		})
 	})
+}
+
+// Missing future columns are pending; published omissions must reach the public reducer.
+func TestMigrationsDeviceClientVersionPublicationBoundary(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 852 {
+		t.Fatalf("device client-version migration is not published: head=%d", head)
+	}
+	artifact := migrationCurrentSuffixTestContract(t, 852).artifact
+	for _, test := range []struct {
+		version int
+		present bool
+		class   string
+	}{
+		{version: 851, class: "migration-behind"},
+		{version: head, present: true},
+		{version: head, class: "migration-schema-drift"},
+	} {
+		row := syntheticMigrationArtifactRow(test.version)
+		row[artifact.rowColumn] = "f"
+		if test.present {
+			row[artifact.rowColumn] = "t"
+		}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(test.version), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.class == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("coherent device columns produced %d alerts", len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("version %d produced %d alerts, want exactly one %s", test.version, len(alerts), test.class)
+		}
+		alert := requireAlertClass(t, alerts, test.class)
+		if test.class == "migration-schema-drift" && !strings.Contains(alert.Markdown(), fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)) {
+			t.Fatal("published device-column drift lost its owning artifact")
+		}
+	}
 }

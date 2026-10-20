@@ -26725,6 +26725,16 @@ contract in the coverage controls) was this missing append, a local validator
 failure rather than an observation of Main's schema. This check does not
 establish that Main applied 850.
 
+Version 852 adds nullable `device.client_version` (`varchar(64)`) and
+`client_version_time` (`timestamp without time zone`), both ordinary stored
+columns without defaults. The versioned artifact checks both exact column
+shapes. Missing columns are pending before 852 and schema drift once that
+version is recorded at a source-known head. Failed or canceled catalog reads
+remain unknown. This is detector coverage, not evidence that Main lacks the
+columns or that the migration has run there. Matching schema does not establish
+when a device connected or whether its reported app version is fresh; the
+probe reads catalog metadata, not device values.
+
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
 permits retirement with unchanged, previously retained excluded proof. The
