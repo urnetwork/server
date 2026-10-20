@@ -122,9 +122,12 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 	if !settings.AutomationPolicy.Enabled {
 		return nil, ErrAutomationDisabled
 	}
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			// Open admission and a draining FIFO are ordinary polling states,
+			// not panics that should emit an unexpected-error stack each poll.
+			result, stateErr = nil, nil
 			round, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
 			var existing []byte
@@ -139,12 +142,14 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			now := self.nowUtc()
 			if round.Canceled || now.Before(round.ClosesAt) {
-				panic(ErrReviewNotReady)
+				stateErr = ErrReviewNotReady
+				return
 			}
 			var active int
 			server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM competition_job WHERE round_id=$1 AND state IN ('queued','running')`, roundId).Scan(&active))
 			if active != 0 {
-				panic(ErrReviewNotReady)
+				stateErr = ErrReviewNotReady
+				return
 			}
 			seal := model.CompetitionEvaluationSeal{Staging: round.Staging, RoundId: roundId, Environment: policy.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: policy.AutomationPolicy.SeasonId,
 				Epoch: round.Epoch, SealedAt: now, PublicationAt: now, TerminalCounts: map[string]int{}, Entries: []model.CompetitionSealedEntry{}}
@@ -237,6 +242,9 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			result = automationResultInTx(ctx, tx, roundId)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 

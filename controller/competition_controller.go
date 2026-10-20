@@ -5806,6 +5806,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	if _, identityErr := validateRuntimeImageDigest(workerImageDigest); identityErr != nil {
 		return nil, identityErr
 	}
+	if settings.AutomationPolicy.Enabled && !model.SupportsCompetitionAutomationCapability(settings.AutomationPolicy.RequiredApiCapability) {
+		return nil, ErrUnsupportedDecisionMode
+	}
 	now := self.nowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
 
@@ -5892,7 +5895,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				  AND ($7::uuid IS NULL OR r.round_id=$7)
 				ORDER BY j.submitted_at, j.job_id
 				LIMIT 1 FOR UPDATE OF j SKIP LOCKED
-			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, model.CompetitionAutomationCapability, optionalAutomationRoundId(settings), settings.AutomationPolicy.Staging)
+			`, now, settings.AutomationPolicy.Enabled, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, settings.AutomationPolicy.RequiredApiCapability, optionalAutomationRoundId(settings), settings.AutomationPolicy.Staging)
 			var scanErr error
 			job, scanErr = scanJob(row, true, self.nowUtc())
 			if errors.Is(scanErr, pgx.ErrNoRows) {
