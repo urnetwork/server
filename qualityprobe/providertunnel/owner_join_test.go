@@ -70,7 +70,7 @@ func (self *ownerJoinTestOob) CloseAndWait(ctx context.Context) error {
 
 // A real admitted credential request remains live after the graceful deadline
 // and strategy cancellation. The URL worker must remain owned until it finishes.
-func TestCloseTunnelPartsRetainsActualGeneratorAfterDeadline(t *testing.T) {
+func TestRetireTunnelPartsRetainsActualGeneratorAfterDeadline(t *testing.T) {
 	connect.GetMessagePoolAggregateStats()
 	synctest.Test(t, func(t *testing.T) {
 		lifecycleCtx, cancelLifecycle := context.WithCancel(t.Context())
@@ -104,7 +104,7 @@ func TestCloseTunnelPartsRetainsActualGeneratorAfterDeadline(t *testing.T) {
 		defer closeCancel()
 		closed := make(chan error, 1)
 		go func() {
-			closed <- closeTunnelParts(closeCtx, func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone, multiClient, generator,
+			closed <- retireTunnelParts(closeCtx, func() {}, func() error { return nil }, pumpDone, multiClient, generator,
 				func() { strategy.Close(); close(strategyClosed) }, cancelLifecycle)
 		}()
 		<-strategyClosed
@@ -214,7 +214,7 @@ func TestOpenFailureRetainsActualGeneratorAfterDeadline(t *testing.T) {
 
 // A slow owner must occupy its own worker only. A second private generator
 // closes immediately without waiting for or inheriting the first owner's error.
-func TestCloseTunnelPartsOwnersRemainIndependent(t *testing.T) {
+func TestRetireTunnelPartsOwnersRemainIndependent(t *testing.T) {
 	connect.GetMessagePoolAggregateStats()
 	synctest.Test(t, func(t *testing.T) {
 		entered, release, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -237,7 +237,7 @@ func TestCloseTunnelPartsOwnersRemainIndependent(t *testing.T) {
 		cancelClose()
 		firstClosed := make(chan error, 1)
 		go func() {
-			firstClosed <- closeTunnelParts(closeCtx, func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone,
+			firstClosed <- retireTunnelParts(closeCtx, func() {}, func() error { return nil }, pumpDone,
 				&recordingCloseWaiter{name: "first", order: &firstOrder}, first, firstStrategy.Close,
 				func() { cancelFirst(); close(canceled) })
 		}()
@@ -250,7 +250,7 @@ func TestCloseTunnelPartsOwnersRemainIndependent(t *testing.T) {
 			return &connect.RemoveNetworkClientResult{}, nil
 		})
 		second.RemoveClientArgs(&connect.MultiClientGeneratorClientArgs{ClientId: connect.NewId()})
-		if err := closeTunnelParts(t.Context(), func() {}, func(context.Context) {}, func() {}, func() error { return nil }, pumpDone,
+		if err := retireTunnelParts(t.Context(), func() {}, func() error { return nil }, pumpDone,
 			&recordingCloseWaiter{name: "second", order: &secondOrder}, second, secondStrategy.Close, cancelSecond); err != nil {
 			t.Fatal(err)
 		}

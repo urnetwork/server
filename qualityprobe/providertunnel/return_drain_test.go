@@ -45,7 +45,7 @@ func (self *drainTimers) next(t *testing.T, want time.Duration) drainTimer {
 
 func newTestProviderReturnDrain() (*providerReturnDrain, *drainTimers) {
 	timers := newDrainTimers()
-	drain := newProviderReturnDrain(time.Second, 5*time.Second)
+	drain := newProviderReturnDrain(time.Second, 5*time.Second, 10*time.Second, time.Minute)
 	drain.after = timers.after
 	return drain, timers
 }
@@ -207,11 +207,12 @@ func (self *recordedGenerator) CloseAndWait(context.Context) error {
 // The derived client is a destination the provider keeps retransmitting to
 // until it acknowledges. Close must end the provider's flows while that client
 // and the whole data path are still live: retire the private resolver's pooled
-// connections, then hold teardown while the provider is still returning data.
-// Nothing that stops acknowledgement -- the data path, the multi-client or the
-// generator's revocation -- may start until the drain ends, and the rest of
-// the teardown keeps its order afterwards.
-func TestCloseTunnelPartsEndsProviderFlowsBeforeRevokingTheDerivedClient(t *testing.T) {
+// connections, then hold teardown while the provider is still returning data,
+// then keep acknowledging the returns still on their way. Nothing that stops
+// acknowledgement -- the data path, the multi-client or the generator's
+// revocation -- may start until the acknowledgment ends, and the rest of the
+// teardown keeps its order afterwards.
+func TestTunnelTeardownEndsProviderFlowsBeforeRevokingTheDerivedClient(t *testing.T) {
 	recorder := &teardownRecorder{}
 	multiClient := &acknowledgingMultiClient{recorder: recorder}
 	generator := &recordedGenerator{recorder: recorder}
@@ -219,41 +220,65 @@ func TestCloseTunnelPartsEndsProviderFlowsBeforeRevokingTheDerivedClient(t *test
 	close(pumpDone)
 	drainEntered := make(chan struct{})
 	drainRelease := make(chan struct{})
+	acknowledgeEntered := make(chan struct{})
+	acknowledgeRelease := make(chan struct{})
+	teardown := &tunnelTeardown{
+		path:          retirementPathClosed,
+		closeTimeout:  time.Minute,
+		closeResolver: func() { recorder.record("resolver") },
+		drainReturns: func(context.Context) {
+			recorder.record("drain")
+			close(drainEntered)
+			// a late provider return reaches the derived client mid-drain
+			multiClient.receiveReturn()
+			<-drainRelease
+		},
+		acknowledgeReturns: func() returnAcknowledgment {
+			recorder.record("acknowledge")
+			close(acknowledgeEntered)
+			// a retransmitted return reaches it after the drain went quiet
+			multiClient.receiveReturn()
+			<-acknowledgeRelease
+			return returnAcknowledgment{outcome: retirementOutcomeQuiet, lateReturnCount: 1}
+		},
+		retireParts: func(ctx context.Context) error {
+			return retireTunnelParts(
+				ctx,
+				func() { recorder.record("cancel-data") },
+				func() error { recorder.record("tun"); return nil },
+				pumpDone,
+				multiClient,
+				generator,
+				func() { recorder.record("client-strategy") },
+				func() { recorder.record("cancel-lifecycle") },
+			)
+		},
+	}
 	closed := make(chan error, 1)
-	go func() {
-		closed <- closeTunnelParts(
-			t.Context(),
-			func() { recorder.record("resolver") },
-			func(context.Context) {
-				recorder.record("drain")
-				close(drainEntered)
-				// a late provider return reaches the derived client mid-drain
-				multiClient.receiveReturn()
-				<-drainRelease
-			},
-			func() { recorder.record("cancel-data") },
-			func() error { recorder.record("tun"); return nil },
-			pumpDone,
-			multiClient,
-			generator,
-			func() { recorder.record("client-strategy") },
-			func() { recorder.record("cancel-lifecycle") },
-		)
-	}()
+	go func() { closed <- teardown.close() }()
 
 	<-drainEntered
 	if steps, want := recorder.snapshot(), []string{"resolver", "drain"}; !reflect.DeepEqual(steps, want) {
 		t.Fatalf("teardown steps while the provider is still returning data = %v, want %v", steps, want)
 	}
 	close(drainRelease)
-	if err := <-closed; err != nil {
-		t.Fatalf("closeTunnelParts: %v", err)
+	select {
+	case <-acknowledgeEntered:
+	case err := <-closed:
+		t.Fatalf("the derived client was revoked without acknowledging late returns (err=%v, steps=%v)", err, recorder.snapshot())
 	}
-	want := []string{"resolver", "drain", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}
+	if steps, want := recorder.snapshot(), []string{"resolver", "drain", "acknowledge"}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("teardown steps while late returns are acknowledged = %v, want %v", steps, want)
+	}
+	close(acknowledgeRelease)
+	if err := <-closed; err != nil {
+		t.Fatalf("tunnel teardown: %v", err)
+	}
+	want := []string{"resolver", "drain", "acknowledge", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}
 	if steps := recorder.snapshot(); !reflect.DeepEqual(steps, want) {
 		t.Fatalf("teardown order = %v, want %v", steps, want)
 	}
-	if multiClient.acked != 1 || multiClient.lost != 0 {
-		t.Fatalf("provider returns during the drain: acknowledged=%d lost=%d, want 1 and 0", multiClient.acked, multiClient.lost)
+	if multiClient.acked != 2 || multiClient.lost != 0 {
+		t.Fatalf("provider returns during teardown: acknowledged=%d lost=%d, want 2 and 0", multiClient.acked, multiClient.lost)
 	}
 }
