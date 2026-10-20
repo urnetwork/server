@@ -30483,6 +30483,28 @@ find /var/lib/grafana/plugins -maxdepth 2 -type f \
   controls do not clear those findings or an independently observed request
   rejection. Runtime `grafana-plugin-registration` investigation and the
   external Grafana rollout/restart owner remain separate from this monitor fix.
+- Recovery authority: a complete HTTP response with a generic HTTP, JSON,
+  missing-result, result-status or result-error failure retains the independent
+  `grafana-datasource-query` finding and its fixed status fields. It also marks
+  plugin execution unknown and emits no plugin healthy sentinel: a 401, an
+  unreadable result or another failed query cannot prove that a previously
+  missing plugin now executes. That visibility survives while the generic
+  finding is held below its two-sample cadence threshold, so the existing
+  notifier does not count these runs toward plugin incident resolution. The
+  explicit plugin failure remains immediate. Only a successful bounded
+  datasource control supplies recovery evidence; the notifier still requires
+  its existing two consecutive complete absent runs. Missing/partial bodies,
+  transport failures and parent cancellation also cannot clear an incident.
+  A parent that ends before or during a control stops further sibling requests
+  and withholds findings from that invocation.
+  False-positive qualifier: retaining the prior incident does not assert that
+  its plugin is still missing; registration is unobserved behind the current
+  failure. False-negative qualifier: a fixed failure classification or absent
+  plugin marker cannot establish recovery, and success through the public
+  boundary still proves only that request, not every serving generation.
+  The marker, generic and successful controls retain response privacy and
+  independent sibling findings. Existing runtime request investigations and
+  dashboard-definition access incidents remain separate causal boundaries.
 - Verify every active exact-edge generation with successful results for both
   controls, Web Analytics view panels populated from `web_page_view`, Logs
   Drilldown selecting `var-ds=warp-loki`, successful evaluation of one

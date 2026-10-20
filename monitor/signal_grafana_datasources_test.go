@@ -239,7 +239,10 @@ func TestGrafanaDatasourcesSignalOmitsUpstreamResponseText(t *testing.T) {
 			if c.errorClass == "plugin-not-registered" {
 				wantClass, wantFrame, wantSustain = "grafana-plugin-unregistered", spec.pluginID, 1
 			}
-			if alert.Class != wantClass || alert.Frame != wantFrame || alert.Sustain != wantSustain || alert.Severity != SeverityWarn || alert.unobservable {
+			// A generic failure proves the query symptom, while plugin execution
+			// remains unknown; the exact plugin marker remains a concrete failure.
+			wantUnobservable := c.errorClass != "plugin-not-registered"
+			if alert.Class != wantClass || alert.Frame != wantFrame || alert.Sustain != wantSustain || alert.Severity != SeverityWarn || alert.unobservable != wantUnobservable {
 				t.Errorf("%s alert %d changed failure classification or sustain", c.name, index)
 			}
 			wantIdentity := "observability/grafana-datasources|" + wantClass + "|synthetic-grafana.service.example.test/" + spec.uid + "|" + wantFrame
@@ -333,7 +336,7 @@ func TestGrafanaDatasourcesSignalPrivacyKeepsIndependentFailure(t *testing.T) {
 			continue
 		}
 		positive, unknown := alerts[0], alerts[1]
-		if positive.Class != c.failureClass || positive.Target != "synthetic-grafana.service.example.test/warp-mimir" || positive.unobservable {
+		if positive.Class != c.failureClass || positive.Target != "synthetic-grafana.service.example.test/warp-mimir" || positive.unobservable != (c.failureClass == "grafana-datasource-query") {
 			t.Errorf("%s lost the independent concrete failure", c.name)
 		}
 		if unknown.Class != "cannot-observe" || unknown.Target != "synthetic-grafana.service.example.test/warp-loki" || !unknown.unobservable {
