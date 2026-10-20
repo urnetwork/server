@@ -25,7 +25,7 @@ func reliabilityIndexSyntheticSettings(t *testing.T, row Row) SignalSettings {
 
 func TestReliabilityIndexSignalReportsProductionOldShape(t *testing.T) {
 	settings := reliabilityIndexSyntheticSettings(t, Row{
-		"t", "t", "f", "f", "", "10", "0", "0",
+		"t", "t", "f", "f", "", "10", "0", "0", "partitioned",
 	})
 	alerts, err := NewReliabilityIndexSignal().Run(context.Background(), settings)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestReliabilityIndexSignalReportsProductionOldShape(t *testing.T) {
 func TestReliabilityIndexSignalReportsInterruptedUpgrade(t *testing.T) {
 	definition := "CREATE INDEX client_reliability_valid_bnch_net_client ON ONLY public.client_reliability" + reliabilityIndexDesiredDefinitionSuffix
 	settings := reliabilityIndexSyntheticSettings(t, Row{
-		"t", "f", "t", "f", definition, "10", "4", "0",
+		"t", "f", "t", "f", definition, "10", "4", "0", "partitioned",
 	})
 	alerts, err := NewReliabilityIndexSignal().Run(context.Background(), settings)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestReliabilityIndexSignalReportsInterruptedUpgrade(t *testing.T) {
 func TestReliabilityIndexSignalReportsFinalizationOnlyWithoutRebuild(t *testing.T) {
 	definition := "CREATE INDEX client_reliability_valid_bnch_net_client ON ONLY public.client_reliability" + reliabilityIndexDesiredDefinitionSuffix
 	settings := reliabilityIndexSyntheticSettings(t, Row{
-		"t", "t", "t", "t", definition, "34", "34", "0",
+		"t", "t", "t", "t", definition, "34", "34", "0", "partitioned",
 	})
 	alerts, err := NewReliabilityIndexSignal().Run(context.Background(), settings)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestReliabilityIndexSignalReportsFinalizationOnlyWithoutRebuild(t *testing.
 func TestReliabilityIndexSignalHealthyAtExactPhysicalContract(t *testing.T) {
 	definition := "CREATE INDEX client_reliability_valid_bnch_net_client ON ONLY public.client_reliability" + reliabilityIndexDesiredDefinitionSuffix
 	settings := reliabilityIndexSyntheticSettings(t, Row{
-		"t", "f", "t", "t", definition, "10", "10", "0",
+		"t", "f", "t", "t", definition, "10", "10", "0", "partitioned",
 	})
 	alerts, err := NewReliabilityIndexSignal().Run(context.Background(), settings)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestReliabilityIndexSignalHealthyAtExactPhysicalContract(t *testing.T) {
 
 func TestReliabilityIndexSignalRejectsMalformedCatalogState(t *testing.T) {
 	settings := reliabilityIndexSyntheticSettings(t, Row{
-		"t", "f", "t", "not-a-bool", "definition", "10", "10", "0",
+		"t", "f", "t", "not-a-bool", "definition", "10", "10", "0", "partitioned",
 	})
 	if _, err := NewReliabilityIndexSignal().Run(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "desired-index-valid") {
 		t.Fatalf("malformed catalog boolean error = %v", err)
