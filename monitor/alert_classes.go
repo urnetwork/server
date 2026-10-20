@@ -148,6 +148,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"ssh-admission-reset":                              visibilityAlertClass,
 	"stale-destination-instrumentation":                visibilityAlertClass,
 	"subnet-monitor-coverage":                          visibilityAlertClass,
+	"subnet-history-availability":                      visibilityAlertClass,
 	"subscription-dashboard-auth":                      visibilityAlertClass,
 	"subscription-dashboard-http":                      visibilityAlertClass,
 	"tailer-ipv6-route-loss":                           visibilityAlertClass,

@@ -168,6 +168,7 @@ type monitorConfig struct {
 	verificationEnabled       bool
 	stConfigStatus            STConfigurationStatus
 	stDeploymentKey           string
+	subnetArtifacts           *SubnetArtifactSettings
 	contractDegradationConfig ContractDegradationConfigStatus
 
 	sshUser     string // deployed login user
