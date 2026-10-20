@@ -297,3 +297,24 @@ func TestSnEpochSummaryWithChainSettingsStatesTheGenesisHash(t *testing.T) {
 		t.Fatalf("unset genesis hash = %q in %s", unset.GenesisHash, unsetJson)
 	}
 }
+
+// The Top 200 page tells a claimant what to put in the fleet manifest, so
+// /sn/head must state the chain id and coordinator SnHeadBinding enforces.
+func TestSnHeadWithChainSettingsStatesTheManifestDeployment(t *testing.T) {
+	cfg := &StConfig{ChainId: 964, ContractAddress: common.HexToAddress("0x00000000000000000000000000000000000000AB"), Netuid: 25}
+	result := &SnHeadResult{}
+	snHeadWithChainSettings(result, cfg)
+	if result.Netuid != 25 || result.ChainId != 964 || result.Coordinator != "0x00000000000000000000000000000000000000ab" {
+		t.Fatalf("head = %+v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || !strings.Contains(string(encoded), `"chain_id":964`) || !strings.Contains(string(encoded), `"coordinator":"0x00000000000000000000000000000000000000ab"`) {
+		t.Fatalf("json = %s, %v", encoded, err)
+	}
+	unset := &SnHeadResult{}
+	snHeadWithChainSettings(unset, &StConfig{Netuid: 25})
+	snHeadWithChainSettings(unset, nil)
+	if encoded, _ := json.Marshal(unset); unset.Coordinator != "" || strings.Contains(string(encoded), "coordinator") {
+		t.Fatalf("unset head = %s", encoded)
+	}
+}
