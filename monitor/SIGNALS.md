@@ -5078,6 +5078,28 @@ the tail reconciliation window above until their own evidence closes them.
 
 ---
 
+Ordinary returned observation errors additionally retain a fixed
+`execution_boundaries` set when the owning local call supplied proof:
+`global-admission/not-attempted`, `transport-preflight/not-attempted`,
+`host-admission/not-attempted`, `native-guard/not-attempted`,
+`native-start/failed-no-child`, `native-wait/started-joined`, or `native-wait/started-join-unknown`.
+These markers apply to their own returned error branches, not every joined
+attempt. Existing `ssh_admission_failures=acquire,release,unknown` remains
+independent; release alone cannot establish a native start. Missing proof,
+custom command callbacks and adapters that discard an error chain remain
+unknown; bounded traversal exhaustion or invalid marker values explicitly add
+`unknown/unknown`. No marker contains a target, command, stderr, credential,
+request identity or elapsed time. Start/Wait proves only local process lifecycle,
+not authentication, remote execution or database health. Lifecycle error classes,
+alert identity, severity, Sustain, timing, admission and retry policies remain
+unchanged. This prospective source change cannot attribute earlier generic gaps
+and does not fix global starvation or shared admission delay.
+
+Only the new execution-boundary projection caps child inspections and visits at
+64 and marks omitted branches unknown. Existing lifecycle classification and
+shared-admission traversal remain separate and carry no new work bound; this is
+not a guarantee for the whole formatter or arbitrary Error/Unwrap methods.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
