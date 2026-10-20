@@ -20,7 +20,7 @@ func TestNetEscrowSignalSyntheticReservationPageOverrun(t *testing.T) {
 					t.Fatalf("detached-page query is missing %q:\n%s", want, query)
 				}
 			}
-			return []Row{{"reservation-page", "3", "721"}}, nil
+			return []Row{{"reservation-page", "3", "721", "", "0"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -53,7 +53,7 @@ func TestNetEscrowSignalSyntheticDetachedReservationPage(t *testing.T) {
 			if strings.Contains(query, "FROM pg_stat_statements") {
 				return []Row{{"0", "0", "0", "0", "0", "0", "0", "0", "0"}}, nil
 			}
-			return []Row{{"reservation-page", "2", "1801"}}, nil
+			return []Row{{"reservation-page", "2", "1801", "", "0"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -88,7 +88,7 @@ func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 			if strings.Contains(query, "pending_task") || strings.Contains(query, "now()-run_at") {
 				t.Fatalf("query mistakes a pending task's due time for its execution start: %s", query)
 			}
-			return []Row{{"completed", "1182", "300"}}, nil
+			return []Row{{"completed", "1182", "300", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -116,7 +116,7 @@ func TestNetEscrowSignalStatementProfileFailureDoesNotRenderDatabaseError(t *tes
 			if strings.Contains(query, "FROM pg_stat_statements") {
 				return nil, errors.New("decode failure: " + hostile)
 			}
-			return []Row{{"completed", "181", "30"}}, nil
+			return []Row{{"completed", "181", "30", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -142,7 +142,7 @@ func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
 				}
 				return []Row{{"2128", "16758829.6", "74031.3", "968502", "4456375.4", "12251.5", "2128", "0", "0"}}, nil
 			}
-			return []Row{{"completed", "177", "30"}}, nil
+			return []Row{{"completed", "177", "30", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -175,7 +175,7 @@ func TestNetEscrowSignalDoesNotMisdiagnoseBoundedLateralAsLegacyPlan(t *testing.
 			if strings.Contains(query, "FROM pg_stat_statements") {
 				return []Row{{"91", "182000", "9000", "900", "3600", "25", "0", "91", "0"}}, nil
 			}
-			return []Row{{"completed", "210", "30"}}, nil
+			return []Row{{"completed", "210", "30", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -210,7 +210,7 @@ func TestNetEscrowSignalRecognizesUnsettledPartialAccessPath(t *testing.T) {
 			if strings.Contains(query, "FROM pg_stat_statements") {
 				return []Row{{"91", "182000", "9000", "900", "3600", "25", "0", "91", "91"}}, nil
 			}
-			return []Row{{"completed", "210", "30"}}, nil
+			return []Row{{"completed", "210", "30", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -248,7 +248,7 @@ func TestNetEscrowSignalAdjacentCountersStayLifetimeOnly(t *testing.T) {
 				profileIndex++
 				return []Row{row}, nil
 			}
-			return []Row{{"completed", "210", "30"}}, nil
+			return []Row{{"completed", "210", "30", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) { return "", nil },
 	}
@@ -286,7 +286,7 @@ func TestNetEscrowStatementProfileWithholdsUnqualifiedDeltas(t *testing.T) {
 func TestNetEscrowSignalCompletedRunSupersedesLingeringHeartbeat(t *testing.T) {
 	source := &syntheticSource{
 		postgresFn: func(string) ([]Row, error) {
-			return []Row{{"completed", "1492", "60"}}, nil
+			return []Row{{"completed", "1492", "60", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
 			return "[taskworker]eval active(1481.89s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
@@ -642,7 +642,7 @@ func TestNetEscrowSignalSyntheticShortOrdinaryDriftIsHealthy(t *testing.T) {
 func TestNetEscrowSignalActiveSuccessorRetainsCompletedPrecursor(t *testing.T) {
 	source := &syntheticSource{
 		postgresFn: func(string) ([]Row, error) {
-			return []Row{{"completed", "1096", "420"}}, nil
+			return []Row{{"completed", "1096", "420", "00000000-0000-0000-0000-000000000001", "1788000000"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
 			return "[taskworker]eval active(265.12s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil

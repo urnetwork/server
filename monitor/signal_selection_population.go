@@ -31,7 +31,8 @@ func (pgSelectionPopulationProbe) tier() string           { return tierPage }
 func (pgSelectionPopulationProbe) cadence() time.Duration { return 5 * time.Minute }
 
 // Keeps the existing PostgreSQL gates and qualifies only the sampled Redis market.
-func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	defer finishHandlerLeaseObservation(ctx, &result, &resultErr)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -47,18 +48,16 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		   AND NOT attisdropped
 		);
 	`)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if err := handlerLeaseQueryError(ctx, err); err != nil {
+		return nil, err
 	}
+	schemaRow, err := pgAggregateRow(schemaRows, 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(schemaRows) != 1 || len(schemaRows[0]) != 1 {
-		return nil, fmt.Errorf("provider population TLS-integrity schema query returned an invalid shape")
-	}
-	tlsIntegrityArmed, err := strconv.ParseBool(schemaRows[0].str(0))
+	tlsIntegrityArmed, err := providerPgBool(schemaRow.str(0))
 	if err != nil {
-		return nil, fmt.Errorf("provider population query returned invalid TLS-integrity arming state %q", schemaRows[0].str(0))
+		return nil, fmt.Errorf("invalid response for provider population: invalid TLS-integrity arming state")
 	}
 	tlsPassingPredicate := ""
 	tlsFailureCount := "0"
@@ -80,6 +79,14 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		    SELECT 1 FROM provide_key pk
 		    WHERE pk.client_id=nclr.client_id AND pk.provide_mode IN (1,3)
 		   )
+		), lease_coverage AS MATERIALIZED (
+		 SELECT COUNT(*) AS potential_open_provider_rows,
+		  COUNT(*) FILTER (WHERE h.handler_id IS NOT NULL AND h.heartbeat_time < now() - interval '2 minutes') AS stale_open_provider_rows
+		 FROM network_client_connection ncc
+		 INNER JOIN network_client nc USING (client_id)
+		 LEFT JOIN network_client_handler h USING (handler_id)
+		 WHERE ncc.connected AND nc.active AND nc.source_client_id IS NULL
+		  AND EXISTS (SELECT 1 FROM provide_key pk WHERE pk.client_id=ncc.client_id AND pk.provide_mode IN (1,3))
 		)
 		SELECT
 		 (SELECT count(DISTINCT ncc.client_id) FROM network_client_connection ncc
@@ -95,24 +102,50 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		    %s),
 		 (SELECT count(*) FROM provider_egress_location),
 		 %s,
-		 (SELECT location_id::text FROM location WHERE location_type='country' AND country_code='us' LIMIT 1);
+		 (SELECT location_id::text FROM location WHERE location_type='country' AND country_code='us' LIMIT 1),
+		 (SELECT potential_open_provider_rows FROM lease_coverage),
+		 (SELECT stale_open_provider_rows FROM lease_coverage);
 	`, tlsPassingPredicate, tlsFailureCount))
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if err := handlerLeaseQueryError(ctx, err); err != nil {
+		return nil, err
 	}
+	row, err := pgAggregateRow(rows, 12)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 || len(rows[0]) < 10 || rows[0].str(9) == "" {
-		return nil, fmt.Errorf("provider population query returned no target location")
+	var counts [9]int64
+	for i := range counts {
+		counts[i], err = providerPgInteger(row.str(i), 64, 0)
+		if err != nil {
+			return nil, err
+		}
 	}
-	connected := atoiRow(rows[0], 0)
-	rawSupply := atoiRow(rows[0], 1)
-	eligible := atoiRow(rows[0], 2)
-	derived := atoiRow(rows[0], 3)
-	inactive := atoiRow(rows[0], 4)
-	tlsAuthenticationFailures := atoiRow(rows[0], 8)
-	targetLocation := rows[0].str(9)
+	// The three supply cohorts partition the same snapshot. Health predicates
+	// select subsets; the TLS-excluding passing and failure sets are disjoint.
+	if counts[2] > counts[1] || counts[3] > counts[1]-counts[2] ||
+		counts[4] != counts[1]-counts[2]-counts[3] ||
+		counts[6] > counts[5] || counts[8] > counts[5] ||
+		tlsIntegrityArmed && counts[6] > counts[5]-counts[8] ||
+		!tlsIntegrityArmed && counts[8] != 0 {
+		return nil, fmt.Errorf("invalid response for provider PostgreSQL population relationships")
+	}
+	potentialOpen, err := providerPgInteger(row.str(10), 64, 0)
+	if err != nil {
+		return nil, err
+	}
+	staleOpen, err := providerPgInteger(row.str(11), 64, 0)
+	if err != nil {
+		return nil, err
+	}
+	if staleOpen > potentialOpen {
+		return nil, fmt.Errorf("invalid response for provider handler lease coverage: inconsistent counts")
+	}
+	connected, rawSupply, eligible := counts[0], counts[1], counts[2]
+	derived, inactive, tlsAuthenticationFailures := counts[3], counts[4], counts[8]
+	targetLocation := row.str(9)
+	if !providerPgLocationPattern.MatchString(targetLocation) {
+		return nil, fmt.Errorf("invalid response for provider PostgreSQL target location")
+	}
 	caller := "00000000-0000-0000-0000-000000000000"
 	normalKey := fmt.Sprintf("{cs_0_q_%s_%s}c_l", caller, targetLocation)
 	forcedKey := fmt.Sprintf("{cs_1_q_%s_%s}c_l", caller, targetLocation)
@@ -240,6 +273,9 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 	}
 
 	findings := []finding{}
+	if staleOpen > 0 {
+		findings = append(findings, handlerLeaseCoverageFinding(self.id(), pgTarget(env), "potential-provider-connections", staleOpen))
+	}
 	if eligibilityKnown && !eligibilityReady && derived+inactive > 0 {
 		findings = append(findings, finding{
 			probeId: "pg/selection-empty", tier: tierPage,
@@ -284,7 +320,9 @@ func (self pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv)
 		return findings, nil
 	}
 	if eligible <= 1000 || normalCount > 0 {
-		findings = append(findings, healthyFinding("pg/selection-empty", tierPage, "selection-empty", pgTarget(env)))
+		if staleOpen == 0 {
+			findings = append(findings, healthyFinding("pg/selection-empty", tierPage, "selection-empty", pgTarget(env)))
+		}
 		return findings, nil
 	}
 	mode := "upstream-empty"

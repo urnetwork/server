@@ -63,7 +63,7 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		{host: "edge-4", block: "g1", instance: "c", cpuRate: 0.06, allocRate: 4 << 20},
 		{host: "edge-3", block: "g2", instance: "hot", cpuRate: 4.003, allocRate: 650 << 20},
 	}
-	ratePayload := workerRatesFixtureJSON(t, now, workers...)
+	ratePayload := workerChurnRatesFixtureJSON(t, now, workers...)
 	source := &syntheticSource{
 		hostFn: func(host HostSettings, command string) (string, error) {
 			if strings.Contains(command, "monitor_score_phase_metric") {
@@ -85,10 +85,10 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 				"[edge-3][taskworker][g2][cid:hot][I][2026-08-31T03:54:51Z][task.go:1938][01a055f4-ccee-406e-4061-603f0dc86869]eval active(7.00s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
 		},
 		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
-			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --json GET "+redisScoreAliasReadyKey {
 				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
 			}
-			return "", nil
+			return "null", nil
 		},
 	}
 
@@ -157,14 +157,14 @@ func runWorkerChurnAliasSynthetic(
 				phaseReads++
 				return workerScorePhaseFixtureJSON(t, now, "worker-hot", "g2", "runtime-hot", phaseComplete), nil
 			}
-			return workerRatesFixtureJSON(t, now, workers...), nil
+			return workerChurnRatesFixtureJSON(t, now, workers...), nil
 		},
 		localFn: func(string, ...string) (string, error) {
 			return "[worker-hot][taskworker][g2][cid:runtime-hot][I][2026-09-12T14:29:55Z][task.go:1938][02b166d9-86af-517f-5172-714a1ed9797a]eval active(90.00s) synthetic/taskworker/work." + taskName + "({})", nil
 		},
 		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
 			redisReads++
-			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --json GET "+redisScoreAliasReadyKey {
 				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
 			}
 			return markerValue, markerErr
@@ -191,7 +191,7 @@ func TestWorkerChurnSignalTreatsMixedPhaseRolloutAsUnobservable(t *testing.T) {
 	alert, _ := runWorkerChurnAliasSynthetic(
 		t,
 		"UpdateClientScores",
-		redisScoreAliasReadyValue,
+		`"1"`,
 		nil,
 		false,
 	)
@@ -224,7 +224,7 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 	}{
 		{
 			name:        "absent",
-			markerValue: "",
+			markerValue: "null",
 			want: []string{
 				"score_alias_schema_ready=false",
 				"does not identify this worker's artifact",
@@ -235,7 +235,7 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 		},
 		{
 			name:        "ready",
-			markerValue: redisScoreAliasReadyValue,
+			markerValue: `"1"`,
 			want: []string{
 				"score_alias_schema_ready=true",
 				"some writer previously completed a compatibility pass",
@@ -304,7 +304,7 @@ func TestWorkerChurnSignalSyntheticNonScoreContextSkipsAliasLookup(t *testing.T)
 	alert, redisReads := runWorkerChurnAliasSynthetic(
 		t,
 		"ProviderEgressProbe",
-		redisScoreAliasReadyValue,
+		`"1"`,
 		nil,
 	)
 	if redisReads != 0 {
@@ -340,15 +340,15 @@ func TestWorkerChurnSignalSyntheticRequiresBothRatesAndFreshSkew(t *testing.T) {
 		if !strings.Contains(command, "monitor_rate") {
 			return "", fmt.Errorf("unexpected query: %s", command)
 		}
-		return workerRatesFixtureJSON(t, now, workers...), nil
+		return workerChurnRatesFixtureJSON(t, now, workers...), nil
 	}}
 
 	alerts, err := NewWorkerChurnSignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("single-rate or stale workers alerted: %+v", alerts)
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !alerts[0].unobservable {
+		t.Fatalf("single-rate or stale worker became churn or lost coverage: %+v", alerts)
 	}
 }
 
@@ -361,7 +361,7 @@ func TestWorkerChurnSignalSyntheticRefreshesClockAfterDelayedLogFallback(t *test
 		{host: "edge-4", block: "g1", instance: "c", cpuRate: 0.06, allocRate: 4 << 20},
 		{host: "edge-3", block: "g2", instance: "hot", cpuRate: 4.0, allocRate: 650 << 20},
 	}
-	ratePayload := workerRatesFixtureJSON(t, metricNow, workers...)
+	ratePayload := workerChurnRatesFixtureJSON(t, metricNow, workers...)
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, _ string) (string, error) { return ratePayload, nil },
 		localFn: func(string, ...string) (string, error) {
@@ -370,6 +370,13 @@ func TestWorkerChurnSignalSyntheticRefreshesClockAfterDelayedLogFallback(t *test
 			// the post-collection clock it is a fresh five-second-old line.
 			clock = metricNow.Add(65 * time.Second)
 			return "[edge-3][taskworker][g2][cid:hot][I][2026-08-31T04:16:45Z][task.go:1938][01a055c8-759e-406e-4061-603f0dc86869]eval active(4190.00s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})", nil
+		},
+		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
+			if host.Name != "redis-1" || port != 6379 || len(args) != 4 ||
+				args[0] != "-c" || args[1] != "--json" || args[2] != "GET" || args[3] != redisScoreAliasReadyKey {
+				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
+			}
+			return "null", nil
 		},
 	}
 	settings := workerMemorySyntheticSettings(source, metricNow)

@@ -28,6 +28,51 @@ type sharedSshAdmission struct {
 	owner sshAdmissionOwner
 }
 
+// The original watcher identity remains pinned across every command. Store
+// acquisition rechecks its liveness/generation and admits only one diagnostic.
+type sharedSshDiagnosticAdmission struct {
+	store   *sshAdmissionStore
+	owner   sshAdmissionOwner
+	watcher SshAdmissionWatcher
+}
+
+func newSharedSshDiagnosticAdmission(ctx context.Context, directory string, hosts []string) (sshAdmissionBackend, error) {
+	owner, err := sshAdmissionCurrentOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newSshAdmissionStore(directory, owner.Identity.BootId)
+	if err != nil {
+		return nil, err
+	}
+	return attachSharedSshDiagnosticAdmission(ctx, store, owner, hosts)
+}
+
+func attachSharedSshDiagnosticAdmission(ctx context.Context, store *sshAdmissionStore, owner sshAdmissionOwner, hosts []string) (sshAdmissionBackend, error) {
+	var watcher SshAdmissionWatcher
+	err := store.update(ctx, func(state *sshAdmissionState, _ int64) error {
+		if state.Version != 1 || state.BootId != owner.Identity.BootId || store.status(ctx, state.Watcher) != sshAdmissionOwnerLive {
+			return errors.New("SSH admission watcher authority unavailable")
+		}
+		if !slices.Equal(state.Hosts, hosts) {
+			return errors.New("SSH admission inventory changed")
+		}
+		if owner.Cgroup == state.Watcher.Cgroup || owner.Unit == state.Watcher.Unit {
+			return errors.New("SSH diagnostic requires a separate owner service")
+		}
+		watcher = state.Watcher.Identity
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &sharedSshDiagnosticAdmission{store: store, owner: owner, watcher: watcher}, nil
+}
+
+func (self *sharedSshDiagnosticAdmission) acquire(ctx context.Context, host string) (func() error, error) {
+	return self.store.acquire(ctx, self.owner, self.watcher, sshAdmissionDiagnostic, []string{host})
+}
+
 type sshAdmissionStore struct {
 	directory string
 	bootId    string

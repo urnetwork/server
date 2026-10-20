@@ -66,76 +66,124 @@ func connectionReconcileQuery(environment string) string {
 	return strings.Join(parts, " or ")
 }
 
-// One block's reconcile over the range.
-type connectionReconcileBlock struct {
-	name        string
-	unheld      float64
-	hasUnheld   bool
-	retired     float64
-	okPasses    float64
-	errorPasses float64
-	// absent before the reconcile counted its unretired rows
-	failedRetires float64
-	busyRetires   float64
+// A metric is authoritative only when exactly one fresh, valid sample exists.
+type connectionReconcileMetric struct {
+	value float64
+	seen  bool
+	valid bool
 }
 
-// Groups the evaluation by block. A sample that is malformed, stale or
-// negative makes the whole frame unobservable rather than a measured zero.
+// Missing or ambiguous evidence must not be rendered as a measured zero.
+func (self connectionReconcileMetric) observed() string {
+	if !self.valid {
+		return "unknown"
+	}
+	return fmt.Sprintf("%.0f", self.value)
+}
+
+// One block's reconcile over the range, retaining each metric's authority.
+type connectionReconcileBlock struct {
+	host        string
+	block       string
+	unheld      connectionReconcileMetric
+	retired     connectionReconcileMetric
+	okPasses    connectionReconcileMetric
+	errorPasses connectionReconcileMetric
+	// Both were absent before the reconcile counted its unretired rows.
+	failedRetires connectionReconcileMetric
+	busyRetires   connectionReconcileMetric
+}
+
+// Groups the evaluation by its label tuple. Missing, duplicate or invalid
+// metrics make fleet health unknown without discarding independent positives.
 func parseConnectionReconcileFrame(response mimirInstantResponse, now time.Time) ([]*connectionReconcileBlock, string) {
-	blocks := map[string]*connectionReconcileBlock{}
+	blocks := map[[2]string]*connectionReconcileBlock{}
+	reasonSet := map[string]bool{}
 	for _, series := range response.Data.Result {
 		host, block := series.Metric["host"], series.Metric["block"]
 		if host == "" || block == "" {
-			return nil, "unlabeled_series"
+			reasonSet["unlabeled_series"] = true
+			continue
+		}
+		key := [2]string{host, block}
+		state, ok := blocks[key]
+		if !ok {
+			state = &connectionReconcileBlock{host: host, block: block}
+			blocks[key] = state
+		}
+		var metric *connectionReconcileMetric
+		switch series.Metric["monitor_metric"] {
+		case "unheld":
+			metric = &state.unheld
+		case "retired":
+			metric = &state.retired
+		case "ok_passes":
+			metric = &state.okPasses
+		case "error_passes":
+			metric = &state.errorPasses
+		case "failed_retires":
+			metric = &state.failedRetires
+		case "busy_retires":
+			metric = &state.busyRetires
+		default:
+			reasonSet["unknown_metric_class"] = true
+			continue
+		}
+		duplicate := metric.seen
+		metric.seen = true
+		if duplicate {
+			metric.valid = false
+			reasonSet["duplicate_metric"] = true
 		}
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil || now.Sub(observedAt) > connectionReconcileFreshness || now.Sub(observedAt) < -30*time.Second ||
 			math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			return nil, "invalid_or_stale_metric"
+			reasonSet["invalid_or_stale_metric"] = true
+			continue
 		}
-		name := host + "/" + block
-		state, ok := blocks[name]
-		if !ok {
-			state = &connectionReconcileBlock{name: name}
-			blocks[name] = state
-		}
-		switch series.Metric["monitor_metric"] {
-		case "unheld":
-			state.unheld, state.hasUnheld = value, true
-		case "retired":
-			state.retired = value
-		case "ok_passes":
-			state.okPasses = value
-		case "error_passes":
-			state.errorPasses = value
-		case "failed_retires":
-			state.failedRetires = value
-		case "busy_retires":
-			state.busyRetires = value
-		default:
-			return nil, "unknown_metric_class"
+		if !duplicate {
+			metric.value, metric.valid = value, true
 		}
 	}
 	ordered := []*connectionReconcileBlock{}
 	for _, state := range blocks {
-		if state.hasUnheld {
-			ordered = append(ordered, state)
+		if !state.unheld.seen {
+			reasonSet["no_reconcile_gauge"] = true
 		}
+		if !state.retired.seen || !state.okPasses.seen || !state.errorPasses.seen ||
+			state.failedRetires.seen != state.busyRetires.seen {
+			reasonSet["incomplete_reconcile_metrics"] = true
+		}
+		ordered = append(ordered, state)
 	}
 	if len(ordered) == 0 {
-		return nil, "no_reconcile_gauge"
+		reasonSet["no_reconcile_gauge"] = true
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].name < ordered[j].name
+		if ordered[i].host != ordered[j].host {
+			return ordered[i].host < ordered[j].host
+		}
+		return ordered[i].block < ordered[j].block
 	})
-	return ordered, ""
+	reasons := []string{}
+	for reason := range reasonSet {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	return ordered, strings.Join(reasons, ",")
 }
 
 // The blocks' values, at most eight, largest unheld first.
 func connectionReconcileObserved(blocks []*connectionReconcileBlock) string {
 	ordered := append([]*connectionReconcileBlock(nil), blocks...)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return ordered[i].unheld > ordered[j].unheld
+		if ordered[i].unheld.valid != ordered[j].unheld.valid {
+			return ordered[i].unheld.valid
+		}
+		if !ordered[i].unheld.valid {
+			return false
+		}
+		return ordered[i].unheld.value > ordered[j].unheld.value
 	})
 	parts := []string{}
 	for i, state := range ordered {
@@ -143,8 +191,8 @@ func connectionReconcileObserved(blocks []*connectionReconcileBlock) string {
 			parts = append(parts, fmt.Sprintf("and %d more", len(ordered)-8))
 			break
 		}
-		parts = append(parts, fmt.Sprintf("%s unheld=%.0f retired_%s=%.0f ok_passes=%.0f error_passes=%.0f failed_retires=%.0f busy_retires=%.0f",
-			state.name, state.unheld, connectionReconcileRange, state.retired, state.okPasses, state.errorPasses, state.failedRetires, state.busyRetires))
+		parts = append(parts, fmt.Sprintf("%s/%s unheld=%s retired_%s=%s ok_passes=%s error_passes=%s failed_retires=%s busy_retires=%s",
+			state.host, state.block, state.unheld.observed(), connectionReconcileRange, state.retired.observed(), state.okPasses.observed(), state.errorPasses.observed(), state.failedRetires.observed(), state.busyRetires.observed()))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -170,31 +218,34 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 
 	target := env.cfg.env + "/connect-fleet"
 	blocks, visibilityReason := parseConnectionReconcileFrame(response, env.now().UTC())
+	findings := []finding{}
 	if visibilityReason != "" {
-		return []finding{{
+		findings = append(findings, finding{
 			probeId: "mimir/connection-reconcile", tier: tierWarn, class: "connection-reconcile-unobservable",
 			target: target, sustain: 2,
-			symptom:   "No Connect block exports a fresh connection reconcile gauge.",
-			mechanism: "Without the gauge, a connection row whose process still heartbeats its handler but no longer holds the connection is invisible: §2.16 sees only rows whose handler is gone.",
-			baseline:  "Every Connect block exports urnetwork_connect_connection_reconcile_unheld with fresh samples.",
+			symptom:   "Connection reconcile metrics are missing, partial, invalid or ambiguous.",
+			mechanism: "Missing evidence cannot establish a healthy fleet or a measured zero. Independently proven stuck or failing reconciles remain reportable; §2.16 sees only rows whose handler is gone.",
+			baseline:  "Every observed Connect block supplies one fresh gauge and one valid 15-minute increase for retired, ok and error counters. When present, the failed and busy retire counters form a complete pair.",
 			observed:  "visibility_reason=" + visibilityReason + " metrics_gateway=" + gateway.name,
 			evidence:  "Only a fixed structural reason is exported; raw samples are discarded.",
-			context:   "This is expected until Connect runs a Server artifact with the handler connection reconcile. Before it, a failed final disconnect left its row connected for the life of the process (about 29.6k provider rows on Main on 2026-10-14).",
-			action:    "Deploy Connect with the handler connection reconcile, then recheck. Until then, compare each block's connected rows with its urnetwork_connect_provider_connections gauge.",
-			verify:    "Every Connect block exports the gauge for two cadences.",
+			context:   "The producer initializes the core metrics at zero. A new counter needs enough samples for increase; older artifacts omit both unretired counters. A block absent from every metric cannot be discovered by this query alone.",
+			action:    "Check the Connect artifact, scrape coverage and query result shape. Restore the missing or ambiguous evidence and recheck; until then compare each block's connected rows with its urnetwork_connect_provider_connections gauge.",
+			verify:    "Every observed block supplies complete, unique, fresh metrics for two cadences, and independent stuck or failing findings recover.",
 			playbook:  "SIGNALS.md §2.16a and §2.16",
-		}}, nil
+		})
+	} else {
+		findings = append(findings, healthyFinding("mimir/connection-reconcile", tierWarn, "connection-reconcile-unobservable", target))
 	}
 
-	findings := []finding{healthyFinding("mimir/connection-reconcile", tierWarn, "connection-reconcile-unobservable", target)}
 	stuck := []*connectionReconcileBlock{}
 	failing := []*connectionReconcileBlock{}
 	for _, state := range blocks {
-		if connectionReconcileStuckFloor <= state.unheld && state.retired == 0 {
+		if state.unheld.valid && connectionReconcileStuckFloor <= state.unheld.value && state.retired.valid && state.retired.value == 0 {
 			stuck = append(stuck, state)
 		}
 		// every pass raised, or retires failed and none succeeded
-		if (0 < state.errorPasses && state.okPasses == 0) || (0 < state.failedRetires && state.retired == 0) {
+		if (state.errorPasses.valid && 0 < state.errorPasses.value && state.okPasses.valid && state.okPasses.value == 0) ||
+			(state.failedRetires.valid && 0 < state.failedRetires.value && state.retired.valid && state.retired.value == 0) {
 			failing = append(failing, state)
 		}
 	}
@@ -216,7 +267,7 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 			verify:    "Unheld falls below the floor or retirements resume for two cadences, and the block's connected provider rows match its provider gauge.",
 			playbook:  "SIGNALS.md §2.16a",
 		})
-	} else {
+	} else if visibilityReason == "" {
 		findings = append(findings, healthyFinding("mimir/connection-reconcile", tierWarn, "connection-reconcile-stuck", target))
 	}
 
@@ -237,7 +288,7 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 			verify:    "Passes complete on every block for two cadences.",
 			playbook:  "SIGNALS.md §2.16a",
 		})
-	} else {
+	} else if visibilityReason == "" {
 		findings = append(findings, healthyFinding("mimir/connection-reconcile", tierWarn, "connection-reconcile-failing", target))
 	}
 	return findings, nil

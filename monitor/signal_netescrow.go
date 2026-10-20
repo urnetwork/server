@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,7 +45,7 @@ type netEscrowStatementProfile struct {
 type netEscrowProbe struct{}
 
 var netEscrowAggregateRe = regexp.MustCompile(
-	`(?i)\[sm\]reconcile net escrow: ([0-9]+) balances, ([0-9]+) networks drifted, over-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b), under-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b)`,
+	`(?i)\[sm\]reconcile net escrow: ([0-9]+) balances, ([0-9]+) networks drifted, over-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b), under-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b)\s*$`,
 )
 
 const (
@@ -57,23 +58,19 @@ const (
 )
 
 type netEscrowAggregate struct {
-	balances   int
-	networks   int
-	overText   string
-	underText  string
-	overBytes  int64
-	underBytes int64
-	identity   warpLogIdentity
+	unobservable bool
+	balances     int
+	networks     int
+	overText     string
+	underText    string
+	overBytes    int64
+	underBytes   int64
+	identity     warpLogIdentity
 }
 
 func (*netEscrowProbe) id() string             { return "pg/netescrow-reconcile-overrun" }
 func (*netEscrowProbe) tier() string           { return tierWarn }
 func (*netEscrowProbe) cadence() time.Duration { return time.Minute }
-
-func netEscrowProfileInt64(row pgRow, column int) int64 {
-	value, _ := strconv.ParseInt(row.str(column), 10, 64)
-	return value
-}
 
 func (self *netEscrowProbe) observeStatementProfile(current netEscrowStatementCounters) netEscrowStatementProfile {
 	return netEscrowStatementProfile{netEscrowStatementCounters: current, intervalQualified: false}
@@ -114,23 +111,58 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 		       coalesce(sum(calls) FILTER (WHERE unsettled_reservation_page),0)
 		FROM statements;
 	`)
+	if interrupted := pgGroupedInterruptedSourceError(ctx, err); interrupted != nil {
+		return netEscrowStatementProfile{}, interrupted
+	}
 	if err != nil {
 		return netEscrowStatementProfile{}, err
 	}
-	if len(rows) != 1 {
-		return netEscrowStatementProfile{}, fmt.Errorf("net-escrow statement profile returned %d rows, want 1", len(rows))
+	if len(rows) != 1 || len(rows[0]) != 9 {
+		return netEscrowStatementProfile{}, fmt.Errorf("invalid response: net-escrow statement profile shape")
 	}
-	return self.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:          netEscrowProfileInt64(rows[0], 0),
-		reservationTotalMs:        atof(rows[0].str(1)),
-		reservationMaxMs:          atof(rows[0].str(2)),
-		balanceCalls:              netEscrowProfileInt64(rows[0], 3),
-		balanceTotalMs:            atof(rows[0].str(4)),
-		balanceMaxMs:              atof(rows[0].str(5)),
-		legacyReservationCalls:    netEscrowProfileInt64(rows[0], 6),
-		boundedReservationCalls:   netEscrowProfileInt64(rows[0], 7),
-		unsettledReservationCalls: netEscrowProfileInt64(rows[0], 8),
-	}), nil
+	row := rows[0]
+	current := netEscrowStatementCounters{}
+	for _, field := range []struct {
+		column int
+		value  *int64
+	}{
+		{column: 0, value: &current.reservationCalls},
+		{column: 3, value: &current.balanceCalls},
+		{column: 6, value: &current.legacyReservationCalls},
+		{column: 7, value: &current.boundedReservationCalls},
+		{column: 8, value: &current.unsettledReservationCalls},
+	} {
+		value, ok := pgGroupedInteger(row.str(field.column), 64, 0)
+		if !ok {
+			return netEscrowStatementProfile{}, fmt.Errorf("invalid response: net-escrow statement count")
+		}
+		*field.value = value
+	}
+	for _, field := range []struct {
+		column int
+		value  *float64
+	}{
+		{column: 1, value: &current.reservationTotalMs},
+		{column: 2, value: &current.reservationMaxMs},
+		{column: 4, value: &current.balanceTotalMs},
+		{column: 5, value: &current.balanceMaxMs},
+	} {
+		value, ok := pgGroupedFloat(row.str(field.column))
+		if !ok {
+			return netEscrowStatementProfile{}, fmt.Errorf("invalid response: net-escrow statement time")
+		}
+		*field.value = value
+	}
+	if current.reservationCalls < current.legacyReservationCalls ||
+		current.reservationCalls < current.boundedReservationCalls ||
+		current.reservationCalls-current.legacyReservationCalls > current.boundedReservationCalls ||
+		current.boundedReservationCalls < current.unsettledReservationCalls ||
+		current.reservationTotalMs < current.reservationMaxMs || current.balanceTotalMs < current.balanceMaxMs ||
+		(current.reservationCalls == 0 && current.reservationTotalMs != 0) ||
+		(current.balanceCalls == 0 && current.balanceTotalMs != 0) {
+		return netEscrowStatementProfile{}, fmt.Errorf("invalid response: net-escrow statement counters disagree")
+	}
+	return self.observeStatementProfile(current), nil
 }
 
 func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -142,6 +174,9 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		netEscrowIncidentLookback,
 		5000,
 	)
+	if interrupted := pgGroupedInterruptedSourceError(ctx, lifecycleLogErr); interrupted != nil {
+		return nil, interrupted
+	}
 	activeRun := parseTaskActiveRun(lifecycleLog, "ReconcileNetEscrow")
 	terminalRun := parseTaskTerminalRunAtLeast(
 		lifecycleLog,
@@ -207,8 +242,12 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		FROM active_reservation_pages
 		WHERE oldest_s >= 120;
 	`, activeTaskIDLiteral, terminalTaskIDLiteral))
-	if err != nil {
-		return nil, err
+	if interrupted := pgGroupedInterruptedSourceError(ctx, err); interrupted != nil {
+		return nil, interrupted
+	}
+	runQueryErr := err
+	if runQueryErr != nil {
+		rows = nil
 	}
 
 	aggregateLog, aggregateLogErr := env.runner.warpctl(
@@ -217,7 +256,13 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		fmt.Sprintf("--since=%dm", int(netEscrowDriftLogLookback/time.Minute)),
 		"--limit=100", "--query=[sm]reconcile net escrow", "--utc",
 	)
-	aggregates := netEscrowAggregates(aggregateLog)
+	if interrupted := pgGroupedInterruptedSourceError(ctx, aggregateLogErr); interrupted != nil {
+		return nil, interrupted
+	}
+	aggregates, aggregateCoverageComplete := netEscrowAggregates(aggregateLog)
+	if aggregateLogErr != nil {
+		aggregates = nil
+	}
 
 	type completion struct {
 		taskID          string
@@ -235,14 +280,36 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	hasTerminalCompletion := false
 	activeReservationPages := 0
 	oldestReservationPageSeconds := 0
+	completionCounts := map[string]int{}
+	reservationRows := 0
 	for _, row := range rows {
+		if row.str(0) == "completed" {
+			completionCounts[row.str(3)]++
+		} else if row.str(0) == "reservation-page" {
+			reservationRows++
+		}
+	}
+	completionCoverageComplete := runQueryErr == nil
+	rowsIncomplete := false
+	for _, row := range rows {
+		if len(row) != 5 {
+			rowsIncomplete = true
+			completionCoverageComplete = false
+			continue
+		}
 		switch row.str(0) {
 		case "completed":
+			duration, age, clock, ok := pgGroupedCompletionValues(row, 3, 1, 2, 4)
+			if !ok || len(completionCounts) > 4 || completionCounts[row.str(3)] != 1 {
+				rowsIncomplete = true
+				completionCoverageComplete = false
+				continue
+			}
 			candidate := completion{
-				durationSeconds: atoi(row.str(1)),
-				ageSeconds:      atoi(row.str(2)),
+				durationSeconds: duration,
+				ageSeconds:      age,
 				taskID:          row.str(3),
-				unixSeconds:     atoi64(row.str(4)),
+				unixSeconds:     clock,
 			}
 			if !hasLatestCompletion || latestCompletion.unixSeconds < candidate.unixSeconds {
 				latestCompletion = candidate
@@ -264,9 +331,35 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				hasTerminalCompletion = true
 			}
 		case "reservation-page":
-			activeReservationPages = atoi(row.str(1))
-			oldestReservationPageSeconds = atoi(row.str(2))
+			count, countOk := pgGroupedInteger(row.str(1), 32, 1)
+			oldest, oldestOk := pgGroupedInteger(row.str(2), 32, 120)
+			if !countOk || !oldestOk || reservationRows != 1 || row.str(3) != "" || row.str(4) != "0" {
+				rowsIncomplete = true
+				continue
+			}
+			activeReservationPages = int(count)
+			oldestReservationPageSeconds = int(oldest)
+		default:
+			rowsIncomplete = true
+			completionCoverageComplete = false
 		}
+	}
+	findings := []finding{}
+	if runQueryErr != nil {
+		issue := cannotObserveFinding(target, runQueryErr)
+		issue.frame = "netescrow-runs"
+		findings = append(findings, issue)
+	} else if rowsIncomplete {
+		findings = append(findings, pgGroupedCoverageFinding(target, "netescrow-runs"))
+	}
+	if aggregateLogErr != nil {
+		issue := cannotObserveFinding("taskworker", aggregateLogErr)
+		issue.frame = "netescrow-drift-aggregates"
+		findings = append(findings, issue)
+	} else if !aggregateCoverageComplete {
+		issue := cannotObserveFinding("taskworker", fmt.Errorf("invalid response: net-escrow aggregate projection"))
+		issue.frame = "netescrow-drift-aggregates"
+		findings = append(findings, issue)
 	}
 	completionForHeartbeat := latestCompletion
 	hasCompletionForHeartbeat := hasLatestCompletion
@@ -299,7 +392,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		!terminalRun.observedAt.IsZero() &&
 		!activeRun.observedAt.IsZero() &&
 		terminalRun.observedAt.Before(activeRun.observedAt)
-	if activeRun.seconds >= int(netEscrowReconcileRunLimit/time.Second) &&
+	if completionCoverageComplete && activeRun.seconds >= int(netEscrowReconcileRunLimit/time.Second) &&
 		!activeAttemptEnded &&
 		!completionSupersedesHeartbeat {
 		phase = "active"
@@ -319,16 +412,15 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		durationSeconds = completedOverrun.durationSeconds
 		ageSeconds = completedOverrun.ageSeconds
 	} else if lifecycleLogErr != nil {
-		return nil, fmt.Errorf("read ReconcileNetEscrow task lifecycle logs: %w", lifecycleLogErr)
+		findings = append(findings, cannotObserveFinding(target, lifecycleLogErr))
 	}
 
-	findings := []finding{}
-	if netEscrowReconcileRunLimit <= time.Duration(oldestReservationPageSeconds)*time.Second {
+	if int(netEscrowReconcileRunLimit/time.Second) <= oldestReservationPageSeconds {
 		probeID := "pg/netescrow-reservation-overrun"
 		class := "netescrow-reservation-overrun"
 		mechanism := "The database page exceeded the two-minute server execution fence target. While it remains within the enclosing 30-minute task attempt, this sample proves an access-path or missing-fence overrun but does not by itself prove the page is detached from its task."
 		context := "The 2026-09-08 recurrence established the access-path defect that made these pages slow. A page under the task deadline can still have an active owner, so retain the lifecycle distinction while repairing the query and enforcing the database timeout."
-		if netEscrowTaskAttemptLimit < time.Duration(oldestReservationPageSeconds)*time.Second {
+		if int(netEscrowTaskAttemptLimit/time.Second) < oldestReservationPageSeconds {
 			probeID = "pg/netescrow-reservation-detached"
 			class = "netescrow-reservation-detached"
 			mechanism = "Task cancellation is not a PostgreSQL execution fence. This page is older than the enclosing 30-minute task attempt, proving that its task can no longer own the original execution; each scheduled retry can add another detached copy."
@@ -385,6 +477,10 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			}
 			mechanism = "Adjacent scheduled passes moved nearly the same >=256GiB quantity in opposite directions. Independent lost writes do not repair as a matched inverse: one reconciliation wrote a stale reservation view and the next pass restored it. A legacy executor can do this with its fleet-wide absolute snapshot. On the current additive executor, each PostgreSQL statement fixes its page snapshot before running; live creates or settlements can update PostgreSQL and Redis while a slow reservation query is still executing, then the later Redis GET sees the newer mirror and the additive correction moves it back toward the older PostgreSQL snapshot. This can happen within the nominal 120s duration band, although multi-second pages make the window much larger."
 			evidence = "The adjacent aggregate pair identifies a reconciliation-created stale write. Exact source executor version plus legacy-ANY, historical bounded-lateral, or unsettled-partial statement timing identifies which race was possible. Negative counters can remain zero when no settlement decrements the overwritten mirror before the corrective successor runs."
+		} else if windowBoundary && !aggregateCoverageComplete {
+			observed += " matched_reversal=unknown_incomplete_source"
+			mechanism = "A valid correction at least 256GiB remains outside the healthy band, but a neighboring aggregate is malformed or the bounded log result is incomplete. The missing pass cannot establish or exclude a matched reversal."
+			evidence = "Retain the independently measured large correction and the separate coverage finding. A rejected aggregate is not zero drift and cannot join two nonadjacent valid passes."
 		} else if windowBoundary {
 			observed += " matched_reversal=unknown_window_boundary"
 			mechanism = "A correction at least 256GiB remains outside the healthy tens-of-GiB band, but it is now the oldest aggregate retained in the observation window. Its preceding scheduled aggregate is no longer observable, so later healthy passes cannot safely reclassify this event as a one-direction correction."
@@ -534,7 +630,13 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	action := "Do not manually re-run reconciliation. Confirm the exact executor has the balance_id index and page-local additive reconciler. Retain those fixes where present and roll them out only where version or code evidence says they are absent; if they are present, treat repeated overruns as a page-walk or storage regression and profile that phase. Observe recurring scheduled runs because one fast run does not prove fleet convergence."
 	verify := "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval."
 	profile, profileErr := self.statementProfile(ctx, env)
+	if interrupted := pgGroupedInterruptedSourceError(ctx, profileErr); interrupted != nil {
+		return nil, interrupted
+	}
 	if profileErr != nil {
+		issue := cannotObserveFinding(target, profileErr)
+		issue.frame = "netescrow-statement-profile"
+		findings = append(findings, issue)
 		evidence += " PostgreSQL statement attribution was unavailable; error_class=" + classifyObservationError(profileErr) + "."
 	} else if 0 < profile.reservationCalls {
 		reservationLifetimeMeanMs := profile.reservationTotalMs / float64(profile.reservationCalls)
@@ -556,7 +658,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		)
 		observed += " statement_interval_qualified=false"
 		evidence += " Completed statement values are endpoint entry-lifetime aggregates only. Rising family counters do not prove continuity across query-entry eviction, recreation or selective reset; no adjacent-window rate or current executor/plan attribution is established."
-		if reservationLifetimeMeanMs >= 1000 && (balanceLifetimeMeanMs == 0 || 10*balanceLifetimeMeanMs < reservationLifetimeMeanMs) {
+		if reservationLifetimeMeanMs >= 1000 && (balanceLifetimeMeanMs == 0 || balanceLifetimeMeanMs < reservationLifetimeMeanMs/10) {
 			evidence += " The historical reservation-page mean is at least 1s and over 10 times the keyset mean (or the keyset denominator is absent). This is a candidate for a current bounded activity/source and non-executing plan discriminator, not proof that the same statement caused this task overrun."
 			action += " Preserve the partial covering index and authoritative outcome join where present. Resolve current source, cache state and bounded plan before changing page size or access path; do not use lifetime counters to prescribe an already-deployed migration."
 		}
@@ -584,21 +686,35 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	return findings, nil
 }
 
-func netEscrowAggregates(logOutput string) []netEscrowAggregate {
+// Invalid matching records retain a gap in the sequence: removing them would
+// manufacture adjacency and could falsely attribute a matched reversal.
+func netEscrowAggregates(logOutput string) ([]netEscrowAggregate, bool) {
 	aggregates := []netEscrowAggregate{}
+	complete := true
 	for _, line := range strings.Split(logOutput, "\n") {
-		match := netEscrowAggregateRe.FindStringSubmatch(line)
-		if len(match) < 7 {
+		if !strings.Contains(strings.ToLower(line), "[sm]reconcile net escrow") {
 			continue
 		}
-		overBytes, overOK := parseNetEscrowBytes(match[3], match[4])
-		underBytes, underOK := parseNetEscrowBytes(match[5], match[6])
-		if !overOK || !underOK {
+		match := netEscrowAggregateRe.FindStringSubmatch(line)
+		if len(match) != 7 {
+			complete = false
+			aggregates = append(aggregates, netEscrowAggregate{unobservable: true})
+			continue
+		}
+		balances, balancesOk := pgGroupedInteger(match[1], strconv.IntSize, 0)
+		networks, networksOk := pgGroupedInteger(match[2], strconv.IntSize, 0)
+		overBytes, overOk := parseNetEscrowBytes(match[3], match[4])
+		underBytes, underOk := parseNetEscrowBytes(match[5], match[6])
+		if !balancesOk || !networksOk || networks > balances || !overOk || !underOk ||
+			(networks == 0 && (overBytes != 0 || underBytes != 0)) ||
+			(networks > 0 && overBytes == 0 && underBytes == 0) {
+			complete = false
+			aggregates = append(aggregates, netEscrowAggregate{unobservable: true})
 			continue
 		}
 		aggregates = append(aggregates, netEscrowAggregate{
-			balances:   atoi(match[1]),
-			networks:   atoi(match[2]),
+			balances:   int(balances),
+			networks:   int(networks),
 			overText:   strings.ToLower(match[3] + match[4]),
 			underText:  strings.ToLower(match[5] + match[6]),
 			overBytes:  overBytes,
@@ -606,35 +722,50 @@ func netEscrowAggregates(logOutput string) []netEscrowAggregate {
 			identity:   parseWarpLogIdentity(line),
 		})
 	}
-	return aggregates
+	// The existing --limit=100 cannot establish absence beyond a full result.
+	if len(aggregates) >= 100 {
+		complete = false
+	}
+	return aggregates, complete
 }
 
+// Convert the finite decimal text exactly before truncating fractional bytes.
+// Float64 rounds MaxInt64 upward, so a float-to-int cast is not a range check.
 func parseNetEscrowBytes(value, unit string) (int64, bool) {
-	n, err := strconv.ParseFloat(value, 64)
-	if err != nil || n < 0 {
+	if len(value) > 32 || !pgGroupedDecimalRe.MatchString(value) || strings.ContainsAny(value, "eE") {
 		return 0, false
 	}
 	multiplier := int64(1)
 	switch strings.ToLower(unit) {
 	case "b":
 	case "kib":
-		multiplier = 1 << 10
+		multiplier = 1024
 	case "mib":
-		multiplier = 1 << 20
+		multiplier = 1024 * 1024
 	case "gib":
-		multiplier = 1 << 30
+		multiplier = 1024 * 1024 * 1024
 	case "tib":
-		multiplier = 1 << 40
+		multiplier = 1024 * 1024 * 1024 * 1024
 	default:
 		return 0, false
 	}
-	return int64(n * float64(multiplier)), true
+	amount, ok := new(big.Rat).SetString(value)
+	if !ok || amount.Sign() < 0 {
+		return 0, false
+	}
+	amount.Mul(amount, new(big.Rat).SetInt64(multiplier))
+	maximum := new(big.Rat).SetInt64(int64(^uint64(0) >> 1))
+	if amount.Cmp(maximum) > 0 {
+		return 0, false
+	}
+	bytes := new(big.Int).Quo(amount.Num(), amount.Denom())
+	return bytes.Int64(), bytes.IsInt64()
 }
 
 func latestLargeNetEscrowDrift(aggregates []netEscrowAggregate) (netEscrowAggregate, *netEscrowAggregate, string, bool, bool) {
 	incidentIndex := -1
 	for i := range aggregates {
-		if aggregates[i].overBytes >= netEscrowLargeDriftBytes || aggregates[i].underBytes >= netEscrowLargeDriftBytes {
+		if !aggregates[i].unobservable && (aggregates[i].overBytes >= netEscrowLargeDriftBytes || aggregates[i].underBytes >= netEscrowLargeDriftBytes) {
 			incidentIndex = i
 		}
 	}
@@ -647,6 +778,9 @@ func latestLargeNetEscrowDrift(aggregates []netEscrowAggregate) (netEscrowAggreg
 			continue
 		}
 		adjacent := &aggregates[adjacentIndex]
+		if adjacent.unobservable {
+			continue
+		}
 		if approximatelyEqualNetEscrowBytes(adjacent.underBytes, incident.overBytes) &&
 			adjacent.underBytes >= netEscrowLargeDriftBytes && incident.overBytes >= netEscrowLargeDriftBytes {
 			return incident, adjacent, "under-to-over", false, true
@@ -656,7 +790,9 @@ func latestLargeNetEscrowDrift(aggregates []netEscrowAggregate) (netEscrowAggreg
 			return incident, adjacent, "over-to-under", false, true
 		}
 	}
-	predecessorOutsideWindow := incidentIndex == 0 && 1 < len(aggregates)
+	predecessorOutsideWindow := (incidentIndex == 0 && 1 < len(aggregates)) ||
+		(incidentIndex > 0 && aggregates[incidentIndex-1].unobservable) ||
+		(incidentIndex+1 < len(aggregates) && aggregates[incidentIndex+1].unobservable)
 	return incident, nil, "", predecessorOutsideWindow, true
 }
 

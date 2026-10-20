@@ -236,9 +236,9 @@ func TestProxyPathSignalReportsBlockWithNoReadyAllocation(t *testing.T) {
 				"synthetic-proxy-g1-second|80:13080,8080:13081,8081:13082,8082:13083|missing",
 			}, "\n"), nil
 		case strings.Contains(command, proxyRouteMarker):
-			return "networkd_start=100\nlb_start=200\nv4_routes=1\nv6_routes=0\nv4_rules=1\nv6_rules=0", nil
+			return "networkd_start=0|100\nlb_start=0|200\nv4_routes=0|1\nv6_routes=0|0\nv4_rules=0|1\nv6_rules=0|0\ncomplete=proxy-route-v1\n", nil
 		case strings.Contains(command, edgeAutoUpgradeMarker):
-			return "periodic_enable=0\napt-daily.timer=masked\napt-daily-upgrade.timer=masked\napt-daily.service=masked\napt-daily-upgrade.service=masked\nunattended-upgrades.service=masked", nil
+			return "periodic_enable=0|0\napt-daily.timer=0|masked\napt-daily-upgrade.timer=0|masked\napt-daily.service=0|masked\napt-daily-upgrade.service=0|masked\nunattended-upgrades.service=0|masked\ncomplete=apt-policy-v2\n", nil
 		default:
 			return "", errors.New("unexpected synthetic host command")
 		}
@@ -350,9 +350,9 @@ func TestProxyPathSignalSyntheticProblems(t *testing.T) {
 			case strings.Contains(command, proxyAllocationMarker):
 				return "synthetic-proxy-g1-current|80:12689,8080:12719,8081:12720,8082:12721|200", nil
 			case strings.Contains(command, proxyRouteMarker):
-				return "networkd_start=200\nlb_start=100\nv4_routes=0\nv6_routes=1\nv4_rules=0\nv6_rules=1", nil
+				return "networkd_start=0|200\nlb_start=0|100\nv4_routes=0|0\nv6_routes=0|1\nv4_rules=0|0\nv6_rules=0|1\ncomplete=proxy-route-v1\n", nil
 			case strings.Contains(command, edgeAutoUpgradeMarker):
-				return "periodic_enable=1\napt-daily.timer=enabled\napt-daily-upgrade.timer=enabled\napt-daily.service=static\napt-daily-upgrade.service=static\nunattended-upgrades.service=enabled", nil
+				return "periodic_enable=0|1\napt-daily.timer=0|enabled\napt-daily-upgrade.timer=0|enabled\napt-daily.service=0|static\napt-daily-upgrade.service=0|static\nunattended-upgrades.service=0|enabled\ncomplete=apt-policy-v2\n", nil
 			default:
 				return "", errors.New("unexpected synthetic host command")
 			}

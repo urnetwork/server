@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -56,6 +55,15 @@ var redisRateMetrics = []redisRateMetric{
 	{name: "redis_expired_keys_total", short: "expired"},
 }
 
+// A configured exporter source is the host and decimal node-port pair that
+// the Redis Fluent Bit multi-target publisher stamps alongside env/job.
+type redisRateSource struct {
+	host string
+	node string
+}
+
+// Counts contain only unique configured sources, after the exact identity
+// and per-source multiplicity checks; foreign sources cannot fill a hole.
 type redisRateCoverage struct {
 	expected int
 	counts   map[string]int
@@ -209,9 +217,17 @@ func (p redisRatesProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 }
 
 func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCoverage, string, error) {
-	// one exporter series per node, across every redis-cluster host
-	nodeCount := len(env.cfg.redisAllNodePorts())
-	if env.cfg.redisEntryHost() == nil || nodeCount == 0 {
+	expectedSources := map[redisRateSource]bool{}
+	for _, nodeHost := range env.cfg.redisNodeHosts() {
+		for _, port := range nodeHost.redisNodePorts() {
+			source := redisRateSource{host: nodeHost.name, node: strconv.Itoa(port)}
+			if expectedSources[source] {
+				return redisRateCoverage{}, "", fmt.Errorf("ambiguous Redis source inventory")
+			}
+			expectedSources[source] = true
+		}
+	}
+	if len(expectedSources) == 0 {
 		return redisRateCoverage{}, "", fmt.Errorf("no Redis node inventory is configured")
 	}
 	metricHosts := env.cfg.hostsWithRole("services")
@@ -228,26 +244,28 @@ func observeRedisRateCoverage(ctx context.Context, env *probeEnv) (redisRateCove
 	if err != nil {
 		return redisRateCoverage{}, "", fmt.Errorf("query Mimir through service gateways: %w", err)
 	}
-	coverage, err := parseRedisRateCoverage(out, nodeCount)
+	coverage, err := parseRedisRateCoverage(out, env.cfg.env, expectedSources)
 	if err != nil {
 		return redisRateCoverage{}, metricHost.name, err
 	}
 	return coverage, metricHost.name, nil
 }
 
+// Preserve configured source labels and count extra publisher series within
+// each source. A zero marker distinguishes empty and omitted partitions.
 func redisRateCoverageQuery(environment string) string {
 	parts := make([]string, 0, len(redisRateMetrics)*3)
 	for _, metric := range redisRateMetrics {
-		selector := metric.name + `{env=` + strconv.Quote(environment) + `}`
+		selector := metric.name + `{env=` + strconv.Quote(environment) + `,job="redis"}`
 		fresh := selector + ` and (timestamp(` + selector + `) >= time() - ` +
 			strconv.FormatInt(int64(redisRatesFreshness/time.Second), 10) + `)`
 		checks := []struct {
 			name       string
 			expression string
 		}{
-			{name: metric.short + "_raw", expression: "count(" + fresh + ")"},
-			{name: metric.short + "_1m", expression: "count(rate(" + selector + "[1m]) and " + fresh + ")"},
-			{name: metric.short + "_5m", expression: "count(rate(" + selector + "[5m]) and " + fresh + ")"},
+			{name: metric.short + "_raw", expression: "count by (env, job, host, node) (" + fresh + ")"},
+			{name: metric.short + "_1m", expression: "count by (env, job, host, node) (rate(" + selector + "[1m]) and " + fresh + ")"},
+			{name: metric.short + "_5m", expression: "count by (env, job, host, node) (rate(" + selector + "[5m]) and " + fresh + ")"},
 		}
 		for _, check := range checks {
 			parts = append(parts, `label_replace((`+check.expression+` or vector(0)),"monitor_check",`+
@@ -257,49 +275,68 @@ func redisRateCoverageQuery(environment string) string {
 	return strings.Join(parts, " or ")
 }
 
-func parseRedisRateCoverage(output string, expected int) (redisRateCoverage, error) {
+// Reduce only complete, unambiguous source partitions. Equal global counts
+// do not establish cohort coverage, and partial success is unknown. Source
+// labels, warning strings and malformed response values never enter errors.
+func parseRedisRateCoverage(output string, environment string, expectedSources map[redisRateSource]bool) (redisRateCoverage, error) {
+	if environment == "" || len(expectedSources) == 0 {
+		return redisRateCoverage{}, fmt.Errorf("no Redis source inventory is configured")
+	}
 	var response mimirInstantResponse
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		return redisRateCoverage{}, fmt.Errorf("decode Mimir response: %w", err)
+		return redisRateCoverage{}, fmt.Errorf("invalid Mimir response encoding")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
-		return redisRateCoverage{}, fmt.Errorf(
-			"Mimir status=%q result_type=%q error=%q",
-			response.Status, response.Data.ResultType, response.Error,
-		)
+		return redisRateCoverage{}, fmt.Errorf("Mimir did not return a successful vector")
 	}
-	want := map[string]bool{}
+	if len(response.Warnings) != 0 {
+		return redisRateCoverage{}, fmt.Errorf("Mimir returned partial query warnings")
+	}
+	partitionSources := map[string]map[redisRateSource]bool{}
 	for _, metric := range redisRateMetrics {
 		for _, window := range []string{"raw", "1m", "5m"} {
-			want[metric.short+"_"+window] = true
+			partitionSources[metric.short+"_"+window] = map[redisRateSource]bool{}
 		}
 	}
-	counts := make(map[string]int, len(want))
+	markers := map[string]bool{}
 	for _, series := range response.Data.Result {
 		check := series.Metric["monitor_check"]
-		if !want[check] {
-			return redisRateCoverage{}, fmt.Errorf("unexpected Mimir result partition %q", check)
-		}
-		if _, duplicate := counts[check]; duplicate {
-			return redisRateCoverage{}, fmt.Errorf("duplicate Mimir result partition %q", check)
+		sources, ok := partitionSources[check]
+		if !ok {
+			return redisRateCoverage{}, fmt.Errorf("unexpected Mimir coverage partition")
 		}
 		_, value, err := mimirInstantValue(series.Value)
-		if err != nil || value < 0 || value != float64(int(value)) {
-			return redisRateCoverage{}, fmt.Errorf("invalid %s count", check)
+		if err != nil {
+			return redisRateCoverage{}, fmt.Errorf("invalid Mimir coverage sample")
 		}
-		counts[check] = int(value)
-	}
-	if len(counts) != len(want) {
-		missing := []string{}
-		for check := range want {
-			if _, ok := counts[check]; !ok {
-				missing = append(missing, check)
+		if len(series.Metric) == 1 {
+			if value != 0 || markers[check] {
+				return redisRateCoverage{}, fmt.Errorf("invalid Mimir coverage partition marker")
 			}
+			markers[check] = true
+			continue
 		}
-		sort.Strings(missing)
-		return redisRateCoverage{}, fmt.Errorf("Mimir response omitted partitions %s", strings.Join(missing, ","))
+		if len(series.Metric) != 5 || series.Metric["env"] != environment ||
+			series.Metric["job"] != "redis" || series.Metric["host"] == "" || series.Metric["node"] == "" {
+			return redisRateCoverage{}, fmt.Errorf("invalid Mimir coverage source labels")
+		}
+		source := redisRateSource{host: series.Metric["host"], node: series.Metric["node"]}
+		if !expectedSources[source] {
+			continue
+		}
+		if value != 1 || sources[source] {
+			return redisRateCoverage{}, fmt.Errorf("ambiguous Mimir coverage for a configured Redis source")
+		}
+		sources[source] = true
 	}
-	return redisRateCoverage{expected: expected, counts: counts}, nil
+	if len(markers) != len(partitionSources) {
+		return redisRateCoverage{}, fmt.Errorf("Mimir response omitted coverage partition markers")
+	}
+	counts := make(map[string]int, len(partitionSources))
+	for check, sources := range partitionSources {
+		counts[check] = len(sources)
+	}
+	return redisRateCoverage{expected: len(expectedSources), counts: counts}, nil
 }
 
 func getBoundedGrafanaJSON(
@@ -413,10 +450,10 @@ func evaluateRedisRateCoverage(metricHost string, coverage redisRateCoverage) fi
 		mechanism: "A missing raw series identifies collection or ingestion loss; a present raw series without a five-minute rate lacks enough samples for a counter derivative. This boundary must be healthy before an empty dashboard can be attributed solely to its query window.",
 		baseline:  "Fresh raw commands, evictions, and expirations plus their five-minute rates each cover every configured Redis node.",
 		observed:  coverage.summary(),
-		evidence:  "The bounded loopback Mimir query returned only aggregate series counts through gateway " + metricHost + "; it retained no node labels or values.",
+		evidence:  "The bounded loopback Mimir query verified configured env/job/host/node identities and unique per-source series through gateway " + metricHost + "; public evidence retains only cohort counts, never source labels or counter values.",
 		context:   "A dashboard definition can be wrong at the same time, but changing it cannot restore a missing exporter or remote-write series.",
 		action:    "Check the missing node's exporter scrape, Fluent Bit input, remote-write response, and Mimir freshness. Do not restart Redis or deploy a dashboard merely to create absent source samples.",
-		verify:    "Two consecutive queries return fresh raw and five-minute-rate coverage equal to the configured node count for all three counters.",
+		verify:    "Two consecutive warning-free queries return exactly one fresh raw and five-minute-rate series for every configured host/node pair and all three counters.",
 		playbook:  "SIGNALS.md §1.4a and §11.14",
 	}
 }

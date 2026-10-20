@@ -1,0 +1,99 @@
+// This inert Server fixture runs only inside a pinned vendored Mimir module.
+package redis_rates_test
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/promqltest"
+)
+
+// Native evaluation, including source timestamps, vector matching and resets.
+// Real vectors are returned to the owning Server reducer after the independent
+// exact-vector assertions have passed.
+func TestRedisRatesConfiguredCohort(t *testing.T) {
+	path := os.Getenv("MONITOR_PROMQL_TEST_SCRIPT")
+	responsePath := os.Getenv("MONITOR_PROMQL_TEST_RESPONSES")
+	if path == "" || responsePath == "" {
+		t.Fatal("MONITOR_PROMQL_TEST_SCRIPT and MONITOR_PROMQL_TEST_RESPONSES are required")
+	}
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := promqltest.NewTestEngine(t, false, 5*time.Minute, 1_000_000)
+	promqltest.RunTest(t, string(script), engine)
+	responses := map[string]json.RawMessage{}
+	for _, block := range strings.Split(strings.TrimPrefix(string(script), "# "), "\n# ") {
+		name, body, ok := strings.Cut(block, "\nclear\n")
+		if !ok {
+			t.Fatal("invalid native fixture block")
+		}
+		load, evaluations, ok := strings.Cut(body, "\neval instant at ")
+		if !ok {
+			t.Fatal("native fixture omitted evaluation")
+		}
+		statement, _, _ := strings.Cut(evaluations, "\n")
+		clock, expression, ok := strings.Cut(statement, " ")
+		if !ok {
+			t.Fatal("native fixture omitted query")
+		}
+		evaluation, err := time.ParseDuration(clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		func() {
+			storage := promqltest.LoadedStorage(t, load+"\n")
+			defer storage.Close()
+			query, err := engine.NewInstantQuery(context.Background(), storage,
+				promql.NewPrometheusQueryOpts(false, 5*time.Minute), expression,
+				time.Unix(0, 0).UTC().Add(evaluation))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer query.Close()
+			result := query.Exec(context.Background())
+			vector, err := result.Vector()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Warnings) != 0 {
+				t.Fatal("native synthetic query returned unexpected warnings")
+			}
+			rows := []map[string]any{}
+			for _, sample := range vector {
+				if sample.H != nil {
+					t.Fatal("native synthetic query returned a histogram")
+				}
+				rows = append(rows, map[string]any{
+					"metric": sample.Metric.Map(),
+					"value": []any{float64(sample.T) / 1000, strconv.FormatFloat(sample.F, 'g', -1, 64)},
+				})
+			}
+			response, err := json.Marshal(map[string]any{
+				"status": "success",
+				"data": map[string]any{"resultType": "vector", "result": rows},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, duplicate := responses[name]; duplicate {
+				t.Fatal("duplicate native fixture case")
+			}
+			responses[name] = response
+		}()
+	}
+	encoded, err := json.Marshal(responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(responsePath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+}

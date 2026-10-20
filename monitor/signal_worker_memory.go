@@ -37,9 +37,10 @@ func (workerMemoryProbe) tier() string           { return tierWarn }
 func (workerMemoryProbe) cadence() time.Duration { return time.Minute }
 
 type mimirInstantResponse struct {
-	Status string `json:"status"`
-	Error  string `json:"error"`
-	Data   struct {
+	Status   string   `json:"status"`
+	Error    string   `json:"error"`
+	Warnings []string `json:"warnings"`
+	Data     struct {
 		ResultType string `json:"resultType"`
 		Result     []struct {
 			Metric map[string]string `json:"metric"`
@@ -53,16 +54,14 @@ type workerRuntimeMetrics struct {
 	block       string
 	instance    string
 	heap        float64
-	objects     float64
-	rss         float64
-	allocTotal  float64
-	gcCycles    float64
 	startTime   float64
 	cpuRate     float64
 	allocRate   float64
 	gcRate      float64
 	gcPauseRate float64
 	rateMask    uint8
+	samples     workerMetricSamples
+	rates       workerMetricSamples
 }
 
 const (
@@ -79,19 +78,27 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		return nil, fmt.Errorf("worker memory: no services host in inventory for the loopback Mimir query")
 	}
 
-	metricNames := strings.Join([]string{
+	metricNames := []string{
 		"go_memstats_heap_alloc_bytes",
 		"go_memstats_heap_objects",
 		"go_memstats_alloc_bytes_total",
 		"go_gc_duration_seconds_count",
 		"process_resident_memory_bytes",
 		"process_start_time_seconds",
-	}, "|")
-	query := fmt.Sprintf(
-		`{__name__=~%s,env=%s,job="taskworker"}`,
-		strconv.Quote(metricNames),
-		strconv.Quote(env.cfg.env),
-	)
+	}
+	queries := make([]string, 0, 2*len(metricNames))
+	for _, name := range metricNames {
+		selector := fmt.Sprintf(`%s{env=%s,job="taskworker"}`, name, strconv.Quote(env.cfg.env))
+		// Instant selector results also carry evaluation time. Each family
+		// needs its own clock; a fresh RSS sample cannot qualify an old heap.
+		// Explicit family labels keep `or` from coalescing different metrics.
+		queries = append(queries,
+			fmt.Sprintf(`label_replace((%s and (timestamp(%s) >= time() - 90) and (timestamp(%s) <= time() + 30)),"monitor_memory_metric",%s,"job",".*")`,
+				selector, selector, selector, strconv.Quote(name)),
+			fmt.Sprintf(`label_replace(timestamp(%s),"monitor_memory_source",%s,"job",".*")`, selector, strconv.Quote(name)),
+		)
+	}
+	query := strings.Join(queries, " or ")
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(query)
 	out, metricHost, err := shellFirstServiceGateway(
 		ctx,
@@ -106,72 +113,80 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 
 	var response mimirInstantResponse
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
-		return nil, fmt.Errorf("worker memory: decode Mimir response: %w", err)
+		return nil, fmt.Errorf("worker memory: invalid Mimir response")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
-		return nil, fmt.Errorf("worker memory: Mimir status=%q result_type=%q error=%q", response.Status, response.Data.ResultType, response.Error)
+		return nil, fmt.Errorf("worker memory: Mimir response was not a successful vector")
 	}
 
 	now := env.now().UTC()
 	workers := map[string]*workerRuntimeMetrics{}
+	bounded := len(response.Warnings) == 0
 	for _, series := range response.Data.Result {
-		observedAt, value, err := mimirInstantValue(series.Value)
-		if err != nil {
-			return nil, fmt.Errorf("worker memory: parse %s sample: %w", series.Metric["__name__"], err)
-		}
-		age := now.Sub(observedAt)
-		if age > workerMemoryMetricFreshness || age < -30*time.Second {
+		kind, hasMetric := series.Metric["monitor_memory_metric"]
+		sourceKind, hasSource := series.Metric["monitor_memory_source"]
+		// The issued query gives each series exactly one family marker.
+		// Missing or simultaneous markers leave returned coverage unknown.
+		if hasMetric == hasSource {
+			bounded = false
 			continue
 		}
-		host := series.Metric["host"]
-		if host == "" {
+		if hasSource {
+			kind = sourceKind
+		}
+		switch kind {
+		case "go_memstats_heap_alloc_bytes", "go_memstats_heap_objects", "go_memstats_alloc_bytes_total",
+			"go_gc_duration_seconds_count", "process_resident_memory_bytes", "process_start_time_seconds":
+		default:
+			bounded = false
 			continue
 		}
-		block := series.Metric["block"]
-		instance := series.Metric["instance"]
-		key := host + "\x00" + block + "\x00" + instance
+		if !workerMetricIdentity(series.Metric, env.cfg.env) {
+			bounded = false
+			continue
+		}
+		host, block, instance := series.Metric["host"], series.Metric["block"], series.Metric["instance"]
+		key := workerScorePhaseKey(host, block, instance)
 		worker := workers[key]
 		if worker == nil {
-			worker = &workerRuntimeMetrics{host: host, block: block, instance: instance}
+			worker = &workerRuntimeMetrics{
+				host: host, block: block, instance: instance,
+				samples: workerMetricSamples{}, rates: workerMetricSamples{},
+			}
 			workers[key] = worker
 		}
-		switch series.Metric["__name__"] {
-		case "go_memstats_heap_alloc_bytes":
-			worker.heap = value
-		case "go_memstats_heap_objects":
-			worker.objects = value
-		case "go_memstats_alloc_bytes_total":
-			worker.allocTotal = value
-		case "go_gc_duration_seconds_count":
-			worker.gcCycles = value
-		case "process_resident_memory_bytes":
-			worker.rss = value
-		case "process_start_time_seconds":
-			worker.startTime = value
+		if hasSource {
+			kind += "_source_time"
 		}
+		worker.samples.observe(kind, series.Value, now)
 	}
 
 	heaps := make([]float64, 0, len(workers))
+	incomplete := 0
 	for _, worker := range workers {
-		if worker.heap > 0 {
-			heaps = append(heaps, worker.heap)
+		if value, valid := worker.samples.qualified("go_memstats_heap_alloc_bytes"); valid {
+			worker.heap = value
+			heaps = append(heaps, value)
+		}
+		worker.startTime, _ = worker.samples.qualified("process_start_time_seconds")
+		for _, kind := range metricNames {
+			if _, valid := worker.samples.qualified(kind); !valid {
+				incomplete++
+				break
+			}
 		}
 	}
-	if len(heaps) == 0 {
-		return nil, fmt.Errorf("worker memory: Mimir returned no fresh taskworker heap samples")
+	if len(workers) == 0 {
+		return []finding{workerMetricCoverage("taskworker-fleet/memory-metrics", 0, 0, 0, bounded)}, nil
 	}
-	median := medianFloat64(heaps)
+	median := workerMedianBounds(heaps, len(workers), bounded)
+	indeterminate := 0
 
 	// Heap size alone cannot distinguish an actively allocating executor from
 	// a completed task whose unreachable objects are waiting for the next GC.
 	// Best-effort five-minute rates make that distinction without weakening the
 	// base heap alert when an older Mimir front cannot evaluate the rate query.
-	rateQuery := strings.Join([]string{
-		fmt.Sprintf(`label_replace(rate(process_cpu_seconds_total{env=%s,job="taskworker"}[5m]),"monitor_rate","cpu","job",".*")`, strconv.Quote(env.cfg.env)),
-		fmt.Sprintf(`label_replace(rate(go_memstats_alloc_bytes_total{env=%s,job="taskworker"}[5m]),"monitor_rate","alloc","job",".*")`, strconv.Quote(env.cfg.env)),
-		fmt.Sprintf(`label_replace(rate(go_gc_duration_seconds_count{env=%s,job="taskworker"}[5m]),"monitor_rate","gc","job",".*")`, strconv.Quote(env.cfg.env)),
-		fmt.Sprintf(`label_replace(rate(go_gc_duration_seconds_sum{env=%s,job="taskworker"}[5m]),"monitor_rate","gc_pause","job",".*")`, strconv.Quote(env.cfg.env)),
-	}, " or ")
+	rateQuery := workerRatesQuery(env.cfg.env, "5m", true)
 	rateURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(rateQuery)
 	rateOut, _, rateErr := shellFirstServiceGateway(
 		ctx,
@@ -183,38 +198,28 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	if rateErr == nil {
 		var rateResponse mimirInstantResponse
 		if err := json.Unmarshal([]byte(rateOut), &rateResponse); err != nil {
-			rateErr = fmt.Errorf("decode five-minute rate response: %w", err)
+			rateErr = fmt.Errorf("invalid five-minute rate response")
 		} else if rateResponse.Status != "success" || rateResponse.Data.ResultType != "vector" {
-			rateErr = fmt.Errorf("five-minute rate status=%q result_type=%q error=%q", rateResponse.Status, rateResponse.Data.ResultType, rateResponse.Error)
+			// Retain private classification evidence; only its fixed error
+			// class is rendered in the optional-enrichment qualifier below.
+			rateErr = fmt.Errorf("five-minute rate response: %s", rateResponse.Error)
+		} else if len(rateResponse.Warnings) != 0 {
+			rateErr = fmt.Errorf("five-minute rate response is incomplete")
 		} else {
 			for _, series := range rateResponse.Data.Result {
-				observedAt, value, err := mimirInstantValue(series.Value)
-				if err != nil {
-					rateErr = fmt.Errorf("parse %s five-minute rate: %w", series.Metric["monitor_rate"], err)
-					break
-				}
-				age := now.Sub(observedAt)
-				if age > workerMemoryMetricFreshness || age < -30*time.Second {
+				kind := series.Metric["monitor_rate"]
+				switch kind {
+				case "cpu", "alloc", "gc", "gc_pause", "cpu_source_time", "alloc_source_time", "gc_source_time", "gc_pause_source_time":
+				default:
 					continue
 				}
-				key := series.Metric["host"] + "\x00" + series.Metric["block"] + "\x00" + series.Metric["instance"]
-				worker := workers[key]
-				if worker == nil {
+				if !workerMetricIdentity(series.Metric, env.cfg.env) {
+					rateErr = fmt.Errorf("five-minute rate identity is invalid")
 					continue
 				}
-				switch series.Metric["monitor_rate"] {
-				case "cpu":
-					worker.cpuRate = value
-					worker.rateMask |= workerRateCPU
-				case "alloc":
-					worker.allocRate = value
-					worker.rateMask |= workerRateAlloc
-				case "gc":
-					worker.gcRate = value
-					worker.rateMask |= workerRateGC
-				case "gc_pause":
-					worker.gcPauseRate = value
-					worker.rateMask |= workerRateGCPause
+				key := workerScorePhaseKey(series.Metric["host"], series.Metric["block"], series.Metric["instance"])
+				if worker := workers[key]; worker != nil {
+					worker.rates.observe(kind, series.Value, now)
 				}
 			}
 		}
@@ -222,15 +227,23 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	cpuRates := make([]float64, 0, len(workers))
 	allocRates := make([]float64, 0, len(workers))
 	for _, worker := range workers {
-		if worker.rateMask&workerRateCPU != 0 {
-			cpuRates = append(cpuRates, worker.cpuRate)
+		if value, valid := worker.rates.qualified("cpu"); valid {
+			worker.cpuRate, worker.rateMask = value, worker.rateMask|workerRateCPU
+			cpuRates = append(cpuRates, value)
 		}
-		if worker.rateMask&workerRateAlloc != 0 {
-			allocRates = append(allocRates, worker.allocRate)
+		if value, valid := worker.rates.qualified("alloc"); valid {
+			worker.allocRate, worker.rateMask = value, worker.rateMask|workerRateAlloc
+			allocRates = append(allocRates, value)
+		}
+		if value, valid := worker.rates.qualified("gc"); valid {
+			worker.gcRate, worker.rateMask = value, worker.rateMask|workerRateGC
+		}
+		if value, valid := worker.rates.qualified("gc_pause"); valid {
+			worker.gcPauseRate, worker.rateMask = value, worker.rateMask|workerRateGCPause
 		}
 	}
-	cpuMedian := medianFloat64OrZero(cpuRates)
-	allocMedian := medianFloat64OrZero(allocRates)
+	cpuMedian := workerMedianBounds(cpuRates, len(workers), bounded && rateErr == nil)
+	allocMedian := workerMedianBounds(allocRates, len(workers), bounded && rateErr == nil)
 
 	findings := []finding{}
 	activeLog := ""
@@ -245,17 +258,27 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	var phaseObservationsErr error
 	phaseObservationsLoaded := false
 	for _, worker := range workers {
-		if worker.heap <= 0 {
+		if _, valid := worker.samples.qualified("go_memstats_heap_alloc_bytes"); !valid {
 			continue
 		}
-		ratio := worker.heap / median
-		outlier := worker.heap >= workerMemoryAbsoluteBytes && ratio >= workerMemorySkewRatio
-		if len(heaps) < 3 {
+		healthy := worker.heap < workerMemoryAbsoluteBytes || worker.heap/workerMemorySkewRatio < median.lower
+		outlier := worker.heap >= workerMemoryAbsoluteBytes && worker.heap/workerMemorySkewRatio >= median.upper
+		if bounded && len(workers) < 3 {
 			outlier = worker.heap >= workerMemorySparseAbsoluteBytes
+			healthy = !outlier
+		}
+		target := worker.host + "/" + worker.block
+		if healthy {
+			observed := healthyFinding("runtime/worker-memory-skew", tierWarn, "worker-memory-skew", target)
+			observed.frame = worker.instance
+			findings = append(findings, observed)
+			continue
 		}
 		if !outlier {
+			indeterminate++
 			continue
 		}
+
 		if !activeLogLoaded {
 			activeLog, activeLogSource, activeLogErr = readTaskLifecycleLog(
 				ctx,
@@ -272,14 +295,14 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			activeLogObservedAt = env.now().UTC()
 		}
 
-		target := worker.host
-		if worker.block != "" {
-			target += "/" + worker.block
+		processAge := "unknown"
+		if _, valid := worker.samples.qualified("process_start_time_seconds"); valid {
+			processAge = "0"
+			if worker.startTime > 0 {
+				processAge = fmt.Sprintf("%d", max(int64(0), now.Unix()-int64(worker.startTime)))
+			}
 		}
-		processAge := int64(0)
-		if worker.startTime > 0 {
-			processAge = max(int64(0), now.Unix()-int64(worker.startTime))
-		}
+
 		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, activeLogObservedAt)
 		scoreActive := false
 		closeActive := false
@@ -292,18 +315,26 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			}
 		}
 		observed := fmt.Sprintf(
-			"heap_alloc_bytes=%.0f heap_gib=%.2f fleet_samples=%d fleet_median_bytes=%.0f fleet_median_gib=%.2f fleet_ratio=%.1f heap_objects=%.0f rss_bytes=%.0f alloc_total_bytes=%.0f gc_cycles=%.0f process_age_s=%d block=%s instance=%s",
-			worker.heap, bytesToGiB(worker.heap), len(heaps), median, bytesToGiB(median), ratio,
-			worker.objects, worker.rss, worker.allocTotal, worker.gcCycles, processAge, worker.block, worker.instance,
+			"heap_alloc_bytes=%.0f heap_gib=%.2f fleet_samples=%d %s fleet_ratio=%s heap_objects=%s rss_bytes=%s alloc_total_bytes=%s gc_cycles=%s process_age_s=%s block=%s instance=%s",
+			worker.heap, bytesToGiB(worker.heap), len(workers), median.summary("fleet_median_bytes", "%.0f"), workerMetricRatio(worker.heap, median.upper),
+			worker.samples.summary("go_memstats_heap_objects"), worker.samples.summary("process_resident_memory_bytes"),
+			worker.samples.summary("go_memstats_alloc_bytes_total"), worker.samples.summary("go_gc_duration_seconds_count"),
+			processAge, worker.block, worker.instance,
 		)
+		if median.complete {
+			observed += fmt.Sprintf(" fleet_median_gib=%.2f", bytesToGiB(median.upper))
+		} else {
+			observed += " fleet_baseline=bounded_partial fleet_ratio_kind=lower_bound_or_unknown"
+		}
 		if rateErr == nil && worker.rateMask == workerRateAll {
 			observed += fmt.Sprintf(
-				" cpu_cores_5m=%.3f fleet_median_cpu_cores_5m=%.3f cpu_ratio_5m=%.1f alloc_bytes_per_s_5m=%.0f alloc_mib_per_s_5m=%.2f fleet_median_alloc_bytes_per_s_5m=%.0f alloc_ratio_5m=%.1f gc_cycles_per_s_5m=%.3f gc_pause_seconds_per_s_5m=%.6f",
-				worker.cpuRate, cpuMedian, safeRatio(worker.cpuRate, cpuMedian),
-				worker.allocRate, worker.allocRate/float64(1<<20), allocMedian, safeRatio(worker.allocRate, allocMedian),
+				" cpu_cores_5m=%.3f %s cpu_ratio_5m=%s alloc_bytes_per_s_5m=%.0f alloc_mib_per_s_5m=%.2f %s alloc_ratio_5m=%s gc_cycles_per_s_5m=%.3f gc_pause_seconds_per_s_5m=%.6f",
+				worker.cpuRate, cpuMedian.summary("fleet_median_cpu_cores_5m", "%.3f"), workerMetricRatio(worker.cpuRate, cpuMedian.upper),
+				worker.allocRate, worker.allocRate/float64(1024*1024), allocMedian.summary("fleet_median_alloc_bytes_per_s_5m", "%.0f"), workerMetricRatio(worker.allocRate, allocMedian.upper),
 				worker.gcRate, worker.gcPauseRate,
 			)
 		}
+
 		if summary := formatExecutorActiveTasks(activeTasks, 8); summary != "" {
 			observed += fmt.Sprintf(
 				" active_task_count=%d active_tasks=%s active_log_source=%s",
@@ -312,7 +343,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				activeLogSource,
 			)
 		}
-		evidence := "The values come from the process's pushed Go runtime and process metrics in Mimir. Five-minute CPU/allocation/GC rates distinguish active allocation pressure from a completed task's heap awaiting collection. The active_tasks field joins the same host/block to authoritative taskworker eval-active heartbeats; compare those task families on other executors."
+		evidence := "The values come from the process's pushed Go runtime and process metrics in Mimir. Missing heap scalars retain their runtime in the fleet comparison; a partial upper bound can prove skew but is not presented as a measured median. Five-minute CPU/allocation/GC rates distinguish active allocation pressure from a completed task's heap awaiting collection. The active_tasks field joins the same host/block to authoritative taskworker eval-active heartbeats; compare those task families on other executors."
 		if rateErr != nil {
 			evidence += fmt.Sprintf(" The best-effort five-minute rate lookup failed (error_class=%s).", classifyObservationError(rateErr))
 		} else if worker.rateMask != workerRateAll {
@@ -377,8 +408,8 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			probeId: "runtime/worker-memory-skew", tier: tierWarn,
 			class: "worker-memory-skew", target: target, frame: worker.instance, sustain: 2,
 			symptom: fmt.Sprintf(
-				"taskworker %s holds %.2fGiB of allocated Go heap, %.1fx the %.2fGiB fleet median",
-				target, bytesToGiB(worker.heap), ratio, bytesToGiB(median),
+				"taskworker %s holds %.2fGiB of allocated Go heap beyond the applicable fleet or sparse-fleet guard",
+				target, bytesToGiB(worker.heap),
 			),
 			mechanism: mechanism,
 			baseline: fmt.Sprintf(
@@ -393,10 +424,15 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			playbook: "SIGNALS.md 2.12",
 		})
 	}
-	if len(findings) == 0 {
-		return []finding{healthyFinding("runtime/worker-memory-skew", tierWarn, "worker-memory-skew", "taskworker-fleet")}, nil
+	if incomplete > 0 || indeterminate > 0 || !bounded {
+		findings = append(findings, workerMetricCoverage("taskworker-fleet/memory-metrics", len(workers), incomplete, indeterminate, bounded))
 	}
-	sort.Slice(findings, func(i, j int) bool { return findings[i].target < findings[j].target })
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].target != findings[j].target {
+			return findings[i].target < findings[j].target
+		}
+		return findings[i].frame < findings[j].frame
+	})
 	return findings, nil
 }
 
@@ -472,7 +508,12 @@ func medianFloat64(values []float64) float64 {
 	if len(ordered)%2 == 1 {
 		return ordered[middle]
 	}
-	return (ordered[middle-1] + ordered[middle]) / 2
+	left, right := ordered[middle-1], ordered[middle]
+	sum := left + right
+	if math.IsInf(sum, 0) && !math.IsInf(left, 0) && !math.IsInf(right, 0) {
+		return left/2 + right/2
+	}
+	return sum / 2
 }
 
 func medianFloat64OrZero(values []float64) float64 {

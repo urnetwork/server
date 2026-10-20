@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1454,4 +1458,292 @@ func TestSubtensorProgressPeerLossContextUnchanged(t *testing.T) {
 	if !strings.Contains(progress.Mechanism, "co-resident with complete peer loss") || progress.Sustain != 3 || progress.PageSustain != 5 || peer.Sustain != 3 || peer.PageSustain != 5 {
 		t.Fatal("bounded narration correction changed independently observed peer-loss context or escalation")
 	}
+}
+
+// Every host inspection executes the generated Python unchanged. Only native
+// commands, network responses, container helper and the head interval are fixtures.
+type subtensorInspectionFixture struct {
+	unitOutput    string
+	unitExit      int
+	unitMissing   bool
+	ipOutput      string
+	ipExit        int
+	ipMissing     bool
+	identityDrift bool
+}
+
+// This wrapper owns all external effects: the real interpreter runs the exact
+// stdin producer, systemctl/ip resolve only in the private directory, urllib
+// returns in-memory RPC records, and the helper never spawns sudo or a container.
+func subtensorInspectionTestSettings(t *testing.T, fixture subtensorInspectionFixture) SignalSettings {
+	t.Helper()
+	directory := t.TempDir()
+	realPython, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, content string) string {
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(content), 0700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	driver := write("driver.py", `import io, json, os, subprocess, sys, time, urllib.parse, urllib.request
+fixture = json.loads(os.environ["INSPECTION_FIXTURE"])
+counts = {}
+native_check_output = subprocess.check_output
+def helper(args, **kwargs):
+    if args[0] != "sudo":
+        return native_check_output(args, **kwargs)
+    index = 1 if args[-1] == "subtensor-lightnode" else 0
+    node = fixture["nodes"][index]
+    excluded = {"name", "sync_mode", "rpc_port", "gateway_port", "direct", "gateway", "first_head", "second_head", "gateway_first_head", "gateway_http"}
+    return json.dumps({k: v for k, v in node.items() if k not in excluded})
+subprocess.check_output = helper
+class Response(io.BytesIO):
+    status = 200
+def urlopen(request, timeout=None):
+    url = request.full_url if hasattr(request, "full_url") else request
+    port = urllib.parse.urlparse(url).port
+    node = next((n for n in fixture["nodes"] if port in (n["rpc_port"], n["gateway_port"])), None)
+    if not hasattr(request, "data"):
+        if node is None or not url.endswith("/healthz"):
+            raise AssertionError("unexpected synthetic HTTP endpoint")
+        response = Response(b"")
+        response.status = node["gateway_http"]
+        return response
+    if node is None and url != "https://reference.example":
+        raise AssertionError("unexpected synthetic RPC endpoint")
+    rpc = fixture["public"] if node is None else node["direct" if port == node["rpc_port"] else "gateway"]
+    method = json.loads(request.data)["method"]
+    if method == "chain_getHeader":
+        count = counts.get(url, 0)
+        counts[url] = count + 1
+        head = rpc["head"]
+        if node is not None:
+            if port == node["rpc_port"]:
+                head = node["first_head"] if count == 0 else node["second_head"]
+            elif count == 0:
+                head = node["gateway_first_head"]
+        result = {"number": head}
+    elif method == "eth_getLogs":
+        result = []
+    else:
+        key = {"system_chain": "chain", "chain_getBlockHash": "genesis", "state_getRuntimeVersion": "runtime", "eth_chainId": "evm_chain_id", "system_health": "health", "system_syncState": "sync"}[method]
+        result = rpc[key]
+    return Response(json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode())
+urllib.request.urlopen = urlopen
+time.sleep = lambda seconds: None
+exec(compile(sys.stdin.read(), "synthetic-generated-subtensor", "exec"))
+`)
+	write("python3", "#!/bin/sh\nexec "+shellSingleQuote(realPython)+" "+shellSingleQuote(driver)+"\n")
+	if !fixture.unitMissing {
+		write("systemctl", `#!/bin/sh
+printf 'systemctl\n' >> "$INSPECTION_TRACE"
+[ "$1" = is-active ] || exit 98
+if [ "$2" = nginx ]; then
+  printf '%s\n' "$UNIT_OUTPUT"
+  printf 'synthetic-private-unit-error\n' >&2
+  exit "$UNIT_EXIT"
+fi
+printf 'active\n'
+`)
+	}
+	if !fixture.ipMissing {
+		write("ip", `#!/bin/sh
+printf 'ip\n' >> "$INSPECTION_TRACE"
+[ "$1" = -j ] && [ "$2" = address ] && [ "$3" = show ] || exit 99
+printf '%s\n' "$IP_OUTPUT"
+printf 'synthetic-private-ip-error\n' >&2
+exit "$IP_EXIT"
+`)
+	}
+	unitOutput, ipOutput := fixture.unitOutput, fixture.ipOutput
+	if unitOutput == "" {
+		unitOutput = "active"
+	}
+	if ipOutput == "" {
+		ipOutput = `[{"addr_info":[{"local":"192.0.2.88"}]}]`
+	}
+	observation := healthySubtensorObservation()
+	if fixture.identityDrift {
+		observation.Public.Chain = "Synthetic other chain"
+	}
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(directory, "inspection-trace")
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if !strings.Contains(command, subtensorMarker) {
+			t.Error("synthetic generated command binding failed")
+			return "", errors.New("synthetic binding failed")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		process := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+		process.Env = []string{"PATH=" + directory, "LC_ALL=C", "INSPECTION_FIXTURE=" + string(encoded), "INSPECTION_TRACE=" + trace,
+			"UNIT_OUTPUT=" + unitOutput, "UNIT_EXIT=" + strconv.Itoa(fixture.unitExit), "IP_OUTPUT=" + ipOutput, "IP_EXIT=" + strconv.Itoa(fixture.ipExit)}
+		output, err := process.Output()
+		if err != nil {
+			t.Error("synthetic generated Python failed before causal assertion")
+			return "", errors.New("synthetic native setup failure")
+		}
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(output, &document); err != nil || document["units"] == nil || document["nodes"] == nil {
+			t.Error("synthetic producer emitted an incomplete document")
+		}
+		calls, err := os.ReadFile(trace)
+		if err != nil || !fixture.unitMissing && strings.Count(string(calls), "systemctl\n") != 3 || !fixture.ipMissing && strings.Count(string(calls), "ip\n") != 1 {
+			t.Error("synthetic native inspections did not execute")
+		}
+		return string(output), nil
+	}}
+	return subtensorSyntheticSettings(source)
+}
+
+// Errors and inconsistent status/state tuples are unknown even with active stdout.
+func TestSubtensorNativeUnitInspectionFailuresAreUnknown(t *testing.T) {
+	for _, fixture := range []subtensorInspectionFixture{
+		{unitOutput: " ", unitExit: 1},
+		{unitOutput: " ", unitExit: 0},
+		{unitOutput: "active", unitExit: 1},
+		{unitOutput: "active", unitExit: 127},
+		{unitOutput: "active", unitExit: 137},
+		{unitOutput: "unknown", unitExit: 1},
+		{unitOutput: "active", unitExit: 4},
+		{unitOutput: "inactive", unitExit: 0},
+		{unitOutput: "inactive", unitExit: 1},
+		{unitOutput: "synthetic-private-state", unitExit: 3},
+		{unitOutput: "active\ninactive", unitExit: 3},
+		{unitMissing: true},
+	} {
+		alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorInspectionTestSettings(t, fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unknown := requireAlertClass(t, alerts, "cannot-observe")
+		wantCount := 1
+		if fixture.unitMissing {
+			wantCount = 3
+		}
+		if len(alerts) != wantCount || unknown.Target != "chain.example.test/subtensor-unit/nginx" && !fixture.unitMissing {
+			t.Fatal("failed unit inspection became gateway drift or lost independent health")
+		}
+		for _, alert := range alerts {
+			if strings.Contains(alert.Markdown(), "synthetic-private") {
+				t.Fatal("native state/diagnostic escaped structural reason")
+			}
+		}
+	}
+}
+
+// A genuine inactive or failed state is exit three, not a command failure.
+func TestSubtensorNativeInactiveAndHealthyUnitControls(t *testing.T) {
+	for _, state := range []string{"active", "inactive", "failed", "missing"} {
+		status := 0
+		if state != "active" {
+			status = 3
+		}
+		output := state
+		if state == "missing" {
+			output, status = "unknown", 4
+		}
+		alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorInspectionTestSettings(t, subtensorInspectionFixture{unitOutput: output, unitExit: status}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state == "active" {
+			if len(alerts) != 0 {
+				t.Fatal("qualified active native control is not healthy")
+			}
+		} else {
+			gateway := requireAlertClass(t, alerts, "subtensor-gateway")
+			stateObserved := strings.Contains(gateway.Observed, "nginx="+state)
+			if state == "missing" {
+				stateObserved = stateObserved || strings.Contains(gateway.Observed, "nginx=unknown")
+			}
+			if len(alerts) != 1 || gateway.Sustain != 2 || !stateObserved {
+				t.Fatal("qualified inactive state was suppressed or reclassified")
+			}
+		}
+	}
+}
+
+// Failed, malformed and structurally incomplete address data is never absence.
+func TestSubtensorNativeAddressInspectionFailuresAreUnknown(t *testing.T) {
+	for _, fixture := range []subtensorInspectionFixture{
+		{ipExit: 1, ipOutput: "[]"},
+		{ipExit: 1, ipOutput: " "},
+		{ipOutput: " "},
+		{ipExit: 1, ipOutput: `[{"addr_info":[{"local":"192.0.2.88"}]}]`},
+		{ipExit: 137, ipOutput: "synthetic-private-ip-output"},
+		{ipOutput: "synthetic-private-ip-output"},
+		{ipOutput: `{}`},
+		{ipOutput: `[{}]`},
+		{ipOutput: `[{"addr_info":null}]`},
+		{ipOutput: `[{"addr_info":[{"local":false}]}]`},
+		{ipOutput: `[{"addr_info":[{"local":""}]}]`},
+		{ipOutput: `[{"addr_info":[{"local":"synthetic-invalid-address"}]}]`},
+		{ipOutput: `[{"addr_info":[{"local":"192.0.2.88"}]},null]`},
+		{ipMissing: true},
+	} {
+		alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorInspectionTestSettings(t, fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unknown := requireAlertClass(t, alerts, "cannot-observe")
+		if len(alerts) != 1 || unknown.Target != "chain.example.test/subtensor-overlay" {
+			t.Fatal("failed address inspection became absence or healthy")
+		}
+		if strings.Contains(unknown.Markdown(), "synthetic-private") {
+			t.Fatal("native address diagnostic escaped structural reason")
+		}
+	}
+}
+
+// A successful complete empty census proves absence; the exact address is healthy.
+func TestSubtensorNativeAddressEmptyAndPresentControls(t *testing.T) {
+	for _, output := range []string{"[]", `[{"addr_info":[]}]`, `[{"addr_info":[{"local":"192.0.2.88"}]}]`} {
+		alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorInspectionTestSettings(t, subtensorInspectionFixture{ipOutput: output}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(output, "192.0.2.88") {
+			if len(alerts) != 0 {
+				t.Fatal("exact-address healthy control alerted")
+			}
+		} else {
+			gateway := requireAlertClass(t, alerts, "subtensor-gateway")
+			if len(alerts) != 1 || !strings.Contains(gateway.Observed, "overlay-address=absent") {
+				t.Fatal("successful address absence was suppressed")
+			}
+		}
+	}
+}
+
+// Neither host inspection failure can erase an independently proved identity breach.
+func TestSubtensorNativeInspectionUnknownPreservesIndependentPositive(t *testing.T) {
+	for _, fixture := range []subtensorInspectionFixture{{unitOutput: "active", unitExit: 1, identityDrift: true}, {ipExit: 1, identityDrift: true}} {
+		alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorInspectionTestSettings(t, fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, "cannot-observe")
+		requireAlertClass(t, alerts, "subtensor-identity")
+		if len(alerts) != 2 {
+			t.Fatal("inspection unknown invented a gateway outage or discarded identity breach")
+		}
+	}
+}
+
+// Misleading active stdout after failed is-active must block absence progress.
+func TestSubtensorNativeInspectionUnknownCannotClearPriorIncident(t *testing.T) {
+	signal := NewSubtensorSignal()
+	alerts, err := signal.Run(context.Background(), subtensorInspectionTestSettings(t, subtensorInspectionFixture{unitOutput: "active", unitExit: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNativeInspectionPreservesIncident(t, signal, alerts, "subtensor-gateway", "chain.example.test")
 }

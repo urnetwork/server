@@ -93,6 +93,7 @@ type mimirBalanceInstance struct {
 }
 
 type mimirBalanceHostSample struct {
+	sourceIncomplete  bool
 	instances         []mimirBalanceInstance
 	count             int
 	localConnections  int64
@@ -326,6 +327,15 @@ func assessMimirBalance(
 			preserveHost()
 			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
 				target: hostName + "/mimir-balance", stage: mimirBalanceStageHostObservationFailed, err: fmt.Errorf("host observation failed"),
+			})
+			continue
+		}
+		if result.sample.sourceIncomplete {
+			assessment.directComplete = false
+			assessment.rateComplete = false
+			preserveHost()
+			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+				target: hostName + "/mimir-balance", stage: mimirBalanceStageHostObservationFailed, err: fmt.Errorf("child discovery incomplete"),
 			})
 			continue
 		}
@@ -629,6 +639,11 @@ func parseMimirBalanceHostSample(output string) (mimirBalanceHostSample, error) 
 			return sample, fmt.Errorf("mimir balance line %d: invalid trailer value", lineNumber+1)
 		}
 		switch key {
+		case "source_incomplete":
+			if parsed != 1 || seenTrailer["mimir_count"] {
+				return sample, fmt.Errorf("mimir balance line %d: invalid source completeness", lineNumber+1)
+			}
+			sample.sourceIncomplete = true
 		case "mimir_count":
 			sample.count = int(parsed)
 		case "front_local_connections":
@@ -661,7 +676,7 @@ func parseMimirBalanceInt(value string) (int64, error) {
 	return parsed, nil
 }
 
-const mimirBalanceScriptBody = `set -u
+const mimirBalanceScriptBody = observabilityListenerScript + `set -u
 for required in ss curl awk sort; do
   if ! command -v "$required" >/dev/null 2>&1; then
     printf 'mimir balance prerequisite missing: %s\n' "$required" >&2
@@ -669,22 +684,34 @@ for required in ss curl awk sort; do
   fi
 done
 mimir_count=0
-ports=$(ss -ltnH 2>/dev/null | awk -v address="$loopback_address" '
-  index($4, address ":") == 1 {
-    port=$4
-    sub(/.*:/, "", port)
-    if (port ~ /^[0-9]+$/) print port
-  }
-' | sort -n -u)
+source_incomplete=0
+ports=$(observability_listener_ports "$loopback_address")
+listener_status=$?
+if [ "$listener_status" -ne 0 ]; then
+  printf 'child listener observation unavailable\n' >&2
+  exit 1
+fi
 for port in $ports; do
-  build_info=$(curl -fsS --max-time 2 "http://${loopback_address}:${port}/api/v1/status/buildinfo" 2>/dev/null || true)
+  build_info=$(curl -fsS --max-time 2 "http://${loopback_address}:${port}/api/v1/status/buildinfo" 2>/dev/null)
+  build_info_status=$?
+  if [ "$build_info_status" -ne 0 ]; then
+    source_incomplete=1
+    continue
+  fi
   case "$build_info" in
     *'"application":"Grafana Mimir"'*) ;;
     *) continue ;;
   esac
   mimir_count=$((mimir_count+1))
   printf 'instance_begin %s\n' "$port"
-  ingestion_rate_limit=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null | awk '
+  # FD 3 carries only fetch status; raw config stays on the AWK input pipe.
+  ingestion_rate_limit=$(
+    exec 3>&1
+    {
+      curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null
+      config_fetch_status=$?
+      printf 'config_source_status %s\n' "$config_fetch_status" >&3
+    } | awk '
     function key(value) {sub(/:$/, "", value); return value}
     function leave(indent) {
       while (depth > 0 && indent <= path_indent[depth]) {
@@ -713,8 +740,17 @@ for port in $ports; do
       if (count == 1 && value ~ /^[0-9]+([.][0-9]+)?$/ && value > 0) print value
       else exit 41
     }
-  ')
+  '
+  )
   config_status=$?
+  # The status write precedes pipe EOF and therefore AWK's END output.
+  # Require that exact successful header even when the numeric prefix parses.
+  case "$ingestion_rate_limit" in
+    'config_source_status 0
+'*) ingestion_rate_limit=${ingestion_rate_limit#*'
+'} ;;
+    *) config_status=1 ;;
+  esac
   metrics=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/metrics" 2>/dev/null)
   metrics_status=$?
   if [ "$config_status" -ne 0 ] || [ "$metrics_status" -ne 0 ]; then
@@ -772,6 +808,9 @@ for port in $ports; do
   fi
   printf 'observable 1\n%s\ningestion_rate_limit %s\ninstance_end 1\n' "$reduced" "$ingestion_rate_limit"
 done
+if [ "$source_incomplete" -ne 0 ]; then
+  printf 'source_incomplete 1\n'
+fi
 printf 'mimir_count %s\n' "$mimir_count"
 connections=$(ss -tnH state established 2>/dev/null)
 connections_status=$?

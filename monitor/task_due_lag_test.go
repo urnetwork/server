@@ -40,12 +40,16 @@ func TestTaskDueLagRejectsInvalidPrimaryRows(t *testing.T) {
 				return nil, nil
 			}}
 			alerts, err := NewTaskConvergenceSignal().Run(context.Background(), syntheticSettings(source))
-			if err == nil || len(alerts) != 0 {
-				t.Errorf("%s: invalid primary result returned alerts=%d err=%v", test.name, len(alerts), err)
+			if err != nil || len(alerts) != 1 {
+				t.Fatalf("%s: invalid primary result did not retain component visibility", test.name)
 			}
-			if err != nil && strings.Contains(err.Error(), "synthetic-private-cell") {
-				t.Errorf("%s: parser exposed the source cell", test.name)
+			unknown := requireAlertClass(t, alerts, "cannot-observe")
+			if unknown.SignalID != "monitor/visibility" || unknown.SignalKey != "task-convergence" ||
+				unknown.Target != "pg-1/task-due-lag" || !unknown.unobservable ||
+				unknown.Observed != "error_class="+observationErrorClassInvalidResponse {
+				t.Errorf("%s: parser changed the fixed component visibility contract", test.name)
 			}
+			requireAlertOmits(t, unknown, "synthetic-private-cell")
 		}()
 	}
 }

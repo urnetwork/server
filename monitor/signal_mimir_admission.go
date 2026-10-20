@@ -110,6 +110,7 @@ type mimirAdmissionInstance struct {
 // Host-level journal counts are diagnostic context only. A failed journal
 // reduction does not suppress an affirmative direct Mimir counter increase.
 type mimirAdmissionHostSample struct {
+	sourceIncomplete bool
 	instances        []mimirAdmissionInstance
 	count            int
 	countSeen        bool
@@ -706,6 +707,17 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 			})
 			continue
 		}
+		if result.sample.sourceIncomplete {
+			assessment.directComplete = false
+			assessment.comparable = false
+			preserveHostHistory()
+			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
+				target: hostName + "/mimir-admission", err: fmt.Errorf("child discovery incomplete"),
+			})
+			if result.sample.count == 0 {
+				continue
+			}
+		}
 		if result.sample.count == 0 {
 			assessment.directComplete = false
 			assessment.comparable = false
@@ -725,7 +737,7 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 			assessment.admissionRejects += result.sample.admissionRejects
 		}
 
-		hostComplete := true
+		hostComplete := !result.sample.sourceIncomplete
 		for _, instance := range result.sample.instances {
 			if !instance.observable {
 				hostComplete = false
@@ -1245,6 +1257,11 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				return sample, fmt.Errorf("mimir admission line %d: unobservable instance contains metric fields", lineNumber+1)
 			}
 			current = -1
+		case "source_incomplete":
+			if len(fields) != 2 || fields[1] != "1" || current >= 0 || sample.sourceIncomplete || sample.countSeen {
+				return sample, fmt.Errorf("mimir admission line %d: invalid source completeness", lineNumber+1)
+			}
+			sample.sourceIncomplete = true
 		case "mimir_count":
 			if len(fields) != 2 || current >= 0 || sample.countSeen {
 				return sample, fmt.Errorf("mimir admission line %d: invalid mimir_count", lineNumber+1)
@@ -1324,7 +1341,7 @@ func parseMimirAdmissionBoolean(value string) (bool, error) {
 	}
 }
 
-const mimirAdmissionScriptBody = `set -u
+const mimirAdmissionScriptBody = observabilityListenerScript + `set -u
 for required in ss curl awk sort; do
   if ! command -v "$required" >/dev/null 2>&1; then
     printf 'mimir admission probe prerequisite missing: %s\n' "$required" >&2
@@ -1332,15 +1349,20 @@ for required in ss curl awk sort; do
   fi
 done
 mimir_count=0
-ports=$(ss -ltnH 2>/dev/null | awk -v address="$loopback_address" '
-  index($4, address ":") == 1 {
-    port=$4
-    sub(/.*:/, "", port)
-    if (port ~ /^[0-9]+$/) print port
-  }
-' | sort -n -u)
+source_incomplete=0
+ports=$(observability_listener_ports "$loopback_address")
+listener_status=$?
+if [ "$listener_status" -ne 0 ]; then
+  printf 'child listener observation unavailable\n' >&2
+  exit 1
+fi
 for port in $ports; do
-  build_info=$(curl -fsS --max-time 2 "http://${loopback_address}:${port}/api/v1/status/buildinfo" 2>/dev/null || true)
+  build_info=$(curl -fsS --max-time 2 "http://${loopback_address}:${port}/api/v1/status/buildinfo" 2>/dev/null)
+  build_info_status=$?
+  if [ "$build_info_status" -ne 0 ]; then
+    source_incomplete=1
+    continue
+  fi
   case "$build_info" in
     *'"application":"Grafana Mimir"'*) ;;
     *) continue ;;
@@ -1367,10 +1389,22 @@ for port in $ports; do
     }
     END {print (version_count == 1 && revision_count == 1) ? 1 : 0}
   ')
+  discard_absence_status=$?
+  if [ "$discard_absence_status" -ne 0 ]; then
+    source_incomplete=1
+    discard_absence_source=0
+  fi
 
   mimir_count=$((mimir_count+1))
   printf 'instance_begin %s\n' "$port"
-  config_values=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null | awk '
+  # FD 3 carries only fetch status; raw config stays on the AWK input pipe.
+  config_values=$(
+    exec 3>&1
+    {
+      curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null
+      config_fetch_status=$?
+      printf 'config_source_status %s\n' "$config_fetch_status" >&3
+    } | awk '
     function yaml_key(value) {sub(/:$/, "", value); return value}
     function clear_path() {
       for (level in path_key) delete path_key[level]
@@ -1415,8 +1449,17 @@ for port in $ports; do
         printf "%s %s %s\n", global_value, rate_value, burst_value
       } else exit 41
     }
-  ')
+  '
+  )
   config_status=$?
+  # The status write precedes pipe EOF and therefore AWK's END output.
+  # Require that exact successful header even when the numeric prefix parses.
+  case "$config_values" in
+    'config_source_status 0
+'*) config_values=${config_values#*'
+'} ;;
+    *) config_status=1 ;;
+  esac
   metrics=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/metrics" 2>/dev/null)
   metrics_status=$?
   if [ "$config_status" -ne 0 ] || [ "$metrics_status" -ne 0 ]; then
@@ -1498,6 +1541,9 @@ for port in $ports; do
   printf 'observable 1\n%s\nglobal_limit %s\ningestion_rate_limit %s\ningestion_burst_limit %s\ndiscard_absence_source %s\ninstance_end\n' \
     "$reduced" "$global_limit" "$ingestion_rate_limit" "$ingestion_burst_limit" "$discard_absence_source"
 done
+if [ "$source_incomplete" -ne 0 ]; then
+  printf 'source_incomplete 1\n'
+fi
 printf 'mimir_count %s\n' "$mimir_count"
 
 journal_complete=0

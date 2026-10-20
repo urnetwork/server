@@ -791,6 +791,19 @@ extend work. The option changes no read, SQL, owner-service or SSH capacity
 limit. Ordinary finite readers keep the default invocation. A failed grant is
 a local refusal, not Main contact.
 
+A source-qualified `-once -ssh-admission-dir PRIVATE_DIRECTORY` joins the
+existing live watcher's diagnostic queue instead of registering another
+watcher. It must run in its own finite `KillMode=control-group` owner service
+with the exact effective inventory, settings, native Warpctl and source proofs.
+Each command retains the shared global four/host two limits, one-diagnostic
+fairness and joined release. Missing, dead, replaced or mismatched watcher
+authority refuses locally before transport. Signal-list mode remains settings-
+free and refuses the shared-admission flag. Preserve a prior local CLI refusal
+as non-contact evidence; do not drop admission or reinterpret it as Main health.
+Qualify the CLI, attachment/replacement, concurrent admission and release paths
+before retrying a failed diagnostic. Existing cadence and external repair holds
+still apply; this is no permission to create another watcher or bypass budgets.
+
 The long-operation helper may be a separately pinned compatible build while
 the watcher remains on its exact current binary. Keep the request's watcher
 identity and the caller's full live-watcher verification unchanged; bind the

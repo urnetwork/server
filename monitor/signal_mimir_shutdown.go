@@ -46,9 +46,10 @@ type mimirShutdownInstance struct {
 }
 
 type mimirShutdownHostSample struct {
-	instances []mimirShutdownInstance
-	count     int
-	countSeen bool
+	sourceIncomplete bool
+	instances        []mimirShutdownInstance
+	count            int
+	countSeen        bool
 }
 
 type mimirShutdownHostResult struct {
@@ -112,17 +113,26 @@ func (mimirShutdownProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			findings = append(findings, cannotObserveFinding(target+"/mimir-shutdown", result.err))
 			continue
 		}
+		if result.sample.sourceIncomplete {
+			complete = false
+			findings = append(findings, cannotObserveFinding(target+"/mimir-shutdown", fmt.Errorf("child configuration observation incomplete")))
+		}
 		if result.sample.count == 0 {
+			if result.sample.sourceIncomplete {
+				continue
+			}
 			complete = false
 			findings = append(findings, mimirShutdownChildMissingFinding(target))
 			continue
 		}
 
-		observableHosts++
 		instanceCount += result.sample.count
-		findings = append(findings, healthyFinding(
-			"observability/mimir-shutdown", tierWarn, "mimir-shutdown-child-missing", target,
-		))
+		if !result.sample.sourceIncomplete {
+			observableHosts++
+			findings = append(findings, healthyFinding(
+				"observability/mimir-shutdown", tierWarn, "mimir-shutdown-child-missing", target,
+			))
+		}
 		for _, instance := range result.sample.instances {
 			identity := fmt.Sprintf("%s:%d", target, instance.port)
 			if !instance.flush {
@@ -333,6 +343,11 @@ func parseMimirShutdownHostSample(output string) (mimirShutdownHostSample, error
 				return sample, fmt.Errorf("mimir shutdown line %d: instance omitted required config field", lineNumber+1)
 			}
 			current = -1
+		case "source_incomplete":
+			if len(fields) != 2 || fields[1] != "1" || current >= 0 || sample.sourceIncomplete || sample.countSeen {
+				return sample, fmt.Errorf("mimir shutdown line %d: invalid source completeness", lineNumber+1)
+			}
+			sample.sourceIncomplete = true
 		case "mimir_count":
 			if len(fields) != 2 || current >= 0 || sample.countSeen {
 				return sample, fmt.Errorf("mimir shutdown line %d: invalid mimir_count", lineNumber+1)
@@ -359,7 +374,7 @@ func parseMimirShutdownHostSample(output string) (mimirShutdownHostSample, error
 	return sample, nil
 }
 
-const mimirShutdownScript = `set -u
+const mimirShutdownScript = observabilityListenerScript + `set -u
 for required in ss curl awk sort; do
   if ! command -v "$required" >/dev/null 2>&1; then
     printf 'mimir shutdown probe prerequisite missing: %s\n' "$required" >&2
@@ -367,9 +382,32 @@ for required in ss curl awk sort; do
   fi
 done
 mimir_count=0
-ports=$(ss -ltnH 2>/dev/null | awk '$4 ~ /^127[.]0[.]0[.]1:[0-9]+$/ {sub(/.*:/, "", $4); print $4}' | sort -n -u)
+source_incomplete=0
+ports=$(observability_listener_ports '127.0.0.1')
+listener_status=$?
+if [ "$listener_status" -ne 0 ]; then
+  printf 'child listener observation unavailable\n' >&2
+  exit 1
+fi
 for port in $ports; do
-	selected=$(curl -fsS --max-time 10 "http://127.0.0.1:${port}/config" 2>/dev/null | awk '
+	selected=$(
+		exec 3>&1
+		{
+			curl -fsS --max-time 10 "http://127.0.0.1:${port}/config" 2>/dev/null
+			config_source_status=$?
+			printf 'config_source_status %s\n' "$config_source_status" >&3
+		} | awk '
+		function duration(value, rest) {
+			rest=value
+			sub(/^[+]/, "", rest)
+			if (rest == "0") return 1
+			while (match(rest, /^([0-9]+([.][0-9]*)?|[.][0-9]+)(ns|us|µs|μs|ms|s|m|h)/)) rest=substr(rest, RLENGTH+1)
+			return value != "" && rest == ""
+		}
+		function select_field(name, value) {
+			if (name in selected) invalid=1
+			selected[name]=value
+		}
 		function yaml_key(value) {sub(/:$/, "", value); return value}
 		function clear_path() {
 			for (level in path_key) delete path_key[level]
@@ -409,15 +447,40 @@ for port in $ports; do
 			leave_to_parent(indent)
 			if ($1 !~ /:$/) next
 			key = yaml_key($1)
-			if (parents_are("blocks_storage", "tsdb") && key == "flush_blocks_on_shutdown") print "flush " $2
-			if ((parent_is("blocks_storage") || parents_are("blocks_storage", "bucket_store")) && key == "ignore_blocks_within") print "ignore_blocks_within " $2
-			if (parents_are("blocks_storage", "bucket_store") && key == "sync_interval") print "bucket_sync_interval " $2
-			if (parent_is("querier") && key == "query_store_after") print "query_store_after " $2
-			if (parent_is("limits") && key == "query_ingesters_within") print "query_ingesters_within " $2
-			if (parent_is("compactor") && key == "cleanup_interval") print "compactor_cleanup_interval " $2
+			if (parents_are("blocks_storage", "tsdb") && key == "flush_blocks_on_shutdown") select_field("flush", $2)
+			if ((parent_is("blocks_storage") || parents_are("blocks_storage", "bucket_store")) && key == "ignore_blocks_within") select_field("ignore_blocks_within", $2)
+			if (parents_are("blocks_storage", "bucket_store") && key == "sync_interval") select_field("bucket_sync_interval", $2)
+			if (parent_is("querier") && key == "query_store_after") select_field("query_store_after", $2)
+			if (parent_is("limits") && key == "query_ingesters_within") select_field("query_ingesters_within", $2)
+			if (parent_is("compactor") && key == "cleanup_interval") select_field("compactor_cleanup_interval", $2)
 			enter_key(indent, key)
 		}
-	' || true)
+		END {
+			if (invalid) exit 41
+			count=0
+			for (name in selected) {
+				count++
+				if (name == "flush") {
+					if (selected[name] != "true" && selected[name] != "false") exit 41
+				} else if (!duration(selected[name]) || length(selected[name]) > 64) exit 41
+			}
+			if (count != 0 && count != 6) exit 41
+			for (name in selected) print name, selected[name]
+		}
+		'
+	)
+	selected_status=$?
+	case "$selected" in
+		'config_source_status 0') selected='' ;;
+		'config_source_status 0
+'*) selected=${selected#*'
+'} ;;
+		*) selected_status=1 ;;
+	esac
+	if [ "$selected_status" -ne 0 ]; then
+		source_incomplete=1
+		continue
+	fi
 	case "$selected" in
 		*'flush true'*|*'flush false'*) ;;
 		*) continue ;;
@@ -428,5 +491,8 @@ for port in $ports; do
 	printf '%s\n' "$selected"
 	printf 'instance_end\n'
 done
+if [ "$source_incomplete" -ne 0 ]; then
+  printf 'source_incomplete 1\n'
+fi
 printf 'mimir_count %s\n' "$mimir_count"
 `
