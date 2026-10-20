@@ -773,14 +773,39 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	sort.Strings(keys)
 	findings := make([]finding, 0, len(keys)*2)
+	metricsComplete := len(response.Warnings) == 0
+	// Missing or newer rows can reverse newest/absence/join predicates. An
+	// observed malformed value or duplicate Boolean/heartbeat remains invalid.
+	appendMetricFindings := func(values ...finding) {
+		for _, value := range values {
+			if metricsComplete || (!value.healthy && value.class == "backup-archive-metrics-invalid") {
+				findings = append(findings, value)
+			}
+		}
+	}
+	if !metricsComplete {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: "cannot-observe", target: "backup-archives/mimir", frame: "response-warnings", sustain: 2,
+			symptom:   "Backup archive metric response completeness is unknown",
+			mechanism: "The successful Mimir vector carries query warnings. Returned rows do not establish that every source, newer generation, or corrective integrity report was observed.",
+			baseline:  "A successful vector response has no query warnings before archive latest, absence, integrity-current, or writer/metric joins can establish current state.",
+			observed:  "reason=mimir-query-warnings",
+			evidence:  "Only warning-list presence is used. Annotation text is neither interpreted nor emitted; an empty entry still withholds completeness.",
+			context:   "This is an observation gap, not proof of archive failure, corrupt media, or storage outage. Direct writer and destination observations and returned-row metric contract violations retain their independent authority.",
+			action:    "Restore a warning-free complete query response through the same configured observation path. Preserve independent writer and destination findings; do not retry a writer, alter archives, or infer media failure from query metadata.",
+			verify:    "Two consecutive complete warning-free responses satisfy the archive and joined writer predicates; independent writer and storage verification gates still apply.",
+			playbook:  "SIGNALS.md §11.22",
+		})
+	}
 	for _, key := range keys {
 		observation := observations[key]
-		findings = append(findings, evaluateBackupArchiveIntegrity(
+		appendMetricFindings(evaluateBackupArchiveIntegrity(
 			now,
 			observation,
 			metricHost.name,
 		)...)
-		findings = append(findings, evaluateBackupArchive(
+		appendMetricFindings(evaluateBackupArchive(
 			now,
 			observation,
 			metricHost.name,
@@ -794,12 +819,17 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		findings = append(findings, evaluateBackupArchiveRoot(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveVolumeRecovery(now, writers[host.name])...)
 		findings = append(findings, evaluateBackupArchiveUnsafeActiveWriter(now, writers[host.name]))
-		findings = append(findings, evaluateBackupArchiveRecoveryIdle(now, writers[host.name], observations))
+		if metricsComplete {
+			findings = append(findings, evaluateBackupArchiveRecoveryIdle(now, writers[host.name], observations))
+		}
 		findings = append(findings, evaluateBackupArchiveGitHubRun(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveGitTransferRetry(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveGitHubTimer(now, writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveDataTimer(now, writers[host.name]))
-		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
+		writerFinding := evaluateBackupArchiveWriter(now, writers[host.name], observations, metricsComplete)
+		if metricsComplete || !writerFinding.healthy {
+			findings = append(findings, writerFinding)
+		}
 		findings = append(findings, evaluateBackupArchiveRun(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveSourceRoute(
@@ -2189,6 +2219,7 @@ func evaluateBackupArchiveWriter(
 	now time.Time,
 	writer backupArchiveWriterObservation,
 	observations map[string]*backupArchiveObservation,
+	metricsComplete bool,
 ) finding {
 	target := writer.host + "/github"
 	progressTotal := float64(0)
@@ -2235,20 +2266,22 @@ func evaluateBackupArchiveWriter(
 		if writer.mainPID == 0 {
 			reasons = append(reasons, "active-unit-without-main-pid")
 		}
-		if !heartbeatComplete {
-			reasons = append(reasons, "github-heartbeat-incomplete")
-		} else if heartbeatAgeDuration > backupArchiveHeartbeatAge {
-			reasons = append(reasons, "metrics-heartbeat-stale")
-		} else if heartbeatAgeDuration < -30*time.Second {
-			reasons = append(reasons, "metrics-heartbeat-in-future")
-		}
-		if !progressComplete {
-			reasons = append(reasons, "github-progress-incomplete")
-		} else if progressTotal != 1 {
-			reasons = append(reasons, "active-unit-progress-total-not-one")
+		if metricsComplete {
+			if !heartbeatComplete {
+				reasons = append(reasons, "github-heartbeat-incomplete")
+			} else if heartbeatAgeDuration > backupArchiveHeartbeatAge {
+				reasons = append(reasons, "metrics-heartbeat-stale")
+			} else if heartbeatAgeDuration < -30*time.Second {
+				reasons = append(reasons, "metrics-heartbeat-in-future")
+			}
+			if !progressComplete {
+				reasons = append(reasons, "github-progress-incomplete")
+			} else if progressTotal != 1 {
+				reasons = append(reasons, "active-unit-progress-total-not-one")
+			}
 		}
 	case "inactive", "failed":
-		if progressComplete && progressTotal != 0 {
+		if metricsComplete && progressComplete && progressTotal != 0 {
 			reasons = append(reasons, "idle-unit-progress-total-not-zero")
 		}
 	case "deactivating":
@@ -2262,6 +2295,22 @@ func evaluateBackupArchiveWriter(
 		return healthyFinding(
 			"observability/backup-archives", tierPage, "backup-archive-progress-stale", target,
 		)
+	}
+	if !metricsComplete {
+		return finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: "backup-archive-progress-stale", target: target,
+			frame: "unit=github-backup-archive.service", sustain: 2,
+			symptom:   fmt.Sprintf("%s direct writer state violates its execution contract", target),
+			mechanism: "The direct systemd observation reports an executing unit without a MainPID or an unexpected unit state. Query warnings independently prevent any heartbeat or progress agreement claim.",
+			baseline:  "An executing archive unit has a nonzero MainPID and a recognized systemd state.",
+			observed:  fmt.Sprintf("unit_state=%s main_pid_present=%t metrics_response_complete=false reasons=%s", writer.unitState, writer.mainPID > 0, strings.Join(reasons, ",")),
+			evidence:  "Only direct unit state and MainPID presence establish these reasons; warned metric rows do not contribute a joined reason.",
+			context:   "The writer identity defect is independent of the incomplete metric observation. Neither observation proves stopped archive progress or corrupt media.",
+			action:    "Inspect the current unit execution identity and restore complete metric visibility before diagnosing writer/telemetry disagreement or choosing a repair.",
+			verify:    "Two direct observations satisfy the writer identity contract and complete warning-free queries independently satisfy heartbeat and progress agreement.",
+			playbook:  "SIGNALS.md §11.22",
+		}
 	}
 	return finding{
 		probeId: "observability/backup-archives", tier: tierPage,

@@ -32219,6 +32219,32 @@ bounded reason and count rather than emitted. The query and direct
 discriminator carry no credentials, repository names, checksums, private key
 paths, or backup contents.
 
+A successful vector carrying any nonempty `warnings` list is incomplete for
+this probe, including a list containing only an empty string. Warning text is
+not an archive or media verdict and never enters public output. The probe emits
+WARN/Sustain2 `cannot-observe`, target `backup-archives/mimir`, frame
+`response-warnings`; held and ready visibility both withhold notifier clears.
+Without complete query authority, it withholds healthy archive predicates and
+newest-generation, absence, integrity-current, queue and recovery-idle claims:
+an omitted newer artifact or corrective check can reverse those conclusions.
+Returned malformed metric values/generations, future timestamps or duplicate
+fresh Boolean/heartbeat rows still prove `backup-archive-metrics-invalid`;
+adding omitted rows cannot repair those observed contract violations. Direct
+systemd writer/result/timer/retry/route and destination root/mount/history/
+clearance findings retain their independent authority. In the progress join,
+active-without-PID and unexpected-unit-state remain direct failures, while
+heartbeat/progress-derived reasons and healthy join findings require a complete
+query. No warning text allowlist or inference of which source failed is used.
+
+False-positive qualifier: a warning can be benign or unrelated, so this policy
+conservatively withholds completeness and does not diagnose an archive outage.
+False-negative qualifier: warning-free metadata alone does not prove writer,
+media, decryption, restore or query-source completeness; every existing row,
+source-clock, generation, writer and storage prerequisite still applies.
+A later complete warning-free query is an observation-path control, not a
+certificate of physical storage repair. Existing operations, forecast and
+migration ownership remain separate.
+
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
 at least one structurally complete candidate; each newest candidate is no more
 than five days old; and every archive has one scrape-fresh integrity report
