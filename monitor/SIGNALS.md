@@ -21237,6 +21237,8 @@ For each master: `INFO memory` → used_memory, maxmemory, pct.
   sustain 2); they cannot clear a capacity page or erase valid node thresholds.
   A failed host collector cannot acquire authority from a later successful
   INFO command. An incomplete node census still prevents aggregate judgment.
+  Native qualification supplies synthetic meminfo text: the test machine's
+  own `/proc/meminfo` is not fixture data, and macOS has none.
   Scope host-capacity findings and their observation gaps to `redis-memory`;
   host RAM is not an input to `redis-buffers` or `redis-connections`. Their
   shared node-INFO gaps still propagate and their independently measured
