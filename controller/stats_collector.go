@@ -59,6 +59,11 @@ package controller
 // the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
 // stats_collector_lag.go and read only by grafana/dashboards/lag-dev.json.
 //
+// The private device_versions{population,version} distribution and its
+// device_versions_observed_at_seconds source clock are listed in
+// stats_device_versions.go and read by grafana/dashboards/providers.json.
+// They use the device's reported app version, not capability evidence.
+//
 // the egress index gauges are internal (connect/GEOMAP.md §10.4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -819,6 +824,9 @@ func StartStatsCollector(ctx context.Context) <-chan struct{} {
 				statsRefreshArindbCanary(ctx)
 			})
 			if dbTick == 0 {
+				server.HandleError(func() {
+					statsRefreshDeviceVersions(ctx)
+				})
 				server.HandleError(func() {
 					statsRefreshDb(ctx, window)
 				})

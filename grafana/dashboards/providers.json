@@ -716,6 +716,325 @@
       "description": "The extender population split by active address family and stacked to its total. All three series are published every refresh."
     },
     {
+      "id": 922,
+      "title": "device app versions",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "id": 923,
+      "title": "provider versions",
+      "description": "Connected, active top-level clients, counted once each. Providers additionally need a Public provide key and connected, valid reliability evidence. Uses device.client_version, the last app version reported at connection time. Missing or blank values are unknown. The 50 most common full versions are shown individually; the remaining versions are other. Refreshes every five minutes. Reads one latest taskworker snapshot, at most 15 minutes old; missing data is not zero.",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "Metric",
+        "showValue": "always",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (version) (urnetwork_stats_device_versions{env=\"$env\",service=\"taskworker\",population=\"provider\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_device_versions_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_device_versions_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "legendFormat": "{{version}}",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 924,
+      "title": "client versions (all roles)",
+      "description": "Connected, active top-level clients, counted once each. Includes providers and other connected client roles; populations overlap. Uses device.client_version, the last app version reported at connection time. Missing or blank values are unknown. The 50 most common full versions are shown individually; the remaining versions are other. Refreshes every five minutes. Reads one latest taskworker snapshot, at most 15 minutes old; missing data is not zero.",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "Metric",
+        "showValue": "always",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (version) (urnetwork_stats_device_versions{env=\"$env\",service=\"taskworker\",population=\"client\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_device_versions_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_device_versions_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "legendFormat": "{{version}}",
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 925,
+      "title": "device version snapshot age",
+      "description": "Age of the latest taskworker device-version source snapshot. Version charts accept snapshots younger than 15 minutes and no more than 30 seconds in the future. A collector read failure withdraws its counts; a missing source is not evidence of an empty fleet.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_stats_device_versions_observed_at_seconds{env=\"$env\",service=\"taskworker\"})",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 926,
+      "title": "quality candidates: modern",
+      "description": "Share of quality candidates that meet the modern-provider threshold: probe-verified post-quantum encryption and resizable receive windows, with evidence newer than seven days. The denominator includes every modern-gate outcome among providers admitted by the other quality rules, including missing and stale evidence; this is not a percentage of all online providers. Device app versions do not establish capability. Uses one latest taskworker source snapshot younger than 30 minutes; an empty or unavailable denominator shows no data.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",service=\"taskworker\",bucket=\"quality\",outcome=\"modern\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 1800) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",service=\"taskworker\",bucket=\"quality\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 1800) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "modern"
+        }
+      ]
+    },
+    {
+      "id": 927,
+      "title": "speed candidates: modern",
+      "description": "Share of speed candidates that meet the modern-provider threshold: probe-verified post-quantum encryption and resizable receive windows, with evidence newer than seven days. The denominator includes every modern-gate outcome among providers admitted by the other speed rules, including missing and stale evidence; this is not a percentage of all online providers. Device app versions do not establish capability. Uses one latest taskworker source snapshot younger than 30 minutes; an empty or unavailable denominator shows no data.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",service=\"taskworker\",bucket=\"speed\",outcome=\"modern\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 1800) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",service=\"taskworker\",bucket=\"speed\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 1800) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "modern"
+        }
+      ]
+    },
+    {
       "id": 14,
       "type": "row",
       "title": "contracts",
@@ -724,7 +1043,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 31
       },
       "panels": []
     },
@@ -740,7 +1059,7 @@
         "h": 5,
         "w": 4,
         "x": 0,
-        "y": 18
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -807,7 +1126,7 @@
         "h": 5,
         "w": 8,
         "x": 4,
-        "y": 18
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -876,7 +1195,7 @@
         "h": 5,
         "w": 4,
         "x": 12,
-        "y": 18
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -930,7 +1249,7 @@
         "h": 5,
         "w": 8,
         "x": 16,
-        "y": 18
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -990,7 +1309,7 @@
         "h": 5,
         "w": 4,
         "x": 0,
-        "y": 23
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -1057,7 +1376,7 @@
         "h": 5,
         "w": 8,
         "x": 4,
-        "y": 23
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -1126,7 +1445,7 @@
         "h": 5,
         "w": 4,
         "x": 12,
-        "y": 23
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -1180,7 +1499,7 @@
         "h": 5,
         "w": 8,
         "x": 16,
-        "y": 23
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -1240,7 +1559,7 @@
         "h": 5,
         "w": 4,
         "x": 0,
-        "y": 28
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -1307,7 +1626,7 @@
         "h": 5,
         "w": 8,
         "x": 4,
-        "y": 28
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -1376,7 +1695,7 @@
         "h": 5,
         "w": 4,
         "x": 12,
-        "y": 28
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -1430,7 +1749,7 @@
         "h": 5,
         "w": 8,
         "x": 16,
-        "y": 28
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -1487,7 +1806,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 47
       },
       "panels": []
     },
@@ -1503,7 +1822,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -1559,7 +1878,7 @@
         "h": 5,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -1610,7 +1929,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 53
       },
       "panels": []
     },
@@ -1626,7 +1945,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 54
       },
       "fieldConfig": {
         "defaults": {
@@ -1685,7 +2004,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 54
       },
       "fieldConfig": {
         "defaults": {
@@ -1741,10 +2060,10 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 63
       },
       "panels": [],
-      "description": "The three buckets FindProviders2 answers from and the providers each egress rule leaves out (connect/GEOMAP.md §10). Membership here is the rules' alone -- the hard exclusions, the country gate and the 90 % rule -- before the reliability and performance minimums of the score cache, over the connected valid public providers the online gauge counts."
+      "description": "The three buckets FindProviders2 answers from and the providers each egress rule leaves out (connect/GEOMAP.md \u00a710). Membership here is the rules' alone -- the hard exclusions, the country gate and the 90 % rule -- before the reliability and performance minimums of the score cache, over the connected valid public providers the online gauge counts."
     },
     {
       "id": 34,
@@ -1758,7 +2077,7 @@
         "h": 5,
         "w": 5,
         "x": 0,
-        "y": 50
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -1812,7 +2131,7 @@
         "h": 5,
         "w": 5,
         "x": 5,
-        "y": 50
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -1866,7 +2185,7 @@
         "h": 5,
         "w": 5,
         "x": 10,
-        "y": 50
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -1920,7 +2239,7 @@
         "h": 5,
         "w": 4,
         "x": 15,
-        "y": 50
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -1974,7 +2293,7 @@
         "h": 5,
         "w": 5,
         "x": 19,
-        "y": 50
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -2028,7 +2347,7 @@
         "h": 4,
         "w": 3,
         "x": 0,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2068,7 +2387,7 @@
           "legendFormat": "blackhole"
         }
       ],
-      "description": "Providers with a current blackhole verdict: absent from every bucket, every count, force_minimum and an explicit client id. The verdict lifts by itself when the next check passes. A wave here is the checker before it is the fleet (GEOMAP §11.2)."
+      "description": "Providers with a current blackhole verdict: absent from every bucket, every count, force_minimum and an explicit client id. The verdict lifts by itself when the next check passes. A wave here is the checker before it is the fleet (GEOMAP \u00a711.2)."
     },
     {
       "id": 40,
@@ -2082,7 +2401,7 @@
         "h": 4,
         "w": 3,
         "x": 3,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2136,7 +2455,7 @@
         "h": 4,
         "w": 3,
         "x": 6,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2190,7 +2509,7 @@
         "h": 4,
         "w": 3,
         "x": 9,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2244,7 +2563,7 @@
         "h": 4,
         "w": 3,
         "x": 12,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2298,7 +2617,7 @@
         "h": 4,
         "w": 3,
         "x": 15,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2352,7 +2671,7 @@
         "h": 4,
         "w": 3,
         "x": 18,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2406,7 +2725,7 @@
         "h": 4,
         "w": 3,
         "x": 21,
-        "y": 55
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -2460,7 +2779,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 59
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -2519,7 +2838,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 59
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -2578,7 +2897,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 59
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -2637,7 +2956,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 67
+        "y": 81
       },
       "fieldConfig": {
         "defaults": {
@@ -2696,7 +3015,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 67
+        "y": 81
       },
       "fieldConfig": {
         "defaults": {
@@ -2755,7 +3074,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 67
+        "y": 81
       },
       "fieldConfig": {
         "defaults": {
@@ -2814,7 +3133,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 75
+        "y": 89
       },
       "fieldConfig": {
         "defaults": {
@@ -2866,7 +3185,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 75
+        "y": 89
       },
       "fieldConfig": {
         "defaults": {
@@ -2925,7 +3244,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 83
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -2984,7 +3303,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 83
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -3043,7 +3362,7 @@
           "legendFormat": "{{rank_mode}}"
         }
       ],
-      "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md §2.19b."
+      "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md \u00a72.19b."
     },
     {
       "id": 76,
@@ -3057,7 +3376,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 83
+        "y": 97
       },
       "fieldConfig": {
         "defaults": {
@@ -3116,7 +3435,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 91
+        "y": 105
       },
       "fieldConfig": {
         "defaults": {
@@ -3169,7 +3488,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 91
+        "y": 105
       },
       "fieldConfig": {
         "defaults": {
@@ -3228,7 +3547,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 99
+        "y": 113
       },
       "fieldConfig": {
         "defaults": {
@@ -3282,7 +3601,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 99
+        "y": 113
       },
       "fieldConfig": {
         "defaults": {
@@ -3322,7 +3641,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md §2.29)."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md \u00a72.29)."
     },
     {
       "id": 69,
@@ -3336,7 +3655,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 99
+        "y": 113
       },
       "fieldConfig": {
         "defaults": {
@@ -3390,7 +3709,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 99
+        "y": 113
       },
       "fieldConfig": {
         "defaults": {
@@ -3445,7 +3764,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 103
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -3515,7 +3834,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 103
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -3553,7 +3872,7 @@
           "legendFormat": "start"
         }
       ],
-      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md §2.29) watches the shadow from 72 hours before it."
+      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md \u00a72.29) watches the shadow from 72 hours before it."
     },
     {
       "id": 77,
@@ -3567,7 +3886,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 103
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -3646,7 +3965,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 107
+        "y": 121
       },
       "fieldConfig": {
         "defaults": {
@@ -3705,7 +4024,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 107
+        "y": 121
       },
       "fieldConfig": {
         "defaults": {
@@ -3761,10 +4080,10 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 115
+        "y": 129
       },
       "panels": [],
-      "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
+      "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, \u00a711.3 and \u00a711.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
     },
     {
       "id": 56,
@@ -3778,7 +4097,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 116
+        "y": 130
       },
       "fieldConfig": {
         "defaults": {
@@ -3818,7 +4137,7 @@
           "legendFormat": "dark"
         }
       ],
-      "description": "The share of the providers with a current measured blackhole check that are dark. Dark is a verdict over consecutive failed checks -- three in a row spanning at least 30 minutes by default (geomap §11.3) -- never a single failed check, and one passing check clears it; only a tls authentication failure is dark at once. Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The share of the providers with a current measured blackhole check that are dark. Dark is a verdict over consecutive failed checks -- three in a row spanning at least 30 minutes by default (geomap \u00a711.3) -- never a single failed check, and one passing check clears it; only a tls authentication failure is dark at once. Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 57,
@@ -3832,7 +4151,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 116
+        "y": 130
       },
       "fieldConfig": {
         "defaults": {
@@ -3891,7 +4210,7 @@
           "legendFormat": "{{class}}"
         }
       ],
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal \u00a72.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 63,
@@ -3905,7 +4224,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 116
+        "y": 130
       },
       "fieldConfig": {
         "defaults": {
@@ -3965,7 +4284,7 @@
         "h": 10,
         "w": 6,
         "x": 0,
-        "y": 124
+        "y": 138
       },
       "fieldConfig": {
         "defaults": {
@@ -4021,7 +4340,7 @@
           "legendFormat": "since the last refresh"
         }
       ],
-      "description": "Time since a taskworker last completed the daily pool refresh, refreshed or skipped, so this saw-tooths between zero and a day. Amber past 25 h, a run is late; red past two days, the refresh is not running (monitor signal §2.19b refresh not running): its task is missing, parked or failing. The time is kept by the process that ran the refresh, so right after every taskworker restarts this reads as decades until the next daily run."
+      "description": "Time since a taskworker last completed the daily pool refresh, refreshed or skipped, so this saw-tooths between zero and a day. Amber past 25 h, a run is late; red past two days, the refresh is not running (monitor signal \u00a72.19b refresh not running): its task is missing, parked or failing. The time is kept by the process that ran the refresh, so right after every taskworker restarts this reads as decades until the next daily run."
     },
     {
       "id": 59,
@@ -4035,7 +4354,7 @@
         "h": 10,
         "w": 9,
         "x": 6,
-        "y": 124
+        "y": 138
       },
       "fieldConfig": {
         "defaults": {
@@ -4087,7 +4406,7 @@
           "range": false
         }
       ],
-      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
+      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal \u00a72.19b."
     },
     {
       "id": 60,
@@ -4101,7 +4420,7 @@
         "h": 10,
         "w": 9,
         "x": 15,
-        "y": 124
+        "y": 138
       },
       "fieldConfig": {
         "defaults": {
@@ -4146,7 +4465,7 @@
           "legendFormat": "{{class}} {{state}}"
         }
       ],
-      "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal §2.19b."
+      "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal \u00a72.19b."
     },
     {
       "id": 900,
@@ -4157,7 +4476,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 134
+        "y": 148
       },
       "panels": []
     },
@@ -4173,7 +4492,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 135
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4225,7 +4544,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 135
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4289,7 +4608,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 135
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4340,7 +4659,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 135
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4404,7 +4723,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 140
+        "y": 154
       },
       "fieldConfig": {
         "defaults": {
@@ -4462,7 +4781,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 140
+        "y": 154
       },
       "fieldConfig": {
         "defaults": {
@@ -4535,7 +4854,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 149
+        "y": 163
       },
       "fieldConfig": {
         "defaults": {
@@ -4609,7 +4928,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 149
+        "y": 163
       },
       "fieldConfig": {
         "defaults": {
@@ -4676,7 +4995,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 158
+        "y": 172
       },
       "fieldConfig": {
         "defaults": {
@@ -4707,7 +5026,7 @@
           "format": "table"
         }
       ],
-      "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal §2.9d names these countries in its page."
+      "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal \u00a72.9d names these countries in its page."
     },
     {
       "id": 910,
@@ -4721,7 +5040,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 158
+        "y": 172
       },
       "fieldConfig": {
         "defaults": {
@@ -4766,7 +5085,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 166
+        "y": 180
       },
       "fieldConfig": {
         "defaults": {
@@ -4822,7 +5141,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 166
+        "y": 180
       },
       "fieldConfig": {
         "defaults": {
@@ -4867,7 +5186,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 173
+        "y": 187
       },
       "fieldConfig": {
         "defaults": {
@@ -4931,7 +5250,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 181
+        "y": 195
       },
       "datasource": {
         "type": "prometheus",
@@ -4985,7 +5304,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 187
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -5043,7 +5362,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 187
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -5101,7 +5420,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 196
+        "y": 210
       },
       "datasource": {
         "type": "prometheus",
@@ -5142,7 +5461,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 196
+        "y": 210
       },
       "datasource": {
         "type": "prometheus",
@@ -5200,7 +5519,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 205
+        "y": 219
       },
       "datasource": {
         "type": "prometheus",
@@ -5247,7 +5566,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 205
+        "y": 219
       },
       "datasource": {
         "type": "prometheus",
@@ -5305,7 +5624,7 @@
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 214
+        "y": 228
       },
       "datasource": {
         "type": "prometheus",
