@@ -2,14 +2,18 @@ package monitor
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestReliabilityPipelineSignalSyntheticReliabilityBacklog(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "6380\t9\t0.1 20.0 14.2 98\n6381\t9\t0.1 1.0 0.4 98", nil
+		return redisReliabilityTestFrame([]int{6380, 6381, 6382}, "9", func(port int) string {
+			if port == 6380 {
+				return "0.1 20.0 14.2 98"
+			}
+			return "0.1 1.0 0.4 98"
+		}), nil
 	}}
 	alerts, err := NewReliabilityPipelineSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -31,17 +35,20 @@ func TestReliabilityPipelineSignalSyntheticReliabilityBacklog(t *testing.T) {
 }
 
 func TestReliabilityPipelineSignalClusterBacklogIsNotDuplicatedPerNode(t *testing.T) {
-	var output strings.Builder
+	ports := []int{}
 	for port := 6380; port < 6380+32; port++ {
-		fmt.Fprintf(&output, "%d\t7\t0.1 1.0 0.3 98\n", port)
+		ports = append(ports, port)
 	}
+	output := redisReliabilityTestFrame(ports, "7", func(int) string { return "0.1 1.0 0.3 98" })
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
 		if count := strings.Count(command, "SCARD client_reliability_stats_blocks"); count != 1 {
 			t.Fatalf("SCARD collection count = %d, want 1; command:\n%s", count, command)
 		}
-		return output.String(), nil
+		return output, nil
 	}}
-	alerts, err := NewReliabilityPipelineSignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts[1].RedisNodePorts = ports
+	alerts, err := NewReliabilityPipelineSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +65,7 @@ func TestReliabilityPipelineSignalClusterBacklogIsNotDuplicatedPerNode(t *testin
 
 func TestReliabilityPipelineSignalRejectsMovedSlotAsMetric(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return "6380\tMOVED 9508 192.0.2.10:6382\t0.145 1.250 0.275 98", nil
+		return redisReliabilityTestFrame([]int{6380, 6381, 6382}, "MOVED 9508 192.0.2.10:6382", func(int) string { return "0.145 1.250 0.275 98" }), nil
 	}}
 	alerts, err := NewReliabilityPipelineSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -82,14 +89,12 @@ func TestParseRedisLatencyFormats(t *testing.T) {
 		{name: "legacy labelled", output: "min: 0, max: 2, avg: 0.31 (98 samples)", want: 0.31},
 		{name: "carriage return updates", output: "0.1 2.0 0.5 20\r0.1 1.0 0.2 98\r", want: 0.2},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := parseRedisLatency(test.output)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != test.want {
-				t.Fatalf("latency = %v, want %v", got, test.want)
-			}
-		})
+		got, err := parseRedisLatency(test.output)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if got != test.want {
+			t.Fatalf("%s: latency = %v, want %v", test.name, got, test.want)
+		}
 	}
 }

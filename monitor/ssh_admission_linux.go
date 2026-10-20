@@ -28,6 +28,51 @@ type sharedSshAdmission struct {
 	owner sshAdmissionOwner
 }
 
+// The original watcher identity remains pinned across every command. Store
+// acquisition rechecks its liveness/generation and admits only one diagnostic.
+type sharedSshDiagnosticAdmission struct {
+	store   *sshAdmissionStore
+	owner   sshAdmissionOwner
+	watcher SshAdmissionWatcher
+}
+
+func newSharedSshDiagnosticAdmission(ctx context.Context, directory string, hosts []string) (sshAdmissionBackend, error) {
+	owner, err := sshAdmissionCurrentOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newSshAdmissionStore(directory, owner.Identity.BootId)
+	if err != nil {
+		return nil, err
+	}
+	return attachSharedSshDiagnosticAdmission(ctx, store, owner, hosts)
+}
+
+func attachSharedSshDiagnosticAdmission(ctx context.Context, store *sshAdmissionStore, owner sshAdmissionOwner, hosts []string) (sshAdmissionBackend, error) {
+	var watcher SshAdmissionWatcher
+	err := store.update(ctx, func(state *sshAdmissionState, _ int64) error {
+		if state.Version != 1 || state.BootId != owner.Identity.BootId || store.status(ctx, state.Watcher) != sshAdmissionOwnerLive {
+			return errors.New("SSH admission watcher authority unavailable")
+		}
+		if !slices.Equal(state.Hosts, hosts) {
+			return errors.New("SSH admission inventory changed")
+		}
+		if owner.Cgroup == state.Watcher.Cgroup || owner.Unit == state.Watcher.Unit {
+			return errors.New("SSH diagnostic requires a separate owner service")
+		}
+		watcher = state.Watcher.Identity
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &sharedSshDiagnosticAdmission{store: store, owner: owner, watcher: watcher}, nil
+}
+
+func (self *sharedSshDiagnosticAdmission) acquire(ctx context.Context, host string) (func() error, error) {
+	return self.store.acquire(ctx, self.owner, self.watcher, sshAdmissionDiagnostic, []string{host})
+}
+
 type sshAdmissionStore struct {
 	directory string
 	bootId    string
@@ -113,6 +158,8 @@ func newSshAdmissionStore(directory, bootId string) (*sshAdmissionStore, error) 
 // Bounded polling is only local queue observation. It never retries SSH or
 // financial work, and cancellation removes only this unstarted request.
 func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOwner, expected SshAdmissionWatcher, class string, hosts []string) (release func() error, resultErr error) {
+	detail := beginPgSharedAdmission(ctx)
+	defer func() { detail.complete(resultErr) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -127,7 +174,9 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 	// Ordinary signals may have a cancellation-only parent. Recovery must not
 	// park a fresh acquisition indefinitely behind an old cleanup's file lock.
 	recovery, cancelRecovery := context.WithTimeout(ctx, time.Second)
+	finishRecovery := beginPgSharedPhase(ctx, pgSharedRecovery)
 	recoveryErr := self.recoverClaims(recovery)
+	finishRecovery(recoveryErr)
 	cancelRecovery()
 	if recoveryErr != nil {
 		return nil, recoveryErr
@@ -142,7 +191,9 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 		return nil, errors.New("SSH admission token unavailable")
 	}
 	token := hex.EncodeToString(random[:])
+	finishClaim := beginPgSharedPhase(ctx, pgSharedClaim)
 	claim, err := self.trackClaim(token, owner)
+	finishClaim(err)
 	if err != nil {
 		return nil, err
 	}
@@ -152,9 +203,14 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 			if queued {
 				// No successful acquire reached the transport, even if publication
 				// succeeded before returning an ambiguous write/cancellation error.
-				resultErr = errors.Join(resultErr, self.releaseClaim(claim))
+				cleanupErr := self.releaseClaim(claim)
+				detail.claimCleanup(cleanupErr)
+				resultErr = errors.Join(resultErr, cleanupErr)
 			} else {
 				self.forgetClaim(claim)
+				if detail != nil {
+					detail.ClaimDisposition = "forgot_unpublished"
+				}
 			}
 		}
 	}()
@@ -205,6 +261,12 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 				return errors.New("SSH admission queued request expired")
 			}
 			granted = state.grant(token)
+			if detail != nil {
+				detail.Decisions++
+				if granted {
+					detail.Grants++
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -214,11 +276,17 @@ func (self *sshAdmissionStore) acquire(ctx context.Context, owner sshAdmissionOw
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			if detail != nil {
+				detail.ClaimDisposition = "returned_reservation"
+			}
 			return func() error {
 				return self.releaseClaim(claim)
 			}, nil
 		}
-		if err := waitSshAdmission(ctx); err != nil {
+		finishWait := beginPgSharedPhase(ctx, pgSharedEligibleWait)
+		err = waitSshAdmission(ctx)
+		finishWait(err)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -251,7 +319,9 @@ func (self *sshAdmissionStore) remove(ctx context.Context, token string, owner s
 
 // Lock-file identity is stable across state renames. Failed writes cannot
 // publish partial capacity, and successful publication is fsynced before use.
-func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmissionState, int64) error) error {
+func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmissionState, int64) error) (resultErr error) {
+	finishLock := beginPgSharedPhase(ctx, pgSharedFlock)
+	defer func() { finishLock(resultErr) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -287,6 +357,9 @@ func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmis
 		}
 	}
 	defer unix.Flock(lock, unix.LOCK_UN)
+	finishLock(nil)
+	finishValidation := beginPgSharedPhase(ctx, pgSharedValidation)
+	defer func() { finishValidation(resultErr) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -320,11 +393,15 @@ func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmis
 	if err := state.validate(); err != nil {
 		return err
 	}
+	finishValidation(nil)
+	finishPublication := beginPgSharedPhase(ctx, pgSharedPublication)
+	defer func() { finishPublication(resultErr) }()
 	raw, err := json.Marshal(state)
 	if err != nil || len(raw) > sshAdmissionStateLimit {
 		return errors.New("SSH admission state exceeds limit")
 	}
 	if bytes.Equal(raw, previous) {
+		recordPgSharedPublication(ctx, false)
 		return nil
 	}
 	var random [16]byte
@@ -347,6 +424,7 @@ func (self *sshAdmissionStore) update(ctx context.Context, change func(*sshAdmis
 	if unix.Renameat(directory, name, directory, "queue.json") != nil || unix.Fsync(directory) != nil {
 		return errors.New("SSH admission state publication failed")
 	}
+	recordPgSharedPublication(ctx, true)
 	if self.afterPublish != nil {
 		return self.afterPublish()
 	}

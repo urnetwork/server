@@ -11,7 +11,7 @@ import (
 const paymentReconciliationHealthQuery = `
 /* monitor-signal-2.21-payment-reconciliation-health */
 WITH expected_store(store) AS (
-    VALUES ('apple'), ('google'), ('solana'), ('stripe')
+    VALUES ('apple'), ('google'), ('solana'), ('stripe'), ('x402')
 ), heartbeat AS (
     SELECT max(event_time) AS event_time
     FROM payment_reconciliation_event
@@ -136,43 +136,75 @@ type paymentReconciliationStoreState struct {
 	taskClaimedCount int64
 }
 
+// Each query owns its complete aggregate. A failed source cannot erase
+// independently proven findings or make the remaining source look healthy.
 func (paymentReconciliationProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	healthRows, err := env.runner.pg(ctx, paymentReconciliationHealthQuery)
-	if err != nil {
-		return nil, err
-	}
-	states, err := parsePaymentReconciliationStates(healthRows)
-	if err != nil {
-		return nil, err
-	}
-	findings := paymentReconciliationHealthFindings(states)
-
-	repairRows, err := env.runner.pg(ctx, paymentReconciliationRepairQuery)
-	if err != nil {
-		return nil, err
-	}
-	repairFindings, err := paymentReconciliationRepairFindings(repairRows)
-	if err != nil {
-		return nil, err
-	}
-	findings = append(findings, repairFindings...)
-
-	unfulfillableRows, err := env.runner.pg(ctx, paymentReconciliationUnfulfillableQuery)
-	if err != nil {
-		return nil, err
-	}
-	unfulfillableFinding, err := paymentReconciliationUnfulfillableFinding(unfulfillableRows)
-	if err != nil {
-		return nil, err
-	}
-	if unfulfillableFinding != nil {
-		findings = append(findings, *unfulfillableFinding)
+	findings := []finding{}
+	for _, source := range []struct {
+		target string
+		query  string
+		reduce func([]pgRow) ([]finding, error)
+	}{
+		{
+			target: "payment-reconciliation/health",
+			query:  paymentReconciliationHealthQuery,
+			reduce: func(rows []pgRow) ([]finding, error) {
+				states, err := parsePaymentReconciliationStates(rows)
+				if err != nil {
+					return nil, err
+				}
+				return paymentReconciliationHealthFindings(states), nil
+			},
+		},
+		{
+			target: "payment-reconciliation/repairs",
+			query:  paymentReconciliationRepairQuery,
+			reduce: paymentReconciliationRepairFindings,
+		},
+		{
+			target: "payment-reconciliation/unfulfillable",
+			query:  paymentReconciliationUnfulfillableQuery,
+			reduce: func(rows []pgRow) ([]finding, error) {
+				terminal, err := paymentReconciliationUnfulfillableFinding(rows)
+				if err != nil || terminal == nil {
+					return nil, err
+				}
+				return []finding{*terminal}, nil
+			},
+		},
+	} {
+		if err := ctx.Err(); err != nil {
+			return findings, err
+		}
+		rows, err := env.runner.pg(ctx, source.query)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if err != nil {
+				return findings, err
+			}
+			return findings, contextErr
+		}
+		if err != nil {
+			// Intentional host exclusion keeps the adapter's scope-policy warning.
+			if hostScopeOnlyError(err) {
+				return findings, err
+			}
+			findings = append(findings, cannotObserveFinding(source.target, err))
+			continue
+		}
+		sourceFindings, err := source.reduce(rows)
+		if err != nil {
+			findings = append(findings, cannotObserveFinding(source.target, fmt.Errorf("invalid response: payment reconciliation aggregate")))
+			continue
+		}
+		findings = append(findings, sourceFindings...)
 	}
 	return findings, nil
 }
 
+// Counts and ages must match their source domains, and the single heartbeat
+// and task aggregates must repeat identically across the complete store set.
 func parsePaymentReconciliationStates(rows []pgRow) ([]paymentReconciliationStoreState, error) {
-	expected := map[string]bool{"apple": false, "google": false, "solana": false, "stripe": false}
+	expected := map[string]bool{"apple": false, "google": false, "solana": false, "stripe": false, "x402": false}
 	states := make([]paymentReconciliationStoreState, 0, len(expected))
 	for _, row := range rows {
 		if len(row) != 9 {
@@ -195,11 +227,28 @@ func parsePaymentReconciliationStates(rows []pgRow) ([]paymentReconciliationStor
 			}
 			values = append(values, value)
 		}
-		states = append(states, paymentReconciliationStoreState{
+		state := paymentReconciliationStoreState{
 			store: store, heartbeatAge: values[0], watermarkAge: values[1], skipped: values[2],
 			errors: values[3], latestEventAge: values[4], taskCount: values[5],
 			taskErrorCount: values[6], taskClaimedCount: values[7],
-		})
+		}
+		if state.heartbeatAge < -1 || state.watermarkAge < -1 || state.latestEventAge < -1 {
+			return nil, fmt.Errorf("payment reconciliation health returned an invalid age")
+		}
+		if state.skipped < 0 || state.errors < 0 || state.taskCount < 0 || state.taskErrorCount < 0 || state.taskClaimedCount < 0 {
+			return nil, fmt.Errorf("payment reconciliation health returned a negative count")
+		}
+		if state.taskErrorCount > state.taskCount || state.taskClaimedCount > state.taskCount {
+			return nil, fmt.Errorf("payment reconciliation health returned inconsistent task counts")
+		}
+		if len(states) > 0 {
+			shared := states[0]
+			if state.heartbeatAge != shared.heartbeatAge || state.taskCount != shared.taskCount ||
+				state.taskErrorCount != shared.taskErrorCount || state.taskClaimedCount != shared.taskClaimedCount {
+				return nil, fmt.Errorf("payment reconciliation health returned inconsistent shared aggregates")
+			}
+		}
+		states = append(states, state)
 	}
 	for store, seen := range expected {
 		if !seen {
@@ -215,8 +264,9 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 		return nil
 	}
 	findings := []finding{}
+	// The parser established one shared tuple before any row supplies it.
 	first := states[0]
-	if first.heartbeatAge < 0 || time.Duration(first.heartbeatAge)*time.Second > paymentReconciliationHeartbeatMaximumAge {
+	if first.heartbeatAge < 0 || first.heartbeatAge > int64(paymentReconciliationHeartbeatMaximumAge/time.Second) {
 		findings = append(findings, finding{
 			probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-stale", target: "payment-reconciliation", sustain: 1,
 			symptom:   "The hourly payment-reconciliation safety net has no current heartbeat",
@@ -244,7 +294,7 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 	}
 	for _, state := range states {
 		if state.skipped > 0 {
-			findings = append(findings, finding{
+			skippedFinding := finding{
 				probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-store-skipped", target: state.store, sustain: 1,
 				symptom:   fmt.Sprintf("Payment reconciliation skipped %s because its credentials were unavailable", state.store),
 				mechanism: "The global task still writes a healthy heartbeat after skipping one store, so task liveness alone masks the loss of that store's missed-notification safety net.",
@@ -254,7 +304,13 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 				action:    "Run the credentials signal, provision or repair the named store credential through Vault, deploy that Vault generation, and allow the ordinary reconciliation overlap to recover missed work. Do not paste tokens into logs or manually fabricate renewal rows.",
 				verify:    "The next two hourly runs contain no skipped_store event for this store, its watermark advances, and any resulting repair is audited exactly once.",
 				playbook:  "SIGNALS.md §2.21 and §8.7",
-			})
+			}
+			if state.store == "x402" {
+				skippedFinding.symptom = "The local x402 reconciliation leg unexpectedly recorded a skipped-store event"
+				skippedFinding.mechanism = "The default x402 leg is always enabled and needs no external store credentials. A skipped-store audit is incompatible with that default source contract; the aggregate cannot identify the writer or configuration."
+				skippedFinding.action = "Compare the executing Taskworker artifact and explicit store selection with the audit writer. Restore the local settled_not_granted retry path; do not provision external x402 store credentials or force its watermark."
+			}
+			findings = append(findings, skippedFinding)
 		}
 		if state.errors > 0 {
 			tier := tierWarn
@@ -275,11 +331,15 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 			if state.store == "stripe" {
 				storeErrorFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; deploy the correction if missing. Absent credit_unfulfillable events alone do not prove either capability or a clean payment cohort. Keep malformed or incomplete provider data, transport failures, and audit-write failures as errors."
 			}
+			if state.store == "x402" {
+				storeErrorFinding.mechanism = "The always-enabled local x402 leg retries settled_not_granted grants without external store credentials. Recorded local validation, grant or persistence failures can hold its watermark while other stores and the global heartbeat remain current; this aggregate does not identify the failed stage."
+				storeErrorFinding.action = "Inspect bounded local settled_not_granted validation, idempotent grant and audit/persistence diagnostics against the executing Taskworker artifact. Repair the established cause without advancing the watermark, inventing external credentials or manually granting from this aggregate."
+			}
 			findings = append(findings, storeErrorFinding)
 		}
-		if state.watermarkAge < 0 || time.Duration(state.watermarkAge)*time.Second > paymentReconciliationWatermarkWarnAge {
+		if state.watermarkAge < 0 || state.watermarkAge > int64(paymentReconciliationWatermarkWarnAge/time.Second) {
 			tier := tierWarn
-			if state.watermarkAge < 0 || time.Duration(state.watermarkAge)*time.Second > paymentReconciliationWatermarkPageAge {
+			if state.watermarkAge < 0 || state.watermarkAge > int64(paymentReconciliationWatermarkPageAge/time.Second) {
 				tier = tierPage
 			}
 			watermarkFinding := finding{
@@ -296,6 +356,10 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 			if state.store == "stripe" {
 				watermarkFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; converge the corrected Taskworker artifact if absent. A healthy heartbeat, fresh sibling stores, or no credit_unfulfillable events does not prove Stripe completion."
 			}
+			if state.store == "x402" {
+				watermarkFinding.mechanism = "The always-enabled local x402 leg advances its watermark after a complete error-free pass, including a pass with no unresolved settled_not_granted events. A missing or stale watermark leaves completion unproved even when the global heartbeat and four sibling stores are fresh. It does not prove an external provider outage or financial loss."
+				watermarkFinding.action = "Compare same-window local error/skip audits and the executing Taskworker artifact. Restore the local retry and persistence boundary; x402 requires no external store credentials. Retain idempotency and never force the watermark forward."
+			}
 			findings = append(findings, watermarkFinding)
 		}
 	}
@@ -303,7 +367,7 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 }
 
 func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
-	allowedStores := map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true}
+	allowedStores := map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true, "x402": true}
 	allowedActions := map[string]bool{"credited": true, "ended": true, "entitlement_repaired": true}
 	findings := make([]finding, 0, len(rows))
 	seen := map[string]bool{}
@@ -338,6 +402,11 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 			action:    "Validate the repaired account state, then trace the provider notification, verification, idempotency ledger, task, and database path for the same bounded time window. Keep the safety-net repair and fix the earlier missing stage rather than replaying provider events manually.",
 			verify:    "The repaired entitlement matches authoritative store state exactly once, later notifications apply normally, and no new repair for this store/action appears through two complete reconciliation windows.",
 			playbook:  "SIGNALS.md §2.21",
+		}
+		if store == "x402" && action == "credited" {
+			repair.mechanism = "The local x402 safety net retried a retained settled_not_granted event and recorded a successful idempotent grant. This is local post-settlement recovery, not proof of a missing external store notification. Audit recording is best effort, so absent repair rows do not prove an empty recovery cohort."
+			repair.action = "Validate the grant against the restricted settled_not_granted audit and idempotency state, then trace the original local grant failure. Preserve the successful repair; do not replay settlement, retarget a payment or manually grant from this aggregate."
+			repair.verify = "The settled transaction grants its original entitlement exactly once and no new local grant error or repeated credited repair appears through two complete reconciliation windows. Audit aging alone does not prove financial disposition."
 		}
 		if store == "stripe" && action == "ended" {
 			repair.symptom = fmt.Sprintf("The payment reconciler first applied %d terminal Stripe subscription state(s) in 24 hours", count)

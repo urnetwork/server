@@ -157,7 +157,7 @@ func generateTestCa() (*x509.Certificate, *ecdsa.PrivateKey, error) {
 // Mints a certificate for host, signed by testCaCert/testCaKey,
 // so it chains to a trusted root under the SSL_CERT_FILE override installed
 // by TestMain.
-func issueLeaf(t *testing.T, host string) (*x509.Certificate, *ecdsa.PrivateKey) {
+func issueLeaf(t testing.TB, host string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -871,6 +871,9 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 	// the measured re-dial cadence of a bounded probe (see
 	// TestOpenRetiresEveryProbeIdentity)
 	expected.FixedDestinationRetryMin = 0
+	// no direct mode (see TestProviderTunnelMultiClientSettingsDisallowDirect)
+	allowDirect := false
+	expected.OverrideAllowDirect = &allowDirect
 
 	settings := providerTunnelMultiClientSettings()
 	if settings.SecurityPolicyGenerator == nil || expected.SecurityPolicyGenerator == nil {
@@ -888,7 +891,7 @@ func TestProviderTunnelMultiClientSettingsDisableNestedProviderProbe(t *testing.
 	actualComparable.SecurityPolicyGenerator = nil
 	expectedComparable.SecurityPolicyGenerator = nil
 	if !reflect.DeepEqual(actualComparable, expectedComparable) {
-		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false and an unpaced re-dial")
+		t.Fatal("provider tunnel settings must preserve every default except ProviderProbe=false, an unpaced re-dial and no direct mode")
 	}
 	settings.ProviderProbe = true
 	if !connect.DefaultMultiClientSettings().ProviderProbe {
@@ -1008,12 +1011,40 @@ func (self *recordingCloseWaiter) CloseAndWait(context.Context) error {
 	return self.err
 }
 
+// A tunnel teardown with no retirement owner whose resolver, drain and
+// acknowledgment record themselves in order; the acknowledgment returns at
+// once as unused.
+func recordedTunnelTeardown(
+	order *[]string,
+	cancelData func(),
+	closeTun func() error,
+	pumpDone <-chan struct{},
+	multiClient closeAndWaiter,
+	generator closeAndWaiter,
+	closeClientStrategy func(),
+	cancelLifecycle func(),
+) *tunnelTeardown {
+	return &tunnelTeardown{
+		path:          retirementPathClosed,
+		closeTimeout:  time.Minute,
+		closeResolver: func() { *order = append(*order, "resolver") },
+		drainReturns:  func(context.Context) { *order = append(*order, "drain") },
+		acknowledgeReturns: func() returnAcknowledgment {
+			*order = append(*order, "acknowledge")
+			return returnAcknowledgment{outcome: retirementOutcomeUnused}
+		},
+		retireParts: func(ctx context.Context) error {
+			return retireTunnelParts(ctx, cancelData, closeTun, pumpDone, multiClient, generator, closeClientStrategy, cancelLifecycle)
+		},
+	}
+}
+
 // A RemoteUserNatMultiClient does not own the generated transport clients; its
 // ApiMultiClientGenerator does. The old Tunnel.Close canceled the shared
 // context and closed only the multi-client/Tun, so every short-lived probe
 // returned before generator-owned Client and OOB retirement was joined. A
 // fleet sweep then accumulated teardown tails faster than they retired.
-func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
+func TestTunnelTeardownJoinsGeneratorOwnership(t *testing.T) {
 	order := []string{}
 	pumpDone := make(chan struct{})
 	close(pumpDone)
@@ -1030,10 +1061,8 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 		},
 	}
 
-	err := closeTunnelParts(
-		t.Context(),
-		func() { order = append(order, "resolver") },
-		func(context.Context) { order = append(order, "drain") },
+	err := recordedTunnelTeardown(
+		&order,
 		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return nil },
 		pumpDone,
@@ -1044,11 +1073,11 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 			order = append(order, "cancel-lifecycle")
 			cancelLifecycle()
 		},
-	)
+	).close()
 	if err != nil {
-		t.Fatalf("closeTunnelParts: %v", err)
+		t.Fatalf("tunnel teardown: %v", err)
 	}
-	if want := []string{"resolver", "drain", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"resolver", "drain", "acknowledge", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
 	}
 	if lifecycleCtx.Err() == nil {
@@ -1060,17 +1089,15 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 // not a short-circuit: returning the first error while leaving the generator
 // alive would recreate the leak precisely on the unhealthy paths that sweep
 // most often.
-func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
+func TestTunnelTeardownAttemptsEveryOwnerAfterError(t *testing.T) {
 	order := []string{}
 	pumpDone := make(chan struct{})
 	close(pumpDone)
 	multiClient := &recordingCloseWaiter{name: "multi-client", order: &order, err: errors.New("multi-client close failed")}
 	generator := &recordingCloseWaiter{name: "generator", order: &order}
 
-	err := closeTunnelParts(
-		t.Context(),
-		func() { order = append(order, "resolver") },
-		func(context.Context) { order = append(order, "drain") },
+	err := recordedTunnelTeardown(
+		&order,
 		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return errors.New("tun close failed") },
 		pumpDone,
@@ -1078,11 +1105,11 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 		generator,
 		func() { order = append(order, "client-strategy") },
 		func() { order = append(order, "cancel-lifecycle") },
-	)
+	).close()
 	if err == nil {
-		t.Fatal("closeTunnelParts returned nil despite close failures")
+		t.Fatal("the tunnel teardown returned nil despite close failures")
 	}
-	if want := []string{"resolver", "drain", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"resolver", "drain", "acknowledge", "cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
 	}
 }

@@ -70,11 +70,16 @@ func TestProviderEgressStateQueryMetricActualOperations(t *testing.T) {
 		}
 		source := connect.Id(clientId)
 		before := proberStateQueryMetric(t, "prober", "mint", "client", "state_valid")
+		mintQueriesBefore := proberObservedCounter(t, "urnetwork_jwt_state_queries_total", nil)
 		child, err := credentials.AuthNetworkClient(ctx, &connect.AuthNetworkClientArgs{SourceClientId: &source})
 		if err != nil || child == nil || child.ByClientJwt == "" {
 			t.Fatal("mint failed", err)
 		}
-		if proberStateQueryMetric(t, "prober", "mint", "client", "state_valid") != before+1 {
+		// The owner's parent check precedes the model's own parent check in the
+		// mint transaction, under the session lifecycle lock (16675a430). Both
+		// belong to the prober mint; no other source may count either query.
+		if proberStateQueryMetric(t, "prober", "mint", "client", "state_valid") != before+2 ||
+			proberObservedCounter(t, "urnetwork_jwt_state_queries_total", nil) != mintQueriesBefore+2 {
 			t.Fatal("mint source missing")
 		}
 		claims, err := session.ParseByJwtForAudience(ctx, child.ByClientJwt, session.ByJwtAudienceApi)

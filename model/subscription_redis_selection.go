@@ -177,6 +177,15 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 	// Reuse the independently scoped free-grant policy. Each small window
 	// preserves discovery order before the payer client's hash chooses a start.
 	internal := false
+	// An internal prober records one finite selection outcome, as the legacy
+	// allocator does; ordinary payers record none. A failure after the first
+	// window identified the prober, including a raised query, remains "error".
+	proberOutcome := ""
+	defer func() {
+		if proberOutcome != "" {
+			proberGrantSelectionResults.WithLabelValues(proberOutcome).Inc()
+		}
+	}()
 	for window := 0; window < 2; window++ {
 		var candidates []*escrowTransferBalance
 		sql := proberGrantSelectionSql
@@ -214,6 +223,9 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 		if !internal {
 			break
 		}
+		if proberOutcome == "" {
+			proberOutcome = "error"
+		}
 		if len(candidates) != 0 {
 			start := int(payerClientId.Hash() % uint64(len(candidates)))
 			attempts := 0
@@ -228,6 +240,10 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 					return nil, 0, err
 				}
 				if done {
+					proberOutcome = "selected_first"
+					if window == 1 {
+						proberOutcome = "selected_extended"
+					}
 					return selected, priority, nil
 				}
 				if attempts == proberGrantAttemptsPerWindow {
@@ -238,6 +254,10 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 		if raw < count {
 			break
 		}
+	}
+	if internal {
+		// The keyset census below is the prober's authoritative fallback.
+		proberOutcome = "fallback"
 	}
 
 	// Ordinary/fallback funding keeps exact earliest-expiry order. Keyset

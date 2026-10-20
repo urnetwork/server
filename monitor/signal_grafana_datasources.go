@@ -49,12 +49,11 @@ var requiredGrafanaDatasourceQueries = []grafanaDatasourceQuerySpec{
 	{uid: "warp-loki", typeName: "loki", pluginID: "loki", expr: `sum(count_over_time({service="web"}[1m]))`},
 }
 
+// Only fixed classes and status fields may leave the response parser.
 type grafanaDatasourceQuerySample struct {
 	httpStatus   int
 	resultStatus int
-	resultError  string
-	response     string
-	parseError   string
+	errorClass   string
 	resultSeen   bool
 }
 
@@ -143,10 +142,19 @@ func queryGrafanaDatasource(
 	}
 	sample := grafanaDatasourceQuerySample{
 		httpStatus: response.StatusCode,
-		response:   strings.Join(strings.Fields(string(responseBody)), " "),
+	}
+	// Preserve the existing plugin discriminator before discarding arbitrary
+	// upstream and parser text; neither belongs in structured alerts or Markdown.
+	failedSample := func(errorClass, detail string) grafanaDatasourceQuerySample {
+		sample.errorClass = errorClass
+		detail = strings.ToLower(strings.Join(strings.Fields(detail), " "))
+		if strings.Contains(detail, "plugin.notregistered") || strings.Contains(detail, "plugin not registered") {
+			sample.errorClass = "plugin-not-registered"
+		}
+		return sample
 	}
 	if response.StatusCode < 200 || 300 <= response.StatusCode {
-		return sample, nil
+		return failedSample("http-status", string(responseBody)), nil
 	}
 	var envelope struct {
 		Results map[string]struct {
@@ -155,21 +163,28 @@ func queryGrafanaDatasource(
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(responseBody, &envelope); err != nil {
-		sample.parseError = err.Error()
-		return sample, nil
+		return failedSample("invalid-json", err.Error()), nil
 	}
 	result, ok := envelope.Results["A"]
 	sample.resultSeen = ok
 	if ok {
 		sample.resultStatus = result.Status
-		sample.resultError = strings.Join(strings.Fields(result.Error), " ")
+		if strings.TrimSpace(result.Error) != "" {
+			return failedSample("result-error", result.Error), nil
+		}
+	}
+	if !sample.resultSeen {
+		return failedSample("missing-result", string(responseBody)), nil
+	}
+	if sample.resultStatus < 200 || 300 <= sample.resultStatus {
+		return failedSample("result-status", string(responseBody)), nil
 	}
 	return sample, nil
 }
 
 func grafanaDatasourceQueryHealthy(sample grafanaDatasourceQuerySample) bool {
 	return 200 <= sample.httpStatus && sample.httpStatus < 300 &&
-		sample.resultSeen && sample.parseError == "" && sample.resultError == "" &&
+		sample.resultSeen && sample.errorClass == "" &&
 		200 <= sample.resultStatus && sample.resultStatus < 300
 }
 
@@ -184,20 +199,17 @@ func evaluateGrafanaDatasourceQuery(target string, spec grafanaDatasourceQuerySp
 		return []finding{pluginHealthy, queryHealthy}
 	}
 
-	detail := firstNonempty(sample.resultError, sample.parseError, sample.response, "empty response")
 	observed := fmt.Sprintf(
-		"datasource=%s type=%s plugin=%q http_status=%d result_status=%d result_seen=%t detail=%s",
+		"datasource=%s type=%s plugin=%q http_status=%d result_status=%d result_seen=%t error_class=%s",
 		spec.uid,
 		spec.typeName,
 		spec.pluginID,
 		sample.httpStatus,
 		sample.resultStatus,
 		sample.resultSeen,
-		detail,
+		sample.errorClass,
 	)
-	pluginMissing := strings.Contains(strings.ToLower(detail), "plugin.notregistered") ||
-		strings.Contains(strings.ToLower(detail), "plugin not registered")
-	if pluginMissing {
+	if sample.errorClass == "plugin-not-registered" {
 		return []finding{
 			{
 				probeId: "observability/grafana-datasources", tier: tierWarn,
@@ -206,7 +218,7 @@ func evaluateGrafanaDatasourceQuery(target string, spec grafanaDatasourceQuerySp
 				mechanism: fmt.Sprintf("Grafana retained the provisioned %s row, but its custom image does not register native datasource plugin %q. Health endpoints and direct backend reads bypass plugin loading, so dashboards can render empty while the observability storage plane remains healthy.", spec.uid, spec.pluginID),
 				baseline:  "Grafana /api/ds/query returns HTTP 200 and a successful result for both warp-mimir and warp-loki on every probe.",
 				observed:  observed,
-				evidence:  "bounded Grafana response: " + sample.response,
+				evidence:  "bounded Grafana response summary: " + observed,
 				context:   "This is an image/plugin packaging failure, not missing Loki events, a missing datasource database row, or a direct Mimir/Loki availability failure.",
 				action:    fmt.Sprintf("Bake the signed, catalog-checksum-pinned %s plugin into the Grafana image for every supported architecture, retain disabled runtime downloads, and deploy a new image. Do not recreate %s or restart the same artifact.", spec.pluginID, spec.uid),
 				verify:    fmt.Sprintf("The image packaging regression passes, %s returns a successful result through Grafana /api/ds/query, the Grafana deploy-readiness gate passes on every active block, and no new grafana-plugin-unregistered log appears after ingestion delay.", spec.uid),
@@ -222,12 +234,12 @@ func evaluateGrafanaDatasourceQuery(target string, spec grafanaDatasourceQuerySp
 			probeId: "observability/grafana-datasources", tier: tierWarn,
 			class: "grafana-datasource-query", target: target, frame: spec.uid, sustain: 2,
 			symptom:   fmt.Sprintf("Grafana's provisioned %s datasource query is failing", spec.uid),
-			mechanism: "The authenticated Grafana query boundary did not return a successful datasource result. This path includes Grafana authentication, plugin execution, the provisioned datasource URL, and the backend query; its bounded response distinguishes the failing layer.",
+			mechanism: "The authenticated Grafana query boundary did not return a successful datasource result. This path includes Grafana authentication, plugin execution, the provisioned datasource URL, and the backend query. Status and a fixed error class describe the observed failure; upstream response and error text are omitted.",
 			baseline:  "Grafana /api/ds/query returns HTTP 200 and a successful result for both warp-mimir and warp-loki on every probe.",
 			observed:  observed,
-			evidence:  "bounded Grafana response: " + sample.response,
+			evidence:  "bounded Grafana response summary: " + observed,
 			context:   "A green /api/health or successful direct backend request does not clear this finding because both bypass the dashboard datasource boundary.",
-			action:    fmt.Sprintf("Inspect the bounded %s result and the same-window Grafana log, then repair the named plugin, provisioned URL, or backend path. Do not recreate a correct datasource row or suppress the query error before identifying the failed layer.", spec.uid),
+			action:    fmt.Sprintf("Inspect the %s status and error class with same-window privacy-reviewed Grafana evidence, then identify and repair the failed plugin, provisioned URL, or backend path. Do not recreate a correct datasource row or suppress the query error before identifying the failed layer.", spec.uid),
 			verify:    fmt.Sprintf("%s returns a successful result through Grafana /api/ds/query on two consecutive probes and the deploy-readiness datasource check passes on every active Grafana block.", spec.uid),
 			playbook:  "SIGNALS.md §11.15 and §11.9",
 		},

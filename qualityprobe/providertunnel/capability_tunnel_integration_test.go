@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -137,10 +138,18 @@ func TestCapabilityTunnelRegistersItsClientKeyThroughTheLocalAuthority(t *testin
 				}
 			}
 		}
+		// A capability measurement sends its provider no packet, so the
+		// provider holds no return for its derived client, which is revoked
+		// without waiting to acknowledge one.
+		unused := tunnelRetirementCounter.WithLabelValues(retirementPathClosed, retirementOutcomeUnused)
+		unusedBefore := testutil.ToFloat64(unused)
 		for index, opened := range tunnels {
 			if err := opened.tunnel.Close(); err != nil {
 				tb.Fatalf("tunnel %d: joined retirement: %v", index, err)
 			}
+		}
+		if retired := testutil.ToFloat64(unused) - unusedBefore; retired != 2 {
+			tb.Fatalf("%v capability tunnels retired without acknowledging, want 2", retired)
 		}
 		if mint, control, retire := stack.AuthorityCalls(); mint < 2 || control == 0 || retire < 2 {
 			tb.Fatalf("missing local mint, control or retirement: mint=%d control=%d retire=%d", mint, control, retire)

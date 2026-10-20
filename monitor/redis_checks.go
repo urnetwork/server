@@ -222,40 +222,41 @@ type redisConnectionDiagnosis struct {
 	verify    string
 }
 
+// Consumers accept only the complete bounded battery schema, including its
+// exact cache annotation. Free-form metadata never supplies diagnostic keys.
 func redisConnectionEvidenceInt(evidence, key string) (int, bool) {
-	prefix := key + "="
-	for _, field := range strings.Fields(evidence) {
-		if !strings.HasPrefix(field, prefix) {
-			continue
-		}
-		value, err := strconv.Atoi(strings.TrimPrefix(field, prefix))
-		return value, err == nil
+	value, valid := redisConnectionEvidenceInt64(evidence, key)
+	if !valid || int64(int(value)) != value {
+		return 0, false
 	}
-	return 0, false
+	return int(value), true
 }
 
+// Latency and nominal-window arithmetic must be finite and nonnegative.
+// Nominal HGET rate does not establish a measured interval or process continuity.
 func redisConnectionEvidenceFloat(evidence, key string) (float64, bool) {
-	prefix := key + "="
-	for _, field := range strings.Fields(evidence) {
-		if !strings.HasPrefix(field, prefix) {
-			continue
-		}
-		value, err := strconv.ParseFloat(strings.TrimPrefix(field, prefix), 64)
-		return value, err == nil
+	diagnostic, valid := parseRedisConnectionDiagnostics(evidence)
+	if !valid {
+		return 0, false
 	}
-	return 0, false
+	switch key {
+	case "latency_avg_ms":
+		return diagnostic.latency, true
+	case "hget_calls_per_nominal_second":
+		return diagnostic.hgetNominalRate, true
+	default:
+		return 0, false
+	}
 }
 
+// Do not infer an observation from a token embedded in optional source text.
 func redisConnectionEvidenceInt64(evidence, key string) (int64, bool) {
-	prefix := key + "="
-	for _, field := range strings.Fields(evidence) {
-		if !strings.HasPrefix(field, prefix) {
-			continue
-		}
-		value, err := strconv.ParseInt(strings.TrimPrefix(field, prefix), 10, 64)
-		return value, err == nil
+	diagnostic, valid := parseRedisConnectionDiagnostics(evidence)
+	if !valid {
+		return 0, false
 	}
-	return 0, false
+	value, found := diagnostic.values[key]
+	return value, found
 }
 
 func redisConnectionControlSummary(evidence string) (string, bool) {
@@ -299,23 +300,23 @@ func redisConnectionControlSummary(evidence string) (string, bool) {
 		details = append(details, fmt.Sprintf("used_memory_bytes=%d", usedMemory))
 	}
 	if clientMemoryKnown && usedMemoryKnown {
-		unhealthy = unhealthy || clientMemory > int64(2<<30) || 4*clientMemory > usedMemory
+		unhealthy = unhealthy || clientMemory > int64(2*1024*1024*1024) || clientMemory > usedMemory/4
 	}
 
 	maxOutputMemory, maxOutputMemoryKnown := redisConnectionEvidenceInt64(evidence, "client_output_memory_max_bytes")
 	complete = complete && maxOutputMemoryKnown
 	if maxOutputMemoryKnown {
 		details = append(details, fmt.Sprintf("max_client_output_memory_bytes=%d", maxOutputMemory))
-		unhealthy = unhealthy || maxOutputMemory > int64(32<<20)
+		unhealthy = unhealthy || maxOutputMemory > int64(32*1024*1024)
 	}
 
 	if len(details) == 0 {
-		return "", false
+		return "Trip-time Redis controls unavailable; incomplete optional evidence cannot establish or clear Redis impairment.", false
 	}
 	summary := "Trip-time Redis controls: " + strings.Join(details, " ") + "."
 	switch {
 	case complete && unhealthy:
-		summary += " At least one captured latency, accept-queue/backlog, client-memory, or output-buffer control is unhealthy; the attributed workload shape is exerting active pressure. Blocked-client state is retained as supporting context rather than treated as pressure by itself."
+		summary += " At least one captured latency, accept-queue/backlog, client-memory, or output-buffer control is unhealthy; the captured controls establish pressure, but do not identify its workload cause. Blocked-client state is retained as supporting context rather than treated as pressure by itself."
 	case complete:
 		summary += " All captured latency, accept-queue/backlog, client-memory, and output-buffer controls are below their alert bands; blocked-client state is retained as supporting context."
 	default:
@@ -324,79 +325,83 @@ func redisConnectionControlSummary(evidence string) (string, bool) {
 	return summary, complete && unhealthy
 }
 
+// Command cohorts and hash assignments are candidate fingerprints. They do
+// not identify callers, accessed keys, running artifacts or historical owners.
 func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
-	lowerEvidence := strings.ToLower(evidence)
-	controlSummary, controlsUnhealthy := redisConnectionControlSummary(lowerEvidence)
+	controlSummary, controlsUnhealthy := redisConnectionControlSummary(evidence)
 	appendControlSummary := func(context string) string {
-		if controlSummary == "" {
-			return context
-		}
 		return context + " " + controlSummary
 	}
-	appendPressureAction := func(action string) string {
-		if !controlsUnhealthy {
-			return action
-		}
-		return action + " At least one trip-time control is already unhealthy; treat this as active Redis pressure and execute the compatible workload-distribution repair instead of waiting only for idle-pool contraction."
+	action := "Independently confirm the caller, accessed key and running artifact before any workload-specific rollout or restart. Compare the current command workload with node latency, pool-timeout logs, accept queues and client/output memory, then repair only the demonstrated owner. Do not kill Redis clients or raise pool floors from the connection ratio or command cohort alone."
+	if controlsUnhealthy {
+		action += " At least one trip-time pressure control is unhealthy; investigate the active Redis pressure promptly while retaining the workload cause as unknown."
 	}
-	clientTotal, clientTotalKnown := redisConnectionEvidenceInt(lowerEvidence, "client_list_total")
-	hgetClients, hgetClientsKnown := redisConnectionEvidenceInt(lowerEvidence, "client_cmd_hget_count")
-	hgetRate, hgetRateKnown := redisConnectionEvidenceFloat(lowerEvidence, "hget_calls_per_second")
-	if clientTotalKnown && hgetClientsKnown && hgetRateKnown &&
-		clientTotal > 0 && hgetClients >= 50 && 2*hgetClients >= clientTotal && hgetRate >= 50 {
+	verify := "Fresh native and historical client-count observations satisfy their healthy bands, and latency, pool timeouts, accept queues and client/output memory remain healthy on consecutive probes. Any workload-specific closure also requires independent caller, key and running-artifact evidence."
+	nominalContext := ""
+	if delta, known := redisConnectionEvidenceInt64(evidence, "hget_calls_delta"); known {
+		nominalRate, _ := redisConnectionEvidenceFloat(evidence, "hget_calls_per_nominal_second")
+		nominalContext = fmt.Sprintf(" HGET counter arithmetic: delta=%d and delta divided by a nominal two-second budget=%.3f. The INFO-to-INFO elapsed interval and Redis generation were not measured; successful or status-124 latency output does not prove the timeout owned a full two-second window. This arithmetic supplies neither a measured command rate nor workload or pressure authority.", delta, nominalRate)
+	}
+	clientTotal, clientTotalKnown := redisConnectionEvidenceInt(evidence, "client_list_total")
+	hgetClients, hgetClientsKnown := redisConnectionEvidenceInt(evidence, "client_cmd_hget_count")
+	if clientTotalKnown && hgetClientsKnown && clientTotal > 0 && hgetClients >= 50 && hgetClients >= clientTotal/2+clientTotal%2 {
 		return redisConnectionDiagnosis{
-			mechanism: "One network-peer keyspace event is being fanned out to every resident listener in the Connect process, and each listener independently reads the same peer metadata with HGET. That live-delta read amplification both produces the measured HGET command rate and causes lazy Redis cluster clients to retain large per-node connection pools for the peer registry's hot slot.",
-			context:   appendControlSummary(fmt.Sprintf("The trip battery counted %d of %d clients ending in HGET and measured %.3f HGET calls/second. This joint cohort-and-rate fingerprint attributes the connection shape to network-peer live-delta fanout rather than a reconnect storm, the retired reliability marker, or Redis alone.", hgetClients, clientTotal, hgetRate)),
-			action:    appendPressureAction("Deploy the Connect version that constructs one lazy peer delta per subscriber event and shares its pipelined metadata/version read across all resident listeners. Do not kill Redis clients or raise pool floors; old per-node pools should contract through their ordinary idle lifetime after the rollout."),
-			verify:    "On consecutive samples, the HGET command rate and HGET-ended client cohort collapse, the outlier node returns near the fleet connection median, key-event delivery continues, listener resets do not spike, and Redis latency plus pool-timeout signals remain healthy.",
+			mechanism: "HGET-ended clients dominate the trip snapshot. Network-peer live-delta fanout is one candidate workload, but unrelated HGET traffic can produce the same cohort. The battery does not identify a caller, accessed key or running artifact, and does not establish the cause of the connection spike.",
+			context:   appendControlSummary(fmt.Sprintf("The trip battery counted %d of %d clients ending in HGET. Confirm the caller and actual key use independently before attributing the cohort to network-peer fanout.", hgetClients, clientTotal) + nominalContext),
+			action:    action,
+			verify:    verify,
 		}
 	}
-	if strings.Contains(lowerEvidence, "queried_node_owns_reliability_marker=true") &&
-		strings.Contains(lowerEvidence, "cmd=sadd") {
+	markerOwner, markerKnown := redisConnectionEvidenceInt(evidence, "reliability_marker_owner_port")
+	queriedPort, queriedKnown := redisConnectionEvidenceInt(evidence, "queried_node_port")
+	saddClients, saddKnown := redisConnectionEvidenceInt(evidence, "client_cmd_sadd_count")
+	if markerKnown && queriedKnown && markerOwner == queriedPort && saddKnown && saddClients > 0 {
 		return redisConnectionDiagnosis{
-			mechanism: "A Redis cluster client creates and retains a per-node pool when a process first touches that node. The SADD cohort identifies the legacy client_reliability_stats_blocks fixed-slot key writer: one fleet-wide marker key concentrates every writer process's pool on its owner.",
-			context:   appendControlSummary("Dominant long-lived normal-client cohorts ending in SADD/EXPIRE identify the legacy client_reliability_stats_blocks fixed-slot variant; the connection count is pool amplification, not by itself a slow Redis process or a reconnect storm."),
-			action:    appendPressureAction("Roll out the marker-free reliability writer after the compatible high-water-mark rollup, then restart writers normally so old pools age out. Do not raise pool floors or kill a healthy Redis owner; those actions multiply or churn the connections."),
-			verify:    "The outlier returns near the fleet median after writer rollout/restarts, the SADD/EXPIRE cohorts disappear, and Redis pool-timeout plus node-latency signals remain healthy.",
+			mechanism: "A SADD cohort and this node's assignment of the slot for client_reliability_stats_blocks form a candidate legacy fixed-slot writer fingerprint. Unrelated SADD traffic on the same slot owner gives the same observation. CLUSTER KEYSLOT does not prove the marker key exists or was accessed, and CLIENT LIST does not identify its caller or running artifact.",
+			context:   appendControlSummary(fmt.Sprintf("The trip battery counted %d SADD-ended clients on the marker's theoretical slot owner. Actual marker-key use and the legacy writer remain unconfirmed.", saddClients) + nominalContext),
+			action:    action,
+			verify:    verify,
 		}
 	}
-	currentShards, currentKnown := redisConnectionEvidenceInt(lowerEvidence, "current_reliability_shards_on_node")
-	previousShards, previousKnown := redisConnectionEvidenceInt(lowerEvidence, "previous_reliability_shards_on_node")
-	shardCount, shardCountKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shard_count")
-	recentMax, recentMaxKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shards_recent_max")
-	lookbackBlocks, lookbackKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shard_lookback_blocks")
-	recentMaxAge, recentMaxAgeKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shards_recent_max_age_blocks")
-	currentCollision := currentKnown && previousKnown && currentShards >= 0 && previousShards >= 0 &&
-		(currentShards >= 2 || previousShards >= 2)
-	historicalCollision := recentMaxKnown && recentMax >= 2
-	if shardCountKnown && (currentCollision || historicalCollision) && strings.Contains(lowerEvidence, "cmd=expire") {
-		mechanism := fmt.Sprintf("At the connection-spike trip, this Redis master owned %d of %d client-reliability shards for the trip minute and %d for the immediately preceding minute. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards)
-		if !currentCollision && historicalCollision && lookbackKnown && recentMaxAgeKnown {
-			mechanism = fmt.Sprintf("At the connection-spike trip, this Redis master owned %d of %d client-reliability shards for the trip minute and %d for the immediately preceding minute, but had owned as many as %d within the bounded %d-block history (%d block(s) before the trip). Independent shard hashing created that earlier hot-key collision, each reliability transaction ended in EXPIRE, and lazy per-node pools outlived the one-minute key ownership that expanded them.", currentShards, shardCount, previousShards, recentMax, lookbackBlocks, recentMaxAge)
+	currentShards, currentKnown := redisConnectionEvidenceInt(evidence, "current_reliability_shards_on_node")
+	previousShards, previousKnown := redisConnectionEvidenceInt(evidence, "previous_reliability_shards_on_node")
+	shardCount, shardCountKnown := redisConnectionEvidenceInt(evidence, "reliability_shard_count")
+	recentMax, recentMaxKnown := redisConnectionEvidenceInt(evidence, "reliability_shards_recent_max")
+	lookbackBlocks, lookbackKnown := redisConnectionEvidenceInt(evidence, "reliability_shard_lookback_blocks")
+	recentMaxAge, recentMaxAgeKnown := redisConnectionEvidenceInt(evidence, "reliability_shards_recent_max_age_blocks")
+	currentCollision := currentKnown && previousKnown && (currentShards >= 2 || previousShards >= 2)
+	earlierNameCollision := recentMaxKnown && recentMax >= 2
+	expireClients, expireKnown := redisConnectionEvidenceInt(evidence, "client_cmd_expire_count")
+	if shardCountKnown && (currentCollision || earlierNameCollision) && expireKnown && expireClients > 0 {
+		mechanism := fmt.Sprintf("At the connection-spike trip, the current slot map assigned this node %d of %d expected client-reliability shard names for the trip minute and %d for the preceding minute. Together with an EXPIRE cohort this is a candidate rotating reliability-workload fingerprint, not proof that those keys exist, were accessed or caused the connections.", currentShards, shardCount, previousShards)
+		if !currentCollision && earlierNameCollision && lookbackKnown && recentMaxAgeKnown {
+			mechanism += fmt.Sprintf(" Hashing names from the bounded %d-block lookback through that same current slot map gives a maximum of %d names at age %d block(s). This is a current-map calculation for earlier key names, not an observation of historical slot ownership or workload.", lookbackBlocks, recentMax, recentMaxAge)
 		}
-		frameContext := "The trip-time EXPIRE cohort and bounded client_reliability_stats.<block>.<shard> ownership history identify a rotating marker-free reliability load collision."
-		if strings.Contains(lowerEvidence, "battery collected once at trip") {
+		frameContext := "Unrelated EXPIRE traffic can coexist with the same calculated shard-name collision. Independently confirm the caller, actual key use and running artifact before attributing a rotating reliability workload."
+		if strings.Contains(evidence, "battery collected once at trip") {
 			frameContext += " This cached battery precedes the alert symptom's later sustained client ratio, so a different CLIENT LIST total is expected while idle pools contract."
 		} else {
-			frameContext += " In a one-shot alert, these battery values share the trip frame with the observed client ratio."
+			frameContext += " The battery describes the trip frame; its commands are sequential observations rather than one atomic snapshot."
 		}
-		frameContext += " This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment."
 		return redisConnectionDiagnosis{
 			mechanism: mechanism,
-			context:   appendControlSummary(frameContext),
-			action:    appendPressureAction("Do not roll back the marker-free writer, kill healthy clients, or lower pool limits from the fleet-median ratio alone. Let minute ownership rotate and ordinary pool idle lifetime contract the shape. If latency, pool timeouts, queues, or memory become unhealthy, use a rolling-compatible wider fanout or deliberate slot placement so simultaneous reliability shards distribute more evenly."),
-			verify:    "The bounded shard-history collision ages out together with the EXPIRE-heavy connection shape, and Redis latency, pool-timeout logs, accept queues, and client-buffer memory remain healthy on consecutive samples.",
+			context:   appendControlSummary(frameContext + nominalContext),
+			action:    action,
+			verify:    verify,
 		}
 	}
 	return redisConnectionDiagnosis{
-		mechanism: "Connected clients are concentrated on this Redis node, but its bounded battery does not prove the reliability-marker fingerprint (the node must own client_reliability_stats_blocks and expose a SADD cohort). Long-lived PING/GET/EXEC cohorts can be normal lazy cluster pools on an actively used slot; uniformly young NULL/PING cohorts instead indicate reconnect churn, while abnormal flags or output memory indicate a stalled consumer.",
-		context:   appendControlSummary("A fleet-median ratio identifies shape, not root cause. Attribute this node's command rate and hot key slots, compare cohort ages and source processes, and read node latency before treating the sockets as harmful."),
-		action:    appendPressureAction("If latency and pool-timeout signals are healthy with long-lived normal-client cohorts, observe consecutive ticks and fix only the workload or pool ownership that explains the hot slots. For uniformly young cohorts, investigate the matching deploy/reconnect boundary; for abnormal flags or output memory, follow the slow-consumer playbook. Do not apply the reliability-marker rollout solely from this alert."),
-		verify:    "The node returns near the fleet connection shape or a stable expected hot-slot owner is documented; node latency, pool timeouts, accept queue, and client output memory remain healthy on consecutive samples.",
+		mechanism: "Connected clients are concentrated on this Redis node, but the optional battery does not establish their workload cause. Last-command cohorts and theoretical key-slot assignments cannot identify callers, actual key use or running artifacts. Long-lived pools, workload changes, reconnect churn and stalled consumers remain candidates requiring independent evidence.",
+		context:   appendControlSummary("A fleet-median ratio identifies connection shape. Read node latency, correlate actual key use and caller/process evidence, and retain missing optional controls as unknown." + nominalContext),
+		action:    action,
+		verify:    verify,
 	}
 }
 
 func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	hosts := env.cfg.redisSweepHosts()
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
@@ -455,6 +460,14 @@ for p in %s; do
     END{if(invalid || !seen["used_memory"] || !seen["maxmemory"] || !seen["used_memory_dataset"] || !seen["mem_clients_normal"] || !seen["mem_clients_slaves"] || !seen["connected_clients"])print "unreachable";else print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
 done`, strings.Join(portNames, " "))
 		out, err := env.runner.shell(ctx, h, script)
+		// A completed callback does not extend its parent lifetime. Reject its
+		// census before it can update medians or re-arm a healthy-row battery.
+		if contextErr := ctx.Err(); contextErr != nil {
+			if err != nil && err != contextErr {
+				return nil, &signalContextError{contextErr: contextErr, sourceErr: err}
+			}
+			return nil, contextErr
+		}
 		if err != nil {
 			failedHosts = append(failedHosts, failedHost{host: h, err: err})
 			continue

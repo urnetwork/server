@@ -2,6 +2,7 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,10 +22,10 @@ func redisHostCapacityAuthoritySettings(rows string) SignalSettings {
 			switch {
 			case strings.Contains(command, "/proc/meminfo") && strings.Contains(command, "for p in"):
 				return rows, nil
-			case strings.Contains(command, "CLIENT LIST") && strings.Contains(command, "omem="):
-				return "2097152 synthetic-client", nil
-			case strings.HasPrefix(command, "ss -lnt "):
-				return "recv_q=0 send_q=128", nil
+			case strings.Contains(command, "CLIENT LIST"):
+				return "client_list_total=1 client_cmd_hget_count=0 client_cmd_sadd_count=0 client_cmd_expire_count=0 client_output_memory_bytes=2097152 client_output_memory_max_bytes=2097152 client_output_over_1mb_count=1 client_max_idle_s=0 client_max_age_s=60 max_expire_idle_s=0", nil
+			case strings.Contains(command, "ss -lnt"):
+				return "accept_recv_q=0 accept_send_q=128", nil
 			default:
 				return "", fmt.Errorf("unexpected host-capacity fixture command")
 			}
@@ -33,7 +34,7 @@ func redisHostCapacityAuthoritySettings(rows string) SignalSettings {
 			if len(args) != 2 || args[0] != "INFO" || args[1] != "memory" {
 				return "", fmt.Errorf("unexpected host-capacity fixture Redis command")
 			}
-			return "used_memory_human:100B\nmaxmemory_human:100B\nused_memory_dataset:80\nmem_clients_normal:0\nmem_clients_slaves:0\nmem_fragmentation_ratio:1", nil
+			return "# Memory\nused_memory:10485760\nmaxmemory:10485760\nused_memory_dataset:8388608\nmem_clients_normal:2097152\nmem_clients_slaves:0\nmem_fragmentation_ratio:1\nused_memory_human:synthetic-private-battery-sentinel\nmaxmemory_human:synthetic-private-battery-sentinel", nil
 		},
 	}
 	settings := syntheticSettings(source)
@@ -246,18 +247,66 @@ func TestRedisHostCapacityAuthorityTransportCanceled(t *testing.T) {
 }
 
 // Keep real node-critical battery collection active while the host collector
-// carries a malformed canary; healthy sibling source channels remain distinct.
+// carries a malformed canary. Host returns already-reduced shell diagnostics;
+// Redis returns raw INFO, whose human fields must stay private.
 func TestRedisHostCapacityAuthorityMalformedFrameKeepsBatteryChannels(t *testing.T) {
-	settings := redisHostCapacityAuthoritySettings("host_memory synthetic-private-sentinel 0\n6380 100 100 80 0 10")
+	settings := redisHostCapacityAuthoritySettings("host_memory synthetic-private-sentinel 0\n6380 10485760 10485760 8388608 2097152 10")
+	source := settings.Source.(*syntheticSource)
+	hostFn, redisFn := source.hostFn, source.redisFn
+	coreCalls, infoCalls, clientCalls, queueCalls := 0, 0, 0, 0
+	source.hostFn = func(host HostSettings, command string) (string, error) {
+		if host.Name != "redis-1" {
+			t.Fatal("battery fixture contacted an unexpected host")
+		}
+		switch {
+		case strings.Contains(command, "/proc/meminfo") && strings.Contains(command, "for p in"):
+			coreCalls++
+		case strings.Contains(command, "CLIENT LIST"):
+			clientCalls++
+		case strings.Contains(command, "ss -lnt"):
+			queueCalls++
+		default:
+			t.Fatal("battery fixture received an unexpected host source channel")
+		}
+		return hostFn(host, command)
+	}
+	source.redisFn = func(host HostSettings, port int, args ...string) (string, error) {
+		if host.Name != "redis-1" || port != 6380 || len(args) != 2 || args[0] != "INFO" || args[1] != "memory" {
+			t.Fatal("battery fixture received an unexpected Redis source channel")
+		}
+		infoCalls++
+		return redisFn(host, port, args...)
+	}
 	alerts, err := NewRedisMemorySignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	critical := requireAlertClass(t, alerts, "node-mem-critical")
-	for _, want := range []string{"node 6380 memory:", "2097152 synthetic-client", "recv_q=0 send_q=128"} {
-		if !strings.Contains(critical.Evidence, want) {
-			t.Fatal("node-critical battery lost its independently routed source evidence")
+	if coreCalls != 1 || infoCalls != 1 || clientCalls != 1 || queueCalls != 1 {
+		t.Fatal("node-critical battery changed its independent source collection bounds")
+	}
+	var jsonl bytes.Buffer
+	if err := WriteAlertsJSONL(&jsonl, alerts); err != nil {
+		t.Fatal("synthetic alert JSON rendering failed")
+	}
+	for _, public := range []string{jsonl.String(), AlertsMarkdown(alerts)} {
+		for _, canary := range []string{"synthetic-private-sentinel", "synthetic-private-battery-sentinel"} {
+			if strings.Contains(public, canary) {
+				t.Fatal("raw source text entered public alert output")
+			}
 		}
+	}
+	critical := requireAlertClass(t, alerts, "node-mem-critical")
+	if critical.SignalID != "redis/node-mem-critical" || critical.Target != "redis-1:6380" ||
+		critical.Severity != SeverityPage || critical.Sustain != 1 || !strings.Contains(critical.Symptom, "100%") {
+		t.Fatal("optional diagnostic changed the independently measured critical-memory finding")
+	}
+	wantEvidence := strings.Join([]string{
+		"node 6380 memory: used_bytes=10485760 maxmemory_bytes=10485760 dataset_bytes=8388608 client_bytes=2097152 fragmentation_ratio=1",
+		"node 6380 client buffers: client_list_total=1 client_cmd_hget_count=0 client_cmd_sadd_count=0 client_cmd_expire_count=0 client_output_memory_bytes=2097152 client_output_memory_max_bytes=2097152 client_output_over_1mb_count=1 client_max_idle_s=0 client_max_age_s=60 max_expire_idle_s=0",
+		"node 6380 accept queue: accept_recv_q=0 accept_send_q=128",
+	}, "\n")
+	if critical.Evidence != wantEvidence {
+		t.Fatal("node-critical battery lost its independently routed numeric source evidence")
 	}
 	unknown := false
 	for _, alert := range alerts {
@@ -265,10 +314,13 @@ func TestRedisHostCapacityAuthorityMalformedFrameKeepsBatteryChannels(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(alert.Markdown(), "synthetic-private-sentinel") || strings.Contains(string(encoded), "synthetic-private-sentinel") {
-			t.Fatal("raw invalid host frame entered public output")
+		for _, canary := range []string{"synthetic-private-sentinel", "synthetic-private-battery-sentinel"} {
+			if strings.Contains(alert.Markdown(), canary) || strings.Contains(string(encoded), canary) {
+				t.Fatal("raw source text entered an individual alert")
+			}
 		}
-		unknown = unknown || alert.SignalID == "redis/host-capacity" && alert.Class == "cannot-observe" && alert.Frame == "host-memory"
+		unknown = unknown || alert.SignalID == "redis/host-capacity" && alert.Class == "cannot-observe" &&
+			alert.Target == "redis-1" && alert.Frame == "host-memory" && alert.Severity == SeverityWarn && alert.Sustain == 2
 	}
 	if !unknown {
 		t.Fatal("malformed host observation lost its independent unknown finding")

@@ -15,6 +15,7 @@ func TestPaymentReconciliationHealthy(t *testing.T) {
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -46,6 +47,7 @@ func TestPaymentReconciliationFindsPerStoreSkipErrorAndStaleWatermark(t *testing
 			{"google", "1800", "14400", "0", "2", "1800", "1", "0", "0"},
 			{"solana", "1800", "1800", "0", "0", "1800", "1", "0", "0"},
 			{"stripe", "1800", "1800", "0", "0", "1800", "1", "0", "0"},
+			{"x402", "1800", "1800", "0", "0", "1800", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -103,6 +105,7 @@ func TestPaymentReconciliationStalledStripeCreditPreservesStageUncertainty(t *te
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "432000", "0", "6", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -170,6 +173,11 @@ func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
 		"Missing/blank evidence, missing/unknown reasons or legs",
 		"webhook-classification correction requires only a refreshed monitor",
 		"An adjacent §2.22 WARN is not by itself a join to the same payment",
+		"The health, repair, and terminal-audit queries are independent observations",
+		"`payment-reconciliation/health`",
+		"`payment-reconciliation/repairs`",
+		"`payment-reconciliation/unfulfillable`",
+		"A partial aggregate never establishes a health PAGE or a healthy component",
 	} {
 		if !strings.Contains(section, expected) {
 			t.Errorf("SIGNALS.md §2.21 omits %q", expected)
@@ -184,6 +192,7 @@ func TestPaymentReconciliationFindsDeadTaskAndHeartbeat(t *testing.T) {
 			{"google", "10801", "600", "0", "0", "600", "0", "0", "0"},
 			{"solana", "10801", "600", "0", "0", "600", "0", "0", "0"},
 			{"stripe", "10801", "600", "0", "0", "600", "0", "0", "0"},
+			{"x402", "10801", "600", "0", "0", "600", "0", "0", "0"},
 		},
 		nil,
 	)
@@ -202,6 +211,7 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		[]Row{
 			{"apple", "credited", "1", "120"},
@@ -239,6 +249,7 @@ func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		[]Row{{"stripe", "ended", "2", "240"}},
 	)
@@ -287,6 +298,7 @@ func TestPaymentReconciliationSurfacesUnfulfillableStripeDestinationOncePerEvide
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 		[]Row{{"1", "3", "3", "0", "120"}},
@@ -344,6 +356,7 @@ func TestPaymentReconciliationKeepsInvalidUnfulfillableDispositionObservable(t *
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 		[]Row{{"1", "3", "3", "1", "120"}},
@@ -394,6 +407,12 @@ func TestPaymentReconciliationRejectsIncompleteOrUnknownAggregate(t *testing.T) 
 		name string
 		rows []Row
 	}{
+		{name: "missing x402", rows: []Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+		}},
 		{name: "missing store", rows: []Row{
 			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
@@ -410,17 +429,17 @@ func TestPaymentReconciliationRejectsIncompleteOrUnknownAggregate(t *testing.T) 
 			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 		}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := NewPaymentReconciliationSignal().Run(
-				context.Background(), syntheticSettings(paymentReconciliationSource(test.rows, nil)),
-			)
-			if err == nil {
-				t.Fatal("malformed aggregate error = nil")
-			}
-		})
+		alerts, err := NewPaymentReconciliationSignal().Run(
+			context.Background(), syntheticSettings(paymentReconciliationSource(test.rows, nil)),
+		)
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s: malformed health must retain one component visibility alert", test.name)
+		}
+		requirePaymentReconciliationPartialVisibility(t, alerts, "payment-reconciliation/health", observationErrorClassInvalidResponse)
 	}
 }
 

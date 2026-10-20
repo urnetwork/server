@@ -137,6 +137,32 @@ func privateLoadReadAccounting(ctx context.Context, f privateLoadFixture) (priva
 	return state, readErr
 }
 
+// Settlement journals a native contract's consumption and leaves its Redis
+// reservation to the durable debit worker (403b9c55b). Run that worker once
+// for exactly this grant, as its shard task would, and return how many
+// journaled contracts it debited and released.
+func privateFlushGrantDebits(t testing.TB, ctx context.Context, grant server.Id) int {
+	t.Helper()
+	// Start the shard page immediately before this grant's key.
+	previous := grant
+	for index := len(previous) - 1; ; index-- {
+		if index < 0 {
+			t.Fatal("synthetic grant has no preceding key")
+		}
+		if previous[index] != 0 {
+			previous[index]--
+			break
+		}
+		previous[index] = 255
+	}
+	result, err := model.FlushTransferDebits(ctx, int(grant[15])%model.TransferDebitShardCount, &previous, 1)
+	if err != nil || result.Failed != 0 || result.Busy != 0 || result.Balances != 1 ||
+		result.LastBalanceId == nil || *result.LastBalanceId != grant || result.Applied != result.Released {
+		t.Fatal("grant debit owner did not settle exactly its own journal", result, err)
+	}
+	return result.Released
+}
+
 // Attempts are path evidence, while committed native rows remain the completion oracle.
 func privateLoadAssertNativeAdmission(t testing.TB, ctx context.Context, f privateLoadFixture, stats map[string]float64, want int) {
 	t.Helper()

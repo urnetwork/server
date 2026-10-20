@@ -6,28 +6,62 @@ import (
 	"testing"
 )
 
+// The optional INFO battery needs its native header and numeric counters.
+// Human-readable fields cannot replace them or erase the independent warning.
 func TestRedisMemorySignalSyntheticHighMemoryNode(t *testing.T) {
-	source := &syntheticSource{
-		hostFn: func(_ HostSettings, command string) (string, error) {
-			if strings.Contains(command, "for p in") {
-				return "6380 8600000000 10000000000 8000000000 1500000000 10", nil
+	legacyMemory := "used_memory_human:8.60G\nmaxmemory_human:10.00G\nused_memory_dataset:8000000000\nmem_clients_normal:1000000000\nmem_clients_slaves:500000000\nmem_fragmentation_ratio:1.01"
+	completeMemory := "# Memory\nused_memory:8600000000\nmaxmemory:10000000000\n" + legacyMemory
+	for _, test := range []struct {
+		name      string
+		memory    string
+		available bool
+	}{
+		{name: "complete numeric memory", memory: completeMemory, available: true},
+		{name: "legacy human counters", memory: legacyMemory},
+		{name: "missing header", memory: strings.TrimPrefix(completeMemory, "# Memory\n")},
+		{name: "missing used bytes", memory: strings.Replace(completeMemory, "used_memory:8600000000\n", "", 1)},
+		{name: "missing ceiling bytes", memory: strings.Replace(completeMemory, "maxmemory:10000000000\n", "", 1)},
+	} {
+		infoCalls := 0
+		source := &syntheticSource{
+			hostFn: func(_ HostSettings, command string) (string, error) {
+				if strings.Contains(command, "for p in") {
+					return "6380 8600000000 10000000000 8000000000 1500000000 10", nil
+				}
+				return "", nil
+			},
+			redisFn: func(_ HostSettings, port int, args ...string) (string, error) {
+				if port != 6380 || len(args) != 2 || args[0] != "INFO" || args[1] != "memory" {
+					t.Fatalf("%s: unexpected optional memory source request", test.name)
+				}
+				infoCalls++
+				return test.memory, nil
+			},
+		}
+		alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatalf("%s: optional memory observation became a signal error", test.name)
+		}
+		alert := requireAlertClass(t, alerts, "node-mem-high")
+		if alert.Sustain != 2 {
+			t.Fatalf("%s: sustain = %d, want 2 consecutive 5-minute ticks", test.name, alert.Sustain)
+		}
+		if alert.Target != "redis-1:6380" || alert.SignalID != "redis/node-mem-high" || alert.Severity != SeverityWarn ||
+			!strings.Contains(alert.Observed, "dataset=8.00G clients=1.50G") {
+			t.Fatalf("%s: optional memory fields changed the independently measured pressure", test.name)
+		}
+		if test.available {
+			want := "node 6380 memory: used_bytes=8600000000 maxmemory_bytes=10000000000 dataset_bytes=8000000000 client_bytes=1500000000 fragmentation_ratio=1.01"
+			if !strings.Contains(alert.Evidence, want) || strings.Contains(alert.Evidence, "INFO memory unavailable") {
+				t.Fatalf("%s: complete INFO did not preserve exact numeric memory evidence", test.name)
 			}
-			return "", nil
-		},
-		redisFn: func(HostSettings, int, ...string) (string, error) {
-			return "used_memory_human:8.60G\nmaxmemory_human:10.00G\nused_memory_dataset:8000000000\nmem_clients_normal:1000000000\nmem_clients_slaves:500000000\nmem_fragmentation_ratio:1.01", nil
-		},
-	}
-	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	alert := requireAlertClass(t, alerts, "node-mem-high")
-	if alert.Sustain != 2 {
-		t.Fatalf("sustain = %d, want 2 consecutive 5-minute ticks", alert.Sustain)
-	}
-	if !strings.Contains(alert.Evidence, "dataset=8.00G clients=1.50G") {
-		t.Fatalf("evidence did not attribute current Redis client fields: %q", alert.Evidence)
+		} else if !strings.Contains(alert.Evidence, "node 6380 INFO memory unavailable: error_class=observation-invalid-response") ||
+			strings.Contains(alert.Evidence, "node 6380 memory:") {
+			t.Fatalf("%s: incomplete INFO acquired optional memory evidence authority", test.name)
+		}
+		if infoCalls != 1 {
+			t.Fatalf("%s: optional memory battery made %d INFO calls, want 1", test.name, infoCalls)
+		}
 	}
 }
 

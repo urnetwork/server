@@ -17,7 +17,7 @@ func TestConnectionOrphansSignalSyntheticLegacyLeak(t *testing.T) {
 				t.Fatalf("connection orphan query missing %q", want)
 			}
 		}
-		return []Row{{"150544", "64194", "64194", "38493728", "20", "0"}}, nil
+		return []Row{{"150544", "64194", "64194", "38493728", "20", "0", "0"}}, nil
 	}}
 	alerts, err := NewConnectionOrphansSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -43,7 +43,7 @@ func TestConnectionOrphansSignalSyntheticLegacyLeak(t *testing.T) {
 
 func TestConnectionOrphansSignalSyntheticFreshRaceIsHealthy(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"10000", "1", "0", "45", "20", "0"}}, nil
+		return []Row{{"10000", "1", "0", "45", "20", "0", "0"}}, nil
 	}}
 	alerts, err := NewConnectionOrphansSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -56,10 +56,10 @@ func TestConnectionOrphansSignalSyntheticFreshRaceIsHealthy(t *testing.T) {
 
 // Every required metric must be authoritative before either health or an alert.
 func TestConnectionOrphansSignalRejectsInvalidAggregates(t *testing.T) {
-	validRow := Row{"10", "1", "1", "180", "2", "0"}
+	validRow := Row{"10", "1", "1", "180", "2", "0", "0"}
 	invalidRows := [][]Row{nil, {{}}, {{"0"}}, {validRow, validRow}, {append(append(Row{}, validRow...), "0")},
-		{{"0", "1", "0", "0", "0", "0"}}, {{"10", "0", "1", "180", "0", "0"}}, {{"10", "0", "0", "0", "0", "1"}}}
-	for width := 2; width < 6; width++ {
+		{{"0", "1", "0", "0", "0", "0", "0"}}, {{"10", "0", "1", "180", "0", "0", "0"}}, {{"10", "0", "0", "0", "0", "1", "0"}}, {{"10", "1", "1", "180", "2", "1", "10"}}, {{"10", "1", "1", "180", "2", "0", "1"}}}
+	for width := 2; width < 7; width++ {
 		invalidRows = append(invalidRows, []Row{append(Row{}, validRow[:width]...)})
 	}
 	for column := range validRow {
@@ -84,7 +84,7 @@ func TestConnectionOrphansSignalRejectsInvalidAggregates(t *testing.T) {
 // Numeric zero is a valid observation, distinct from absent or malformed input.
 func TestConnectionOrphansSignalAcceptsZeroAggregate(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"0", "0", "0", "0", "0", "0"}}, nil
+		return []Row{{"0", "0", "0", "0", "0", "0", "0"}}, nil
 	}}
 	alerts, err := NewConnectionOrphansSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil || len(alerts) != 0 {

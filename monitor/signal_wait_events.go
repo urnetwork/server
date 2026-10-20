@@ -38,12 +38,26 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		return nil, err
 	}
 	findings := []finding{}
+	waitCounts := map[[2]string]int{}
 	for _, row := range rows {
-		if len(row) != 9 {
-			return nil, fmt.Errorf("PostgreSQL wait-event query returned %d columns, want 9", len(row))
+		waitCounts[[2]string{row.str(0), row.str(1)}]++
+	}
+	incomplete := false
+	for _, row := range rows {
+		count, countOk := pgGroupedInteger(row.str(2), 64, 1)
+		oldest, oldestOk := pgGroupedInteger(row.str(3), 32, 0)
+		_, pidOk := pgGroupedInteger(row.str(5), 32, 1)
+		_, addressOk := parseMonitorAddress(row.str(8))
+		if len(row) != 9 || row.str(0) == "" || row.str(1) == "" ||
+			waitCounts[[2]string{row.str(0), row.str(1)}] != 1 ||
+			!countOk || !oldestOk || (count < 5 && oldest < 60) || !pidOk ||
+			!pgGroupedQueryId(row.str(6)) || row.str(4) == "" || row[7] == "" ||
+			(row.str(8) != "local" && !addressOk) {
+			incomplete = true
+			continue
 		}
 		wait := row.str(0) + ":" + row.str(1)
-		oldestSeconds := atoi(row.str(3))
+		oldestSeconds := int(oldest)
 		if wait == "Client:ClientRead" && oldestSeconds < 60 {
 			// A busy client fleet continuously produces a handful of active
 			// ClientRead samples while BEGIN/COMMIT and ordinary queries hand the
@@ -86,6 +100,9 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			verify:    "The class returns inside its existing count/query-age band on consecutive samples, and the attributed query completes inside its historical band. Continuous wait residence requires separate evidence.",
 			playbook:  "SIGNALS.md §2.2",
 		})
+	}
+	if incomplete {
+		findings = append(findings, pgGroupedCoverageFinding(target, "wait-event-groups"))
 	}
 	if len(findings) == 0 {
 		findings = append(findings, healthyFinding("pg/wait-events", tierWarn, "wait-event-cluster", target))

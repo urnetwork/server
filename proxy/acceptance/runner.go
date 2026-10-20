@@ -358,6 +358,13 @@ func isPeerTCPSYNStall(line string) bool {
 func parseLocalNetworkSignals(output []byte, runnerPID int) localNetworkSignals {
 	signals := localNetworkSignals{}
 	lines := strings.Split(string(output), "\n")
+	// The command may echo its predicate before the records. Its search terms
+	// are query metadata, not evidence of matching network events.
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Filtering the log data using ") {
+			lines[i] = ""
+		}
+	}
 	flowBySummary := map[peerTCPSummaryKey]string{}
 	currentSummary := peerTCPSummaryKey{}
 	haveCurrentSummary := false

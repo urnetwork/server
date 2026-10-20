@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -44,13 +45,33 @@ func pgSampleFailureAlert(settings SignalSettings, signal Signal, err error) Ale
 			}
 		}
 	}
+	collector := ""
+	symptom := "PostgreSQL query/load coverage did not complete its bounded turn"
+	mechanism := "Global signal-slot admission or a local inventory, complete-settings-generation or durable-state prerequisite can stop the sampler before host contact and receipt creation. A later source/adapter error also cannot establish current query coverage. The first missing observation remains visible."
+	var interrupted *pgSampleEvaluationInterrupted
+	if errors.As(err, &interrupted) {
+		phase, cause, contact = "post-collection-evaluation", "owner-canceled", "true"
+		if errors.Is(err, context.DeadlineExceeded) {
+			cause = "owner-deadline"
+		}
+		proof := interrupted.collection
+		attempted = proof.RequestedAt.Format(time.RFC3339Nano)
+		completed = proof.FinishedAt.Format(time.RFC3339Nano)
+		next = "unknown"
+		if !proof.NextEligibleAt.IsZero() {
+			next = proof.NextEligibleAt.Format(time.RFC3339Nano)
+		}
+		collector = fmt.Sprintf(" collector_complete=true collector_samples=%d collector_receipt_sha256=%s evaluator_complete=unknown", proof.Samples, proof.ReceiptSha256)
+		symptom = "PostgreSQL collection completed but its bounded evaluator was interrupted"
+		mechanism = "This same call durably published a complete immutable collector receipt and any continuous terminal state; its parent was ended when the adapter checked. Publication before deadline is not established. The adapter withholds interrupted findings; collection completion does not establish a complete evaluator verdict, database health or uncapped workload coverage."
+	}
 	return Alert{
 		SignalNumber: signal.Number(), SignalKey: signal.Key(), SignalID: signal.ID(), SignalName: signal.Name(),
 		Severity: SeverityWarn, Class: "pg-query-sample-unavailable", Target: signal.ID(),
 		Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
-		Symptom:   "PostgreSQL query/load coverage did not complete its bounded turn",
-		Observed:  fmt.Sprintf("mode=%s phase=%s cause=%s error_class=%s source_contact_attempted=%s last_attempted_at=%s last_completed_at=%s next_eligible_at=%s", mode, phase, cause, classifyObservationError(err), contact, attempted, completed, next),
-		Mechanism: "Global signal-slot admission or a local inventory, complete-settings-generation or durable-state prerequisite can stop the sampler before host contact and receipt creation. A later source/adapter error also cannot establish current query coverage. The first missing observation remains visible.",
+		Symptom:   symptom,
+		Observed:  fmt.Sprintf("mode=%s phase=%s cause=%s error_class=%s source_contact_attempted=%s last_attempted_at=%s last_completed_at=%s next_eligible_at=%s", mode, phase, cause, classifyObservationError(err), contact, attempted, completed, next) + collector,
+		Mechanism: mechanism,
 		Baseline:  "The enabled recurring sampler completes a bounded catalog sample under the unchanged shared4-signal/host2-command limits and15-minute durable cadence floor.",
 		Action:    "Inspect the finite phase/cause and retained sampler state. For stale settings use the controlled watcher promotion in RUN-MAIN.md; for an unobservable comparison repair the local settings loader before promotion. Preserve the complete-generation guard and cadence files. Do not treat absent receipts as database execution, raise concurrency, or retry before the next scheduled/durable floor.",
 		Verify:    "The replacement or repaired watcher proves current complete settings and a later eligible turn retains a complete immutable12-snapshot receipt with actual source clocks. A second eligible completion proves recurring coverage; until then missing query coverage remains unknown.",

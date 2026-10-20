@@ -82,11 +82,12 @@ const (
 
 // Groups values and producer timestamps by one exact process identity.
 type proxyTransportMetrics struct {
-	host        string
-	block       string
-	instance    string
-	values      map[string]float64
-	sourceTimes map[string]float64
+	host          string
+	block         string
+	instance      string
+	values        map[string]float64
+	sourceTimes   map[string]float64
+	startRepeated bool
 }
 
 // Filters each required family by producer freshness and preserves its source
@@ -260,6 +261,10 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if strings.HasSuffix(metricName, proxyTransportSourceSuffix) {
 			process.sourceTimes[strings.TrimSuffix(metricName, proxyTransportSourceSuffix)] = value
 		} else {
+			if metricName == "process_start_time_seconds" {
+				_, repeated := process.values[metricName]
+				process.startRepeated = process.startRepeated || repeated
+			}
 			process.values[metricName] = value
 		}
 	}
@@ -270,11 +275,11 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			expectedProcesses[key] = process
 		}
 	}
-	current, err := newestProxyTransportProcesses(expectedProcesses)
-	if err != nil {
-		return nil, err
-	}
+	current, generationGaps := newestProxyTransportProcesses(now, expectedProcesses)
 	observedSlots := map[string]bool{}
+	for _, gap := range generationGaps {
+		observedSlots[gap.slot] = true
+	}
 	for _, process := range current {
 		observedSlots[process.host+"\x00"+process.block] = true
 	}
@@ -340,7 +345,7 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		}
 	}
 
-	findings := []finding{}
+	findings := proxyProcessGenerationFindings("runtime/proxy-transport-budget", "SIGNALS.md §14.6", metricHost.name, len(current), generationGaps)
 	if len(admissionUnknown) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
@@ -452,34 +457,24 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	return findings, nil
 }
 
-// Selects the latest start within each host/block and keeps unplaced instances
-// separate when no block label establishes their shared slot.
-func newestProxyTransportProcesses(processes map[string]*proxyTransportMetrics) ([]*proxyTransportMetrics, error) {
-	newest := map[string]*proxyTransportMetrics{}
-	for _, process := range processes {
-		rss, hasRss := process.values["process_resident_memory_bytes"]
-		if !hasRss || rss <= 0 {
-			continue
+// Requires instantaneous cohort evidence; a retired process's rate-only range
+// does not compete with the current generation.
+func newestProxyTransportProcesses(now time.Time, processes map[string]*proxyTransportMetrics) ([]*proxyTransportMetrics, []proxyProcessGenerationGap) {
+	return newestProxyProcesses(now, processes, func(process *proxyTransportMetrics) proxyProcessGeneration {
+		current := false
+		for _, name := range proxyTransportAllMetricNames() {
+			_, hasValue := process.values[name]
+			_, hasSource := process.sourceTimes[name]
+			current = current || hasValue || hasSource
 		}
 		start, hasStart := process.values["process_start_time_seconds"]
-		if !hasStart {
-			return nil, fmt.Errorf("proxy transport: fresh RSS identity %s omitted process_start_time_seconds", proxyTransportLabel(process))
+		rss, hasRss := process.values["process_resident_memory_bytes"]
+		return proxyProcessGeneration{
+			host: process.host, block: process.block, instance: process.instance, current: current, requireRss: true,
+			start: start, startPresent: hasStart, startRepeated: process.startRepeated,
+			rss: rss, rssPresent: hasRss,
 		}
-		slot := process.host + "\x00" + process.block
-		if process.block == "" {
-			slot += "\x00" + process.instance
-		}
-		previous := newest[slot]
-		if previous == nil || start > previous.values["process_start_time_seconds"] ||
-			(start == previous.values["process_start_time_seconds"] && process.instance > previous.instance) {
-			newest[slot] = process
-		}
-	}
-	current := make([]*proxyTransportMetrics, 0, len(newest))
-	for _, process := range newest {
-		current = append(current, process)
-	}
-	return current, nil
+	})
 }
 
 // Formats only the process identity already supplied by the metrics gateway.

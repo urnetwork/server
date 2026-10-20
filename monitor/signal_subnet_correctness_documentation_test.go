@@ -142,9 +142,21 @@ func TestSubnetCorrectnessDocumentationRetainsEvidenceAndRecoveryRules(t *testin
 func TestSubnetCorrectnessDocumentationLabelsUnimplementedCoverage(t *testing.T) {
 	t.Parallel()
 	section := subnetCorrectnessDocumentation(t)
-	matches := catalogProbePattern.FindAllStringSubmatch(section, -1)
-	if len(matches) != 1 || matches[0][1] != "subnet-coverage" {
-		t.Fatalf("subnet catalog probes = %v, want only subnet-coverage", matches)
+	partialDeclarationsOnly := func(text string) bool {
+		matches := catalogProbePattern.FindAllStringSubmatch(text, -1)
+		return len(matches) == 2 && matches[0][1] == "subnet-coverage" && matches[1][1] == "subnet-artifacts"
+	}
+	if !partialDeclarationsOnly(section) {
+		t.Fatalf("subnet catalog probes = %v, want only the coverage sentinel and partial artifact reader", catalogProbePattern.FindAllStringSubmatch(section, -1))
+	}
+	for _, unsupported := range []string{
+		section + "\nProbe: `subnet-unrecognized-test`\n",
+		strings.Replace(section, "Probe: `subnet-artifacts`", "Probe: `subnet-unrecognized-test`", 1),
+		section + "\nProbe: `subnet-coverage`\n",
+	} {
+		if partialDeclarationsOnly(unsupported) {
+			t.Error("a third, unrecognized or duplicate subnet declaration passed the partial-coverage contract")
+		}
 	}
 	compact := strings.Join(strings.Fields(section), " ")
 	for _, required := range []string{

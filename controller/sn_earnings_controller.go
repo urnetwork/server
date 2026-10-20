@@ -517,6 +517,8 @@ type SnHeadResult struct {
 	Rank         int          `json:"rank"`
 	Epoch        uint64       `json:"epoch"`
 	Netuid       uint64       `json:"netuid"`
+	ChainId      uint64       `json:"chain_id"`
+	Coordinator  string       `json:"coordinator,omitempty"`
 	Source       string       `json:"source"`
 	Error        *SnHeadError `json:"error,omitempty"`
 }
@@ -713,6 +715,21 @@ func snHotkeySs58(hotkey [32]byte) string {
 	return address
 }
 
+// snHeadWithChainSettings states the deployment a fleet manifest must name:
+// the netuid, EVM chain id and coordinator (lowercase 0x hex, as protocol
+// fleet manifests require; omitted while unset). SnHeadBinding refuses any
+// binding for another chain id or coordinator.
+func snHeadWithChainSettings(result *SnHeadResult, cfg *StConfig) {
+	if cfg == nil {
+		return
+	}
+	result.Netuid = cfg.Netuid
+	result.ChainId = cfg.ChainId
+	if cfg.ContractAddress != (common.Address{}) {
+		result.Coordinator = strings.ToLower(cfg.ContractAddress.Hex())
+	}
+}
+
 // SnHead reports the caller network's Top 200 standing.
 func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 	ctx := clientSession.Ctx
@@ -722,9 +739,7 @@ func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 		Epoch:  snCurrentEpoch(ctx),
 		Source: "server",
 	}
-	if cfg := stConfig(); cfg != nil {
-		result.Netuid = cfg.Netuid
-	}
+	snHeadWithChainSettings(result, stConfig())
 	ranking := snHeadRankingSafe(ctx)
 	var prefer map[server.Id]bool
 	if ranking == nil {

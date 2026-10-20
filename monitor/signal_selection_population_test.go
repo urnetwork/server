@@ -31,7 +31,7 @@ func TestSelectionPopulationSignalSyntheticFreshEmptyCache(t *testing.T) {
 					t.Fatalf("provider supply query missing TLS-integrity clause %q", want)
 				}
 			}
-			return []Row{{"100442", "88903", "88000", "800", "103", "88000", "0", "88000", "88000", "target-us"}}, nil
+			return []Row{{"100442", "88903", "88000", "800", "103", "88000", "0", "88000", "88000", "12345678-1234-4234-8234-123456789abc", "0", "0"}}, nil
 		},
 		redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
@@ -94,7 +94,7 @@ func TestSelectionPopulationSignalSyntheticRejectsIneligibleSupply(t *testing.T)
 			if strings.Contains(query, "tls_authentication_failure") {
 				t.Fatalf("pre-migration population query references the absent TLS column:\n%s", query)
 			}
-			return []Row{{"150544", "390110", "90298", "297776", "2036", "0", "0", "0", "0", "target-us"}}, nil
+			return []Row{{"150544", "390110", "90298", "297776", "2036", "0", "0", "0", "0", "12345678-1234-4234-8234-123456789abc", "0", "0"}}, nil
 		},
 		redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
@@ -143,7 +143,7 @@ func TestSelectionPopulationSignalSyntheticReadyMarkerClearsRawResidue(t *testin
 			if strings.Contains(query, "pg_attribute") {
 				return []Row{{"t"}}, nil
 			}
-			return []Row{{"150544", "390110", "90298", "297776", "2036", "0", "0", "0", "0", "target-us"}}, nil
+			return []Row{{"150544", "390110", "90298", "297776", "2036", "0", "0", "0", "0", "12345678-1234-4234-8234-123456789abc", "0", "0"}}, nil
 		},
 		redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
 			key := args[len(args)-1]
@@ -239,7 +239,7 @@ func selectionPopulationFamilyTestSettings(fixture selectionPopulationFamilyTest
 			return []Row{{
 				"4001", strconv.Itoa(3000 + fixture.derived + fixture.inactive), "3000",
 				strconv.Itoa(fixture.derived), strconv.Itoa(fixture.inactive), "2997", "2995", "2996", "2",
-				"12345678-1234-4234-8234-123456789abc",
+				"12345678-1234-4234-8234-123456789abc", "0", "0",
 			}}, nil
 		},
 		redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
@@ -752,5 +752,202 @@ func TestSelectionPopulationFamilyInFlightCancellationIsLifecycle(t *testing.T) 
 	completed := <-done
 	if completed.err != ctx.Err() || len(completed.alerts) != 0 {
 		t.Fatalf("in-flight parent cancellation invented findings: alerts=%d err=%v", len(completed.alerts), completed.err)
+	}
+}
+
+// This is the actual twelve-column population result, including its UUID target.
+func selectionPopulationAuthorityRow() Row {
+	return Row{"4001", "3000", "3000", "0", "0", "2997", "2995", "2996", "2", "12345678-1234-4234-8234-123456789abc", "0", "0"}
+}
+
+// The public scalar reducer must qualify all eleven counts before reading Redis
+// or clearing an empty-market / ineligible-supply product finding.
+func TestSelectionPopulationAuthorityRejectsMalformedPostgres(t *testing.T) {
+	valid := selectionPopulationAuthorityRow()
+	cases := requiredAggregateBadShapes(valid)
+	for _, column := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11} {
+		for _, invalid := range []struct{ name, value string }{
+			{"private text", aggregatePrivateCell}, {"null", ""}, {"blank", " "},
+			{"negative", "-1"}, {"fraction", "0.9"}, {"integral decimal", "0.0"},
+			{"not a number", "NaN"}, {"infinity", "Inf"}, {"overflow", "9223372036854775808"},
+			{"exponent", "1e3"}, {"leading plus", "+1"},
+		} {
+			row := append(Row(nil), valid...)
+			row[column] = invalid.value
+			cases = append(cases, struct {
+				name string
+				rows []Row
+			}{fmt.Sprintf("column %d %s", column, invalid.name), []Row{row}})
+		}
+	}
+	for _, test := range []struct {
+		name  string
+		cells map[int]string
+	}{
+		{"eligible exceeds supply", map[int]string{2: "3001"}},
+		{name: "stale open exceeds potential provider rows", cells: map[int]string{10: "1", 11: "2"}},
+		{"supply partition mismatch", map[int]string{3: "1"}},
+		{"supply partition overflow", map[int]string{1: "9223372036854775807", 2: "9223372036854775807", 3: "1"}},
+		{"passing exceeds health", map[int]string{6: "2998"}},
+		{"TLS failures exceed health", map[int]string{8: "2998"}},
+		{"disjoint health overlap", map[int]string{8: "3"}},
+		{"missing target", map[int]string{9: ""}},
+		{"non UUID target", map[int]string{9: aggregatePrivateCell}},
+		{"target suffix", map[int]string{9: valid[9] + "suffix"}},
+	} {
+		row := append(Row(nil), valid...)
+		for column, value := range test.cells {
+			row[column] = value
+		}
+		cases = append(cases, struct {
+			name string
+			rows []Row
+		}{test.name, []Row{row}})
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows, postgresReads, redisReads := test.rows, 0, 0
+			zero := selectionPopulationFamilyTestGob(t, nil)
+			forced := selectionPopulationFamilyTestGob(t, []int{3})
+			source := &syntheticSource{
+				postgresFn: func(query string) ([]Row, error) {
+					postgresReads++
+					if strings.Contains(query, "pg_attribute") {
+						return []Row{{"t"}}, nil
+					}
+					for _, fragment := range []string{
+						"WITH supply AS MATERIALIZED", "count(DISTINCT ncc.client_id)",
+						"WHERE active AND source_client_id IS NULL", "WHERE NOT active AND source_client_id IS NULL",
+						"AND NOT peh.tls_authentication_failure", "SELECT location_id::text FROM location",
+					} {
+						if !strings.Contains(query, fragment) {
+							t.Fatal("population authority control did not reach its actual aggregate query")
+						}
+					}
+					return rows, nil
+				},
+				redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
+					redisReads++
+					key := args[len(args)-1]
+					if key == providerEligibilityReadyKey {
+						return "1", nil
+					}
+					if key == selectionPopulationFamilyReadyKey || !strings.HasSuffix(key, "}c_l") {
+						return "\n", nil
+					}
+					if strings.Contains(key, "{cs_0_q_") {
+						return zero, nil
+					}
+					return forced, nil
+				},
+			}
+			signal := NewSelectionPopulationSignal()
+			m := NewWithSignals(syntheticSettings(source), signal)
+			alerts, err := m.Run(context.Background())
+			if err == nil {
+				t.Error("malformed PostgreSQL population established product authority")
+			}
+			requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+			if postgresReads != 2 || redisReads != 0 {
+				t.Error("invalid PostgreSQL population consumed dependent Redis observations")
+			}
+			rows = []Row{valid}
+			alerts, err = m.Run(context.Background())
+			if err != nil || len(alerts) != 1 {
+				t.Fatal("valid population continuation lost the independently real empty-market finding")
+			}
+			alert := requireAlertClass(t, alerts, "selection-empty")
+			if alert.Frame != "gate-wipe" || alert.Severity != SeverityPage || alert.Sustain != 2 {
+				t.Error("complete normal zero and positive forced count changed the existing gate-wipe contract")
+			}
+		})
+	}
+}
+
+// A malformed schema Boolean cannot select either SQL shape or product state.
+func TestSelectionPopulationAuthoritySchemaBoolean(t *testing.T) {
+	for _, raw := range []string{"", " ", "1", "0", "TRUE", "FALSE", aggregatePrivateCell} {
+		sourceReads, redisReads := 0, 0
+		source := &syntheticSource{
+			postgresFn: func(query string) ([]Row, error) {
+				sourceReads++
+				if strings.Contains(query, "pg_attribute") {
+					return []Row{{raw}}, nil
+				}
+				return []Row{selectionPopulationAuthorityRow()}, nil
+			},
+			redisFn: func(HostSettings, int, ...string) (string, error) { redisReads++; return "", nil },
+		}
+		signal := NewSelectionPopulationSignal()
+		alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+		if err == nil || sourceReads != 1 || redisReads != 0 {
+			t.Error("noncanonical schema Boolean acquired dependent evidence or product authority")
+		}
+		requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+	}
+}
+
+// Valid zero/small supply keeps its threshold, and cache loss cannot erase a
+// fully observed eligibility violation from the independent marker and counts.
+func TestSelectionPopulationAuthorityPreservesIndependentAndZeroControls(t *testing.T) {
+	for _, test := range []struct {
+		name                        string
+		eligible, derived, inactive string
+		marker                      string
+		cacheUnavailable            bool
+		normalPopulated             bool
+		wantIneligible              bool
+	}{
+		{name: "zero supply", eligible: "0", derived: "0", inactive: "0", marker: "1"},
+		{name: "exact eligible threshold", eligible: "1000", derived: "0", inactive: "0", marker: "1"},
+		{name: "maximum valid supply", eligible: "9223372036854775807", derived: "0", inactive: "0", marker: "1", normalPopulated: true},
+		{name: "independent eligibility survives", eligible: "3000", derived: "5", inactive: "2", cacheUnavailable: true, wantIneligible: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row := selectionPopulationAuthorityRow()
+			eligible, _ := strconv.ParseInt(test.eligible, 10, 64)
+			derived, _ := strconv.ParseInt(test.derived, 10, 64)
+			inactive, _ := strconv.ParseInt(test.inactive, 10, 64)
+			row[1], row[2], row[3], row[4] = strconv.FormatInt(eligible+derived+inactive, 10), test.eligible, test.derived, test.inactive
+			zero := selectionPopulationFamilyTestGob(t, nil)
+			populated := selectionPopulationFamilyTestGob(t, []int{1})
+			source := &syntheticSource{
+				postgresFn: func(query string) ([]Row, error) {
+					if strings.Contains(query, "pg_attribute") {
+						return []Row{{"true"}}, nil
+					}
+					return []Row{row}, nil
+				},
+				redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
+					key := args[len(args)-1]
+					if key == providerEligibilityReadyKey {
+						return test.marker, nil
+					}
+					if test.cacheUnavailable {
+						return "", errors.New("synthetic cache unavailable")
+					}
+					if key == selectionPopulationFamilyReadyKey || !strings.HasSuffix(key, "}c_l") {
+						return "\n", nil
+					}
+					if test.normalPopulated {
+						return populated, nil
+					}
+					return zero, nil
+				},
+			}
+			alerts, err := NewWithSignals(syntheticSettings(source), NewSelectionPopulationSignal()).Run(context.Background())
+			if err != nil {
+				t.Fatal("valid population control lost PostgreSQL authority")
+			}
+			if test.wantIneligible {
+				if len(alerts) != 2 {
+					t.Fatal("partial cache source erased independent eligibility evidence")
+				}
+				requireAlertClass(t, alerts, "provider-supply-ineligible")
+				requireAlertClass(t, alerts, "cannot-observe")
+			} else if len(alerts) != 0 {
+				t.Error("valid zero or exact small-supply boundary became a product outage")
+			}
+		})
 	}
 }

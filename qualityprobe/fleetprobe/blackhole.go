@@ -60,6 +60,11 @@ type BlackholeOptions struct {
 	// How many providers are checked at once. Zero uses
 	// DefaultBlackholeConcurrency.
 	Concurrency int
+	// How many closed tunnels the run holds while their derived clients
+	// acknowledge late provider returns (providertunnel.Retirements), when
+	// TunnelConfig carries no owner of the caller's. Zero uses twice the
+	// concurrency. A held tunnel costs what an open one does.
+	RetirementCount int
 	// Optional pass-owned fixed worker set. Sharing it between logical cohorts
 	// does not merge their results or guards. Nil owns a private batch pool.
 	WorkerPool *BlackholeWorkerPool
@@ -92,6 +97,14 @@ func (self BlackholeOptions) concurrency() int {
 		return self.Concurrency
 	}
 	return DefaultBlackholeConcurrency
+}
+
+// Returns RetirementCount, or twice the concurrency when unset.
+func (self BlackholeOptions) retirementCount() int {
+	if 0 < self.RetirementCount {
+		return self.RetirementCount
+	}
+	return 2 * self.concurrency()
 }
 
 // Returns IpEchoUrl, or the echo derived from the tunnel's api url.
@@ -146,6 +159,9 @@ func validateBlackholeOptions(options BlackholeOptions) error {
 	if options.Concurrency < 0 {
 		return fmt.Errorf("fleetprobe: blackhole concurrency must not be negative (got %d)", options.Concurrency)
 	}
+	if options.RetirementCount < 0 {
+		return fmt.Errorf("fleetprobe: blackhole retirement count must not be negative (got %d)", options.RetirementCount)
+	}
 	if options.WorkerPool != nil && options.concurrency() < options.WorkerPool.workerCount {
 		return fmt.Errorf("fleetprobe: shared blackhole pool exceeds the batch concurrency")
 	}
@@ -166,6 +182,14 @@ func RunBlackhole(
 	}
 	if len(providers) == 0 {
 		return BlackholeSummary{}, nil
+	}
+	// A run whose caller holds no retirements of its own owns its tunnels'
+	// and joins them before it returns, so no derived client outlives the run
+	// or its prober shard.
+	if options.TunnelConfig.Retirements == nil {
+		retirements := providertunnel.NewRetirements(options.retirementCount())
+		defer retirements.Close()
+		options.TunnelConfig.Retirements = retirements
 	}
 
 	// One provider is measured only through its constructed tunnel -- re-created

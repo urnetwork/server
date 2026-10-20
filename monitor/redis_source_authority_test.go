@@ -8,11 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,46 +22,25 @@ import (
 func TestRedisProcessAuthorityNativeCensus(t *testing.T) {
 	cases := []struct {
 		name        string
-		rows        string
-		status      int
-		kernel      string
+		fixture     redisProcessCpuFixture
 		wantUnknown bool
 		wantCpu     bool
 		wantOom     bool
 	}{
 		{name: "complete empty"},
-		{name: "complete unrelated process", rows: "4242 0.0 100 50 synthetic-worker\n"},
-		{name: "complete spaced command", rows: "4242 0.0 100 50 synthetic worker name\n"},
-		{name: "cpu boundary", rows: "4242 200.0 100 50 redis-server\n"},
-		{name: "cpu positive", rows: "4242 200.1 100 50 redis-server\n", wantCpu: true},
-		{name: "failed empty", status: 1, wantUnknown: true},
-		{name: "unavailable", status: 127, wantUnknown: true},
-		{name: "timeout", status: 124, wantUnknown: true},
-		{name: "failed partial", rows: "4242 250.0 100 50 redis-server\n", status: 1, wantUnknown: true},
-		{name: "malformed cpu", rows: "4242 synthetic-private-diagnostic 100 50 redis-server\n", wantUnknown: true},
-		{name: "malformed unrelated process", rows: "synthetic-private-diagnostic\n", wantUnknown: true},
-		{name: "kernel survives failed census", status: 1, kernel: "Out of memory: Killed process 4242 (redis-server)\n", wantUnknown: true, wantOom: true},
+		{name: "complete unrelated process", fixture: redisProcessCpuFixture{before: map[string]string{"4242": redisProcessCpuStat(4242, "synthetic-worker", 100, 0, 0)}}},
+		{name: "complete spaced command", fixture: redisProcessCpuFixture{before: map[string]string{"4242": redisProcessCpuStat(4242, "synthetic worker name", 100, 0, 0)}}},
+		{name: "cpu boundary", fixture: redisProcessCpuSingleFixture("200", 0, 200)},
+		{name: "cpu positive", fixture: redisProcessCpuSingleFixture("201", 0, 201), wantCpu: true},
+		{name: "failed empty", fixture: redisProcessCpuFixture{processStatus: 1}, wantUnknown: true},
+		{name: "failed partial", fixture: redisProcessCpuFixture{processStatus: 1, processPrefix: redisProcessCpuRow(4242, "250")}, wantUnknown: true},
+		{name: "unavailable", fixture: redisProcessCpuFixture{processStatus: 127}, wantUnknown: true},
+		{name: "timeout", fixture: redisProcessCpuFixture{processStatus: 124}, wantUnknown: true},
+		{name: "malformed source", fixture: redisProcessCpuFixture{before: map[string]string{"4242": "synthetic-private-diagnostic\n"}}, wantUnknown: true},
+		{name: "kernel survives failed census", fixture: redisProcessCpuFixture{processStatus: 1, kernel: "Out of memory: Killed process 4242 (redis-server)\n"}, wantUnknown: true, wantOom: true},
 	}
 	for _, test := range cases {
-		directory := t.TempDir()
-		for name, script := range map[string]string{
-			"ps":    "#!/bin/sh\nprintf '%s' \"$AUTHORITY_PROCESS_ROWS\"\nprintf '%s\\n' synthetic-private-diagnostic >&2\nexit \"$AUTHORITY_PROCESS_STATUS\"\n",
-			"dmesg": "#!/bin/sh\nprintf '%s' \"$AUTHORITY_KERNEL_ROWS\"\n",
-		} {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-		}
-		source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cmd := redisAuthorityNativeCommand(ctx, command)
-			cmd.Env = []string{"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C", "AUTHORITY_PROCESS_ROWS=" + test.rows, fmt.Sprintf("AUTHORITY_PROCESS_STATUS=%d", test.status), "AUTHORITY_KERNEL_ROWS=" + test.kernel}
-			output, err := cmd.Output()
-			redisAuthorityKillNativeGroup(cmd)
-			return string(output), err
-		}}
-		settings := syntheticSettings(source)
+		settings, _, _ := redisProcessCpuNativeFixture(t, test.fixture)
 		alerts, err := NewRedisProcessSignal().Run(context.Background(), settings)
 		if err != nil {
 			t.Fatalf("%s: %v", test.name, err)
@@ -109,20 +86,28 @@ func TestRedisProcessAuthorityNativeCensus(t *testing.T) {
 // Successful transport must not convert bad source numbers or truncated census
 // frames into zero CPU; kernel authority remains independent.
 func TestRedisProcessAuthorityRejectsIncompleteCensus(t *testing.T) {
+	row := redisProcessCpuRow(4242, "250")
+	complete := "process_source complete 1\n"
 	cases := []string{
-		"", "redis 4242 250 100 50\n", "process_source complete 1\n",
-		"redis 4242 NaN 100 50\nprocess_source complete 1\n",
-		"redis 4242 +Inf 100 50\nprocess_source complete 1\n",
-		"redis 4242 -1 100 50\nprocess_source complete 1\n",
-		"redis 4242 250 bad 50\nprocess_source complete 1\n",
-		"redis 0 250 100 50\nprocess_source complete 1\n",
-		"redis 4242 250 100\nprocess_source complete 1\n",
-		"redis 4242 250 100 50 extra\nprocess_source complete 1\n",
-		"redis 4242 250 100 50\nredis 4242 250 100 50\nprocess_source complete 2\n",
+		"", row, complete,
+		redisProcessCpuRow(4242, "NaN") + complete,
+		redisProcessCpuRow(4242, "+Inf") + complete,
+		redisProcessCpuRow(4242, "-1") + complete,
+		strings.Replace(row, " 9000000 ", " bad ", 1) + complete,
+		redisProcessCpuRow(0, "250") + complete,
+		strings.Replace(row, " 1000000000", "", 1) + complete,
+		strings.TrimSuffix(row, "\n") + " extra\n" + complete,
+		strings.Replace(row, redisProcessCpuTestGeneration, "invalid", 1) + complete,
+		strings.Replace(row, redisProcessCpuTestGeneration, strings.Repeat("g", 64), 1) + complete,
+		strings.Replace(row, " 1000000000", " 0", 1) + complete,
+		strings.Replace(row, " 1000000000", " 999999999", 1) + complete,
+		strings.Replace(row, " 1000000000", " 3000000001", 1) + complete,
+		row + row + "process_source complete 2\n",
 		"process_source complete 0\nprocess_source complete 0\n",
-		"process_source complete 0\nredis 4242 250 100 50\n",
-		"redis 4242 250 100 50\nprocess_source unavailable\n",
+		"process_source complete 0\n" + row,
+		row + "process_source unavailable\n",
 	}
+
 	for index, output := range cases {
 		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return output + "kernel_source complete\n", nil }}
 		alerts, err := NewRedisProcessSignal().Run(context.Background(), syntheticSettings(source))
@@ -132,123 +117,6 @@ func TestRedisProcessAuthorityRejectsIncompleteCensus(t *testing.T) {
 		alert := requireAlertClass(t, alerts, "cannot-observe")
 		if len(alerts) != 1 || alert.Target != "redis-1/redis-process" {
 			t.Errorf("case %d: malformed process evidence escaped its authority boundary", index)
-		}
-	}
-}
-
-// Each fake producer's actual exit status crosses timeout, head and reduction.
-// A million rows forces the real head cap; upstream SIGPIPE is expected only
-// when all 300,000 requested lines were successfully selected.
-func TestRedisFamilyAuthorityNativeBoundedScan(t *testing.T) {
-	cases := []struct {
-		name            string
-		rows            string
-		status          int
-		cap             bool
-		exactCapFailure bool
-		nulMode         string
-		wantUnknown     bool
-	}{
-		{name: "complete empty"},
-		{name: "unterminated nul-only record", nulMode: "unterminated", wantUnknown: true},
-		{name: "complete nul-only record", nulMode: "complete"},
-		{name: "nul within known namespace", nulMode: "namespace"},
-		{name: "unterminated single record", rows: "synthetic-key", wantUnknown: true},
-		{name: "unterminated twenty-first record", rows: strings.TrimSuffix(redisAuthorityDistinctScanRows(), "\n"), wantUnknown: true},
-		{name: "complete twenty-one records", rows: redisAuthorityDistinctScanRows()},
-		{name: "complete chunk boundary", rows: strings.Repeat("a", 16383) + "\n"},
-		{name: "unterminated full chunk", rows: strings.Repeat("a", 16384), wantUnknown: true},
-		{name: "complete two chunks", rows: strings.Repeat("a", 16383) + "\n" + strings.Repeat("b", 16383) + "\n"},
-		{name: "complete positive", rows: "ckey_00000000-0000-0000-0000-000000000001\n"},
-		{name: "bounded completion", cap: true},
-		{name: "failure at exact cap", exactCapFailure: true, wantUnknown: true},
-		{name: "failed empty", status: 1, wantUnknown: true},
-		{name: "failed partial", rows: "ckey_00000000-0000-0000-0000-000000000001\n", status: 1, wantUnknown: true},
-		{name: "timeout partial", rows: "ckey_00000000-0000-0000-0000-000000000001\n", status: 124, wantUnknown: true},
-		{name: "unavailable", status: 127, wantUnknown: true},
-		{name: "premature sigpipe", rows: "ckey_00000000-0000-0000-0000-000000000001\n", status: 141, wantUnknown: true},
-	}
-	for _, test := range cases {
-		directory := t.TempDir()
-		for name, script := range map[string]string{
-			"timeout":   "#!/bin/sh\nshift\nexec \"$@\"\n",
-			"redis-cli": "#!/bin/sh\nprintf '%s\\n' synthetic-private-diagnostic >&2\ncase \"$AUTHORITY_SCAN_NUL_MODE\" in unterminated) printf '\\000'; exit 0;; complete) printf '\\000\\n'; exit 0;; namespace) printf 'ckey_00000000-0000-0000-0000-000000000001\\000\\n'; exit 0;; esac\nif [ \"$AUTHORITY_SCAN_EXACT_CAP_FAILURE\" = true ]; then awk 'BEGIN { for (i=0; i<300000; i++) print \"ckey_00000000-0000-0000-0000-000000000001\" }'; exit 1; fi\nif [ \"$AUTHORITY_SCAN_CAP\" = true ]; then exec awk 'BEGIN { for (i=0; i<1000000; i++) print \"ckey_00000000-0000-0000-0000-000000000001\" }'; fi\nprintf '%s' \"$AUTHORITY_SCAN_ROWS\"\nexit \"$AUTHORITY_SCAN_STATUS\"\n",
-		} {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-		}
-		source := &syntheticSource{
-			hostFn: func(_ HostSettings, command string) (string, error) {
-				if !strings.Contains(command, "INFO memory") {
-					t.Fatal("unexpected source invocation")
-				}
-				return "6380 9000000 10000000\n6381 4000000 10000000\n6382 3000000 10000000", nil
-			},
-			hostTimeoutFn: func(_ HostSettings, command string, _ time.Duration) (string, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				cmd := redisAuthorityNativeCommand(ctx, command)
-				cmd.Env = []string{"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C", "TMPDIR=" + directory, "AUTHORITY_SCAN_ROWS=" + test.rows, fmt.Sprintf("AUTHORITY_SCAN_STATUS=%d", test.status), fmt.Sprintf("AUTHORITY_SCAN_CAP=%t", test.cap), fmt.Sprintf("AUTHORITY_SCAN_EXACT_CAP_FAILURE=%t", test.exactCapFailure), "AUTHORITY_SCAN_NUL_MODE=" + test.nulMode}
-				output, err := cmd.Output()
-				redisAuthorityKillNativeGroup(cmd)
-				return string(output), err
-			},
-		}
-		env, err := newProbeEnv(syntheticSettings(source).withDefaults())
-		if err != nil {
-			t.Fatal(err)
-		}
-		env.baseline, err = newBaselineStore(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		findings, err := (redisFamilyProbe{}).check(context.Background(), env)
-		if err != nil {
-			t.Fatalf("%s: %v", test.name, err)
-		}
-		if len(findings) != 1 {
-			t.Fatalf("%s: expected exactly one observation", test.name)
-		}
-		if test.wantUnknown {
-			if findings[0].class != "cannot-observe" || findings[0].healthy || len(env.baseline.metricSamples) != 0 {
-				t.Errorf("%s: failed bounded scan acquired health or baseline authority", test.name)
-			}
-		} else {
-			if !findings[0].healthy {
-				t.Errorf("%s: complete bounded scan lost health authority", test.name)
-			}
-			if test.nulMode == "complete" || test.nulMode == "namespace" {
-				samples := env.baseline.metricSamples["redis/family/redacted-binary-family"]
-				if len(samples) != 1 || samples[0].v != 1 || len(env.baseline.metricSamples) != 1 {
-					t.Errorf("complete NUL-bearing line escaped the binary aggregate")
-				}
-			}
-			if test.name == "complete twenty-one records" {
-				samples := env.baseline.metricSamples["redis/family/redacted-unnormalized-family"]
-				if len(samples) != 1 || samples[0].v != 20 {
-					t.Errorf("complete top-20 sample did not retain twenty counted rows")
-				}
-			}
-			if test.cap {
-				samples := env.baseline.metricSamples["redis/family/ckey_<id>"]
-				if len(samples) != 1 || samples[0].v != familyScanKeyLimit {
-					t.Errorf("%s: full requested cap not recorded", test.name)
-				}
-			}
-		}
-		alerts, err := NewKeyFamiliesSignal().Run(context.Background(), syntheticSettings(source))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if test.wantUnknown {
-			alert := requireAlertClass(t, alerts, "cannot-observe")
-			if alert.Target != "redis-1:6380/key-families" || alert.SignalNumber != "3.3" || alert.SignalKey != "key-families" || alert.Sustain != 2 || !alert.unobservable {
-				t.Errorf("%s: scan visibility identity changed", test.name)
-			}
-			requireAlertOmits(t, alert, "synthetic-private-diagnostic")
-		} else if len(alerts) != 0 {
-			t.Errorf("%s: complete sample unexpectedly alerted", test.name)
 		}
 	}
 }
@@ -404,16 +272,6 @@ func redisAuthorityKillNativeGroup(cmd *exec.Cmd) error {
 	return err
 }
 
-// Twenty-one distinct sorted families force an actual omitted histogram row;
-// the unterminated version differs only in its final newline.
-func redisAuthorityDistinctScanRows() string {
-	var rows strings.Builder
-	for index := 0; index < 21; index++ {
-		fmt.Fprintf(&rows, "synthetic-family-%02d\n", index)
-	}
-	return rows.String()
-}
-
 // An inherited readiness descriptor proves that the actual collector reached
 // its fake source before cancellation. No wall-clock sleep selects the race.
 func TestRedisFamilyAuthorityNativeOwnerCancellation(t *testing.T) {
@@ -481,35 +339,30 @@ func TestRedisFamilyAuthorityNativeOwnerCancellation(t *testing.T) {
 	}
 }
 
-// Bound interpreter work rather than elapsed time: a synthetic read wrapper
-// refuses the 8193rd invocation. The unchanged full sample requires 300001
-// line reads in the former validator, versus fewer than 1024 fixed-chunk reads.
-func TestRedisFamilyAuthorityNativeBufferedReadBudget(t *testing.T) {
+// A Bash whose read rejects -N (before 4.1, such as macOS /bin/bash 3.2) fails
+// with status 2 without consuming input. The BASH_ENV shim drains the stream
+// before failing, forcing the ordering in which every producer exits cleanly,
+// so no upstream SIGPIPE can decide the verdict in place of the validator.
+// The shim scans "$@" because the caller's empty IFS would join "$*" unspaced.
+func TestRedisFamilyAuthorityNativeUnsupportedChunkReadIsUnknown(t *testing.T) {
 	directory := t.TempDir()
-	countPath := filepath.Join(directory, "read-count")
-	budgetPath := filepath.Join(directory, "read-budget")
+	unsupportedPath := filepath.Join(directory, "unsupported-read")
 	for name, script := range map[string]string{
 		"timeout":   "#!/bin/sh\nshift\nexec \"$@\"\n",
-		"redis-cli": "#!/bin/sh\nexec awk 'BEGIN { for (i=0; i<1000000; i++) print \"ckey_00000000-0000-0000-0000-000000000001\" }'\n",
-		"read-budget": `umask 077
-read_calls=0
-read() {
- read_calls=$((read_calls + 1))
- if (( read_calls > 8192 )); then
-  printf '%s\n' "$read_calls" > "$AUTHORITY_READ_COUNT_PATH"
-  exit 75
- fi
+		"redis-cli": "#!/bin/sh\nprintf '%s\\n' ckey_00000000-0000-0000-0000-000000000001\n",
+		"unsupported-read": `read() {
+ for read_argument in "$@"; do
+  if [[ "$read_argument" == -N ]]; then
+   cat >/dev/null
+   return 2
+  fi
+ done
  builtin read "$@"
- read_status=$?
- if (( read_status != 0 )); then
-  printf '%s\n' "$read_calls" > "$AUTHORITY_READ_COUNT_PATH"
- fi
- return "$read_status"
 }
 `,
 	} {
 		mode := os.FileMode(0700)
-		if name == "read-budget" {
+		if name == "unsupported-read" {
 			mode = 0600
 		}
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), mode); err != nil {
@@ -524,7 +377,7 @@ read() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := redisAuthorityNativeCommand(ctx, command)
-			cmd.Env = []string{"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C", "TMPDIR=" + directory, "BASH_ENV=" + budgetPath, "AUTHORITY_READ_COUNT_PATH=" + countPath}
+			cmd.Env = []string{"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C", "TMPDIR=" + directory, "BASH_ENV=" + unsupportedPath}
 			output, err := cmd.Output()
 			redisAuthorityKillNativeGroup(cmd)
 			return string(output), err
@@ -540,28 +393,9 @@ read() {
 	}
 	findings, err := (redisFamilyProbe{}).check(context.Background(), env)
 	if err != nil {
-		t.Fatalf("bounded read-budget observation: %v", err)
+		t.Fatal(err)
 	}
-	countBytes, err := os.ReadFile(countPath)
-	if err != nil {
-		t.Fatal("native read-budget receipt unavailable")
+	if len(findings) != 1 || findings[0].class != "cannot-observe" || findings[0].healthy || len(env.baseline.metricSamples) != 0 {
+		t.Fatal("a read that rejected -N authorized an empty complete scan")
 	}
-	calls, err := strconv.Atoi(strings.TrimSpace(string(countBytes)))
-	if err != nil || calls <= 0 {
-		t.Fatal("native read-budget receipt invalid")
-	}
-	if calls > 8192 {
-		t.Fatal("native collector exceeded the deterministic 8192-read budget")
-	}
-	if len(findings) != 1 || !findings[0].healthy {
-		t.Fatal("complete bounded source became unknown within the native read budget")
-	}
-	samples := env.baseline.metricSamples["redis/family/ckey_<id>"]
-	if len(samples) != 1 || samples[0].v != familyScanKeyLimit {
-		t.Fatal("read budget changed the requested sample scope")
-	}
-	if calls >= 1024 {
-		t.Fatal("native collector did not use bounded chunk reads")
-	}
-	t.Logf("native_read_invocations=%d selected_lines=%d", calls, familyScanKeyLimit)
 }

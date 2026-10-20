@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 	"github.com/urnetwork/server/qualityprobe/ingest"
 	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 func testUrlProbePass() (*providerEgressProbePass, *ProviderEgressProbeArgs, *recordingEgressProbeIngest) {
@@ -122,6 +124,55 @@ func TestUrlProbePublishesBeforeUnrelatedSlowTurn(t *testing.T) {
 		}
 		close(slowRelease)
 		<-done
+	})
+}
+
+// A URL turn is a run of one provider, so a run's own retirement owner would
+// hold the turn's worker for the ten seconds its derived client spends
+// acknowledging the provider's late returns. Every turn of a pass retires its
+// tunnel through the pass's one owner instead, which the pass closes, every
+// held tunnel retired, before it returns to its prober shard's cleanup.
+func TestUrlProbeTurnsRetireThroughOnePassOwner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pass, args, _ := testUrlProbePass()
+		args.UrlProbe.Limit, args.UrlProbe.Concurrency = 2, 2
+		selected := false
+		pass.fullDue = func(context.Context, int) ([]ingest.DueProvider, error) {
+			if selected {
+				return nil, nil
+			}
+			selected = true
+			return testDueProviders("first-provider", "second-provider"), nil
+		}
+		var ownerLock sync.Mutex
+		owners := []*providertunnel.Retirements{}
+		pass.runFull = func(ctx context.Context, providers []prober.Provider, options fleetprobe.FullOptions) (prober.Summary, error) {
+			func() {
+				ownerLock.Lock()
+				defer ownerLock.Unlock()
+				owners = append(owners, options.TunnelConfig.Retirements)
+			}()
+			for _, provider := range providers {
+				if err := options.HealthResults.SubmitEgressHealth(ctx, provider.ClientId, testHealthRun(1, 0)); err != nil {
+					return prober.Summary{}, err
+				}
+				if err := options.Attempts.ReportAttempt(ctx, provider.ClientId, ""); err != nil {
+					return prober.Summary{}, err
+				}
+			}
+			return prober.Summary{Attempted: len(providers), Submitted: len(providers)}, nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		if result, err := pass.run(ctx, args); err != nil || result.Submitted != 2 {
+			t.Fatalf("URL pass: result=%+v error=%v", result, err)
+		}
+		if len(owners) != 2 || owners[0] == nil || owners[0] != owners[1] {
+			t.Fatalf("the pass's turns retired through %v, want one owner of the pass", owners)
+		}
+		if owners[0].Testing_Hold(func() {}) {
+			t.Fatal("the pass returned with its retirement owner still taking tunnels")
+		}
 	})
 }
 

@@ -35,14 +35,15 @@ type monitorYaml struct {
 	Routers     []RouterSettings  `yaml:"routers"`
 	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
 	Hosts       []struct {
-		Name             string   `yaml:"name"`
-		LANIp            string   `yaml:"lan_ip"`
-		OverlayIp        string   `yaml:"overlay_ip"`
-		Roles            []string `yaml:"roles"`
-		Disabled         bool     `yaml:"disabled"`
-		SSHUser          string   `yaml:"ssh_user"`
-		SSHIdentityFiles []string `yaml:"ssh_identity_files"`
-		Redis            *struct {
+		Name               string    `yaml:"name"`
+		LANIp              string    `yaml:"lan_ip"`
+		OverlayIp          string    `yaml:"overlay_ip"`
+		Roles              []string  `yaml:"roles"`
+		Disabled           bool      `yaml:"disabled"`
+		PgBouncerInstances yaml.Node `yaml:"pgbouncer_instances"`
+		SSHUser            string    `yaml:"ssh_user"`
+		SSHIdentityFiles   []string  `yaml:"ssh_identity_files"`
+		Redis              *struct {
 			EntryPort        int   `yaml:"entry_port"`
 			NodePorts        []int `yaml:"node_ports"`
 			ExpectedReplicas int   `yaml:"expected_replicas"`
@@ -95,6 +96,8 @@ type monitorYaml struct {
 	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
 	// the former to noop and the latter to fail closed as invalid desired state.
 	DNSAliases yaml.Node `yaml:"dns_aliases"`
+	// Present malformed artifact expectations remain an explicit coverage gap.
+	SubnetArtifacts yaml.Node `yaml:"subnet_artifacts"`
 	// Outbound notification. An empty webhook disables the Slack notifier.
 	// bringyourctl reads the same key for Grafana's default contact point
 	// (grafana.AlertRoutingSettingsFromMonitorVault).
@@ -284,26 +287,28 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	stConfiguration := loadSTConfigurationObservation(env)
 	queryDomain, queryUsername, queryPassword := loadMimirQuerySettings(env, services)
 	settings := SignalSettings{
-		Routers:                cloneRouterSettings(y.Routers),
-		PublicUdp:              clonePublicUdpSettings(y.PublicUdp),
-		Environment:            env,
-		PublicDomain:           strings.TrimSpace(services.Domain),
-		WebsiteDomain:          activeWebsiteDomainFromServices(services),
-		ManagerHostname:        activeManagerHostnameFromServices(services),
-		LogServices:            logServices,
-		LogServiceBlocks:       logServiceBlocks,
-		LogServiceHosts:        logServiceHosts,
-		ProxyPathExpectedHosts: len(proxyByHost),
-		VerificationEnabled:    stConfiguration.configuredEnabled,
-		STConfigStatus:         stConfiguration.status,
-		STDeploymentKey:        stConfiguration.deploymentKey,
-		SSHUser:                y.Ssh.User,
-		SSHDevUser:             y.Ssh.DevUser,
-		SSHKeyPaths:            append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
-		AddressMode:            AddressMode(y.AddressMode),
-		StateDir:               filepath.Join(home, ".urnetwork-monitor", env),
-		SSHConnectTimeout:      10 * time.Second,
-		CommandTimeout:         60 * time.Second,
+		Routers:                   cloneRouterSettings(y.Routers),
+		PublicUdp:                 clonePublicUdpSettings(y.PublicUdp),
+		Environment:               env,
+		PublicDomain:              strings.TrimSpace(services.Domain),
+		WebsiteDomain:             activeWebsiteDomainFromServices(services),
+		ManagerHostname:           activeManagerHostnameFromServices(services),
+		LogServices:               logServices,
+		LogServiceBlocks:          logServiceBlocks,
+		LogServiceHosts:           logServiceHosts,
+		ProxyPathExpectedHosts:    len(proxyByHost),
+		VerificationEnabled:       stConfiguration.configuredEnabled,
+		STConfigStatus:            stConfiguration.status,
+		STDeploymentKey:           stConfiguration.deploymentKey,
+		SubnetArtifacts:           subnetArtifactSettingsFromNode(y.SubnetArtifacts),
+		ContractDegradationConfig: loadContractDegradationConfig(),
+		SSHUser:                   y.Ssh.User,
+		SSHDevUser:                y.Ssh.DevUser,
+		SSHKeyPaths:               append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
+		AddressMode:               AddressMode(y.AddressMode),
+		StateDir:                  filepath.Join(home, ".urnetwork-monitor", env),
+		SSHConnectTimeout:         10 * time.Second,
+		CommandTimeout:            60 * time.Second,
 		PostgreSQL: PostgreSQLSettings{
 			Port:          y.Pg.Port,
 			PgBouncerPort: y.Pg.PgbouncerPort,
@@ -339,16 +344,24 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		if lanAddress == "" && !configured.Disabled {
 			lanAddress = routes[configured.Name]
 		}
+		// Invalid or absent census authority stays local to the pool probe.
+		pgbouncerInstances := 0
+		if node := configured.PgBouncerInstances; node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+			if count, err := strconv.Atoi(node.Value); err == nil && 0 < count {
+				pgbouncerInstances = count
+			}
+		}
 		h := HostSettings{
-			Name:           configured.Name,
-			LANAddress:     lanAddress,
-			OverlayAddress: configured.OverlayIp,
-			Roles:          append([]string(nil), configured.Roles...),
-			SSHUser:        strings.TrimSpace(configured.SSHUser),
-			SSHKeyPaths:    monitorSSHKeyPaths(configured.SSHIdentityFiles),
-			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
-			PublicLB:       clonePublicLBSettings(publicLBByHost[configured.Name]),
-			Proxy:          cloneProxyHostSettings(proxyByHost[configured.Name]),
+			PgBouncerInstances: pgbouncerInstances,
+			Name:               configured.Name,
+			LANAddress:         lanAddress,
+			OverlayAddress:     configured.OverlayIp,
+			Roles:              append([]string(nil), configured.Roles...),
+			SSHUser:            strings.TrimSpace(configured.SSHUser),
+			SSHKeyPaths:        monitorSSHKeyPaths(configured.SSHIdentityFiles),
+			EdgeIPv6:           cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
+			PublicLB:           clonePublicLBSettings(publicLBByHost[configured.Name]),
+			Proxy:              cloneProxyHostSettings(proxyByHost[configured.Name]),
 		}
 		if configured.Disabled {
 			if configured.Proxy != nil && configured.Proxy.PublicHostname != "" {

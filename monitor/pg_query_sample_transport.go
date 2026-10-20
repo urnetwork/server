@@ -43,8 +43,9 @@ type pgSampleTransportReceipt struct {
 	NativeExitCode                  *int                    `json:"native_exit_code"`
 	ProgressStatus                  string                  `json:"progress_status"`
 	// Only a local refusal populates this field; it is never a native Start fact.
-	StartRefusalRemainingBudgetNs *int64               `json:"start_refusal_remaining_budget_ns,omitempty"`
-	LocalPhaseTiming              *pgSampleLocalTiming `json:"local_phase_timing,omitempty"`
+	StartRefusalRemainingBudgetNs *int64                         `json:"start_refusal_remaining_budget_ns,omitempty"`
+	LocalPhaseTiming              *pgSampleLocalTiming           `json:"local_phase_timing,omitempty"`
+	SharedAdmissionDetail         *pgSampleSharedAdmissionDetail `json:"shared_admission_detail,omitempty"`
 }
 
 // Offsets describe local elapsed time, including descheduling. Return marks

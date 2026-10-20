@@ -100,14 +100,15 @@ func (l *hostCommandLimiter) acquire(ctx context.Context, host string) (func(), 
 
 // host is one monitored host from the inventory (vault/<env>/monitor.yml).
 type host struct {
-	scopeEndpoints []string
-	disabled       bool
-	name           string
-	lanIp          string // resolved from config settings.yml routes (lan mode)
-	overlayIp      string // from monitor.yml (overlay mode)
-	roles          []string
-	sshUser        string // optional host-specific override
-	sshKeyPaths    []string
+	scopeEndpoints     []string
+	disabled           bool
+	name               string
+	lanIp              string // resolved from config settings.yml routes (lan mode)
+	overlayIp          string // from monitor.yml (overlay mode)
+	roles              []string
+	sshUser            string // optional host-specific override
+	sshKeyPaths        []string
+	pgbouncerInstances int // expected indexes 1..N on a pg-primary host
 	// redis-cluster hosts only
 	redisEntryPort        int
 	redisPorts            []int
@@ -156,17 +157,19 @@ func (self *host) redisNodePorts() []int {
 // monitorConfig is the monitor's view of the environment
 // (from monitor.yml + pg.yml + config settings.yml).
 type monitorConfig struct {
-	env                    string              // WARP_ENV
-	publicDomain           string              // active services.yml domain
-	websiteDomain          string              // canonical managed product website, when present
-	managerHostname        string              // configured manager alias, when exposed
-	logServices            []string            // active services.yml service inventory
-	logServiceBlocks       map[string][]string // active blocks and expected-process denominators
-	logServiceHosts        map[string][]string // active host placements, including excluded hosts
-	proxyPathExpectedHosts int                 // active services.yml proxy placements
-	verificationEnabled    bool
-	stConfigStatus         STConfigurationStatus
-	stDeploymentKey        string
+	env                       string              // WARP_ENV
+	publicDomain              string              // active services.yml domain
+	websiteDomain             string              // canonical managed product website, when present
+	managerHostname           string              // configured manager alias, when exposed
+	logServices               []string            // active services.yml service inventory
+	logServiceBlocks          map[string][]string // active blocks and expected-process denominators
+	logServiceHosts           map[string][]string // active host placements, including excluded hosts
+	proxyPathExpectedHosts    int                 // active services.yml proxy placements
+	verificationEnabled       bool
+	stConfigStatus            STConfigurationStatus
+	stDeploymentKey           string
+	subnetArtifacts           *SubnetArtifactSettings
+	contractDegradationConfig ContractDegradationConfigStatus
 
 	sshUser     string // deployed login user
 	sshDevUser  string // login user for local dev over the overlay

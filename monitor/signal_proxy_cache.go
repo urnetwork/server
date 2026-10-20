@@ -77,6 +77,7 @@ type proxyCacheMetrics struct {
 	expirations   float64
 	evictions     float64
 	availableMask uint16
+	startRepeated bool
 }
 
 func proxyCacheQuery(environment string) string {
@@ -165,6 +166,7 @@ func (proxyCacheProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			process.rss = value
 			process.availableMask |= proxyCacheMetricRSS
 		case "process_start_time_seconds":
+			process.startRepeated = process.startRepeated || process.availableMask&proxyCacheMetricStart != 0
 			process.start = value
 			process.availableMask |= proxyCacheMetricStart
 		case "urnetwork_proxy_lock_cache_entries":
@@ -188,11 +190,8 @@ func (proxyCacheProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		}
 	}
 
-	current, err := newestProxyCacheProcesses(processes)
-	if err != nil {
-		return nil, err
-	}
-	if len(current) == 0 {
+	current, generationGaps := newestProxyCacheProcesses(now, processes)
+	if len(current) == 0 && len(generationGaps) == 0 {
 		return nil, fmt.Errorf("proxy cache: Mimir returned no actual-scrape-fresh proxy process samples")
 	}
 	sort.Slice(current, func(i, j int) bool {
@@ -223,7 +222,7 @@ func (proxyCacheProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		}
 	}
 
-	findings := []finding{}
+	findings := proxyProcessGenerationFindings("runtime/proxy-lock-cache", "SIGNALS.md §14.7c", metricHost.name, len(current), generationGaps)
 	if len(missing) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-lock-cache", tier: tierWarn,
@@ -293,33 +292,16 @@ func (proxyCacheProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	return findings, nil
 }
 
-func newestProxyCacheProcesses(processes map[string]*proxyCacheMetrics) ([]*proxyCacheMetrics, error) {
-	newest := map[string]*proxyCacheMetrics{}
-	for _, process := range processes {
-		if process.availableMask&proxyCacheMetricRSS == 0 || process.rss <= 0 {
-			continue
+// Selects generation authority before requiring complete owner telemetry.
+func newestProxyCacheProcesses(now time.Time, processes map[string]*proxyCacheMetrics) ([]*proxyCacheMetrics, []proxyProcessGenerationGap) {
+	return newestProxyProcesses(now, processes, func(process *proxyCacheMetrics) proxyProcessGeneration {
+		return proxyProcessGeneration{
+			host: process.host, block: process.block, instance: process.instance, current: true, requireRss: true,
+			start: process.start, startPresent: process.availableMask&proxyCacheMetricStart != 0,
+			startRepeated: process.startRepeated,
+			rss:           process.rss, rssPresent: process.availableMask&proxyCacheMetricRSS != 0,
 		}
-		if process.availableMask&proxyCacheMetricStart == 0 {
-			return nil, fmt.Errorf(
-				"proxy cache: fresh RSS identity %s omitted process_start_time_seconds",
-				proxyCacheLabel(process),
-			)
-		}
-		slot := process.host + "\x00" + process.block
-		if process.block == "" {
-			slot += "\x00" + process.instance
-		}
-		previous := newest[slot]
-		if previous == nil || process.start > previous.start ||
-			(process.start == previous.start && process.instance > previous.instance) {
-			newest[slot] = process
-		}
-	}
-	current := make([]*proxyCacheMetrics, 0, len(newest))
-	for _, process := range newest {
-		current = append(current, process)
-	}
-	return current, nil
+	})
 }
 
 func proxyCacheLabel(process *proxyCacheMetrics) string {

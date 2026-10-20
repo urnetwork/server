@@ -72,7 +72,14 @@ type FullOptions struct {
 	ProbeTimeout time.Duration
 	// How many providers are probed at once. Zero uses
 	// DefaultFullConcurrency.
-	Concurrency     int
+	Concurrency int
+	// How many closed tunnels the run holds while their derived clients
+	// acknowledge late provider returns (providertunnel.Retirements), when
+	// TunnelConfig carries no owner of the caller's. Zero uses twice the
+	// concurrency: a URL probe holds its slot about 6s and a closed tunnel
+	// about 10s more, so the run seldom waits for room. A held tunnel costs
+	// what an open one does.
+	RetirementCount int
 	AllDestinations bool
 	// Deprecated compatibility input. Never requested.
 	IpEchoUrl string
@@ -104,6 +111,14 @@ func (self FullOptions) concurrency() int {
 	return DefaultFullConcurrency
 }
 
+// Returns RetirementCount, or twice the concurrency when unset.
+func (self FullOptions) retirementCount() int {
+	if 0 < self.RetirementCount {
+		return self.RetirementCount
+	}
+	return 2 * self.concurrency()
+}
+
 // Returns IpEchoUrl, or the echo derived from the tunnel's api url.
 func (self FullOptions) ipEchoUrl() string {
 	if self.IpEchoUrl != "" {
@@ -121,6 +136,9 @@ func validateFullOptions(options FullOptions) error {
 	}
 	if options.Concurrency < 0 {
 		return fmt.Errorf("fleetprobe: concurrency must not be negative (got %d)", options.Concurrency)
+	}
+	if options.RetirementCount < 0 {
+		return fmt.Errorf("fleetprobe: retirement count must not be negative (got %d)", options.RetirementCount)
 	}
 	if options.HealthResults == nil {
 		return fmt.Errorf("fleetprobe: health reporter is required")
@@ -259,6 +277,14 @@ func NewFullProber(options FullOptions) *prober.Prober {
 func RunFull(ctx context.Context, providers []prober.Provider, options FullOptions) (prober.Summary, error) {
 	if err := validateFullOptions(options); err != nil {
 		return prober.Summary{}, err
+	}
+	// A run whose caller holds no retirements of its own owns its tunnels'
+	// and joins them before it returns, so no derived client outlives the run
+	// or its prober shard.
+	if options.TunnelConfig.Retirements == nil {
+		retirements := providertunnel.NewRetirements(options.retirementCount())
+		defer retirements.Close()
+		options.TunnelConfig.Retirements = retirements
 	}
 	scheduler := &prober.Scheduler{
 		Prober:          NewFullProber(options),

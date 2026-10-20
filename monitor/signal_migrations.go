@@ -450,7 +450,36 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	name: "legacy settlement missing-payer registration index", requiredVersion: 793, rowColumn: 204,
 }), migrationCurrentSuffixArtifacts()...)
 
-func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (migrationsProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		contextErr := ctx.Err()
+		if contextErr == nil {
+			return
+		}
+		if resultErr != nil {
+			if resultErr != contextErr {
+				resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+			}
+			return
+		}
+		// An ended owner cannot certify schema health from late successful
+		// rows. Retain independently established faults and unknowns; the
+		// public scoped adapter keeps its existing lifecycle policy.
+		retained := result[:0]
+		for _, finding := range result {
+			if !finding.healthy {
+				retained = append(retained, finding)
+			}
+		}
+		result = retained
+		if len(result) == 0 {
+			result = nil
+			resultErr = contextErr
+		}
+	}()
 	// Every artifact is queried before its version is checked. Nullable catalog
 	// lookups keep future or missing functions from aborting schema inspection;
 	// an existence conjunct cannot protect a strict regprocedure cast.
@@ -2221,11 +2250,19 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	target := pgTarget(env)
 	dbVersion := atoiRow(rows[0], 0)
 	requiredHead := server.MigrationCount()
+	futureHead := requiredHead < dbVersion
+	unqualifiedArtifacts := 0
 	missing := make([]string, 0)
 	for _, artifact := range migrationArtifacts {
 		isPublished := artifact.requiredVersion <= dbVersion
 		isStillRequired := artifact.removedVersion == 0 || dbVersion < artifact.removedVersion
 		if isPublished && isStillRequired && !migrationBool(rows[0].str(artifact.rowColumn)) {
+			// A later append may legitimately replace any live definition.
+			// Only a monitor that knows that head can call this schema drift.
+			if futureHead {
+				unqualifiedArtifacts++
+				continue
+			}
 			missing = append(missing, fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion))
 		}
 	}
@@ -2274,7 +2311,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		}
 	}
 
-	findings := make([]finding, 0, 2)
+	findings := make([]finding, 0, 3)
 	if len(missing) > 0 {
 		findings = append(findings, finding{
 			probeId: "pg/migration-coherence", tier: tierPage,
@@ -2287,8 +2324,23 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			verify:    "The recorded head advances only through the corrected append-only stream, every required artifact matches its published operative definition and checked indexes are valid and ready, and a fresh migration-coherence run has no schema-drift alert.",
 			playbook:  "SIGNALS.md §8.9",
 		})
-	} else {
+	} else if !futureHead {
 		findings = append(findings, healthyFinding("pg/migration-coherence", tierPage, "migration-schema-drift", target))
+	}
+
+	if futureHead {
+		findings = append(findings, finding{
+			probeId: "pg/migration-coherence", tier: tierWarn,
+			class: "cannot-observe", target: target, sustain: 2,
+			symptom:   "The database migration head is newer than this monitor's schema catalog",
+			mechanism: "A later append-only migration may replace or remove a live artifact that this binary still requires. Failed older predicates cannot distinguish that successor from corruption, and passing older predicates cannot validate the unknown appended contracts. Immutable identities in the known prefix and durable catalog completeness remain independently checked.",
+			baseline:  "The monitor's compiled migration catalog covers the observed database head before it certifies the live schema definitions.",
+			observed:  fmt.Sprintf("db_version=%d code_required_version=%d unqualified_artifact_predicates=%d", dbVersion, requiredHead, unqualifiedArtifacts),
+			context:   "This is schema-authority unknown, not evidence that the newer database is broken or healthy. Any independently proven immutable identity or catalog fault retains its migration-schema-drift PAGE. Unknown cannot clear an existing schema incident.",
+			action:    "Use a separately qualified monitor whose source includes the observed database head, then compare the exact published successors and retained contracts. Do not roll back services, edit migration_audit or change database objects merely to satisfy this older validator.",
+			verify:    "A fresh observation from a monitor that knows the applied head validates the complete immutable catalog and every still-required live artifact; known-prefix faults must also be resolved through the reviewed append-only process.",
+			playbook:  "SIGNALS.md §8.9",
+		})
 	}
 
 	if dbVersion < requiredHead {

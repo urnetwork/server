@@ -55,6 +55,16 @@ func (self *sshAdmissionUnavailableError) Unwrap() error { return self.err }
 // Explicit Main profile opt-in; other library embedders retain their existing
 // transport. Registration refuses a second live watcher and malformed state.
 func (self SignalSettings) WithSharedSshAdmission(ctx context.Context, directory string) (SignalSettings, error) {
+	return self.withSharedSshAdmission(ctx, directory, newSharedSshAdmission)
+}
+
+// A bounded one-shot joins the existing live watcher's diagnostic queue. It
+// cannot register or replace a watcher and retains the same transport limits.
+func (self SignalSettings) WithSharedSshDiagnosticAdmission(ctx context.Context, directory string) (SignalSettings, error) {
+	return self.withSharedSshAdmission(ctx, directory, newSharedSshDiagnosticAdmission)
+}
+
+func (self SignalSettings) withSharedSshAdmission(ctx context.Context, directory string, create func(context.Context, string, []string) (sshAdmissionBackend, error)) (SignalSettings, error) {
 	hosts := make([]string, 0, len(self.Hosts)+len(self.Routers))
 	for _, host := range self.Hosts {
 		hosts = append(hosts, host.Name)
@@ -66,7 +76,7 @@ func (self SignalSettings) WithSharedSshAdmission(ctx context.Context, directory
 	}
 	slices.Sort(hosts)
 	hosts = slices.Compact(hosts)
-	admission, err := newSharedSshAdmission(ctx, directory, hosts)
+	admission, err := create(ctx, directory, hosts)
 	if err != nil {
 		return SignalSettings{}, err
 	}

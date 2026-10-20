@@ -3,13 +3,8 @@ package monitor
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Execute the real observation command with local synthetic source programs.
@@ -19,52 +14,33 @@ func TestRedisKernelAuthorityNativeRead(t *testing.T) {
 		name      string
 		kernel    string
 		status    int
-		processes string
+		cpuTicks  uint64
 		wantClass string
 		wantCpu   bool
 	}{
 		{name: "readable empty kernel"},
 		{name: "readable nonmatching kernel", kernel: "synthetic ordinary kernel message\n"},
-		{name: "cpu threshold", processes: "4242 200 9000000 4000000 redis-server\n"},
+		{name: "cpu threshold", cpuTicks: 200},
 		{name: "permission denied", status: 1, wantClass: "cannot-observe"},
 		{name: "timeout exit", status: 124, wantClass: "cannot-observe"},
 		{name: "command unavailable", status: 127, wantClass: "cannot-observe"},
 		{name: "partial failed read", kernel: "Out of memory: Killed process 4242 (redis-server) synthetic-private-kernel\n", status: 1, wantClass: "cannot-observe"},
-		{name: "cpu survives kernel denial", status: 1, processes: "4242 250.5 9000000 4000000 redis-server\n", wantClass: "cannot-observe", wantCpu: true},
+		{name: "cpu survives kernel denial", status: 1, cpuTicks: 251, wantClass: "cannot-observe", wantCpu: true},
 		{name: "complete redis victim", kernel: "Out of memory: Killed process 4242 (redis-server)\n", wantClass: "redis-kernel-oom"},
 	}
 	for _, test := range cases {
-		directory := t.TempDir()
-		for name, script := range map[string]string{
-			"ps":    "#!/bin/sh\nprintf '%s' \"$REDIS_AUTHORITY_PROCESSES\"\n",
-			"dmesg": "#!/bin/sh\nprintf '%s' \"$REDIS_AUTHORITY_KERNEL\"\nprintf '%s\\n' 'synthetic-private-kernel-diagnostic' >&2\nexit \"$REDIS_AUTHORITY_STATUS\"\n",
-		} {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
+		fixture := redisProcessCpuFixture{kernel: test.kernel, kernelStatus: test.status}
+		if test.cpuTicks > 0 {
+			fixture = redisProcessCpuSingleFixture("250.5", 0, test.cpuTicks)
+			fixture.kernel = test.kernel
+			fixture.kernelStatus = test.status
 		}
-		calls := 0
-		source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
-			calls++
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-			cmd.Env = []string{
-				"PATH=" + directory + ":/usr/bin:/bin", "LC_ALL=C",
-				"REDIS_AUTHORITY_KERNEL=" + test.kernel,
-				"REDIS_AUTHORITY_PROCESSES=" + test.processes,
-				fmt.Sprintf("REDIS_AUTHORITY_STATUS=%d", test.status),
-			}
-			output, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("%s: synthetic observation command failed: %v", test.name, err)
-			}
-			return string(output), nil
-		}}
-		alerts, err := NewRedisProcessSignal().Run(context.Background(), syntheticSettings(source))
-		if err != nil || calls != 1 {
-			t.Fatalf("%s: observation err=%v calls=%d", test.name, err, calls)
+		settings, _, _ := redisProcessCpuNativeFixture(t, fixture)
+		alerts, err := NewRedisProcessSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: observation err=%v", test.name, err)
 		}
+
 		wantCount := 0
 		if test.wantClass != "" {
 			wantCount++

@@ -40,9 +40,10 @@ type lokiTailInstance struct {
 }
 
 type lokiTailHostSample struct {
-	instances []lokiTailInstance
-	count     int
-	countSeen bool
+	sourceIncomplete bool
+	instances        []lokiTailInstance
+	count            int
+	countSeen        bool
 }
 
 type lokiTailHostResult struct {
@@ -99,13 +100,21 @@ func (lokiTailersProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			findings = append(findings, cannotObserveFinding(target+"/loki-tailers", result.err))
 			continue
 		}
+		if result.sample.sourceIncomplete {
+			findings = append(findings, cannotObserveFinding(target+"/loki-tailers", fmt.Errorf("child source observation incomplete")))
+		}
 		if result.sample.count == 0 {
+			if result.sample.sourceIncomplete {
+				continue
+			}
 			findings = append(findings, lokiTailChildMissingFinding(target))
 			continue
 		}
-		findings = append(findings, healthyFinding(
-			"observability/loki-tailers", tierWarn, "loki-tail-child-missing", target,
-		))
+		if !result.sample.sourceIncomplete {
+			findings = append(findings, healthyFinding(
+				"observability/loki-tailers", tierWarn, "loki-tail-child-missing", target,
+			))
+		}
 
 		invalid := make([]string, 0, len(result.sample.instances))
 		for instanceIndex, instance := range result.sample.instances {
@@ -133,6 +142,9 @@ func (lokiTailersProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 
 		if len(invalid) == 0 {
+			if result.sample.sourceIncomplete {
+				continue
+			}
 			findings = append(findings, healthyFinding(
 				"observability/loki-tailers", tierWarn, "loki-tail-accounting-invalid", target,
 			))
@@ -206,6 +218,11 @@ func parseLokiTailHostSample(output string) (lokiTailHostSample, error) {
 				return sample, fmt.Errorf("loki tailers line %d: unexpected instance_end", lineNumber+1)
 			}
 			current = -1
+		case "source_incomplete":
+			if len(fields) != 2 || fields[1] != "1" || current >= 0 || sample.sourceIncomplete || sample.countSeen {
+				return sample, fmt.Errorf("loki tailers line %d: invalid source completeness", lineNumber+1)
+			}
+			sample.sourceIncomplete = true
 		case "loki_count":
 			if len(fields) != 2 || sample.countSeen {
 				return sample, fmt.Errorf("loki tailers line %d: invalid loki_count", lineNumber+1)
@@ -269,7 +286,7 @@ func parseLokiTailHostSample(output string) (lokiTailHostSample, error) {
 	return sample, nil
 }
 
-const lokiTailersScript = `set -u
+const lokiTailersScript = observabilityListenerScript + `set -u
 for required in ss curl awk sort; do
   if ! command -v "$required" >/dev/null 2>&1; then
     printf 'loki tailers probe prerequisite missing: %s\n' "$required" >&2
@@ -277,30 +294,62 @@ for required in ss curl awk sort; do
   fi
 done
 loki_count=0
-ports=$(ss -ltnH 2>/dev/null | awk '$4 ~ /^127[.]0[.]0[.]1:[0-9]+$/ {sub(/.*:/, "", $4); print $4}' | sort -n -u)
+source_incomplete=0
+ports=$(observability_listener_ports '127.0.0.1')
+listener_status=$?
+if [ "$listener_status" -ne 0 ]; then
+  printf 'child listener observation unavailable\n' >&2
+  exit 1
+fi
 for port in $ports; do
-  metrics=$(curl -fsS --max-time 10 "http://127.0.0.1:${port}/metrics" 2>/dev/null || true)
+  metrics=$(curl -fsS --max-time 10 "http://127.0.0.1:${port}/metrics" 2>/dev/null)
+  metrics_status=$?
+  if [ "$metrics_status" -ne 0 ]; then
+    source_incomplete=1
+    continue
+  fi
   case "$metrics" in
     *'loki_querier_tail_active'*) ;;
     *) continue ;;
   esac
 
-  loki_count=$((loki_count+1))
-  printf 'instance_begin %s\n' "$port"
-  printf '%s\n' "$metrics" | awk '
+  projection=$(printf '%s\n' "$metrics" | awk '
+    function gauge(value) {
+      return value ~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/ ||
+        value == "NaN" || value == "Inf" || value == "+Inf" || value == "-Inf"
+    }
     /^loki_build_info[{]/ {
       if (match($1, /[,{]version="[^"]+"/)) {
         value=substr($1, RSTART, RLENGTH)
         sub(/^[,{]version="/, "", value)
         sub(/"$/, "", value)
+        if (value !~ /^[0-9]+[.][0-9]+[.][0-9]+$/) value="unknown"
         print "version", value
       }
     }
-    /^process_start_time_seconds / {print "process_start", $2}
-    /^loki_querier_tail_active / {print "tails_active", $2}
-    /^loki_querier_tail_active_streams / {print "streams_active", $2}
-  '
-  printf 'instance_end\n'
+    /^process_start_time_seconds / {
+      if (!gauge($2)) exit 41
+      print "process_start", $2
+    }
+    /^loki_querier_tail_active / {
+      if (!gauge($2)) exit 41
+      print "tails_active", $2
+    }
+    /^loki_querier_tail_active_streams / {
+      if (!gauge($2)) exit 41
+      print "streams_active", $2
+    }
+  ')
+  projection_status=$?
+  if [ "$projection_status" -ne 0 ]; then
+    source_incomplete=1
+    continue
+  fi
+  loki_count=$((loki_count+1))
+  printf 'instance_begin %s\n%s\ninstance_end\n' "$port" "$projection"
 done
+if [ "$source_incomplete" -ne 0 ]; then
+  printf 'source_incomplete 1\n'
+fi
 printf 'loki_count %s\n' "$loki_count"
 `

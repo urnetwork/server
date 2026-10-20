@@ -16,12 +16,28 @@ import (
 
 const redisInfoAuthorityHealthy = "# Memory\r\nused_memory:1000\r\nmaxmemory:10000\r\nused_memory_dataset:900\r\nmem_clients_normal:0\r\nmem_clients_slaves:0\r\n# Clients\r\nconnected_clients:10\r\n"
 
+// Synthetic host RAM with ample availability. A complete census also judges
+// host capacity, which must not depend on the test machine's own memory.
+const redisInfoAuthorityMeminfo = "MemTotal: 16777216 kB\nMemAvailable: 12582912 kB\n"
+
 // Execute the exact generated shell with scripted replies and exit statuses.
 // No real Redis, SSH, production configuration, or network socket is used.
 func redisInfoAuthorityFixture(t *testing.T, reply string, status int) (SignalSettings, string) {
 	t.Helper()
+	return redisInfoAuthorityMeminfoFixture(t, reply, status, redisInfoAuthorityMeminfo)
+}
+
+// The awk shim serves the collector's /proc/meminfo read from synthetic text.
+// The local file exists only on Linux and describes the test machine, so
+// reading it made host-capacity verdicts depend on where the test ran.
+func redisInfoAuthorityMeminfoFixture(t *testing.T, reply string, status int, meminfo string) (SignalSettings, string) {
+	t.Helper()
 	directory := t.TempDir()
 	callPath := filepath.Join(directory, "calls")
+	meminfoPath := filepath.Join(directory, "meminfo")
+	if err := os.WriteFile(meminfoPath, []byte(meminfo), 0600); err != nil {
+		t.Fatal(err)
+	}
 	redisScript := `#!/bin/sh
 [ "$#" -eq 3 ] && [ "$1" = "-p" ] && [ "$3" = "INFO" ] || exit 126
 printf '%s\n' "$2" >> "$REDIS_INFO_TEST_CALLS"
@@ -32,6 +48,7 @@ fi
 printf '%s' "$REDIS_INFO_TEST_HEALTHY"
 `
 	for name, script := range map[string]string{
+		"awk":       "#!/bin/sh\nif [ \"$2\" = /proc/meminfo ]; then\n  exec /usr/bin/awk \"$1\" \"$REDIS_INFO_TEST_MEMINFO\"\nfi\nexec /usr/bin/awk \"$@\"\n",
 		"redis-cli": redisScript,
 		"timeout":   "#!/bin/sh\nshift\nexec \"$@\"\n",
 	} {
@@ -52,6 +69,7 @@ printf '%s' "$REDIS_INFO_TEST_HEALTHY"
 			"REDIS_INFO_TEST_REPLY=" + reply,
 			fmt.Sprintf("REDIS_INFO_TEST_STATUS=%d", status),
 			"REDIS_INFO_TEST_HEALTHY=" + redisInfoAuthorityHealthy,
+			"REDIS_INFO_TEST_MEMINFO=" + meminfoPath,
 		}
 		out, err := cmd.Output()
 		if err != nil {
@@ -224,6 +242,39 @@ func TestRedisInfoAuthorityNativePressureControls(t *testing.T) {
 		alert := requireAlertClass(t, alerts, sample.class)
 		if alert.Target != "redis-info.example:6381" {
 			t.Fatal("native INFO pressure was attributed to a different configured node")
+		}
+	}
+}
+
+// Host capacity is judged from the fixture's synthetic RAM in both directions,
+// so neither the test machine's memory nor a missing local file decides it.
+func TestRedisInfoAuthorityNativeSyntheticHostMemory(t *testing.T) {
+	critical := strings.Replace(redisInfoAuthorityHealthy, "used_memory:1000", "used_memory:9300", 1)
+	for _, sample := range []struct {
+		meminfo string
+		page    bool
+	}{
+		{meminfo: "MemTotal: 16777216 kB\nMemAvailable: 0 kB\n", page: true},
+		{meminfo: redisInfoAuthorityMeminfo, page: false},
+	} {
+		settings, _ := redisInfoAuthorityMeminfoFixture(t, critical, 0, sample.meminfo)
+		alerts, err := NewRedisMemorySignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, "node-mem-critical")
+		capacityAlertCount := 0
+		for _, alert := range alerts {
+			if alert.SignalID != "redis/host-capacity" {
+				continue
+			}
+			capacityAlertCount++
+			if alert.Class != "redis-host-capacity" || alert.Target != "redis-info.example" {
+				t.Fatalf("synthetic host memory produced %s on %s instead of a capacity verdict", alert.Class, alert.Target)
+			}
+		}
+		if sample.page != (capacityAlertCount == 1) {
+			t.Fatalf("synthetic host memory page=%t produced %d host-capacity alerts", sample.page, capacityAlertCount)
 		}
 	}
 }

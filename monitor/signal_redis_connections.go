@@ -64,6 +64,9 @@ func (self *redisConnectionsProbe) check(ctx context.Context, env *probeEnv) ([]
 		findings = append(findings, cannotObserveFinding("redis-connections/current", nativeErr))
 	}
 	if err := ctx.Err(); err != nil {
+		if nativeErr != nil && nativeErr != err {
+			return nil, &signalContextError{contextErr: err, sourceErr: nativeErr}
+		}
 		return nil, err
 	}
 	at := env.now().UTC().Truncate(time.Second)

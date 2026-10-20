@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -220,29 +221,63 @@ func readConnectStormDiagnostic(ctx context.Context, env *probeEnv) (connectStor
 	if err != nil {
 		return connectStormDiagnostic{}, err
 	}
-	if len(rows) != 1 || len(rows[0]) < 18 {
-		return connectStormDiagnostic{}, fmt.Errorf("connection storm diagnostic returned %d malformed rows", len(rows))
+	row, err := pgAggregateRow(rows, 18)
+	if err != nil {
+		return connectStormDiagnostic{}, err
 	}
-	row := rows[0]
+	var counts [18]int
+	for _, column := range []int{0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 14, 15, 16} {
+		bits := strconv.IntSize
+		if column == 14 {
+			bits = 32
+		}
+		value, err := providerPgInteger(row.str(column), bits, 0)
+		if err != nil {
+			return connectStormDiagnostic{}, err
+		}
+		counts[column] = int(value)
+	}
+	var numbers [18]float64
+	for _, column := range []int{5, 6, 12, 13, 17} {
+		numbers[column], err = providerPgFloat(row.str(column))
+		if err != nil {
+			return connectStormDiagnostic{}, err
+		}
+	}
+	// A deleted durable client can leave cohort parent/network counts at zero;
+	// only the SQL subsets and the nonempty closed-lifetime distribution bind.
+	for _, start := range []int{0, 7} {
+		if counts[start+1] > counts[start] || counts[start+2] > counts[start] ||
+			counts[start+3] > counts[start] || counts[start+4] > counts[start] ||
+			counts[start+2] == 0 && (counts[start+1] != 0 || counts[start+3] != 0) ||
+			numbers[start+5] > numbers[start+6] ||
+			counts[start] == counts[start+4] && (numbers[start+5] != 0 || numbers[start+6] != 0) {
+			return connectStormDiagnostic{}, fmt.Errorf("invalid response for provider PostgreSQL connection cohort relationships")
+		}
+	}
+	if counts[16] > counts[15] || counts[15] == 0 && numbers[17] != 0 ||
+		counts[15] > 0 && (counts[16] > 0) != (numbers[17] >= reliabilityDriftMinimumWeight) {
+		return connectStormDiagnostic{}, fmt.Errorf("invalid response for provider PostgreSQL connection score relationships")
+	}
 	return connectStormDiagnostic{
-		currentTotal:          atoiRow(row, 0),
-		currentChildren:       atoiRow(row, 1),
-		currentParents:        atoiRow(row, 2),
-		currentNetworks:       atoiRow(row, 3),
-		currentSurviving:      atoiRow(row, 4),
-		currentP50Seconds:     atof(row.str(5)),
-		currentP90Seconds:     atof(row.str(6)),
-		baselineTotal:         atoiRow(row, 7),
-		baselineChildren:      atoiRow(row, 8),
-		baselineParents:       atoiRow(row, 9),
-		baselineNetworks:      atoiRow(row, 10),
-		baselineSurviving:     atoiRow(row, 11),
-		baselineP50Seconds:    atof(row.str(12)),
-		baselineP90Seconds:    atof(row.str(13)),
-		classificationVersion: atoiRow(row, 14),
-		scoreRows:             atoiRow(row, 15),
-		passingRows:           atoiRow(row, 16),
-		maxWeight:             atof(row.str(17)),
+		currentTotal:          counts[0],
+		currentChildren:       counts[1],
+		currentParents:        counts[2],
+		currentNetworks:       counts[3],
+		currentSurviving:      counts[4],
+		currentP50Seconds:     numbers[5],
+		currentP90Seconds:     numbers[6],
+		baselineTotal:         counts[7],
+		baselineChildren:      counts[8],
+		baselineParents:       counts[9],
+		baselineNetworks:      counts[10],
+		baselineSurviving:     counts[11],
+		baselineP50Seconds:    numbers[12],
+		baselineP90Seconds:    numbers[13],
+		classificationVersion: counts[14],
+		scoreRows:             counts[15],
+		passingRows:           counts[16],
+		maxWeight:             numbers[17],
 	}, nil
 }
 
@@ -287,23 +322,24 @@ func (self *pgConnectRateProbe) cadence() time.Duration { return 60 * time.Secon
 // observe converts PostgreSQL's cumulative insert counter into a per-minute
 // rate. The first observation and a stats reset are warmups, not zero-rate
 // incidents.
-func (self *pgConnectRateProbe) observe(count int64, now time.Time) (rate int, ok bool) {
+func (self *pgConnectRateProbe) observe(count int64, now time.Time) (rate int, ok bool, err error) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	if !self.initialized || count < self.lastCount || !self.lastTime.Before(now) {
 		self.initialized = true
 		self.lastCount = count
 		self.lastTime = now
-		return 0, false
+		return 0, false, nil
 	}
-	elapsedMinutes := now.Sub(self.lastTime).Minutes()
+	elapsed := now.Sub(self.lastTime)
 	delta := count - self.lastCount
+	rate, err = providerPgConnectionRate(delta, elapsed)
+	if err != nil {
+		return 0, false, err
+	}
 	self.lastCount = count
 	self.lastTime = now
-	if elapsedMinutes <= 0 {
-		return 0, false
-	}
-	return int(float64(delta)/elapsedMinutes + 0.5), true
+	return rate, true, nil
 }
 
 func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -327,8 +363,14 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err != nil {
 		return nil, err
 	}
-	count := int64(atoiRow(row, 0))
-	rate, rateReady := self.observe(count, time.Now())
+	count, err := providerPgInteger(row.str(0), 64, 0)
+	if err != nil {
+		return nil, err
+	}
+	rate, rateReady, err := self.observe(count, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	if !rateReady {
 		return []finding{
 			healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
@@ -397,7 +439,8 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		verify := "The initiating fault clears, new connections return to the learned band, and two consecutive mature cohorts recover their baseline survival and lifetime distribution."
 		playbook := "SIGNALS.md §2.7"
 		if diagnosticErr != nil {
-			observed += " diagnostic_error=" + diagnosticErr.Error()
+			observed += " diagnostic_error_class=" + classifyObservationError(diagnosticErr)
+			evidence += " The optional matched-cohort source is unavailable; no cohort-specific cause is assigned."
 		} else {
 			observed += " " + diagnostic.observed()
 			if diagnostic.classificationVersion < reliabilityDriftClassificationVersion &&
@@ -409,9 +452,10 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 				action = "Apply the §2.15 migrations through schema head 603, converge every Taskworker on the current Server revision, and let the serialized reliability task perform its mandatory guarded re-anchor and normal score export. Do not restart Connect, manually rotate child identities, edit score rows/Redis blobs, or weaken the reliability gate."
 				verify = "The guard trigger is enabled; all reliability windows reach version 1 with current write tokens; a completed re-anchor and score export restore a nonzero 12-hour passing population; destination diversity expands; and two consecutive mature cohorts recover child creation and lifetime bands."
 				playbook = "SIGNALS.md §2.7 and §2.15"
-			} else if diagnostic.currentParents > 0 && diagnostic.baselineParents > 0 &&
-				float64(diagnostic.currentChildren)/float64(diagnostic.currentParents) >
-					2*float64(diagnostic.baselineChildren)/float64(diagnostic.baselineParents) {
+			} else if providerPgChildRatioDoubled(
+				diagnostic.currentChildren, diagnostic.currentParents,
+				diagnostic.baselineChildren, diagnostic.baselineParents,
+			) {
 				frame = "window-child-churn"
 				mechanism = "The same-sized parent population is creating more derived window clients per parent, so this is window replacement amplification rather than new-account growth. The reliability signature does not prove the version-0 score corruption; inspect provider removals, selection diversity, and client-side verdicts before assigning a cause."
 				context = "Compare the mature cohort's p50/p90 and survivor count with the three-hour control, then join provider-selection and exact Connect/client versions. Do not infer a fleet restart from aggregate rate alone."
@@ -468,7 +512,10 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 	if err != nil {
 		return nil, err
 	}
-	gapS := atoiRow(row, 0)
+	gapS, err := providerPgInteger(row.str(0), 32, -1)
+	if err != nil {
+		return nil, err
+	}
 
 	if gapS < 0 || gapS > 90*60 {
 		activeLog, activeLogSource, activeLogErr := readTaskLifecycleLog(
@@ -478,6 +525,12 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			5*time.Minute,
 			1000,
 		)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if activeLogErr != nil {
+				return nil, &signalContextError{contextErr: contextErr, sourceErr: activeLogErr}
+			}
+			return nil, contextErr
+		}
 		active := parseTaskActiveRun(activeLog, "UpdateClientScores")
 		tier := tierWarn
 		if gapS > 3*60*60 || gapS < 0 {
@@ -512,10 +565,15 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			context = "If reboot-collision correlates this same durable attempt, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
 			action = "Let the live attempt finish. Retain the streaming, bounded-batch score exporter on generations that already have it and roll it out only where version or code evidence says it is absent. If an uninterrupted bounded-export run still exceeds 60 minutes, profile and checkpoint the remaining full-map load and caller-location fan-out. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
 			verify = "This exact claimed attempt reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
-		} else if activeLogErr != nil {
-			evidence += " Task lifecycle lookup failed: " + activeLogErr.Error()
 		}
-		return []finding{{
+		if activeLogErr != nil {
+			// The optional journal error may contain private record metadata.
+			// A retained heartbeat still proves activity during a partial read,
+			// but cannot establish complete lifecycle visibility.
+			observed += " active_log_error_class=" + classifyObservationError(activeLogErr)
+			evidence += " Task lifecycle visibility is incomplete; private source details are omitted."
+		}
+		findings := []finding{{
 			probeId: "pg/selection-stale", tier: tier,
 			class: "selection-stale", target: target, sustain: 1,
 			symptom: fmt.Sprintf("UpdateClientScores last completed %dm ago (healthy: back-to-back runs, gap < ~60m)",
@@ -528,7 +586,14 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			action:    action,
 			verify:    verify,
 			playbook:  "SIGNALS.md §2.8, §2.12, and §2.13",
-		}}, nil
+		}}
+		if activeLogErr != nil {
+			visibility := cannotObserveFinding(target, activeLogErr)
+			visibility.frame = "selection-lifecycle"
+			visibility.playbook = "SIGNALS.md §2.8"
+			findings = append(findings, visibility)
+		}
+		return findings, nil
 	}
 	return []finding{healthyFinding("pg/selection-stale", tierWarn, "selection-stale", target)}, nil
 }
@@ -822,8 +887,8 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		horizon := "no backend_xid/backend_xmin horizon candidate reported"
 		if r.str(12) != "" && r.str(12) != "0" {
 			horizon = fmt.Sprintf(
-				"oldest MVCC horizon candidate: pid=%s horizon_age_xids=%s backend_xid=%s backend_xmin=%s xact_age_s=%s state=%s backend=%s application=%s query=%s",
-				r.str(12), r.str(13), r.str(14), r.str(15), r.str(16), r.str(17), r.str(18), r.str(19), r.str(20),
+				"oldest MVCC horizon candidate: pid=%s horizon_age_xids=%s backend_xid=%s backend_xmin=%s xact_age_s=%s state=%s backend=%s application=withheld query=withheld",
+				r.str(12), r.str(13), r.str(14), r.str(15), r.str(16), r.str(17), r.str(18),
 			)
 		}
 		mechanism := "Dead-row production is outrunning cleanup, or an old backend_xid/backend_xmin horizon is preventing cleanup. A vacuum that has scanned the full heap but remains in index vacuum while dead tuples keep rising points to continuing writer churn, not a stalled heap scan."
