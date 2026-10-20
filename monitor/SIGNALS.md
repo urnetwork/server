@@ -40124,7 +40124,20 @@ value or family, returns a forbidden family, or returns `NXDOMAIN` rather than
 `dns-recursive-answer-family` after two cadences and promote it to PAGE after
 three. Suppress this downstream drift class while authoritative state is
 broken or unknown; do not duplicate the upstream cause or close a prior
-recursive ticket from an unknown sample.
+recursive ticket from an unknown sample. Even a readable recursive answer
+must emit `dns-recursive-unobservable` while authority is non-exact; merely
+omitting downstream findings lets the public notifier count an unsupported
+complete absence. The visibility finding preserves unknown state both while
+held below sustain and after emission, alongside any independent authoritative
+PAGE. It does not claim that the recursive resolver itself failed.
+
+False-positive qualifier: an upstream RRset disagreement can explain the
+recursive view; retain the upstream cause and suppress duplicate recursive
+drift. False-negative qualifier: internal healthy markers are filtered by the
+public adapter and cannot preserve prior incident membership. Only exact
+fresh authority plus the corresponding recursive comparison supplies complete
+absence credit; notification clearance still does not prove the three-sample
+functional recovery window below.
 
 The 2026-09-13 defining incident exposed both halves of this blind spot: an
 authoritative alias RRset had diverged from operator intent while a recursive
