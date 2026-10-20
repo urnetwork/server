@@ -267,6 +267,13 @@ func privateProviderLateCommittedContractClosesRequesterOnly(t *testing.T, credi
 		if closed, ok := model.GetContractClose(ctx, contract); !ok || closed.Outcome != model.ContractOutcomeSettled {
 			t.Fatal("independent provider close did not use normal settlement")
 		}
+		// The reservation stays with its durable debit owner until that owner runs.
+		if got := model.Testing_NetEscrowByteCount(ctx, fixture.grant); got != model.ByteCount(stored.TransferByteCount) {
+			t.Fatal("settlement released the reservation before its debit owner")
+		}
+		if released := privateFlushGrantDebits(t, ctx, fixture.grant); released != 1 {
+			t.Fatal("normal two-party settlement did not journal exactly its contract", released)
+		}
 		if got := model.Testing_NetEscrowByteCount(ctx, fixture.grant); got != 0 {
 			t.Fatal("normal two-party settlement retained the reservation")
 		}
@@ -292,6 +299,7 @@ func TestPrivateProviderContractLoadedSingleConnection(t *testing.T) {
 		defer owner.CloseAndWait(ctx)
 		start := make(chan struct{})
 		done := make(chan error, 8)
+		var reservedBytes atomic.Int64
 		for range 8 {
 			go func() {
 				<-start
@@ -310,6 +318,7 @@ func TestPrivateProviderContractLoadedSingleConnection(t *testing.T) {
 					done <- err
 					return
 				}
+				reservedBytes.Add(int64(stored.TransferByteCount))
 				contract, err := server.IdFromBytes(stored.ContractId)
 				if err != nil {
 					done <- err
@@ -337,8 +346,16 @@ func TestPrivateProviderContractLoadedSingleConnection(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE outcome='settled') FROM transfer_contract WHERE destination_id=$1`, fixture.peer).Scan(&total, &settled))
 		})
-		if total != 8 || settled != 8 || model.Testing_NetEscrowByteCount(ctx, fixture.grant) != 0 {
+		if total != 8 || settled != 8 {
 			t.Fatal("concurrent one-connection lifecycles did not settle exactly eight contracts")
+		}
+		// Settlement leaves each reservation with its durable debit owner.
+		if model.Testing_NetEscrowByteCount(ctx, fixture.grant) != reservedBytes.Load() {
+			t.Fatal("settlement released reservations before their debit owner")
+		}
+		if released := privateFlushGrantDebits(t, ctx, fixture.grant); released != 8 ||
+			model.Testing_NetEscrowByteCount(ctx, fixture.grant) != 0 {
+			t.Fatal("debit owner did not release exactly the eight settled reservations", released)
 		}
 	})
 }

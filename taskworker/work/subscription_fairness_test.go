@@ -107,6 +107,8 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 					!reflect.DeepEqual(stored.Sweep.Historical, legacy) || !reflect.DeepEqual(stored.Cursor, legacy) {
 					t.Fatal("accounting retry lost the post-epoch to historical lane handoff")
 				}
+				// The settled origin keeps its reservation until its debit owner runs.
+				drainCloseRetryOriginDebits(t, ctx, recent)
 				recent.requireAccounting(t, ctx)
 				if _, closed := model.GetContractClose(ctx, historical.originId); closed {
 					t.Fatal("post-epoch page unexpectedly consumed historical work")
@@ -115,6 +117,7 @@ func TestCloseExpiryFairAccountingRetryPersistsLaneHandoff(t *testing.T) {
 				t.Fatal("both completed lanes failed to reset the same rejected task")
 			}
 		}
+		drainCloseRetryOriginDebits(t, ctx, historical)
 		historical.requireAccounting(t, ctx)
 		recent.requireAccounting(t, ctx)
 	})
