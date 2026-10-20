@@ -260,8 +260,14 @@ func pointsOperatorFinding(target, tier, class, symptom, mechanism, action strin
 }
 
 func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	target := pointsReadinessTarget(env)
 	snapshotRows, err := env.runner.pg(ctx, pointsSnapshotQuery)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -313,28 +319,47 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		})
 	}
 
+	// The public adapter discards findings on error. Keep a validated snapshot
+	// warning when a later independent layer is unknown, without asserting
+	// operator readiness or treating an ended parent as a partial observation.
+	dependencyFailure := func(layer string, err error) ([]finding, error) {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		if len(findings) == 0 {
+			return nil, err
+		}
+		return append(findings, cannotObserveFinding("points-readiness/"+layer, err)), nil
+	}
+
 	schemaRows, err := env.runner.pg(ctx, pointsOperatorSchemaQuery)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
 	if err != nil {
-		return nil, err
+		return dependencyFailure("operator-schema", err)
 	}
 	if len(schemaRows) != 1 || len(schemaRows[0]) != 1 {
-		return nil, fmt.Errorf("points operator schema preflight returned an invalid shape")
+		return dependencyFailure("operator-schema", fmt.Errorf("points operator schema preflight returned an invalid shape"))
 	}
 	schemaReady, err := strconv.ParseBool(schemaRows[0].str(0))
 	if err != nil {
-		return nil, fmt.Errorf("points operator schema preflight returned an invalid readiness value")
+		return dependencyFailure("operator-schema", fmt.Errorf("points operator schema preflight returned an invalid readiness value"))
 	}
 	if !schemaReady {
 		return append(findings, pointsOperatorSchemaFinding(target)), nil
 	}
 
 	sourceRows, err := env.runner.pg(ctx, pointsOperatorSourceQuery())
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
 	if err != nil {
-		return nil, err
+		return dependencyFailure("operator-source", err)
 	}
 	source, err := parsePointsOperatorSource(sourceRows)
 	if err != nil {
-		return nil, err
+		return dependencyFailure("operator-source", err)
 	}
 	appendFinding := func(tier, class, symptom, mechanism, action string) {
 		findings = append(findings, pointsOperatorFinding(target, tier, class, symptom, mechanism, action, snapshot, source))
@@ -372,6 +397,9 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			"The operator calendar and currently complete rollup are ahead of the published block snapshot.",
 			"Rollup and snapshot publication are separate reads and transactions. Completion time is unknown; even an old Sunday boundary cannot prove that this rebuild handoff is overdue. A stale snapshot retains its separate two-hour warning.",
 			"Let the normal bounded rollup/rebuild task publish. Check repeated progress and task failures if this persists; do not infer ST readiness or flip the availability bit.")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(findings) == 0 {
 		findings = append(findings, healthyFinding("pg/points-readiness", tierWarn, "points-readiness", target))

@@ -39313,7 +39313,20 @@ This known readiness state is not a probe execution error: a one-shot retains
 the warning and can complete. Stale/incomplete total-point snapshot findings
 remain independent; no operator-readiness healthy sentinel or ST fallback is
 emitted. Preflight read errors or malformed rows still fail closed as
-observation errors.
+observation errors. While the parent is live, a valid complete snapshot that
+already establishes `points-leaderboard-stale` retains that warning if the later
+schema or operator-source read/parse fails. This owning partial result also
+returns a separate `cannot-observe` WARN at the fixed target
+`points-readiness/operator-schema` or `points-readiness/operator-source`;
+its unobservable marker prevents healthy/recovery inference for the signal,
+even while below Sustain. It is returned without a fatal signal error because
+the public adapter discards findings on error. No operator health or failed
+layer's product conclusion is emitted. A fresh snapshot with no established
+positive retains the existing fatal observation-error contract. An ended
+parent, failed original snapshot read, or malformed original snapshot cannot
+publish a stale positive or healthy result; known snapshot absence retains
+its existing unavailable warning. Source-local cancellation/deadline errors
+with a live parent are dependency failures, not proof the parent ended.
 
 When the preflight passes, a third single-output-row, command-deadline-bounded
 query uses a UTC-normalized database clock and the owning model's calendar constants.
@@ -39444,7 +39457,13 @@ Sunday boundaries, exact rollup eligibility, incomplete and missing payment
 links, asynchronous snapshot/source handoffs, observation failures, stale and
 incomplete snapshots, absent/present/malformed schema preflights, one-shot
 completion with a readiness warning, and genuine internal/calendar
-contradictions once the operator schema is observable.
+contradictions once the operator schema is observable. The independent-positive
+controls in `signal_points_partial_test.go` cover stale/future snapshots crossed
+with later read/parse failures, exact dependency stopping points, public
+one-shot/execution-loop held results, actual parent cancellation, private-cell
+and source-error rendering, and no incident clear until complete recovery.
+These controls do not establish a production incidence or repair the external
+points product's writer, rollout, accounting or task boundaries.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
