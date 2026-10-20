@@ -27489,6 +27489,31 @@ to become ready before testing their task fixes.
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
+Scope and observation authority: this probe observes the post-cutover physical
+contract on `public.client_reliability`. The ordinary pre-cutover table is not
+covering-index drift: the separate partition cutover builds its desired index.
+An absent required public relation, a same-named table only in another schema,
+and an unsupported public relation kind are readiness/observation gaps. The
+single catalog query projects an explicit status (`absent`, `wrong-schema`,
+`plain`, `partitioned`, or `unsupported`) in addition to its index facts; missing,
+invalid or inconsistent status is unknown. No service-path check is added.
+
+A positively observed plain table is off this physical probe's post-cutover
+scope; it does not prove that cutover is intended or required now. It produces
+visibility rather than index drift or a physical-contract healthy result.
+Both off-scope plain and unavailable relation states preserve an existing
+index incident through the notifier. Only a qualified partitioned state meeting
+the complete existing index contract supplies physical health and permits the
+ordinary clear window. No quiet scope mechanism or migration policy is inferred.
+
+False-positive qualifier: a legitimate pre-cutover plain table, a fresh local
+fixture or a differently scoped schema is not index corruption, data loss or
+maintenance authorization. Visibility distinguishes missing authority from a
+broken covering index. False-negative qualifier: absent/wrong-schema/plain or
+unsupported-kind evidence must not masquerade as index recovery. These source
+and local deterministic controls establish no Main table loss, cutover state,
+index regression, actual notification clear or recovery.
+
 The partitioned `client_reliability` table has a physical optimization step
 that is intentionally separate from ordinary schema migrations. Production's
 partition cutover created
