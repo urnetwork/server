@@ -35574,9 +35574,15 @@ queue policy.
 | `unknown`, or mode/reason-only schema (`boundary=unobserved` in the monitor frame) | No exact gate is established. | Do not borrow the gate or kind from another process or artifact. `kind=unknown` can reflect the bounded decoder, not necessarily malformed signaling. |
 
 **Recovery and false-negative qualifiers:** `kind=offer` may replay when
-`WaitingForSdpOffer` arrives. A passive peer already holding an offer ignores
-its duplicate; a refused answer is therefore not proved replayed by that
-duplicate. Candidate flush clears its local buffer before sending, so a
+`WaitingForSdpOffer` arrives. Current Connect source replays a passive peer's
+cached answer only for identical offer SDP and matching sender-generation
+presence and value; non-reset legacy offers can replay when both omit the tag.
+The replay uses the duplicate's immutable reply lane, the same zero-wait
+handoff and ordinary admission, without applying SDP again. There is no
+periodic answer retry: another matching offer and available admission are
+required, and the emitting artifact must contain this behavior before it can
+qualify a runtime observation. Candidate flush clears its local buffer before
+sending, so a
 refused candidate is not proved regenerated either. An outer P2P generation
 timeout/reconnect or a usable exchange route can still recover service. This
 asymmetry alone does not establish an outage or justify changing negotiation;
