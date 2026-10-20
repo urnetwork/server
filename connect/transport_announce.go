@@ -590,6 +590,12 @@ func (self *ConnectionAnnounce) run() {
 
 	self.setConnectionId(connectionId)
 	self.startWorker(self.runMeasurementPublisher)
+	// the device's last app version; a failed write never ends the transport
+	if versionErr := self.recoverLiveCall(func() {
+		model.SetDeviceClientVersion(self.ctx, self.clientId, self.appVersion)
+	}); versionErr != nil {
+		glog.Infof("[t][%s]could not set device client version. err = %s\n", hex.EncodeToString(clientAddressHash[:]), versionErr)
+	}
 	if registered := self.settings.connectionRegisteredForTest; registered != nil {
 		registered(self)
 	}

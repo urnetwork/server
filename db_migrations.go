@@ -10506,4 +10506,14 @@ var migrations = []any{
 
 	// 851: explicit runtime-blob consumers independently authenticate retained source envelopes.
 	newSqlMigration(competitionAutomationRuntimeBlobMigration),
+
+	// 852: the app version each device last connected with, from the connect
+	// auth's app_version (model.SetDeviceClientVersion). Nullable columns
+	// only, so applying it is a catalog change and old servers ignore them.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE device
+			ADD COLUMN client_version varchar(64) NULL,
+			ADD COLUMN client_version_time timestamp NULL;
+	`),
 }
