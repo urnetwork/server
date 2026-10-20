@@ -165,9 +165,10 @@ func TestDNSAliasesSignalSyntheticAuthoritativeMismatchSuppressesRecursiveDuplic
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 1 {
-		t.Fatalf("alerts = %d, want one authoritative root cause: %+v", len(alerts), alerts)
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %d, want authoritative root cause and recursive visibility: %+v", len(alerts), alerts)
 	}
+	requireAlertClass(t, alerts, "dns-recursive-unobservable")
 	alert := requireAlertClass(t, alerts, "dns-authoritative-rrset")
 	if alert.SignalNumber != "18.3" || alert.SignalKey != "dns-aliases" ||
 		alert.Target != "alt.example.test" || alert.Frame != "A" {
@@ -196,6 +197,9 @@ func TestDNSRecursiveFindingCannotResolveWhileAuthorityIsNotExact(t *testing.T) 
 	}
 	for _, state := range []dnsAuthorityState{dnsAuthorityUnknown, dnsAuthorityBroken} {
 		findings := dnsRecursiveFindings(result, state)
+		if len(findings) != 1 || findings[0].healthy || findings[0].class != "dns-recursive-unobservable" || !findings[0].isUnobservable() {
+			t.Fatalf("authority state %d lost recursive visibility", state)
+		}
 		for _, finding := range findings {
 			if finding.class == "dns-recursive-answer-family" {
 				t.Fatalf("authority state %d emitted recursive RRset health: %+v", state, finding)
@@ -224,9 +228,10 @@ func TestDNSAliasesSignalSyntheticAuthoritativeNXDomainIsNotNoData(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 1 {
-		t.Fatalf("alerts = %d, want authoritative NXDOMAIN only: %+v", len(alerts), alerts)
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %d, want authoritative NXDOMAIN and recursive visibility: %+v", len(alerts), alerts)
 	}
+	requireAlertClass(t, alerts, "dns-recursive-unobservable")
 	alert := requireAlertClass(t, alerts, "dns-authoritative-rrset")
 	if alert.Target != "alt-v4.example.test" || alert.Frame != "AAAA" ||
 		!strings.Contains(alert.Observed, "non_success_count=2") ||
@@ -255,9 +260,10 @@ func TestDNSAliasesSignalSyntheticAuthoritativeForbiddenFamily(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 1 {
-		t.Fatalf("alerts = %d, want forbidden-family authoritative drift: %+v", len(alerts), alerts)
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %d, want forbidden-family authoritative drift and recursive visibility: %+v", len(alerts), alerts)
 	}
+	requireAlertClass(t, alerts, "dns-recursive-unobservable")
 	alert := requireAlertClass(t, alerts, "dns-authoritative-rrset")
 	if alert.Target != "alt-v6.example.test" || alert.Frame != "A" ||
 		!strings.Contains(alert.Observed, "expected_count=0") ||
@@ -343,8 +349,8 @@ func TestDNSAliasesSignalSyntheticObservationFailuresAreExplicitAndRedacted(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 3 {
-		t.Fatalf("alerts = %d, want partial authority, failed authority, and recursive visibility: %+v", len(alerts), alerts)
+	if len(alerts) != 5 {
+		t.Fatalf("alerts = %d, want partial/failed authority and independent recursive visibility: %+v", len(alerts), alerts)
 	}
 	classes := map[string]int{}
 	for _, alert := range alerts {
@@ -354,7 +360,7 @@ func TestDNSAliasesSignalSyntheticObservationFailuresAreExplicitAndRedacted(t *t
 		}
 		requireAlertOmits(t, alert, "fixture authority endpoint unavailable", "fixture recursive response unavailable")
 	}
-	if classes["dns-authoritative-unobservable"] != 2 || classes["dns-recursive-unobservable"] != 1 {
+	if classes["dns-authoritative-unobservable"] != 2 || classes["dns-recursive-unobservable"] != 3 {
 		t.Fatalf("visibility classes = %+v", classes)
 	}
 	partial := alertByIdentity(t, alerts, "dns-authoritative-unobservable", "alt.example.test", "A")

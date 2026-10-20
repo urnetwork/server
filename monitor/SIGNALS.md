@@ -5078,6 +5078,28 @@ the tail reconciliation window above until their own evidence closes them.
 
 ---
 
+Ordinary returned observation errors additionally retain a fixed
+`execution_boundaries` set when the owning local call supplied proof:
+`global-admission/not-attempted`, `transport-preflight/not-attempted`,
+`host-admission/not-attempted`, `native-guard/not-attempted`,
+`native-start/failed-no-child`, `native-wait/started-joined`, or `native-wait/started-join-unknown`.
+These markers apply to their own returned error branches, not every joined
+attempt. Existing `ssh_admission_failures=acquire,release,unknown` remains
+independent; release alone cannot establish a native start. Missing proof,
+custom command callbacks and adapters that discard an error chain remain
+unknown; bounded traversal exhaustion or invalid marker values explicitly add
+`unknown/unknown`. No marker contains a target, command, stderr, credential,
+request identity or elapsed time. Start/Wait proves only local process lifecycle,
+not authentication, remote execution or database health. Lifecycle error classes,
+alert identity, severity, Sustain, timing, admission and retry policies remain
+unchanged. This prospective source change cannot attribute earlier generic gaps
+and does not fix global starvation or shared admission delay.
+
+Only the new execution-boundary projection caps child inspections and visits at
+64 and marks omitted branches unknown. Existing lifecycle classification and
+shared-admission traversal remain separate and carry no new work bound; this is
+not a guarantee for the whole formatter or arbitrary Error/Unwrap methods.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -30461,6 +30483,28 @@ find /var/lib/grafana/plugins -maxdepth 2 -type f \
   controls do not clear those findings or an independently observed request
   rejection. Runtime `grafana-plugin-registration` investigation and the
   external Grafana rollout/restart owner remain separate from this monitor fix.
+- Recovery authority: a complete HTTP response with a generic HTTP, JSON,
+  missing-result, result-status or result-error failure retains the independent
+  `grafana-datasource-query` finding and its fixed status fields. It also marks
+  plugin execution unknown and emits no plugin healthy sentinel: a 401, an
+  unreadable result or another failed query cannot prove that a previously
+  missing plugin now executes. That visibility survives while the generic
+  finding is held below its two-sample cadence threshold, so the existing
+  notifier does not count these runs toward plugin incident resolution. The
+  explicit plugin failure remains immediate. Only a successful bounded
+  datasource control supplies recovery evidence; the notifier still requires
+  its existing two consecutive complete absent runs. Missing/partial bodies,
+  transport failures and parent cancellation also cannot clear an incident.
+  A parent that ends before or during a control stops further sibling requests
+  and withholds findings from that invocation.
+  False-positive qualifier: retaining the prior incident does not assert that
+  its plugin is still missing; registration is unobserved behind the current
+  failure. False-negative qualifier: a fixed failure classification or absent
+  plugin marker cannot establish recovery, and success through the public
+  boundary still proves only that request, not every serving generation.
+  The marker, generic and successful controls retain response privacy and
+  independent sibling findings. Existing runtime request investigations and
+  dashboard-definition access incidents remain separate causal boundaries.
 - Verify every active exact-edge generation with successful results for both
   controls, Web Analytics view panels populated from `web_page_view`, Logs
   Drilldown selecting `var-ds=warp-loki`, successful evaluation of one
@@ -40102,7 +40146,20 @@ value or family, returns a forbidden family, or returns `NXDOMAIN` rather than
 `dns-recursive-answer-family` after two cadences and promote it to PAGE after
 three. Suppress this downstream drift class while authoritative state is
 broken or unknown; do not duplicate the upstream cause or close a prior
-recursive ticket from an unknown sample.
+recursive ticket from an unknown sample. Even a readable recursive answer
+must emit `dns-recursive-unobservable` while authority is non-exact; merely
+omitting downstream findings lets the public notifier count an unsupported
+complete absence. The visibility finding preserves unknown state both while
+held below sustain and after emission, alongside any independent authoritative
+PAGE. It does not claim that the recursive resolver itself failed.
+
+False-positive qualifier: an upstream RRset disagreement can explain the
+recursive view; retain the upstream cause and suppress duplicate recursive
+drift. False-negative qualifier: internal healthy markers are filtered by the
+public adapter and cannot preserve prior incident membership. Only exact
+fresh authority plus the corresponding recursive comparison supplies complete
+absence credit; notification clearance still does not prove the three-sample
+functional recovery window below.
 
 The 2026-09-13 defining incident exposed both halves of this blind spot: an
 authoritative alias RRset had diverged from operator intent while a recursive

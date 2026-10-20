@@ -376,17 +376,25 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	admissionErr := observation.admitNativeStart(ctx)
 	observation.endLocalPhase(pgLocalFinalGuard)
 	if admissionErr != nil {
-		return "", "", admissionErr
+		return "", "", &observationBoundaryError{err: admissionErr, boundary: observationBoundaryNativeGuard}
 	}
+	boundary := observationBoundaryNativeStart
 	err := cmd.Start()
 	if err == nil {
 		observation.started(ctx)
 		err = cmd.Wait()
+		boundary = observationBoundaryNativeWaitUnknown
+		if cmd.ProcessState != nil {
+			boundary = observationBoundaryNativeWait
+		}
 		if observation != nil {
 			observation.joined(cmd.ProcessState, errOut.String())
 		}
 	} else {
 		observation.stage("ssh_start", "start_failed")
+	}
+	if err != nil {
+		err = &observationBoundaryError{err: err, boundary: boundary}
 	}
 	return out.String(), errOut.String(), err
 }
@@ -420,11 +428,11 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	observation.localPoint(pgLocalTransportEntry)
 	observation.stage("transport_preflight", "not_attempted")
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", &observationBoundaryError{err: err, boundary: observationBoundaryPreflight}
 	}
 	addr := h.addr(self.cfg.addressMode)
 	if addr == "" {
-		return "", &unreachableError{host: h.name, err: fmt.Errorf("no address for mode %q", self.cfg.addressMode)}
+		return "", &observationBoundaryError{err: &unreachableError{host: h.name, err: fmt.Errorf("no address for mode %q", self.cfg.addressMode)}, boundary: observationBoundaryPreflight}
 	}
 
 	if timeout <= 0 {
@@ -439,7 +447,7 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	release, err := self.remoteCommands.acquire(ctx, addr)
 	observation.endLocalPhase(pgLocalHostAdmission)
 	if err != nil {
-		return "", &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}
+		return "", &observationBoundaryError{err: &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}, boundary: observationBoundaryHost}
 	}
 	defer release()
 	observation.localPoint(pgLocalHostGranted)
@@ -476,10 +484,10 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	observation.stage("ssh_start", "unknown")
 	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
 	if cmdCtx.Err() == context.DeadlineExceeded {
-		return out, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
+		return out, carryObservationBoundary(err, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)})
 	}
-	if err := ctx.Err(); err != nil {
-		return out, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return out, carryObservationBoundary(err, contextErr)
 	}
 	if err != nil {
 		stderr := strings.TrimSpace(errOut)
