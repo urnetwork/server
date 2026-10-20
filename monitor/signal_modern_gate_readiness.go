@@ -62,6 +62,8 @@ const (
 	modernGateReadinessMaxShare = 0.5
 	// the oldest dashboard counts the shadow is judged on
 	modernGateReadinessMaxCountsAge = 30 * time.Minute
+	// allow the same cross-host clock skew as other Mimir source reads
+	modernGateReadinessMaxFutureSkew = 30 * time.Second
 	// how long a taskworker process runs before the fleet's agreement is
 	// judged on it: its stats collector registers the gate at its first
 	// refresh, a minute or two after the start, and a drained process's
@@ -434,6 +436,10 @@ func evaluateModernGateReadiness(observation modernGateReadinessObservation, now
 	switch {
 	case now.Before(start.Add(-modernGateReadinessWarnLead)):
 		// only an earlier start opens the window this early
+	case observation.countsStarted.After(now.Add(modernGateReadinessMaxFutureSkew)) && (now.Before(start) || settled.onEvery):
+		// Counts cannot establish readiness or a post-flip drop when the
+		// source claims a read that has not happened yet.
+		unobserved = errors.Join(unobserved, fmt.Errorf("modern gate readiness: the dashboard counts start more than %s in the future (urnetwork_stats_provider_egress_source_started_seconds), so the counts cannot be judged", modernGateReadinessMaxFutureSkew))
 	case now.Before(start):
 		if observation.countsStarted.IsZero() || modernGateReadinessMaxCountsAge < now.Sub(observation.countsStarted) {
 			unobserved = fmt.Errorf("modern gate readiness: the dashboard counts are older than %s (urnetwork_stats_provider_egress_source_started_seconds), so the shadow cannot be judged", modernGateReadinessMaxCountsAge)

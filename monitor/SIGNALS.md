@@ -19589,7 +19589,12 @@ out.
 Outside 72 hours before the earliest start to the end of the watch after the
 latest the signal is otherwise quiet, whatever the gauges say. A part the
 verdict cannot read is `cannot-observe`, beside the findings the rest of it
-gives. No start series means the switch is set, true, false or unreadable,
+gives. For both readiness and the post-flip drop, a dashboard source-read
+start more than 30 seconds in the monitor's future is `cannot-observe`,
+never evidence that a bucket is ready, recovered, or fallen; this permits
+the same small cross-host clock skew as adjacent Mimir source checks.
+Independent fleet-disagreement findings still stand. No start series means
+the switch is set, true, false or unreadable,
 so no flip is scheduled and only the fleet's agreement is judged: the
 owner's postponement silences the rest, and a moved start moves its windows.
 When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
@@ -23568,7 +23573,17 @@ Probe: `journal-buffer`
 
 The edge journal is a short recovery buffer, not the durable log store. Fluent
 Bit continuously moves Warp logs to Loki, and local retention is intentionally
-one hour regardless of host uptime. The effective contract is:
+one hour regardless of host uptime. Until xops `journal-evidence-runner-loki`,
+"Warp logs" meant the service containers only: the warp runner units'
+deploy, drain and readiness lines stayed in this buffer, and on 2026-10-19 the
+decisions behind a connect redeploy loop had rotated out before anyone read
+them. Runner lines now ship too, as their own streams (`service="warp-runner"`,
+`block="<service>-<block>"`; `warpctl logs main warp-runner connect-g1`), and
+warp `512dec9` logs a runner's polled versions only on the first poll, on a
+change and every five minutes instead of twice per five-second poll. 48 hours
+of local journal would cost about 390 GB per edge at the 2026-10-19 rate
+(8 GiB an hour, mostly the `lb` and `connect` containers already in Loki), so
+the buffer stays one hour. The effective contract is:
 
 ```ini
 [Journal]
@@ -32485,6 +32500,10 @@ sudo docker image inspect <image-id> | jq -r '.[0].Created'
 sudo journalctl --utc -u 'warp-main-proxy-*' --since=-10m \
   | grep -E 'Latest version|Polled latest versions'
 ```
+Since warp `512dec9` each runner logs its polled versions on the first poll, on
+every change and otherwise every five minutes, so a ten-minute window still
+holds at least one line per block; the same lines are in Loki as
+`warpctl logs main warp-runner proxy-g1 --since=10m --query='Polled latest versions'`.
 Compare the tag and image creation time with the release containing the fix,
 not merely with the container start time; a reboot can restart an old image.
 If every controller repeatedly polls the old version as `Latest`, the rollout
@@ -37690,11 +37709,14 @@ totals, its failure share, and the failed/attempted counts by sending job. No
 address, phone number, message or identity leaves Mimir.
 
 ACTION: read the failing service's `[aws]account <channel> send failed (<code>)`
-line for the SDK error code and fix the provider side. `AccessDeniedException`
-is an IAM policy that does not allow `ses:SendEmail` or
-`sms-voice:SendTextMessage` for the messaging user on the configured identity
-or origination number; `ThrottlingException` is a quota; a suspended identity
-or origination number refuses every call. Do not retry sends by hand or
+line for the SDK error code, then use the provider's original error details
+to distinguish the cause before changing provider settings.
+`AccessDeniedException` alone cannot distinguish an IAM policy denying
+`ses:SendEmail` or `sms-voice:SendTextMessage` from an SMS account spend
+threshold refusal. `ThrottlingException` reports throttling; a suspended
+identity or origination number can also refuse every call. The counters
+contain no original error details; missing details leave the cause unknown.
+Do not retry sends by hand or
 restart services for this alone: the credential and policy are read per call,
 so a policy fix applies to the next send. Verify with one successful send on
 the channel (`sent > 0`), then a real sign-in code arriving.

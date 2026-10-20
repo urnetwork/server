@@ -108,11 +108,11 @@ func TestNetworkReliabilityScoresSameEndRemovesPrefixOnlyProvider(t *testing.T) 
 		earlierStart := start.Add(-3 * ReliabilityBlockDuration)
 		prefixNetworkId := insertPaymentPlanReliabilityPrefixProvider(t, ctx, earlierStart)
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			UpdateNetworkReliabilityScoresInTx(tx, ctx, earlierStart, end, false)
+			UpdateNetworkReliabilityScoresInTx(tx, ctx, earlierStart, end, false, nil)
 			requirePaymentPlanReliabilityPrefixScore(t, ctx, tx, prefixNetworkId, true)
 		}, server.TxReadCommitted)
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			UpdateNetworkReliabilityScoresInTx(tx, ctx, start, end, false)
+			UpdateNetworkReliabilityScoresInTx(tx, ctx, start, end, false, nil)
 			requirePaymentPlanReliabilityPrefixScore(t, ctx, tx, prefixNetworkId, false)
 			rows := readPaymentPlanReliabilityScores(t, ctx, tx)
 			if len(rows) != 3 {

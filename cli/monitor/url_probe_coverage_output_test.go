@@ -32,7 +32,8 @@ func TestMonitorUrlProbeCoverageOutputAppendsWithoutAlerts(t *testing.T) {
 	}
 	for _, configuration := range []string{"enabled: false", "enabled: true"} {
 		pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(configuration))
-		err := runWithSettingsLoader([]string{"-once", "-include-signal", "url-probe-coverage", "-url-probe-coverage-output", path}, &bytes.Buffer{}, loader)
+		// the synthetic source serves the URL coverage probe alone, not the tier-0 vitals
+		err := runWithSettingsLoader([]string{"-once", "-include-signal", "url-probe-coverage", "-skip-tier-zero-vitals", "-url-probe-coverage-output", path}, &bytes.Buffer{}, loader)
 		pop()
 		if err != nil {
 			t.Fatal(err)

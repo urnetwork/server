@@ -221,6 +221,34 @@ func IncludeSignals(signals []Signal, identifiers ...string) ([]Signal, error) {
 	return selected, nil
 }
 
+// The tier-0 vitals every focused run includes besides the signals it names:
+// PgBouncer pool starvation (§2.11a), connected providers (§1.1a) and open
+// connection handler ownership (§2.16). On 2026-10-19 a focused verification
+// that ran only the signals under change came back clean at 10:17Z, twenty
+// minutes into a pool livelock that went on to disconnect nearly every
+// provider (RUN-MAIN.md, "Tier-0 vitals in every verification").
+var TierZeroVitalSignalKeys = []string{
+	"pgbouncer-pool-starvation",
+	"provider-connections",
+	"connection-orphans",
+}
+
+// IncludeSignalsWithTierZeroVitals returns IncludeSignals' selection plus each
+// tier-0 vital it left out, in registry order. The named identifiers keep
+// IncludeSignals' fail-closed contract, and a tier-0 vital missing from the
+// registry fails closed too, so a focused run cannot silently lose one.
+func IncludeSignalsWithTierZeroVitals(signals []Signal, identifiers ...string) ([]Signal, error) {
+	if len(identifiers) == 0 {
+		return nil, fmt.Errorf("monitor: at least one included signal is required")
+	}
+	// the operator's identifiers resolve exactly as a plain focused run's
+	if _, err := IncludeSignals(signals, identifiers...); err != nil {
+		return nil, err
+	}
+	withVitals := append(append([]string{}, identifiers...), TierZeroVitalSignalKeys...)
+	return IncludeSignals(signals, withVitals...)
+}
+
 // ExcludeSignals returns the registered signals except those named by short
 // key, SIGNALS.md number, or probe ID. Unknown names fail closed so a typo
 // cannot silently re-enable a signal an operator intended to pause.

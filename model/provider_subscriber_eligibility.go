@@ -79,6 +79,9 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 	}
 	// read before any database connection is taken; 0 is the latest slot
 	servingEpoch := readArindbServingEpoch(ctx)
+	// judged before any database connection is taken: the judgement reads
+	// Redis (network_client_handler_liveness.go)
+	liveStaleHandlerIds := defaultLiveStaleNetworkClientHandlers.get(ctx)
 	// Positive decisions always read current connection facts on the primary.
 	// A one-second negative-only cache coalesces repeated rejections; its age
 	// starts before the first fact query. It cannot admit a new unknown or risky
@@ -108,7 +111,7 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 				// Connection queueing has read no facts. Start the bounded age
 				// immediately before the first query; later chunks cannot renew it.
 				markObserved()
-				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), servingEpoch)
+				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout), liveStaleHandlerIds, servingEpoch)
 				if err != nil {
 					readErr = err
 					return
@@ -152,7 +155,9 @@ func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id)
 
 // Aggregate the candidate batch together so the live-handler relation is joined
 // once per batch rather than rescanned by a correlated aggregate per candidate.
-// $3 is the serving epoch: 0 reads each row's latest slot as before the canary;
+// A live handler heartbeat at or after $2 or is one of $3, the stale handlers
+// judged live (network_client_handler_liveness.go).
+// $4 is the serving epoch: 0 reads each row's latest slot as before the canary;
 // otherwise the slot whose epoch it is, and a row with neither is not Quality.
 const providerSubscriberExclusionsSql = `
 	WITH candidates AS MATERIALIZED (
@@ -165,7 +170,7 @@ const providerSubscriberExclusionsSql = `
 		SELECT connections.client_id, connections.connection_id
 		FROM connections
 		JOIN network_client_handler AS handler ON handler.handler_id = connections.handler_id
-			AND handler.heartbeat_time >= $2
+			AND (handler.heartbeat_time >= $2 OR handler.handler_id = ANY($3::uuid[]))
 	)
 	SELECT candidates.client_id, bool_or(COALESCE(location.arin_risk, false)) AS arin_risk,
 		count(live.connection_id) = 0 AS no_live_connection
@@ -175,10 +180,10 @@ const providerSubscriberExclusionsSql = `
 	GROUP BY candidates.client_id
 	HAVING count(live.connection_id) = 0 OR bool_and(
 		CASE
-			WHEN $3::bigint = 0 OR location.arin_database_build_epoch = $3::bigint THEN
+			WHEN $4::bigint = 0 OR location.arin_database_build_epoch = $4::bigint THEN
 				COALESCE(location.arin_quality_verified, false)
 				AND NOT COALESCE(location.arin_non_quality, true)
-			WHEN location.arin_old_database_build_epoch = $3::bigint THEN
+			WHEN location.arin_old_database_build_epoch = $4::bigint THEN
 				COALESCE(location.arin_old_quality_verified, false)
 				AND NOT COALESCE(location.arin_old_non_quality, true)
 			ELSE false
