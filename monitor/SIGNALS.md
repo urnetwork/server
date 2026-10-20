@@ -970,6 +970,21 @@ valid count of zero remains the real `canary-dead` PAGE with sustain 1 on the
 one-minute cadence. Empty optional overdue or failure `GROUP BY` results remain
 valid; this is not a global rule rejecting empty PostgreSQL query results.
 
+The required canary count also must be a nonnegative signed 64-bit integer,
+matching PostgreSQL `COUNT`'s bigint domain. Empty, malformed, fractional,
+negative or overflowing scalar values are unknown
+(`cannot-observe`, `observation-invalid-response`); they cannot supply either
+a zero-completion PAGE or a healthy canary result. Rejected scalar bytes do
+not enter errors or rendered alerts, and optional diagnostics are not read
+after this required observation fails. Valid zero retains the PAGE and valid
+positive counts retain the quiet canary result, including bigint maximum;
+neither result erases independent overdue/parked findings or later component
+visibility. The scalar check does not identify why a real zero occurred.
+These invalid-result controls are synthetic source-contract cases: trusted
+PostgreSQL `COUNT` does not emit them, and no malformed Main result or driver
+failure is established by this repair. Shared permissive integer conversion,
+signed sentinel owners and legitimate empty optional groups are unchanged.
+
 ```sql
 -- completions (locations) in the last 3 minutes: healthy 12–25, broken 0
 SELECT count(*) FROM finished_task

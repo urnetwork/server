@@ -671,11 +671,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
-	row, err := pgAggregateRow(rows, 1)
+	counts, err := pgAggregateIntegers(rows, 1)
 	if err != nil {
 		return nil, err
 	}
-	completions := atoiRow(row, 0)
+	completions := counts[0]
 	if completions == 0 {
 		findings = append(findings, finding{
 			probeId: "pg/canary-dead", tier: tierPage,
