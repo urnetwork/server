@@ -5317,6 +5317,19 @@ raw errors and changes no caps, thresholds, deadlines, cadence, queue protocol,
 claim accounting or native lifecycle. Acquisition detail remains unchanged by
 later release; missing internal release diagnostics are not healthy zero.
 
+When a scoped PG adapter checks an ended parent after this same call publishes
+a complete immutable collector receipt and any continuous terminal state, its
+failure projection uses `phase=post-collection-evaluation` with fixed owner
+cancellation/deadline cause. It retains `collector_complete=true`, the bounded
+sample count and exact `collector_receipt_sha256`, and explicitly leaves
+`evaluator_complete=unknown`. The error remains the original parent lifecycle,
+WARN/unobservable and `pg-query-sample-unavailable`; interrupted findings remain
+withheld. This proof comes from the same call, not a mutable cadence-state read
+or timestamp match. Legacy, preflight, incomplete and undurable paths retain
+their existing unknown/source classifications. Collection completion does not
+prove a complete evaluator verdict, database health or uncapped workload/history
+coverage. No deadline, native lifecycle, sample/cadence/cap policy is changed.
+
 Remote progress uses ordered fixed records matched to this attempt's private
 stdin nonce. Version 1's two records remain supported with an unknown frame
 count: `remote_started` proves validated reader input and `database_identity`

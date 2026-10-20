@@ -891,6 +891,12 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 	}
 	if r.Complete {
+		// Same-call proof exists only after immutable receipt and terminal state
+		// publication. It cannot make a later interrupted evaluation successful.
+		env.pgSampleCompletion = &pgSampleCompletedCollection{ReceiptSha256: receiptSHA256, RequestedAt: r.RequestedAt, FinishedAt: r.FinishedAt, Samples: r.Samples}
+		if recurring {
+			env.pgSampleCompletion.NextEligibleAt = r.FinishedAt.Add(pgQuerySampleCadence)
+		}
 		findings := pgSampleFindings(r, pgTarget(env))
 		for i := range findings {
 			findings[i].evidence += " Immutable receipt_sha256=" + receiptSHA256

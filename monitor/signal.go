@@ -81,6 +81,9 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	findings, err := s.probe.check(ctx, env)
 	if scoped, ok := env.runner.(*hostScopeRunner); ok {
 		if contextErr := ctx.Err(); contextErr != nil {
+			if s.ID() == "pg/query-sample" && env.pgSampleCompletion != nil {
+				return nil, &pgSampleEvaluationInterrupted{contextErr: contextErr, sourceErr: err, collection: *env.pgSampleCompletion}
+			}
 			if err == nil || err == contextErr {
 				return nil, contextErr
 			}
