@@ -515,9 +515,11 @@ func parseRedisPersistentSample(out string) (redisPersistentSample, error) {
 	if len(fields) != expectedFields {
 		return redisPersistentSample{}, fmt.Errorf("bounded Redis family/PTTL response had an unexpected aggregate shape")
 	}
+	// Bound every counter before arithmetic. Nine families and four PTTL
+	// categories then keep all sums and the churn multiplication inside int64.
 	parse := func(field string) (int64, error) {
 		value, err := strconv.ParseInt(field, 10, 64)
-		if err != nil || value < 0 {
+		if err != nil || value < 0 || value > redisPersistentSampleKeyLimit {
 			return 0, fmt.Errorf("bounded Redis family/PTTL response contained an invalid aggregate")
 		}
 		return value, nil
