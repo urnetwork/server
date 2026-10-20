@@ -13394,6 +13394,58 @@ successful-inactive-contract sample in that bounded comparison leaves the
 separate success-side invariant unmeasured, and the two signals' overlapping
 five-minute rates must not be added as unique failures.
 
+2026-10-19/20: the URL prober was the dominant producer. Split by
+`destination_owner`, the detail rate at 02:30Z on 10-20 was 4,724/s
+`egress_prober` and 751/s `other`. The total had regrown from 501/s at 22:10Z
+while the URL pass ran, adding about 1,300/s an hour. Each URL probe mints a
+derived client and revokes it when its tunnel closes. A provider on sdk
+v2026.8.31 or later keeps every return it read from an origin until that
+client acknowledges it, and the sdks before the September fixes retry such a
+return against the revoked client every few seconds for as long as the
+provider stays connected. Three teardown paths left returns behind:
+- the drain revoked after one quiet second, while a provider's resend timer
+  backs off to 8 s;
+- a canceled pass (deploy, shutdown or deadline) skipped the drain;
+- a tunnel whose provider had left was revoked before the provider came back.
+
+Server `b17ca7351` (merged in `5aed41e2d`) changes teardown:
+- After the drain, the derived client keeps acknowledging until a whole 10 s
+  passes with no return while its provider is present, capped at 60 s. The
+  pass's `providertunnel.Retirements` holds that wait, so it doesn't hold the
+  probe slot.
+- Only Close ends the data path; the caller's context no longer does.
+- Probe tunnels follow connect's hosted-client rule and never upgrade to a
+  direct connection.
+
+This stops new routes only. A stale route lasts until its provider reconnects,
+for example after an edge reboot or a Connect redeploy on that provider's host.
+On 10-20 the 03:05Z redeploy of edge-1 and edge-4 halved the `egress_prober`
+rate, from 4,453/s to 2,326/s. Judge the fix by the slope while probes run,
+not by the level:
+
+```promql
+sum(rate(urnetwork_connect_inactive_destination_details_total{
+  destination_owner="egress_prober"}[10m]))
+```
+
+Healthy: the rate stays flat or falls over any hour in which
+`sum(rate(urnetwork_egress_probe_attempts_total[10m]))` is 35–60/s.
+
+`urnetwork_provider_tunnel_retirements_total{path,outcome}` counts every
+revocation:
+- `closed/quiet` should dominate;
+- `unused` counts tunnels that sent their provider nothing, such as
+  capability measurements;
+- `canceled` should appear only at pass deadlines and deploys.
+
+`time_bound`, `no_path`, `cut` and
+`urnetwork_provider_tunnel_retirement_trailing_returns_total` count revocations
+that can still leave a route, and should stay near zero.
+`urnetwork_provider_tunnel_retirement_late_returns_total` counts returns that
+the old one-second drain would have left. `urnetwork_provider_tunnel_retirements_held`
+should be about the probe rate × 11 s. `_backpressure_total` and
+`_errors_total` should be near zero.
+
 Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 `signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
 tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
@@ -22819,10 +22871,11 @@ Do not judge recovery by the commit rate alone. From at least 10-15 until the
 05Z edge reboots on 10-19, about 15–19k commits a second were contract
 creations that ended in `protocol_reject`
 (`urnetwork_contract_creation_completed_total{outcome="protocol_reject"}`),
-with almost no row work. That stream stopped at the reboots and has not come
-back, so commits sit about 20k/s below the days before even with every pool
-healthy. Judge the work rate by `outcome="contract_reply"`, which was 200–650
-a second over those days, and by inserts and updates.
+with almost no row work. That stream stopped at the reboots, so commits sat
+about 20k/s below the days before even with every pool healthy. It regrew
+while the URL prober ran, from 881/s at 22:10Z to about 5.9k/s by 02:40Z on
+10-20 (§2.18). Judge the work rate by `outcome="contract_reply"`, which was
+200–650 a second over those days, and by inserts and updates.
 
 ### 5.13 Planned primary restart — stop the Taskworker first
 Use for a planned edge-2 PostgreSQL restart, such as the 2026-10-13 06:45Z
