@@ -270,13 +270,16 @@ func hmacCutoverReadinessFinding(snapshot hmacCutoverSnapshot) finding {
 	return finding{
 		probeId: "pg/hmac-cutover", tier: tierWarn,
 		class: "contract-hmac-readiness", target: "provider-fleet", frame: "legacy-linux", sustain: 2,
+		// Readiness cannot establish recovery of an earlier incompatibility.
+		// Keep its warning positive without absent-incident clear credit.
+		unobservable: true,
 		symptom: fmt.Sprintf(
 			"%d eligible providers claim a pre-%d.%d.%d Linux version %s the stored-contract HMAC cutover, but current controls do not yet prove one disposition.",
 			snapshot.legacy, storedContractHMACCompatibleYear, storedContractHMACCompatibleMonth, storedContractHMACCompatibleDay, state,
 		),
 		mechanism: "A wall-clock signing change is safe only after every active receiver can verify the new shape. Claimed legacy metadata establishes a readiness risk. Missing current checks or insufficient passing compatible checks keep this sample below the incompatibility-pattern threshold; meeting it would still not establish exact executable ancestry or a per-provider failure cause.",
 		baseline:  "The legacy-claim count reaches zero before the cutoff, or complete current behavior proves compatibility through the exact signer boundary.",
-		observed:  hmacCutoverObserved(snapshot),
+		observed:  hmacCutoverObserved(snapshot) + " incompatible_recovery_observable=false",
 		evidence:  "Only aggregate claimed-version classes, distinct legacy-network count, and current verdict counts leave PostgreSQL. Descriptions and provider/network identities remain private.",
 		context:   "Unknown metadata is not treated as compatible. Conversely, a claimed old version is not by itself proof that the live process still runs old code; the dark/pass comparison is an aggregate pattern, not an HMAC-specific or runtime-attestation discriminator. A current compatible control below the behavioral threshold fails closed to readiness and cannot retroactively negate an earlier behaviorally confirmed incompatibility; a PAGE-to-WARN class reassignment is not recovery.",
 		action:    "Complete §2.19 coverage and compare current legacy and compatible cohorts. Before activating standard signing, upgrade or quarantine the legacy cohort and prove capacity. After activation, use the explicit secure-versus-compatibility decision in this section; do not infer readiness from the calendar or silently alter signing behavior.",

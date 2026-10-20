@@ -20614,6 +20614,22 @@ sample fails closed from `contract-hmac-incompatible` PAGE to
 `contract-hmac-readiness` WARN. That class reassignment is not a severity
 downgrade of one Alert identity, does not prove receiver recovery, and cannot
 retroactively negate an earlier behaviorally confirmed incompatibility.
+
+The readiness WARN retains its existing identity, severity and sustain, but
+marks this run unobservable for incompatible-incident recovery. Its fixed
+`incompatible_recovery_observable=false` qualifier states the boundary: legacy
+claims remain, and the current controls do not establish compatibility. The
+ordinary notifier therefore gives neither held nor emitted readiness samples
+absent-run clear credit for a prior incompatible PAGE. No prior incident is
+invented from readiness alone. Two later complete no-legacy samples can clear
+the monitor incident through the existing notifier gate; that operational clear
+does not replace the security/availability and runtime closure evidence below.
+Deterministic composed controls retain the PAGE through consecutive degraded
+compatible controls, schema/source/parse failures and a requalified PAGE, keep
+the readiness WARN independent, and clear only after two complete no-legacy
+runs. Public render and cancellation controls retain privacy and lifecycle
+boundaries. These local controls are not Main recovery evidence.
+
 Diagnose the compatible-cohort degradation as a separate boundary while
 retaining the prior HMAC incident until its full closure gate passes. This
 prevents a shared capacity or reachability regression from hiding an already
