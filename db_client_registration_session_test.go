@@ -11,7 +11,9 @@ func TestClientRegistrationSessionMigrationFollowsPublishedCatalog(t *testing.T)
 	deliveryIndex := sqlMigrationIndex(t, "ADD COLUMN deliver_time")
 	index := sqlMigrationIndex(t, "ADD COLUMN session_accept_until")
 	windowIndex := sqlMigrationIndex(t, "ADD COLUMN head_window")
-	if deliveryIndex != 839 || deliveryIndex != sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")+1 || index != deliveryIndex+1 || windowIndex != index+1 {
+	// sqlMigrationIndex is 0-based: the published version 839 is index 838,
+	// right after the ARIN canary's 837 and 838
+	if deliveryIndex != 838 || deliveryIndex != sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")+1 || index != deliveryIndex+1 || windowIndex != index+1 {
 		t.Fatal("registration session schema changed published migration order", deliveryIndex, index, windowIndex)
 	}
 	value, ok := migrations[index].(*SqlMigration)
