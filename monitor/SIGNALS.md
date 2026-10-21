@@ -31450,6 +31450,24 @@ or reinterpret a missing observation as zero throughput.
 
 Probe: `mimir-admission`
 
+Fleet counter and journal-context sums use checked nonnegative int64
+aggregation. A sum above MaxInt64 renders only that field as `unavailable`,
+never a wrapped negative, zero, partial total, or saturated exact count.
+Overflow of a direct discard or created/removed delta emits fixed
+`cannot-observe` at `mimir-admission/aggregate`, denies complete/comparable
+recovery credit, and resets the existing quiet windows. Qualified child
+baselines and independently affirmative series/rate PAGE flags remain intact;
+a later complete flat observation can begin a new full quiet window.
+Journal-only sum overflow is optional context unknown and cannot open a direct
+incident or revoke otherwise complete direct-counter recovery authority.
+False-positive qualifier: a representability failure is not proof of service
+failure, unique rejected requests, or actual production counter magnitude.
+False-negative qualifier: the exact oversized fleet total is unavailable even
+though child positives remain affirmative; no new visibility into an unknown
+child, historical loss, or producer attribution is supplied. Per-child parsing,
+identity/generation/reset gates, headroom pairing, thresholds, cadence, state
+schema and atomic-save requirements remain unchanged.
+
 A canceled wait for this probe's existing per-host fanout permit retains
 `execution_boundaries=mimir-host-admission/not-attempted` on that host's
 visibility finding. It proves that this host attempt did not enter transport;

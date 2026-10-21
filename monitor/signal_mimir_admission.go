@@ -139,17 +139,17 @@ type mimirAdmissionAssessment struct {
 	descriptorInstances   int
 	sourceZeroInstances   int
 	journalHosts          int
-	publisherStarts       int64
-	readinessRejects      int64
-	admissionRejects      int64
+	publisherStarts       mimirAdmissionAggregate
+	readinessRejects      mimirAdmissionAggregate
+	admissionRejects      mimirAdmissionAggregate
 	affectedInstances     int
 	initialPositive       int
-	discardIncrease       int64
+	discardIncrease       mimirAdmissionAggregate
 	rateAffectedInstances int
 	rateInitialPositive   int
-	rateDiscardIncrease   int64
-	createdIncrease       int64
-	removedIncrease       int64
+	rateDiscardIncrease   mimirAdmissionAggregate
+	createdIncrease       mimirAdmissionAggregate
+	removedIncrease       mimirAdmissionAggregate
 	memoryMinimum         int64
 	memoryMaximum         int64
 	activeMinimum         int64
@@ -175,6 +175,34 @@ type mimirAdmissionAssessment struct {
 	rateIncidentActive    bool
 	rateQuietFor          time.Duration
 	visibilityFailures    []mimirAdmissionVisibilityFailure
+}
+
+// An aggregate keeps exact nonnegative int64 sums or an explicit unavailable
+// marker. Overflow is sticky for this observation; no partial sum is rendered.
+type mimirAdmissionAggregate struct {
+	value    int64
+	overflow bool
+}
+
+// Parsed inputs and positive counter deltas are nonnegative. Check before
+// addition so accepted individual counters cannot wrap the fleet total.
+func (self *mimirAdmissionAggregate) add(value int64) {
+	if self.overflow {
+		return
+	}
+	if value > math.MaxInt64-self.value {
+		self.overflow = true
+		return
+	}
+	self.value += value
+}
+
+// Render only an exact total or the fixed unknown marker.
+func (self mimirAdmissionAggregate) String() string {
+	if self.overflow {
+		return "unavailable"
+	}
+	return strconv.FormatInt(self.value, 10)
 }
 
 // Visibility failures use fixed messages so remote output cannot enter an
@@ -734,9 +762,9 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 		assessment.instanceCount += len(result.sample.instances)
 		if result.sample.journalComplete {
 			assessment.journalHosts++
-			assessment.publisherStarts += result.sample.publisherStarts
-			assessment.readinessRejects += result.sample.readinessRejects
-			assessment.admissionRejects += result.sample.admissionRejects
+			assessment.publisherStarts.add(result.sample.publisherStarts)
+			assessment.readinessRejects.add(result.sample.readinessRejects)
+			assessment.admissionRejects.add(result.sample.admissionRejects)
 		}
 
 		hostComplete := !result.sample.sourceIncomplete
@@ -836,13 +864,13 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 					seriesPositive = true
 					assessment.affectedInstances++
 					assessment.initialPositive++
-					assessment.discardIncrease += instance.discardTotal
+					assessment.discardIncrease.add(instance.discardTotal)
 				}
 				if instance.rateDiscardTotal > 0 {
 					ratePositive = true
 					assessment.rateAffectedInstances++
 					assessment.rateInitialPositive++
-					assessment.rateDiscardIncrease += instance.rateDiscardTotal
+					assessment.rateDiscardIncrease.add(instance.rateDiscardTotal)
 				}
 			} else {
 				counterReset := instance.discardTotal < previous.discardTotal ||
@@ -861,18 +889,18 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 				if discardDelta := instance.discardTotal - previous.discardTotal; discardDelta > 0 {
 					seriesPositive = true
 					assessment.affectedInstances++
-					assessment.discardIncrease += discardDelta
+					assessment.discardIncrease.add(discardDelta)
 				}
 				if rateDelta := instance.rateDiscardTotal - previous.rateDiscardTotal; rateDelta > 0 {
 					ratePositive = true
 					assessment.rateAffectedInstances++
-					assessment.rateDiscardIncrease += rateDelta
+					assessment.rateDiscardIncrease.add(rateDelta)
 				}
 				if createdDelta := instance.createdTotal - previous.createdTotal; createdDelta > 0 {
-					assessment.createdIncrease += createdDelta
+					assessment.createdIncrease.add(createdDelta)
 				}
 				if removedDelta := instance.removedTotal - previous.removedTotal; removedDelta > 0 {
-					assessment.removedIncrease += removedDelta
+					assessment.removedIncrease.add(removedDelta)
 				}
 			}
 			nextHistories[identity] = current
@@ -882,6 +910,16 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 		} else {
 			assessment.observableHosts++
 		}
+	}
+
+	if assessment.discardIncrease.overflow || assessment.rateDiscardIncrease.overflow ||
+		assessment.createdIncrease.overflow || assessment.removedIncrease.overflow {
+		assessment.directComplete = false
+		assessment.comparable = false
+		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
+			target: "mimir-admission/aggregate",
+			err:    fmt.Errorf("a direct counter aggregate exceeds its numeric bound"),
+		})
 	}
 
 	self.histories = nextHistories
@@ -965,7 +1003,7 @@ func mimirAdmissionHeadroomFinding(assessment mimirAdmissionAssessment) finding 
 // rejected requests and never elevates publisher correlation into causation.
 func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 	state := "new direct counter increase"
-	if assessment.discardIncrease == 0 {
+	if !assessment.discardIncrease.overflow && assessment.discardIncrease.value == 0 {
 		state = "two-hour complete quiet hold in progress"
 	}
 	return finding{
@@ -978,7 +1016,7 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 			mimirAdmissionQuietWindow,
 		),
 		observed: fmt.Sprintf(
-			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d discard_counter_increase=%d memory_series=%d..%d active_series=%d..%d local_limit=%d..%d global_limit=%d..%d local_headroom=%d..%d created_increase=%d removed_increase=%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%d readiness_rejects=%d admission_rejects=%d",
+			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d discard_counter_increase=%s memory_series=%d..%d active_series=%d..%d local_limit=%d..%d global_limit=%d..%d local_headroom=%d..%d created_increase=%s removed_increase=%s generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%s readiness_rejects=%s admission_rejects=%s",
 			state,
 			assessment.configuredHosts,
 			assessment.observableHosts,
@@ -1026,7 +1064,7 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 // flat. Runtime limits are context, never producer attribution.
 func mimirAdmissionRateLimitFinding(assessment mimirAdmissionAssessment) finding {
 	state := "new direct counter increase"
-	if assessment.rateDiscardIncrease == 0 {
+	if !assessment.rateDiscardIncrease.overflow && assessment.rateDiscardIncrease.value == 0 {
 		state = "two-hour complete quiet hold in progress"
 	}
 	return finding{
@@ -1039,7 +1077,7 @@ func mimirAdmissionRateLimitFinding(assessment mimirAdmissionAssessment) finding
 			mimirAdmissionQuietWindow,
 		),
 		observed: fmt.Sprintf(
-			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d rate_discard_counter_increase=%d ingestion_rate_limit=%g..%g/s ingestion_burst_limit=%d..%d series_discard_counter_increase=%d memory_series=%d..%d active_series=%d..%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%d readiness_rejects=%d",
+			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d rate_discard_counter_increase=%s ingestion_rate_limit=%g..%g/s ingestion_burst_limit=%d..%d series_discard_counter_increase=%s memory_series=%d..%d active_series=%d..%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%s readiness_rejects=%s",
 			state,
 			assessment.configuredHosts,
 			assessment.observableHosts,
