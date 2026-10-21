@@ -109,17 +109,17 @@ func TestPaymentReconciliationUsesOneSessionWithSingletonPools(t *testing.T) {
 		defer disableAllReconcileStores(t)()
 		owner := reconcileTestSession(t, t.Context())
 		result, err := RunPaymentReconciliation(owner)
-		if err != nil || result == nil || result.Errors != 0 || len(result.SkippedStores) != 5 {
+		if err != nil || result == nil || result.Errors != 0 || len(result.SkippedStores) != 7 {
 			t.Fatal("single-session reconciliation failed", result, err)
 		}
 		state := owner.Ctx.Value(paymentReconcileConnectionKey{}).(*paymentReconcileConnectionState)
 		state.mutex.Lock()
 		acquisitions, transactions, retained := state.acquisitions, state.transactions, state.owner != nil
 		state.mutex.Unlock()
-		if acquisitions != 1 || transactions != 6 || retained {
+		if acquisitions != 1 || transactions != 8 || retained {
 			t.Fatal("run did not reuse and release its single session", acquisitions, transactions, retained)
 		}
-		if events := model.GetPaymentReconciliationEvents(t.Context(), result.RunId); len(events) != 6 {
+		if events := model.GetPaymentReconciliationEvents(t.Context(), result.RunId); len(events) != 8 {
 			t.Fatal("run acknowledged missing audit commits", len(events))
 		}
 	})

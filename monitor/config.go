@@ -807,6 +807,26 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			},
 		},
 		{
+			// optional until counsel switches the coin on (crypto_pay.yml): a
+			// coin whose file is missing is off. A present partial file is
+			// still observable.
+			key: "monero-payment", resource: "monero.yml", purpose: "Monero view-only wallet daemon for crypto payments", required: false,
+			fields: []credentialFieldSpec{
+				field("monero.wallet_rpc_url", "monero", "wallet_rpc_url"),
+				field("monero.wallet_rpc_user", "monero", "wallet_rpc_user"),
+				field("monero.wallet_rpc_password", "monero", "wallet_rpc_password"),
+				field("monero.primary_address", "monero", "primary_address"),
+			},
+		},
+		{
+			key: "zcash-payment", resource: "zcash.yml", purpose: "Zcash watch-only wallet daemon for crypto payments", required: false,
+			fields: []credentialFieldSpec{
+				field("zcash.wallet_rpc_url", "zcash", "wallet_rpc_url"),
+				field("zcash.wallet_rpc_user", "zcash", "wallet_rpc_user"),
+				field("zcash.wallet_rpc_password", "zcash", "wallet_rpc_password"),
+			},
+		},
+		{
 			key: "coinbase-payment", resource: "coinbase.yml", purpose: "Coinbase data-pack checkout and webhook verification", required: required,
 			fields: []credentialFieldSpec{
 				// The current exchange-rate client is unauthenticated and reads

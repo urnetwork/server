@@ -1,0 +1,295 @@
+{
+  "uid": "urnetwork-crypto-pay",
+  "title": "urnetwork / crypto payments",
+  "description": "Authenticated view of the crypto payment rail (Zcash, Monero and USDC on Solana; server controller/crypto_pay_*.go). Every label is a closed set: asset, delivery, state, reason, source and height kind. No invoice, network, address or amount is a label. A coin that is switched off has no scanner series.",
+  "tags": [
+    "urnetwork",
+    "payments"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_crypto_pay_quotes_total, env)",
+        "definition": "label_values(urnetwork_crypto_pay_quotes_total, env)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "scanner last success age",
+      "description": "Seconds since each coin's scanner last completed a scan. The quote path stops selling a coin whose last success is older than three scan intervals (60 s by default). Every scanned coin has a scanner while its wallet daemon is in the vault, sold or not; a coin with no daemon configured has no series.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (asset) (urnetwork_crypto_pay_scan_last_success_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{asset}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "free pool addresses",
+      "description": "Pre-derived receive addresses waiting for an invoice, per coin. An empty pool refuses new invoices (asset_unavailable) until the refill task derives more.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset) (urnetwork_crypto_pay_address_pool_free{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{asset}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "receipts held for review",
+      "description": "Receipts waiting for an operator, by coin and reason (underpaid, late_underpaid, extra, unknown_address, orphaned, voided, credit_failed). Resolve them with bringyourctl crypto.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset, reason) (urnetwork_crypto_pay_receipts{env=\"$env\",service=\"taskworker\",instance!=\"\",state=\"review\"})",
+          "legendFormat": "{{asset}} {{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "wallet, node and network heights",
+      "description": "The heights each coin's scanner last read: the wallet's scanned block, the node's tip and the network's best known height. A wallet more than max_lag_blocks behind the network stops quoting.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset, kind) (urnetwork_crypto_pay_height{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{asset}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "scans / s by result",
+      "description": "Scanner runs per coin and result. Errors keep the cursor and record the daemon's error; a scan never retries inside a run.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, result) (rate(urnetwork_crypto_pay_scans_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{asset}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "quotes / s by result",
+      "description": "Invoice quotes made (quoted, requoted) and refused, by coin and reason: too few fresh rate sources, divergent sources, scanner lagging, network height unknown, address pool empty, too many open invoices or open code invoices, code delivery off, over the per-invoice cap, or the coin switched off.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, result) (rate(urnetwork_crypto_pay_quotes_total{env=\"$env\",service=~\"api|taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{asset}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "invoices created and credited / s",
+      "description": "Invoices created by coin and delivery, and credits by coin, delivery and timing (on_time, late).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, delivery) (rate(urnetwork_crypto_pay_intents_created_total{env=\"$env\",service=~\"api|taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "created {{asset}} {{delivery}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (asset, delivery, timing) (rate(urnetwork_crypto_pay_credits_total{env=\"$env\",service=~\"api|taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "credited {{asset}} {{delivery}} {{timing}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "rate source requests / s",
+      "description": "Rate source answers and failures by coin and source (kraken, coingecko, coinbase). A quote needs two fresh answers within the spread limit; failures are logged at verbosity 1 only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, source, result) (rate(urnetwork_crypto_pay_rate_source_results_total{env=\"$env\",service=~\"api|taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{asset}} {{source}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "rate spread of the last quote",
+      "description": "Max over min of the fresh rate answers behind each coin's last quote, percent. Quotes are refused above the configured limit (3%).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset) (urnetwork_crypto_pay_rate_spread_percent{env=\"$env\",service=~\"api|taskworker\",instance!=\"\"})",
+          "legendFormat": "{{asset}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "receipts by state",
+      "description": "Receipts the scanner holds by coin and state (seen, confirmed, credited, review, orphaned, ignored), and new receipts recorded per second by state and reason. Ignored receipts are time-locked or transparent Zcash; a mempool receipt the wallet flags as a double spend is seen (reason double_spend) and counts once mined.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset, state) (urnetwork_crypto_pay_receipts{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{asset}} {{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (asset, state, reason) (rate(urnetwork_crypto_pay_receipts_recorded_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "recorded {{asset}} {{state}} {{reason}}"
+        }
+      ]
+    }
+  ]
+}

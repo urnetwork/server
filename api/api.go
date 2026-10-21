@@ -263,6 +263,13 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/pay/data/network-lookup", handlers.PayDataNetworkLookup),
 		router.NewRoute("POST", "/pay/data/solana-intent", handlers.PayDataSolanaIntent),
 		router.NewRoute("POST", "/pay/data/solana-status", handlers.PayDataSolanaStatus),
+		// crypto payments (docs/CRYPTO-PAY-API.md): Zcash, Monero and USDC on
+		// one invoice API; the Solana routes above stay for shipped clients
+		router.NewRoute("GET", "/pay/crypto/assets", handlers.CryptoPaymentAssets),
+		router.NewRoute("POST", "/pay/crypto/intent", handlers.CryptoPaymentIntent),
+		router.NewRoute("POST", "/pay/data/crypto-intent", handlers.PayDataCryptoIntent),
+		router.NewRoute("POST", "/pay/crypto/status", handlers.CryptoPaymentStatus),
+		router.NewRoute("POST", "/pay/crypto/requote", handlers.CryptoPaymentRequote),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),

@@ -1,0 +1,51 @@
+# zebrad 6.4.2 on a private regtest chain, as zecd's own regtest harness runs
+# it (mmm/ZCASH-WALLET-DAEMONS.md §A.6). up.sh writes
+# .state/zebrad.toml from this file, with the funder zecd's transparent address
+# as the miner address. No ZEBRA_* environment variable is set anywhere: zebrad
+# reads those as config overrides.
+
+[network]
+network = "Regtest"
+listen_addr = "127.0.0.1:18344"
+cache_dir = "/data/network"
+
+[network.testnet_parameters]
+disable_pow = true
+
+[network.testnet_parameters.activation_heights]
+NU5 = 1
+NU6 = 1
+"NU6.1" = 4
+"NU6.2" = 4
+# NU6.3 (Ironwood), active on mainnet since 3,428,143; must equal the zecd
+# containers' ZECD_REGTEST_NU63_HEIGHT
+"NU6.3" = __NU63_HEIGHT__
+
+[[network.testnet_parameters.funding_streams]]
+[network.testnet_parameters.funding_streams.height_range]
+start = 1
+end = 1_000_000
+[[network.testnet_parameters.funding_streams.recipients]]
+receiver = "Deferred"
+numerator = 12
+addresses = []
+
+[[network.testnet_parameters.lockbox_disbursements]]
+address = "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v"
+amount = 1
+
+__MINING_SECTION__
+
+[state]
+ephemeral = false
+cache_dir = "/data/state"
+
+# Inside the compose network only; the host reaches it on 127.0.0.1. Cookie
+# auth off, as in zecd's regtest harness (production keeps it on, behind a
+# copied cookie: xops zebrad.toml.j2).
+[rpc]
+listen_addr = "0.0.0.0:18232"
+enable_cookie_auth = false
+
+[tracing]
+use_color = false

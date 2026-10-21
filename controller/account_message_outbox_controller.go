@@ -79,6 +79,11 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SubscriptionDataAppliedTemplate{}).Name(): func() Template {
 		return &SubscriptionDataAppliedTemplate{}
 	},
+	// a data code bought with a coin, owed in the credit's transaction
+	// (crypto_pay_credit.go)
+	(&SubscriptionTransferBalanceCodeTemplate{}).Name(): func() Template {
+		return &SubscriptionTransferBalanceCodeTemplate{}
+	},
 	(&X402ReceiptTemplate{}).Name(): func() Template {
 		return &X402ReceiptTemplate{}
 	},

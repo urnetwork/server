@@ -164,6 +164,11 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
+		// crypto payments (controller/crypto_pay_scan.go): the scan and
+		// address refill chains of the coins that are on, and the retention
+		// unlink
+		work.ScheduleCryptoPaymentScans(clientSession, tx)
+		work.ScheduleCryptoPaymentUnlink(clientSession, tx)
 		// lag.dev guest expiry and result retention (lag.dev/PLAN.md A2, A5)
 		work.ScheduleSweepLag(clientSession, tx)
 	}, server.TxReadCommitted)
@@ -625,6 +630,19 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,
 			work.PaymentReconcilePost,
+		),
+		// crypto payments (controller/crypto_pay_scan.go)
+		task.NewTaskTargetWithPost(
+			work.CryptoPaymentScan,
+			work.CryptoPaymentScanPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.CryptoAddressRefill,
+			work.CryptoAddressRefillPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.CryptoPaymentUnlink,
+			work.CryptoPaymentUnlinkPost,
 		),
 		// lag.dev/PLAN.md A2, A5
 		task.NewTaskTargetWithPost(

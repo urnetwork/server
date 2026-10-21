@@ -11,7 +11,7 @@ import (
 const paymentReconciliationHealthQuery = `
 /* monitor-signal-2.21-payment-reconciliation-health */
 WITH expected_store(store) AS (
-    VALUES ('apple'), ('google'), ('solana'), ('stripe'), ('x402')
+    VALUES ('apple'), ('google'), ('monero'), ('solana'), ('stripe'), ('x402'), ('zcash')
 ), heartbeat AS (
     SELECT max(event_time) AS event_time
     FROM payment_reconciliation_event
@@ -204,7 +204,7 @@ func (paymentReconciliationProbe) check(ctx context.Context, env *probeEnv) ([]f
 // Counts and ages must match their source domains, and the single heartbeat
 // and task aggregates must repeat identically across the complete store set.
 func parsePaymentReconciliationStates(rows []pgRow) ([]paymentReconciliationStoreState, error) {
-	expected := map[string]bool{"apple": false, "google": false, "solana": false, "stripe": false, "x402": false}
+	expected := map[string]bool{"apple": false, "google": false, "monero": false, "solana": false, "stripe": false, "x402": false, "zcash": false}
 	states := make([]paymentReconciliationStoreState, 0, len(expected))
 	for _, row := range rows {
 		if len(row) != 9 {
@@ -367,7 +367,7 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 }
 
 func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
-	allowedStores := map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true, "x402": true}
+	allowedStores := map[string]bool{"apple": true, "google": true, "monero": true, "solana": true, "stripe": true, "x402": true, "zcash": true}
 	allowedActions := map[string]bool{"credited": true, "ended": true, "entitlement_repaired": true}
 	findings := make([]finding, 0, len(rows))
 	seen := map[string]bool{}

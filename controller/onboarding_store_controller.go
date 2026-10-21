@@ -83,6 +83,11 @@ func solanaRecordOnboarding(clientSession *session.ClientSession, paymentSearchR
 	if paymentSearchResult == nil || paymentSearchResult.NetworkId == nil {
 		return
 	}
+	// an intent of the generic crypto API recorded its tier and offer inside
+	// its credit (crypto_pay_credit.go)
+	if cryptoLinkedSolanaIntentLookup(nil, clientSession, paymentSearchResult.PaymentReference) != nil {
+		return
+	}
 	networkId := *paymentSearchResult.NetworkId
 	plan := paymentSearchResult.SubscriptionPlan
 	offerApplied := plan == model.SolanaPlanYearlyOnboarding

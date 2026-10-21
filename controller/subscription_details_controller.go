@@ -49,7 +49,7 @@ const SubscriptionCadenceYearly = "yearly"
 const SubscriptionCadenceMonthly = "monthly"
 
 type SubscriptionDetail struct {
-	// the market: stripe | apple | google | solana | manual | x402 | "" (unknown)
+	// the market: stripe | apple | google | solana | monero | zcash | manual | x402 | "" (unknown)
 	Store string `json:"store"`
 	// the wire plan value ("supporter"); the ui names it Pro
 	Plan string `json:"plan"`
@@ -68,7 +68,8 @@ type SubscriptionDetail struct {
 	// where the customer manages it when we cannot (App Store / Google Play)
 	ManageUrl string `json:"manage_url"`
 	// the store handle, for support: invoice id (stripe), original transaction
-	// id (apple), purchase token (google), payment reference (solana)
+	// id (apple), purchase token (google), payment reference (solana), invoice
+	// id (monero, zcash)
 	TransactionId string `json:"transaction_id,omitempty"`
 }
 
@@ -276,7 +277,7 @@ func buildSubscriptionDetails(
 		case model.SubscriptionMarketGoogle:
 			detail.ManageUrl = googleManageSubscriptionsUrl
 			detail.TransactionId = renewal.PurchaseToken
-		case model.SubscriptionMarketSolana:
+		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
 			detail.TransactionId = renewal.TransactionId
 		}
 
@@ -918,6 +919,12 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 		return subscriptionCancelError(
 			SubscriptionErrorCodeDoesNotRenew,
 			"A USDC payment covers one period and does not renew. There is nothing to cancel.",
+			"",
+		)
+	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+		return subscriptionCancelError(
+			SubscriptionErrorCodeDoesNotRenew,
+			"A crypto payment covers one period and does not renew. There is nothing to cancel.",
 			"",
 		)
 	default:

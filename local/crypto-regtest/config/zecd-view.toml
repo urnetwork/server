@@ -1,0 +1,58 @@
+# The wallet under test: a WATCH-ONLY zecd holding a regtest test wallet's
+# unified full viewing key and no spending key. Configured like production
+# (xops host_files/snow/crypto-pay/zecd.toml.j2), except:
+#   - network = "regtest";
+#   - the upstream is zebrad in the compose network (an RFC 1918 address, so
+#     rfc1918_is_local stays at its default, true), where production dials
+#     loopback with Zebra's cookie;
+#   - RPC binds the container's interfaces (published on host 127.0.0.1 only);
+#   - sync polls every 2 s instead of 20 s, to keep the tests short.
+network = "regtest"
+default_wallet = "default"
+
+[backend]
+server = "zebra://zebrad:18232"
+connect_timeout_secs = 10
+allow_remote_cleartext = false
+
+[rpc]
+bind = "0.0.0.0"
+port = 18262
+user = "urpay"
+password_file = "/secrets/zecd-view.rpc-password"
+# production's invoicer safelist (xops wallets.yml crypto_pay_zecd_allowed_methods)
+allowed_methods = [
+  "getnewaddress",
+  "z_getaddressforaccount",
+  "getaddressinfo",
+  "listsinceblock",
+  "listtransactions",
+  "z_listtransactions",
+  "gettransaction",
+  "getreceivedbyaddress",
+  "getblockchaininfo",
+  "getblockcount",
+  "getwalletinfo",
+  "waitforblockheight",
+  "waitforsync",
+  "validateaddress",
+  "z_validateaddress",
+  "z_listunifiedreceivers",
+]
+
+[keys]
+bootstrap_from_keys = true
+
+[pools]
+# shielded only (ZCASH.md decision 4): an Orchard receiver, where Ironwood
+# notes arrive too, and a Sapling receiver
+enabled = ["orchard", "sapling"]
+default_receivers = ["orchard", "sapling"]
+transparent = false
+
+[sync]
+interval_secs = 2
+
+[log]
+level = "info"
+format = "text"
