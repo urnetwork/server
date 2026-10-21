@@ -1669,7 +1669,7 @@ func playRenewalMatchesSubscriptionInConn(connOwner server.PgConn,
 //	    amount >= quote - tolerance -> credit (through the intent one-shot)
 //	recorded no_intent payment already credited elsewhere -> clear the record
 //	active renewal whose credited tx signature is NOT on-chain (per Helius,
-//	    full-history lookup, credited > 1h ago) -> end
+//	    full-history lookup, credited > 1h and < unlink_after ago) -> end
 //	underpaid records -> left for the operator (still underpaid)
 func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
@@ -1749,6 +1749,12 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 	// leg 2: verify credited payments still exist on-chain. A signature that
 	// Helius' full-history lookup cannot find means the credited transaction
 	// never landed (dropped or rolled back) -- entitlement without payment.
+	//
+	// Only payments credited within the retention window are verified: once
+	// unlink_after has passed since the credit, the renewal no longer names
+	// its intent, nor the intent its network (RunCryptoPaymentUnlink), and a
+	// transaction that was on-chain for a month does not leave it.
+	linkedSince := run.now.Add(-cryptoPayConfigFunc().UnlinkAfter)
 	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
@@ -1768,6 +1774,10 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 		// only re-verify well past finality, so a fresh credit is never judged
 		// missing while the index catches up
 		if renewal.StartTime.After(run.now.Add(-paymentReconcileSolanaFinalityGrace)) {
+			continue
+		}
+		// past the retention window: unlinked, or about to be
+		if renewal.StartTime.Before(linkedSince) {
 			continue
 		}
 		if renewal.TransactionId == "" {
