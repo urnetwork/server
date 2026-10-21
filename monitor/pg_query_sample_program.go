@@ -45,6 +45,35 @@ def observe_output():
   if not valid:progress_disabled=True;return
   if progress_index==0 and (len(raw)>4096 or not all(type(row.get(k)) is bool for k in ('primary','read_only','database_ok'))):progress_disabled=True;return
   progress(stage,count);progress_index+=1
+# Only the last two activity iterations and final collection have markers.
+# They prove psql dispatch/return, not server execution or the pending query.
+tail_expected=[(c,i) for i in (10,11) for c in 'wWcCaA']+[(c,12) for c in 'cCbBhH']
+tail_sequence=0
+tail_disabled=False
+stdout_pending=bytearray()
+stdout_received=0
+def absorb_stdout(chunk):
+ global tail_sequence,tail_disabled,stdout_received
+ stdout_received+=len(chunk)
+ if stdout_received>4194304:raise Failure('output','output_cap')
+ stdout_pending.extend(chunk)
+ while True:
+  end=stdout_pending.find(b'\n')
+  if end<0:return
+  line=bytes(stdout_pending[:end+1]);del stdout_pending[:end+1]
+  if line.startswith(b'monitor-pg-tail '):
+   expected=None
+   if not tail_disabled and tail_sequence<len(tail_expected):
+    code,index=tail_expected[tail_sequence]
+    expected=('monitor-pg-tail %s %02d %s %02d\n'%(nonce,tail_sequence,code,index)).encode()
+   if line==expected:
+    sys.stderr.write('mpg3 %s %02d %s %02d\n'%(nonce,tail_sequence,code,index));sys.stderr.flush()
+    tail_sequence+=1
+    continue
+   if not tail_disabled:
+    sys.stderr.write('mpg3 %s 99 ! 99\n'%nonce);sys.stderr.flush()
+   tail_disabled=True
+  output.extend(line);observe_output()
 def sql_phase(raw):
  match=re.search(r'psql:(?:<stdin>|-):([0-9]+):',raw)
  if not match:return 'child_process'
@@ -74,6 +103,12 @@ try:
  assert 0<len(cfg['sql'])<200000 and 0<cfg['port']<65536
  assert re.fullmatch('[0-9a-f]{32}',cfg['transport_nonce'])
  sql=cfg['sql'];nonce=cfg['transport_nonce']
+ marker='\\echo monitor-pg-tail __MONITOR_PG_TAIL_NONCE__ '
+ marker_lines=[line for line in sql.splitlines() if line.startswith(marker)]
+ if marker_lines:
+  expected=[marker+'%02d %s %02d'%(n,code,index) for n,(code,index) in enumerate(tail_expected)]
+  assert marker_lines==expected
+  sql='\n'.join(line.replace('__MONITOR_PG_TAIL_NONCE__',nonce,1) if line.startswith(marker) else line for line in sql.split('\n'))
  env=dict(os.environ,PGPASSWORD=cfg['password'],PGCONNECT_TIMEOUT='3',PGOPTIONS='-c statement_timeout=3000 -c lock_timeout=250 -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=3000',LC_ALL='C')
  deadline=time.monotonic()+32
  phase='child_start'
@@ -93,15 +128,15 @@ try:
     if not payload:sel.unregister(p.stdin);p.stdin.close()
    else:
     chunk=os.read(key.fileobj.fileno(),65536)
-    if not chunk:sel.unregister(key.fileobj);key.fileobj.close()
+    if not chunk:
+     if key.fileobj is p.stdout and stdout_pending:output.extend(stdout_pending);stdout_pending.clear()
+     sel.unregister(key.fileobj);key.fileobj.close()
     elif key.fileobj is p.stderr:
      room=4096-len(stderr)
      if len(chunk)>room:stderr_truncated=True
      stderr.extend(chunk[:room])
     else:
-     output.extend(chunk)
-     if len(output)>4194304:raise Failure('output','output_cap')
-     observe_output()
+     absorb_stdout(chunk)
  status=p.wait(timeout=max(.001,deadline-time.monotonic()))
  if status!=0:raise Failure(*child_failure())
  if broken_stdin:raise Failure('stdin','broken_pipe')
