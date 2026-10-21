@@ -2058,6 +2058,14 @@ backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
 proves the owner. This probe exports only aggregate loopback counts and ages;
 the exact loopback address/CIDR predicate never appears in logs or alerts.
 
+Missing, malformed, or failed aggregate evidence is unavailable, not healthy
+reserve or proof of a pool outage. Public errors retain only owned field names
+and fixed failure classes; raw cells, invalid-state dumps, and source diagnostics
+are withheld. Cancellation and deadline causes remain recognizable without
+retaining private source causes; intentional host exclusions remain partial
+coverage. This boundary does not establish current runtime leakage or full
+settings equality, and valid aggregate warning thresholds remain unchanged.
+
 The application pool has a separate ownership failure: `GetNetworkUser` used
 to retain its profile-read client while four authentication helpers opened
 independent transactions from the same pool. At saturation, each outer reader
@@ -2084,6 +2092,17 @@ FROM pg_stat_activity
 WHERE backend_type = 'client backend';
 ```
 
+- FALSE-POSITIVE QUALIFIER: a shaped numeric row is not authoritative until
+  the nonnegative idle, active and idle-in-transaction counts fit within the
+  loopback-client count, which must fit within total clients. Validate each
+  partition against the remaining count without adding counts that can overflow.
+  Other backend states can leave the listed partition smaller than its parent;
+  equality is not required. Impossible counts are unavailable, not pool pressure.
+- FALSE-NEGATIVE QUALIFIER: individually representable counts can have an
+  unrepresentable sum. Such an inconsistent snapshot, or any cell outside the
+  supported integer range, must produce `cannot-observe`, never healthy reserve
+  or recovery credit. Valid low-idle observations retain the healthy threshold;
+  valid high-idle observations retain their independent warning.
 - HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
   ceiling, excess pool connections drain toward their configured warm minimum
   after 600 idle seconds, and §1.3a retains both more than 25% normal-role

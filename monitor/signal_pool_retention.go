@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -95,7 +96,7 @@ func parsePoolRetentionRows(rows []pgRow) (poolRetentionState, error) {
 	for i, name := range names {
 		value, err := strconv.Atoi(rows[0].str(i))
 		if err != nil || value < 0 {
-			return poolRetentionState{}, fmt.Errorf("invalid PostgreSQL pool-retention %s %q", name, rows[0].str(i))
+			return poolRetentionState{}, fmt.Errorf("invalid PostgreSQL pool-retention %s", name)
 		}
 		values[i] = value
 	}
@@ -110,9 +111,11 @@ func parsePoolRetentionRows(rows []pgRow) (poolRetentionState, error) {
 		oldestIdleSec: values[7],
 	}
 	if state.normalCeiling <= 0 || state.localClients > state.totalClients ||
-		state.localIdle+state.localActive+state.localIdleTx > state.localClients ||
+		state.localIdle > state.localClients ||
+		state.localActive > state.localClients-state.localIdle ||
+		state.localIdleTx > state.localClients-state.localIdle-state.localActive ||
 		state.agedIdle > state.localIdle {
-		return poolRetentionState{}, fmt.Errorf("inconsistent PostgreSQL pool-retention summary: %+v", state)
+		return poolRetentionState{}, errors.New("inconsistent PostgreSQL pool-retention summary")
 	}
 	return state, nil
 }
@@ -155,7 +158,17 @@ func poolRetentionMechanism(state poolRetentionState) string {
 func (poolRetentionProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	rows, err := env.runner.pg(ctx, poolRetentionQuery)
 	if err != nil {
-		return nil, err
+		// Preserve only safe lifecycle and scope classes, never private source text.
+		switch {
+		case hostScopeOnlyError(err):
+			return nil, &hostScopeExcludedError{}
+		case errors.Is(err, context.Canceled):
+			return nil, fmt.Errorf("PostgreSQL pool-retention observation unavailable: %w", context.Canceled)
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, fmt.Errorf("PostgreSQL pool-retention observation unavailable: %w", context.DeadlineExceeded)
+		default:
+			return nil, errors.New("PostgreSQL pool-retention observation unavailable")
+		}
 	}
 	state, err := parsePoolRetentionRows(rows)
 	if err != nil {
