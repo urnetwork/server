@@ -10,30 +10,30 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: 44e9a3745817aed1f84e8aee81e5c485c7d58bc9
+    ref: f1837db6df365cc24ecbd9fa6f0bf7c40cd9ea11
   - repository: urnetwork/glog
     path: glog
-    ref: 80a11b434ae90ae2221deb932daa21913919875a
+    ref: c9292862af39bbc73aeeddb38981059841ea84fe
   - repository: urnetwork/sdk
     path: sdk
-    ref: 8d8ecc4d84763de09f0a69c355b3a65e79d38126
+    ref: 23b3c7dd18fc16be13e8782501d6fb4cffe92aa7
   - repository: urnetwork/proxy
     path: proxy
-    ref: 15ccbdda72756ef07d05d3a18a50dc036c321576
+    ref: 69824fd10f202c88e6fccfff5cadff37b3a274eb
   - repository: urnetwork/goidenticons
     path: goidenticons
-    ref: 06eb779a691e056be7dc5fa9a0239001c3ea390f
+    ref: 39ccec1b69db3a6f67e7346d6f44863499e6241d
   - repository: urnetwork/userwireguard
     path: userwireguard
-    ref: 85fb1ca4086fa5dbfcda526bec7a17a894e691b9
+    ref: f9a92f0e5f5577a80d358065c4d39ca21f971a1c
   - repository: urnetwork/warp
     path: warp
-    ref: 3b6e875f83140b2de1a50d2bfffe0f7830edd74e
+    ref: 142b48b4553e819537a17b108ce3824d0547857e
   - repository: urfoundation/sn
     path: sn
-    ref: a70dae9c367868073f7325a16b34bd885f59b943
+    ref: 83e6f48c2541001850cf2b10a96a45654a85e431
   # Server and SN's fixture generator use this same reviewed fork. Published
   # release modules receive an immutable replacement from the builder.
   - repository: urnetwork/gvisor
     path: gvisor
-    ref: c0783dba2eeff7b79692a7f122ffee5f8bd837c1
+    ref: 5b55cde5a3cbfd3aa151eca8137a49e8b3a22924
