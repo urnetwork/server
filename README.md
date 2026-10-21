@@ -4,7 +4,7 @@
 
 [The source lock](local/source-graph/lock.yml) locks the sibling repositories to
 complete commit IDs. Check out those revisions beside `server`, using the listed
-directory names, and use Go 1.26.7. The source gate verifies the effective module
+directory names, and use Go 1.27.3. The source gate verifies the effective module
 replacements and refuses stale or dirty sibling inputs. Build first to populate
 the checksum-verified module cache used by the offline source check:
 
