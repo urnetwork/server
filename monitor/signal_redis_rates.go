@@ -374,7 +374,7 @@ func getBoundedGrafanaJSON(
 
 func auditRedisRatesDashboard(response redisRatesDashboardEnvelope) (redisRateWindowAudit, error) {
 	if response.Dashboard.UID != redisRatesDashboardUID {
-		return redisRateWindowAudit{}, fmt.Errorf("Grafana returned dashboard UID %q", response.Dashboard.UID)
+		return redisRateWindowAudit{}, fmt.Errorf("unexpected response: Grafana dashboard UID mismatch")
 	}
 	expressionsByPanel := map[int][]string{}
 	var collect func([]redisRatesPanel)
@@ -411,7 +411,7 @@ func auditRedisRatesDashboard(response redisRatesDashboardEnvelope) (redisRateWi
 
 func auditRedisRatesAlertRule(rule redisRatesAlertRule) (redisRateWindowAudit, error) {
 	if rule.UID != redisRatesAlertRuleUID {
-		return redisRateWindowAudit{}, fmt.Errorf("Grafana returned alert-rule UID %q", rule.UID)
+		return redisRateWindowAudit{}, fmt.Errorf("unexpected response: Grafana alert-rule UID mismatch")
 	}
 	audit := redisRateWindowAudit{uid: rule.UID, expectedOccurrences: 2}
 	joined := ""
