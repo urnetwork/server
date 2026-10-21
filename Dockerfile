@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23 AS builder
+FROM golang:1.27.3@sha256:6928d94d1142af58816fed5a62338d605a266ccd53a0deaab6b1096f19059261 AS builder
 ADD . /build/
 RUN mkdir /out
 WORKDIR /build/

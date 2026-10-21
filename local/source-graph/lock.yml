@@ -4,7 +4,7 @@
 # complete source revisions makes one server commit select one reproducible
 # graph. Bump the refs together after compiling the service commands. The tests
 # in this directory read the refs from here.
-go: 1.26.7
+go: 1.27.3
 siblings:
   # Connect's tracked sctp/ directory supplies the SCTP fork from the same
   # revision.
