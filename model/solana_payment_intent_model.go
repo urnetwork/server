@@ -881,3 +881,216 @@ func ListSolanaPaymentIntentsByAmountMicro(
 	})
 	return
 }
+
+// ----- the retention unlink of the old Solana Pay endpoints -----
+//
+// The payments of POST /solana/payment-intent (a plan for the signed-in
+// network) and POST /pay/data/solana-intent (a data pack for a named network)
+// keep their link to the network for unlink_after past the credit, as a
+// crypto invoice's does (UnlinkCryptoPaymentIntents, mmm/ZCASH-CONTRACT.md
+// §3.13.6). An intent linked from a crypto invoice (USDC through the invoice
+// flow) is the invoice's to unlink, and these never touch it.
+
+// solanaMatchNoteNetworkPattern finds a network id in an unfulfilled
+// payment's match note: the memo-less match describes a candidate intent as
+// "intent <reference> (network <id>, plan <plan>, quoted <amount> USDC)".
+const solanaMatchNoteNetworkPattern = `network [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+
+// What an unlinked match note says in place of the network id.
+const solanaMatchNoteNetworkUnlinked = `network (unlinked)`
+
+// UnlinkSolanaPaymentIntents drops the link between the old endpoints' paid
+// intents and the networks they paid for, once cutoff has passed since the
+// credit. An intent keeps no credit time of its own. A plan's credit wrote
+// its renewal with its own clock (start_time), so that is a plan's credit
+// time. A data pack's credit wrote nothing the intent can be joined to, so its
+// clock is the intent's created_at: a pack is credited only while its intent
+// is open, and the sweep deletes an open intent an hour after its day-long
+// quote expires. Its link is kept at most unlink_after past the credit, and
+// at least about a day less.
+//
+// For each intent, in one transaction:
+//   - a plan's renewal gets a fresh random transaction id. The renewal is
+//     keyed by the reference, or by the signature for the credits of
+//     2025-09-06 to 2025-09-09, and neither finds it after;
+//   - the intent loses its network, and its times are truncated to the day;
+//   - the reconciliation events about its payment (store solana, evidence
+//     its signature) lose their network;
+//   - the unfulfilled payments about it lose their network, also in the
+//     match note: an underpayment of its quote, and a memo-less payment
+//     whose note names it.
+//
+// After the batch, every Solana event older than cutoff loses its network,
+// whatever it names, as the crypto stores' events do.
+//
+// The reference, the signature, the amounts and the days stay for
+// accounting, as the crypto unlink keeps the txid. The signature also keeps a
+// redelivery of the payment from being credited again. The network's
+// renewal, balances and welcome offer are its own and stay; someone with
+// database access could still correlate their amounts and times with the
+// payment, as for the crypto invoices. The amount reservation names no
+// network, and its hold must run out. One batch per call, oldest first; the
+// caller repeats while a batch comes back full.
+func UnlinkSolanaPaymentIntents(ctx context.Context, cutoff time.Time, limit int) (unlinked int) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		unlinked = 0
+		type unlinkRow struct {
+			reference string
+			networkId server.Id
+			signature string
+		}
+		rows := []*unlinkRow{}
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT intent.payment_reference, intent.network_id, intent.tx_signature
+				FROM solana_payment_intent intent
+				LEFT JOIN LATERAL (
+					SELECT min(renewal.start_time) AS start_time
+					FROM subscription_renewal renewal
+					WHERE renewal.network_id = intent.network_id
+					  AND renewal.market = $3
+					  AND renewal.transaction_id IN (intent.payment_reference, intent.tx_signature)
+				) credit ON true
+				WHERE intent.tx_signature IS NOT NULL
+				  AND intent.network_id IS NOT NULL
+				  AND NOT EXISTS (
+					SELECT 1 FROM crypto_payment_intent invoice
+					WHERE invoice.solana_reference = intent.payment_reference
+				  )
+				  AND COALESCE(credit.start_time, intent.created_at) < $1
+				ORDER BY COALESCE(credit.start_time, intent.created_at), intent.payment_reference
+				LIMIT $2
+				FOR UPDATE OF intent SKIP LOCKED
+			`,
+			cutoff,
+			limit,
+			SubscriptionMarketSolana,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				row := &unlinkRow{}
+				server.Raise(result.Scan(&row.reference, &row.networkId, &row.signature))
+				rows = append(rows, row)
+			}
+		})
+
+		references := []string{}
+		signatures := []string{}
+		for _, row := range rows {
+			// a plan's renewal; a data pack has none
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE subscription_renewal
+					SET transaction_id = $5
+					WHERE network_id = $1 AND market = $2 AND transaction_id IN ($3, $4)
+				`,
+				row.networkId,
+				SubscriptionMarketSolana,
+				row.reference,
+				row.signature,
+				server.NewId().String(),
+			))
+			references = append(references, row.reference)
+			signatures = append(signatures, row.signature)
+		}
+		if 0 < len(rows) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE solana_payment_intent
+					SET network_id = NULL,
+						created_at = date_trunc('day', created_at),
+						expires_at = date_trunc('day', expires_at)
+					WHERE payment_reference = ANY($1)
+				`,
+				references,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE payment_reconciliation_event
+					SET network_id = NULL
+					WHERE store = $1 AND network_id IS NOT NULL AND evidence = ANY($2)
+				`,
+				SubscriptionMarketSolana,
+				signatures,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE solana_unfulfilled_payment
+					SET network_id = NULL,
+						match_note = regexp_replace(match_note, $2, $3, 'gi')
+					WHERE (network_id IS NOT NULL OR match_note ~* $2)
+					  AND (
+						payment_reference = ANY($1)
+						OR EXISTS (
+							SELECT 1 FROM unnest($1::text[]) AS unlinked(reference)
+							WHERE strpos(
+								solana_unfulfilled_payment.match_note,
+								'intent ' || unlinked.reference || ' (network '
+							) > 0
+						)
+					  )
+				`,
+				references,
+				solanaMatchNoteNetworkPattern,
+				solanaMatchNoteNetworkUnlinked,
+			))
+		}
+		unlinked = len(rows)
+
+		// and every Solana event older than the cutoff, whatever it names:
+		// also those about a USDC invoice's payment, which name its signature
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE payment_reconciliation_event
+				SET network_id = NULL
+				WHERE store = $1 AND network_id IS NOT NULL AND event_time < $2
+			`,
+			SubscriptionMarketSolana,
+			cutoff,
+		))
+	}, server.TxReadCommitted)
+	return
+}
+
+// UnlinkSolanaUnfulfilledPayments drops the network from the unfulfilled
+// Solana payments recorded before cutoff: money that arrived and bought
+// nothing, an underpayment of a quote (whose network is the quote's) or a
+// payment no open intent matched (whose match note may name a candidate
+// intent's network). Each loses its network, in the column and in the note.
+// The row stays, with its signature, amounts, reference, sender and times: it
+// is the one record of money to refund or credit by hand, and the chain shows
+// all of those to anyone who has the signature. One batch per call, oldest
+// first; the caller repeats while a batch comes back full.
+func UnlinkSolanaUnfulfilledPayments(ctx context.Context, cutoff time.Time, limit int) (unlinked int) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE solana_unfulfilled_payment
+				SET network_id = NULL,
+					match_note = regexp_replace(match_note, $2, $3, 'gi')
+				WHERE tx_signature IN (
+					SELECT tx_signature
+					FROM solana_unfulfilled_payment
+					WHERE record_time < $1
+					  AND (network_id IS NOT NULL OR match_note ~* $2)
+					ORDER BY record_time, tx_signature
+					LIMIT $4
+					FOR UPDATE SKIP LOCKED
+				)
+			`,
+			cutoff,
+			solanaMatchNoteNetworkPattern,
+			solanaMatchNoteNetworkUnlinked,
+			limit,
+		))
+		unlinked = int(tag.RowsAffected())
+	}, server.TxReadCommitted)
+	return
+}

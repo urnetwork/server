@@ -613,6 +613,10 @@ const cryptoUnlinkMaxBatches = 100
 // CryptoPaymentUnlinkResult is what one unlink run did.
 type CryptoPaymentUnlinkResult struct {
 	Unlinked int `json:"unlinked"`
+	// paid intents of the old Solana Pay endpoints, which no invoice links
+	SolanaUnlinked int `json:"solana_unlinked"`
+	// unfulfilled Solana payments recorded before the cutoff
+	SolanaUnfulfilledUnlinked int `json:"solana_unfulfilled_unlinked"`
 }
 
 // RunCryptoPaymentUnlink drops the link between invoices and their networks
@@ -620,19 +624,47 @@ type CryptoPaymentUnlinkResult struct {
 // made when it was never credited (decision 9, mmm/ZCASH-CONTRACT.md §3.13.6;
 // model.UnlinkCryptoPaymentIntents has the steps). Transaction ids, amounts
 // and days stay.
+//
+// The USDC paid through the old Solana Pay endpoints (POST
+// /solana/payment-intent, POST /pay/data/solana-intent), which older apps and
+// the SDK still use, is unlinked after the same unlink_after
+// (model.UnlinkSolanaPaymentIntents), and so is every unfulfilled Solana
+// payment recorded before then (model.UnlinkSolanaUnfulfilledPayments).
 func RunCryptoPaymentUnlink(clientSession *session.ClientSession) (*CryptoPaymentUnlinkResult, error) {
 	config := cryptoPayConfigFunc()
 	now := server.NowUtc()
+	cutoff := now.Add(-config.UnlinkAfter)
 	result := &CryptoPaymentUnlinkResult{}
 	for range cryptoUnlinkMaxBatches {
-		unlinked := model.UnlinkCryptoPaymentIntents(clientSession.Ctx, now.Add(-config.UnlinkAfter), cryptoUnlinkBatchSize, now)
+		unlinked := model.UnlinkCryptoPaymentIntents(clientSession.Ctx, cutoff, cryptoUnlinkBatchSize, now)
 		result.Unlinked += unlinked
+		if unlinked < cryptoUnlinkBatchSize {
+			break
+		}
+	}
+	for range cryptoUnlinkMaxBatches {
+		unlinked := model.UnlinkSolanaPaymentIntents(clientSession.Ctx, cutoff, cryptoUnlinkBatchSize)
+		result.SolanaUnlinked += unlinked
+		if unlinked < cryptoUnlinkBatchSize {
+			break
+		}
+	}
+	for range cryptoUnlinkMaxBatches {
+		unlinked := model.UnlinkSolanaUnfulfilledPayments(clientSession.Ctx, cutoff, cryptoUnlinkBatchSize)
+		result.SolanaUnfulfilledUnlinked += unlinked
 		if unlinked < cryptoUnlinkBatchSize {
 			break
 		}
 	}
 	if 0 < result.Unlinked {
 		glog.Infof("[cryptopay]unlinked %d paid invoices from their networks\n", result.Unlinked)
+	}
+	if 0 < result.SolanaUnlinked || 0 < result.SolanaUnfulfilledUnlinked {
+		glog.Infof(
+			"[cryptopay]unlinked %d paid Solana Pay intents and %d unfulfilled Solana payments from their networks\n",
+			result.SolanaUnlinked,
+			result.SolanaUnfulfilledUnlinked,
+		)
 	}
 	return result, nil
 }
