@@ -955,8 +955,9 @@ func TestCryptoPayConfigAbsentOrMalformedIsOff(t *testing.T) {
 	connect.AssertEqual(t, empty.UnlinkAfter, 720*time.Hour)
 }
 
-// The shipped config files parse, keep Monero and Zcash off on main (counsel
-// gates them) and USDC on.
+// The shipped config files parse with USDC on. Main sells Monero and Zcash
+// since the owner's launch go of 2026-10-21 (mmm/ZCASH.md §0.7); local keeps
+// them off, since a developer machine has no wallet daemons.
 func TestCryptoPayConfigFiles(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	for _, env := range []string{"local", "main"} {
@@ -971,8 +972,8 @@ func TestCryptoPayConfigFiles(t *testing.T) {
 		config := parseCryptoPayConfig(resource)
 		pop()
 		connect.AssertEqual(t, config.Asset(model.CryptoAssetUsdcSolana).Enabled, true)
-		connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).Enabled, false)
-		connect.AssertEqual(t, config.Asset(model.CryptoAssetZec).Enabled, false)
+		connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).Enabled, env == "main")
+		connect.AssertEqual(t, config.Asset(model.CryptoAssetZec).Enabled, env == "main")
 		connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).CreditConfirmations, int64(1))
 		connect.AssertEqual(t, config.Asset(model.CryptoAssetZec).CreditConfirmations, int64(10))
 		connect.AssertEqual(t, config.Quote.MaxInvoiceUsd, float64(100))
