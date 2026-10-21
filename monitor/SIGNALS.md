@@ -2924,6 +2924,21 @@ timeout -k 1s 2s redis-cli --raw -h 127.0.0.1 -p "$configured_port" PING
   The reducer no longer automatically runs the optional §5.2 node battery;
   use that playbook separately for the causal discriminator. Raw CLI replies
   and optional CLUSTER NODES failure text are not emitted as error evidence.
+- Optional `CLUSTER NODES` context on an independently established cluster
+  fault publishes only fixed numeric row counts for exact `fail`, `fail?` and
+  `noaddr` flag tokens. Substrings in node ids, endpoints, hostnames and slot
+  text have no flag authority; none of those raw values is emitted. Successful
+  output is still untrusted: more than 64 KiB, an empty observation, a short
+  row, or unknown/repeated flag tokens leaves this optional context unknown.
+  This bounds only the ancillary reducer, not the source transport response.
+- FALSE-POSITIVE QUALIFIER: optional counts describe flags in bounded rows
+  with at least eight fields; they do not validate endpoints, deduplicate node
+  identities, prove topology, or create a PAGE. The independent valid INFO
+  fault remains authoritative even when optional context is unavailable.
+- FALSE-NEGATIVE QUALIFIER: strict optional shape/flag limits can withhold
+  context for an unsupported or larger response; zero flag counts do not
+  resolve the known INFO fault. Raw node locations are deliberately omitted;
+  a separately admitted diagnostic is needed to attribute a member or path.
 - With `cluster-require-full-coverage=no`, one unavailable shard can affect
   its owned keys without changing the aggregate state observed on another
   member. Check each configured shard as well as the bootstrap aggregate.
