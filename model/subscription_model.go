@@ -5327,6 +5327,11 @@ const SubscriptionMarketManual = "manual"
 // See controller/x402_controller.go.
 const SubscriptionMarketX402 = "x402"
 
+// one-time payments in Monero and in shielded Zcash: a year that never renews,
+// like a Solana payment (controller/crypto_pay_credit.go)
+const SubscriptionMarketMonero = "monero"
+const SubscriptionMarketZcash = "zcash"
+
 type SubscriptionRenewal struct {
 	NetworkId          server.Id
 	SubscriptionType   SubscriptionType

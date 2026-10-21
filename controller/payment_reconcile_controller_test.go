@@ -35,17 +35,23 @@ func disableAllReconcileStores(t testing.TB) func() {
 	prevPlay := playReconcileHasCredentials
 	prevSolana := solanaReconcileHasCredentials
 	prevX402 := x402ReconcileHasCredentials
+	prevMonero := moneroReconcileHasCredentials
+	prevZcash := zcashReconcileHasCredentials
 	stripeReconcileHasCredentials = func() bool { return false }
 	appleReconcileHasCredentials = func() bool { return false }
 	playReconcileHasCredentials = func() bool { return false }
 	solanaReconcileHasCredentials = func() bool { return false }
 	x402ReconcileHasCredentials = func() bool { return false }
+	moneroReconcileHasCredentials = func() bool { return false }
+	zcashReconcileHasCredentials = func() bool { return false }
 	t.Cleanup(func() {
 		stripeReconcileHasCredentials = prevStripe
 		appleReconcileHasCredentials = prevApple
 		playReconcileHasCredentials = prevPlay
 		solanaReconcileHasCredentials = prevSolana
 		x402ReconcileHasCredentials = prevX402
+		moneroReconcileHasCredentials = prevMonero
+		zcashReconcileHasCredentials = prevZcash
 	})
 	return closeScope
 }
@@ -245,7 +251,8 @@ func TestPaymentReconcileSkipsStripeWithSKUOnlyVault(t *testing.T) {
 
 // Credential checks run outside each store's panic-isolation block, so every
 // production checker must fail closed on malformed optional resources. This
-// exercises all four together through the real run orchestration.
+// exercises all four together through the real run orchestration (x402,
+// Monero and Zcash stay switched off by disableAllReconcileStores).
 func TestPaymentReconcileMalformedCredentialResourcesSkipAllStores(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -278,7 +285,7 @@ func TestPaymentReconcileMalformedCredentialResourcesSkipAllStores(t *testing.T)
 		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Errors, 0)
-		connect.AssertEqual(t, len(result.SkippedStores), 5)
+		connect.AssertEqual(t, len(result.SkippedStores), 7)
 		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionSkippedStore), 1)
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketApple, model.PaymentReconcileActionSkippedStore), 1)
@@ -600,7 +607,7 @@ func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 		connect.AssertEqual(t, result.Credited, 0)
 		connect.AssertEqual(t, result.Ended, 0)
 		connect.AssertEqual(t, result.Errors, 0)
-		connect.AssertEqual(t, len(result.SkippedStores), 5)
+		connect.AssertEqual(t, len(result.SkippedStores), 7)
 
 		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
 		for _, store := range []string{
@@ -609,6 +616,8 @@ func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 			model.SubscriptionMarketGoogle,
 			model.SubscriptionMarketSolana,
 			model.SubscriptionMarketX402,
+			model.SubscriptionMarketMonero,
+			model.SubscriptionMarketZcash,
 		} {
 			connect.AssertEqual(t, countReconcileEvents(events, store, model.PaymentReconcileActionSkippedStore), 1)
 			// a skipped store never advances its watermark
@@ -2618,7 +2627,7 @@ func TestPaymentReconcileRunLockExcludesConcurrentRuns(t *testing.T) {
 		// lock released: the real run proceeds
 		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(result.SkippedStores), 5)
+		connect.AssertEqual(t, len(result.SkippedStores), 7)
 	})
 }
 

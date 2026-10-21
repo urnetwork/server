@@ -148,6 +148,17 @@ var x402ReconcileHasCredentials = func() bool {
 	return true
 }
 
+// The Monero and Zcash legs always run: their first leg reads only our own
+// receipts, and the legs that ask the wallet daemon run when its vault file is
+// there (a coin that was never on has nothing for them to check).
+var moneroReconcileHasCredentials = func() bool {
+	return true
+}
+
+var zcashReconcileHasCredentials = func() bool {
+	return true
+}
+
 // ----- apple App Store Server API client -----
 
 // The only genuinely new credential reconciliation needs: App Store Server
@@ -395,7 +406,8 @@ type PaymentReconcileRunOptions struct {
 	// the real repair would carry, tagged dry_run.
 	DryRun bool
 	// Stores limits the pass to the named stores
-	// (model.SubscriptionMarketStripe | Apple | Google | Solana | X402); empty
+	// (model.SubscriptionMarketStripe | Apple | Google | Solana | X402 | Monero
+	// | Zcash); empty
 	// runs all of them. Filtered-out stores are untouched entirely: no events, no
 	// watermark.
 	Stores []string
@@ -794,6 +806,8 @@ func runPaymentReconciliation(
 		{model.SubscriptionMarketGoogle, playReconcileHasCredentials, reconcilePlay},
 		{model.SubscriptionMarketSolana, solanaReconcileHasCredentials, reconcileSolana},
 		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
+		{model.SubscriptionMarketMonero, moneroReconcileHasCredentials, reconcileMonero},
+		{model.SubscriptionMarketZcash, zcashReconcileHasCredentials, reconcileZcash},
 	}
 	if 0 < len(options.Stores) {
 		selected := map[string]bool{}
@@ -1924,4 +1938,415 @@ func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// ----- monero and zcash (crypto_pay_*.go) -----
+//
+// decision table (per coin; mmm/ZCASH-CONTRACT.md §3.9):
+//
+//	receipt in review as short, its invoice now covered (a top-up arrived)
+//	    -> credit through the one credit (the scanner does this too; this is
+//	       the safety net)
+//	credited receipt at final depth (or credited long ago and never final)
+//	    that the daemon no longer shows with the same output and amount,
+//	    from a wallet that passed its identity check, whose scanner is
+//	    current and within max_lag_blocks of a known network height, and
+//	    that is the final depth past the receipt (mmm/ZCASH-CONTRACT.md §3.13.2)
+//	    -> orphaned; when its invoice is no longer covered by its other
+//	       receipts, end what the credit granted, take the credit back and
+//	       hold the receipt for review (orphaned), so `bringyourctl crypto
+//	       credit` can grant it again. More than
+//	       cryptoReconcileMaxOrphansPerRun at once ends none: an error for
+//	       an operator (a rebuilt or resyncing wallet looks like that)
+//	    otherwise -> skipped and retried next run (an error when the wallet
+//	       cannot be trusted at all)
+//	the daemon's incoming total over a day of final blocks differs from our
+//	    receipts' -> error (ledger): an output the scanner missed, for example
+//	    beyond the Monero lookahead
+//
+// The first leg needs no daemon. The others run when the coin's vault file
+// is there; with none, credited receipts awaiting re-verification are an
+// error (they cannot be checked), and nothing else is to be done.
+
+// A credited receipt not stamped final this long after the scanner last saw
+// it is re-checked anyway: a credited transaction that left the chain stops
+// being reported, so it would never reach final depth.
+const cryptoReconcileStaleCredit = 2 * time.Hour
+
+// The most credited receipts one run takes as gone from the chain. Real
+// reorgs past the final depth are near impossible; many receipts vanishing at
+// once is a wallet that was rebuilt or lost its history, and ending paid
+// years on its word would be the outage.
+const cryptoReconcileMaxOrphansPerRun = 3
+
+// Blocks in a day, per coin: the ledger leg's window.
+func cryptoBlocksPerDay(assetConfig *CryptoPayAssetConfig, asset string, height int64) int64 {
+	switch asset {
+	case model.CryptoAssetXmr:
+		// 2-minute blocks
+		return 720
+	case model.CryptoAssetZec:
+		if 0 < assetConfig.Nu7ActivationHeight && assetConfig.Nu7ActivationHeight <= height {
+			// 25-second blocks after NU7
+			return 3456
+		}
+		// 75-second blocks
+		return 1152
+	}
+	return 0
+}
+
+func reconcileMonero(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetXmr)
+}
+
+func reconcileZcash(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetZec)
+}
+
+func reconcileCryptoAsset(run *paymentReconcileRun, asset string) (bool, error) {
+	ctx := run.clientSession.Ctx
+	store := cryptoAssetMarket(asset)
+	config := cryptoPayConfigFunc()
+	policy := cryptoIntentPolicyFor(config, asset)
+
+	// leg 1: receipts held as short whose invoice is now covered
+	review := model.ListCryptoPaymentReceiptsByStateInConn(
+		run.connOwner,
+		ctx,
+		asset,
+		[]string{model.CryptoReceiptStateReview},
+		paymentReconcileRenewalLimit,
+	)
+	intentIds := []server.Id{}
+	seenIntents := map[server.Id]bool{}
+	for _, receipt := range review {
+		if receipt.IntentId == nil || !cryptoReceiptCounts(receipt) || seenIntents[*receipt.IntentId] {
+			continue
+		}
+		seenIntents[*receipt.IntentId] = true
+		intentIds = append(intentIds, *receipt.IntentId)
+	}
+	for _, intentId := range intentIds {
+		run.examine(store)
+		intent := model.GetCryptoPaymentIntentInConn(run.connOwner, ctx, intentId)
+		if intent == nil || intent.CreditedAt != nil || intent.VoidedAt != nil {
+			continue
+		}
+		receipts := model.GetCryptoPaymentReceiptsForIntentInConn(run.connOwner, ctx, intentId)
+		view := cryptoEvaluateIntent(intent, receipts, policy, run.now)
+		if view.Action != cryptoIntentActionCredit {
+			continue
+		}
+		details := map[string]any{"intent_id": intentId.String(), "leg": "credit", "reason": "review_cleared"}
+		if run.dryRun {
+			run.record(store, model.PaymentReconcileActionWouldCredit, intent.NetworkId, intentId.String(), details)
+			continue
+		}
+		credited, err := cryptoCreditIntentInConn(run.connOwner, run.clientSession, intent, &cryptoCredit{
+			usdNanoCents: view.CreditUsd,
+			receipts:     view.CreditReceipts,
+			receiptUsd:   view.ReceiptUsdValue,
+			late:         view.Late,
+		})
+		if err != nil {
+			run.record(store, model.PaymentReconcileActionError, intent.NetworkId, intentId.String(), map[string]any{
+				"error": err.Error(),
+				"leg":   "credit",
+			})
+			continue
+		}
+		if credited {
+			run.record(store, model.PaymentReconcileActionCredited, intent.NetworkId, intentId.String(), details)
+		}
+	}
+
+	toVerify := model.ListCryptoPaymentReceiptsToVerifyInConn(
+		run.connOwner,
+		ctx,
+		asset,
+		run.now.Add(-paymentReconcileWindow),
+		run.now.Add(-cryptoReconcileStaleCredit),
+		paymentReconcileRenewalLimit,
+	)
+	wallet, _, err := cryptoWalletForAsset(config, asset)
+	if err != nil {
+		if len(toVerify) == 0 {
+			return true, nil
+		}
+		return false, fmt.Errorf("%d credited %s receipts await re-verification, but the wallet daemon is not configured", len(toVerify), asset)
+	}
+
+	// leg 2: credited receipts must still be on the chain, by the word of a
+	// wallet that can be trusted to know
+	if 0 < len(toVerify) {
+		cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
+		refused := ""
+		if err := cryptoCheckWallet(ctx, run.connOwner, asset, wallet); err != nil {
+			refused = "the wallet check failed: " + err.Error()
+		} else if !cryptoCursorFresh(cursor, config, run.now) {
+			refused = "the scanner is not current"
+		} else if cursor.WalletHeight == nil || cursor.NetworkHeight == nil ||
+			!cryptoWalletCaughtUp(config, asset, *cursor.WalletHeight, *cursor.NetworkHeight) {
+			refused = "the wallet has not caught up with a known network height"
+		}
+		if refused != "" {
+			run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{
+				"error":    fmt.Sprintf("%d credited receipts not re-verified: %s", len(toVerify), refused),
+				"leg":      "verify",
+				"receipts": len(toVerify),
+			})
+		} else if !cryptoReconcileVerify(run, config, asset, store, wallet, policy, toVerify, *cursor.WalletHeight) {
+			return false, nil
+		}
+	}
+
+	// leg 3: the daemon's incoming total over a day of final blocks equals our
+	// receipts', whenever the daemon is configured (sold or not) and its
+	// scanner current: a scanner that is behind has not recorded what the
+	// daemon shows (cryptoReconcileLedger checks).
+	if !run.spend(store) {
+		return false, nil
+	}
+	if err := cryptoReconcileLedger(run, config, asset, store, wallet); err != nil {
+		run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{
+			"error": err.Error(),
+			"leg":   "ledger",
+		})
+	}
+	return true, nil
+}
+
+// cryptoReconcileVerify is leg 2 on a wallet already found trustworthy:
+// every credited receipt's transaction must still show the same output and
+// amount. A receipt the wallet does not show is gone only once the wallet is
+// the final depth past it; more than cryptoReconcileMaxOrphansPerRun gone at
+// once ends none. complete = false when the run's budget ran out.
+func cryptoReconcileVerify(
+	run *paymentReconcileRun,
+	config *CryptoPayConfig,
+	asset string,
+	store string,
+	wallet cryptoWallet,
+	policy *cryptoIntentPolicy,
+	toVerify []*model.CryptoPaymentReceipt,
+	walletHeight int64,
+) (complete bool) {
+	ctx := run.clientSession.Ctx
+	assetConfig := config.Asset(asset)
+	byTx := map[string][]*model.CryptoPaymentReceipt{}
+	txIds := []string{}
+	for _, receipt := range toVerify {
+		if _, ok := byTx[receipt.TxId]; !ok {
+			txIds = append(txIds, receipt.TxId)
+		}
+		byTx[receipt.TxId] = append(byTx[receipt.TxId], receipt)
+	}
+	type vanished struct {
+		receipt *model.CryptoPaymentReceipt
+		reason  string
+	}
+	gone := []*vanished{}
+	for _, txId := range txIds {
+		if !run.spend(store) {
+			return false
+		}
+		walletReceipts, found, err := wallet.Transaction(ctx, txId)
+		if err != nil {
+			run.record(store, model.PaymentReconcileActionError, nil, txId, map[string]any{
+				"error": err.Error(),
+				"leg":   "verify",
+			})
+			continue
+		}
+		finalKeys := []model.CryptoPaymentReceiptKey{}
+		for _, receipt := range byTx[txId] {
+			run.examine(store)
+			var present *cryptoWalletReceipt
+			if found {
+				for _, walletReceipt := range walletReceipts {
+					if walletReceipt.OutputKey == receipt.OutputKey &&
+						walletReceipt.AmountAtomic == uint64(receipt.AmountAtomic) &&
+						0 < walletReceipt.BlockHeight {
+						present = walletReceipt
+					}
+				}
+			}
+			if present != nil {
+				if receipt.FinalAt == nil && assetConfig != nil &&
+					assetConfig.FinalConfirmationsAt(int64(present.BlockHeight)) <= int64(present.Confirmations) {
+					finalKeys = append(finalKeys, receipt.Key())
+				}
+				continue
+			}
+			if receipt.BlockHeight == nil || walletHeight < *receipt.BlockHeight+assetConfig.FinalConfirmationsAt(*receipt.BlockHeight) {
+				// not yet the final depth behind the wallet: next run
+				continue
+			}
+			reason := "tx_not_found"
+			if found {
+				reason = "output_changed"
+			}
+			gone = append(gone, &vanished{receipt: receipt, reason: reason})
+		}
+		if !run.dryRun {
+			model.MarkCryptoPaymentReceiptsFinalInConn(run.connOwner, ctx, asset, finalKeys, run.now)
+		}
+	}
+	if cryptoReconcileMaxOrphansPerRun < len(gone) {
+		run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{
+			"error": fmt.Sprintf(
+				"%d credited receipts are no longer shown by the wallet at once; nothing was ended. A rebuilt or resyncing wallet looks like this: check it, and end only what really left the chain",
+				len(gone),
+			),
+			"leg":      "verify",
+			"receipts": len(gone),
+		})
+		glog.Errorf("[reconcile]%s: %d credited receipts vanished at once; ended none\n", store, len(gone))
+		return true
+	}
+	for _, candidate := range gone {
+		cryptoReconcileOrphan(run, asset, store, candidate.receipt, policy, candidate.reason)
+	}
+	return true
+}
+
+// cryptoReconcileOrphan handles a credited receipt the daemon no longer
+// shows. While the invoice's other credited receipts still cover the payment,
+// the receipt is only marked orphaned; otherwise the credit's grant is ended
+// at now and the receipt is held for review (orphaned).
+func cryptoReconcileOrphan(
+	run *paymentReconcileRun,
+	asset string,
+	store string,
+	receipt *model.CryptoPaymentReceipt,
+	policy *cryptoIntentPolicy,
+	reason string,
+) {
+	ctx := run.clientSession.Ctx
+	evidence := receipt.TxId
+	if receipt.IntentId == nil {
+		return
+	}
+	intent := model.GetCryptoPaymentIntentInConn(run.connOwner, ctx, *receipt.IntentId)
+	if intent == nil || intent.CreditedAt == nil {
+		return
+	}
+	details := map[string]any{
+		"intent_id": intent.IntentId.String(),
+		"leg":       "verify",
+		"reason":    reason,
+	}
+
+	// what the other credited receipts still carry
+	var remainingAtomic int64
+	var remainingUsd model.NanoCents
+	usdKnown := true
+	for _, other := range model.GetCryptoPaymentReceiptsForIntentInConn(run.connOwner, ctx, intent.IntentId) {
+		if other.Key() == receipt.Key() || other.State != model.CryptoReceiptStateCredited {
+			continue
+		}
+		remainingAtomic += other.AmountAtomic
+		if other.UsdValueNanoCents == nil {
+			usdKnown = false
+		} else {
+			remainingUsd += *other.UsdValueNanoCents
+		}
+	}
+	covered := cryptoAcceptThresholdAtomic(intent.AmountAtomic, policy.acceptPercent) <= remainingAtomic
+	if usdKnown && intent.CreditedUsdNanoCents != nil && cryptoAcceptValueNanoCents(*intent.CreditedUsdNanoCents, policy.acceptPercent) <= remainingUsd {
+		covered = true
+	}
+
+	if covered {
+		if !run.dryRun {
+			model.SetCryptoPaymentReceiptsStateInConn(run.connOwner, ctx, receipt.IntentId, []model.CryptoPaymentReceiptKey{receipt.Key()}, model.CryptoReceiptStateOrphaned, "")
+		}
+		return
+	}
+	if run.dryRun {
+		run.record(store, model.PaymentReconcileActionWouldEnd, intent.NetworkId, evidence, details)
+		return
+	}
+
+	market, transactionId := model.CryptoPaymentRenewalHandle(intent)
+	plan := slices.Contains(cryptoPayKnownPlans, intent.Item)
+	var endedNetworkIds []server.Id
+	var endErr error
+	server.HandleError(func() {
+		server.TxInConn(ctx, run.connOwner, func(tx server.PgTx) {
+			endedNetworkIds, _ = model.EndCryptoPaymentGrantInTx(tx, ctx, intent, market, transactionId, plan, run.now)
+			model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, receipt.IntentId, []model.CryptoPaymentReceiptKey{receipt.Key()}, model.CryptoReceiptStateReview, model.CryptoReviewReasonOrphaned)
+			// the credit is taken back with what it granted: the invoice reads
+			// review/orphaned, and `bringyourctl crypto credit` grants it again
+			// if the payment turns out to be on the chain after all
+			model.UncreditCryptoPaymentIntentInTx(tx, ctx, intent.IntentId)
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}, func(err error) {
+		endErr = err
+	})
+	if endErr != nil {
+		run.record(store, model.PaymentReconcileActionError, intent.NetworkId, evidence, map[string]any{
+			"error":     endErr.Error(),
+			"leg":       "end",
+			"intent_id": intent.IntentId.String(),
+		})
+		return
+	}
+	for _, networkId := range endedNetworkIds {
+		model.UpdateProNetworkInConn(run.connOwner, ctx, networkId)
+	}
+	run.record(store, model.PaymentReconcileActionEnded, intent.NetworkId, evidence, details)
+	glog.Infof("[reconcile]%s: invoice %s paid by a transaction that left the chain; its credit was ended\n", store, intent.IntentId)
+}
+
+// cryptoReconcileLedger compares the daemon's incoming total over the last
+// day of final blocks with our receipts'.
+func cryptoReconcileLedger(
+	run *paymentReconcileRun,
+	config *CryptoPayConfig,
+	asset string,
+	store string,
+	wallet cryptoWallet,
+) error {
+	ctx := run.clientSession.Ctx
+	assetConfig := config.Asset(asset)
+	cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
+	if cursor == nil || cursor.LastSuccessAt == nil || cursor.WalletHeight == nil ||
+		3*config.ScanInterval < run.now.Sub(*cursor.LastSuccessAt) {
+		// the scanner is behind; the quote path already stops selling
+		return nil
+	}
+	walletTop := *cursor.WalletHeight
+	// blocks at least the final depth deep: h <= top - final
+	toHeight := walletTop - assetConfig.FinalConfirmationsAt(walletTop) + 1
+	fromHeight := max(0, toHeight-cryptoBlocksPerDay(assetConfig, asset, toHeight))
+	if toHeight <= fromHeight {
+		return nil
+	}
+	walletReceipts, _, err := wallet.IncomingSince(ctx, uint64(fromHeight))
+	if err != nil {
+		return err
+	}
+	var walletTotal int64
+	walletCount := 0
+	for _, walletReceipt := range walletReceipts {
+		if fromHeight <= int64(walletReceipt.BlockHeight) && int64(walletReceipt.BlockHeight) < toHeight && 0 < walletReceipt.BlockHeight {
+			walletTotal += int64(walletReceipt.AmountAtomic)
+			walletCount += 1
+		}
+	}
+	ourTotal, ourCount := model.SumCryptoPaymentReceiptsInConn(run.connOwner, ctx, asset, fromHeight, toHeight)
+	run.storeDetail(store)["ledger"] = map[string]any{
+		"from_height": fromHeight,
+		"to_height":   toHeight,
+		"receipts":    ourCount,
+	}
+	if walletTotal != ourTotal || walletCount != ourCount {
+		return fmt.Errorf(
+			"ledger mismatch over heights [%d, %d): the wallet shows %d receipts totalling %d atomic, we hold %d totalling %d",
+			fromHeight, toHeight, walletCount, walletTotal, ourCount, ourTotal,
+		)
+	}
+	return nil
 }

@@ -159,7 +159,7 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 			return nil, ctx.Err()
 		}
 		observation.CensusReason = "transport_unavailable"
-		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable")}, nil
+		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable " + observationFailureDetails(err, classifyObservationError(err)))}, nil
 	}
 	now = env.now()
 	observation.ObservedAt = now

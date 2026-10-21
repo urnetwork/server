@@ -370,6 +370,11 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
+	var pgOut, pgErr *pgSampleNativeBuffer
+	if observation != nil {
+		pgOut, pgErr = &pgSampleNativeBuffer{}, &pgSampleNativeBuffer{}
+		cmd.Stdout, cmd.Stderr = pgOut, pgErr
+	}
 	observation.endLocalPhase(pgLocalNativeSetup)
 	observation.stage("ssh_start", "not_attempted")
 	observation.beginLocalPhase(pgLocalFinalGuard)
@@ -379,22 +384,41 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 		return "", "", &observationBoundaryError{err: admissionErr, boundary: observationBoundaryNativeGuard}
 	}
 	boundary := observationBoundaryNativeStart
+	var nativeStartEntered, nativeStartReturned, nativeWaitEntered, nativeWaitReturned time.Time
+	if observation != nil {
+		nativeStartEntered = time.Now()
+	}
 	err := cmd.Start()
+	if observation != nil {
+		nativeStartReturned = time.Now()
+	}
 	if err == nil {
 		observation.started(ctx)
+		if observation != nil {
+			nativeWaitEntered = time.Now()
+		}
 		err = cmd.Wait()
+		if observation != nil {
+			nativeWaitReturned = time.Now()
+		}
 		boundary = observationBoundaryNativeWaitUnknown
 		if cmd.ProcessState != nil {
 			boundary = observationBoundaryNativeWait
 		}
 		if observation != nil {
-			observation.joined(cmd.ProcessState, errOut.String())
+			observation.joined(cmd.ProcessState, pgErr.String())
 		}
 	} else {
 		observation.stage("ssh_start", "start_failed")
 	}
+	if observation != nil {
+		observation.recordNativeLifecycle(nativeStartEntered, nativeStartReturned, nativeWaitEntered, nativeWaitReturned, pgOut, pgErr)
+	}
 	if err != nil {
 		err = &observationBoundaryError{err: err, boundary: boundary}
+	}
+	if observation != nil {
+		return pgOut.String(), pgErr.String(), err
 	}
 	return out.String(), errOut.String(), err
 }

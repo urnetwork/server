@@ -247,6 +247,12 @@ func PayDataSolanaStatus(
 	if intent == nil || !solanaIsDataPackPlan(intent.SubscriptionPlan) {
 		return &PayDataSolanaStatusResult{Status: PayDataSolanaStatusUnknown}, nil
 	}
+	// an intent of the generic crypto API is read through its invoice, with
+	// the invoice's status token: its reference is on the chain for anyone to
+	// see, and must not name the network it paid for (mmm/ZCASH-CONTRACT.md §3.13.7)
+	if model.GetCryptoPaymentIntentBySolanaReference(clientSession.Ctx, reference) != nil {
+		return &PayDataSolanaStatusResult{Status: PayDataSolanaStatusUnknown}, nil
+	}
 
 	result := &PayDataSolanaStatusResult{
 		Status:    payDataSolanaStatusOf(intent, server.NowUtc()),
@@ -468,21 +474,5 @@ func addSolanaDataAppliedNoteInTx(
 	byteCount model.ByteCount,
 	paymentReference string,
 ) {
-	networkName, userAuth, ok := model.GetNetworkAdminUserAuthInTx(ctx, tx, networkId)
-	if !ok || userAuth == "" {
-		return
-	}
-	normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
-	if userAuthType != model.UserAuthTypeEmail {
-		return
-	}
-	addAccountMessageInTx(ctx, tx, &accountMessage{
-		key:       fmt.Sprintf("solana_data_pack/%s", paymentReference),
-		networkId: &networkId,
-		userAuth:  normalUserAuth,
-		template: &SubscriptionDataAppliedTemplate{
-			BalanceByteCount: byteCount,
-			NetworkName:      networkName,
-		},
-	})
+	addDataAppliedNoteInTx(ctx, tx, networkId, byteCount, fmt.Sprintf("solana_data_pack/%s", paymentReference))
 }

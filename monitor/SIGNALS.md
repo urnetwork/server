@@ -1934,6 +1934,19 @@ deliberately combined only after retaining application, role, state, and wait
 dimensions; resolving one unknown endpoint requires an authorized private
 socket census rather than disclosing its address in monitor output.
 
+Application, role and wait text remain transient private grouping inputs. Both
+healthy logs and public Alert Evidence render observation-local integer
+`application_group`, `role_group` and `wait_group` values instead of raw labels
+or stable fingerprints. Only the fixed connection states active, idle, idle in
+transaction, idle in transaction (aborted), fastpath function call, disabled
+and starting are rendered literally. An unset state is unavailable; arbitrary
+states receive observation-local withheld groups. The existing private owner
+aggregation, safe-host merging, ranking, top-ten bound, counts and oldest ages
+are unchanged. Group numbers are not stable across observations and establish
+neither an authenticated caller nor an application/role identity. Recovering
+exact names requires independently authorized private evidence. This is a
+source publication correction; no sensitive production occurrence is alleged.
+
 - `normal_role_ceiling = max_connections -
   superuser_reserved_connections - reserved_connections`. Every existing
   client backend consumes the admission threshold, including a privileged or
@@ -2954,7 +2967,12 @@ resolve either.
   for a configured source, invalid source labels, malformed samples, or missing
   partition markers withhold completeness. A successful HTTP/JSON envelope
   alone cannot establish a complete source response. Independent dashboard
-  and alert-rule definition findings remain reportable.
+  and alert-rule definition findings remain reportable. A successful HTTP
+  response with a mismatched dashboard or alert-rule UID is a fixed
+  `observation-invalid-response`; arbitrary returned UID text never enters the
+  diagnostic or chooses an access, timeout or native-exit classification.
+  This source correction cannot identify the cause of a historical reduced
+  access-denied warning or establish the serving Grafana generation.
 - FALSE-POSITIVE QUALIFIERS: an empty one-minute rate is expected with the
   intentional slow scrape cadence; a finite zero counter/rate is still present
   coverage. Additional valid unconfigured sources do not spoil a complete configured
@@ -5397,6 +5415,37 @@ The reader validates complete JSON framing, duplicate keys, fixed kind/index
 order and finite response timestamps. Unexpected or malformed source headers
 stop later progress; the unchanged full-result parser still decides validity.
 Even count 12 with `history_end` cannot make a failed native/source result healthy.
+
+An optional fixed tail projection now records the last received psql client
+metacommand dispatch/return boundary for sample indices10 and11 (zero-based),
+then the blockers snapshot/query and final history. It deliberately omits the
+first ten activity iterations and all raw statements, errors, addresses, query
+identities and private correlation nonce. A dispatch marker means psql reached
+that client boundary; it does not prove server execution, the currently pending
+operation at deadline, successful semantic output, or completion. A return marker
+proves the client advanced after that statement; the unchanged full-result
+parser and native/source result still decide collection authority. Missing,
+buffered, lost, malformed, foreign, truncated or unsupported markers leave the
+tail unknown; last received is not necessarily last executed.
+
+The eighteen ordered compact markers add828 bytes to the unchanged1796-byte
+healthy version2 progress stream (2624 bytes total), under the unchanged4KiB
+progress limit. Versions1/2 retain their exact parser and seventeen-record
+sequence. The SQL workload retains twelve activity queries and eleven two-second
+waits: only client metacommands are added. They cost finite client/transport work,
+not zero overhead or a missed-sample repair. Marker bytes are charged to the
+existing4MiB raw source-output cap; no cap, retry, deadline or cadence increases.
+Only exact expected markers are removed from successful stdout. Corrupt markers
+cannot be discarded to manufacture an otherwise healthy source.
+
+Optional same-attempt native lifecycle offsets record actual Start/Wait entry
+and return plus explicitly observed local stdout/stderr EOF. Absent copy paths,
+callbacks and preflight remain unknown; Wait return alone never supplies EOF.
+EOF identifies the local SSH pipe boundary, not database success or every remote
+descendant. Concurrent pipe EOFs have no mutual ordering, and local receipt of a
+remote marker supplies no synchronized remote operation duration. Invalid clocks
+withhold offsets without altering native/source classifications. These fields do
+not attribute a holder's CPU time or repair unknown scheduling/SQL causes.
 
 Source output remains buffered until successful child completion. Cancellation
 and owner deadlines preserve the original cannot-observe result, top-level
@@ -11564,6 +11613,21 @@ were not ok over ten minutes. They are the series the providers dashboard's
   no-attempt rates are valid optional observations. Query evaluations older
   than 30 minutes or more than 30 seconds in the future are unavailable;
   future decision/pair timestamps beyond that skew are invalid.
+
+This reader locally decodes query `warnings` and `infos`. Any nonempty array,
+including an empty-string entry, unknown text, duplicates, additional messages
+or a truncation summary, leaves the whole query unqualified. The existing
+`arindb-canary-unobservable` WARN and 15-cadence sustain remain; publisher
+values render as unknown and this query supplies no positive or healthy
+predicate. No harmless-message, omission-only or arithmetic semantics are
+assumed without an exact serving-engine/producer/formatter contract. Absent,
+null and empty arrays preserve the existing reader behavior; malformed metadata
+remains a decode failure. Annotation text never enters findings. Existing
+incidents remain held by the signal-wide incomplete-execution policy, even
+before visibility sustain matures. Independently established source findings
+retain their own authority. A benign annotation can withhold useful evidence,
+and an unqualified query can hide a real failure; warning-free metadata alone
+does not establish complete serving input or deployment health.
 
 Action on a fallback: judge whether the latest database is a bad release from
 the losses and emptied countries, its catalog audit and its Atlas validation.
@@ -18663,6 +18727,18 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+A failed URL census gateway query retains the existing finite `error_class`,
+SSH admission phases and code-owned `execution_boundaries` in the owning
+`url-probe-coverage-unobservable` alert. Raw errors, gateway identities and
+partial response bodies are never rendered. The JSONL census remains
+`transport_unavailable` / `census_unavailable` with null source clocks and
+counts. False-positive qualifier: joined boundary sets do not establish attempt
+order or count, remote command execution, Mimir failure or provider scarcity;
+a started/joined local SSH child alone proves no remote contact. False-negative
+qualifier: an absent boundary marker remains unknown, and an unavailable census
+cannot clear prior quota/security findings or certify recovery. A later valid
+census is a visibility control and needs its own fresh source identity and clocks.
+
 First admission waits for current reliability history: URL admission needs a
 one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
 intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
@@ -21035,6 +21111,21 @@ Observe all three layers every five minutes:
   and response body never do. Non-2xx responses retain
   `identity_observed=false` without UID/title comparisons; only a decoded
   successful response qualifies those comparisons.
+
+The snapshot reader locally decodes query `warnings` and `infos`. Any nonempty
+array, including empty-string, duplicate, additional, unknown or truncated
+annotation entries, makes snapshot authority unavailable. Until exact serving
+annotation semantics are qualified, the returned top value supplies neither a
+stale/gap/future finding nor healthy recovery. Absent, null and empty arrays
+preserve the existing reader behavior; malformed metadata stays unknown. No
+annotation text enters findings, no shared all-Mimir policy is introduced, and
+no harmless-message or omission-only exception is assumed. Independent
+PostgreSQL task and authenticated dashboard failures remain reportable. The
+existing signal-wide clear hold also retains absent sibling incidents while
+snapshot visibility is incomplete, including before its sustain matures.
+Benign annotations can withhold useful results, and unqualified responses can
+hide real snapshot failures. Source controls do not establish a production
+annotation occurrence, serving-engine completeness or runtime recovery.
 
 The dashboard findings are `subscription-dashboard-auth` for absent/denied
 authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
@@ -31359,6 +31450,36 @@ or reinterpret a missing observation as zero throughput.
 
 Probe: `mimir-admission`
 
+Fleet counter and journal-context sums use checked nonnegative int64
+aggregation. A sum above MaxInt64 renders only that field as `unavailable`,
+never a wrapped negative, zero, partial total, or saturated exact count.
+Overflow of a direct discard or created/removed delta emits fixed
+`cannot-observe` at `mimir-admission/aggregate`, denies complete/comparable
+recovery credit, and resets the existing quiet windows. Qualified child
+baselines and independently affirmative series/rate PAGE flags remain intact;
+a later complete flat observation can begin a new full quiet window.
+Journal-only sum overflow is optional context unknown and cannot open a direct
+incident or revoke otherwise complete direct-counter recovery authority.
+False-positive qualifier: a representability failure is not proof of service
+failure, unique rejected requests, or actual production counter magnitude.
+False-negative qualifier: the exact oversized fleet total is unavailable even
+though child positives remain affirmative; no new visibility into an unknown
+child, historical loss, or producer attribution is supplied. Per-child parsing,
+identity/generation/reset gates, headroom pairing, thresholds, cadence, state
+schema and atomic-save requirements remain unchanged.
+
+A canceled wait for this probe's existing per-host fanout permit retains
+`execution_boundaries=mimir-host-admission/not-attempted` on that host's
+visibility finding. It proves that this host attempt did not enter transport;
+it does not describe sibling attempts. Once transport is entered, the existing
+host/shared admission and native Start/Wait error markers remain separate.
+No native or remote progress is inferred from a callback, global permit,
+unmarked timeout, or absent marker. False-positive qualifier: a local fanout
+wait can expire while Mimir is healthy. False-negative qualifier: that host's
+unobserved counters can conceal loss; the held PAGE and complete comparable
+two-hour recovery requirement remain unchanged. These finite error markers
+add no request, retry, timeout, cadence, or concurrency change.
+
 Native listener acquisition, its selector and sorting, build-info curl, and
 the lazy-family source selector each require successful completion. A valid
 prefix from any failed stage cannot identify a child or authorize an absent
@@ -38338,6 +38459,27 @@ matches. Rebuild and promote the watcher when its inventory changes. Do not
 restart, replace, or reset a progressing historical node solely because the
 public current runtime advanced. A lower public spec, or any
 chain/genesis/runtime name/EVM mismatch, remains `subtensor-identity`.
+
+Runtime identity authority is per measured member on the public, direct and
+gateway RPC surfaces. Missing/null runtime results, empty names and absent,
+null or invalid version members remain unknown and produce cannot-observe;
+they cannot become an empty-name or zero-version identity mismatch. The local
+decoder isolates malformed runtime data from independent host observations.
+Valid sibling runtime members, including explicitly measured zero versions,
+and independent chain, gateway, peer and progress breaches retain their own
+authority. Runtime evidence renders unobserved members as unknown. A complete
+healthy runtime and a complete newer public runtime retain the existing
+healthy/runtime-ahead behavior. Explicit gateway runtime-method errors retain
+their existing gateway page, including during historical bootstrap. These
+source controls do not establish private interpreter qualification, executing
+artifact identity, production adoption or historical incident recovery.
+
+Controls: TestSubtensorRuntimeMissingFieldsRemainUnknown,
+TestSubtensorRuntimeMalformedResultPreservesIndependentIdentity,
+TestSubtensorRuntimePartialResultPreservesMeasuredMismatch,
+TestSubtensorRuntimeCompleteControlsRemainAuthoritative,
+TestSubtensorRuntimeUnknownPreservesIndependentLag, plus the retained gateway
+method-error, historical-runtime and independent wrong-identity controls.
 
 Host lifecycle inspection is separate from lifecycle health. The native
 `systemctl is-active` output must agree with its command-specific result:

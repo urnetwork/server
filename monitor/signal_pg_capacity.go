@@ -297,15 +297,37 @@ func postgresTooManyClients(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "too many clients already")
 }
 
+// Keep source labels only as transient grouping keys. Display groups are local
+// to this observation; they do not authenticate an application or role owner.
 func pgCapacityEvidence(owners []pgCapacityOwner) string {
 	if len(owners) == 0 {
 		return "No owner groups were returned; preserve the aggregate result and repeat the direct observation."
 	}
-	lines := []string{"Top client-backend owner groups (bounded to ten after privacy-safe host aggregation; no client addresses or query text):"}
+	applicationGroupIds := map[string]int{}
+	roleGroupIds := map[string]int{}
+	waitGroupIds := map[string]int{}
+	stateGroupIds := map[string]int{}
+	groupId := func(groups map[string]int, label string) int {
+		if id, ok := groups[label]; ok {
+			return id
+		}
+		id := len(groups) + 1
+		groups[label] = id
+		return id
+	}
+	lines := []string{"Top client-backend owner groups (bounded to ten after privacy-safe host aggregation; no client addresses or query text; private label groups are observation-local):"}
 	for _, owner := range owners {
+		state := "unavailable"
+		switch owner.state {
+		case "active", "idle", "idle in transaction", "idle in transaction (aborted)", "fastpath function call", "disabled", "starting":
+			state = owner.state
+		case "(unset)":
+		default:
+			state = fmt.Sprintf("withheld-group-%d", groupId(stateGroupIds, owner.state))
+		}
 		lines = append(lines, fmt.Sprintf(
-			"application=%s role=%s client_owner=%s state=%s clients=%d waits=%s oldest_state_s=%d oldest_backend_s=%d",
-			owner.application, owner.role, owner.clientOwner, owner.state, owner.clients, owner.waits,
+			"application_group=%d role_group=%d client_owner=%s state=%s clients=%d wait_group=%d oldest_state_s=%d oldest_backend_s=%d",
+			groupId(applicationGroupIds, owner.application), groupId(roleGroupIds, owner.role), owner.clientOwner, state, owner.clients, groupId(waitGroupIds, owner.waits),
 			owner.oldestState, owner.oldestAge,
 		))
 	}

@@ -179,6 +179,7 @@ type subtensorRuntimeVersion struct {
 	SpecName           string `json:"specName"`
 	SpecVersion        int64  `json:"specVersion"`
 	TransactionVersion int64  `json:"transactionVersion"`
+	observed           *subtensorRuntimeAuthority
 }
 
 type subtensorHealth struct {
@@ -454,7 +455,7 @@ type subtensorArchivePeerControl struct {
 func buildSubtensorArchivePeerControl(settings *SubtensorHostSettings, configured map[string]SubtensorNodeSettings, nodes []subtensorNodeObservation) subtensorArchivePeerControl {
 	for _, node := range nodes {
 		configuredNode, ok := configured[node.Name]
-		if !ok || configuredNode.SyncMode != "full" || len(subtensorIdentityProblems(settings, node.Direct, false)) > 0 {
+		if !ok || configuredNode.SyncMode != "full" || node.Direct.runtimeProblem() != nil || len(subtensorIdentityProblems(settings, node.Direct, false)) > 0 {
 			continue
 		}
 		firstHead, firstErr := subtensorHex(node.FirstHead)
@@ -740,11 +741,21 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 	}
 
 	publicHead, publicHeadErr := subtensorHex(observation.Public.Head)
-	if len(observation.Public.Errors) > 0 || publicHeadErr != nil {
-		findings = append(findings, cannotObserveFinding(target.name+"/subtensor-public-reference", fmt.Errorf("public RPC: %s", subtensorErrors(observation.Public.Errors, publicHeadErr))))
-	} else {
+	publicErrors := map[string]string{}
+	for key, value := range observation.Public.Errors {
+		if key != "runtime" {
+			publicErrors[key] = value
+		}
+	}
+	if len(publicErrors) > 0 || publicHeadErr != nil {
+		findings = append(findings, cannotObserveFinding(target.name+"/subtensor-public-reference", fmt.Errorf("public RPC: %s", subtensorErrors(publicErrors, publicHeadErr))))
+	}
+	if err := observation.Public.runtimeProblem(); err != nil {
+		findings = append(findings, cannotObserveFinding(target.name+"/subtensor-public-runtime", err))
+	}
+	if len(publicErrors) == 0 && publicHeadErr == nil {
 		identityProblems := subtensorIdentityProblems(settings, observation.Public, true)
-		runtimeAhead := observation.Public.Runtime.SpecVersion > settings.ExpectedSpecVersion &&
+		runtimeAhead := observation.Public.runtimeProblem() == nil && observation.Public.Runtime.SpecVersion > settings.ExpectedSpecVersion &&
 			observation.Public.Chain == settings.ExpectedChain &&
 			strings.EqualFold(observation.Public.Genesis, settings.ExpectedGenesisHash) &&
 			observation.Public.Runtime.SpecName == settings.ExpectedSpecName &&
@@ -811,7 +822,7 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 	firstHead, firstErr := subtensorHex(node.FirstHead)
 	secondHead, secondErr := subtensorHex(node.SecondHead)
 	essentialErrors := map[string]string{}
-	for _, key := range []string{"chain", "genesis", "head", "runtime", "health", "sync", "second_head"} {
+	for _, key := range []string{"chain", "genesis", "head", "health", "sync", "second_head"} {
 		if value := node.Direct.Errors[key]; value != "" {
 			essentialErrors[key] = value
 		}
@@ -825,6 +836,9 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 	if len(essentialErrors) > 0 {
 		findings = append(findings, cannotObserveFinding(identity+"/direct-rpc", fmt.Errorf("%s", subtensorErrors(essentialErrors, nil))))
 		return findings
+	}
+	if err := node.Direct.runtimeProblem(); err != nil {
+		findings = append(findings, cannotObserveFinding(identity+"/direct-runtime", err))
 	}
 	targetHead := node.Direct.Sync.HighestBlock
 	if publicHeadErr == nil && publicHead > targetHead {
@@ -915,6 +929,9 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		gatewayFirstHeadErr == nil && gatewayHeadErr == nil &&
 		absInt64(publicHead-gatewayFirstHead) <= 128 &&
 		absInt64(publicHead-gatewayHead) <= 128
+	if err := node.Gateway.runtimeProblem(); err != nil {
+		findings = append(findings, cannotObserveFinding(identity+"/gateway-runtime", err))
+	}
 	gatewayErrorKeys := []string{"healthz", "chain", "genesis", "head", "runtime"}
 	if gatewayCurrentRuntimeConvergenceObserved {
 		gatewayErrorKeys = append(gatewayErrorKeys, "evm_chain_id", "eth_get_logs")
@@ -1055,7 +1072,7 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 			symptom:   fmt.Sprintf("%s is %d blocks behind the Subtensor target", identity, lag),
 			mechanism: mechanism,
 			baseline:  "Cutover requires isSyncing=false, a near-reference head, current runtime/transaction identity, EVM chain identity, and eth_getLogs.",
-			observed:  fmt.Sprintf("current_head=%d target_head=%d lag=%d peers=%d is_syncing=%t runtime=%d", secondHead, targetHead, lag, node.Direct.Health.Peers, node.Direct.Health.IsSyncing, node.Direct.Runtime.SpecVersion),
+			observed:  fmt.Sprintf("current_head=%d target_head=%d lag=%d peers=%d is_syncing=%t %s", secondHead, targetHead, lag, node.Direct.Health.Peers, node.Direct.Health.IsSyncing, node.Direct.runtimeEvidence()),
 			context:   "Archive full-sync lag is an expected operational wait while progress and peers remain healthy; it is not an exporter defect.",
 			action:    "Keep the node out of cutover and track lag slope. Intervene only if progress/peers fail or measured catch-up no longer converges.",
 			verify:    "Require the lag to reach the configured near-head band and every current-runtime interface gate to pass.",
@@ -1063,10 +1080,11 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		})
 	} else if currentRuntimeConvergenceObserved {
 		currentProblems := []string{}
-		if node.Direct.Runtime.SpecVersion != settings.ExpectedSpecVersion {
+		runtimeAuthority := node.Direct.runtimeAuthority()
+		if runtimeAuthority.SpecVersion && node.Direct.Runtime.SpecVersion != settings.ExpectedSpecVersion {
 			currentProblems = append(currentProblems, fmt.Sprintf("specVersion=%d expected=%d", node.Direct.Runtime.SpecVersion, settings.ExpectedSpecVersion))
 		}
-		if node.Direct.Runtime.TransactionVersion != settings.ExpectedTransactionVersion {
+		if runtimeAuthority.TransactionVersion && node.Direct.Runtime.TransactionVersion != settings.ExpectedTransactionVersion {
 			currentProblems = append(currentProblems, fmt.Sprintf("transactionVersion=%d expected=%d", node.Direct.Runtime.TransactionVersion, settings.ExpectedTransactionVersion))
 		}
 		if !strings.EqualFold(node.Direct.EVMChainID, settings.ExpectedEVMChainID) {
@@ -1084,19 +1102,20 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 
 func subtensorIdentityProblems(settings *SubtensorHostSettings, observed subtensorRPCObservation, includeCurrentRuntime bool) []string {
 	problems := []string{}
+	runtimeAuthority := observed.runtimeAuthority()
 	if observed.Chain != settings.ExpectedChain {
 		problems = append(problems, fmt.Sprintf("chain=%q expected=%q", observed.Chain, settings.ExpectedChain))
 	}
 	if !strings.EqualFold(observed.Genesis, settings.ExpectedGenesisHash) {
 		problems = append(problems, fmt.Sprintf("genesis=%q expected=%q", observed.Genesis, settings.ExpectedGenesisHash))
 	}
-	if observed.Runtime.SpecName != settings.ExpectedSpecName {
+	if runtimeAuthority.SpecName && observed.Runtime.SpecName != settings.ExpectedSpecName {
 		problems = append(problems, fmt.Sprintf("specName=%q expected=%q", observed.Runtime.SpecName, settings.ExpectedSpecName))
 	}
-	if includeCurrentRuntime && observed.Runtime.SpecVersion != settings.ExpectedSpecVersion {
+	if includeCurrentRuntime && runtimeAuthority.SpecVersion && observed.Runtime.SpecVersion != settings.ExpectedSpecVersion {
 		problems = append(problems, fmt.Sprintf("specVersion=%d expected=%d", observed.Runtime.SpecVersion, settings.ExpectedSpecVersion))
 	}
-	if includeCurrentRuntime && observed.Runtime.TransactionVersion != settings.ExpectedTransactionVersion {
+	if includeCurrentRuntime && runtimeAuthority.TransactionVersion && observed.Runtime.TransactionVersion != settings.ExpectedTransactionVersion {
 		problems = append(problems, fmt.Sprintf("transactionVersion=%d expected=%d", observed.Runtime.TransactionVersion, settings.ExpectedTransactionVersion))
 	}
 	if includeCurrentRuntime && !strings.EqualFold(observed.EVMChainID, settings.ExpectedEVMChainID) {
@@ -1113,7 +1132,7 @@ func subtensorIdentityFinding(hostName, frame string, problems []string, observe
 		mechanism: "A reachable RPC can be the wrong chain, stale deployment, or wrong gateway upstream; reachability alone is not a safe cutover gate.",
 		baseline:  "Chain name, genesis hash, runtime name, and—at the current head—runtime/transaction/EVM identities match the pinned deployment.",
 		observed:  strings.Join(problems, "; "),
-		evidence:  fmt.Sprintf("chain=%q genesis=%q runtime=%s/%d transaction=%d evm=%q", observed.Chain, observed.Genesis, observed.Runtime.SpecName, observed.Runtime.SpecVersion, observed.Runtime.TransactionVersion, observed.EVMChainID),
+		evidence:  fmt.Sprintf("chain=%q genesis=%q %s evm=%q", observed.Chain, observed.Genesis, observed.runtimeEvidence(), observed.EVMChainID),
 		action:    "Compare the direct node, overlay gateway, public reference, rendered Compose digest, and active xops vars before changing data or traffic.",
 		verify:    "Repeat every identity method through direct and gateway RPC and require exact configured values at convergence.",
 		playbook:  "SIGNALS.md §17.1",
