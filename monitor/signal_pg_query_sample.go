@@ -160,6 +160,11 @@ func pgSampleBlockersSQL() string {
 }
 func pgQuerySampleSQL(database string) string {
 	var b strings.Builder
+	tailSequence := 0
+	tail := func(code byte, index int) {
+		fmt.Fprintf(&b, "\n\\echo monitor-pg-tail __MONITOR_PG_TAIL_NONCE__ %02d %c %02d\n", tailSequence, code, index)
+		tailSequence++
+	}
 	b.WriteString("-- monitor_query_sample_phase:identity\n")
 	b.WriteString("SELECT json_build_object('kind','identity','sample',0,'at',extract(epoch FROM clock_timestamp()),'primary',NOT pg_is_in_recovery(),'read_only',current_setting('transaction_read_only')='on','track_activity_query_size',pg_size_bytes(current_setting('track_activity_query_size')),'pgss_version',(SELECT extversion FROM pg_extension WHERE extname='pg_stat_statements'),'database_ok',current_database()=" + "'" + strings.ReplaceAll(database, "'", "''") + "');\n")
 	b.WriteString("-- monitor_query_sample_phase:authority\n")
@@ -169,17 +174,39 @@ func pgQuerySampleSQL(database string) string {
 	for i := 0; i < pgQuerySampleCount; i++ {
 		if i > 0 {
 			b.WriteString("\n-- monitor_query_sample_phase:sample_wait\n")
+			if i >= 10 {
+				tail('w', i)
+			}
 			b.WriteString("SELECT pg_sleep(2);\n")
+			if i >= 10 {
+				tail('W', i)
+			}
 		}
 		b.WriteString("\n-- monitor_query_sample_phase:activity\n")
+		if i >= 10 {
+			tail('c', i)
+		}
 		b.WriteString("SELECT pg_stat_clear_snapshot();\n")
+		if i >= 10 {
+			tail('C', i)
+			tail('a', i)
+		}
 		b.WriteString(pgSampleActivitySQL(i))
+		if i >= 10 {
+			tail('A', i)
+		}
 	}
 	b.WriteString("\n-- monitor_query_sample_phase:blockers\n")
+	tail('c', 12)
 	b.WriteString("SELECT pg_stat_clear_snapshot();\n")
+	tail('C', 12)
+	tail('b', 12)
 	b.WriteString(pgSampleBlockersSQL())
+	tail('B', 12)
 	b.WriteString("\n-- monitor_query_sample_phase:history_end\n")
+	tail('h', 12)
 	b.WriteString(pgSampleHistorySQL(1))
+	tail('H', 12)
 	return b.String()
 }
 

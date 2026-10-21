@@ -494,7 +494,9 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
-				resultValues <- mimirAdmissionHostResult{host: target, err: ctx.Err()}
+				resultValues <- mimirAdmissionHostResult{host: target, err: &observationBoundaryError{
+					err: ctx.Err(), boundary: observationBoundaryMimirHost,
+				}}
 				return
 			}
 

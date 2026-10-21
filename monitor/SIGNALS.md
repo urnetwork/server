@@ -5416,6 +5416,37 @@ order and finite response timestamps. Unexpected or malformed source headers
 stop later progress; the unchanged full-result parser still decides validity.
 Even count 12 with `history_end` cannot make a failed native/source result healthy.
 
+An optional fixed tail projection now records the last received psql client
+metacommand dispatch/return boundary for sample indices10 and11 (zero-based),
+then the blockers snapshot/query and final history. It deliberately omits the
+first ten activity iterations and all raw statements, errors, addresses, query
+identities and private correlation nonce. A dispatch marker means psql reached
+that client boundary; it does not prove server execution, the currently pending
+operation at deadline, successful semantic output, or completion. A return marker
+proves the client advanced after that statement; the unchanged full-result
+parser and native/source result still decide collection authority. Missing,
+buffered, lost, malformed, foreign, truncated or unsupported markers leave the
+tail unknown; last received is not necessarily last executed.
+
+The eighteen ordered compact markers add828 bytes to the unchanged1796-byte
+healthy version2 progress stream (2624 bytes total), under the unchanged4KiB
+progress limit. Versions1/2 retain their exact parser and seventeen-record
+sequence. The SQL workload retains twelve activity queries and eleven two-second
+waits: only client metacommands are added. They cost finite client/transport work,
+not zero overhead or a missed-sample repair. Marker bytes are charged to the
+existing4MiB raw source-output cap; no cap, retry, deadline or cadence increases.
+Only exact expected markers are removed from successful stdout. Corrupt markers
+cannot be discarded to manufacture an otherwise healthy source.
+
+Optional same-attempt native lifecycle offsets record actual Start/Wait entry
+and return plus explicitly observed local stdout/stderr EOF. Absent copy paths,
+callbacks and preflight remain unknown; Wait return alone never supplies EOF.
+EOF identifies the local SSH pipe boundary, not database success or every remote
+descendant. Concurrent pipe EOFs have no mutual ordering, and local receipt of a
+remote marker supplies no synchronized remote operation duration. Invalid clocks
+withhold offsets without altering native/source classifications. These fields do
+not attribute a holder's CPU time or repair unknown scheduling/SQL causes.
+
 Source output remains buffered until successful child completion. Cancellation
 and owner deadlines preserve the original cannot-observe result, top-level
 `samples=0`, cadence and source-failure class while retaining valid progress.
@@ -18696,6 +18727,18 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+A failed URL census gateway query retains the existing finite `error_class`,
+SSH admission phases and code-owned `execution_boundaries` in the owning
+`url-probe-coverage-unobservable` alert. Raw errors, gateway identities and
+partial response bodies are never rendered. The JSONL census remains
+`transport_unavailable` / `census_unavailable` with null source clocks and
+counts. False-positive qualifier: joined boundary sets do not establish attempt
+order or count, remote command execution, Mimir failure or provider scarcity;
+a started/joined local SSH child alone proves no remote contact. False-negative
+qualifier: an absent boundary marker remains unknown, and an unavailable census
+cannot clear prior quota/security findings or certify recovery. A later valid
+census is a visibility control and needs its own fresh source identity and clocks.
+
 First admission waits for current reliability history: URL admission needs a
 one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
 intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
@@ -31406,6 +31449,18 @@ or reinterpret a missing observation as zero throughput.
 ### 11.20a Mimir series and sample-rate admission
 
 Probe: `mimir-admission`
+
+A canceled wait for this probe's existing per-host fanout permit retains
+`execution_boundaries=mimir-host-admission/not-attempted` on that host's
+visibility finding. It proves that this host attempt did not enter transport;
+it does not describe sibling attempts. Once transport is entered, the existing
+host/shared admission and native Start/Wait error markers remain separate.
+No native or remote progress is inferred from a callback, global permit,
+unmarked timeout, or absent marker. False-positive qualifier: a local fanout
+wait can expire while Mimir is healthy. False-negative qualifier: that host's
+unobserved counters can conceal loss; the held PAGE and complete comparable
+two-hour recovery requirement remain unchanged. These finite error markers
+add no request, retry, timeout, cadence, or concurrency change.
 
 Native listener acquisition, its selector and sorting, build-info curl, and
 the lazy-family source selector each require successful completion. A valid
