@@ -18694,6 +18694,18 @@ source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
 
+A failed URL census gateway query retains the existing finite `error_class`,
+SSH admission phases and code-owned `execution_boundaries` in the owning
+`url-probe-coverage-unobservable` alert. Raw errors, gateway identities and
+partial response bodies are never rendered. The JSONL census remains
+`transport_unavailable` / `census_unavailable` with null source clocks and
+counts. False-positive qualifier: joined boundary sets do not establish attempt
+order or count, remote command execution, Mimir failure or provider scarcity;
+a started/joined local SSH child alone proves no remote contact. False-negative
+qualifier: an absent boundary marker remains unknown, and an unavailable census
+cannot clear prior quota/security findings or certify recovery. A later valid
+census is a visibility control and needs its own fresh source identity and clocks.
+
 First admission waits for current reliability history: URL admission needs a
 one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
 intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
