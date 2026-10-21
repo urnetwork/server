@@ -309,25 +309,55 @@ func parseRedisClusterPing(output string, ports []int) redisClusterPingObservati
 	return observation
 }
 
-// redisFailingNodes lists nodes marked fail/noaddr (evidence for cluster-state).
+// Optional node context contains only fixed flag counts. Node ids, endpoints
+// and other source fields are neither interpreted nor emitted as evidence.
 func redisFailingNodes(ctx context.Context, env *probeEnv, h *host) string {
 	out, err := env.runner.redis(ctx, h, h.redisEntryPort, "CLUSTER", "NODES")
 	if err != nil {
 		return "cluster nodes failed: error_class=" + classifyObservationError(err)
 	}
-	badAddrs := []string{}
+	const unknown = "cluster nodes optional context unknown: invalid response"
+	if len(out) > 64*1024 {
+		return unknown
+	}
+	rows, failed, possiblyFailed, noAddress := 0, 0, 0, 0
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "fail") || strings.Contains(line, "noaddr") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				badAddrs = append(badAddrs, fields[1])
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Only the fixed flags column of an eight-field-or-longer row is
+		// projected. This is not endpoint, membership or node-id authority.
+		if len(fields) < 8 {
+			return unknown
+		}
+		flags := map[string]bool{}
+		for _, flag := range strings.Split(fields[2], ",") {
+			if flags[flag] {
+				return unknown
 			}
+			switch flag {
+			case "myself", "master", "slave", "fail?", "fail", "handshake", "noaddr", "nofailover", "noflags":
+			default:
+				return unknown
+			}
+			flags[flag] = true
+		}
+		rows++
+		if flags["fail"] {
+			failed++
+		}
+		if flags["fail?"] {
+			possiblyFailed++
+		}
+		if flags["noaddr"] {
+			noAddress++
 		}
 	}
-	if len(badAddrs) == 0 {
-		return "no fail/noaddr nodes in cluster nodes"
+	if rows == 0 {
+		return unknown
 	}
-	return "fail/noaddr nodes: " + strings.Join(badAddrs, ", ")
+	return fmt.Sprintf("cluster nodes optional flags: rows=%d fail=%d pfail=%d noaddr=%d", rows, failed, possiblyFailed, noAddress)
 }
 
 // parseRedisInfo parses "key:value" lines from INFO / CLUSTER INFO output.
