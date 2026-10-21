@@ -17602,6 +17602,12 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   denominator. This pattern does not isolate site policy, provider paths,
   shared route/admission capacity or the `/ip` echo. Retain the legacy class
   as a diagnostic pattern, not proof of universal unreachability;
+  the current country query lists only failing cohorts, with a `HAVING`
+  predicate and a listing cap. It supplies no comparable passing cohort, so
+  this source cannot emit a country healthy sentinel or establish country-ticket
+  recovery through healthy findings. Empty or nonqualifying results, eligibility
+  changes and capped omissions leave recovery unknown. The continuous notifier's
+  separate absence transitions do not certify recovery and are unchanged;
 - **backfill sustained** (`egress-backfill-sustained`, frame the rank mode):
   more than half of the providers FindProviders2 answered with for a rank
   mode over the last hour were borrowed from another bucket
