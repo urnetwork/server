@@ -15,6 +15,7 @@ const (
 	observationBoundaryNativeStart
 	observationBoundaryNativeWait
 	observationBoundaryNativeWaitUnknown
+	observationBoundaryMimirHost
 	observationBoundaryCount
 )
 
@@ -111,6 +112,7 @@ func observationBoundaryDetails(err error) string {
 		"native-start/failed-no-child",
 		"native-wait/started-joined",
 		"native-wait/started-join-unknown",
+		"mimir-host-admission/not-attempted",
 	}
 	var selected []string
 	for boundary, found := range present {

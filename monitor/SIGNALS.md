@@ -31359,6 +31359,18 @@ or reinterpret a missing observation as zero throughput.
 
 Probe: `mimir-admission`
 
+A canceled wait for this probe's existing per-host fanout permit retains
+`execution_boundaries=mimir-host-admission/not-attempted` on that host's
+visibility finding. It proves that this host attempt did not enter transport;
+it does not describe sibling attempts. Once transport is entered, the existing
+host/shared admission and native Start/Wait error markers remain separate.
+No native or remote progress is inferred from a callback, global permit,
+unmarked timeout, or absent marker. False-positive qualifier: a local fanout
+wait can expire while Mimir is healthy. False-negative qualifier: that host's
+unobserved counters can conceal loss; the held PAGE and complete comparable
+two-hour recovery requirement remain unchanged. These finite error markers
+add no request, retry, timeout, cadence, or concurrency change.
+
 Native listener acquisition, its selector and sorting, build-info curl, and
 the lazy-family source selector each require successful completion. A valid
 prefix from any failed stage cannot identify a child or authorize an absent
