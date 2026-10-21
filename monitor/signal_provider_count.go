@@ -173,10 +173,10 @@ func parseProviderCountCohorts(raw string, now time.Time) ([]providerCountCohort
 		Infos []string `json:"infos"`
 	}
 	if err := json.Unmarshal([]byte(raw), &response); err != nil {
-		return nil, fmt.Errorf("provider count: decode Mimir response: %w", err)
+		return nil, fmt.Errorf("provider count: decode Mimir response")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
-		return nil, fmt.Errorf("provider count: Mimir status=%q result_type=%q error=%q", response.Status, response.Data.ResultType, response.Error)
+		return nil, fmt.Errorf("provider count: Mimir response status or result type is unsupported")
 	}
 	// These aggregate ratios need the whole response, including their
 	// denominators. An annotation leaves every returned cohort unqualified.
@@ -194,7 +194,7 @@ func parseProviderCountCohorts(raw string, now time.Time) ([]providerCountCohort
 		}
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil {
-			return nil, fmt.Errorf("provider count: parse %s: %w", key.frame(), err)
+			return nil, fmt.Errorf("provider count: parse Mimir outcome value")
 		}
 		age := now.Sub(observedAt)
 		if age > providerCountFreshness || age < -30*time.Second {
