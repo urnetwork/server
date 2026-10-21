@@ -5153,6 +5153,32 @@ Only the new execution-boundary projection caps child inspections and visits at
 shared-admission traversal remain separate and carry no new work bound; this is
 not a guarantee for the whole formatter or arbitrary Error/Unwrap methods.
 
+A shared signal adapter that entered with a live evaluation context withholds
+its returned findings when that owner ends before acceptance, whether or not
+host exclusions enabled a scope runner. Its own finite run budget is part of
+that evaluation owner; a live outer watcher does not turn an expired child
+into a complete healthy execution. The canonical context verdict retains any
+already returned source cause through the error chain, without rendering its
+private text. A live owner's independent child/source failure keeps its prior
+authority. Existing pre-canceled no-policy local evaluation behavior remains a
+compatibility contract, not a newly qualified live observation.
+
+This acceptance fence cannot roll back probe-owned cache/baseline writes or an
+observer callback that already began while live. It checks lifecycle at the
+adapter boundaries; it is not an atomic certificate against cancellation after
+the last check. The execution loop already suppresses ended outer-monitor
+results before its gate/handler. The additional public-loop control covers an
+ended per-execution budget while that outer owner remains live; it does not
+attribute a production notification incident or replace owning state staging.
+
+The PgBouncer cancellation controls enter with a live context and cancel it
+inside the source callback. Their scoped and unscoped expectations therefore
+both require no returned findings and the parent context cause; source errors
+retain their original Is/As identity alongside that cause, with one source
+call and no second gateway. Their earlier unscoped PAGE/source-only assertions
+are deliberately superseded by this live-entry policy, rather than reclassified
+as pre-canceled compatibility or borrowed as notifier-incident evidence.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -10578,6 +10604,21 @@ Unannotated, otherwise valid independent cohorts retain their existing findings.
 Raw annotation text never enters the error or Alert. This gate does not change
 the PAGE/WARN thresholds or establish complete native process/window coverage;
 unannotated omissions and affected-request supply remain separate limitations.
+
+Failed status/non-vector envelopes, JSON decode failures and invalid outcome
+value parsing return only fixed provider-count error text. Backend status,
+result-type/error strings, decoder details and invalid sample text never enter
+the public signal or aggregate error. Unsupported envelopes retain the
+unclassified observation class; decode/value failures retain invalid-response.
+Untrusted response text cannot select a timeout or access-denied class. These
+are unavailable observations, with no healthy/provider verdict or recovery
+credit. Direct source-error chains and parent cancellation/deadline precedence
+remain unchanged; this local parser correction does not redact other sources.
+False-positive qualifier: rejecting an unavailable response is not a measured
+provider failure. False-negative qualifier: missing cohorts can conceal real
+degradation, and a fixed error cannot recover discarded backend detail. Clean
+independent responses and the existing annotation policy retain their separate
+authority; no threshold, query, retry, transport or cadence change is made.
 
 `provider-count-direct-unclassified` is a separate evidence-unknown WARN, never
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
@@ -26871,6 +26912,23 @@ remain unknown. This is detector coverage, not evidence that Main lacks the
 columns or that the migration has run there. Matching schema does not establish
 when a device connected or whether its reported app version is fresh; the
 probe reads catalog metadata, not device values.
+
+Version 853 adds the five crypto-payment intent, quote, receipt, address and
+scan-cursor tables. Its one ordered artifact contract checks all 69 published
+columns, permanent ordinary-table custody, the five primary keys and separate
+address uniqueness, all eleven lookup/partial/unique indexes, and the existing
+`solana_payment_intent.network_id` change to nullable ordinary `uuid` without a
+default. Types, widths, nullability, defaults, key order, index uniqueness,
+readiness and predicates are operative checks; names or the numeric head alone
+are insufficient. The new relations remain pending before 853 and a missing or
+incompatible contract pages at a source-known applied head. Failed, excluded,
+or canceled evidence remains unavailable, and a still-newer head retains the
+separate future-schema warning and immutable-prefix checks. This detector reads
+catalog metadata only, not payment rows or private address/token values. It
+does not prove current Main schema, authorize the payment rollout or a rollback,
+or replace the migration's client/config deployment ordering. Retained
+853-versus-852 warnings are older-validator authority gaps, not proof that the
+database is broken; their recovery requires a qualified 853-aware observation.
 
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
