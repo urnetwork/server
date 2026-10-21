@@ -5398,6 +5398,37 @@ order and finite response timestamps. Unexpected or malformed source headers
 stop later progress; the unchanged full-result parser still decides validity.
 Even count 12 with `history_end` cannot make a failed native/source result healthy.
 
+An optional fixed tail projection now records the last received psql client
+metacommand dispatch/return boundary for sample indices10 and11 (zero-based),
+then the blockers snapshot/query and final history. It deliberately omits the
+first ten activity iterations and all raw statements, errors, addresses, query
+identities and private correlation nonce. A dispatch marker means psql reached
+that client boundary; it does not prove server execution, the currently pending
+operation at deadline, successful semantic output, or completion. A return marker
+proves the client advanced after that statement; the unchanged full-result
+parser and native/source result still decide collection authority. Missing,
+buffered, lost, malformed, foreign, truncated or unsupported markers leave the
+tail unknown; last received is not necessarily last executed.
+
+The eighteen ordered compact markers add828 bytes to the unchanged1796-byte
+healthy version2 progress stream (2624 bytes total), under the unchanged4KiB
+progress limit. Versions1/2 retain their exact parser and seventeen-record
+sequence. The SQL workload retains twelve activity queries and eleven two-second
+waits: only client metacommands are added. They cost finite client/transport work,
+not zero overhead or a missed-sample repair. Marker bytes are charged to the
+existing4MiB raw source-output cap; no cap, retry, deadline or cadence increases.
+Only exact expected markers are removed from successful stdout. Corrupt markers
+cannot be discarded to manufacture an otherwise healthy source.
+
+Optional same-attempt native lifecycle offsets record actual Start/Wait entry
+and return plus explicitly observed local stdout/stderr EOF. Absent copy paths,
+callbacks and preflight remain unknown; Wait return alone never supplies EOF.
+EOF identifies the local SSH pipe boundary, not database success or every remote
+descendant. Concurrent pipe EOFs have no mutual ordering, and local receipt of a
+remote marker supplies no synchronized remote operation duration. Invalid clocks
+withhold offsets without altering native/source classifications. These fields do
+not attribute a holder's CPU time or repair unknown scheduling/SQL causes.
+
 Source output remains buffered until successful child completion. Cancellation
 and owner deadlines preserve the original cannot-observe result, top-level
 `samples=0`, cadence and source-failure class while retaining valid progress.
