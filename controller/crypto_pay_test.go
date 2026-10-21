@@ -984,8 +984,8 @@ func TestCryptoPayConfigFiles(t *testing.T) {
 		connect.AssertEqual(t, config.MaxOpenCodeIntentsPerAsset, 100)
 		if env == "main" {
 			connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).Network, cryptoNetworkMainnet)
-			// no USDC codes until every server runs a build with migration 853
-			connect.AssertEqual(t, config.Asset(model.CryptoAssetUsdcSolana).CodeDeliveryEnabled(), false)
+			// USDC codes are on from the launch (owner, 2026-10-21)
+			connect.AssertEqual(t, config.Asset(model.CryptoAssetUsdcSolana).CodeDeliveryEnabled(), true)
 			connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).CodeDeliveryEnabled(), true)
 		} else {
 			connect.AssertEqual(t, config.Asset(model.CryptoAssetUsdcSolana).CodeDeliveryEnabled(), true)
