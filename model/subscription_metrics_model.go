@@ -32,6 +32,8 @@ var subscriptionMetricsStores = []string{
 	SubscriptionMarketGoogle,
 	SubscriptionMarketStripe,
 	SubscriptionMarketSolana,
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
 }
 
 var subscriptionMetricsWindows = []string{
@@ -100,7 +102,7 @@ type SubscriptionMetricsSnapshot struct {
 //     rolling window and no later window remains in that store/any store.
 //
 // The per-store active/engagement/churn series count a network once per store.
-// The deduplicated series count a network once across the four tracked stores.
+// The deduplicated series count a network once across the tracked stores.
 // `network_client_network_id_top_level` makes each active-subscriber
 // engagement EXISTS probe index-backed; starting from the much smaller active
 // paid cohort avoids scanning the fleet-wide 30-day auth band.
@@ -110,7 +112,7 @@ WITH tracked_renewal AS MATERIALIZED (
     SELECT network_id, market, start_time, end_time
     FROM subscription_renewal
     WHERE subscription_type = 'supporter'
-      AND market IN ('apple', 'google', 'stripe', 'solana')
+      AND market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
 ), metric_window(window_name, since_time) AS (
     VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
 ), active_by_store AS (
@@ -217,7 +219,7 @@ WITH metric_window(window_name, since_time) AS (
 SELECT event.store, event.action, metric_window.window_name, count(*)::bigint
 FROM payment_reconciliation_event event
 CROSS JOIN metric_window
-WHERE event.store IN ('apple', 'google', 'stripe', 'solana')
+WHERE event.store IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
   AND event.action IN ('credited', 'ended', 'entitlement_repaired', 'refunded', 'disputed', 'revoked')
   AND NOT event.dry_run
   AND metric_window.since_time <= event.event_time
@@ -366,7 +368,7 @@ func LoadSubscriptionMetricsSnapshot(ctx context.Context, now time.Time) *Subscr
 
 		result, err = conn.Query(
 			ctx,
-			`SELECT store, update_time FROM payment_reconciliation_watermark WHERE store IN ('apple', 'google', 'stripe', 'solana') ORDER BY store`,
+			`SELECT store, update_time FROM payment_reconciliation_watermark WHERE store IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash') ORDER BY store`,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

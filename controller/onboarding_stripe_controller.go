@@ -501,12 +501,14 @@ const stripeAlreadySubscribedMessage = "You already have an active Pro subscript
 
 // subscriptionMarketsBlockNewPurchase reports whether the network's active
 // supporter subscription markets mean it is already paying for Pro. Manual
-// grants and x402 agent payments are not a store subscription the customer
-// would be charged for twice.
+// grants, x402 agent payments and one-time Monero and Zcash payments are not
+// a store subscription the customer would be charged for twice (a crypto
+// year never renews).
 func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket) bool {
 	for _, market := range markets {
 		switch market {
-		case model.SubscriptionMarketManual, model.SubscriptionMarketX402:
+		case model.SubscriptionMarketManual, model.SubscriptionMarketX402,
+			model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
 			continue
 		}
 		return true

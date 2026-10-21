@@ -240,6 +240,15 @@ func RecordUnfulfilledSolanaPayment(
 	ctx context.Context,
 	payment *UnfulfilledSolanaPayment,
 ) (err error) {
+	return RecordUnfulfilledSolanaPaymentInConn(nil, ctx, payment)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func RecordUnfulfilledSolanaPaymentInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	payment *UnfulfilledSolanaPayment,
+) (err error) {
 
 	var referenceCandidates *string
 	if 0 < len(payment.ReferenceCandidates) {
@@ -253,7 +262,7 @@ func RecordUnfulfilledSolanaPayment(
 	// a failed insert raises, which ends the transaction at once; the error
 	// result is always nil. It used to be assigned to the result while the
 	// transaction went on to a commit that server.Tx retried for a minute.
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -423,8 +432,14 @@ func GetSolanaPaymentIntentCompletionInConn(connOwner server.PgConn,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&networkId, &signature))
-				ok = true
+				// a USDC data code bought without a network has no owner for a
+				// renewal: not a completion this lookup reports
+				var owner *server.Id
+				server.Raise(result.Scan(&owner, &signature))
+				if owner != nil {
+					networkId = *owner
+					ok = true
+				}
 			}
 		})
 	})
@@ -470,6 +485,11 @@ func GetUnfulfilledSolanaPayment(
 }
 
 // todo - create a task to cleanup expired intents without a tx_signature
+//
+// An intent linked from a crypto payment invoice (USDC on the generic API) is
+// kept while the invoice is: re-quoting the invoice extends its intent, and a
+// late payment must still find it (mmm/ZCASH-CONTRACT.md §3.13.11). It is swept once
+// the invoice's retention unlink has run.
 func CleanupExpiredPaymentIntents(
 	ctx context.Context,
 	minTime time.Time,
@@ -483,6 +503,11 @@ func CleanupExpiredPaymentIntents(
 			DELETE FROM solana_payment_intent
 			WHERE expires_at < $1
 			  AND tx_signature IS NULL
+			  AND NOT EXISTS (
+				SELECT 1 FROM crypto_payment_intent invoice
+				WHERE invoice.solana_reference = solana_payment_intent.payment_reference
+				  AND invoice.unlinked_at IS NULL
+			  )
 			`,
 			minTime,
 		)
@@ -534,7 +559,10 @@ func CreateSolanaPaymentIntentForNetwork(
 
 // SolanaPaymentIntent is one intent row, open or consumed.
 type SolanaPaymentIntent struct {
-	PaymentReference  string
+	PaymentReference string
+	// the zero id when the intent has no network: a USDC data code bought
+	// without one (network_id is NULL until the code is redeemed). Every
+	// reader treats it as no network, which matches no caller and no admin.
 	NetworkId         server.Id
 	ExpectedAmountUsd float64
 	SubscriptionPlan  string
@@ -570,17 +598,21 @@ func GetSolanaPaymentIntent(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				intent = &SolanaPaymentIntent{}
+				var networkId *server.Id
 				var expectedAmountUsd *float64
 				var subscriptionPlan *string
 				server.Raise(result.Scan(
 					&intent.PaymentReference,
-					&intent.NetworkId,
+					&networkId,
 					&expectedAmountUsd,
 					&subscriptionPlan,
 					&intent.CreatedAt,
 					&intent.ExpiresAt,
 					&intent.TxSignature,
 				))
+				if networkId != nil {
+					intent.NetworkId = *networkId
+				}
 				if expectedAmountUsd != nil {
 					intent.ExpectedAmountUsd = *expectedAmountUsd
 				}
@@ -657,79 +689,139 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 	expiresAt time.Time,
 	pickSuffixMicro func() int64,
 ) (amountUsd float64, err error) {
-	now := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
-		amountUsd = 0
-		err = nil
-		// a failed statement raises, which ends the transaction at once. Each
-		// used to set the error result while the transaction went on to a
-		// commit that server.Tx retried for a minute.
-		tag := server.RaisePgResult(tx.Exec(
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmountInTx(
+			tx,
 			ctx,
-			`
-				INSERT INTO solana_payment_intent
-				(payment_reference, network_id, created_at, expires_at, expected_amount_usd, subscription_plan)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT DO NOTHING
-			`,
 			reference,
-			networkId,
-			now,
-			expiresAt,
+			&networkId,
 			priceUsd,
 			subscriptionPlan,
-		))
-		if tag.RowsAffected() == 0 {
-			err = errors.New("payment_reference already exists")
-			return
-		}
-		amountUsd = priceUsd
-
-		for range solanaUniqueAmountAttempts {
-			amountMicro, ok := SolanaUniqueAmountMicro(priceUsd, pickSuffixMicro())
-			if !ok {
-				continue
-			}
-			tag := server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-					INSERT INTO solana_payment_amount_reservation
-					(amount_micro, payment_reference, reserved_until)
-					VALUES ($1, $2, $3)
-					ON CONFLICT (amount_micro) DO UPDATE
-					SET payment_reference = EXCLUDED.payment_reference,
-						reserved_until = EXCLUDED.reserved_until
-					WHERE solana_payment_amount_reservation.reserved_until < $4
-				`,
-				amountMicro,
-				reference,
-				expiresAt.Add(SolanaUniqueAmountHold),
-				now,
-			))
-			if tag.RowsAffected() == 0 {
-				// held by another quote
-				continue
-			}
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-					UPDATE solana_payment_intent
-					SET expected_amount_usd = $2,
-						expected_amount_micro = $3
-					WHERE payment_reference = $1
-				`,
-				reference,
-				SolanaMicroToUsd(amountMicro),
-				amountMicro,
-			))
-			amountUsd = SolanaMicroToUsd(amountMicro)
-			return
-		}
+			expiresAt,
+			pickSuffixMicro,
+		)
 	})
 	if err != nil {
 		return 0, err
 	}
 	return amountUsd, nil
+}
+
+// CreateSolanaPaymentIntentWithUniqueAmountInTx is
+// CreateSolanaPaymentIntentWithUniqueAmount in the caller's transaction.
+// networkId is nil for a USDC data code bought without a network: the crypto
+// invoice linked to the intent delivers it (CreateLinkedSolanaCryptoPaymentIntent).
+func CreateSolanaPaymentIntentWithUniqueAmountInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	reference string,
+	networkId *server.Id,
+	priceUsd float64,
+	subscriptionPlan string,
+	expiresAt time.Time,
+	pickSuffixMicro func() int64,
+) (amountUsd float64, err error) {
+	now := server.NowUtc()
+	// a failed statement raises, which ends the transaction at once. Each
+	// used to set the error result while the transaction went on to a
+	// commit that server.Tx retried for a minute.
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO solana_payment_intent
+			(payment_reference, network_id, created_at, expires_at, expected_amount_usd, subscription_plan)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT DO NOTHING
+		`,
+		reference,
+		networkId,
+		now,
+		expiresAt,
+		priceUsd,
+		subscriptionPlan,
+	))
+	if tag.RowsAffected() == 0 {
+		return 0, errors.New("payment_reference already exists")
+	}
+	amountUsd = priceUsd
+
+	for range solanaUniqueAmountAttempts {
+		amountMicro, ok := SolanaUniqueAmountMicro(priceUsd, pickSuffixMicro())
+		if !ok {
+			continue
+		}
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO solana_payment_amount_reservation
+				(amount_micro, payment_reference, reserved_until)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (amount_micro) DO UPDATE
+				SET payment_reference = EXCLUDED.payment_reference,
+					reserved_until = EXCLUDED.reserved_until
+				WHERE solana_payment_amount_reservation.reserved_until < $4
+			`,
+			amountMicro,
+			reference,
+			expiresAt.Add(SolanaUniqueAmountHold),
+			now,
+		))
+		if tag.RowsAffected() == 0 {
+			// held by another quote
+			continue
+		}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE solana_payment_intent
+				SET expected_amount_usd = $2,
+					expected_amount_micro = $3
+				WHERE payment_reference = $1
+			`,
+			reference,
+			SolanaMicroToUsd(amountMicro),
+			amountMicro,
+		))
+		return SolanaMicroToUsd(amountMicro), nil
+	}
+	return amountUsd, nil
+}
+
+// CreateLinkedSolanaCryptoPaymentIntent records a USDC invoice of the generic
+// crypto API: the Solana Pay intent the Helius webhook matches (reference,
+// unique amount, plan or data item) and the crypto invoice linked to it, in
+// one transaction. The invoice's amount is the Solana quote in micro-USDC.
+// The webhook's credit of the Solana intent goes through the invoice's
+// credit (controller cryptoCreditIntentInConn).
+func CreateLinkedSolanaCryptoPaymentIntent(
+	ctx context.Context,
+	intent *CryptoPaymentIntent,
+	priceUsd float64,
+	pickSuffixMicro func() int64,
+) (returnErr error) {
+	if intent.SolanaReference == nil {
+		return errors.New("a linked USDC invoice needs a Solana reference")
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = nil
+		amountUsd, err := CreateSolanaPaymentIntentWithUniqueAmountInTx(
+			tx,
+			ctx,
+			*intent.SolanaReference,
+			intent.NetworkId,
+			priceUsd,
+			intent.Item,
+			intent.ExpiresAt,
+			pickSuffixMicro,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		intent.AmountAtomic = SolanaUsdToMicro(amountUsd)
+		CreateCryptoPaymentIntentInTx(tx, ctx, intent)
+	})
+	return
 }
 
 // ListSolanaPaymentIntentsByAmountMicro returns every intent, open or consumed,
@@ -770,15 +862,19 @@ func ListSolanaPaymentIntentsByAmountMicro(
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				intent := &SolanaPaymentIntent{}
+				var networkId *server.Id
 				server.Raise(result.Scan(
 					&intent.PaymentReference,
-					&intent.NetworkId,
+					&networkId,
 					&intent.ExpectedAmountUsd,
 					&intent.SubscriptionPlan,
 					&intent.CreatedAt,
 					&intent.ExpiresAt,
 					&intent.TxSignature,
 				))
+				if networkId != nil {
+					intent.NetworkId = *networkId
+				}
 				intents = append(intents, intent)
 			}
 		})

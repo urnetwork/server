@@ -891,13 +891,13 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	upgrades := dashboardPanelById(dashboard, 21)
 	churn := dashboardPanelById(dashboard, 11)
 	if active == nil || len(active.Targets) != 1 ||
-		!strings.Contains(active.Targets[0].Expr, `store=~"apple|google|stripe|solana"`) {
-		t.Fatal("subscriptions dashboard lacks the bounded four-store active view")
+		!strings.Contains(active.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded tracked-store active view")
 	}
 	if upgrades == nil || len(upgrades.Targets) != 1 ||
-		!strings.Contains(upgrades.Targets[0].Expr, `store=~"apple|google|stripe|solana"`) ||
+		!strings.Contains(upgrades.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) ||
 		!strings.Contains(upgrades.Targets[0].Expr, `window="$window"`) {
-		t.Fatal("subscriptions dashboard lacks the bounded four-store upgrade view")
+		t.Fatal("subscriptions dashboard lacks the bounded tracked-store upgrade view")
 	}
 	upgradeTotal := dashboardPanelById(dashboard, 6)
 	if upgradeTotal == nil || len(upgradeTotal.Targets) != 1 ||
@@ -906,7 +906,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, panel := range []*testPanel{engagement, churn} {
 		if panel == nil || len(panel.Targets) != 1 ||
-			!strings.Contains(panel.Targets[0].Expr, `store=~"apple|google|stripe|solana|deduplicated"`) ||
+			!strings.Contains(panel.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash|deduplicated"`) ||
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Fatal("subscriptions dashboard lacks a bounded store/window account view")
 		}
@@ -921,7 +921,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		expression := panel.Targets[0].Expr
 		for _, required := range []string{
 			`store="all"`,
-			`store=~"apple|google|stripe|solana"`,
+			`store=~"apple|google|stripe|solana|monero|zcash"`,
 			"time() - 9000",
 			"time() - 10800",
 			"and on(env,service,block,host,instance,store)",

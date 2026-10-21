@@ -86,6 +86,11 @@ Usage:
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
+    bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
+    bringyourctl crypto show --intent=<intent_id>
+    bringyourctl crypto credit --intent=<intent_id>
+    bringyourctl crypto void --intent=<intent_id>
+    bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
@@ -178,7 +183,11 @@ Options:
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
-    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
+    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero or zcash.
+    --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
+    --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
+    --intent=<intent_id>  A crypto invoice id.
+    --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
@@ -303,6 +312,8 @@ func main() {
 		if reconcile, _ := opts.Bool("reconcile"); reconcile {
 			paymentsReconcile(opts)
 		}
+	} else if crypto, _ := opts.Bool("crypto"); crypto {
+		os.Exit(cryptoCommand(opts, os.Stdout))
 	} else if payout, _ := opts.Bool("payout"); payout {
 		if single, _ := opts.Bool("single"); single {
 			payoutByPaymentId(opts)
@@ -1917,11 +1928,13 @@ func paymentsReconcile(opts docopt.Opts) {
 		model.SubscriptionMarketGoogle,
 		model.SubscriptionMarketSolana,
 		model.SubscriptionMarketX402,
+		model.SubscriptionMarketMonero,
+		model.SubscriptionMarketZcash,
 	}
 	stores := allStores
 	if store, _ := opts.String("--store"); store != "" {
 		if !slices.Contains(allStores, store) {
-			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, or x402)\n", store)
+			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, or zcash)\n", store)
 			os.Exit(1)
 		}
 		options.Stores = []string{store}

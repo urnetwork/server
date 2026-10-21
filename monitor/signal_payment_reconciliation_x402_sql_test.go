@@ -22,7 +22,7 @@ CREATE TEMP TABLE payment_reconciliation_watermark (store text, update_time time
 CREATE TEMP TABLE pending_task (function_name text, reschedule_error text, claim_time timestamptz) ON COMMIT DROP;
 INSERT INTO pending_task VALUES ('github.com/urnetwork/server/taskworker/work.PaymentReconcile',NULL,NULL);
 INSERT INTO payment_reconciliation_watermark
-SELECT store,now()-interval '10 minutes' FROM (VALUES ('apple'),('google'),('solana'),('stripe'),('x402')) s(store);
+SELECT store,now()-interval '10 minutes' FROM (VALUES ('apple'),('google'),('monero'),('solana'),('stripe'),('x402'),('zcash')) s(store);
 `))
 	server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO payment_reconciliation_event
 VALUES ('all','heartbeat',NULL,$1,NULL,false,now()-interval '10 minutes')`, server.NewId()))

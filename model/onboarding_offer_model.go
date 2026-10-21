@@ -46,6 +46,8 @@ const (
 	OnboardingStorePlay   = "play"
 	OnboardingStoreStripe = "stripe"
 	OnboardingStoreSolana = "solana"
+	OnboardingStoreZcash  = "zcash"
+	OnboardingStoreMonero = "monero"
 )
 
 type OnboardingOffer struct {

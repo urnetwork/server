@@ -192,6 +192,11 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/data/network-lookup":                 routeAccessPublic,
 	"POST /pay/data/solana-intent":                  routeAccessPublic,
 	"POST /pay/data/solana-status":                  routeAccessPublic,
+	"GET /pay/crypto/assets":                        routeAccessPublic,
+	"POST /pay/crypto/intent":                       routeAccessClient,
+	"POST /pay/data/crypto-intent":                  routeAccessPublic,
+	"POST /pay/crypto/status":                       routeAccessPublic,  // the invoice's status token is the credential
+	"POST /pay/crypto/requote":                      routeAccessPublic,  // the invoice's status token is the credential
 	"GET /wallet/balance":                           routeAccessNetwork, // Circle wallet balance
 	"POST /wallet/validate-address":                 routeAccessClient,
 	"POST /wallet/circle-init":                      routeAccessNetwork, // creates the Circle wallet

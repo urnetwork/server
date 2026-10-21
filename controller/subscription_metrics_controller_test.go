@@ -86,17 +86,19 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 		t.Fatalf("snapshot timestamp = %v, want %d", got, refreshedAt.Unix())
 	}
 
-	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 5 {
-		t.Errorf("active series = %d, want 5 bounded stores", got)
+	// six tracked stores (apple, google, stripe, solana, monero, zcash) plus
+	// the deduplicated series
+	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 7 {
+		t.Errorf("active series = %d, want 7 bounded stores", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 15 {
-		t.Errorf("engagement series = %d, want 5 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 21 {
+		t.Errorf("engagement series = %d, want 7 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 15 {
-		t.Errorf("new-paid series = %d, want 5 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 21 {
+		t.Errorf("new-paid series = %d, want 7 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 72 {
-		t.Errorf("reconciliation series = %d, want 4 stores x 6 actions x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 108 {
+		t.Errorf("reconciliation series = %d, want 6 stores x 6 actions x 3 windows", got)
 	}
 	if got := len(metricFamilies["urnetwork_subscription_data_pack_fulfillments"].Metric); got != 12 {
 		t.Errorf("data-pack series = %d, want 3 sources x 4 windows", got)
@@ -221,8 +223,10 @@ func requireSubscriptionMetricsGeneration(
 	refreshedAt time.Time,
 ) {
 	t.Helper()
-	if len(metrics) != 152 {
-		t.Fatalf("collected metrics = %d, want 152 bounded samples", len(metrics))
+	// six tracked stores (apple, google, stripe, solana, monero, zcash): monero
+	// and zcash added 58 samples to the 152 of four stores
+	if len(metrics) != 210 {
+		t.Fatalf("collected metrics = %d, want 210 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

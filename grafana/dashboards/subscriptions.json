@@ -95,7 +95,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Paid accounts** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, and Solana. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all four stores. **New paid accounts / upgrades** count a network's first supporter window per store, while `deduplicated` is its first-ever window across all tracked stores; renewals and store switches never inflate that overall total. **Engaged** means a currently paid network has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry and cancellation because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
+        "content": "**Paid accounts** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, Solana, Monero and Zcash. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all tracked stores. **New paid accounts / upgrades** count a network's first supporter window per store, while `deduplicated` is its first-ever window across all tracked stores; renewals and store switches never inflate that overall total. **Engaged** means a currently paid network has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry and cancellation because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
       }
     },
     {
@@ -175,7 +175,7 @@
       "id": 5,
       "type": "stat",
       "title": "current paid accounts",
-      "description": "Distinct networks with a current tracked-store supporter window, deduplicated across Apple, Google Play / Android, Stripe, and Solana.",
+      "description": "Distinct networks with a current tracked-store supporter window, deduplicated across Apple, Google Play / Android, Stripe, Solana, Monero and Zcash.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -351,7 +351,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (store) (urnetwork_subscription_active_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "max by (store) (urnetwork_subscription_active_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{store}}",
           "instant": true,
@@ -398,7 +398,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (store) (urnetwork_subscription_engaged_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "max by (store) (urnetwork_subscription_engaged_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{store}}",
           "instant": true,
@@ -445,7 +445,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (store) (urnetwork_subscription_new_paid_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "max by (store) (urnetwork_subscription_new_paid_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{store}}",
           "instant": true,
@@ -505,7 +505,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (store) (urnetwork_subscription_churned_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "max by (store) (urnetwork_subscription_churned_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{store}}",
           "instant": true,
@@ -567,7 +567,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",action=~\"ended|refunded|disputed|revoked\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} > time() - 10800))",
+          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\",action=~\"ended|refunded|disputed|revoked\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\"} > time() - 10800))",
           "refId": "A",
           "legendFormat": "{{store}} / {{action}}",
           "instant": true,
@@ -614,7 +614,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",action=~\"credited|ended|entitlement_repaired\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} > time() - 10800))",
+          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\",action=~\"credited|ended|entitlement_repaired\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash\"} > time() - 10800))",
           "refId": "A",
           "legendFormat": "{{store}} / {{action}}",
           "instant": true,
@@ -678,7 +678,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (store) (time() - (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"all|apple|google|stripe|solana\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))))",
+          "expr": "max by (store) (time() - (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"all|apple|google|stripe|solana|monero|zcash\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))))",
           "refId": "A",
           "legendFormat": "{{store}}",
           "instant": true,

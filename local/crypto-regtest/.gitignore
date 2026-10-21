@@ -1,0 +1,5 @@
+# Downloaded release tarballs and the binaries extracted from them.
+/.cache/
+# Generated per run: RPC logins, wallet passwords, the regtest test wallets'
+# keys and mnemonics, and harness.json. Removed by down.sh.
+/.state/
