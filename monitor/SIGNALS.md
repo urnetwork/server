@@ -2058,6 +2058,14 @@ backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
 proves the owner. This probe exports only aggregate loopback counts and ages;
 the exact loopback address/CIDR predicate never appears in logs or alerts.
 
+Missing, malformed, or failed aggregate evidence is unavailable, not healthy
+reserve or proof of a pool outage. Public errors retain only owned field names
+and fixed failure classes; raw cells, invalid-state dumps, and source diagnostics
+are withheld. Cancellation and deadline causes remain recognizable without
+retaining private source causes; intentional host exclusions remain partial
+coverage. This boundary does not establish current runtime leakage or full
+settings equality, and valid aggregate warning thresholds remain unchanged.
+
 The application pool has a separate ownership failure: `GetNetworkUser` used
 to retain its profile-read client while four authentication helpers opened
 independent transactions from the same pool. At saturation, each outer reader
@@ -2084,6 +2092,17 @@ FROM pg_stat_activity
 WHERE backend_type = 'client backend';
 ```
 
+- FALSE-POSITIVE QUALIFIER: a shaped numeric row is not authoritative until
+  the nonnegative idle, active and idle-in-transaction counts fit within the
+  loopback-client count, which must fit within total clients. Validate each
+  partition against the remaining count without adding counts that can overflow.
+  Other backend states can leave the listed partition smaller than its parent;
+  equality is not required. Impossible counts are unavailable, not pool pressure.
+- FALSE-NEGATIVE QUALIFIER: individually representable counts can have an
+  unrepresentable sum. Such an inconsistent snapshot, or any cell outside the
+  supported integer range, must produce `cannot-observe`, never healthy reserve
+  or recovery credit. Valid low-idle observations retain the healthy threshold;
+  valid high-idle observations retain their independent warning.
 - HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
   ceiling, excess pool connections drain toward their configured warm minimum
   after 600 idle seconds, and §1.3a retains both more than 25% normal-role
@@ -3000,6 +3019,22 @@ resolve either.
 
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`
+
+Generic TCP dial-timeout frame qualification: a caller or metadata address
+earlier in a line can misattribute a true positive class count when a generic
+first-address matcher is used. The dial class instead uses its own regexp
+capture from the first counted exemplar; the healthy discriminator is the
+same synthetic dial with and without an earlier unrelated endpoint, yielding
+the same frame and unchanged aggregate count. An exemplar with multiple
+`dial tcp` candidates leaves its frame unknown and still counts toward the
+PAGE. This correction does not validate an older reduced frame. Other legacy
+ungrouped classes, including `connection-refused`, retain a first-address hint
+and require independent native-event attribution. False-negative qualifiers:
+one retained exemplar, class precedence, echo/replay exclusions, missing native
+source identity and partial collection can conceal other destinations or
+failures. Require bounded original-event/source/artifact evidence for historical
+attribution and independent outcome controls for impact or recovery; an empty
+frame, a later reachable target or a quiet log window is not that evidence.
 
 The monitor tails the logs of ALL services AT ALL TIMES, classifying lines
 against the section 4 signatures. This is a standing collector, not a
@@ -5118,6 +5153,32 @@ Only the new execution-boundary projection caps child inspections and visits at
 shared-admission traversal remain separate and carry no new work bound; this is
 not a guarantee for the whole formatter or arbitrary Error/Unwrap methods.
 
+A shared signal adapter that entered with a live evaluation context withholds
+its returned findings when that owner ends before acceptance, whether or not
+host exclusions enabled a scope runner. Its own finite run budget is part of
+that evaluation owner; a live outer watcher does not turn an expired child
+into a complete healthy execution. The canonical context verdict retains any
+already returned source cause through the error chain, without rendering its
+private text. A live owner's independent child/source failure keeps its prior
+authority. Existing pre-canceled no-policy local evaluation behavior remains a
+compatibility contract, not a newly qualified live observation.
+
+This acceptance fence cannot roll back probe-owned cache/baseline writes or an
+observer callback that already began while live. It checks lifecycle at the
+adapter boundaries; it is not an atomic certificate against cancellation after
+the last check. The execution loop already suppresses ended outer-monitor
+results before its gate/handler. The additional public-loop control covers an
+ended per-execution budget while that outer owner remains live; it does not
+attribute a production notification incident or replace owning state staging.
+
+The PgBouncer cancellation controls enter with a live context and cancel it
+inside the source callback. Their scoped and unscoped expectations therefore
+both require no returned findings and the parent context cause; source errors
+retain their original Is/As identity alongside that cause, with one source
+call and no second gateway. Their earlier unscoped PAGE/source-only assertions
+are deliberately superseded by this live-entry policy, rather than reclassified
+as pre-canceled compatibility or borrowed as notifier-incident evidence.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -6898,8 +6959,19 @@ Probe: `planner-flips`
 The catastrophic mode: stale statistics flip a hot query to a bad plan
 (observed: pair-lookup 58ms → 6.1s scanning all open contracts). Signals:
 one query's mean time step-changes ×10–100 in pg_stat_statements without a
-deploy. Remediation was ANALYZE + a structural index. Monitor: track
-per-query mean_exec_time deltas hour-over-hour for the top-20 by calls.
+deploy. Remediation was ANALYZE + a structural index. Hourly observation
+requirement: compare adjacent hour means from execution-time and call-count
+deltas for the top-20 by calls.
+
+The registered `NewPlannerFlipsSignal` currently runs only the daily
+`pgStatsLandmineProbe`: it checks the three valid/ready structural index
+families and open-column statistics target 300. Its healthy result covers
+that static protection. Hourly per-query observation remains unimplemented;
+completed endpoint-lifetime means and active-query ages do not supply adjacent
+hour means. That capability still needs scoped identity and entry-lifetime
+continuity, qualified baselines, cohort policy, deployment comparability, and
+threshold/severity/sustain policy. Missing hourly evidence remains unknown,
+while static WARNs retain their existing meaning.
 
 2026-07-17 variant — the rare-value stats landmine (incident playbook: 5.8).
 Stats can be systematically wrong, not just stale: a value rarer than
@@ -10532,6 +10604,21 @@ Unannotated, otherwise valid independent cohorts retain their existing findings.
 Raw annotation text never enters the error or Alert. This gate does not change
 the PAGE/WARN thresholds or establish complete native process/window coverage;
 unannotated omissions and affected-request supply remain separate limitations.
+
+Failed status/non-vector envelopes, JSON decode failures and invalid outcome
+value parsing return only fixed provider-count error text. Backend status,
+result-type/error strings, decoder details and invalid sample text never enter
+the public signal or aggregate error. Unsupported envelopes retain the
+unclassified observation class; decode/value failures retain invalid-response.
+Untrusted response text cannot select a timeout or access-denied class. These
+are unavailable observations, with no healthy/provider verdict or recovery
+credit. Direct source-error chains and parent cancellation/deadline precedence
+remain unchanged; this local parser correction does not redact other sources.
+False-positive qualifier: rejecting an unavailable response is not a measured
+provider failure. False-negative qualifier: missing cohorts can conceal real
+degradation, and a fixed error cannot recover discarded backend detail. Clean
+independent responses and the existing annotation policy retain their separate
+authority; no threshold, query, retry, transport or cadence change is made.
 
 `provider-count-direct-unclassified` is a separate evidence-unknown WARN, never
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
@@ -17515,6 +17602,12 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   denominator. This pattern does not isolate site policy, provider paths,
   shared route/admission capacity or the `/ip` echo. Retain the legacy class
   as a diagnostic pattern, not proof of universal unreachability;
+  the current country query lists only failing cohorts, with a `HAVING`
+  predicate and a listing cap. It supplies no comparable passing cohort, so
+  this source cannot emit a country healthy sentinel or establish country-ticket
+  recovery through healthy findings. Empty or nonqualifying results, eligibility
+  changes and capped omissions leave recovery unknown. The continuous notifier's
+  separate absence transitions do not certify recovery and are unchanged;
 - **backfill sustained** (`egress-backfill-sustained`, frame the rank mode):
   more than half of the providers FindProviders2 answered with for a rank
   mode over the last hour were borrowed from another bucket
@@ -22924,7 +23017,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[family]dial tag=doh ... err=...i/o timeout`, `[egress]dial tag=doh ... err=...i/o timeout`, or exact `observable=v1 ... result=timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. Proxy `path=tun` legs are classified separately as `doh-tun-dial-timeout`. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and legacy diagnostic forms can describe one attempt twice, so line rate is neither an attempt count nor a logical failure denominator. Legacy path/family/outcome remain unknown. New finite `path`, `attempted_family`, `resolver_owner`, `resolver_scope`, and `resolver_outcome` tokens identify only the initiating resolver call; a detached losing HTTP dial may report `answer` after that call returned successfully. | Preserve PAGE at 10 lines/minute and the single `doh-attempt` frame. The bounded sample retains only validated finite tokens and omits endpoints, domains, and correlation identifiers. Correlate the original process path, same-window controls, and fresh same-process `[doh]resolver` cumulative outcome snapshots; see §5.2 for scope and Taskworker measurement qualifiers. Pending/unknown outcomes and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
 | Proxy exact `observable=v1 path=tun ... result=timeout` (`doh-tun-dial-timeout`) | A hosted device's remote DoH leg through its own tunnel timed out. The tunnel egresses through the provider the customer selected, so a device pinned to an offline or retired provider times out every leg it races. Lines are throttled per process and resolver target: one such device keeps a process above threshold, and the rate measures neither devices nor failed lookups. On Main on 2026-10-12 every Proxy process logged ~20/min of these while logical tun resolver calls had zero timeouts and zero failures (~66% answered, ~34% canceled by their callers), host-path calls answered 100%, and the ingress dial failure ratio was at its pre-incident baseline. | WARN at 10 lines/minute with the single `doh-tun-attempt` frame. Before treating it as a platform incident, compare fresh same-process `[doh]resolver owner_path=tun` deltas and the Proxy ingress dial outcome ratio with their baseline; a platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups (it would egress the customer's queries from the platform host) or lengthen resolver timeouts from this class. Platform-owned host/caller paths keep the `doh-dial-timeout` page. |
 | DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
-| otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 lines/minute and the existing emitter-service/endpoint identity. Resolve the exact target and original source path; compare same-window process, listener, TCP, and resource evidence. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls, and ten minutes below threshold. |
+| otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
@@ -26825,6 +26918,23 @@ remain unknown. This is detector coverage, not evidence that Main lacks the
 columns or that the migration has run there. Matching schema does not establish
 when a device connected or whether its reported app version is fresh; the
 probe reads catalog metadata, not device values.
+
+Version 853 adds the five crypto-payment intent, quote, receipt, address and
+scan-cursor tables. Its one ordered artifact contract checks all 69 published
+columns, permanent ordinary-table custody, the five primary keys and separate
+address uniqueness, all eleven lookup/partial/unique indexes, and the existing
+`solana_payment_intent.network_id` change to nullable ordinary `uuid` without a
+default. Types, widths, nullability, defaults, key order, index uniqueness,
+readiness and predicates are operative checks; names or the numeric head alone
+are insufficient. The new relations remain pending before 853 and a missing or
+incompatible contract pages at a source-known applied head. Failed, excluded,
+or canceled evidence remains unavailable, and a still-newer head retains the
+separate future-schema warning and immutable-prefix checks. This detector reads
+catalog metadata only, not payment rows or private address/token values. It
+does not prove current Main schema, authorize the payment rollout or a rollback,
+or replace the migration's client/config deployment ordering. Retained
+853-versus-852 warnings are older-validator authority gaps, not proof that the
+database is broken; their recovery requires a qualified 853-aware observation.
 
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that

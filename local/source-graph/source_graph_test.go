@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/mod/modfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +58,7 @@ func resolvedSourceModuleIn(t *testing.T, directory, modulePath string) sourceMo
 
 // lock.yml beside this file is the source lock a clean checkout follows.
 type sourceLock struct {
+	Go       string `yaml:"go"`
 	Siblings []struct {
 		Repository string `yaml:"repository"`
 		Path       string `yaml:"path"`
@@ -189,5 +191,47 @@ func TestReleaseSourceGraphPinsSharedGvisorFork(t *testing.T) {
 	module := resolvedSourceModuleIn(t, snDirectory, "gvisor.dev/gvisor")
 	if module.Path != "gvisor.dev/gvisor" || module.Replace == nil || module.Replace.Path != "../gvisor" || module.Replace.Version != "" || module.Replace.Dir != filepath.Join(snDirectory, "..", "gvisor") {
 		t.Fatalf("SN's fixture generator resolved a different gVisor source: %+v replacement=%+v", module, module.Replace)
+	}
+}
+
+// A compiler-only lock bump must not leave the selected first-party modules on
+// older Go declarations. Inspect the locked commits, not the sibling HEADs:
+// otherwise newer working checkouts could hide a stale source lock.
+func TestReleaseSourceGraphLockedModulesUseReleaseGoToolchain(t *testing.T) {
+	server := serverDirectory(t)
+	lock := readSourceLock(t)
+	moduleGoVersion := func(t *testing.T, name string, raw []byte) string {
+		t.Helper()
+		module, err := modfile.Parse(name, raw, nil)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if module.Go == nil || module.Go.Version == "" {
+			t.Fatalf("%s has no Go declaration", name)
+		}
+		return module.Go.Version
+	}
+	raw, err := os.ReadFile(filepath.Join(server, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := moduleGoVersion(t, "server/go.mod", raw)
+	if lock.Go != want {
+		t.Fatalf("source lock Go = %q, server go.mod requires %q", lock.Go, want)
+	}
+	for _, sibling := range lock.Siblings {
+		t.Run(sibling.Path, func(t *testing.T) {
+			revision := reviewedRevision(t, sibling.Path, sibling.Repository)
+			command := exec.CommandContext(t.Context(), "git", "show", revision+":go.mod")
+			command.Dir = filepath.Join(server, "..", sibling.Path)
+			command.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+			raw, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("read locked %s go.mod at %s without fetching: %v\n%s", sibling.Path, revision, err, raw)
+			}
+			if got := moduleGoVersion(t, sibling.Path+"@"+revision+"/go.mod", raw); got != want {
+				t.Fatalf("locked %s at %s declares Go%s; release source graph requires Go%s", sibling.Path, revision, got, want)
+			}
+		})
 	}
 }

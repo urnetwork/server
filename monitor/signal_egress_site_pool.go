@@ -846,7 +846,9 @@ func evaluateEgressSitePool(
 			f.verify = "Later comparable observed-site loads improve with coverage retained. A country or failing site disappearing from the tally is not proof of recovery."
 			failing = append(failing, f)
 		}
-		emit("egress-country-unreachable", failing)
+		// The having-only, capped query has no comparable passing cohort.
+		// Absence can mean lost coverage or changed eligibility, not recovery.
+		findings = append(findings, failing...)
 	}
 
 	// A parsed vector is not evidence of complete fleet or window coverage.

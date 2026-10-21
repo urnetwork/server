@@ -168,7 +168,8 @@ func ScheduleCryptoPaymentUnlink(clientSession *session.ClientSession, tx server
 }
 
 // CryptoPaymentUnlink drops the link between invoices paid more than
-// unlink_after ago and their networks (decision 9).
+// unlink_after ago and their networks (decision 9), and between the old
+// Solana Pay endpoints' payments and theirs.
 func CryptoPaymentUnlink(
 	args *CryptoPaymentUnlinkArgs,
 	clientSession *session.ClientSession,

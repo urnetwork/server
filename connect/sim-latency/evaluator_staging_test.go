@@ -262,3 +262,22 @@ func TestEvaluatorBaseGoPinSupportsFrozenServerModule(t *testing.T) {
 		t.Fatalf("new evaluator toolchain is older than frozen server %s: %v", head, err)
 	}
 }
+
+// Patch releases also change the minimum toolchain: the old digest-pinned
+// 1.27.2 image must not satisfy a module that now requires 1.27.3.
+func TestEvaluatorGoPinRejectsPreviousPatchRelease(t *testing.T) {
+	module := []byte("module synthetic.example/server\n\ngo 1.27.3\n")
+	stale := []byte("ARG GO_IMAGE=golang:1.27.2-bookworm@sha256:" + strings.Repeat("a", 64) + "\n")
+	current := []byte("ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:" + strings.Repeat("b", 64) + "\n")
+	if evaluatorGoPinSupportsModule(module, stale) || !evaluatorGoPinSupportsModule(module, current) {
+		t.Fatal("patch-level module requirement did not reject the previous compiler")
+	}
+	workingModule, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile, err := os.ReadFile("evaluator/container/Dockerfile.base")
+	if err != nil || !evaluatorGoPinSupportsModule(workingModule, dockerfile) {
+		t.Fatalf("evaluator toolchain does not support the current module: %v", err)
+	}
+}

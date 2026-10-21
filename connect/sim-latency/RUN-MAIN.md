@@ -126,7 +126,7 @@ checkpoint/image remains historical evidence, not qualification for new staging.
 
 After those distinct review/publication steps, these commands verify the frozen
 record and build its new evaluator. `source-record` verifies existing refs; it
-does not freeze, publish, or approve them. The new builder pins Go 1.27.2 and
+does not freeze, publish, or approve them. The new builder pins Go 1.27.3 and
 marks the image explicitly as staging. Sol 6.1 low executes all build/test and
 qualification steps; a successful image build alone is not runtime readiness.
 
