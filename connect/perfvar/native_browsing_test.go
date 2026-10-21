@@ -1,5 +1,5 @@
-// Rapid navigation crosses the real full-TUN/H1/provider path. Every next HTML
-// request starts while the previous page still owns two unfinished assets.
+// Rapid navigation crosses the real full-TUN/H1/provider path. The clean control
+// gates unfinished assets; the shaped pressure variant streams older bodies.
 package perfvar
 
 import (
@@ -30,11 +30,12 @@ import (
 )
 
 const (
-	nativeBrowsingPageCount       = 100
-	nativeBrowsingOriginCount     = 4
-	nativeBrowsingAssetCount      = 4
-	nativeBrowsingHTMLBytes       = 2048
-	nativeBrowsingHeldPrefixBytes = 1024
+	nativeBrowsingPageCount            = 100
+	nativeBrowsingOriginCount          = 4
+	nativeBrowsingConnectionsPerOrigin = 4
+	nativeBrowsingAssetCount           = 4
+	nativeBrowsingHTMLBytes            = 2048
+	nativeBrowsingHeldPrefixBytes      = 1024
 )
 
 // Structural dispatch keeps the SAME workload source buildable on OLD. The
@@ -56,21 +57,21 @@ func nativeBrowsingBatchSender(multi *clientconnect.RemoteUserNatMultiClient, so
 }
 
 // Fixed per-navigation gates retain no payload. The client owns release;
-// serverDone proves actual handler disposal, not assumed FIN after cancellation.
+// receipts join every HTTP attempt of each logical asset, including GET replay.
 type nativeBrowsingPageState struct {
-	release       chan struct{}
-	releaseOnce   sync.Once
-	held          chan int
-	serverDone    [nativeBrowsingAssetCount]chan bool
-	serverStarted [nativeBrowsingAssetCount]atomic.Int32
-	clientDone    [nativeBrowsingAssetCount]chan nativeBrowsingAssetResult
-	assetCancel   [nativeBrowsingAssetCount]context.CancelFunc
+	release        chan struct{}
+	releaseOnce    sync.Once
+	held           chan int
+	heldOnce       [nativeBrowsingAssetCount]sync.Once
+	serverReceipts [nativeBrowsingAssetCount]*clientconnect.MonitorValue[nativeBrowsingServerReceipt]
+	clientDone     [nativeBrowsingAssetCount]chan nativeBrowsingAssetResult
+	assetCancel    [nativeBrowsingAssetCount]context.CancelFunc
 }
 
 func newNativeBrowsingPageState() *nativeBrowsingPageState {
 	state := &nativeBrowsingPageState{release: make(chan struct{}), held: make(chan int, 2)}
 	for index := range nativeBrowsingAssetCount {
-		state.serverDone[index] = make(chan bool, 1)
+		state.serverReceipts[index] = clientconnect.NewMonitorValue(nativeBrowsingServerReceipt{})
 		state.clientDone[index] = make(chan nativeBrowsingAssetResult, 1)
 	}
 	return state
@@ -82,6 +83,7 @@ func (self *nativeBrowsingPageState) releaseAssets() {
 
 type nativeBrowsingAssetResult struct {
 	bytes     int
+	status    int
 	firstByte time.Duration
 	complete  time.Duration
 	err       error
@@ -151,11 +153,13 @@ type nativeBrowsingObservation struct {
 	CanceledPrefixBytes            int                                                    `json:"canceled_prefix_bytes"`
 	CanceledAssets                 int                                                    `json:"canceled_assets"`
 	MaximumConcurrentAssetHandlers int64                                                  `json:"maximum_concurrent_asset_handlers"`
+	MaximumConcurrentLogicalAssets int64                                                  `json:"maximum_concurrent_logical_assets"`
 	Baseline                       nativeBrowsingMemory                                   `json:"baseline"`
 	Peak                           nativeBrowsingMemory                                   `json:"sampled_peak"`
 	Steady                         nativeBrowsingMemory                                   `json:"steady"`
 	Drain                          nativeBrowsingMemory                                   `json:"drain"`
 	Bridge                         fullTunBridgeBatchObservation                          `json:"bridge"`
+	Pressure                       *nativeBrowsingPressureObservation                     `json:"pressure,omitempty"`
 }
 
 func (self *nativeBrowsingObservation) sampleMemory() {
@@ -234,13 +238,31 @@ func nativeBrowsingReferences(body []byte) ([nativeBrowsingAssetCount]string, st
 // All four origins are private listeners reached through the actual app TUN.
 // The fixed URLs need neither public DNS nor Internet access.
 func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observation *nativeBrowsingObservation) (resultErr error) {
+	return measureNativeBrowsing100WithSettings(ctx, path, observation, nativeBrowsingRunSettings{maxLivePages: 2})
+}
+
+// The clean control keeps its two-page gates and navigation deadline. The
+// four-page pressure workload streams bodies and records slow navigation.
+func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath, observation *nativeBrowsingObservation, settings nativeBrowsingRunSettings) (resultErr error) {
+	if err := settings.validate(); err != nil {
+		return err
+	}
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 	var pages [nativeBrowsingPageCount]*nativeBrowsingPageState
 	for index := range pages {
 		pages[index] = newNativeBrowsingPageState()
+		if settings.pressure != nil {
+			for asset := range nativeBrowsingAssetCount {
+				settings.pressure.assets[index][asset].serverReceipt = pages[index].serverReceipts[asset]
+			}
+		}
 	}
 	var liveHandlers, peakHandlers atomic.Int64
+	var liveAssets, peakAssets atomic.Int64
+	assetServer := &nativeBrowsingAssetServer{workCtx: workCtx, pages: &pages,
+		streaming: settings.pressure != nil, pressure: settings.pressure,
+		liveHandlers: &liveHandlers, peakHandlers: &peakHandlers}
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
 		if len(parts) < 2 {
@@ -266,51 +288,15 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 			http.NotFound(writer, request)
 			return
 		}
-		state := pages[page]
-		if state.serverStarted[asset].Add(1) != 1 {
-			http.Error(writer, "duplicate asset request", http.StatusConflict)
-			return
-		}
-		live := liveHandlers.Add(1)
-		for old := peakHandlers.Load(); old < live && !peakHandlers.CompareAndSwap(old, live); old = peakHandlers.Load() {
-		}
-		canceled := false
-		defer func() {
-			liveHandlers.Add(-1)
-			state.serverDone[asset] <- canceled
-		}()
-		body := nativeBrowsingAsset(page, asset)
-		writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		writer.Header().Set("Content-Type", [nativeBrowsingAssetCount]string{"text/css", "application/javascript", "image/png", "image/jpeg"}[asset])
-		if asset < 2 {
-			_, _ = writer.Write(body)
-			return
-		}
-		if count, err := writer.Write(body[:nativeBrowsingHeldPrefixBytes]); err != nil || count != nativeBrowsingHeldPrefixBytes {
-			return
-		}
-		flusher, ok := writer.(http.Flusher)
-		if !ok {
-			return
-		}
-		flusher.Flush()
-		state.held <- asset
-		select {
-		case <-request.Context().Done():
-			canceled = true
-			return
-		case <-workCtx.Done():
-			canceled = true
-			return
-		case <-state.release:
-		}
-		_, _ = writer.Write(body[nativeBrowsingHeldPrefixBytes:])
+		assetServer.serveAsset(writer, request, page, asset)
 	})
 	var listeners [nativeBrowsingOriginCount]net.Listener
 	var servers [nativeBrowsingOriginCount]*http.Server
 	var serverWorkers sync.WaitGroup
 	var assetWorkers sync.WaitGroup
-	transport := &http.Transport{MaxConnsPerHost: 4, MaxIdleConns: 16, MaxIdleConnsPerHost: 4,
+	transport := &http.Transport{MaxConnsPerHost: nativeBrowsingConnectionsPerOrigin,
+		MaxIdleConns:        nativeBrowsingOriginCount * nativeBrowsingConnectionsPerOrigin,
+		MaxIdleConnsPerHost: nativeBrowsingConnectionsPerOrigin,
 		DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil || port != "80" {
@@ -318,7 +304,20 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 			}
 			for index, listener := range listeners {
 				if host == fmt.Sprintf("origin%d.test", index) && listener != nil {
-					return path.appTun.DialContext(dialCtx, network, listener.Addr().String())
+					// A custom Tun dial does not emit net.Dialer trace events. These
+					// pressure-only events enclose the actual fixture dial, not pool wait.
+					var trace *httptrace.ClientTrace
+					if settings.pressure != nil {
+						trace = httptrace.ContextClientTrace(dialCtx)
+					}
+					if trace != nil && trace.ConnectStart != nil {
+						trace.ConnectStart(network, address)
+					}
+					connection, dialErr := path.appTun.DialContext(dialCtx, network, listener.Addr().String())
+					if trace != nil && trace.ConnectDone != nil {
+						trace.ConnectDone(network, address, dialErr)
+					}
+					return connection, dialErr
 				}
 			}
 			return nil, errors.New("unexpected synthetic origin")
@@ -326,9 +325,7 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 	}
 	defer func() {
 		cancelWork()
-		for _, state := range pages {
-			state.releaseAssets()
-		}
+		nativeBrowsingReleasePages(pages[:])
 		transport.CloseIdleConnections()
 		joinCtx, cancelJoin := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelJoin()
@@ -340,15 +337,19 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 			}
 		}
 		joined := make(chan struct{})
-		go func() { assetWorkers.Wait(); serverWorkers.Wait(); close(joined) }()
+		go func() { assetWorkers.Wait(); serverWorkers.Wait(); assetServer.workers.Wait(); close(joined) }()
 		select {
 		case <-joined:
 		case <-joinCtx.Done():
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing owners did not join"))
 		}
 		observation.MaximumConcurrentAssetHandlers = peakHandlers.Load()
+		observation.MaximumConcurrentLogicalAssets = peakAssets.Load()
 		if liveHandlers.Load() != 0 {
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained asset handlers"))
+		}
+		if liveAssets.Load() != 0 {
+			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained logical assets"))
 		}
 	}()
 	for index := range listeners {
@@ -363,23 +364,52 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		go func() { defer serverWorkers.Done(); _ = httpServer.Serve(listener) }()
 	}
 	client := &http.Client{Transport: transport}
-	fetch := func(requestCtx context.Context, target string, expected []byte) nativeBrowsingAssetResult {
+	fetch := func(requestCtx context.Context, target string, expected []byte, trace *nativeBrowsingHttpTrace, progress *nativeBrowsingRequestProgress) nativeBrowsingAssetResult {
 		start := time.Now()
+		if settings.pressure != nil {
+			settings.pressure.beginFetch(len(expected))
+			defer settings.pressure.activeRequests.Add(-1)
+		}
+		if progress != nil {
+			progress.started.Store(true)
+			defer progress.finished.Store(true)
+		}
 		var firstByte atomic.Int64
 		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, target, nil)
 		if err != nil {
 			return nativeBrowsingAssetResult{err: err}
 		}
-		request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		clientTrace := &httptrace.ClientTrace{
 			GotFirstResponseByte: func() { firstByte.CompareAndSwap(0, int64(time.Since(start))) },
-		}))
+		}
+		if trace != nil {
+			trace.started = start
+			clientTrace = trace.clientTrace(&firstByte)
+		}
+		request = request.WithContext(httptrace.WithClientTrace(request.Context(), clientTrace))
+		if progress != nil {
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), progress.retryTrace()))
+		}
 		response, err := client.Do(request)
 		if err != nil {
 			return nativeBrowsingAssetResult{firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
 		}
-		defer response.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(response.Body, int64(len(expected)+1)))
-		result := nativeBrowsingAssetResult{bytes: len(body), firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
+		defer func() {
+			closeErr := response.Body.Close()
+			if progress != nil {
+				progress.bodyCloseError.Store(closeErr != nil)
+				progress.bodyClosed.Store(true)
+			}
+		}()
+		if progress != nil {
+			progress.responseStatus.Store(int64(response.StatusCode))
+		}
+		var reader io.Reader = response.Body
+		if settings.pressure != nil {
+			reader = &nativeBrowsingProgressReader{reader: reader, pressure: settings.pressure, progress: progress}
+		}
+		body, err := io.ReadAll(io.LimitReader(reader, int64(len(expected)+1)))
+		result := nativeBrowsingAssetResult{bytes: len(body), status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
 		result.err = nativeBrowsingResponseError(response.StatusCode, body, expected, result.err)
 		return result
 	}
@@ -387,20 +417,23 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		state := pages[page]
 		row := &observation.Pages[page]
 		var canceled [nativeBrowsingAssetCount]bool
-		if cancelAbandoned && page%2 == 0 {
+		if settings.pressure != nil {
+			for asset := range nativeBrowsingAssetCount {
+				canceled[asset] = settings.pressure.assets[page][asset].cancelRequested.Load()
+			}
+		} else if cancelAbandoned && page%2 == 0 {
 			for asset := 2; asset < nativeBrowsingAssetCount; asset++ {
 				state.assetCancel[asset]()
 				canceled[asset] = true
 			}
 			// A canceled client call alone is not a server ownership receipt.
 			for asset := 2; asset < nativeBrowsingAssetCount; asset++ {
-				select {
-				case actualCanceled := <-state.serverDone[asset]:
-					if !actualCanceled {
-						return fmt.Errorf("page %d asset %d completed instead of observing cancel", page, asset)
-					}
-				case <-workCtx.Done():
+				receipt, err := state.waitAssetServer(workCtx, asset)
+				if err != nil {
 					return fmt.Errorf("page %d cancellation never reached its handler: %w", page, workCtx.Err())
+				}
+				if receipt.canceled != receipt.started {
+					return fmt.Errorf("page %d asset %d completed instead of observing cancel", page, asset)
 				}
 			}
 		}
@@ -408,30 +441,38 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		for asset := range nativeBrowsingAssetCount {
 			select {
 			case result := <-state.clientDone[asset]:
-				if canceled[asset] {
-					if !nativeBrowsingCanceledAssetValid(result) {
+				if canceled[asset] && (settings.pressure == nil || result.err != nil) {
+					valid := nativeBrowsingCanceledAssetValid(result)
+					if settings.pressure != nil {
+						valid = nativeBrowsingStreamingCancellationValid(result, nativeBrowsingAssetBytes(page, asset))
+					}
+					if !valid {
 						return fmt.Errorf("page %d canceled asset %d: bytes=%d err=%v", page, asset, result.bytes, result.err)
 					}
 					row.CanceledAssets++
 					row.CanceledPrefixBytes += result.bytes
 				} else {
 					if result.err != nil || result.bytes != nativeBrowsingAssetBytes(page, asset) {
-						return fmt.Errorf("page %d completed asset %d: bytes=%d err=%v", page, asset, result.bytes, result.err)
+						return fmt.Errorf("page %d completed asset %d: status=%d bytes=%d err=%v", page, asset, result.status, result.bytes, result.err)
 					}
 					row.CompletedBytes += result.bytes
+					if canceled[asset] && settings.pressure != nil {
+						settings.pressure.CompletedDespiteCancellation++
+					}
 				}
 				row.CompletionNanoseconds = max(row.CompletionNanoseconds, int64(result.complete))
 			case <-workCtx.Done():
 				return fmt.Errorf("page %d asset %d unfinished: %w", page, asset, workCtx.Err())
 			}
-			if !canceled[asset] {
-				select {
-				case actualCanceled := <-state.serverDone[asset]:
-					if actualCanceled {
-						return fmt.Errorf("page %d asset %d unexpectedly canceled", page, asset)
-					}
-				case <-workCtx.Done():
-					return workCtx.Err()
+			if settings.pressure != nil || !canceled[asset] {
+				receipt, err := state.waitAssetServer(workCtx, asset)
+				if err != nil {
+					return err
+				}
+				if settings.pressure != nil {
+					settings.pressure.ServerObservedCancellation += int(receipt.canceled)
+				} else if receipt.canceled != 0 {
+					return fmt.Errorf("page %d asset %d unexpectedly canceled", page, asset)
 				}
 			}
 			state.assetCancel[asset]()
@@ -448,13 +489,12 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		row := &observation.Pages[page]
 		row.Page, row.PlannedBytes = page, nativeBrowsingPageBytes(page)
 		observation.PlannedBytes += row.PlannedBytes
-		if page != 0 {
+		if page != 0 && settings.pressure == nil {
 			prior := pages[page-1]
 			for asset := 2; asset < nativeBrowsingAssetCount; asset++ {
-				select {
-				case <-prior.serverDone[asset]:
+				receipt := prior.serverReceipts[asset].Value()
+				if receipt.started != 0 && receipt.finished == receipt.started {
 					return fmt.Errorf("page %d started after prior assets finished", page)
-				default:
 				}
 			}
 			select {
@@ -468,14 +508,34 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		if navigation != nativeBrowsingURL(page, -1) {
 			return errors.New("HTML next-navigation link changed origin or page")
 		}
-		htmlResult := fetch(workCtx, navigation, nativeBrowsingHTML(page))
+		var trace *nativeBrowsingHttpTrace
+		if settings.pressure != nil {
+			trace = settings.pressure.beginNavigation(page, settings.maxLivePages)
+			if settings.pressure.Navigations[page].UnfinishedPriorAssets != 0 {
+				observation.OverlapProofs++
+			}
+			// Abandon the chosen previous-page images at the next tap, not at
+			// retirement. Other older bodies keep flowing under the link shape.
+			if page != 0 && (page-1)%2 == 0 {
+				for asset := 2; asset < nativeBrowsingAssetCount; asset++ {
+					settings.pressure.assets[page-1][asset].cancelRequested.Store(true)
+					settings.pressure.CancellationAttempts++
+					pages[page-1].assetCancel[asset]()
+				}
+			}
+		}
+		htmlResult := fetch(workCtx, navigation, nativeBrowsingHTML(page), trace, nil)
+		if settings.pressure != nil {
+			// Capture even failed/canceled HTML before its error can start teardown.
+			settings.pressure.finishNavigation(path, page, trace, htmlResult)
+		}
 		if htmlResult.err != nil {
 			return fmt.Errorf("page %d HTML: %w", page, htmlResult.err)
 		}
 		row.FirstByteNanoseconds = int64(htmlResult.firstByte)
 		row.CompletedBytes = htmlResult.bytes
 		row.NavigationStalled = sdk.DefaultDeviceLocalSettings().SendTimeout <= htmlResult.firstByte
-		if row.NavigationStalled {
+		if row.NavigationStalled && settings.pressure == nil {
 			return fmt.Errorf("NATIVE_BROWSING_NAVIGATION_STALL: page=%d first_byte=%s prior_assets_held=%d", page, htmlResult.firstByte, row.PreviousAssetsHeld)
 		}
 		assets, next, err := nativeBrowsingReferences(nativeBrowsingHTML(page))
@@ -490,14 +550,23 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 			}
 			assetCtx, cancel := context.WithCancel(workCtx)
 			state.assetCancel[asset] = cancel
+			var progress *nativeBrowsingRequestProgress
+			if settings.pressure != nil {
+				progress = &settings.pressure.assets[page][asset]
+				progress.expectedBytes = int64(nativeBrowsingAssetBytes(page, asset))
+			}
 			assetWorkers.Add(1)
+			live := liveAssets.Add(1)
+			for old := peakAssets.Load(); old < live && !peakAssets.CompareAndSwap(old, live); old = peakAssets.Load() {
+			}
 			go func() {
 				defer assetWorkers.Done()
-				state.clientDone[asset] <- fetch(assetCtx, target, nativeBrowsingAsset(page, asset))
+				defer liveAssets.Add(-1)
+				state.clientDone[asset] <- fetch(assetCtx, target, nativeBrowsingAsset(page, asset), nil, progress)
 			}()
 		}
-		if page != 0 {
-			if err := finishPage(page-1, true); err != nil {
+		if retire := nativeBrowsingRetirePage(page, settings.maxLivePages); 0 <= retire {
+			if err := finishPage(retire, true); err != nil {
 				return err
 			}
 		}
@@ -515,11 +584,19 @@ func measureNativeBrowsing100(ctx context.Context, path *fullTunPath, observatio
 		}
 		observation.sampleMemory()
 	}
-	if err := finishPage(nativeBrowsingPageCount-1, false); err != nil {
-		return err
+	for page := nativeBrowsingFinalPageStart(settings.maxLivePages); page < nativeBrowsingPageCount; page++ {
+		if err := finishPage(page, page != nativeBrowsingPageCount-1); err != nil {
+			return err
+		}
 	}
-	if observation.CompletedNavigations != nativeBrowsingPageCount || observation.OverlapProofs != nativeBrowsingPageCount-1 || observation.CanceledAssets != 100 || peakHandlers.Load() > 8 {
-		return fmt.Errorf("navigation ownership census: pages=%d overlaps=%d canceled=%d peak_handlers=%d", observation.CompletedNavigations, observation.OverlapProofs, observation.CanceledAssets, peakHandlers.Load())
+	if observation.CompletedNavigations != nativeBrowsingPageCount || peakAssets.Load() > int64(settings.maxLivePages*nativeBrowsingAssetCount) {
+		return fmt.Errorf("navigation ownership census: pages=%d overlaps=%d canceled=%d peak_assets=%d peak_handlers=%d", observation.CompletedNavigations, observation.OverlapProofs, observation.CanceledAssets, peakAssets.Load(), peakHandlers.Load())
+	}
+	if settings.pressure == nil && (observation.OverlapProofs != nativeBrowsingPageCount-1 || observation.CanceledAssets != 100 || peakHandlers.Load() > 8) {
+		return fmt.Errorf("clean navigation ownership census: overlaps=%d canceled=%d peak_handlers=%d", observation.OverlapProofs, observation.CanceledAssets, peakHandlers.Load())
+	}
+	if settings.pressure != nil && (settings.pressure.CancellationAttempts != 100 || observation.CanceledAssets+settings.pressure.CompletedDespiteCancellation != 100) {
+		return fmt.Errorf("streaming cancellation census: attempts=%d canceled=%d completed=%d", settings.pressure.CancellationAttempts, observation.CanceledAssets, settings.pressure.CompletedDespiteCancellation)
 	}
 	return nil
 }
