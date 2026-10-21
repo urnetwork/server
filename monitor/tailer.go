@@ -97,6 +97,10 @@ type logClass struct {
 	// left truncation would hide. It receives an already-redacted line and must
 	// return a bounded human-readable sample.
 	sample func(string) string
+	// frame optionally selects attribution from the first counted exemplar,
+	// without changing its service/class count. Empty means unknown and must
+	// not fall back to an unrelated address elsewhere in the line.
+	frame func(string) string
 	// groupBy splits one class into independently actionable frames. Most log
 	// classes intentionally aggregate retry volume by service; route-bound
 	// configuration defects must retain their resource, route, and generation.
@@ -606,14 +610,25 @@ var logClasses = []logClass{
 	},
 	{name: "doh-dial-observation", re: dohDialObservationRe, match: dohDialInformational, metricOnly: true},
 	{name: "doh-resolver-observation", re: dohResolverObservationRe, match: dohResolverObserved, metricOnly: true},
-	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
+	{name: "dial-io-timeout", re: dialIoTimeoutRe,
 		sample: func(string) string {
 			return "outgoing TCP dial: i/o timeout (correlation metadata and other fields omitted)"
+		},
+		frame: func(line string) string {
+			// Combined errors cannot identify a single exemplar destination.
+			if strings.Count(line, "dial tcp ") != 1 {
+				return ""
+			}
+			match := dialIoTimeoutRe.FindStringSubmatch(line)
+			if len(match) != 2 {
+				return ""
+			}
+			return match[1]
 		},
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §5.2",
 		meaning:   "an otherwise-unclassified outgoing TCP connection attempt exceeded its deadline",
 		mechanism: "A dial timeout identifies an unfinished connection attempt, not the target service or cause. Remote listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives until independently distinguished.",
-		context:   "Service-specific signatures take precedence. Do not infer a Redis event-loop wedge or a persistent target outage from this generic text alone; the stable service target names the emitter and the endpoint frame names only the attempted destination.",
+		context:   "Service-specific signatures take precedence. Do not infer a Redis event-loop wedge or a persistent target outage from this generic text alone. The stable service target names the emitter; the count aggregates all matching service/class lines. The frame names only the first exemplar's textual dial destination, not every counted line's destination; multiple dial candidates leave it unknown.",
 		action:    "Resolve the exact target and original source path, then compare bounded same-window process, listener, TCP, and resource evidence. Use §5.2 only for an identified Redis node with a corroborating local PING hang and accept-path evidence. Do not restart an inferred service before attribution and authorization.",
 		verify:    "The original source path reaches the intended target, its owning health signal remains healthy, and this class stays below threshold for 10 minutes through the relevant lifecycle. Later reachability alone does not establish the earlier cause.",
 	},
@@ -1356,8 +1371,11 @@ func panicLogSample(line string) string {
 // searches can truncate the exact burst that makes the severity actionable.
 const netEscrowNegativePageRate = 100
 
-// targetRe extracts the ip:port a class line is about (the sick-node
-// attribution from §4: identity is class + target + frame).
+// The generic dial class uses its own capture for exemplar attribution.
+var dialIoTimeoutRe = regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`)
+
+// Legacy ungrouped classes retain a first-address exemplar hint, which need
+// not identify the failing endpoint. Class-specific frames bypass this hint.
 var targetRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+`)
 
 // warpctl wraps the authoritative source timestamp in brackets and preserves
@@ -2326,6 +2344,8 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 				self.classSamples[key] = logClassSample(c, line)
 				if attribution != "" {
 					self.classTargets[key] = attribution
+				} else if c.frame != nil && !c.aggregateWithGroup {
+					self.classTargets[key] = c.frame(line)
 				} else if target := targetRe.FindString(line); !c.aggregateWithGroup && target != "" {
 					self.classTargets[key] = target
 				}
