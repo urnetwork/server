@@ -28003,6 +28003,20 @@ to become ready before testing their task fixes.
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
+Malformed scalar privacy: the four projected booleans and three non-negative
+counts retain their fixed field/reason diagnostic on rejection, without the
+rejected cell value in the public `Signal.Run` error. Empty, non-integral,
+negative or out-of-range counts and malformed booleans remain unobserved; this
+is not a healthy physical index or recovery of a previous incident. The existing
+relation-status grammar and C12C scope/notifier policy remain independent.
+Qualified, valid physical index-definition evidence remains intentional output;
+this boundary does not delete it or sanitize arbitrary source/transport errors.
+False-positive qualifier: synthetic malformed catalog cells prove the error
+handling boundary, not an observed malformed PostgreSQL response or a live
+privacy incident. False-negative qualifier: safe visibility Alerts alone do
+not protect a returned parser error; these controls cover only the seven
+boolean/count fields, not all possible source errors or definition outputs.
+
 Scope and observation authority: this probe observes the post-cutover physical
 contract on `public.client_reliability`. The ordinary pre-cutover table is not
 covering-index drift: the separate partition cutover builds its desired index.

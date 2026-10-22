@@ -102,14 +102,14 @@ func parseReliabilityIndexState(row pgRow) (reliabilityIndexState, error) {
 	parseBool := func(column int, name string) (bool, error) {
 		value, err := strconv.ParseBool(row.str(column))
 		if err != nil {
-			return false, fmt.Errorf("invalid %s boolean %q", name, row.str(column))
+			return false, fmt.Errorf("invalid %s boolean", name)
 		}
 		return value, nil
 	}
 	parseCount := func(column int, name string) (int, error) {
 		value, err := strconv.Atoi(row.str(column))
 		if err != nil || value < 0 {
-			return 0, fmt.Errorf("invalid %s count %q", name, row.str(column))
+			return 0, fmt.Errorf("invalid %s count", name)
 		}
 		return value, nil
 	}
