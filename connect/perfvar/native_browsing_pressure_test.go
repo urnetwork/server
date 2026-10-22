@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -484,6 +485,9 @@ func TestFullTunH1NativeRapidBrowsingPressure100Pages(t *testing.T) {
 			nativeBrowsingRunSettings{maxLivePages: plan.maxLivePages, pressure: pressure}); err != nil {
 			t.Fatal(err)
 		}
+		if err := nativeBrowsingPressureLatencyError(observation); err != nil {
+			t.Fatal(err)
+		}
 		if observation.OverlapProofs == 0 || pressure.MaximumPriorRemainingBodyBytes == 0 {
 			t.Fatal("pressure browsing never offered a navigation before older bodies finished")
 		}
@@ -491,6 +495,59 @@ func TestFullTunH1NativeRapidBrowsingPressure100Pages(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// Completion alone must not hide the pauses this workload was built to catch.
+// Use the same navigation threshold as the clean browsing control, without
+// changing offered load, cancellation, the link shape or the overall deadline.
+func nativeBrowsingPressureLatencyError(observation *nativeBrowsingObservation) error {
+	if observation.CompletedNavigations != nativeBrowsingPageCount {
+		return fmt.Errorf("NATIVE_BROWSING_INCOMPLETE: completed=%d want=%d", observation.CompletedNavigations, nativeBrowsingPageCount)
+	}
+	limit := sdk.DefaultDeviceLocalSettings().SendTimeout
+	for page, row := range observation.Pages {
+		if row.NavigationStalled || limit <= time.Duration(row.FirstByteNanoseconds) {
+			return fmt.Errorf("NATIVE_BROWSING_NAVIGATION_STALL: page=%d first_byte=%s limit=%s", page, time.Duration(row.FirstByteNanoseconds), limit)
+		}
+	}
+	if observation.Pressure == nil || observation.Pressure.SlowNavigationCount != 0 {
+		return errors.New("NATIVE_BROWSING_NAVIGATION_STALL: missing pressure evidence or nonzero slow navigation count")
+	}
+	return nil
+}
+
+func TestNativeBrowsingPressureLatencyGateRejectsCompletedStalls(t *testing.T) {
+	limit := sdk.DefaultDeviceLocalSettings().SendTimeout
+	for _, test := range []struct {
+		name            string
+		page            int
+		delay           time.Duration
+		stalled         bool
+		slow            int
+		completed       int
+		wantError       bool
+		missingPressure bool
+	}{
+		{name: "below-boundary", delay: limit - time.Nanosecond, completed: nativeBrowsingPageCount},
+		{name: "first-page-boundary", delay: limit, completed: nativeBrowsingPageCount, wantError: true},
+		{name: "middle-page-stall", page: nativeBrowsingPageCount / 2, delay: limit + time.Nanosecond, completed: nativeBrowsingPageCount, wantError: true},
+		{name: "last-page-boundary", page: nativeBrowsingPageCount - 1, delay: limit, completed: nativeBrowsingPageCount, wantError: true},
+		{name: "row-verdict", stalled: true, completed: nativeBrowsingPageCount, wantError: true},
+		{name: "aggregate-verdict", slow: 1, completed: nativeBrowsingPageCount, wantError: true},
+		{name: "incomplete", completed: nativeBrowsingPageCount - 1, wantError: true},
+		{name: "missing-pressure", completed: nativeBrowsingPageCount, missingPressure: true, wantError: true},
+	} {
+		observation := &nativeBrowsingObservation{CompletedNavigations: test.completed,
+			Pressure: &nativeBrowsingPressureObservation{SlowNavigationCount: test.slow}}
+		if test.missingPressure {
+			observation.Pressure = nil
+		}
+		observation.Pages[test.page].FirstByteNanoseconds = int64(test.delay)
+		observation.Pages[test.page].NavigationStalled = test.stalled
+		if err := nativeBrowsingPressureLatencyError(observation); (err != nil) != test.wantError {
+			t.Fatalf("%s: completed browsing latency gate: err=%v want_error=%t", test.name, err, test.wantError)
+		}
+	}
 }
 
 // Every scheduled navigation retains older unfinished work without filling
