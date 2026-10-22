@@ -93,13 +93,13 @@ func TestProxyMemorySignalUdpBootMalformedRemainsUnknown(t *testing.T) {
 
 // The collector must discard partial output even if the failed read emitted a UUID.
 func TestProxyMemoryScriptUdpBootReadFailureDiscardsOutput(t *testing.T) {
-	const hostMarker = "printf 'proxy_host 1\\n'\n"
-	start := strings.Index(proxyMemoryScript, hostMarker)
-	end := strings.Index(proxyMemoryScript, "warpctl_path=")
-	if start < 0 || end <= start {
+	const bootMarker = "if ! boot_id=$(tr -d '\\n' < /proc/sys/kernel/random/boot_id 2>/dev/null); then\n"
+	const endMarker = "\nwarpctl_path="
+	start := strings.Index(proxyMemoryScript, bootMarker)
+	end := strings.Index(proxyMemoryScript, endMarker)
+	if strings.Count(proxyMemoryScript, bootMarker) != 1 || strings.Count(proxyMemoryScript, endMarker) != 1 || start < 0 || end <= start {
 		t.Fatal("boot collector fixture could not locate the actual source stanza")
 	}
-	start += len(hostMarker)
 	directory := t.TempDir()
 	bootPath := filepath.Join(directory, "synthetic-boot-id")
 	shimPath := filepath.Join(directory, "tr")

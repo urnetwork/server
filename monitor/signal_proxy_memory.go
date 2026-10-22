@@ -92,15 +92,31 @@ func (self *proxyMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 }
 
 const proxyMemoryScript = `set -u
-running_units=$(systemctl list-units --type=service --state=running --no-legend "$proxy_unit_pattern" 2>/dev/null |
-  awk '$1 ~ /[.]service$/ {n++} END{print n+0}')
-proxy_process_rows=$(ps -C bringyour-proxy -o pid=,rss= 2>/dev/null || true)
+running_units_unknown=0
+if running_unit_rows=$(systemctl list-units --type=service --state=running --no-legend "$proxy_unit_pattern" 2>/dev/null); then
+  :
+else
+  running_unit_rows=
+  running_units_unknown=1
+fi
+running_units=$(printf '%s\n' "$running_unit_rows" | awk '$1 ~ /[.]service$/ {n++} END{print n+0}')
+if ! process_rows=$(LC_ALL=C ps -e -o pid=,rss=,comm= 2>/dev/null); then
+  exit 1
+fi
+if ! proxy_process_rows=$(printf '%s\n' "$process_rows" |
+  awk 'NF==3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3=="bringyour-proxy" {print $1, $2}'); then
+  exit 1
+fi
 proxy_processes=$(printf '%s\n' "$proxy_process_rows" | awk 'NF>=2 {n++} END{print n+0}')
 if [ "$running_units" -eq 0 ] && [ "$proxy_processes" -eq 0 ]; then
+  if [ "$running_units_unknown" -ne 0 ]; then
+    exit 1
+  fi
   printf 'proxy_host 0\n'
   exit 0
 fi
 printf 'proxy_host 1\n'
+printf 'running_units_unknown %s\n' "$running_units_unknown"
 
 if ! boot_id=$(tr -d '\n' < /proc/sys/kernel/random/boot_id 2>/dev/null); then
   boot_id=unknown
@@ -144,7 +160,7 @@ printf '%s\n' "$proxy_process_rows" |
 bounded=0
 unbounded=0
 unknown=0
-for pid in $(ps -C bringyour-proxy -o pid= 2>/dev/null); do
+for pid in $(printf '%s\n' "$proxy_process_rows" | awk '{print $1}'); do
   cgroup=$(awk -F: '$1=="0" {print $3; exit}' "/proc/$pid/cgroup" 2>/dev/null)
   limit_path="/sys/fs/cgroup${cgroup}/memory.max"
   if [ -z "$cgroup" ] || [ ! -r "$limit_path" ]; then
@@ -200,6 +216,7 @@ type proxyMemorySample struct {
 	swapTotalKiB         int64
 	swapFreeKiB          int64
 	runningUnits         int64
+	runningUnitsUnknown  bool
 	proxyProcesses       int64
 	proxyRSSKiB          int64
 	proxyMaxRSSKiB       int64
@@ -286,6 +303,7 @@ func (self *proxyMemoryProbe) observeUDP(ctx context.Context, host string, sampl
 func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 	sample := proxyMemorySample{}
 	proxyHostValue := int64(-1)
+	runningUnitsUnknownValue := int64(0)
 	values := map[string]*int64{
 		"proxy_host":             &proxyHostValue,
 		"mem_total_kib":          &sample.memTotalKiB,
@@ -293,6 +311,7 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		"swap_total_kib":         &sample.swapTotalKiB,
 		"swap_free_kib":          &sample.swapFreeKiB,
 		"running_units":          &sample.runningUnits,
+		"running_units_unknown":  &runningUnitsUnknownValue,
 		"proxy_processes":        &sample.proxyProcesses,
 		"proxy_rss_kib":          &sample.proxyRSSKiB,
 		"proxy_max_rss_kib":      &sample.proxyMaxRSSKiB,
@@ -314,6 +333,9 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		}
 		key, value, ok := strings.Cut(line, " ")
 		value = strings.TrimSpace(value)
+		if !ok && key == "running_units_unknown" {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid unit census qualifier")
+		}
 		if key == "boot_id" {
 			bootIdRows++
 			if bootIdRows == 1 && proxyMemoryBootIdPattern.MatchString(value) {
@@ -345,6 +367,9 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		if !ok {
 			continue
 		}
+		if key == "running_units_unknown" && (seen[key] || (value != "0" && value != "1")) {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid unit census qualifier")
+		}
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || parsed < 0 {
 			return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid %s %q", key, value)
@@ -356,7 +381,11 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		return proxyMemorySample{}, fmt.Errorf("proxy memory: observation omitted or invalid proxy_host")
 	}
 	sample.proxyHost = proxyHostValue == 1
+	sample.runningUnitsUnknown = runningUnitsUnknownValue == 1
 	if !sample.proxyHost {
+		if sample.runningUnitsUnknown {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: unknown unit census cannot establish absence")
+		}
 		return sample, nil
 	}
 	for _, key := range []string{
@@ -373,6 +402,9 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 	if sample.memTotalKiB == 0 || sample.memAvailableKiB > sample.memTotalKiB || sample.swapFreeKiB > sample.swapTotalKiB {
 		return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent host memory observation")
 	}
+	if sample.runningUnitsUnknown && (sample.runningUnits != 0 || sample.proxyProcesses == 0) {
+		return proxyMemorySample{}, fmt.Errorf("proxy memory: unknown unit census requires independently observed proxy processes")
+	}
 	if sample.proxyProcesses != sample.proxyMemoryBounded+sample.proxyMemoryUnbounded+sample.proxyMemoryUnknown {
 		return proxyMemorySample{}, fmt.Errorf("proxy memory: process and cgroup counts disagree")
 	}
@@ -380,6 +412,10 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 }
 
 func evaluateProxyUDPReceiveDrops(host string, sample proxyMemorySample, delta proxyUDPDelta) finding {
+	runningUnitsObservation := strconv.FormatInt(sample.runningUnits, 10)
+	if sample.runningUnitsUnknown {
+		runningUnitsObservation = "unknown"
+	}
 	elapsedMinutes := delta.elapsed.Minutes()
 	if elapsedMinutes <= 0 {
 		return healthyFinding("proxy/host-memory", tierWarn, "proxy-udp-receive-drops", host)
@@ -407,10 +443,10 @@ func evaluateProxyUDPReceiveDrops(host string, sample proxyMemorySample, delta p
 			host, delta.rcvbufErrors, delta.elapsed.Seconds(), dropRate),
 		mechanism: "Linux increments Udp.RcvbufErrors when a datagram reaches the host but the destination socket's receive queue has no room before userspace drains it. This is host-wide loss below WireGuard authentication: memory pressure, CPU starvation, a slow receive loop, or undersized socket buffering can cause it; a peer-install or handshake change cannot recover the discarded datagram.",
 		baseline:  fmt.Sprintf("No material live receive-buffer loss: udp_rcvbuf_errors_rate stays below %.0f/min and udp_receive_drop_ratio stays below %.2f%% of delivered-plus-dropped datagrams; incident windows remain at zero.", proxyUDPReceiveDropWarnPerMinute, proxyUDPReceiveDropPageRatio*100),
-		observed: fmt.Sprintf("warpctl_rollout_guard=%s sample_elapsed_s=%.0f udp_in_datagrams_delta=%d udp_rcvbuf_errors_delta=%d udp_rcvbuf_errors_rate_per_min=%.2f udp_receive_drop_ratio_pct=%.4f udp_in_datagrams_before=%d udp_in_datagrams_after=%d udp_rcvbuf_errors_before=%d udp_rcvbuf_errors_after=%d running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f recent_proxy_oom_kills=%d",
+		observed: fmt.Sprintf("warpctl_rollout_guard=%s sample_elapsed_s=%.0f udp_in_datagrams_delta=%d udp_rcvbuf_errors_delta=%d udp_rcvbuf_errors_rate_per_min=%.2f udp_receive_drop_ratio_pct=%.4f udp_in_datagrams_before=%d udp_in_datagrams_after=%d udp_rcvbuf_errors_before=%d udp_rcvbuf_errors_after=%d running_block_units=%s proxy_processes=%d proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f recent_proxy_oom_kills=%d",
 			sample.warpctlRolloutGuard, delta.elapsed.Seconds(), delta.inDatagrams, delta.rcvbufErrors,
 			dropRate, dropRatio*100, delta.inBefore, delta.inAfter, delta.rcvbufBefore, delta.rcvbufAfter,
-			sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB),
+			runningUnitsObservation, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB),
 			kiBToGiB(sample.memAvailableKiB), kiBToGiB(sample.swapFreeKiB), sample.recentProxyOOMKills),
 		evidence: fmt.Sprintf("Known same-UUID /proc/net/snmp counters advanced over %.0fs between consecutive valid samples. Unavailable observations never replace a valid baseline; first samples, boot-id changes, counter regressions, and sub-30s reruns are warmups rather than loss findings.", delta.elapsed.Seconds()),
 		context:  "Udp.RcvbufErrors and InDatagrams cover the whole host, so the delta proves live kernel receive loss but not socket ownership by itself. A high drop ratio or incident-sized rate makes this page-tier. Larger buffers can absorb a short burst but cannot create CPU, RAM, or per-process client capacity; sustained loss at a steady single fleet may require application receive-loop work or additional proxy hardware.",
@@ -426,12 +462,17 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 	fullRolloutRequiredKiB := sample.proxyRSSKiB + reserveKiB
 	fullRolloutDeficitKiB := max(int64(0), fullRolloutRequiredKiB-sample.memAvailableKiB)
 	guardObservation := fmt.Sprintf("warpctl_rollout_guard=%s", sample.warpctlRolloutGuard)
+	runningUnitsObservation := strconv.FormatInt(sample.runningUnits, 10)
+	if sample.runningUnitsUnknown {
+		runningUnitsObservation = "unknown"
+		findings = append(findings, cannotObserveFinding(host+"/proxy-running-units", fmt.Errorf("proxy memory: running unit census unavailable")))
+	}
 
 	if sample.kernelJournalStatus != 0 {
 		findings = append(findings, cannotObserveFinding(host+"/proxy-kernel-oom", fmt.Errorf("kernel journal exited with status %d", sample.kernelJournalStatus)))
 	} else if sample.recentProxyOOMKills > 0 {
 		mechanism := "A global host OOM selected a proxy process. Proxy cgroups have no effective memory ceiling, so overlapping old and candidate processes compete with the kernel and every other service for physical RAM."
-		if sample.runningUnits > 0 && sample.oomProxyProcesses > sample.runningUnits {
+		if !sample.runningUnitsUnknown && sample.runningUnits > 0 && sample.oomProxyProcesses > sample.runningUnits {
 			mechanism = fmt.Sprintf("The kernel OOM task table contained %d proxy processes for %d running block units, proving old and candidate fleets overlapped. Their aggregate resident memory exhausted host RAM and swap before the old fleet drained.", sample.oomProxyProcesses, sample.runningUnits)
 		}
 		action := "The full-overlap host guard is installed; preserve the incident processes and validate why more than one replacement entered. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below the measured steady process size."
@@ -446,8 +487,8 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 			symptom:   fmt.Sprintf("%s entered a global OOM and the kernel killed a proxy process", host),
 			mechanism: mechanism,
 			baseline:  "No proxy process is OOM-killed; a rollout never overlaps more candidates than host memory can hold while preserving at least 8 GiB of operational reserve and unused swap.",
-			observed: fmt.Sprintf("%s recent_proxy_oom_kills=%d oom_task_table_proxy_processes=%d running_block_units=%d current_proxy_processes=%d current_proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f udp_rcvbuf_errors_since_boot=%d unbounded_proxy_cgroups=%d",
-				guardObservation, sample.recentProxyOOMKills, sample.oomProxyProcesses, sample.runningUnits, sample.proxyProcesses,
+			observed: fmt.Sprintf("%s recent_proxy_oom_kills=%d oom_task_table_proxy_processes=%d running_block_units=%s current_proxy_processes=%d current_proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f udp_rcvbuf_errors_since_boot=%d unbounded_proxy_cgroups=%d",
+				guardObservation, sample.recentProxyOOMKills, sample.oomProxyProcesses, runningUnitsObservation, sample.proxyProcesses,
 				kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memAvailableKiB), kiBToGiB(sample.swapFreeKiB),
 				sample.udpRcvbufErrors, sample.proxyMemoryUnbounded),
 			evidence: sample.oomLine,
@@ -458,7 +499,7 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 		})
 	}
 
-	if sample.proxyProcesses > sample.runningUnits && sample.memAvailableKiB < sample.proxyMaxRSSKiB+reserveKiB {
+	if !sample.runningUnitsUnknown && sample.proxyProcesses > sample.runningUnits && sample.memAvailableKiB < sample.proxyMaxRSSKiB+reserveKiB {
 		action := "Pause new candidates on this host until an old proxy exits or capacity is restored, then resume the proxy image or config-generation rollout with host-aware bounded concurrency and the same memory preflight. Preserve the current processes long enough to identify old versus candidate ownership."
 		if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
 			action = fmt.Sprintf("Pause new candidates and do not resume a proxy image or config-generation rollout until Warp commit %s or later is installed and every service worker has restarted. Preserve the current processes long enough to identify old versus candidate ownership, then validate one serialized replacement with the memory preflight.", proxyRolloutGuardCommit)
@@ -469,8 +510,8 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 			symptom:   fmt.Sprintf("%s is overlapping proxy candidates without room for another process", host),
 			mechanism: "More proxy processes than block units proves a rollout overlap is live, while available memory is below the largest current proxy process plus the host reserve. Launching another candidate can force swap or a global OOM before an old process exits.",
 			baseline:  "Live proxy process count is at most block count plus bounded host rollout concurrency, and available memory exceeds the next candidate's expected RSS plus operational reserve.",
-			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d largest_proxy_rss_gib=%.2f mem_available_gib=%.2f next_candidate_plus_reserve_gib=%.2f swap_free_gib=%.2f",
-				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyMaxRSSKiB), kiBToGiB(sample.memAvailableKiB),
+			observed: fmt.Sprintf("%s running_block_units=%s proxy_processes=%d largest_proxy_rss_gib=%.2f mem_available_gib=%.2f next_candidate_plus_reserve_gib=%.2f swap_free_gib=%.2f",
+				guardObservation, runningUnitsObservation, sample.proxyProcesses, kiBToGiB(sample.proxyMaxRSSKiB), kiBToGiB(sample.memAvailableKiB),
 				kiBToGiB(sample.proxyMaxRSSKiB+reserveKiB), kiBToGiB(sample.swapFreeKiB)),
 			context:  "This is a live capacity boundary, not proof that one proxy leaked. Compare per-process RSS and the old/candidate ownership before attributing growth to application state.",
 			action:   action,
@@ -495,8 +536,8 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 			symptom:   fmt.Sprintf("%s cannot hold a second full proxy fleet with host reserve", host),
 			mechanism: mechanism,
 			baseline:  "MemAvailable is at least the current proxy fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM before an all-block image or config-generation rollout begins.",
-			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_total_gib=%.2f mem_available_gib=%.2f operational_reserve_gib=%.2f full_rollout_required_available_gib=%.2f capacity_deficit_gib=%.2f unbounded_proxy_cgroups=%d udp_rcvbuf_errors_since_boot=%d",
-				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memTotalKiB),
+			observed: fmt.Sprintf("%s running_block_units=%s proxy_processes=%d proxy_rss_gib=%.2f mem_total_gib=%.2f mem_available_gib=%.2f operational_reserve_gib=%.2f full_rollout_required_available_gib=%.2f capacity_deficit_gib=%.2f unbounded_proxy_cgroups=%d udp_rcvbuf_errors_since_boot=%d",
+				guardObservation, runningUnitsObservation, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memTotalKiB),
 				kiBToGiB(sample.memAvailableKiB), kiBToGiB(reserveKiB), kiBToGiB(fullRolloutRequiredKiB),
 				kiBToGiB(fullRolloutDeficitKiB), sample.proxyMemoryUnbounded, sample.udpRcvbufErrors),
 			context:  "Summed RSS is conservative because shared pages can be counted more than once, but proxy heaps dominate the measured processes and the kernel OOM task table uses the same resident-memory boundary. A host-safe serialized rollout needs only one candidate RSS plus reserve, not a duplicate full fleet.",

@@ -36927,6 +36927,23 @@ capacity owners while those joins remain open.
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
+**Applicability census authority:** a quiet `proxy_host 0` requires a successful
+complete unit census and a successful whole-process census (`ps -e` with
+explicit pid, RSS and command-name fields). An exact fixed name filter makes
+no proxy match an ordinary successful empty result; any failed census status,
+including 1 with empty stdout, remains `cannot-observe`, not healthy absence.
+Failed partial stdout is discarded. The same filtered PID rows are reused
+for cgroup inspection, without a second selection call. Collection does not
+rely on inherited shell pipeline flags. A failed unit list
+with independently observed live proxy processes retains memory, kernel OOM,
+and same-boot UDP evidence while emitting unit-coverage visibility; the unit
+count is explicitly unknown, and process-versus-unit overlap is withheld.
+Successful empty censuses remain quiet services-only scope. Held and emitted
+visibility block notifier recovery credit; complete healthy absence retains the
+existing two-observation recovery policy. These source controls prove no live
+host census failure, OOM or production clear and change no threshold, cadence,
+lease marker or rollout guidance. UDP cancellation/state ownership is separate.
+
 UDP private-state cancellation boundary: a valid host frame whose context is
 already canceled at that host's locked publication checkpoint must not
 initialize, evict or replace its cached cumulative counters. Capture the context
