@@ -64,6 +64,12 @@ package controller
 // stats_device_versions.go and read by grafana/dashboards/providers.json.
 // They use the device's reported app version, not capability evidence.
 //
+// The provider capability census (provider_capabilities{e2e,window},
+// provider_capability_evidence_age{age}, provider_capability_key_exchanges
+// {key_exchange} and provider_capabilities_observed_at_seconds) is listed in
+// stats_provider_capabilities.go and read by
+// grafana/dashboards/capability-probes.json.
+//
 // the egress index gauges are internal (connect/GEOMAP.md §10.4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -826,6 +832,9 @@ func StartStatsCollector(ctx context.Context) <-chan struct{} {
 			if dbTick == 0 {
 				server.HandleError(func() {
 					statsRefreshDeviceVersions(ctx)
+				})
+				server.HandleError(func() {
+					statsRefreshProviderCapabilities(ctx)
 				})
 				server.HandleError(func() {
 					statsRefreshDb(ctx, window)
