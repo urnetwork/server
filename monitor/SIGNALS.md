@@ -186,6 +186,24 @@ tables gained matching qualifiers or cross-references. §2.11 and the §4
 `pgbouncer-query-wait` row now name the handoff livelock as a cause of a
 login-only queue, §12.2 and §13.4 correct the readiness check they describe,
 and §11.20 and §11.21 record the decision to zero Mimir's store horizons.
+Updated 2026-10-22 after the 2026-10-21/22 provider-gate, identity-churn and
+storage incident
+([postmortem](../../factury/postmortem/2026-10-21-provider-gate-churn-storage.md)).
+The modern provider gate turned on by itself at 10-21 00:00Z although the
+capability evidence (10-19 07:47Z) said it would remove 91% of Speed and leave
+Quality one modern provider: that handoff stayed WARN behind an unrecorded
+go/no-go, and §2.29's own observation timed out and stayed unknown. Hosted
+window identities then churned at 250–760/s, PgBouncer queued from 14:00Z, and
+the churn filled edge-2's root filesystem at up to 20 GB/h (145 GB left at
+23:57Z) and MinIO's drives at about 1 TB of raw space a day. No runway alert
+existed for either: the §2.4c forecast had stayed unimplemented since 10-13,
+the §2.4b floor (100 GB) was never crossed, and §11.6a watches percentages and
+MinIO's own lagging accounting, which also cannot see the PostgreSQL base
+backup written beside MinIO on the same drives. New entries: §2.4f storage
+runway estimator, §2.4g retention liveness, the §2.29 addendum, §2.30
+contract-creation stage latency, §5.14 database-disk-filling playbook, the §7
+2026-10-22 emission rules, §11.6b MinIO drive runway and accounting
+divergence, and §14.8 hosted identity churn.
 
 Historical evidence reviewed 2026-10-16: the
 [October outage postmortem](../../factury/postmortem/2026-10-10.md) and its
@@ -234,8 +252,11 @@ active missing capability and must not be read as green.
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
+| 2.4f | Coverage gap | `pg-disk-space` (absolute 100 GB floor) and `pg-disk-runway` (visibility-only unknown) are the registered boundaries; the max-of-windows runway estimator for edge-2 and every other stateful volume is missing. |
+| 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
+| 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -248,6 +269,7 @@ active missing capability and must not be read as green.
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
+| 5.14 | Runbook | `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution, guarded partition drops and the payout-frontier check are direct operator steps |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
 | 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
@@ -265,6 +287,7 @@ active missing capability and must not be read as green.
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
 | 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.6b | Coverage gap | `minio-storage` reads percent bands, quotas and S3 errors from MinIO's own accounting; drive runway, raw-versus-logical divergence, put-surge and backup-reserve checks are missing. |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
@@ -288,6 +311,7 @@ active missing capability and must not be read as green.
 | 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
 | 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
 | 14.6 | Probe | `proxy-transport` plus `log-errors`, `proxy-pool`, `proxy-runtime` controls |
+| 14.8 | Coverage gap | `proxy-runtime` and `control-route-pressure` see proxy process health and control load; identity mint/retire rate, lifetime and refusal checks are missing. |
 | 15.2 | Shared contract | `key-publication`, `log-errors` |
 | 15.3 | Shared contract | `key-publication`, `log-errors` |
 | 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
@@ -7490,6 +7514,13 @@ unknown `pg-disk-runway` does not prevent measured `pg-disk-space` recovery;
 unavailable floor telemetry still prevents clearing an earlier floor incident.
 Storage additions, retention changes and workload changes remain owner actions.
 
+2026-10-22: this coverage WARN was open from 10-13 to 10-22 while edge-2's root
+filesystem fell from about 700 GB to 145 GB, and it never became a forecast.
+§2.4f now selects the estimator and thresholds so the forecast can exist;
+replace this visibility-only observation with it. A perfect net-growth model is
+not a precondition for warning: the raw max-of-windows decline would have
+warned from 10-20 and paged at about 15:00Z on 10-21.
+
 ### 2.4d Configured freeze-age risk
 Probe: `pg-freeze-age`
 
@@ -7673,6 +7704,120 @@ JSON requires a separate owner decision; do not enable logging or change
 permissions from this observation. Two complete quiet observed-file windows
 can clear this event finding through the existing notifier; neither quiet logs
 nor a replacement pass alone proves recovery of an unobserved historical cause.
+
+### 2.4f Storage runway — one estimator for every stateful volume
+Probe: `storage-runway` (catalog entry; not implemented as of 2026-10-22)
+
+Why: edge-2's root filesystem ran to within hours of full on 10-12/13 and
+again on 10-21. Both times the only implemented check was the §2.4b absolute
+floor (100 GB, WARN), which the 10-21 cleanup pre-empted at 145 GB, and the
+§2.4c forecast returned `unknown` throughout. MinIO's drives (§11.6b) lost
+about 4.4 TB of raw space in a week with every §11.6a band quiet. This entry
+decides the estimator so that a runway signal exists for every volume that
+holds state.
+
+Volumes (from inventory roles): edge-2 `/` (PostgreSQL data, WAL and temp),
+edge-5 `/mnt/blob1`..`/mnt/blob4` (one MinIO erasure set: judge the drive with
+the least free space, since one full drive fails every write), the Redis data
+volumes (`/mnt/data` on edge-5 and edge-6), and every host's `/`.
+
+Estimator:
+- `free = avail - floor` for the volume's floor: 100 GB on edge-2 `/` (the
+  §2.4b line); on MinIO drives MinIO's free-space floor, or the base backup's
+  reserve while the volume also holds `pg-basebackup` (§11.6b).
+- `decline(w) = max(0, avail(t - w) - avail(t)) / w` for w in 1 h, 6 h and
+  24 h; `rate = max(decline(1h), decline(6h), decline(24h))`.
+- `runway = free / rate`; no positive decline means no runway finding (the
+  floor checks still apply).
+- Taking the maximum over windows reports acceleration at once (the §2.4c
+  review rejected the minimum of six hourly rates for hiding it). A recent
+  cleanup or partition drop raises `avail(t)` and can only shorten the measured
+  decline in the windows it falls in; the shorter windows recover first.
+
+Thresholds: WARN at runway ≤ 72 h, PAGE at ≤ 24 h, each for two probes at a
+15-minute cadence. Independently, PAGE when `free` is under twice the largest
+24-hour decline seen in the last 7 days, a floor scaled to the volume's own
+pace.
+
+```promql
+# edge-2: free above the floor and the 1h decline (repeat with 6h/21600, 24h/86400)
+(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-2",mountpoint="/"} - 100e9)
+clamp_min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-2",mountpoint="/"} offset 1h
+  - node_filesystem_avail_bytes{host="by-us-fmt-5-edge-2",mountpoint="/"}, 0) / 3600
+# MinIO: the drive with the least free space
+min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+```
+
+Backtest on edge-2 (decimal GB from Mimir):
+
+| Time (UTC) | Free | Fastest decline | Runway | Result |
+|---|---|---|---|---|
+| 10-20 00:00 | 511 GB | 7.7 GB/h over 6 h | 53 h | WARN |
+| 10-21 12:00 | 344 GB | 9 GB/h over 1 h | 27 h | WARN |
+| 10-21 15:00 | 306 GB | 18 GB/h over 1 h | 11 h | PAGE |
+
+The PAGE would have come nine hours before the cleanup that actually started
+at 23:57Z.
+
+Attribution, read-only, to say what is growing: two `pg_total_relation_size`
+snapshots four minutes apart, grouping daily partitions. On 10-22 at 05:40Z
+the total was 15.1 GB/h, mostly identity churn (§14.8):
+
+| Relation | Growth |
+|---|---|
+| `st_client_key_history` | 4.3 GB/h |
+| `transfer_contract` | 2.8 GB/h |
+| `client_reliability` partitions | 2.0 GB/h |
+| `contract_close_report_evidence` | 1.3 GB/h |
+| `contract_close` | 1.0 GB/h |
+| `network_client` | 0.9 GB/h |
+| `contract_close_report` | 0.85 GB/h |
+
+False-positive qualifier: temp spills and vacuum holds as in §2.4b. A
+`REINDEX CONCURRENTLY` or repack consumes the size of its new copy before it
+frees the old one.
+False-negative qualifier: growth on an unscraped mountpoint, and a stale or
+absent node-exporter series, which is unknown, never healthy (§7, 2026-10-22
+rules). A planned large write (a base backup, §11.6b) can arrive faster than
+the 15-minute cadence.
+
+ACTION: §5.14.
+
+### 2.4g Retention liveness — tables whose retention stopped reclaiming
+Probe: `retention-liveness` (catalog entry; not implemented as of 2026-10-22)
+
+Retention that silently stops looks like growth, and a runway alert (§2.4f)
+only says how long is left, not why. Facts on 10-22:
+- **The contract tables hold about 4.1 TB and are not being reaped.** Under 1%
+  of `transfer_contract` rows in any month since 2026-06-01 had `reap_time`.
+  `RemoveCompletedContracts` stamps `reap_time` only from a completed payment
+  (completion + 7 days), and subsidy payouts stopped with the epoch that ended
+  2026-10-05. Rows therefore wait for the 300-day straggler horizon
+  (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
+  `server/CONTRACT-PARTITION.md`.
+- **`client_reliability` retention is pinned to the last subsidy epoch.**
+  `clientReliabilityRetentionCutoffBlock` keeps blocks from that epoch's end
+  minus one day (2026-10-05), for the next payout. Once the 21-day cutoff
+  passes 10-05, nightly drops stop until `ClientExpiration` (30 days) forces
+  them on 11-04.
+- **`st_client_key_history` has no retention at all.** It is immutable by
+  trigger, held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90%
+  of its rows belong to inactive clients.
+
+Checks, all cheap and read-only:
+1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
+   when it is more than 10 days old. Payout-held frontiers stop reclaiming.
+2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
+   WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
+   14 days have `reap_time`.
+3. Partition drop: WARN `partition-retention-stuck` when the oldest non-empty
+   partition's upper bound is more than 2 days past its retention.
+4. Per relation over 100 GB: report net growth over 7 days with no deletes
+   (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
+
+ACTION: retention horizons are owner decisions. Never drop data inside a
+payout frontier without the owner: the code's own comment notes that a missing
+reliability block silently cuts provider credit.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -21636,6 +21781,79 @@ that is not judged until its process has settled, and a failed
 postponement in the desired provider.yml, beside a Mimir that answers and
 one that cannot be read.
 
+2026-10-22 addendum, the miss: the gate turned on by itself at 2026-10-21
+00:00Z. The score export kept 1 of 146 admitted Quality providers and 203 of
+2,165 Speed providers until the start was moved to 2026-10-28 at 04:03Z on
+10-22. The evidence existed in time but no signal fired:
+- **The capability evidence was filed, not escalated.** The handoff
+  `factury/monitor/alerts/12modern-gate-capability-evidence` was escalated to
+  the owner on 10-18 at 23:10Z as a decision with a 10-20 12:00Z go/no-go. At
+  10-19 07:47Z it recorded Quality at 1 modern provider of 456 and Speed at
+  2,397 of 27,725 (91.4% removed). It stayed WARN and open, and the deadline
+  passed with no recorded decision.
+- **This probe's own verdict was unknown.** Its observation timed out at
+  00:25:51Z on 10-18, inside the 72-hour lead
+  (`factury/monitor/alerts/modern-gate-readiness-visibility`, WARN,
+  needs_evidence), so neither the 72-hour WARN nor the 24-hour PAGE was ever
+  computed.
+
+Rules added:
+- `modern-gate-readiness-unknown`: an unknown verdict within 24 hours of a
+  scheduled start is PAGE, not WARN. A probe that cannot see the shadow cannot
+  vouch for the flip.
+- `modern-gate-decision-missing`: a recorded go/no-go deadline that passes
+  without a recorded decision PAGEs the owner. It repeats at the start, and
+  stays open until the start moves, the switch is set or the decision is
+  recorded.
+- Fail safe in code (follow-up, not implemented): the gate should not turn
+  itself on while its own shadow would remove more than half of a bucket.
+  Turning it on anyway should require an explicit
+  `quality_speed_requires_modern_provider: true`. A date default should
+  postpone, not proceed, when the evidence is missing or bad.
+- After a flip, watch what the bucket loss sets off, not only the counts. The
+  counts moved at 00:05Z, but the damage built up over 14 hours: §14.8
+  identity churn, then §2.30 contract latency and PgBouncer queueing from
+  14:00Z.
+
+### 2.30 Contract-creation stage latency — the database reaching the data plane
+Probe: `contract-stage-latency` (catalog entry; a Grafana rule candidate, not
+implemented as of 2026-10-22)
+
+A client cannot carry traffic until its contract exists. When the database
+queues, every stage of contract creation slows together. That is the
+user-visible cost of pool saturation, and it feeds the identity-churn loop
+(§14.8).
+
+Source: `urnetwork_contract_creation_completed_stage_seconds_total{stage}` over
+`urnetwork_contract_creation_completed_total{outcome="contract_reply"}`. The
+mean time per completed contract for each stage is the rate of the first over
+the rate of the second.
+
+| Stage (mean ms per contract) | 10-15 (baseline) | 10-22 06:30Z |
+|---|---|---|
+| total | about 50 | about 1,350 |
+| transaction | not shown | 317 |
+| relationship | 20 | 221 |
+| metadata | 2 | 175 |
+| endpoint_lookup | 1 | 163 |
+| client_stamp | 1 | 151 |
+| other | 8 | 122 |
+| companion_origin | 3 | 62 |
+| grant_selection | 4.6 | 32 |
+
+Every database stage rose 50 to 150 times. That is pool queueing
+(`pgbouncer_pool_clients_waiting` at 850–1,250), not one slow query.
+
+Thresholds: WARN when the total mean exceeds 250 ms for 10 minutes; PAGE when
+it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
+(`urnetwork_http_request_duration_seconds{job="api",route="POST ^/connect/control$"}`):
+2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22.
+
+False-positive qualifier: one stage rising alone (for example
+`companion_origin`) is a query or plan problem, not pool saturation; read the
+spread across stages. False-negative qualifier: means hide tails, and the code
+exports no per-stage histogram.
+
 ---
 
 ## 3. redis signal catalog
@@ -25307,6 +25525,39 @@ huge-pages attempt.
 Pause deploys and database-heavy work for the window: a container that starts
 during the outage fails its one-shot readiness check (§12.2).
 
+### 5.14 Database disk filling (the 2026-10-21 edge-2 runway)
+
+This is the order used on 10-21/22, when edge-2 reached 145 GB free while
+losing up to 20 GB/h. Each production action needs the owner's go.
+1. **Measure** free space and runway in decimal GB from Mimir (§2.4f). `df -BG`
+   prints GiB: 467 GiB is 500 GB.
+2. **Attribute the growth.** Take two relation-size snapshots four minutes
+   apart (§2.4f), then check temp and WAL (`pg_ls_tmpdir()`, `pg_ls_waldir()`)
+   and replication slots (`pg_replication_slots`, which also shows a running
+   base backup's `pgbackup_*` slot).
+3. **Free space quickly and safely:**
+   - `REINDEX INDEX CONCURRENTLY` on bloated indexes over small live data. On
+     10-21, `pending_task` had 94 GB of indexes for about 200 MB of rows and
+     went to about 25 MB. It needs room only for the new index.
+   - Trim host logs behind a hostname guard (+22 GB).
+   - Drop the time partitions that retention would drop within days anyway
+     (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
+     guarded transaction with `lock_timeout = '5s'`; each took seconds.
+4. **Respect the payout frontier.** `client_reliability` blocks from the last
+   subsidy epoch's end minus one day are read by the next payout, and dropping
+   them silently cuts provider credit. Check
+   `SELECT max(end_time) FROM subsidy_payment` before dropping anything newer
+   than the 21-day cutoff (§2.4g).
+5. **Not first:**
+   - `VACUUM FULL`, which holds an exclusive lock for hours on hot tables;
+   - pg_repack, which needs free space equal to the table;
+   - dropping indexes that back constraints.
+
+   Dropping a column frees nothing until the table is rewritten.
+6. **Treat the source.** On 10-21 most growth came from identity churn
+   (§14.8): `st_client_key_history`, the contract tables and close-report
+   evidence. Space bought in step 3 lasts only as long as the churn allows.
+
 ## 6. How we decided what was REAL (methodology)
 
 1. **One discriminating measurement before any action.** Every hypothesis got
@@ -25593,6 +25844,43 @@ from a log line, a task name) belongs in `frame`. Healthy resolution matches
 (probe, class, target) ignoring frame; an identity keyed on a varying value
 opens tickets that no later healthy finding can ever match — observed as 61
 zombie dial-io-timeout tickets accumulated across one outage.
+
+### 2026-10-22 emission rules (from the gate, churn and storage miss)
+
+1. **Unknown is not healthy for a safety property.** A capacity or
+   scheduled-change probe that returns unknown inside its risk window (no
+   estimator, a timed-out read, a missing series) emits at the severity of the
+   condition it cannot rule out. Examples:
+   - storage runway unknown on a volume that declined more than 5 GB/h in the
+     last 6 hours: PAGE;
+   - gate readiness unknown within 24 hours of a scheduled start: PAGE
+     (§2.29 addendum).
+2. **Every capacity signal has a runway form** (§2.4f). Percent-full and fixed
+   floors missed both disks on 10-21. edge-2 never crossed its 100 GB floor,
+   and MinIO sat at 47% used while losing about 1 TB of raw space a day
+   (§11.6b).
+3. **A recorded decision with a deadline is an alert with a deadline.** When
+   the deadline passes without a recorded decision it pages the owner, and it
+   pages again at the change time.
+4. **Handoff files are not delivery.** A finding filed at WARN under
+   `factury/monitor/alerts` reaches the next review round, not a person.
+   Production capacity and scheduled-change findings also go to the delivery
+   route above and need an acknowledgement.
+5. **Production PAGE-class conditions come before harness work.** A review
+   round that sees a PAGE-class production condition (runway at or under 24 h,
+   PgBouncer waiting over 500, prober health halved) escalates it before
+   continuing work on the monitor's own sampling and attribution.
+
+Catalog rows from this incident, none implemented as of 2026-10-22:
+
+| id | source | check | threshold |
+|---|---|---|---|
+| storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
+| minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
+| retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| contract-stage-latency | Mimir | §2.30 total mean | WARN over 250 ms, PAGE over 1 s, 10 min |
+| identity-churn / identity-churn-loop | Mimir proxy metrics + pg | §14.8 | WARN on per-device mints, retire/mint ratio or refusals; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
+| modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |
 
 ---
 
@@ -30057,6 +30345,83 @@ lost write quorum, quota bands including a quota raised within the window,
 request-error bands, missing/stale/incomplete drive and usage layers,
 malformed Mimir responses, foreign-host series, a dark inventory, and the
 query's freshness bounds.
+
+### 11.6b MinIO drive runway, accounting divergence and foreign data on its drives
+Probe: `minio-runway` (catalog entry; not implemented as of 2026-10-22)
+
+MinIO on main is one node on edge-5: four 3.84 TB drives (`/mnt/blob1`..`4`)
+in one 2+2 erasure set, 7.68 TB usable. On 10-22 MinIO reported about 988 GB of
+logical bucket data and 4.08 TB usable free (47% used), so every §11.6a band
+stayed quiet. Raw free space meanwhile fell from 12.6 TB (10-15) to 12.3 TB
+(10-19), 9.1 TB (10-21) and 8.2 TB (10-22), and was falling about 41 GB/h
+(about 1 TB a day): roughly 8 days to full. MinIO fails every write once one
+drive is full, and client-key registration has no fallback when its evidence
+cannot be published, so new identities would stop working.
+
+What MinIO's own accounting cannot see:
+1. **Data beside MinIO on the same drives.** The PostgreSQL physical base
+   backup (xops `main/ansible/playbook-pg-basebackup.yml`, written to
+   `/mnt/blobN/pg-basebackup` next to `/mnt/blobN/minio`) wrote about 2.75 TB
+   of raw space (about 690 GB per drive) between about 12:00Z on 10-19 and
+   12:00Z on 10-20, with almost no S3 traffic.
+   - It runs by hand (`pg_basebackup_timer_enabled: false`) and keeps one
+     generation (`pg_basebackup_retain: 1`).
+   - It needs room for a second generation until the new one is verified.
+   - Each piece must fit above `pg_basebackup_reserve_bytes`, 1.5 TiB per
+     drive. With about 1.87 TiB free per drive on 10-22, the next run fails.
+   - It also reads the whole primary at up to 200 MB/s from edge-2's already
+     saturated disk.
+2. **Small objects.** Client-key evidence is written twice per registration,
+   under a content key and a history key (§14.8). Each object of about 2 KB
+   costs about 24 KB of raw disk across the four drives: a directory and an
+   `xl.meta` file on every drive. In one 6-hour window, 11.6M puts used 277 GB
+   of raw space. One drive held 254.6M inodes while the scanner reported 57M
+   objects; the scanner lags by tens of millions of entries in one flat
+   prefix, so bucket metrics understate both count and growth.
+
+Checks:
+- **Runway** from `node_filesystem_avail_bytes` on `/mnt/blob*`, judging the
+  drive with the least free space, with the §2.4f estimator. WARN at ≤ 14
+  days, PAGE at ≤ 3 days. These are longer than §2.4f's thresholds because
+  adding drives takes days.
+- **Accounting divergence:** raw used (`node_filesystem_size_bytes - avail`
+  over the blob drives) minus twice MinIO's logical bucket bytes (2+2 erasure
+  coding). WARN `minio-accounting-divergence` above 1 TB. It means foreign
+  data, scanner lag or small-object overhead; it was about 4.4 TB on 10-22
+  against about 0.5 TB a week earlier. Report
+  `minio_cluster_usage_buckets_since_last_update_seconds` beside it, and check
+  the exporter's units first: the 10-22 value only made sense as nanoseconds.
+- **Put surge:** `rate(minio_api_requests_total{job="minio",name="PutObject"}[1h])`
+  over 3 times its 7-day median for an hour: WARN `minio-put-surge`. It was
+  90/s on 10-15 and 512–540/s on 10-22, about two puts per client-key
+  registration.
+- **Backup about to write:** a `pgbackup_*` replication slot on the primary,
+  or the backup unit active on edge-5, while the drive with the least free
+  space is below the backup reserve plus the last backup's size. WARN before
+  it starts writing.
+
+```promql
+min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+sum(node_filesystem_size_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."}
+  - node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+  - 2 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
+sum(rate(minio_api_requests_total{job="minio",name="PutObject"}[1h]))
+```
+
+Read-only limits: the monitor's SSH user cannot read MinIO's or pgbackup's
+directories, and `du` skips them silently (30 GB reported on a drive with
+1.7 TB used). Use the filesystem gauges, the backup's own output, or a
+privileged `du` run by the owner.
+
+False-positive qualifier: a scheduled backup's transient second generation,
+and scanner lag right after a MinIO restart.
+False-negative qualifier: raw cost per object varies with object size and
+filesystem; healing and replication write without S3 puts.
+
+ACTION: cut object growth at its source (§14.8, plus skipping the
+history-key copy for client-key evidence and a lifecycle rule for the existing
+copies). Run backups only with room for two generations above the reserve. Add
+drives: a new pool needs at least 4 drives to keep 2+2 parity.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -37437,6 +37802,102 @@ and capped-out samples. The immutable successor reduction is
 `a8eddf727d09dc4a4f38c13c1283aa8ce2bba3db02f6e16b1aa52eacfb3d97bd`,
 with independent actual GO SHA-256
 `a570027ab36a073c97449a3caaf4a97954442883875ba8e54f765e7e2dbaa2dc`.
+
+### 14.8 Hosted identity churn — the loop that fills both disks
+Probe: `identity-churn` (catalog entry; not implemented as of 2026-10-22)
+
+How it works:
+- A hosted proxy device keeps multi-client windows. Every candidate exit is a
+  newly minted network-client identity: `AuthNetworkClient`, counted as
+  `urnetwork_jwt_state_queries_total{job="proxy",operation="mint"}`. It is
+  retired with `RemoveNetworkClient` (`operation="retire"`).
+- An identity that registers its key writes one immutable
+  `st_client_key_history` row (about 4.7 KB on disk) and two MinIO evidence
+  objects (§11.6b), as well as its contracts and close reports. Identity churn
+  is therefore storage growth on edge-2 and on MinIO at the same time.
+
+| | 10-15 (baseline) | 10-21 01:00Z to 10-22 06:00Z |
+|---|---|---|
+| Mints | 57/s | 240–760/s |
+| Retires | 8/s | 228/s |
+| Active hosted devices | 6.8k | 9.5–11k |
+| Mints per device-minute | about 0.5 (identities lived) | 1.0–2.4 |
+| Hosted mint refusals | 0 | 42/s at 14:00Z on 10-21, 600/s and more from 17:00Z |
+
+One minute of one network's identities, sampled at 06:20Z on 10-22: 18,676
+were created. 65% were retired without ever connecting, retired identities
+lived a median of 8 s (30 s on 10-18 and 10-20), those that connected took a
+median of 14 s to connect, and 8% were alive 10 minutes later.
+
+The loop:
+1. Discovery fails or slows. First the gate emptied the pools (§2.29); then
+   quality validation came back `unavailable` under the saturated pool.
+2. Windows cancel candidates that have not proven themselves and mint
+   replacements. `EvaluationPoolMultiple = 2` also mints twice the candidates
+   it needs.
+3. Every replacement adds database work, PgBouncer queues (§2.30), and
+   connects and contracts slow down.
+4. More candidates are cut, and the loop repeats.
+
+Once running, the loop outlived its trigger. The gate was postponed at 04:03Z
+on 10-22, and churn stayed at 240–310 mints/s.
+
+Signals:
+- **Mints per active device-minute,**
+  `60 * rate(mint[30m]) / sum(urnetwork_proxy_devices_active)`: WARN when over
+  twice its 7-day median for 30 minutes.
+- **Retire/mint ratio** over 30 minutes while mints exceed 150/s: WARN above
+  0.8. Identities are not lasting.
+- **Hosted mint refusals,**
+  `rate(urnetwork_hosted_mint_admission_refusals_total[15m])`: WARN above
+  100/s. It was 0 throughout the baseline week.
+- **Loop engaged:** any of the above together with
+  `pgbouncer_pool_clients_waiting` over 500 or the §2.30 total over 1 s: PAGE
+  `identity-churn-loop`.
+- **Discovery outcomes,**
+  `urnetwork_findproviders2_native_source_outcomes_total{job="proxy",source="primary"}`.
+  Label trap: `quota` is success (the source filled the request). `exhausted`
+  means too few candidates, and `unavailable` means an incomplete source or
+  the 250 ms quality-validation budget ran out. WARN when `exhausted` plus
+  `unavailable` exceed 30% of primary outcomes for 30 minutes. On 10-15 each
+  outcome ran about 1–2/s at 2.9 discoveries/s; on 10-22, 44/s were
+  `unavailable` and 16/s `exhausted` out of 90/s.
+
+Identity lifetime, read-only and aggregates only (read the network id from a
+private file; never print it). Identities are time-ordered, so one minute of
+one network's identities is an index range on `(network_id, client_id)`:
+
+```sql
+WITH b AS (
+  SELECT (lpad(to_hex((extract(epoch FROM now() - interval '11 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AS lo,
+         (lpad(to_hex((extract(epoch FROM now() - interval '10 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AS hi
+), c AS (
+  SELECT n.client_id, n.create_time, n.active, n.deactivate_time
+  FROM network_client n, b
+  WHERE n.network_id = :network AND n.client_id >= b.lo AND n.client_id < b.hi
+)
+SELECT count(*) AS identities,
+  round(100.0 * avg(active::int), 1) AS pct_alive,
+  round(100.0 * avg((NOT EXISTS (SELECT 1 FROM network_client_connection cc WHERE cc.client_id = c.client_id))::int), 1) AS pct_never_connected,
+  percentile_disc(0.5) WITHIN GROUP (ORDER BY deactivate_time - create_time) FILTER (WHERE NOT active) AS p50_life
+FROM c;
+```
+
+Connection rows of retired identities are reaped within days, so the
+never-connected share can be measured only for recent minutes. The lifetime
+(from creation to deactivation) survives longer.
+
+False-positive qualifier: a fleet rollout recreates windows for its duration,
+and a growing hosted fleet raises mints without raising per-device churn.
+False-negative qualifier: the admission bound caps mints, so read refusals
+beside them. Taskworker and api mints (probes, apps) are separate jobs.
+
+ACTION: break the loop on the database side (§2.30, §5.6) or the client side:
+discovery pacing (connect 8033a898), a lower hosted mint cap, racing 1× for
+hosted windows, keeping the 429 backoff across a successful discovery, and
+reusing identities that never connected (connect `fix/hosted-window-churn`
+and server `fix/client-key-evidence-churn-brakes`, unmerged as of 10-22). Do
+not restart proxies fleet-wide: every restart recreates windows.
 
 ---
 
