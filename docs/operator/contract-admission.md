@@ -168,7 +168,9 @@ closed; the margin absorbs a Redis clock step of up to 90s. A request that
 died with pending tokens leaves them reserved for up to two minutes, then any
 request on the balance recovers them. Attempts of one request share its
 tokens: the request's own release or hand-off advances an in-process epoch
-first, and an attempt that reserved before it refuses to publish.
+first, and an attempt that reserved before it refuses to publish. Compensation
+releases a pending token directly only while no attempt is in flight and none
+has started publishing; otherwise the fenced SQL custody check decides.
 
 The previous release's scripts run beside this one during a rolling deploy.
 Its recovery page reads only the recovery marker and its owned release

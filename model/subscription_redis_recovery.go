@@ -456,11 +456,13 @@ func (self *redisContractAdmission) reservationCleanup() redisReservationCleanup
 // attempts' transactions have joined. No transaction can publish a pending
 // token that no attempt in flight holds, so it is released in Redis alone,
 // with no SQL custody check or transaction. A token that is no longer
-// pending, or one an attempt in flight may hold, keeps the fenced SQL custody
-// check that recovery applies to any request.
+// pending, one an attempt in flight may hold, and one an attempt may have
+// published since compensation began keep the fenced SQL custody check that
+// recovery applies to any request. A published token stays pending until its
+// attempt's own page acknowledges it.
 func (self *redisContractAdmission) releaseReservation(ctx context.Context, balanceId server.Id) error {
 	return self.retirePending(func(inFlight bool) error {
-		if !inFlight {
+		if !inFlight && !self.publicationHasStarted() {
 			_, err := redisContractReservation(ctx, "release-pending", balanceId, self.contractId, 0, math.MaxInt64, redisContractReservationLease)
 			if !errors.Is(err, errRedisReservationNotPending) {
 				return err
@@ -468,6 +470,13 @@ func (self *redisContractAdmission) releaseReservation(ctx context.Context, bala
 		}
 		return recoverRedisReservationRequest(ctx, balanceId, self.contractId)
 	})
+}
+
+// Read again on each compensation attempt: compensationIds checks it only once.
+func (self *redisContractAdmission) publicationHasStarted() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.publicationStarted
 }
 
 func defaultRedisReservationCleanup() redisReservationCleanup {

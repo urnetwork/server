@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
@@ -293,6 +294,71 @@ func TestRedisPendingReservationScriptOwnership(t *testing.T) {
 		if got := Testing_NetEscrowByteCount(ctx, balance); got != 0 {
 			t.Fatal("released reservations left a total", got)
 		}
+	})
+}
+
+// Compensation may begin while another attempt of the same request is
+// publishing: its first, fenced attempt finds the request fence held and
+// retries. That attempt then commits and ends. The retry must leave the token
+// it published, although no attempt is in flight any more and the token stays
+// pending until the publishing attempt's own page acknowledges it.
+func TestRedisPendingCompensationRetryKeepsPublishedToken(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		neighbor := createRedisAdmissionTest(ctx, f, 17)
+		request := withRedisContractAdmission(ctx)
+		owner := redisAdmissionFromContext(request)
+		reserved, finish := reserveRedisAdmissionTestBeforeTx(t, request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
+		defer finish()
+		// compensation began before the publication started
+		ids := owner.compensationIds()
+		if len(ids) != 1 || ids[0] != f.balanceId {
+			t.Fatal("compensation fixture differs", ids)
+		}
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		held, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		server.Raise(err)
+		defer held.Rollback(context.Background())
+		published, _, err := createTransferEscrowInTx(reserved, held, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
+		if err != nil || published == nil {
+			t.Fatal("publishing attempt fixture failed", err)
+		}
+		attempts := 0
+		cleanup := owner.reservationCleanup()
+		release := cleanup.recover
+		cleanup.recover = func(owned context.Context, balance, contract server.Id) error {
+			attempts++
+			return release(owned, balance, contract)
+		}
+		cleanup.wait = func(context.Context, time.Duration) error {
+			// the publishing attempt commits and ends between compensation attempts
+			server.Raise(held.Commit(ctx))
+			finish()
+			return nil
+		}
+		if err := cleanup.run(ctx, owner.contractId, ids); err != nil {
+			t.Fatal("compensation did not complete after the publication", err)
+		}
+		if attempts != 2 {
+			t.Fatal("the publishing attempt's fence did not hold the first compensation attempt", attempts)
+		}
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 40 {
+			t.Fatal("compensation released a token its own request published", got)
+		}
+		server.Redis(ctx, func(client server.RedisClient) {
+			tokens, err := client.HGetAll(ctx, redisContractReservationKeys(f.balanceId)[1]).Result()
+			server.Raise(err)
+			if len(tokens) != 2 || tokens[neighbor.ContractId.String()] != "17" || tokens[published.ContractId.String()] != "23" {
+				t.Fatal("compensation changed a published token", tokens)
+			}
+		})
+		// the fenced custody check acknowledged the committed contract
+		redisRecoveryRequireMarker(t, ctx, f.balanceId, published.ContractId, false)
 	})
 }
 
