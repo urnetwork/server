@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
@@ -98,6 +99,7 @@ func TestRedisPendingReservationPastPublicationWindowRefuses(t *testing.T) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		neighbor := createRedisAdmissionTest(ctx, f, 17)
+		refusalsBefore := testutil.ToFloat64(redisPendingPublicationRefusals.WithLabelValues("window_expired"))
 		escrow, err := runRedisContractAdmission(ctx, func(attempt context.Context) (*TransferEscrow, error) {
 			reserved, finish, err := reserveRedisTransferEscrowBeforeTx(attempt, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
 			if err != nil {
@@ -112,8 +114,11 @@ func TestRedisPendingReservationPastPublicationWindowRefuses(t *testing.T) {
 			}, server.TxReadCommitted, server.OptNoRetry())
 			return escrow, err
 		})
-		if escrow != nil || !errors.Is(err, errRedisPendingReservationExpired) {
+		if escrow != nil || !errors.Is(err, ErrRedisPendingReservationExpired) {
 			t.Fatal("a reservation past its publication window was published", escrow, err)
+		}
+		if refusals := testutil.ToFloat64(redisPendingPublicationRefusals.WithLabelValues("window_expired")) - refusalsBefore; refusals != 1 {
+			t.Fatal("the expired publication was not counted", refusals)
 		}
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatal("the expired attempt kept its reservation", got)
@@ -140,6 +145,7 @@ func TestRedisPendingReservationSameRequestReleaseStopsPublication(t *testing.T)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 40 {
 			t.Fatal("pending reservation fixture differs", got)
 		}
+		refusalsBefore := testutil.ToFloat64(redisPendingPublicationRefusals.WithLabelValues("released"))
 		if err := owner.compensate(ctx); err != nil {
 			t.Fatal("the request's own release failed", err)
 		}
@@ -154,8 +160,11 @@ func TestRedisPendingReservationSameRequestReleaseStopsPublication(t *testing.T)
 				t.Fatal("an attempt published a token its own request released", escrow)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		if !errors.Is(publishErr, errRedisPendingReservationReleased) {
+		if !errors.Is(publishErr, ErrRedisPendingReservationReleased) {
 			t.Fatal("the released attempt was not refused", publishErr)
+		}
+		if refusals := testutil.ToFloat64(redisPendingPublicationRefusals.WithLabelValues("released")) - refusalsBefore; refusals != 1 {
+			t.Fatal("the released publication was not counted", refusals)
 		}
 		requireRedisRefusalOnlyContract(t, ctx, f, neighbor.ContractId)
 	})

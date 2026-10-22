@@ -42,8 +42,8 @@ const redisPendingRecoveryAge = 10 * time.Minute
 
 var errRedisReservationInsufficient = errors.New("Insufficient balance")
 var errRedisReservationNotPending = errors.New("Redis reservation request already owns a reservation that is not pending; reconcile its original contract")
-var errRedisPendingReservationExpired = errors.New("Redis reservation outlived its pending publication window")
-var errRedisPendingReservationReleased = errors.New("Redis reservation was released by its own request before publication")
+var ErrRedisPendingReservationExpired = errors.New("Redis reservation outlived its pending publication window")
+var ErrRedisPendingReservationReleased = errors.New("Redis reservation was released by its own request before publication")
 var errRedisPendingReservationMissing = errors.New("Redis reservation must precede its contract transaction")
 
 var redisContractReservationResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -62,8 +62,16 @@ var redisGrantSelectionFraction = prometheus.NewHistogramVec(prometheus.Histogra
 	Buckets: []float64{0.1, 0.25, 0.5, 0.75, 0.8, 0.9, 1},
 }, []string{"resource"})
 
+var redisPendingPublicationRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_redis_contract_publication_refusals_total",
+	Help: "Creation transactions that refused to publish their pending Redis reservation, by reason: window_expired when the request fence came after the publication window, released when the request's own release came first.",
+}, []string{"reason"})
+
 func init() {
-	prometheus.MustRegister(redisContractReservationResults, redisGrantSelectionLimitsMetric, redisGrantSelectionFraction)
+	for _, reason := range []string{"window_expired", "released"} {
+		redisPendingPublicationRefusals.WithLabelValues(reason)
+	}
+	prometheus.MustRegister(redisContractReservationResults, redisGrantSelectionLimitsMetric, redisGrantSelectionFraction, redisPendingPublicationRefusals)
 }
 
 type redisAdmissionContextKey struct{}
@@ -390,10 +398,12 @@ func (self *redisPendingReservation) requirePublishable() error {
 		return errRedisPendingReservationMissing
 	}
 	if self.admission.pendingEpoch.Load() != self.epoch {
-		return errRedisPendingReservationReleased
+		redisPendingPublicationRefusals.WithLabelValues("released").Inc()
+		return ErrRedisPendingReservationReleased
 	}
 	if redisPendingPublicationTimeout <= time.Since(self.startTime) {
-		return errRedisPendingReservationExpired
+		redisPendingPublicationRefusals.WithLabelValues("window_expired").Inc()
+		return ErrRedisPendingReservationExpired
 	}
 	return nil
 }

@@ -88,7 +88,8 @@ var contractFailureCounter = prometheus.NewCounterVec(
 var contractRejectionCauses = []string{
 	"inactive_destination", "provide_mode_unavailable", "provide_secret_unavailable",
 	"insufficient_balance", "missing_companion_origin", "client_not_found",
-	"source_inactive", "canceled", "deadline", "other",
+	"source_inactive", "canceled", "deadline", "reservation_window_expired",
+	"reservation_released", "other",
 }
 
 var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -226,6 +227,15 @@ func recordControlFrameFailure(message any, err error) {
 func contractFailureClass(err error) string {
 	if errors.Is(err, errContractDestinationInactive) {
 		return "inactive_destination"
+	}
+	// A pending Redis reservation the creation transaction refused to
+	// publish (model.redisPendingReservation): its window closed before the
+	// request fence, or its own request released it first.
+	if errors.Is(err, model.ErrRedisPendingReservationExpired) {
+		return "reservation_window_expired"
+	}
+	if errors.Is(err, model.ErrRedisPendingReservationReleased) {
+		return "reservation_released"
 	}
 	message := strings.ToLower(err.Error())
 	switch {

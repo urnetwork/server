@@ -176,6 +176,12 @@ publish. Compensation releases a pending token directly only while no attempt
 is in flight and none has started publishing; otherwise the fenced SQL custody
 check decides.
 
+`urnetwork_redis_contract_publication_refusals_total{reason}` counts the
+transactions that refused to publish: `window_expired` and `released`. The
+connect controller reports them as contract failure and rejection causes
+`reservation_window_expired` and `reservation_released`, and answers clients
+with Setup, which they retry.
+
 The previous release's scripts run beside this one during a rolling deploy.
 Its recovery page reads only the recovery marker and its owned release
 requires one, so it can neither discover nor release a pending token. Its
