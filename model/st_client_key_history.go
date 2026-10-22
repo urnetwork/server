@@ -66,24 +66,42 @@ func ownStClientKeySigner(key *ecdsa.PrivateKey) (*ecdsa.PrivateKey, error) {
 }
 
 // Refuses row tamper and mismatched wrappers before returning a usable record.
-func decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes []byte, evidenceHash string) (StClientKeyHistoryRecord, error) {
-	registration, err := protocol.DecodeClientKeyRegistration(registrationBytes)
-	if err != nil {
-		return StClientKeyHistoryRecord{}, err
-	}
-	contentHash := sha256.Sum256(registrationBytes)
-	if !bytes.Equal(contentHash[:], registrationHash) || len(evidenceBytes) == 0 || len(evidenceBytes) > startifact.MaxClientKeyEvidenceBytes {
+// The signed registration bytes are the evidence wrapper's exact payload, so a
+// row's registration_hash names them and readers never need a second copy.
+func decodeStClientKeyHistoryRecord(registrationHash, evidenceBytes []byte, evidenceHash string) (StClientKeyHistoryRecord, error) {
+	if len(evidenceBytes) == 0 || len(evidenceBytes) > startifact.MaxClientKeyEvidenceBytes {
 		return StClientKeyHistoryRecord{}, errors.New("stored client-key registration byte identity differs")
 	}
 	var envelope startifact.EvidenceEnvelope
 	if err := json.Unmarshal(evidenceBytes, &envelope); err != nil {
 		return StClientKeyHistoryRecord{}, err
 	}
+	registrationBytes := []byte(envelope.Payload)
+	registration, err := protocol.DecodeClientKeyRegistration(registrationBytes)
+	if err != nil {
+		return StClientKeyHistoryRecord{}, err
+	}
+	contentHash := sha256.Sum256(registrationBytes)
+	if !bytes.Equal(contentHash[:], registrationHash) {
+		return StClientKeyHistoryRecord{}, errors.New("stored client-key registration byte identity differs")
+	}
 	canonical, err := startifact.EvidenceBytes(&envelope)
-	if err != nil || !bytes.Equal(canonical, evidenceBytes) || !bytes.Equal(envelope.Payload, registrationBytes) || envelope.Kind != startifact.ClientKeyRegistrationEvidenceKind || envelope.ContentHash != evidenceHash || envelope.RunID != "" || envelope.ChainID != registration.Domain.ChainID || envelope.Netuid != registration.Domain.Netuid || envelope.GenesisHash != fmt.Sprintf("0x%x", registration.Domain.GenesisHash) || sha256.Sum256([]byte(envelope.DeploymentID)) != registration.Domain.DeploymentIDHash {
+	if err != nil || !bytes.Equal(canonical, evidenceBytes) || envelope.Kind != startifact.ClientKeyRegistrationEvidenceKind || envelope.ContentHash != evidenceHash || envelope.RunID != "" || envelope.ChainID != registration.Domain.ChainID || envelope.Netuid != registration.Domain.Netuid || envelope.GenesisHash != fmt.Sprintf("0x%x", registration.Domain.GenesisHash) || sha256.Sum256([]byte(envelope.DeploymentID)) != registration.Domain.DeploymentIDHash {
 		return StClientKeyHistoryRecord{}, errors.Join(errors.New("stored client-key evidence wrapper differs from its signed registration"), err)
 	}
 	return StClientKeyHistoryRecord{Registration: registration, RegistrationBytes: bytes.Clone(registrationBytes), EvidenceHash: evidenceHash, EvidenceBytes: bytes.Clone(evidenceBytes)}, nil
+}
+
+// Fixed per-record control storage counted by LoadStClientKeyHistory.
+func stClientKeyHistoryControlBytes() int64 {
+	return int64(reflect.TypeFor[StClientKeyHistoryRecord]().Size() + reflect.TypeFor[startifact.EvidenceEnvelope]().Size() + reflect.TypeFor[protocol.ClientKeyRegistration]().Size() + 256)
+}
+
+// The allowance LoadStClientKeyHistory admits for one decoded generation: row
+// bytes, decoded/canonical copies, owned return buffers and fixed control
+// storage, including the registration copy its evidence payload carries.
+func stClientKeyHistoryRecordAllowanceBytes(record *StClientKeyHistoryRecord, registrationHash []byte, controlBytes int64) int64 {
+	return 6*int64(len(record.RegistrationBytes)) + 6*int64(len(record.EvidenceBytes)) + 2*int64(len(record.EvidenceHash)) + int64(len(registrationHash)) + controlBytes
 }
 
 // Exact retries reuse the original signed record, including creation metadata.
@@ -137,18 +155,18 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		var networkID server.Id
 		server.Raise(tx.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id = $1 AND active = true FOR UPDATE`, input.ClientID).Scan(&networkID))
 		var priorRegistration *protocol.ClientKeyRegistration
-		var storedDomain, registrationBytes, registrationHash, evidenceBytes []byte
+		var storedDomain, registrationHash, evidenceBytes []byte
 		var storedNetworkID server.Id
 		var generation int64
 		var retired bool
 		var evidenceHash string
 		err := tx.QueryRow(ctx, `
 			SELECT h.domain_hash, h.network_id, h.generation, h.retired,
-				r.registration, r.registration_hash, r.evidence, r.evidence_hash
+				r.registration_hash, r.evidence, r.evidence_hash
 			FROM st_client_key_head h
 			JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
 			WHERE h.client_id = $1 AND h.is_current FOR UPDATE OF h
-		`, input.ClientID).Scan(&storedDomain, &storedNetworkID, &generation, &retired, &registrationBytes, &registrationHash, &evidenceBytes, &evidenceHash)
+		`, input.ClientID).Scan(&storedDomain, &storedNetworkID, &generation, &retired, &registrationHash, &evidenceBytes, &evidenceHash)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			server.Raise(err)
 		}
@@ -156,7 +174,7 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 			if retired || storedNetworkID != networkID || generation <= 0 {
 				server.Raise(errors.New("client-key registration cannot replace a retired or different-network head"))
 			}
-			prior, err := decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes, evidenceHash)
+			prior, err := decodeStClientKeyHistoryRecord(registrationHash, evidenceBytes, evidenceHash)
 			server.Raise(err)
 			priorDomainHash, err := prior.Registration.Domain.Digest()
 			server.Raise(err)
@@ -201,7 +219,7 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		}
 		server.Raise(protocol.SignClientKeyRegistration(&registration, rootKey))
 		server.Raise(registration.Follows(priorRegistration))
-		registrationBytes, err = registration.Bytes()
+		registrationBytes, err := registration.Bytes()
 		server.Raise(err)
 		contentHash := sha256.Sum256(registrationBytes)
 		evidenceBytes, evidenceHash, err = startifact.SealClientKeyRegistrationEvidence(input.DeploymentID, registration, artifactKey, input.CreatedAt)
@@ -262,34 +280,42 @@ func LoadStClientKeyHistory(ctx context.Context, domain protocol.ClientKeyHistor
 		}
 		var count, first, last, storedBytes int64
 		// Cover row bytes, decoded/canonical copies, owned return buffers and
-		// per-record fixed control storage before the proportional SELECT.
-		controlBytes := int64(reflect.TypeFor[StClientKeyHistoryRecord]().Size() + reflect.TypeFor[startifact.EvidenceEnvelope]().Size() + reflect.TypeFor[protocol.ClientKeyRegistration]().Size() + 256)
+		// per-record fixed control storage before the proportional SELECT. The
+		// registration copy each evidence payload carries is known only once it
+		// decodes, so the census is a lower bound and every decoded row then
+		// counts against the exact allowance.
+		controlBytes := stClientKeyHistoryControlBytes()
 		server.Raise(tx.QueryRow(ctx, `
 			SELECT COUNT(*), COALESCE(MIN(generation), 0), COALESCE(MAX(generation), 0),
-				COALESCE(SUM(6 * octet_length(registration) + 6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $2), 0)::bigint
+				COALESCE(SUM(6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $2), 0)::bigint
 			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $3
 		`, clientID, controlBytes, domainHash[:]).Scan(&count, &first, &last, &storedBytes))
 		if count != generation || first != 1 || last != generation || storedBytes <= 0 || uint64(storedBytes) > maximumBytes {
 			server.Raise(errors.New("client-key history census, continuity or bytes exceed the independent allowance"))
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT generation, domain_hash, registration_hash, registration, evidence_hash, evidence
+			SELECT generation, domain_hash, registration_hash, evidence_hash, evidence
 			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $3 ORDER BY generation ASC LIMIT $2
 		`, clientID, generation+1, domainHash[:])
 		server.Raise(err)
 		defer rows.Close()
 		result = make([]StClientKeyHistoryRecord, 0, int(generation))
 		var prior *protocol.ClientKeyRegistration
+		var allowanceBytes int64
 		for rows.Next() {
 			if int64(len(result)) >= generation {
 				server.Raise(errors.New("client-key history returned extra generations"))
 			}
 			var rowGeneration int64
-			var registrationBytes, registrationHash, evidenceBytes, rowDomain []byte
+			var registrationHash, evidenceBytes, rowDomain []byte
 			var evidenceHash string
-			server.Raise(rows.Scan(&rowGeneration, &rowDomain, &registrationHash, &registrationBytes, &evidenceHash, &evidenceBytes))
-			record, err := decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes, evidenceHash)
+			server.Raise(rows.Scan(&rowGeneration, &rowDomain, &registrationHash, &evidenceHash, &evidenceBytes))
+			record, err := decodeStClientKeyHistoryRecord(registrationHash, evidenceBytes, evidenceHash)
 			server.Raise(err)
+			allowanceBytes += stClientKeyHistoryRecordAllowanceBytes(&record, registrationHash, controlBytes)
+			if uint64(allowanceBytes) > maximumBytes {
+				server.Raise(errors.New("client-key history census, continuity or bytes exceed the independent allowance"))
+			}
 			if rowGeneration != int64(len(result))+1 || !bytes.Equal(rowDomain, domainHash[:]) || record.Registration.Generation != uint64(rowGeneration) || record.Registration.Domain != domain || record.Registration.ClientID != [16]byte(clientID) || record.Registration.NetworkID != [16]byte(networkID) {
 				server.Raise(errors.New("client-key history row differs from its exact signed census"))
 			}
@@ -314,7 +340,6 @@ type stClientKeyCurrentProjection struct {
 	found, retired, clientExists bool
 	networkID                    server.Id
 	generation                   int64
-	registrationBytes            []byte
 	registrationHash             []byte
 	evidenceBytes                []byte
 	domainHash                   []byte
@@ -328,7 +353,7 @@ func (p *stClientKeyCurrentProjection) publicKey(clientID server.Id) ([]byte, er
 	if !p.found || p.retired || !p.clientExists {
 		return nil, nil
 	}
-	record, err := decodeStClientKeyHistoryRecord(p.registrationBytes, p.registrationHash, p.evidenceBytes, p.evidenceHash)
+	record, err := decodeStClientKeyHistoryRecord(p.registrationHash, p.evidenceBytes, p.evidenceHash)
 	if err != nil {
 		return nil, err
 	}
@@ -366,10 +391,10 @@ func stClientKeyCurrent(ctx context.Context, clientID server.Id) (publicKey []by
 	server.Db(ctx, func(conn server.PgConn) {
 		err := conn.QueryRow(ctx, `
 			SELECT h.retired, EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
-				h.network_id, h.generation, h.domain_hash, r.registration, r.registration_hash, r.evidence, r.evidence_hash
+				h.network_id, h.generation, h.domain_hash, r.registration_hash, r.evidence, r.evidence_hash
 			FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
 			WHERE h.client_id = $1 AND h.is_current
-		`, clientID).Scan(&projection.retired, &projection.clientExists, &projection.networkID, &projection.generation, &projection.domainHash, &projection.registrationBytes, &projection.registrationHash, &projection.evidenceBytes, &projection.evidenceHash)
+		`, clientID).Scan(&projection.retired, &projection.clientExists, &projection.networkID, &projection.generation, &projection.domainHash, &projection.registrationHash, &projection.evidenceBytes, &projection.evidenceHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
@@ -397,7 +422,7 @@ func overlayStClientKeyCurrent(ctx context.Context, clientIDs []server.Id, publi
 			rows, err := conn.Query(ctx, `
 				SELECT h.client_id, h.retired,
 					EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
-					h.network_id, h.generation, h.domain_hash, r.registration, r.registration_hash, r.evidence, r.evidence_hash
+					h.network_id, h.generation, h.domain_hash, r.registration_hash, r.evidence, r.evidence_hash
 				FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
 				WHERE h.client_id = ANY($1::uuid[]) AND h.is_current LIMIT 101
 			`, idStrings(chunk))
@@ -412,9 +437,9 @@ func overlayStClientKeyCurrent(ctx context.Context, clientIDs []server.Id, publi
 				var clientID, networkID server.Id
 				var retired, clientExists bool
 				var generation int64
-				var domainHash, registrationBytes, registrationHash, evidenceBytes []byte
+				var domainHash, registrationHash, evidenceBytes []byte
 				var evidenceHash string
-				server.Raise(rows.Scan(&clientID, &retired, &clientExists, &networkID, &generation, &domainHash, &registrationBytes, &registrationHash, &evidenceBytes, &evidenceHash))
+				server.Raise(rows.Scan(&clientID, &retired, &clientExists, &networkID, &generation, &domainHash, &registrationHash, &evidenceBytes, &evidenceHash))
 				if !wanted[clientID] || seen[clientID] || len(seen) >= 100 {
 					server.Raise(errors.New("client-key current batch returned a duplicate or outside client"))
 				}
@@ -423,7 +448,7 @@ func overlayStClientKeyCurrent(ctx context.Context, clientIDs []server.Id, publi
 				if retired || !clientExists {
 					continue
 				}
-				record, err := decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes, evidenceHash)
+				record, err := decodeStClientKeyHistoryRecord(registrationHash, evidenceBytes, evidenceHash)
 				server.Raise(err)
 				wantedDomain, err := record.Registration.Domain.Digest()
 				server.Raise(err)

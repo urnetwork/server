@@ -10693,4 +10693,16 @@ var migrations = []any{
 
 		ALTER TABLE solana_payment_intent ALTER COLUMN network_id DROP NOT NULL;
 	`),
+
+	// st_client_key_history.registration is the exact payload of the row's
+	// evidence, so readers derive it from evidence and the copy is removed in
+	// three steps: this makes the column optional while every deployed writer
+	// still fills it; writers then stop filling it once no deployed reader
+	// names it; and a later migration drops it once no deployed writer does.
+	// The lock_timeout keeps this catalog change from queueing hot key reads
+	// behind a long transaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE st_client_key_history ALTER COLUMN registration DROP NOT NULL;
+	`),
 }

@@ -228,3 +228,26 @@ func TestStClosedWorkOriginalReportCapacityOmitsWholeProof(t *testing.T) {
 		}
 	})
 }
+
+// A history row written without the registration column still yields the exact
+// original registration that the close report retains.
+func TestContractCloseOriginalRetainsRegistrationDerivedFromEvidence(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportFixture(t)
+		input := newStClientKeyHistoryUnitTestInput(t, f.sourceId)
+		key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{53}, 32))
+		input.PublicKey = key[32:]
+		record := insertStClientKeyHistoryTestRecordWithoutRegistration(t, input, nil)
+		domain, _ := input.Domain.Digest()
+		report := signCloseReportOriginal(t, f.report(), domain, key)
+		if applied, err := CloseContractWithReport(f.ctx, report); err != nil || !applied {
+			t.Fatal("original signature was not admitted with its increment", applied, err)
+		}
+		_, retained := retainedCloseOriginal(t, report)
+		if !bytes.Equal(retained, record.RegistrationBytes) || retainedCloseKeyIssue(t, report) != "" {
+			t.Fatal("close report did not retain the registration its evidence carries")
+		}
+	})
+}
