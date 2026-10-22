@@ -2488,7 +2488,7 @@
             "id": 66,
             "type": "timeseries",
             "title": "moves out and in / min by host",
-            "description": "Moves out: the moves each source host's movers sent. Sent to: the same sends by the host they named. Arrived: handoffs by intent at the target (urnetwork_connect_moves_arrived_total, counted by the move primitives at the target process). The host and block filters select the counting process: the source for sends, the target for arrivals. Sent minus arrived is declines, failures and intents that expired; the success ratio is SIGNALS.md section 24.2. Counter rates per process, summed.",
+            "description": "Moves out: the moves each source host's movers sent. Sent to: the same sends by the host they named. Arrived: handoffs by intent at the target of the mover's kinds, advisory and compulsory (urnetwork_connect_moves_arrived_total, counted by the move primitives at the target process); same-host drain arrivals are left out. The host and block filters select the counting process: the source for sends, the target for arrivals. Sent minus arrived is declines, failures and intents that expired; the success ratio is SIGNALS.md section 24.2. Counter rates per process, summed.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -2530,7 +2530,7 @@
                 },
                 {
                     "refId": "C",
-                    "expr": "sum by (target_host) (rate(urnetwork_connect_moves_arrived_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "expr": "sum by (target_host) (rate(urnetwork_connect_moves_arrived_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\",kind=~\"advisory|compulsory\"}[$__rate_interval])) * 60",
                     "legendFormat": "arrived {{target_host}}"
                 }
             ]

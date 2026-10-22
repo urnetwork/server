@@ -14,6 +14,8 @@ import (
 // panel says what no-data means.
 func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 	const selector = `{env="$env",service="connect",block=~"$block",host=~"$host",instance!=""}`
+	// the mover's kinds: same-host drain arrivals are not placement
+	const arrivalSelector = `{env="$env",service="connect",block=~"$block",host=~"$host",instance!="",kind=~"advisory|compulsory"}`
 	perMinute := func(by string, metric string) string {
 		return "sum by (" + by + ") (rate(" + metric + selector + "[$__rate_interval])) * 60"
 	}
@@ -53,9 +55,9 @@ func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 			targets: []testTarget{
 				{Expr: perMinute("source_host", "urnetwork_connect_moves_sent_total"), LegendFormat: "out {{source_host}}"},
 				{Expr: perMinute("target_host", "urnetwork_connect_moves_sent_total"), LegendFormat: "sent to {{target_host}}"},
-				{Expr: perMinute("target_host", "urnetwork_connect_moves_arrived_total"), LegendFormat: "arrived {{target_host}}"},
+				{Expr: "sum by (target_host) (rate(urnetwork_connect_moves_arrived_total" + arrivalSelector + "[$__rate_interval])) * 60", LegendFormat: "arrived {{target_host}}"},
 			},
-			descriptionParts: []string{"handoffs by intent", "the source for sends, the target for arrivals", "declines, failures", "success ratio"},
+			descriptionParts: []string{"handoffs by intent", "advisory and compulsory", "drain arrivals are left out", "the source for sends, the target for arrivals", "declines, failures", "success ratio"},
 		},
 		{
 			id: 67, unit: "opm",
