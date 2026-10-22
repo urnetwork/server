@@ -61,7 +61,8 @@ import (
 // A local resident as the mover sees it. Times are on this process's clock.
 type MoveCandidate struct {
 	ClientId server.Id
-	// When this resident started here (its nomination).
+	// When this resident started here (its nomination). Zero is unknown, and
+	// the resident is then never a balance candidate.
 	ResidentStartTime time.Time
 	// The latest payload on any of the resident's forwards. Zero when there
 	// has been none since the resident started. Pings, and an open contract

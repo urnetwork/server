@@ -444,7 +444,8 @@ func balanceMoveIneligibility(candidate *MoveCandidate, now time.Time, settings 
 	if 0 < candidate.OpenStreamCount {
 		return moveIneligibleStreams
 	}
-	if now.Sub(candidate.ResidentStartTime) < settings.MoveMinResidentAge {
+	// an unknown start is not old enough
+	if candidate.ResidentStartTime.IsZero() || now.Sub(candidate.ResidentStartTime) < settings.MoveMinResidentAge {
 		return moveIneligibleYoung
 	}
 	if now.Sub(moveCandidateLastActivity(candidate)) < settings.MoveIdleTimeout {

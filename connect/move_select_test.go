@@ -447,6 +447,7 @@ func TestMoveCandidateEligibility(t *testing.T) {
 			c.LastPayloadTime = time.Time{}
 		}), balance: moveEligible, arrival: moveEligible},
 		{name: "payload 9 min ago", candidate: with(func(c *MoveCandidate) { c.LastPayloadTime = now.Add(-9 * time.Minute) }), balance: moveIneligibleActive, arrival: moveEligible},
+		{name: "an unknown start", candidate: with(func(c *MoveCandidate) { c.ResidentStartTime = time.Time{} }), balance: moveIneligibleYoung, arrival: moveEligible},
 	}
 	for _, c := range cases {
 		if reason := balanceMoveIneligibility(c.candidate, now, &settings.ExchangeMoverSettings); reason != c.balance {
