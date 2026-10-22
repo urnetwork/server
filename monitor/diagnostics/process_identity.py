@@ -6,6 +6,7 @@ Only the exact proc executable is hashed, through a noninteractive read-only
 sudo command. There is no fallback to the installed file or another PID.
 """
 
+import dataclasses
 import datetime
 import os
 import re
@@ -33,12 +34,36 @@ class AuditError(Exception):
         super().__init__(cause)
 
 
-def validate_authority(authority):
+@dataclasses.dataclass(frozen=True)
+class UnitAuthority:
+    """Caller-bound exact unit; this value neither discovers nor authorizes a service action."""
+
+    unit: str
+
+
+LEGACY_UNIT_AUTHORITY = UnitAuthority(UNIT)
+
+
+def validate_unit_authority(unit_authority):
+    """Require a bounded literal service name, never a path, option, glob or template."""
+    if type(unit_authority) is not UnitAuthority:
+        raise AuditError("invalid_authority")
+    unit = unit_authority.unit
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    if (type(unit) is not str or not 9 <= len(unit) <= 240
+            or not unit.endswith(".service") or unit[0] not in allowed[:62]
+            or any(character not in allowed for character in unit)):
+        raise AuditError("invalid_authority")
+
+
+def validate_authority(authority, *, unit_authority=LEGACY_UNIT_AUTHORITY):
+    """Bind the process tuple to the separately supplied exact-unit authority before contact."""
+    validate_unit_authority(unit_authority)
     if not isinstance(authority, dict) or set(authority) != {
         "unit", "pid", "sha256", "start_ticks", "boot_id", "n_restarts"
     }:
         raise AuditError("invalid_authority")
-    if (authority["unit"] != UNIT or type(authority["pid"]) is not int
+    if (authority["unit"] != unit_authority.unit or type(authority["pid"]) is not int
             or not 1 <= authority["pid"] <= 4194304
             or type(authority["start_ticks"]) is not int
             or not 1 <= authority["start_ticks"] < 2**64
@@ -158,7 +183,7 @@ def _generation(authority):
 
 def _unit(authority, deadline):
     code, out, stderr_bytes = _run_bounded([
-        "/usr/bin/systemctl", "--user", "show", UNIT,
+        "/usr/bin/systemctl", "--user", "show", authority["unit"],
         "--property=ActiveState,SubState,MainPID,NRestarts",
     ], min(deadline, time.monotonic() + 1.0))
     if code != 0 or stderr_bytes:
@@ -200,9 +225,9 @@ def _hash(authority, deadline):
         raise AuditError("hash_mismatch")
 
 
-def verify(authority):
+def verify(authority, *, unit_authority=LEGACY_UNIT_AUTHORITY):
     """Verify exactly one frozen process generation. No discovery or retries."""
-    validate_authority(authority)
+    validate_authority(authority, unit_authority=unit_authority)
     began = time.monotonic()
     deadline = began + AUDIT_SECONDS
     _unit(authority, deadline)

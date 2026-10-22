@@ -28677,6 +28677,19 @@ This is a local admission helper, not a new remote signal or proof of query
 coverage. Apply it only to freshly reviewed reader successors; sealed historical
 readers and expired grants stay closed.
 
+Fresh consumers may supply a separate immutable exact-unit authority to the
+read-only verifier and promotion identity capture, same-unit replacement check
+and attempt marker. Bounded service-name syntax is a transport-safety check;
+it does not discover or authorize a unit. The process tuple must match the
+Root-bound literal exactly, and the omitted argument retains the legacy cap2
+scope. A foreign unit, unavailable proc evidence or generation mismatch remains
+unknown; a validly shaped wrong executable digest is refused after the single
+permitted proc hash. Correct unit syntax alone proves neither service health
+nor promotion authority. The mutating legacy promoter remains restricted to
+its original unit and fixed binary/launcher paths. These controls use synthetic
+unit/proc/command boundaries; runtime adoption still needs fresh exact authority
+and the consumer's own gates. No historical reader or expired grant is reopened.
+
 The staged promotion entry point `diagnostics/promote_monitor.py` applies the
 same verifier before replacement and to the new unit-owned generation after
 one same-unit restart. Its companion `promotion_identity.py` captures the new
