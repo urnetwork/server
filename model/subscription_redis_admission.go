@@ -423,12 +423,20 @@ func reserveRedisTransferEscrowBeforeTx(ctx context.Context, sourceNetworkId, so
 		return ctx, func() {}, err
 	}
 	reservation, finish := admission.startPendingReservation(payerNetworkId, requested)
+	// A selection that fails or panics, as a grant read can, ends the attempt
+	// here; one handed to its transaction ends after that transaction joins.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			finish()
+		}
+	}()
 	selected, priority, err := selectRedisTransferBalances(ctx, admission, payerNetworkId, payerClientId, requested)
 	if err != nil {
-		finish()
 		return ctx, func() {}, err
 	}
 	reservation.selected, reservation.priority = selected, priority
+	handedOff = true
 	return context.WithValue(ctx, redisPendingReservationContextKey{}, reservation), finish, nil
 }
 

@@ -362,6 +362,65 @@ func TestRedisPendingCompensationRetryKeepsPublishedToken(t *testing.T) {
 	})
 }
 
+// Fails only grant pages that continue after a keyset cursor.
+type redisSelectionPageFaultQuery struct {
+	query server.PgCanQuery
+	fault error
+}
+
+func (self *redisSelectionPageFaultQuery) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if strings.Contains(sql, "(end_time,start_time,balance_id)>(") {
+		return nil, self.fault
+	}
+	return self.query.Query(ctx, sql, args...)
+}
+
+// A grant page that fails after earlier pages reserved tokens panics out of
+// the selection. The attempt still ends, so the request releases its pending
+// tokens in Redis alone: no transaction holds a Redis round trip to
+// compensate them, and the request's own page is not kept from its markers.
+func TestRedisPendingSelectionPanicEndsAttempt(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		ids := redisSelectionTestGrants(t, ctx, clients, redisGrantPageRows+1, 1, false)
+		fault := errors.New("synthetic second grant page failure")
+		request := withRedisContractAdmission(context.WithValue(ctx, redisGrantReadContextKey{}, func(query server.PgCanQuery) server.PgCanQuery {
+			return &redisSelectionPageFaultQuery{query: query, fault: fault}
+		}))
+		owner := redisAdmissionFromContext(request)
+		observation, uninstall := server.Testing_ObserveTxIo()
+		defer uninstall()
+		var failure error
+		if value := server.HandleError(func() {
+			_, failure = CreateTransferEscrow(request, clients.payerNetworkId, clients.payerId, clients.providerNetworkId, clients.providerId, redisGrantPageRows+1)
+		}); value != nil {
+			failure, _ = value.(error)
+		}
+		uninstall()
+		if !errors.Is(failure, fault) {
+			t.Fatal("the second grant page did not fail the request", failure)
+		}
+		owner.pendingLock.Lock()
+		writers := owner.pendingWriters
+		owner.pendingLock.Unlock()
+		if writers != 0 {
+			t.Fatal("the failed attempt never ended", writers)
+		}
+		for _, id := range ids {
+			if got := Testing_NetEscrowByteCount(ctx, id); got != 0 {
+				t.Fatal("the failed attempt kept a token", got)
+			}
+		}
+		for _, event := range observation.Events() {
+			t.Fatalf("compensation held a transaction across I/O: %s in %s from %s", event.Kind, event.TxSite, event.Site)
+		}
+	})
+}
+
 // The previous release's reservation and recovery page scripts, which run
 // beside this release during a rolling deploy.
 const redisContractReservationScriptPrevious = `
