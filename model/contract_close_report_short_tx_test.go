@@ -512,3 +512,48 @@ func TestContractCloseReportStopBetweenSignedReadsStartsNoHistoryRead(t *testing
 		}
 	})
 }
+
+// The reaper removes a contract's closes and row without its lock. A contract
+// removed after its closes were read has nothing left to settle, and the
+// report that committed answers with its own result.
+func TestContractCloseReportReapedBeforeSettlementKeepsReportResult(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportFixture(t)
+		reaped := 0
+		ctx := context.WithValue(f.ctx, contractSettlementTxTestKey{}, func(contractId server.Id) {
+			reaped++
+			server.Tx(f.ctx, func(tx server.PgTx) {
+				for _, table := range []string{"contract_close", "transfer_escrow", "transfer_escrow_sweep", "contract_extender", "transfer_contract"} {
+					server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM `+table+` WHERE contract_id=$1`, contractId))
+				}
+			})
+		})
+		senderFinal := f.report()
+		senderFinal.Checkpoint = false
+		receiverFinal := f.report()
+		receiverFinal.ClientId = f.destinationId
+		receiverFinal.Checkpoint = false
+		for _, report := range []ContractCloseReport{senderFinal, receiverFinal} {
+			var applied bool
+			var added ByteCount
+			var err error
+			server.HandleError(func() { added, err = CloseContractWithReportUsage(ctx, report); applied = err == nil && 0 < added }, func(recovered error) { err = recovered })
+			if !applied || err != nil || added != report.AckedByteCount {
+				t.Fatal("reaped contract replaced the committed report's result", applied, added, err)
+			}
+		}
+		if reaped != 1 {
+			t.Fatal("settlement attempts reached the reaper", reaped)
+		}
+		var remaining int
+		server.Db(f.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(f.ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=$1`, f.contractId).Scan(&remaining))
+		})
+		if remaining != 0 {
+			t.Fatal("reaped contract reappeared")
+		}
+		assertCloseReportCounts(t, f.ctx, f.contractId, 2, 0)
+	})
+}

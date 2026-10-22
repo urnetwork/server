@@ -3298,7 +3298,14 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 				// The report transaction has ended. Take the outcome owner's
 				// lock before interpreting absent escrow as a free close.
 				var currentOutcome *ContractOutcome
-				server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
+				outcomeErr := tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome)
+				if errors.Is(outcomeErr, pgx.ErrNoRows) {
+					// The reaper takes no contract lock before it removes the
+					// closes and the contract. One removed after its closes were
+					// read leaves nothing to settle.
+					return
+				}
+				server.Raise(outcomeErr)
 				if currentOutcome != nil {
 					return
 				}
