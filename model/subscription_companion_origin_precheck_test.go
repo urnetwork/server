@@ -45,9 +45,11 @@ func TestCompanionWithoutOriginReadsOnce(t *testing.T) {
 	})
 }
 
-// With an origin the existence read comes first, and the write transaction
-// that follows selects the origin again before creating the companion on it.
-func TestCompanionWithOriginSelectsItAgainInTransaction(t *testing.T) {
+// With an origin the existence read comes first, then the origin selection,
+// both outside any transaction. The write transaction that follows only
+// rechecks the selected origin's deadline, after the client lifecycle fence,
+// before creating the companion on it.
+func TestCompanionWithOriginSelectsItBeforeTransaction(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
 		clients := newEscrowSelectionTestClients(t, ctx)
@@ -65,17 +67,35 @@ func TestCompanionWithOriginSelectsItAgainInTransaction(t *testing.T) {
 			t.Fatalf("a companion with an origin = %+v, %v", companion, err)
 		}
 		reads := statements.take()
-		begin, reselect := -1, -1
+		begin, end, selection, recheck, fence := -1, -1, -1, -1, -1
 		for i, statement := range reads {
-			if begin < 0 && strings.HasPrefix(strings.ToLower(statement), "begin") {
+			lower := strings.ToLower(statement)
+			switch {
+			case begin < 0 && strings.HasPrefix(lower, "begin"):
 				begin = i
+			case 0 <= begin && end < 0 && (lower == "commit" || lower == "rollback"):
+				end = i
 			}
-			if reselect < 0 && strings.Contains(statement, "AS earliest_origin") {
-				reselect = i
+			if strings.Contains(statement, "AS earliest_origin") {
+				if selection < 0 {
+					selection = i
+				}
+				if 0 <= begin && end < 0 {
+					t.Fatalf("the transaction selected the origin: %q", reads)
+				}
+			}
+			if strings.Contains(statement, "contract_lifecycle_write_boundary") {
+				fence = i
+			}
+			if strings.HasPrefix(statement, "SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND COALESCE(expiration_time") {
+				recheck = i
 			}
 		}
-		if len(reads) == 0 || !strings.HasPrefix(reads[0], "SELECT EXISTS") || begin < 1 || reselect < begin {
-			t.Fatalf("want the existence read, then BEGIN, then the origin selection inside the transaction: %q", reads)
+		if len(reads) == 0 || !strings.HasPrefix(reads[0], "SELECT EXISTS") || selection < 1 || begin < selection {
+			t.Fatalf("want the existence read, then the origin selection, then BEGIN: %q", reads)
+		}
+		if fence < begin || recheck < fence || end < recheck {
+			t.Fatalf("want the origin deadline recheck after the client fence, inside the transaction: %q", reads)
 		}
 	})
 }

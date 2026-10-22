@@ -131,6 +131,55 @@ committed contracts. Legacy cache counters cover legacy rows only. Missing or
 capped query families remain unknown, and faster local tests do not establish
 Main recovery or the FP2 coverage target.
 
+## Reservation before the contract transaction (pending markers)
+
+A creator used to reserve in Redis inside its read committed contract
+transaction, holding the request fence (`pg_advisory_xact_lock` on
+`redis-contract-v2/<contract>`) so that recovery could not release a token the
+transaction was about to publish. Under transaction pooling, every Redis round
+trip there (a preflight PING and an EVAL per attempted grant, about 4.5 per
+positive contract on Main on 2026-10-22) kept a pooler server idle in
+transaction, and a Redis stall stalled every creator's server at once.
+
+A creator now reserves before BEGIN. Grant discovery runs as autocommit
+statements on pooled connections, and each reservation marks its token
+pending in `{escrow_<balance>}approx_pending_v3`, which recovery never reads.
+The transaction takes the request fence first, checks the attempt is still
+publishable, and then runs SQL only: custody, shard, endpoint and grant checks
+and the escrow/contract inserts. After the transaction joins, the request hands
+its pending tokens to recovery's own marker with its post-admission recovery
+page (acknowledging the published ones without SQL), or, when it published
+nothing, releases them in Redis alone with `release-pending`, with no
+PostgreSQL transaction. The companion origin is likewise selected before the
+transaction, which only rechecks its deadline after the client fence.
+
+Two bounds keep recovery away from a live request's tokens:
+
+- A transaction publishes only if it takes the request fence within
+  `redisPendingPublicationTimeout` (30s) of the attempt's first reservation,
+  measured on the creator's monotonic clock. A later one refuses and
+  compensates.
+- A recovery page moves another request's pending marker to the recovery
+  marker only when it is older than `redisPendingRecoveryAge` (2 minutes) by
+  Redis time. Only then can the fenced SQL custody check release it.
+
+A pending token can therefore reach recovery only after its request's window
+closed; the margin absorbs a Redis clock step of up to 90s. A request that
+died with pending tokens leaves them reserved for up to two minutes, then any
+request on the balance recovers them. Attempts of one request share its
+tokens: the request's own release or hand-off advances an in-process epoch
+first, and an attempt that reserved before it refuses to publish.
+
+The previous release's scripts run beside this one during a rolling deploy.
+Its recovery page reads only the recovery marker and its owned release
+requires one, so it can neither discover nor release a pending token. Its
+token-keyed close-path releases and settlements work unchanged and leave at
+most a stale pending marker, which the next current page removes. A rollback
+to the previous release leaves pending tokens of interrupted requests reserved
+until their 24-hour lease. `urnetwork_redis_contract_reservation_total` gains
+the operations `reserve-pending`, `reserve-pending-full` and
+`release-pending`; `reserve-owned` no longer counts creation.
+
 ## Asynchronous settlement writeback (migration 758)
 
 Current Redis-reserved contracts commit their terminal outcome and exact payer

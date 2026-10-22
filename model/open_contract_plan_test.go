@@ -125,8 +125,9 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// These are the two executed tx.Query literals, not independent fixture
+	// These are the two executed conn.Query literals, not independent fixture
 	// strings or unreachable declarations. Each has both discovery predicates.
+	// The selection reads before the transaction, on a pooled connection.
 	queries := map[string]bool{"AS earliest_origin": false, "AS earliest_companion_origin": false}
 	ast.Inspect(owner.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -139,7 +140,7 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 		}
 		receiver, ok := selector.X.(*ast.Ident)
 		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "tx" || !literalOk || literal.Kind != token.STRING {
+		if !ok || receiver.Name != "conn" || !literalOk || literal.Kind != token.STRING {
 			return true
 		}
 		sql, err := strconv.Unquote(literal.Value)
@@ -159,7 +160,7 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 	})
 	for marker, found := range queries {
 		if !found {
-			t.Errorf("actual companion tx.Query %s not found", marker)
+			t.Errorf("actual companion conn.Query %s not found", marker)
 		}
 	}
 

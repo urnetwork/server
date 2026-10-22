@@ -402,7 +402,7 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 		}
 		receiver, ok := method.X.(*ast.Ident)
 		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "tx" || !literalOk || literal.Kind != token.STRING {
+		if !ok || receiver.Name != "conn" || !literalOk || literal.Kind != token.STRING {
 			return true
 		}
 		sql, err := strconv.Unquote(literal.Value)

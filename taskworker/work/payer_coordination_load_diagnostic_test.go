@@ -201,7 +201,7 @@ func privateLoadStats(t testing.TB) map[string]float64 {
 			values[name+"_"+result] = privateLoadMetric(t, "urnetwork_net_escrow_"+name+"_snapshot_total", map[string]string{"result": result})
 		}
 	}
-	for _, operation := range []string{"reserve", "reserve-owned", "reserve-owned-full"} {
+	for _, operation := range []string{"reserve", "reserve-owned", "reserve-owned-full", "reserve-pending", "reserve-pending-full"} {
 		values["native_reserved"] += privateLoadMetric(t, "urnetwork_redis_contract_reservation_total", map[string]string{"operation": operation, "result": "accepted"})
 	}
 	for _, result := range []string{"selected_first", "fallback", "error"} {

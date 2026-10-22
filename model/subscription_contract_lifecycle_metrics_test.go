@@ -3,6 +3,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -64,18 +65,24 @@ func TestContractLifecycleCountersRedisCreateReuseCloseReplay(t *testing.T) {
 		if len(existing) != 1 || existing[0].ContractId != contract.ContractId {
 			t.Fatal("open-reservation reuse did not return the existing contract")
 		}
+		// The duplicate's reservation finds the published token no longer
+		// pending, before any transaction.
 		var duplicateErr error
 		server.HandleError(func() {
-			server.Tx(ctx, func(tx server.PgTx) {
-				admission := &redisContractAdmission{contractId: contract.ContractId}
-				_, _, err := createRedisTransferEscrowInTx(ctx, tx, admission,
+			duplicate := context.WithValue(ctx, redisAdmissionContextKey{}, &redisContractAdmission{contractId: contract.ContractId})
+			reserved, finish, err := reserveRedisTransferEscrowBeforeTx(duplicate, fixture.sourceNetworkId, fixture.sourceId,
+				fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 100)
+			server.Raise(err)
+			defer finish()
+			server.Tx(reserved, func(tx server.PgTx) {
+				_, _, err := createRedisTransferEscrowInTx(reserved, tx, redisAdmissionFromContext(duplicate),
 					fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId,
 					fixture.sourceNetworkId, 100, nil)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		}, func(err error) { duplicateErr = err })
-		if duplicateErr == nil {
-			t.Fatal("duplicate SQL custody was not refused")
+		if !errors.Is(duplicateErr, errRedisReservationNotPending) {
+			t.Fatal("duplicate SQL custody was not refused", duplicateErr)
 		}
 		if Testing_NetEscrowByteCount(ctx, fixture.balanceId) != 100 {
 			t.Fatal("reuse or duplicate changed the reservation")
