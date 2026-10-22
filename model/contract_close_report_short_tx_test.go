@@ -1,5 +1,6 @@
 // A close report holds its transaction's server only for work that needs the
 // contract lock: no key-history read, no signature check, no repeated read.
+// A report that cannot settle opens no settlement transaction.
 package model
 
 import (
@@ -384,5 +385,54 @@ func TestContractCloseReportSenderFinalOrderFromAccumulation(t *testing.T) {
 		}
 		assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 1)
 		assertCloseReportLegacyReceipts(t, f.ctx, f.otherContractId, 2)
+	})
+}
+
+// A report that leaves its contract open opens no settlement transaction. The
+// later of two finals, and a receiver report after the sender's final, still do.
+func TestContractCloseReportOpenContractSkipsSettlementTransaction(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportFixture(t)
+		settlements := map[server.Id]int{}
+		ctx := context.WithValue(f.ctx, contractSettlementTxTestKey{}, func(contractId server.Id) {
+			settlements[contractId]++
+		})
+		final := func(report ContractCloseReport, clientId server.Id) ContractCloseReport {
+			report.ClientId = clientId
+			report.Checkpoint = false
+			return report
+		}
+		receiverAfterSender := f.report()
+		receiverAfterSender.ContractId = f.otherContractId
+		receiverAfterSender.ClientId = f.destinationId
+		senderFirst := final(f.report(), f.sourceId)
+		senderFirst.ContractId = f.otherContractId
+		for _, step := range []struct {
+			report      ContractCloseReport
+			settlements int
+		}{
+			{f.report(), 0},
+			{final(f.report(), f.destinationId), 0},
+			{final(f.report(), f.sourceId), 1},
+			{senderFirst, 0},
+			{receiverAfterSender, 1},
+		} {
+			before := settlements[step.report.ContractId]
+			if applied, err := CloseContractWithReport(ctx, step.report); !applied || err != nil {
+				t.Fatal("report was not admitted", applied, err)
+			}
+			if opened := settlements[step.report.ContractId] - before; opened != step.settlements {
+				t.Fatalf("settlement transactions=%d, want %d", opened, step.settlements)
+			}
+		}
+		var outcome *ContractOutcome
+		server.Db(f.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(f.ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, f.contractId).Scan(&outcome))
+		})
+		if outcome == nil || *outcome != ContractOutcomeSettled {
+			t.Fatal("the later final did not settle its contract", outcome)
+		}
 	})
 }
