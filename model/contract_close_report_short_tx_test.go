@@ -436,3 +436,79 @@ func TestContractCloseReportOpenContractSkipsSettlementTransaction(t *testing.T)
 		}
 	})
 }
+
+// A caller that stops while the retained identity is read starts no key
+// history read: the stop is returned once the first read finishes.
+func TestContractCloseReportStopBetweenSignedReadsStartsNoHistoryRead(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f, input, record, key := originalCloseAvailabilityFixture(t)
+		domain, _ := input.Domain.Digest()
+		report := signCloseReportOriginal(t, f.report(), domain, key)
+		tripwire := &originalCloseCatalogTripwire{}
+		scope, err := server.NewTestPgQueryScope(f.ctx, tripwire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := scope.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
+		defer cancel()
+		reportCtx, stopReport := context.WithCancel(ctx)
+		defer stopReport()
+		outcomes := make(chan closeReportOutcome, 1)
+		server.Db(ctx, func(conn server.PgConn) {
+			holder, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			server.Raise(err)
+			defer rollbackCloseReportTestTransaction(ctx, holder)
+			var holderPid int
+			server.Raise(holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPid))
+			// The retained identity read waits on this table lock.
+			server.RaisePgResult(holder.Exec(ctx, `LOCK TABLE contract_close_report_evidence IN ACCESS EXCLUSIVE MODE`))
+			go func() {
+				var outcome closeReportOutcome
+				server.HandleError(func() { outcome.applied, outcome.err = CloseContractWithReport(reportCtx, report) }, func(err error) { outcome.err = err })
+				outcomes <- outcome
+			}()
+			for {
+				var waiting bool
+				server.Raise(holder.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks
+				 WHERE locktype='relation' AND NOT granted AND relation='contract_close_report_evidence'::regclass
+				 AND $1::int=ANY(pg_blocking_pids(pid)))`, holderPid).Scan(&waiting))
+				if waiting {
+					break
+				}
+				select {
+				case outcome := <-outcomes:
+					t.Fatal("close escaped the retained identity barrier", outcome.applied, outcome.err)
+				case <-ctx.Done():
+					t.Fatal("close did not reach the retained identity barrier", ctx.Err())
+				case <-time.After(time.Millisecond):
+				}
+			}
+			stopReport()
+			server.Raise(holder.Rollback(ctx))
+		})
+		select {
+		case outcome := <-outcomes:
+			if outcome.applied || !errors.Is(outcome.err, context.Canceled) {
+				t.Fatal("stopped close admitted work or lost its stop", outcome.applied, outcome.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("stopped close did not finish", ctx.Err())
+		}
+		tripwire.assertReads(t, 0)
+		assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+		if applied, err := CloseContractWithReport(f.ctx, report); !applied || err != nil {
+			t.Fatal("stopped original could not recover", applied, err)
+		}
+		tripwire.assertReads(t, 1)
+		if _, registration := retainedCloseOriginal(t, report); !bytes.Equal(registration, record.RegistrationBytes) {
+			t.Fatal("recovered original lost its exact registration")
+		}
+	})
+}

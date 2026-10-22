@@ -179,7 +179,8 @@ func readSignedContractCloseReportBeforeBegin(ctx context.Context, conn server.P
 	defer stopBound()
 	var key originalCloseKeyRead
 	retained, err := readRetainedContractCloseReport(readCtx, conn, report)
-	if err == nil && retained == nil {
+	// A caller that stopped during the first read starts no second one.
+	if err == nil && retained == nil && ctx.Err() == nil {
 		key = readOriginalCloseKey(readCtx, conn, original)
 	}
 	if stopErr := ctx.Err(); stopErr != nil {
