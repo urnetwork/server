@@ -472,3 +472,42 @@ func TestStClientKeyRegistrationRotatesFromHeadWithoutRegistration(t *testing.T)
 		}
 	})
 }
+
+// Writers keep only the registration's hash beside its evidence: the stored
+// row has no registration copy, and every reader still recovers the exact
+// signed bytes from the evidence payload, for a first generation and a rotation.
+func TestStClientKeyRegistrationStoresNoRegistrationCopy(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		input := newStClientKeyHistoryTestInput(tb)
+		first, err := StoreStClientKeyRegistration(tb.Context(), input)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		input.PublicKey = bytes.Repeat([]byte{10}, 32)
+		input.Boundary.Block++
+		input.Boundary.Hash = [32]byte{6}
+		rotated, err := StoreStClientKeyRegistration(tb.Context(), input)
+		if err != nil || rotated.Registration.Generation != 2 {
+			tb.Fatalf("rotation from a stored head without a registration copy failed: %v", err)
+		}
+		for _, record := range []*StClientKeyHistoryRecord{first, rotated} {
+			var copied bool
+			var registrationHash []byte
+			server.Db(tb.Context(), func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(tb.Context(), `SELECT registration IS NOT NULL, registration_hash FROM st_client_key_history WHERE client_id = $1 AND generation = $2`, input.ClientID, int64(record.Registration.Generation)).Scan(&copied, &registrationHash))
+			})
+			wantHash := sha256.Sum256(record.RegistrationBytes)
+			if copied || !bytes.Equal(registrationHash, wantHash[:]) {
+				tb.Fatalf("generation %d stored a registration copy or a different hash", record.Registration.Generation)
+			}
+		}
+		current, err := GetClientPublicKey(tb.Context(), input.ClientID)
+		if err != nil || !bytes.Equal(current, input.PublicKey) {
+			tb.Fatalf("current key did not derive from the stored evidence: %v", err)
+		}
+		history, err := LoadStClientKeyHistory(tb.Context(), input.Domain, input.ClientID, 2, MaxStClientKeyHistoryBytes)
+		if err != nil || len(history) != 2 || !bytes.Equal(history[0].RegistrationBytes, first.RegistrationBytes) || !bytes.Equal(history[1].RegistrationBytes, rotated.RegistrationBytes) {
+			tb.Fatalf("history did not derive both generations from their evidence: %v", err)
+		}
+	})
+}
