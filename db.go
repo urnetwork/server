@@ -710,6 +710,7 @@ func discardPgConnection(ctx context.Context, conn PgConn) {
 
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	checkPostgresAllowed(ctx)
+	observeTxIo(TxIoNestedDb)
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
@@ -1056,6 +1057,10 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }
+			if observations := txIoObservations(); observations[0] != nil || observations[1] != nil {
+				// registered first, so it ends after commit or rollback
+				defer observeTxIoBegin(tx)()
+			}
 			defer func() {
 				if err := recover(); err != nil {
 					rollbackStarted := timing.start()
