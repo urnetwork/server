@@ -51,6 +51,7 @@ func moveTestInventoryHost(v4 string, v6 string) MoveInventoryHost {
 	return MoveInventoryHost{Interfaces: []MoveInventoryInterface{inventoryInterface}}
 }
 
+// Every breaker closed.
 func moveTestNoBreaker(netip.Addr) bool {
 	return false
 }

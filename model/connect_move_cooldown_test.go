@@ -10,6 +10,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// The cooldown's whole life: set, read, withdraw, expiry and many at once.
 func TestConnectMoveCooldown(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := connectMoveTestContext(t)

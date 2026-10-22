@@ -46,12 +46,15 @@ const connectMoveBudgetWindowSeconds = 60
 // boundary, then expires.
 const connectMoveBudgetCounterTtlSeconds = 2 * connectMoveBudgetWindowSeconds
 
+// The per-minute counter of the fleet's moves.
 const connectMoveBudgetFleetKey = "{connect_move}budget"
 
+// The per-minute counter of moves from a source host.
 func connectMoveBudgetSourceKey(host string) string {
 	return "{connect_move}budget_source_" + host
 }
 
+// The per-minute counter of moves to a target host.
 func connectMoveBudgetTargetKey(host string) string {
 	return "{connect_move}budget_target_" + host
 }

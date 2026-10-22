@@ -22,6 +22,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// The client's cooldown key. No hash tag: one key per client.
 func connectMoveCooldownKey(clientId server.Id) string {
 	return "move_cooldown_" + clientId.String()
 }

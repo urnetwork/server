@@ -141,6 +141,7 @@ type moveTestCpuSampler struct {
 	sample moveCpuSample
 }
 
+// The fixed sample.
 func (self *moveTestCpuSampler) NextCpuSample() moveCpuSample {
 	return self.sample
 }
@@ -156,6 +157,8 @@ type moveTestLoadStore struct {
 	removed    chan struct{}
 }
 
+// Records the record and whether its context had a deadline, or fails as
+// scripted.
 func (self *moveTestLoadStore) publishLoad(ctx context.Context, load *model.ConnectMoveLoad) (time.Time, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -174,6 +177,7 @@ func (self *moveTestLoadStore) publishLoad(ctx context.Context, load *model.Conn
 	return moveTestNodeTime, nil
 }
 
+// Records the remove.
 func (self *moveTestLoadStore) removeLoad(ctx context.Context, identity MoveProcessIdentity) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

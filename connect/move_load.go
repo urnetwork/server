@@ -149,6 +149,16 @@ type moveCpuSampler interface {
 	NextCpuSample() moveCpuSample
 }
 
+// The /proc/stat `cpu` line format: values in clock ticks of user, nice,
+// system, idle, iowait, irq, softirq and steal, then guest and guest_nice,
+// which user and nice already include. Kernels before 2.6.33 report fewer.
+const (
+	procStatCpuMinValueCount   = 4
+	procStatCpuTotalValueCount = 8
+	procStatCpuIdleIndex       = 3
+	procStatCpuIowaitIndex     = 4
+)
+
 // The aggregate CPU time of /proc/stat, in clock ticks.
 type procStatCpu struct {
 	// everything except idle and iowait
@@ -156,10 +166,9 @@ type procStatCpu struct {
 	total uint64
 }
 
-// The aggregate `cpu` line of /proc/stat: user, nice, system, idle, iowait,
-// irq, softirq, steal, guest and guest_nice, of which kernels before 2.6.33
-// report fewer. Guest time is already in user and nice, so it is not added
-// again. Busy is the total less idle and iowait.
+// The aggregate `cpu` line of /proc/stat. The total is user through steal:
+// guest time is already in user and nice, so it is not added again. Busy is
+// the total less idle and iowait.
 func parseProcStatCpu(reader io.Reader) (procStatCpu, error) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
@@ -168,11 +177,10 @@ func parseProcStatCpu(reader io.Reader) (procStatCpu, error) {
 			continue
 		}
 		values := fields[1:]
-		if len(values) < 4 {
+		if len(values) < procStatCpuMinValueCount {
 			return procStatCpu{}, fmt.Errorf("/proc/stat cpu line has %d values", len(values))
 		}
-		// user nice system idle iowait irq softirq steal
-		values = values[:min(len(values), 8)]
+		values = values[:min(len(values), procStatCpuTotalValueCount)]
 		var cpu procStatCpu
 		idle := uint64(0)
 		for i, value := range values {
@@ -181,7 +189,7 @@ func parseProcStatCpu(reader io.Reader) (procStatCpu, error) {
 				return procStatCpu{}, err
 			}
 			cpu.total += ticks
-			if i == 3 || i == 4 {
+			if i == procStatCpuIdleIndex || i == procStatCpuIowaitIndex {
 				idle += ticks
 			}
 		}
@@ -220,6 +228,8 @@ type procMoveCpuSampler struct {
 	previousTime      time.Time
 }
 
+// The sampler of this host and process: /proc/stat, rusage and
+// runtime.NumCPU().
 func newProcMoveCpuSampler() *procMoveCpuSampler {
 	return &procMoveCpuSampler{
 		procStatPath:   "/proc/stat",
@@ -229,6 +239,8 @@ func newProcMoveCpuSampler() *procMoveCpuSampler {
 	}
 }
 
+// The interval since the previous sample. A stat file that cannot be read is
+// an unknown host CPU, and primes nothing for the next sample.
 func (self *procMoveCpuSampler) NextCpuSample() moveCpuSample {
 	now := self.now()
 	sample := moveCpuSample{
@@ -267,10 +279,12 @@ type moveLoadStore interface {
 	removeLoad(ctx context.Context, identity MoveProcessIdentity) error
 }
 
+// model.PublishConnectMoveLoad.
 func (moveModelStore) publishLoad(ctx context.Context, load *model.ConnectMoveLoad) (time.Time, error) {
 	return model.PublishConnectMoveLoad(ctx, load)
 }
 
+// model.RemoveConnectMoveLoad.
 func (moveModelStore) removeLoad(ctx context.Context, identity MoveProcessIdentity) error {
 	return model.RemoveConnectMoveLoad(ctx, identity.Host, identity.Block, identity.ExchangeId)
 }

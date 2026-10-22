@@ -75,6 +75,7 @@ func ParseConnectMoveMode(value string) (ConnectMoveMode, bool) {
 	}
 }
 
+// The mode's control value. Any value outside the modes prints off.
 func (self ConnectMoveMode) String() string {
 	switch self {
 	case ConnectMoveModeDryRun:

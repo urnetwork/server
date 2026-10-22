@@ -16,6 +16,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// The mover's whole path through Redis: publish, read, control, budget,
+// cooldowns and remove.
 func TestMoverOverTheRedisModel(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

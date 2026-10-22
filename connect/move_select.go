@@ -268,6 +268,7 @@ type moveTarget struct {
 	ipv6Interfaces []moveTargetInterface
 }
 
+// Whether the target has an address in one of the families.
 func (self *moveTarget) offers(families moveFamilies) bool {
 	return (families.ipv4 && 0 < len(self.ipv4Interfaces)) || (families.ipv6 && 0 < len(self.ipv6Interfaces))
 }

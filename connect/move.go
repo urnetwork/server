@@ -166,6 +166,7 @@ const (
 	moveKindCompulsory = "compulsory"
 )
 
+// The kind label of a move the mover sends.
 func moveKindLabel(kind protocol.ResidentMoveKind) string {
 	if kind == protocol.ResidentMoveKind_ResidentMoveKindCompulsory {
 		return moveKindCompulsory
@@ -203,30 +204,37 @@ type moveStore interface {
 // The move model in Redis.
 type moveModelStore struct{}
 
+// model.GetConnectMoveControl.
 func (moveModelStore) getControl(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
 	return model.GetConnectMoveControl(ctx, ceiling)
 }
 
+// model.GetConnectMoveLoads.
 func (moveModelStore) getLoads(ctx context.Context) ([]*model.ConnectMoveLoad, time.Time, error) {
 	return model.GetConnectMoveLoads(ctx)
 }
 
+// model.RemoveStaleConnectMoveLoads.
 func (moveModelStore) removeStaleLoads(ctx context.Context, loads []*model.ConnectMoveLoad, nodeTime time.Time, cleanupTimeout time.Duration) (int, error) {
 	return model.RemoveStaleConnectMoveLoads(ctx, loads, nodeTime, cleanupTimeout)
 }
 
+// model.ReserveConnectMoveBudget.
 func (moveModelStore) reserveBudget(ctx context.Context, sourceHost string, targetHost string, caps model.ConnectMoveBudgetCaps) (string, error) {
 	return model.ReserveConnectMoveBudget(ctx, sourceHost, targetHost, caps)
 }
 
+// model.GetConnectMoveCooldowns.
 func (moveModelStore) getCooldowns(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
 	return model.GetConnectMoveCooldowns(ctx, clientIds)
 }
 
+// model.SetConnectMoveCooldown.
 func (moveModelStore) setCooldown(ctx context.Context, clientId server.Id, moveId server.Id, ttl time.Duration) error {
 	return model.SetConnectMoveCooldown(ctx, clientId, moveId, ttl)
 }
 
+// model.RemoveConnectMoveCooldown.
 func (moveModelStore) removeCooldown(ctx context.Context, clientId server.Id, moveId server.Id) error {
 	return model.RemoveConnectMoveCooldown(ctx, clientId, moveId)
 }
@@ -433,6 +441,7 @@ func (self *Mover) tick() string {
 	return outcome
 }
 
+// The tick's steps (see the file header) under ctx, and its outcome.
 func (self *Mover) tickWithContext(ctx context.Context) string {
 	settings := self.settings
 	now := self.now()
@@ -756,6 +765,8 @@ func (self *Mover) commit(
 	return self.commitOutcome(sentCount, refusedCount, sendErrorCount)
 }
 
+// The outcome of a commit from what it sent, what the budget refused and
+// what failed to send.
 func (self *Mover) commitOutcome(sentCount int, refusedCount int, sendErrorCount int) string {
 	switch {
 	case 0 < sentCount:

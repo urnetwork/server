@@ -60,6 +60,7 @@ type moveTestStore struct {
 	setCooldownErr error
 }
 
+// An empty store: no control, no table, an unspent budget, no cooldowns.
 func newMoveTestStore() *moveTestStore {
 	return &moveTestStore{
 		controlFields: map[string]string{},
@@ -70,6 +71,7 @@ func newMoveTestStore() *moveTestStore {
 	}
 }
 
+// The scripted control, narrowed by the real model function.
 func (self *moveTestStore) getControl(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -80,6 +82,7 @@ func (self *moveTestStore) getControl(ctx context.Context, ceiling model.Connect
 	return model.NarrowConnectMoveControl(self.controlFields, ceiling), nil
 }
 
+// The scripted table and node clock.
 func (self *moveTestStore) getLoads(ctx context.Context) ([]*model.ConnectMoveLoad, time.Time, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -89,6 +92,7 @@ func (self *moveTestStore) getLoads(ctx context.Context) ([]*model.ConnectMoveLo
 	return self.loads, self.nodeTime, nil
 }
 
+// Records the cleanup timeout; removes nothing.
 func (self *moveTestStore) removeStaleLoads(ctx context.Context, loads []*model.ConnectMoveLoad, nodeTime time.Time, cleanupTimeout time.Duration) (int, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -96,6 +100,8 @@ func (self *moveTestStore) removeStaleLoads(ctx context.Context, loads []*model.
 	return 0, nil
 }
 
+// Refuses at the first spent cap, in the script's order, and records the
+// answer.
 func (self *moveTestStore) reserveBudget(ctx context.Context, sourceHost string, targetHost string, caps model.ConnectMoveBudgetCaps) (string, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -123,6 +129,7 @@ func (self *moveTestStore) reserveBudget(ctx context.Context, sourceHost string,
 	return refusedCap, nil
 }
 
+// The cooling clients of clientIds. Records the read.
 func (self *moveTestStore) getCooldowns(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -136,6 +143,7 @@ func (self *moveTestStore) getCooldowns(ctx context.Context, clientIds []server.
 	return cooling, nil
 }
 
+// Starts the client's cooldown, or fails as scripted.
 func (self *moveTestStore) setCooldown(ctx context.Context, clientId server.Id, moveId server.Id, ttl time.Duration) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -147,6 +155,7 @@ func (self *moveTestStore) setCooldown(ctx context.Context, clientId server.Id, 
 	return nil
 }
 
+// Ends the client's cooldown if moveId set it.
 func (self *moveTestStore) removeCooldown(ctx context.Context, clientId server.Id, moveId server.Id) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -157,6 +166,7 @@ func (self *moveTestStore) removeCooldown(ctx context.Context, clientId server.I
 	return nil
 }
 
+// Replaces the control the next tick reads.
 func (self *moveTestStore) setControl(fields map[string]string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -168,6 +178,7 @@ type moveTestResidents struct {
 	candidates []*MoveCandidate
 }
 
+// A copy of the scripted residents.
 func (self *moveTestResidents) MoveCandidates() []*MoveCandidate {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -179,6 +190,7 @@ type moveTestLoadSource struct {
 	counts    MoveLoadCounts
 }
 
+// The scripted counts.
 func (self *moveTestLoadSource) MoveLoadCounts() MoveLoadCounts {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -192,6 +204,7 @@ type moveTestInventory struct {
 	loadCount int
 }
 
+// The scripted inventory, or error. Counts the loads.
 func (self *moveTestInventory) LoadMoveInventory(ctx context.Context) (map[string]MoveInventoryHost, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -211,6 +224,7 @@ type moveTestExecutor struct {
 	sent chan *MoveRequest
 }
 
+// Records the request, or fails for a scripted client.
 func (self *moveTestExecutor) SendMove(ctx context.Context, request *MoveRequest) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -227,6 +241,7 @@ func (self *moveTestExecutor) SendMove(ctx context.Context, request *MoveRequest
 	return nil
 }
 
+// The requests sent so far.
 func (self *moveTestExecutor) sentRequests() []*MoveRequest {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -239,6 +254,7 @@ type moveTestBreaker struct {
 	queries   []netip.Addr
 }
 
+// Whether the scripted breaker of the address is open. Records the query.
 func (self *moveTestBreaker) TargetBreakerOpen(ctx context.Context, address netip.Addr) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -251,6 +267,7 @@ type moveTestDbWait struct {
 	wait      time.Duration
 }
 
+// The scripted wait.
 func (self *moveTestDbWait) PoolAcquireWait() time.Duration {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -371,6 +388,7 @@ func moveTestSent(kind string, trigger string, targetHost string) float64 {
 	return testutil.ToFloat64(movesSentCounter.WithLabelValues(kind, trigger, moveTestOwnHost, targetHost))
 }
 
+// The would-send counter value now, for deltas across a test.
 func moveTestWouldSend(kind string, trigger string, targetHost string) float64 {
 	return testutil.ToFloat64(movesWouldSendCounter.WithLabelValues(kind, trigger, moveTestOwnHost, targetHost))
 }
