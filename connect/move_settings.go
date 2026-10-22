@@ -54,12 +54,16 @@ type ExchangeMoverSettings struct {
 	// `EnableMove`. Off by default, so a deploy changes nothing until an
 	// operator sets the control.
 	MoveDefaultMode string
-	// Load record cadence into the `{connect_load}` hash.
+	// Load record cadence into the `{connect_load}` hash. Non-positive
+	// publishes nothing.
 	MoveLoadPublishInterval time.Duration
 	// Load records older than this are ignored; a host with no fresh record is
 	// neither a source nor a target.
 	MoveLoadStaleTimeout time.Duration
-	// Mover tick cadence.
+	// The movers delete load records older than this, left by processes that
+	// ended without removing theirs (MOVE.md §5.4). Non-positive deletes none.
+	MoveLoadCleanupTimeout time.Duration
+	// Mover tick cadence. Non-positive runs no mover.
 	MoveTickInterval time.Duration
 	// Fleet budget of balance moves per minute (D8). Zero or negative allows none.
 	MoveMaxPerMinute int
@@ -67,7 +71,8 @@ type ExchangeMoverSettings struct {
 	// allows none.
 	MoveMaxPerMinutePerSourceHost int
 	MoveMaxPerMinutePerTargetHost int
-	// Moves one process may start in one tick.
+	// Moves one process may start in one tick, and the candidates it examines
+	// in one tick. Non-positive moves none.
 	MoveMaxPerTick int
 	// The band around the fleet mean of residents per capacity unit (D3, D8): a
 	// host above mean × (1 + tolerance) is a source.
@@ -96,6 +101,7 @@ type ExchangeMoverSettings struct {
 	// this. Zero or negative disables the guard.
 	MoveDbWaitPauseThreshold time.Duration
 	// Reload of the edge inventory from the vault `services.yml` (D17).
+	// Non-positive loads it once.
 	MoveInventoryRefreshInterval time.Duration
 	// A target IP's breaker opens when failure reports over sends exceed this
 	// ratio with at least `MoveTargetBreakerMinSends` sends in the window, and
@@ -110,6 +116,7 @@ func DefaultExchangeMoverSettings() *ExchangeMoverSettings {
 		MoveDefaultMode:               "off",
 		MoveLoadPublishInterval:       15 * time.Second,
 		MoveLoadStaleTimeout:          60 * time.Second,
+		MoveLoadCleanupTimeout:        10 * time.Minute,
 		MoveTickInterval:              10 * time.Second,
 		MoveMaxPerMinute:              120,
 		MoveMaxPerMinutePerSourceHost: 60,
