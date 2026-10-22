@@ -70,6 +70,34 @@ func TestAuthorityMintAdmissionRefusesPastBound(t *testing.T) {
 	admission.release()
 }
 
+// The hosted proxy's default bound of two admits two registrations in flight
+// and refuses a third as the 429 the SDK window reads as a rate limit; a
+// returned slot admits the next call to its preflight.
+func TestAuthorityMintAdmissionBoundOfTwoRefusesTheThird(t *testing.T) {
+	admission := NewMintAdmission(2)
+	authority, args := mintAdmissionTestAuthority(admission)
+	for range 2 {
+		if !admission.tryAcquire() {
+			t.Fatal("a bound of two refused an in-bound slot")
+		}
+	}
+	_, err := authority.AuthNetworkClient(t.Context(), args)
+	if mintAdmissionStatus(t, err) != http.StatusTooManyRequests {
+		t.Fatalf("the third registration answered %v, want 429", err)
+	}
+	admission.release()
+	_, err = authority.AuthNetworkClient(t.Context(), args)
+	if mintAdmissionStatus(t, err) != http.StatusUnauthorized {
+		t.Fatalf("a call admitted by a returned slot answered %v, want its preflight 401", err)
+	}
+	admission.release()
+	for range 2 {
+		if !admission.tryAcquire() {
+			t.Fatal("an ended call kept its slot")
+		}
+	}
+}
+
 // One owner's bound is shared by all of its authorities: the slots taken
 // through one device are unavailable to another.
 func TestAuthorityMintAdmissionIsSharedByOwner(t *testing.T) {
