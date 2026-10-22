@@ -403,21 +403,18 @@ func TestTaskDrainPartialObservationParserPreservesStranded(t *testing.T) {
 	requireAlertClass(t, alerts, "task-lease-stranded")
 }
 
-// Ended parents retain source causes at the adapter boundary. Scoped runs
-// keep the parent verdict; unscoped runs keep the original source error.
-func requireTaskCanceledObservation(t *testing.T, signal Signal, settings SignalSettings, scoped bool, alerts Alerts, err, sourceErr error, sourceText string) {
+// An owner canceled during a live evaluation retains its parent verdict and
+// exact source cause, for both host-scoped and local-only observation.
+func requireTaskCanceledObservation(t *testing.T, signal Signal, settings SignalSettings, alerts Alerts, err, sourceErr error, sourceText string) {
 	t.Helper()
 	if err == nil || len(alerts) != 0 {
 		t.Fatal("canceled task observation returned successful partial findings")
 	}
-	returnedSource := err
-	if scoped {
-		var joined *signalContextError
-		if !errors.Is(err, context.Canceled) || !errors.As(err, &joined) || err.Error() != context.Canceled.Error() {
-			t.Fatal("canceled task observation lost the adapter's parent verdict or source cause")
-		}
-		returnedSource = joined.sourceErr
+	var joined *signalContextError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &joined) || err.Error() != context.Canceled.Error() {
+		t.Fatal("canceled task observation lost the adapter's parent verdict or source cause")
 	}
+	returnedSource := joined.sourceErr
 	if sourceErr != nil && (returnedSource != sourceErr || !errors.Is(err, sourceErr)) {
 		t.Fatal("canceled task observation discarded or replaced the original source error")
 	}
@@ -484,7 +481,7 @@ func TestTaskCanariesPartialObservationCanceledOwnerPreservesCauses(t *testing.T
 			if failedReads != 1 || readsAfterEnd != 0 || !errors.Is(err, sourceCause) {
 				t.Fatal("canceled canary repeated source work or lost its nested cause")
 			}
-			requireTaskCanceledObservation(t, signal, settings, scoped, alerts, err, sourceErr, "")
+			requireTaskCanceledObservation(t, signal, settings, alerts, err, sourceErr, "")
 		}
 	}
 }
@@ -551,7 +548,7 @@ func TestTaskDrainPartialObservationCanceledOwnerPreservesCauses(t *testing.T) {
 				if failedReads != 1 || readsAfterEnd != 0 || (sourceErr != nil && !errors.Is(err, sourceCause)) {
 					t.Fatal("canceled drain repeated source work or lost its nested cause")
 				}
-				requireTaskCanceledObservation(t, signal, settings, scoped, alerts, err, sourceErr, test.parserText)
+				requireTaskCanceledObservation(t, signal, settings, alerts, err, sourceErr, test.parserText)
 			}
 		}
 	}
