@@ -686,6 +686,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFp2Index("crypto_payment_address", "crypto_payment_address_free", "asset, address_index", "(allocated_at IS NULL)", false),
 		snMainnetMigrationColumns("solana_payment_intent",
 			snMainnetMigrationColumn{name: "network_id", kind: "uuid"})),
+	migrationCurrentSuffix(854, "optional client-key history registration copy",
+		snMainnetMigrationColumns("st_client_key_history",
+			snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

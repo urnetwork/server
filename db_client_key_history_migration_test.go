@@ -157,3 +157,53 @@ func TestMainVersion650MigratesThroughClientKeyAppend(t *testing.T) {
 		})
 	})
 }
+
+// The registration copy becomes optional exactly at its published version,
+// while the hash and evidence that readers derive it from stay required.
+func TestStClientKeyHistoryRegistrationCopyBecomesOptional(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const publishedVersion = 854
+		version := migrationIndex(t, "ALTER TABLE st_client_key_history ALTER COLUMN registration DROP NOT NULL") + 1
+		if version != publishedVersion {
+			t.Fatalf("optional registration copy is migration %d, want its published version %d", version, publishedVersion)
+		}
+		notNull := func(column string) bool {
+			var required bool
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(ctx, `
+					SELECT a.attnotnull FROM pg_attribute a
+					WHERE a.attrelid = to_regclass('public.st_client_key_history') AND a.attname = $1 AND NOT a.attisdropped
+				`, column).Scan(&required))
+			})
+			return required
+		}
+		insertWithoutRegistration := func() error {
+			var err error
+			MaintenanceDb(ctx, func(conn PgConn) {
+				hash := NewId()
+				_, err = conn.Exec(ctx, `
+					INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
+					VALUES ($1, 1, $2, $3, $4, $5)
+				`, NewId(), make([]byte, 32), append(hash.Bytes(), hash.Bytes()...), "sha256:"+strings.Repeat("ab", 32), []byte("{}"))
+			})
+			return err
+		}
+		ApplyDbMigrationsUpTo(ctx, version-1)
+		if !notNull("registration") || insertWithoutRegistration() == nil {
+			t.Fatal("registration copy was optional before its migration")
+		}
+		ApplyDbMigrationsUpTo(ctx, version)
+		if notNull("registration") {
+			t.Fatal("registration copy is still required")
+		}
+		for _, column := range []string{"registration_hash", "evidence_hash", "evidence"} {
+			if !notNull(column) {
+				t.Fatalf("%s became optional", column)
+			}
+		}
+		if err := insertWithoutRegistration(); err != nil {
+			t.Fatalf("row without a registration copy was refused: %v", err)
+		}
+	})
+}
