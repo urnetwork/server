@@ -27,6 +27,16 @@ func TestProxyDeviceManagerOwnsOneMintAdmission(t *testing.T) {
 	}
 }
 
+// The default admits two registrations in flight per process, the brake on the
+// 2026-10-22 identity-churn loop. localclient's
+// TestAuthorityMintAdmissionBoundOfTwoRefusesTheThird shows a bound of two
+// refusing the third concurrent registration as a 429.
+func TestProxyDeviceManagerDefaultMintBoundIsTwo(t *testing.T) {
+	if settings := DefaultProxyDeviceManagerSettings(); settings.HostedMintConcurrency != 2 {
+		t.Fatalf("default registration bound = %d, want 2", settings.HostedMintConcurrency)
+	}
+}
+
 // A device's local authority registers through its manager's admission, so
 // one process's devices share one bound.
 func TestProxyDeviceAuthoritySharesManagerMintAdmission(t *testing.T) {

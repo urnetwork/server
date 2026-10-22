@@ -210,7 +210,7 @@ func publishStClientKeyRegistrationWindow(requests []*stClientKeyRegistrationPub
 		}
 		cancel()
 	}
-	batch, groupErr = server.BeginLocalBlobWriteBatch(batchCtx, stores, 2*len(ready))
+	batch, groupErr = server.BeginLocalBlobWriteBatch(batchCtx, stores, startifact.ClientKeyEvidenceStoredObjects*len(ready))
 	if groupErr != nil {
 		return
 	}

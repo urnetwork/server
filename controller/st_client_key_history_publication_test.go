@@ -147,8 +147,8 @@ func newStClientKeyPublicationFixtureTest(t *testing.T, clients int) *stClientKe
 	return fixture
 }
 
-// The actual default publisher still stages and independently reads both
-// immutable routes on a fresh write and an exact collided retry.
+// The actual default publisher still stages and independently reads the
+// immutable content route on a fresh write and an exact collided retry.
 func TestStClientKeyPublicationBatchRollsWithEveryImmutableReadback(t *testing.T) {
 	fixture := newStClientKeyPublicationFixtureTest(t, 33)
 	before, err := json.Marshal(fixture.result)
@@ -159,17 +159,18 @@ func TestStClientKeyPublicationBatchRollsWithEveryImmutableReadback(t *testing.T
 		if err := publishStClientKeyObservationBatch(t.Context(), fixture.owner, fixture.histories, fixture.result, protocol.MaxClientKeyHistoryResponseBytes); err != nil {
 			t.Fatal(err)
 		}
-		count := 4 * 33
+		// a history record and an observation per client
+		count := 2 * 33 * startifact.ClientKeyEvidenceStoredObjects
 		if len(fixture.store.contexts) != count*(pass+1) || fixture.store.gets != count*(pass+1) || fixture.store.closes != fixture.store.gets {
 			t.Fatal("bulk publication omitted original immutable attempts or exact readbacks")
 		}
 		contexts := fixture.store.contexts[pass*count : (pass+1)*count]
-		for _, ctx := range contexts[:2*stClientKeyPublicationBatchEnvelopes] {
+		for _, ctx := range contexts[:startifact.ClientKeyEvidenceStoredObjects*stClientKeyPublicationBatchEnvelopes] {
 			if ctx != contexts[0] || ctx == t.Context() {
 				t.Fatal("bulk publication rescanned instead of retaining its finite quota owner")
 			}
 		}
-		for _, ctx := range contexts[2*stClientKeyPublicationBatchEnvelopes:] {
+		for _, ctx := range contexts[startifact.ClientKeyEvidenceStoredObjects*stClientKeyPublicationBatchEnvelopes:] {
 			if ctx != contexts[len(contexts)-1] || ctx == contexts[0] || ctx == t.Context() {
 				t.Fatal("bulk publication failed to roll its finite quota owner")
 			}
@@ -214,7 +215,7 @@ func TestStClientKeyPublicationBatchRejectsChangedRetainedEvidence(t *testing.T)
 }
 
 // A foreign observation domain and an invalid typed body still fail through
-// the original decoder even after authentic history routes were published.
+// the original decoder even after the authentic history record was published.
 func TestStClientKeyPublicationBatchPreservesTypedObservationAdmission(t *testing.T) {
 	for _, fault := range []string{"domain", "body", "allowance"} {
 		fixture := newStClientKeyPublicationFixtureTest(t, 1)
@@ -227,7 +228,7 @@ func TestStClientKeyPublicationBatchPreservesTypedObservationAdmission(t *testin
 		case "allowance":
 			maximum = 1
 		}
-		if err := publishStClientKeyObservationBatch(t.Context(), fixture.owner, fixture.histories, fixture.result, maximum); err == nil || len(fixture.store.contexts) != 2 || fixture.store.gets != 2 || fixture.store.closes != 2 {
+		if err := publishStClientKeyObservationBatch(t.Context(), fixture.owner, fixture.histories, fixture.result, maximum); err == nil || len(fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects || fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects || fixture.store.closes != startifact.ClientKeyEvidenceStoredObjects {
 			t.Fatalf("%s observation bypassed original typed admission: %v", fault, err)
 		}
 	}
@@ -240,7 +241,7 @@ func TestStClientKeyPublicationBatchRetainsFinalFailureAndCancellation(t *testin
 		fixture := newStClientKeyPublicationFixtureTest(t, 1)
 		ctx, cancel := context.WithCancel(t.Context())
 		fixture.store.afterClose = func(count int) {
-			if count == 4 {
+			if count == 2*startifact.ClientKeyEvidenceStoredObjects {
 				if cancelled {
 					cancel()
 				} else if err := os.WriteFile(filepath.Join(fixture.root, "unaccounted.json"), []byte("synthetic"), 0o600); err != nil {
@@ -250,7 +251,7 @@ func TestStClientKeyPublicationBatchRetainsFinalFailureAndCancellation(t *testin
 		}
 		err := publishStClientKeyObservationBatch(ctx, fixture.owner, fixture.histories, fixture.result, protocol.MaxClientKeyHistoryResponseBytes)
 		cancel()
-		if err == nil || len(fixture.store.contexts) != 4 || fixture.store.closes != 4 || cancelled && !errors.Is(err, context.Canceled) || !cancelled && !strings.Contains(err.Error(), "unaccounted bytes") {
+		if err == nil || len(fixture.store.contexts) != 2*startifact.ClientKeyEvidenceStoredObjects || fixture.store.closes != 2*startifact.ClientKeyEvidenceStoredObjects || cancelled && !errors.Is(err, context.Canceled) || !cancelled && !strings.Contains(err.Error(), "unaccounted bytes") {
 			t.Fatal("bulk publication lost its final failure", cancelled, err)
 		}
 		fixture.store.afterClose = nil
@@ -308,7 +309,7 @@ func TestStClientKeyPublicationBatchActualControllerClearsFinalFailedResponse(t 
 		result, err := snClientKeyObservationsWithPublicationStore(request, clientSession, func(store server.BlobStore) server.BlobStore {
 			observer = &stClientKeyPublicationStoreTest{BlobStore: store}
 			observer.afterClose = func(count int) {
-				if count == 4 {
+				if count == 2*startifact.ClientKeyEvidenceStoredObjects {
 					if err := os.WriteFile(filepath.Join(root, "unaccounted.json"), []byte("synthetic"), 0o600); err != nil {
 						tb.Fatal(err)
 					}
@@ -320,7 +321,7 @@ func TestStClientKeyPublicationBatchActualControllerClearsFinalFailedResponse(t 
 		if observer == nil || !changed || result != nil || err == nil || !strings.Contains(err.Error(), "unaccounted bytes") {
 			tb.Fatalf("actual controller leaked its failed response: observed=%v changed=%v result=%v err=%v", observer != nil, changed, result, err)
 		}
-		if len(observer.contexts) != 4 || observer.gets != 4 || observer.closes != 4 {
+		if len(observer.contexts) != 2*startifact.ClientKeyEvidenceStoredObjects || observer.gets != 2*startifact.ClientKeyEvidenceStoredObjects || observer.closes != 2*startifact.ClientKeyEvidenceStoredObjects {
 			tb.Fatal("actual final failure control omitted a signed immutable route or readback")
 		}
 		// The nil/default public route must independently retry the genuine

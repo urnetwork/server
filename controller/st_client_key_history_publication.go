@@ -36,7 +36,7 @@ func publishStClientKeyObservationBatch(ctx context.Context, owner *stClientKeyA
 			batch = nil
 			publicationCtx = ctx
 			var err error
-			batch, err = server.BeginLocalBlobWriteBatch(ctx, []server.BlobStore{owner.store}, 2*stClientKeyPublicationBatchEnvelopes)
+			batch, err = server.BeginLocalBlobWriteBatch(ctx, []server.BlobStore{owner.store}, startifact.ClientKeyEvidenceStoredObjects*stClientKeyPublicationBatchEnvelopes)
 			if err != nil {
 				return err
 			}

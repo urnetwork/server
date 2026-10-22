@@ -23,18 +23,23 @@ import (
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
-		SequenceBufferSize:          2048,
-		DeviceMemoryTargetByteCount: proxyDeviceMemoryTargetByteCountFromConfig(),
-		HostedMintConcurrency:       defaultHostedMintConcurrency,
+		CheckProxyDeviceIdleTimeout:  1 * time.Minute,
+		SequenceBufferSize:           2048,
+		DeviceMemoryTargetByteCount:  proxyDeviceMemoryTargetByteCountFromConfig(),
+		HostedMintConcurrency:        defaultHostedMintConcurrency,
+		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
 	}
 }
 
-// A quarter of the proxy's 16-connection default database pool. A healthy
+// An eighth of the proxy's 16-connection default database pool. A healthy
 // registration takes tens of milliseconds, so the bound admits far more than a
 // paced fleet needs, and a slow database sheds the excess at once instead of
-// exhausting the pool for every device's control operations.
-const defaultHostedMintConcurrency = 4
+// exhausting the pool for every device's control operations. It was a quarter
+// until the 2026-10-22 identity-churn loop: with the database saturated, hosted
+// windows retired most new identities before they connected and minted
+// replacements, and every admitted mint added database work to the loop while
+// a refused mint costs none.
+const defaultHostedMintConcurrency = 2
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(sdk.LowMemoryDeviceTargetByteCount)
 
@@ -80,6 +85,10 @@ type ProxyDeviceManagerSettings struct {
 	// across every device of this manager; past it a registration is refused
 	// as a rate limit (see localclient.MintAdmission). Nonpositive is unbounded.
 	HostedMintConcurrency int
+	// HostedEvaluationPoolMultiple is each opened device's
+	// ProxyDeviceSettings.HostedEvaluationPoolMultiple. Nonpositive keeps the
+	// connect default.
+	HostedEvaluationPoolMultiple int
 	// HoldWindowIdentityRestore keeps a replacement from restoring identities
 	// while its predecessor is still draining. Fresh lazy-open identities are
 	// buffered and become durable when ReleaseWindowIdentityRestore runs.
@@ -396,6 +405,7 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
 	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
 	settings.MemoryTargetByteCount = self.settings.DeviceMemoryTargetByteCount
+	settings.HostedEvaluationPoolMultiple = self.settings.HostedEvaluationPoolMultiple
 	settings.windowIdentityGate = self.windowIdentityGate
 	settings.mintAdmission = self.mintAdmission
 	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
@@ -684,12 +694,13 @@ func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
 
 func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettings {
 	return &ProxyDeviceSettings{
-		ProxyDeviceDescription: "resident proxy",
-		ProxyDeviceSpec:        "resident proxy",
-		Mtu:                    connect.DefaultMtu,
-		ProxyDeviceIdleTimeout: 90 * time.Minute,
-		SequenceBufferSize:     bufferSize,
-		MemoryTargetByteCount:  defaultProxyDeviceMemoryTargetByteCount,
+		ProxyDeviceDescription:       "resident proxy",
+		ProxyDeviceSpec:              "resident proxy",
+		Mtu:                          connect.DefaultMtu,
+		ProxyDeviceIdleTimeout:       90 * time.Minute,
+		SequenceBufferSize:           bufferSize,
+		MemoryTargetByteCount:        defaultProxyDeviceMemoryTargetByteCount,
+		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
 	}
 }
 
@@ -709,7 +720,11 @@ type ProxyDeviceSettings struct {
 	// client ids, orphaning established inner flows (the pre-persistence
 	// behavior).
 	DisableWindowIdentityPersistence bool
-	windowIdentityGate               *windowIdentityRestoreGate
+	// HostedEvaluationPoolMultiple is the evaluation pool multiple of every
+	// window the device builds (connect ReliabilitySettings
+	// EvaluationPoolMultiple). Nonpositive keeps the connect default.
+	HostedEvaluationPoolMultiple int
+	windowIdentityGate           *windowIdentityRestoreGate
 	// the owning manager's registration bound; nil is unbounded
 	mintAdmission *localclient.MintAdmission
 }
@@ -729,6 +744,9 @@ type ProxyDevice struct {
 
 	deviceLocal  *sdk.DeviceLocal
 	localControl *localclient.Authority
+	// applies the hosted evaluation pool multiple to each window; nil when
+	// the device keeps the connect default
+	hostedEvaluationPoolSub sdk.Sub
 	// deviceState is the lifecycle/readiness surface used by selection and
 	// readiness. Production points it at deviceLocal; tests replace it with an
 	// exact transition source.
@@ -853,6 +871,16 @@ func NewProxyDevice(
 	// the proxy egresses DNS and HTTP unchanged (pass-through); disable the upgrade mux
 	// so each of the many proxy devices avoids the per-device tun/stack it would create
 	deviceLocal.SetUpgradeMuxSettings(nil)
+	// before the first window can be built, so every window gets the hosted
+	// evaluation pool multiple
+	var hostedEvaluationPoolSub sdk.Sub
+	if 0 < settings.HostedEvaluationPoolMultiple {
+		hostedEvaluationPoolSub = deviceLocal.AddConnectChangeListener(&hostedEvaluationPoolListener{
+			device:   deviceLocal,
+			multiple: settings.HostedEvaluationPoolMultiple,
+		})
+		applyHostedEvaluationPoolMultiple(deviceLocal, settings.HostedEvaluationPoolMultiple)
+	}
 
 	var dnsResolverSettings *connect.DnsResolverSettings
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
@@ -911,19 +939,20 @@ func NewProxyDevice(
 	deviceLocal.StartHostedRpc(rpcListener, deviceGeneration.String())
 
 	proxyDevice := &ProxyDevice{
-		ctx:               cancelCtx,
-		cancel:            cancel,
-		clientId:          proxyDeviceConfig.ClientId,
-		instanceId:        proxyDeviceConfig.InstanceId,
-		proxyDeviceConfig: proxyDeviceConfig,
-		deviceLocal:       deviceLocal,
-		localControl:      localControl,
-		deviceState:       deviceLocal,
-		tun:               tun,
-		settings:          settings,
-		receiveMonitor:    connect.NewMonitor(),
-		rpcListener:       rpcListener,
-		deviceGeneration:  deviceGeneration,
+		ctx:                     cancelCtx,
+		cancel:                  cancel,
+		clientId:                proxyDeviceConfig.ClientId,
+		instanceId:              proxyDeviceConfig.InstanceId,
+		proxyDeviceConfig:       proxyDeviceConfig,
+		deviceLocal:             deviceLocal,
+		localControl:            localControl,
+		hostedEvaluationPoolSub: hostedEvaluationPoolSub,
+		deviceState:             deviceLocal,
+		tun:                     tun,
+		settings:                settings,
+		receiveMonitor:          connect.NewMonitor(),
+		rpcListener:             rpcListener,
+		deviceGeneration:        deviceGeneration,
 	}
 	// One NAT address per device, held for its lifetime (see natAddr).
 	if natAddr, ok := connect.TakeLocalIpv4Address(); ok {
@@ -1602,6 +1631,9 @@ func (self *ProxyDevice) Close() error {
 	self.closeOnce.Do(func() {
 		if self.cancel != nil {
 			self.cancel()
+		}
+		if self.hostedEvaluationPoolSub != nil {
+			self.hostedEvaluationPoolSub.Close()
 		}
 		// No receive state lock may be held while callbacks drain.
 		if self.closeDeviceLocalForTest != nil {
