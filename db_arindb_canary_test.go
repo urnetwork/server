@@ -15,8 +15,10 @@ func TestArinDatabaseCanaryMigrationsKeepPublishedOrder(t *testing.T) {
 	rollup := sqlMigrationIndex(t, "ADD COLUMN arin_old_epoch")
 	location := sqlMigrationIndex(t, "ADD COLUMN arin_old_quality_write_token")
 	evidence := sqlMigrationIndex(t, "CREATE TABLE provider_modern_evidence")
-	if rollup != 837 || location != rollup+1 || rollup <= evidence {
-		t.Fatalf("canary migrations at versions %d and %d of %d, after the modern provider evidence at %d; want published adjacent versions 838 and 839",
+	// sqlMigrationIndex is 0-based: the published versions 837 and 838 are
+	// indexes 836 and 837
+	if rollup != 836 || location != rollup+1 || rollup <= evidence {
+		t.Fatalf("canary migrations at versions %d and %d of %d, after the modern provider evidence at %d; want published adjacent versions 837 and 838",
 			rollup+1, location+1, len(migrations), evidence+1)
 	}
 }

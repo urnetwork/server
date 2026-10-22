@@ -139,17 +139,18 @@ type arindbCanaryObservation struct {
 	cohortLoss float64
 	// when the compared pair was first compared, and the rate of failed latest
 	// lookups: a shrinking cohort is blamed on a release only with either
-	pairSince          time.Time
-	hasPairSince       bool
-	latestLookupErrors float64
-	servingChanges     float64
-	readsNotOk         float64
-	hasReadsNotOk      bool
-	servingEpoch       float64
-	decisionAt         time.Time
-	hasDecisionAt      bool
-	complete           bool
-	observedSeries     int
+	pairSince              time.Time
+	hasPairSince           bool
+	latestLookupErrors     float64
+	servingChanges         float64
+	readsNotOk             float64
+	hasReadsNotOk          bool
+	servingEpoch           float64
+	decisionAt             time.Time
+	hasDecisionAt          bool
+	complete               bool
+	observedSeries         int
+	annotationsUnqualified bool
 }
 
 // The buckets whose measure is over threshold with a sample of old supply.
@@ -243,12 +244,20 @@ func (arindbCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	if err != nil {
 		return nil, fmt.Errorf("arindb canary: query Mimir through service gateways: %w", err)
 	}
-	var response mimirInstantResponse
+	var response struct {
+		mimirInstantResponse
+		Infos []string `json:"infos"`
+	}
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
 		return nil, fmt.Errorf("arindb canary: decode Mimir response failed")
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
 		return nil, fmt.Errorf("arindb canary: Mimir response was not a successful vector")
+	}
+	if len(response.Warnings) != 0 || len(response.Infos) != 0 {
+		// No serving-source contract qualifies these annotations as harmless
+		// or omission-only. Withhold query values as well as healthy clears.
+		return arindbCanaryFindings(&arindbCanaryObservation{annotationsUnqualified: true}, env.now().UTC(), metricHost.name), nil
 	}
 	observation := &arindbCanaryObservation{
 		flags: map[string]bool{}, losses: map[string]float64{}, gains: map[string]float64{}, churns: map[string]float64{},
@@ -454,13 +463,16 @@ func arindbCanaryFindings(observation *arindbCanaryObservation, now time.Time, g
 		strings.Join(observation.states, ","), observation.fallback, observation.servingEpoch, strings.Join(flags, ","),
 		observation.lossSummary(), observation.emptiedSummary(), observation.coverageSummary(),
 		observation.cohort["current"], observation.cohort["reference"], observation.servingChanges, gateway)
+	if observation.annotationsUnqualified {
+		observed = "query_authority=unqualified-annotations publisher_values=unknown metrics_gateway=" + gateway
+	}
 
 	if !observation.complete {
 		add(finding{
 			probeId: probeId, tier: tierWarn, class: "arindb-canary-unobservable", target: target, frame: gateway, sustain: 15,
 			symptom:   "The ARIN canary publisher projection is missing, incomplete or ambiguous",
-			mechanism: "Every score publication writes a canary decision and every Taskworker's stats collector exports it. A nil or unreadable decision exports four zero states and retains its previous decision time. Missing or invalid mandatory values cannot establish that incident conditions are absent; independently valid positive evidence remains reportable.",
-			baseline:  "One recognized state is selected; all fixed publisher scalars, flags, bucket comparisons and coverage values are present and valid.",
+			mechanism: "Every score publication writes a canary decision and every Taskworker's stats collector exports it. A nil or unreadable decision exports four zero states and retains its previous decision time. Missing or invalid mandatory values cannot establish that incident conditions are absent; independently valid positive evidence remains reportable. Unqualified query warnings or infos withhold all query values because no harmless or omission-only serving contract is established.",
+			baseline:  "The query has no unqualified warnings or infos, one recognized state is selected, and all fixed publisher scalars, flags, bucket comparisons and coverage values are present and valid.",
 			observed:  observed,
 			action:    "Check that the Taskworkers run a build with the canary and that their stats pusher reaches Mimir; read {arindb_canary_decision} through the monitor's Redis access to see whether the indexer published one.",
 			verify:    "The complete publisher projection is readable and the decision age stays under 30 minutes.",

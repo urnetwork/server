@@ -2924,10 +2924,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		var streamSendBudget *connect.H3HybridStreamSendBudget
 		streamInput := (<-chan []byte)(residentTransport.receive)
 		if useH3Datagrams {
-			streamSend = make(chan []byte, connect.H3HybridStreamQueueMessageCount)
+			datagramSettings := self.settings.H3DatagramSettings
+			streamSend = make(chan []byte, datagramSettings.HybridStreamQueueMessageCount)
 			streamSendBudget = connect.NewH3HybridStreamSendBudget(
-				connect.H3HybridStreamQueueMessageCount,
-				connect.H3HybridStreamQueueByteCount,
+				datagramSettings.HybridStreamQueueMessageCount,
+				datagramSettings.HybridStreamQueueByteCount(),
 				self.settings.H3DatagramStats,
 			)
 			streamInput = streamSend

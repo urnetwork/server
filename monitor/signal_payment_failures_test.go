@@ -64,7 +64,7 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 }
 
 func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'solana', 'stripe')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
 		t.Fatal("payment failures query does not limit entitlement checks to authoritative provider markets")
 	}
 	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'stripe')") != 1 {

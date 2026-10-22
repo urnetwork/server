@@ -345,6 +345,8 @@ func DecoratePlan(result *SubscriptionBalanceResult, storefrontCountry string, c
 	result.PriceTier = tier.Result()
 	result.OnboardingOffer = onboardingOfferResult(model.GetOnboardingOffer(clientSession.Ctx, networkId), tier.Tier, now)
 	result.Experiments = model.Onboarding().AssignExperiments(networkId, now)
+	// the crypto methods ride on the plan response every app already reads
+	decorateCryptoPay(result, clientSession)
 }
 
 // ----- client events -----

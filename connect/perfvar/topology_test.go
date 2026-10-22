@@ -167,6 +167,9 @@ type fullTunPath struct {
 
 	bridgeWaitGroup sync.WaitGroup
 	bridgeStarted   bool
+	// Opt-in native ingress preserves the ordinary fixture's blocking bridge.
+	// Only native-boundary workloads install this before the bridge starts.
+	nativeIngressForTest bool
 
 	// workloadProgressBytes counts application payload bytes delivered by the
 	// measured TCP workloads (client reads on download, server reads on
@@ -4343,6 +4346,9 @@ func (self *fullTunPath) startBridge(
 				-1,
 				accepted,
 			)
+		}
+		if self.nativeIngressForTest {
+			sendPacketBatch = nativeBrowsingBatchSender(self.multiClient, clientconnect.SourceId(self.deviceClientId))
 		}
 		if resources.SingularBridgeSend {
 			sendPacketBatch = func(packetBatch [][]byte, accepted []bool) int {

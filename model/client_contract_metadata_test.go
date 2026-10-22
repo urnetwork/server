@@ -175,9 +175,23 @@ func TestClientContractMetadataSQLFailurePreservesCertificate(t *testing.T) {
 	})
 }
 
+// Contract creation reads a head written without the registration column and
+// derives the signed key from its evidence, beside the published certificate.
+func TestClientContractMetadataReadsHeadWithoutRegistration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		input := newStClientKeyHistoryTestInput(tb)
+		SetClientTlsCertificateWithSignature(tb.Context(), input.ClientID, []byte("cert"), []byte("signature"))
+		insertStClientKeyHistoryTestRecordWithoutRegistration(tb, input, nil)
+		got, err := GetClientContractMetadata(tb.Context(), input.ClientID)
+		if err != nil || !bytes.Equal(got.PublicKey, input.PublicKey) || !bytes.Equal(got.TLSCertificatePEM, []byte("cert")) || !bytes.Equal(got.ClientKeySignedTLSCertificate, []byte("signature")) {
+			tb.Fatalf("contract metadata did not derive its signed key: %v", err)
+		}
+	})
+}
+
 func TestClientContractMetadataSignedProjectionRejectsTamper(t *testing.T) {
 	// The decoder remains fail closed after moving it outside the DB callback.
-	projection := stClientKeyCurrentProjection{found: true, clientExists: true, registrationBytes: []byte("malformed")}
+	projection := stClientKeyCurrentProjection{found: true, clientExists: true, evidenceBytes: []byte("malformed")}
 	if key, err := projection.publicKey(server.NewId()); err == nil || key != nil {
 		t.Fatal("malformed signed metadata returned a key")
 	}

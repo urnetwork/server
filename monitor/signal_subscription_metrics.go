@@ -205,12 +205,20 @@ func observeSubscriptionMetricsSnapshot(ctx context.Context, env *probeEnv) (sub
 }
 
 func parseSubscriptionMetricsSnapshot(output string, now time.Time) (subscriptionMetricsSnapshotObservation, error) {
-	var response mimirInstantResponse
+	var response struct {
+		mimirInstantResponse
+		Infos []string `json:"infos"`
+	}
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
 		return subscriptionMetricsSnapshotObservation{}, fmt.Errorf("decode Mimir response: %w", err)
 	}
 	if response.Status != "success" || response.Data.ResultType != "vector" {
 		return subscriptionMetricsSnapshotObservation{}, fmt.Errorf("Mimir status=%q result_type=%q error=%q", response.Status, response.Data.ResultType, response.Error)
+	}
+	if len(response.Warnings) != 0 || len(response.Infos) != 0 {
+		// The top result cannot establish a fleet extremum without qualified
+		// query authority; independent task and dashboard findings still run.
+		return subscriptionMetricsSnapshotObservation{}, fmt.Errorf("Mimir query annotation source contract is unavailable")
 	}
 	if len(response.Data.Result) == 0 {
 		return subscriptionMetricsSnapshotObservation{}, nil

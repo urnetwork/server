@@ -641,9 +641,9 @@ func TestPgBouncerPoolStarvationAuthorityNotifierRaisesPageBesideHeldVisibility(
 	}
 }
 
-// Scoped executions give parent cancellation precedence after a successful
-// source return. Unscoped executions preserve the adapter's existing source
-// authority and may publish that completed result; neither path adds a read.
+// An execution entered live gives its ended parent precedence after a
+// successful source return in both adapter paths. This does not change the
+// separate pre-canceled no-policy local-evaluation compatibility contract.
 func TestPgBouncerPoolStarvationAuthorityCanceledObservationRespectsScope(t *testing.T) {
 	now := time.Date(2026, 10, 19, 10, 30, 0, 0, time.UTC)
 	payload := pgbouncerStarvationFixtureJson(t, now, []pgbouncerStarvationFixture{pgbouncerStarvationLivelocked(1), pgbouncerStarvationLivelocked(2)})
@@ -665,15 +665,8 @@ func TestPgBouncerPoolStarvationAuthorityCanceledObservationRespectsScope(t *tes
 		if calls != 1 {
 			t.Fatal("cancellation started another successful-source read")
 		}
-		if scoped {
-			if !errors.Is(err, context.Canceled) || len(alerts) != 0 {
-				t.Fatal("scoped parent cancellation lost precedence")
-			}
-		} else {
-			if err != nil {
-				t.Fatal("unscoped completed source lost its inherited authority")
-			}
-			requireAlertClass(t, alerts, "pgbouncer-pools-starved")
+		if !errors.Is(err, context.Canceled) || len(alerts) != 0 {
+			t.Fatal("live-entry parent cancellation lost precedence")
 		}
 	}
 }
@@ -694,8 +687,8 @@ type pgbouncerStarvationSourceFailure struct{}
 
 func (*pgbouncerStarvationSourceFailure) Error() string { return "synthetic source failure" }
 
-// Both paths retain the actual source failure and stop before another
-// gateway. Only scoped execution adds parent cancellation to that error chain.
+// Both live-entry paths retain the actual source failure and parent
+// cancellation in the error chain, and stop before another gateway.
 func TestPgBouncerPoolStarvationAuthorityCanceledFailurePreservesScopedAndUnscopedCause(t *testing.T) {
 	now := time.Date(2026, 10, 19, 10, 30, 0, 0, time.UTC)
 	for _, scoped := range []bool{false, true} {
@@ -715,15 +708,15 @@ func TestPgBouncerPoolStarvationAuthorityCanceledFailurePreservesScopedAndUnscop
 		}
 		alerts, err := pgbouncerPoolStarvationSignalForTest(t).Run(ctx, settings)
 		cancel()
-		if !errors.Is(err, sourceErr) || errors.Is(err, context.Canceled) != scoped || len(alerts) != 0 || calls != 1 {
+		if !errors.Is(err, sourceErr) || !errors.Is(err, context.Canceled) || len(alerts) != 0 || calls != 1 {
 			t.Fatal("cancellation changed scoped/source authority or started another gateway read")
 		}
 		var sourceLeaf *pgbouncerStarvationSourceFailure
 		var contextFailure *signalContextError
-		if !errors.As(err, &sourceLeaf) || sourceLeaf != sourceErr || errors.As(err, &contextFailure) != scoped {
+		if !errors.As(err, &sourceLeaf) || sourceLeaf != sourceErr || !errors.As(err, &contextFailure) {
 			t.Fatal("source or scoped-context error identity was lost")
 		}
-		if scoped && (!errors.Is(contextFailure.contextErr, context.Canceled) || !errors.Is(contextFailure.sourceErr, sourceErr)) {
+		if !errors.Is(contextFailure.contextErr, context.Canceled) || !errors.Is(contextFailure.sourceErr, sourceErr) {
 			t.Fatal("scoped cancellation no longer retains both original causes")
 		}
 	}

@@ -37,7 +37,7 @@ func GetClientContractMetadata(ctx context.Context, clientID server.Id) (metadat
 				EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
 				COALESCE(h.network_id, '00000000-0000-0000-0000-000000000000'::uuid),
 				COALESCE(h.generation, 0), h.domain_hash,
-				r.registration, r.registration_hash, r.evidence, COALESCE(r.evidence_hash, '')
+				r.registration_hash, r.evidence, COALESCE(r.evidence_hash, '')
 			FROM (SELECT $1::uuid AS client_id) requested
 			LEFT JOIN client_tls_certificate c ON c.client_id = requested.client_id
 			LEFT JOIN (st_client_key_head h JOIN st_client_key_history r
@@ -45,7 +45,7 @@ func GetClientContractMetadata(ctx context.Context, clientID server.Id) (metadat
 				ON h.client_id = requested.client_id AND h.is_current
 		`, clientID).Scan(&metadata.TLSCertificatePEM, &metadata.ClientKeySignedTLSCertificate,
 				&projection.found, &projection.retired, &projection.clientExists, &projection.networkID,
-				&projection.generation, &projection.domainHash, &projection.registrationBytes,
+				&projection.generation, &projection.domainHash,
 				&projection.registrationHash, &projection.evidenceBytes, &projection.evidenceHash))
 		})
 	}, func(err error) { queryErr = err })

@@ -29,19 +29,21 @@ type pgSampleTransportObservation struct {
 // not remote descendants. Completed response headers are neither valid samples
 // nor SQL authority. Missing/legacy frame counts remain unknown, never zero.
 type pgSampleTransportReceipt struct {
-	Phase                           string                  `json:"phase"`
-	Spawn                           string                  `json:"spawn"`
-	RemotePhase                     string                  `json:"remote_phase"`
-	RemoteSampleFramesObserved      *int                    `json:"remote_sample_frames_observed"`
-	RemainingBudgetMs               int64                   `json:"remaining_budget_ms"`
-	RunSlotWaitMs                   *int64                  `json:"run_slot_wait_ms,omitempty"`
-	RunSlotGrantedRemainingBudgetMs *int64                  `json:"run_slot_granted_remaining_budget_ms,omitempty"`
-	RunSlotHolders                  *pgSampleRunSlotHolders `json:"run_slot_holders,omitempty"`
-	SpawnRemainingBudgetMs          *int64                  `json:"spawn_remaining_budget_ms"`
-	OwnerDeadlineExceeded           bool                    `json:"owner_deadline_exceeded"`
-	Joined                          bool                    `json:"joined"`
-	NativeExitCode                  *int                    `json:"native_exit_code"`
-	ProgressStatus                  string                  `json:"progress_status"`
+	Phase                           string                   `json:"phase"`
+	Spawn                           string                   `json:"spawn"`
+	RemotePhase                     string                   `json:"remote_phase"`
+	RemoteSampleFramesObserved      *int                     `json:"remote_sample_frames_observed"`
+	RemainingBudgetMs               int64                    `json:"remaining_budget_ms"`
+	RunSlotWaitMs                   *int64                   `json:"run_slot_wait_ms,omitempty"`
+	RunSlotGrantedRemainingBudgetMs *int64                   `json:"run_slot_granted_remaining_budget_ms,omitempty"`
+	RunSlotHolders                  *pgSampleRunSlotHolders  `json:"run_slot_holders,omitempty"`
+	SpawnRemainingBudgetMs          *int64                   `json:"spawn_remaining_budget_ms"`
+	OwnerDeadlineExceeded           bool                     `json:"owner_deadline_exceeded"`
+	Joined                          bool                     `json:"joined"`
+	NativeExitCode                  *int                     `json:"native_exit_code"`
+	ProgressStatus                  string                   `json:"progress_status"`
+	TailBoundary                    *pgSampleTailBoundary    `json:"tail_boundary,omitempty"`
+	NativeLifecycle                 *pgSampleNativeLifecycle `json:"native_lifecycle,omitempty"`
 	// Only a local refusal populates this field; it is never a native Start fact.
 	StartRefusalRemainingBudgetNs *int64                         `json:"start_refusal_remaining_budget_ns,omitempty"`
 	LocalPhaseTiming              *pgSampleLocalTiming           `json:"local_phase_timing,omitempty"`
@@ -327,6 +329,7 @@ func (self *pgSampleTransportObservation) joined(state *os.ProcessState, stderr 
 		}
 	}
 	self.receipt.RemotePhase, self.receipt.ProgressStatus, self.receipt.RemoteSampleFramesObserved = parsePgSampleTransportProgress(stderr, self.nonce)
+	self.receipt.TailBoundary = parsePgSampleTailBoundary(stderr, self.nonce)
 }
 
 // Only complete, ordered records for this private stdin nonce count. Valid

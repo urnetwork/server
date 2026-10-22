@@ -208,6 +208,12 @@ func registry() []specEndpoint {
 		{"POST", "/pay/data/network-lookup", rt(controller.PayDataNetworkLookupArgs{}), rt(controller.PayDataNetworkLookupResult{})},
 		{method: "POST", path: "/pay/data/solana-intent", argType: rt(controller.PayDataSolanaIntentArgs{}), resultType: rt(controller.PayDataSolanaIntentResult{})},
 		{method: "POST", path: "/pay/data/solana-status", argType: rt(controller.PayDataSolanaStatusArgs{}), resultType: rt(controller.PayDataSolanaStatusResult{})},
+		// crypto payments (docs/CRYPTO-PAY-API.md)
+		{method: "GET", path: "/pay/crypto/assets", argType: nil, resultType: rt(controller.CryptoPaymentAssetsResult{})},
+		{method: "POST", path: "/pay/crypto/intent", argType: rt(controller.CreateCryptoPaymentIntentArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
+		{method: "POST", path: "/pay/data/crypto-intent", argType: rt(controller.CreateDataCryptoPaymentIntentArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
+		{method: "POST", path: "/pay/crypto/status", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentStatusResult{})},
+		{method: "POST", path: "/pay/crypto/requote", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
 
 		{"GET", "/verify/keys", nil, rt(controller.GetVerifyKeysResult{})},
 		{"POST", "/sn/wallet", rt(controller.SnSetWalletArgs{}), rt(controller.SnSetWalletResult{})},

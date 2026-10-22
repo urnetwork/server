@@ -61,7 +61,8 @@ func (s *signalAdapter) runBudget() time.Duration {
 	return 0
 }
 
-func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alerts, error) {
+func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alerts Alerts, resultErr error) {
+	enteredLive := ctx.Err() == nil
 	if budget := s.runBudget(); budget > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, budget)
@@ -78,17 +79,30 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	if scoped, ok := env.runner.(*hostScopeRunner); ok {
 		ctx = context.WithValue(ctx, hostScopeContextKey{}, scoped)
 	}
-	findings, err := s.probe.check(ctx, env)
-	if scoped, ok := env.runner.(*hostScopeRunner); ok {
-		if contextErr := ctx.Err(); contextErr != nil {
-			if s.ID() == "pg/query-sample" && env.pgSampleCompletion != nil {
-				return nil, &pgSampleEvaluationInterrupted{contextErr: contextErr, sourceErr: err, collection: *env.pgSampleCompletion}
-			}
-			if err == nil || err == contextErr {
-				return nil, contextErr
-			}
-			return nil, &signalContextError{contextErr: contextErr, sourceErr: err}
+	_, scoped := env.runner.(*hostScopeRunner)
+	// Preserve the legacy pre-canceled local-only contract. A live evaluation,
+	// including its owned budget, cannot publish after its owner has ended.
+	defer func() {
+		contextErr := ctx.Err()
+		if contextErr == nil || (!enteredLive && !scoped) {
+			return
 		}
+		alerts = nil
+		if s.ID() == "pg/query-sample" && env.pgSampleCompletion != nil {
+			resultErr = &pgSampleEvaluationInterrupted{contextErr: contextErr, sourceErr: resultErr, collection: *env.pgSampleCompletion}
+			return
+		}
+		if resultErr == nil || resultErr == contextErr {
+			resultErr = contextErr
+		} else {
+			resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
+		}
+	}()
+	findings, err := s.probe.check(ctx, env)
+	if (enteredLive || scoped) && ctx.Err() != nil {
+		return nil, err
+	}
+	if scoped, ok := env.runner.(*hostScopeRunner); ok {
 		if hostScopeOnlyError(err) {
 			err = nil
 		}
@@ -97,7 +111,7 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	if err != nil {
 		return nil, err
 	}
-	alerts := make(Alerts, 0, len(findings))
+	alerts = make(Alerts, 0, len(findings))
 	for _, finding := range findings {
 		// An accept filter selects this signal's detections. A shared probe's
 		// unobservable finding still says this signal's own evidence may be
@@ -106,6 +120,9 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 			continue
 		}
 		alerts = append(alerts, alertFromFinding(settings, s.number, s.key, s.name, finding))
+	}
+	if (enteredLive || scoped) && ctx.Err() != nil {
+		return nil, err
 	}
 	if settings.UrlProbeCoverageObserver != nil && env.urlProbeCoverageObservation != nil {
 		observation := env.urlProbeCoverageObservation
@@ -119,6 +136,9 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 			// Keep actual findings when the independent local output fails.
 			return alerts, fmt.Errorf("monitor: URL coverage observation output failed")
 		}
+	}
+	if (enteredLive || scoped) && ctx.Err() != nil {
+		return nil, err
 	}
 	if settings.ProviderSelectionObserver != nil && env.providerSelectionObservation != nil {
 		observation := env.providerSelectionObservation

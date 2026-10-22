@@ -10516,4 +10516,193 @@ var migrations = []any{
 			ADD COLUMN client_version varchar(64) NULL,
 			ADD COLUMN client_version_time timestamp NULL;
 	`),
+
+	// 853 (PROVISIONAL: the number is this branch's next one and must be
+	// renumbered when the branch merges after other migrations): the crypto
+	// payment rail (mmm/ZCASH.md, mmm/ZCASH-CONTRACT.md §3.1). Invoices
+	// for Zcash, Monero and USDC on Solana (crypto_payment_intent), their
+	// re-quote history, the on-chain receipts the scanner records, the pool of
+	// pre-derived receive addresses, and the scanner's per-coin cursor. New
+	// tables only, plus one catalog change: solana_payment_intent.network_id
+	// becomes nullable, because a USDC data code bought without a network has
+	// none until the code is redeemed. Dropping NOT NULL rewrites nothing and
+	// holds the table's exclusive lock only for the catalog update.
+	//
+	// The intent keeps every status token it handed out (a reused open invoice
+	// hands a new one to each caller): the first in status_token_hash, the
+	// rest in extra_status_token_hashes. balance_id is the transfer balance a
+	// credit granted (the Pro balance of a plan, the data balance of a pack),
+	// so a refund or an orphaned payment ends exactly that one. voided_at
+	// closes an open invoice by hand (bringyourctl crypto void): a payment
+	// that still arrives goes to review instead of being credited.
+	//
+	// A receipt is keyed by its transaction and the receiving address's index
+	// within the wallet: a Monero subaddress ("<major>.<minor>"), or a Zcash
+	// diversifier index (a transparent output, never counted, by its output
+	// index, "t:<vout>"). The Zcash pool is data, not part of the key: zecd
+	// can report a mempool receipt as orchard and the mined one as ironwood.
+	// Receipts are matched to invoices by address_index, because zecd reports
+	// the single receiver that was paid, not the unified address handed out.
+	// first_seen_height is the wallet's height when a receipt was first seen:
+	// a mempool receipt the daemon stops reporting counts as dropped only once
+	// the wallet is the final depth past it.
+	//
+	// refunded_at makes the operator refund one-shot. credit_failure_count
+	// counts credits of the invoice that failed in a row: past a few, its
+	// receipts go to review (credit_failed) instead of being retried every
+	// scan.
+	//
+	// Deploy ordering: the tables are new and nothing built before 853 reads
+	// them, so applying it is safe under old servers. The one change to an
+	// existing table is the hazard. A server built before 853 scans
+	// solana_payment_intent.network_id into a non-null id, so once a row with
+	// a NULL network exists (a USDC data code bought without a network,
+	// through /pay/data/crypto-intent), that server's Helius webhook and
+	// Solana reconciler fail on it. Such rows are made only while
+	// crypto_pay.yml lets usdc_solana deliver codes (code_delivery), which
+	// config/main keeps false until every api server and taskworker runs a
+	// build with 853. Rolling back to a build before 853 is unsafe while any
+	// such row is open or unexpired: the old webhook's reference matching
+	// reads every open intent of a payment's references, and its memoless
+	// matching every unexpired intent of the payment's amount, and both fail
+	// on a NULL network. Before such a rollback, switch code_delivery off,
+	// delete the open USDC code intents (network_id IS NULL AND tx_signature
+	// IS NULL), and let the credited ones expire (an hour); after that only a
+	// lookup of one of their own references fails.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+
+		CREATE TABLE crypto_payment_intent (
+			intent_id uuid NOT NULL PRIMARY KEY,
+			status_token_hash bytea NOT NULL,
+			extra_status_token_hashes bytea[] NOT NULL DEFAULT '{}',
+			asset varchar(16) NOT NULL,
+			delivery varchar(16) NOT NULL,
+			network_id uuid NULL,
+			item varchar(32) NOT NULL,
+			tier varchar(32) NULL,
+			offer_applied bool NOT NULL DEFAULT false,
+			price_usd_nano_cents bigint NOT NULL,
+			regular_price_usd_nano_cents bigint NOT NULL,
+			email varchar(256) NULL,
+			address text NOT NULL,
+			address_index bigint NULL,
+			solana_reference text NULL,
+			amount_atomic bigint NOT NULL,
+			rate_usd double precision NOT NULL,
+			rate_sources jsonb NULL,
+			quoted_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			credited_at timestamp NULL,
+			credited_usd_nano_cents bigint NULL,
+			balance_id uuid NULL,
+			balance_code_id uuid NULL,
+			voided_at timestamp NULL,
+			refunded_at timestamp NULL,
+			credit_failure_count int NOT NULL DEFAULT 0,
+			unlinked_at timestamp NULL
+		);
+		CREATE UNIQUE INDEX crypto_payment_intent_address
+		ON crypto_payment_intent (asset, address)
+		WHERE solana_reference IS NULL;
+		CREATE UNIQUE INDEX crypto_payment_intent_solana_reference
+		ON crypto_payment_intent (solana_reference)
+		WHERE solana_reference IS NOT NULL;
+		CREATE INDEX crypto_payment_intent_open
+		ON crypto_payment_intent (network_id, asset, item, expires_at)
+		WHERE credited_at IS NULL;
+		CREATE INDEX crypto_payment_intent_asset_open
+		ON crypto_payment_intent (asset, expires_at)
+		WHERE credited_at IS NULL;
+		CREATE INDEX crypto_payment_intent_unlink
+		ON crypto_payment_intent (credited_at)
+		WHERE credited_at IS NOT NULL AND unlinked_at IS NULL;
+		CREATE INDEX crypto_payment_intent_unlink_uncredited
+		ON crypto_payment_intent (create_time)
+		WHERE credited_at IS NULL AND unlinked_at IS NULL;
+		CREATE UNIQUE INDEX crypto_payment_intent_address_index
+		ON crypto_payment_intent (asset, address_index)
+		WHERE address_index IS NOT NULL;
+
+		CREATE TABLE crypto_payment_quote (
+			intent_id uuid NOT NULL,
+			quoted_at timestamp NOT NULL,
+			amount_atomic bigint NOT NULL,
+			rate_usd double precision NOT NULL,
+			rate_sources jsonb NULL,
+			expires_at timestamp NOT NULL,
+			PRIMARY KEY (intent_id, quoted_at)
+		);
+
+		CREATE TABLE crypto_payment_receipt (
+			asset varchar(16) NOT NULL,
+			tx_id varchar(128) NOT NULL,
+			output_key varchar(64) NOT NULL,
+			intent_id uuid NULL,
+			address text NULL,
+			address_index bigint NULL,
+			pool varchar(32) NULL,
+			amount_atomic bigint NOT NULL,
+			block_height bigint NULL,
+			confirmations int NOT NULL DEFAULT 0,
+			first_seen_at timestamp NOT NULL,
+			first_seen_height bigint NULL,
+			first_seen_rate_usd double precision NULL,
+			confirmed_at timestamp NULL,
+			final_at timestamp NULL,
+			usd_value_nano_cents bigint NULL,
+			state varchar(16) NOT NULL,
+			review_reason varchar(32) NULL,
+			update_time timestamp NOT NULL DEFAULT now(),
+			PRIMARY KEY (asset, tx_id, output_key)
+		);
+		CREATE INDEX crypto_payment_receipt_intent
+		ON crypto_payment_receipt (intent_id);
+		CREATE INDEX crypto_payment_receipt_open
+		ON crypto_payment_receipt (asset, state)
+		WHERE state IN ('seen', 'confirmed', 'review');
+		CREATE INDEX crypto_payment_receipt_block_height
+		ON crypto_payment_receipt (asset, block_height);
+
+		CREATE TABLE crypto_payment_address (
+			asset varchar(16) NOT NULL,
+			address_index bigint NOT NULL,
+			address text NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			allocated_at timestamp NULL,
+			intent_id uuid NULL,
+			PRIMARY KEY (asset, address_index),
+			UNIQUE (asset, address)
+		);
+		CREATE INDEX crypto_payment_address_free
+		ON crypto_payment_address (asset, address_index)
+		WHERE allocated_at IS NULL;
+
+		CREATE TABLE crypto_scan_cursor (
+			asset varchar(16) NOT NULL PRIMARY KEY,
+			height bigint NOT NULL DEFAULT 0,
+			block_hash text NULL,
+			wallet_height bigint NULL,
+			node_height bigint NULL,
+			network_height bigint NULL,
+			last_success_at timestamp NULL,
+			last_error text NULL,
+			update_time timestamp NOT NULL DEFAULT now()
+		);
+
+		ALTER TABLE solana_payment_intent ALTER COLUMN network_id DROP NOT NULL;
+	`),
+
+	// st_client_key_history.registration is the exact payload of the row's
+	// evidence, so readers derive it from evidence and the copy is removed in
+	// three steps: this makes the column optional while every deployed writer
+	// still fills it; writers then stop filling it once no deployed reader
+	// names it; and a later migration drops it once no deployed writer does.
+	// The lock_timeout keeps this catalog change from queueing hot key reads
+	// behind a long transaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE st_client_key_history ALTER COLUMN registration DROP NOT NULL;
+	`),
 }

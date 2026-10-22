@@ -273,3 +273,25 @@ func TestProviderWorkOwnerCancellationAndCanonicalBoundary(t *testing.T) {
 		t.Fatal("SDK enrollment accepted alternate original spelling", err)
 	}
 }
+
+// A current head written without the registration column admits the owner and
+// retains the exact registration its evidence carries.
+func TestProviderWorkOwnerRetainsRegistrationDerivedFromEvidence(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		input, owner, _, raw := providerWorkOwnerFixture(t)
+		record := insertStClientKeyHistoryTestRecordWithoutRegistration(t, input, nil)
+		receipt, err := RetainProviderWorkOwner(t.Context(), raw, owner.DomainHash, crypto.PubkeyToAddress(input.RootKey.PublicKey))
+		if err != nil || receipt.OwnerHash != sha256.Sum256(raw) {
+			t.Fatal("derived registration did not admit the owner", err)
+		}
+		server.Db(t.Context(), func(conn server.PgConn) {
+			var retained []byte
+			server.Raise(conn.QueryRow(t.Context(), `SELECT key_registration FROM provider_work_owner WHERE owner_hash=$1`, receipt.OwnerHash[:]).Scan(&retained))
+			if !bytes.Equal(retained, record.RegistrationBytes) {
+				t.Fatal("owner retained a registration other than its evidence payload")
+			}
+		})
+	})
+}

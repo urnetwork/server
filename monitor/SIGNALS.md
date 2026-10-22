@@ -1934,6 +1934,19 @@ deliberately combined only after retaining application, role, state, and wait
 dimensions; resolving one unknown endpoint requires an authorized private
 socket census rather than disclosing its address in monitor output.
 
+Application, role and wait text remain transient private grouping inputs. Both
+healthy logs and public Alert Evidence render observation-local integer
+`application_group`, `role_group` and `wait_group` values instead of raw labels
+or stable fingerprints. Only the fixed connection states active, idle, idle in
+transaction, idle in transaction (aborted), fastpath function call, disabled
+and starting are rendered literally. An unset state is unavailable; arbitrary
+states receive observation-local withheld groups. The existing private owner
+aggregation, safe-host merging, ranking, top-ten bound, counts and oldest ages
+are unchanged. Group numbers are not stable across observations and establish
+neither an authenticated caller nor an application/role identity. Recovering
+exact names requires independently authorized private evidence. This is a
+source publication correction; no sensitive production occurrence is alleged.
+
 - `normal_role_ceiling = max_connections -
   superuser_reserved_connections - reserved_connections`. Every existing
   client backend consumes the admission threshold, including a privileged or
@@ -2045,6 +2058,14 @@ backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
 proves the owner. This probe exports only aggregate loopback counts and ages;
 the exact loopback address/CIDR predicate never appears in logs or alerts.
 
+Missing, malformed, or failed aggregate evidence is unavailable, not healthy
+reserve or proof of a pool outage. Public errors retain only owned field names
+and fixed failure classes; raw cells, invalid-state dumps, and source diagnostics
+are withheld. Cancellation and deadline causes remain recognizable without
+retaining private source causes; intentional host exclusions remain partial
+coverage. This boundary does not establish current runtime leakage or full
+settings equality, and valid aggregate warning thresholds remain unchanged.
+
 The application pool has a separate ownership failure: `GetNetworkUser` used
 to retain its profile-read client while four authentication helpers opened
 independent transactions from the same pool. At saturation, each outer reader
@@ -2071,6 +2092,17 @@ FROM pg_stat_activity
 WHERE backend_type = 'client backend';
 ```
 
+- FALSE-POSITIVE QUALIFIER: a shaped numeric row is not authoritative until
+  the nonnegative idle, active and idle-in-transaction counts fit within the
+  loopback-client count, which must fit within total clients. Validate each
+  partition against the remaining count without adding counts that can overflow.
+  Other backend states can leave the listed partition smaller than its parent;
+  equality is not required. Impossible counts are unavailable, not pool pressure.
+- FALSE-NEGATIVE QUALIFIER: individually representable counts can have an
+  unrepresentable sum. Such an inconsistent snapshot, or any cell outside the
+  supported integer range, must produce `cannot-observe`, never healthy reserve
+  or recovery credit. Valid low-idle observations retain the healthy threshold;
+  valid high-idle observations retain their independent warning.
 - HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
   ceiling, excess pool connections drain toward their configured warm minimum
   after 600 idle seconds, and §1.3a retains both more than 25% normal-role
@@ -2892,6 +2924,21 @@ timeout -k 1s 2s redis-cli --raw -h 127.0.0.1 -p "$configured_port" PING
   The reducer no longer automatically runs the optional §5.2 node battery;
   use that playbook separately for the causal discriminator. Raw CLI replies
   and optional CLUSTER NODES failure text are not emitted as error evidence.
+- Optional `CLUSTER NODES` context on an independently established cluster
+  fault publishes only fixed numeric row counts for exact `fail`, `fail?` and
+  `noaddr` flag tokens. Substrings in node ids, endpoints, hostnames and slot
+  text have no flag authority; none of those raw values is emitted. Successful
+  output is still untrusted: more than 64 KiB, an empty observation, a short
+  row, or unknown/repeated flag tokens leaves this optional context unknown.
+  This bounds only the ancillary reducer, not the source transport response.
+- FALSE-POSITIVE QUALIFIER: optional counts describe flags in bounded rows
+  with at least eight fields; they do not validate endpoints, deduplicate node
+  identities, prove topology, or create a PAGE. The independent valid INFO
+  fault remains authoritative even when optional context is unavailable.
+- FALSE-NEGATIVE QUALIFIER: strict optional shape/flag limits can withhold
+  context for an unsupported or larger response; zero flag counts do not
+  resolve the known INFO fault. Raw node locations are deliberately omitted;
+  a separately admitted diagnostic is needed to attribute a member or path.
 - With `cluster-require-full-coverage=no`, one unavailable shard can affect
   its owned keys without changing the aggregate state observed on another
   member. Check each configured shard as well as the bootstrap aggregate.
@@ -2954,7 +3001,12 @@ resolve either.
   for a configured source, invalid source labels, malformed samples, or missing
   partition markers withhold completeness. A successful HTTP/JSON envelope
   alone cannot establish a complete source response. Independent dashboard
-  and alert-rule definition findings remain reportable.
+  and alert-rule definition findings remain reportable. A successful HTTP
+  response with a mismatched dashboard or alert-rule UID is a fixed
+  `observation-invalid-response`; arbitrary returned UID text never enters the
+  diagnostic or chooses an access, timeout or native-exit classification.
+  This source correction cannot identify the cause of a historical reduced
+  access-denied warning or establish the serving Grafana generation.
 - FALSE-POSITIVE QUALIFIERS: an empty one-minute rate is expected with the
   intentional slow scrape cadence; a finite zero counter/rate is still present
   coverage. Additional valid unconfigured sources do not spoil a complete configured
@@ -2982,6 +3034,22 @@ resolve either.
 
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`
+
+Generic TCP dial-timeout frame qualification: a caller or metadata address
+earlier in a line can misattribute a true positive class count when a generic
+first-address matcher is used. The dial class instead uses its own regexp
+capture from the first counted exemplar; the healthy discriminator is the
+same synthetic dial with and without an earlier unrelated endpoint, yielding
+the same frame and unchanged aggregate count. An exemplar with multiple
+`dial tcp` candidates leaves its frame unknown and still counts toward the
+PAGE. This correction does not validate an older reduced frame. Other legacy
+ungrouped classes, including `connection-refused`, retain a first-address hint
+and require independent native-event attribution. False-negative qualifiers:
+one retained exemplar, class precedence, echo/replay exclusions, missing native
+source identity and partial collection can conceal other destinations or
+failures. Require bounded original-event/source/artifact evidence for historical
+attribution and independent outcome controls for impact or recovery; an empty
+frame, a later reachable target or a quiet log window is not that evidence.
 
 The monitor tails the logs of ALL services AT ALL TIMES, classifying lines
 against the section 4 signatures. This is a standing collector, not a
@@ -5100,6 +5168,32 @@ Only the new execution-boundary projection caps child inspections and visits at
 shared-admission traversal remain separate and carry no new work bound; this is
 not a guarantee for the whole formatter or arbitrary Error/Unwrap methods.
 
+A shared signal adapter that entered with a live evaluation context withholds
+its returned findings when that owner ends before acceptance, whether or not
+host exclusions enabled a scope runner. Its own finite run budget is part of
+that evaluation owner; a live outer watcher does not turn an expired child
+into a complete healthy execution. The canonical context verdict retains any
+already returned source cause through the error chain, without rendering its
+private text. A live owner's independent child/source failure keeps its prior
+authority. Existing pre-canceled no-policy local evaluation behavior remains a
+compatibility contract, not a newly qualified live observation.
+
+This acceptance fence cannot roll back probe-owned cache/baseline writes or an
+observer callback that already began while live. It checks lifecycle at the
+adapter boundaries; it is not an atomic certificate against cancellation after
+the last check. The execution loop already suppresses ended outer-monitor
+results before its gate/handler. The additional public-loop control covers an
+ended per-execution budget while that outer owner remains live; it does not
+attribute a production notification incident or replace owning state staging.
+
+The PgBouncer cancellation controls enter with a live context and cancel it
+inside the source callback. Their scoped and unscoped expectations therefore
+both require no returned findings and the parent context cause; source errors
+retain their original Is/As identity alongside that cause, with one source
+call and no second gateway. Their earlier unscoped PAGE/source-only assertions
+are deliberately superseded by this live-entry policy, rather than reclassified
+as pre-canceled compatibility or borrowed as notifier-incident evidence.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -5397,6 +5491,37 @@ The reader validates complete JSON framing, duplicate keys, fixed kind/index
 order and finite response timestamps. Unexpected or malformed source headers
 stop later progress; the unchanged full-result parser still decides validity.
 Even count 12 with `history_end` cannot make a failed native/source result healthy.
+
+An optional fixed tail projection now records the last received psql client
+metacommand dispatch/return boundary for sample indices10 and11 (zero-based),
+then the blockers snapshot/query and final history. It deliberately omits the
+first ten activity iterations and all raw statements, errors, addresses, query
+identities and private correlation nonce. A dispatch marker means psql reached
+that client boundary; it does not prove server execution, the currently pending
+operation at deadline, successful semantic output, or completion. A return marker
+proves the client advanced after that statement; the unchanged full-result
+parser and native/source result still decide collection authority. Missing,
+buffered, lost, malformed, foreign, truncated or unsupported markers leave the
+tail unknown; last received is not necessarily last executed.
+
+The eighteen ordered compact markers add828 bytes to the unchanged1796-byte
+healthy version2 progress stream (2624 bytes total), under the unchanged4KiB
+progress limit. Versions1/2 retain their exact parser and seventeen-record
+sequence. The SQL workload retains twelve activity queries and eleven two-second
+waits: only client metacommands are added. They cost finite client/transport work,
+not zero overhead or a missed-sample repair. Marker bytes are charged to the
+existing4MiB raw source-output cap; no cap, retry, deadline or cadence increases.
+Only exact expected markers are removed from successful stdout. Corrupt markers
+cannot be discarded to manufacture an otherwise healthy source.
+
+Optional same-attempt native lifecycle offsets record actual Start/Wait entry
+and return plus explicitly observed local stdout/stderr EOF. Absent copy paths,
+callbacks and preflight remain unknown; Wait return alone never supplies EOF.
+EOF identifies the local SSH pipe boundary, not database success or every remote
+descendant. Concurrent pipe EOFs have no mutual ordering, and local receipt of a
+remote marker supplies no synchronized remote operation duration. Invalid clocks
+withhold offsets without altering native/source classifications. These fields do
+not attribute a holder's CPU time or repair unknown scheduling/SQL causes.
 
 Source output remains buffered until successful child completion. Cancellation
 and owner deadlines preserve the original cannot-observe result, top-level
@@ -6849,8 +6974,19 @@ Probe: `planner-flips`
 The catastrophic mode: stale statistics flip a hot query to a bad plan
 (observed: pair-lookup 58ms → 6.1s scanning all open contracts). Signals:
 one query's mean time step-changes ×10–100 in pg_stat_statements without a
-deploy. Remediation was ANALYZE + a structural index. Monitor: track
-per-query mean_exec_time deltas hour-over-hour for the top-20 by calls.
+deploy. Remediation was ANALYZE + a structural index. Hourly observation
+requirement: compare adjacent hour means from execution-time and call-count
+deltas for the top-20 by calls.
+
+The registered `NewPlannerFlipsSignal` currently runs only the daily
+`pgStatsLandmineProbe`: it checks the three valid/ready structural index
+families and open-column statistics target 300. Its healthy result covers
+that static protection. Hourly per-query observation remains unimplemented;
+completed endpoint-lifetime means and active-query ages do not supply adjacent
+hour means. That capability still needs scoped identity and entry-lifetime
+continuity, qualified baselines, cohort policy, deployment comparability, and
+threshold/severity/sustain policy. Missing hourly evidence remains unknown,
+while static WARNs retain their existing meaning.
 
 2026-07-17 variant — the rare-value stats landmine (incident playbook: 5.8).
 Stats can be systematically wrong, not just stale: a value rarer than
@@ -10484,6 +10620,21 @@ Raw annotation text never enters the error or Alert. This gate does not change
 the PAGE/WARN thresholds or establish complete native process/window coverage;
 unannotated omissions and affected-request supply remain separate limitations.
 
+Failed status/non-vector envelopes, JSON decode failures and invalid outcome
+value parsing return only fixed provider-count error text. Backend status,
+result-type/error strings, decoder details and invalid sample text never enter
+the public signal or aggregate error. Unsupported envelopes retain the
+unclassified observation class; decode/value failures retain invalid-response.
+Untrusted response text cannot select a timeout or access-denied class. These
+are unavailable observations, with no healthy/provider verdict or recovery
+credit. Direct source-error chains and parent cancellation/deadline precedence
+remain unchanged; this local parser correction does not redact other sources.
+False-positive qualifier: rejecting an unavailable response is not a measured
+provider failure. False-negative qualifier: missing cohorts can conceal real
+degradation, and a fixed error cannot recover discarded backend detail. Clean
+independent responses and the existing annotation policy retain their separate
+authority; no threshold, query, retry, transport or cadence change is made.
+
 `provider-count-direct-unclassified` is a separate evidence-unknown WARN, never
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
 location, group, or best-available selector. In the emitting API's matching
@@ -11564,6 +11715,21 @@ were not ok over ten minutes. They are the series the providers dashboard's
   no-attempt rates are valid optional observations. Query evaluations older
   than 30 minutes or more than 30 seconds in the future are unavailable;
   future decision/pair timestamps beyond that skew are invalid.
+
+This reader locally decodes query `warnings` and `infos`. Any nonempty array,
+including an empty-string entry, unknown text, duplicates, additional messages
+or a truncation summary, leaves the whole query unqualified. The existing
+`arindb-canary-unobservable` WARN and 15-cadence sustain remain; publisher
+values render as unknown and this query supplies no positive or healthy
+predicate. No harmless-message, omission-only or arithmetic semantics are
+assumed without an exact serving-engine/producer/formatter contract. Absent,
+null and empty arrays preserve the existing reader behavior; malformed metadata
+remains a decode failure. Annotation text never enters findings. Existing
+incidents remain held by the signal-wide incomplete-execution policy, even
+before visibility sustain matures. Independently established source findings
+retain their own authority. A benign annotation can withhold useful evidence,
+and an unqualified query can hide a real failure; warning-free metadata alone
+does not establish complete serving input or deployment health.
 
 Action on a fallback: judge whether the latest database is a bad release from
 the losses and emptied countries, its catalog audit and its Atlas validation.
@@ -17451,6 +17617,12 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   denominator. This pattern does not isolate site policy, provider paths,
   shared route/admission capacity or the `/ip` echo. Retain the legacy class
   as a diagnostic pattern, not proof of universal unreachability;
+  the current country query lists only failing cohorts, with a `HAVING`
+  predicate and a listing cap. It supplies no comparable passing cohort, so
+  this source cannot emit a country healthy sentinel or establish country-ticket
+  recovery through healthy findings. Empty or nonqualifying results, eligibility
+  changes and capped omissions leave recovery unknown. The continuous notifier's
+  separate absence transitions do not certify recovery and are unchanged;
 - **backfill sustained** (`egress-backfill-sustained`, frame the rank mode):
   more than half of the providers FindProviders2 answered with for a rank
   mode over the last hour were borrowed from another bucket
@@ -18662,6 +18834,18 @@ alert stream cannot establish a healthy mature sample. The running binary's
 source must contain the cohort query, reducer and optional observation sink.
 Output failures remain monitor visibility errors and retain actual deficit
 alerts; the observer never converts healthy samples into alerts.
+
+A failed URL census gateway query retains the existing finite `error_class`,
+SSH admission phases and code-owned `execution_boundaries` in the owning
+`url-probe-coverage-unobservable` alert. Raw errors, gateway identities and
+partial response bodies are never rendered. The JSONL census remains
+`transport_unavailable` / `census_unavailable` with null source clocks and
+counts. False-positive qualifier: joined boundary sets do not establish attempt
+order or count, remote command execution, Mimir failure or provider scarcity;
+a started/joined local SSH child alone proves no remote contact. False-negative
+qualifier: an absent boundary marker remains unknown, and an unavailable census
+cannot clear prior quota/security findings or certify recovery. A later valid
+census is a visibility control and needs its own fresh source identity and clocks.
 
 First admission waits for current reliability history: URL admission needs a
 one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
@@ -21036,6 +21220,21 @@ Observe all three layers every five minutes:
   `identity_observed=false` without UID/title comparisons; only a decoded
   successful response qualifies those comparisons.
 
+The snapshot reader locally decodes query `warnings` and `infos`. Any nonempty
+array, including empty-string, duplicate, additional, unknown or truncated
+annotation entries, makes snapshot authority unavailable. Until exact serving
+annotation semantics are qualified, the returned top value supplies neither a
+stale/gap/future finding nor healthy recovery. Absent, null and empty arrays
+preserve the existing reader behavior; malformed metadata stays unknown. No
+annotation text enters findings, no shared all-Mimir policy is introduced, and
+no harmless-message or omission-only exception is assumed. Independent
+PostgreSQL task and authenticated dashboard failures remain reportable. The
+existing signal-wide clear hold also retains absent sibling incidents while
+snapshot visibility is incomplete, including before its sustain matures.
+Benign annotations can withhold useful results, and unqualified responses can
+hide real snapshot failures. Source controls do not establish a production
+annotation occurrence, serving-engine completeness or runtime recovery.
+
 The dashboard findings are `subscription-dashboard-auth` for absent/denied
 authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
 `subscription-dashboard-http` for other non-2xx responses, and
@@ -22833,7 +23032,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[family]dial tag=doh ... err=...i/o timeout`, `[egress]dial tag=doh ... err=...i/o timeout`, or exact `observable=v1 ... result=timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. Proxy `path=tun` legs are classified separately as `doh-tun-dial-timeout`. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and legacy diagnostic forms can describe one attempt twice, so line rate is neither an attempt count nor a logical failure denominator. Legacy path/family/outcome remain unknown. New finite `path`, `attempted_family`, `resolver_owner`, `resolver_scope`, and `resolver_outcome` tokens identify only the initiating resolver call; a detached losing HTTP dial may report `answer` after that call returned successfully. | Preserve PAGE at 10 lines/minute and the single `doh-attempt` frame. The bounded sample retains only validated finite tokens and omits endpoints, domains, and correlation identifiers. Correlate the original process path, same-window controls, and fresh same-process `[doh]resolver` cumulative outcome snapshots; see §5.2 for scope and Taskworker measurement qualifiers. Pending/unknown outcomes and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
 | Proxy exact `observable=v1 path=tun ... result=timeout` (`doh-tun-dial-timeout`) | A hosted device's remote DoH leg through its own tunnel timed out. The tunnel egresses through the provider the customer selected, so a device pinned to an offline or retired provider times out every leg it races. Lines are throttled per process and resolver target: one such device keeps a process above threshold, and the rate measures neither devices nor failed lookups. On Main on 2026-10-12 every Proxy process logged ~20/min of these while logical tun resolver calls had zero timeouts and zero failures (~66% answered, ~34% canceled by their callers), host-path calls answered 100%, and the ingress dial failure ratio was at its pre-incident baseline. | WARN at 10 lines/minute with the single `doh-tun-attempt` frame. Before treating it as a platform incident, compare fresh same-process `[doh]resolver owner_path=tun` deltas and the Proxy ingress dial outcome ratio with their baseline; a platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups (it would egress the customer's queries from the platform host) or lengthen resolver timeouts from this class. Platform-owned host/caller paths keep the `doh-dial-timeout` page. |
 | DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
-| otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 lines/minute and the existing emitter-service/endpoint identity. Resolve the exact target and original source path; compare same-window process, listener, TCP, and resource evidence. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls, and ten minutes below threshold. |
+| otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
@@ -26734,6 +26933,23 @@ remain unknown. This is detector coverage, not evidence that Main lacks the
 columns or that the migration has run there. Matching schema does not establish
 when a device connected or whether its reported app version is fresh; the
 probe reads catalog metadata, not device values.
+
+Version 853 adds the five crypto-payment intent, quote, receipt, address and
+scan-cursor tables. Its one ordered artifact contract checks all 69 published
+columns, permanent ordinary-table custody, the five primary keys and separate
+address uniqueness, all eleven lookup/partial/unique indexes, and the existing
+`solana_payment_intent.network_id` change to nullable ordinary `uuid` without a
+default. Types, widths, nullability, defaults, key order, index uniqueness,
+readiness and predicates are operative checks; names or the numeric head alone
+are insufficient. The new relations remain pending before 853 and a missing or
+incompatible contract pages at a source-known applied head. Failed, excluded,
+or canceled evidence remains unavailable, and a still-newer head retains the
+separate future-schema warning and immutable-prefix checks. This detector reads
+catalog metadata only, not payment rows or private address/token values. It
+does not prove current Main schema, authorize the payment rollout or a rollback,
+or replace the migration's client/config deployment ordering. Retained
+853-versus-852 warnings are older-validator authority gaps, not proof that the
+database is broken; their recovery requires a qualified 853-aware observation.
 
 Version 811 requires the durable recurring-grant receipt table and composite
 run/kind identity. Version 812 requires the exact deadline usage guard that
@@ -31358,6 +31574,36 @@ or reinterpret a missing observation as zero throughput.
 ### 11.20a Mimir series and sample-rate admission
 
 Probe: `mimir-admission`
+
+Fleet counter and journal-context sums use checked nonnegative int64
+aggregation. A sum above MaxInt64 renders only that field as `unavailable`,
+never a wrapped negative, zero, partial total, or saturated exact count.
+Overflow of a direct discard or created/removed delta emits fixed
+`cannot-observe` at `mimir-admission/aggregate`, denies complete/comparable
+recovery credit, and resets the existing quiet windows. Qualified child
+baselines and independently affirmative series/rate PAGE flags remain intact;
+a later complete flat observation can begin a new full quiet window.
+Journal-only sum overflow is optional context unknown and cannot open a direct
+incident or revoke otherwise complete direct-counter recovery authority.
+False-positive qualifier: a representability failure is not proof of service
+failure, unique rejected requests, or actual production counter magnitude.
+False-negative qualifier: the exact oversized fleet total is unavailable even
+though child positives remain affirmative; no new visibility into an unknown
+child, historical loss, or producer attribution is supplied. Per-child parsing,
+identity/generation/reset gates, headroom pairing, thresholds, cadence, state
+schema and atomic-save requirements remain unchanged.
+
+A canceled wait for this probe's existing per-host fanout permit retains
+`execution_boundaries=mimir-host-admission/not-attempted` on that host's
+visibility finding. It proves that this host attempt did not enter transport;
+it does not describe sibling attempts. Once transport is entered, the existing
+host/shared admission and native Start/Wait error markers remain separate.
+No native or remote progress is inferred from a callback, global permit,
+unmarked timeout, or absent marker. False-positive qualifier: a local fanout
+wait can expire while Mimir is healthy. False-negative qualifier: that host's
+unobserved counters can conceal loss; the held PAGE and complete comparable
+two-hour recovery requirement remain unchanged. These finite error markers
+add no request, retry, timeout, cadence, or concurrency change.
 
 Native listener acquisition, its selector and sorting, build-info curl, and
 the lazy-family source selector each require successful completion. A valid
@@ -38338,6 +38584,27 @@ matches. Rebuild and promote the watcher when its inventory changes. Do not
 restart, replace, or reset a progressing historical node solely because the
 public current runtime advanced. A lower public spec, or any
 chain/genesis/runtime name/EVM mismatch, remains `subtensor-identity`.
+
+Runtime identity authority is per measured member on the public, direct and
+gateway RPC surfaces. Missing/null runtime results, empty names and absent,
+null or invalid version members remain unknown and produce cannot-observe;
+they cannot become an empty-name or zero-version identity mismatch. The local
+decoder isolates malformed runtime data from independent host observations.
+Valid sibling runtime members, including explicitly measured zero versions,
+and independent chain, gateway, peer and progress breaches retain their own
+authority. Runtime evidence renders unobserved members as unknown. A complete
+healthy runtime and a complete newer public runtime retain the existing
+healthy/runtime-ahead behavior. Explicit gateway runtime-method errors retain
+their existing gateway page, including during historical bootstrap. These
+source controls do not establish private interpreter qualification, executing
+artifact identity, production adoption or historical incident recovery.
+
+Controls: TestSubtensorRuntimeMissingFieldsRemainUnknown,
+TestSubtensorRuntimeMalformedResultPreservesIndependentIdentity,
+TestSubtensorRuntimePartialResultPreservesMeasuredMismatch,
+TestSubtensorRuntimeCompleteControlsRemainAuthoritative,
+TestSubtensorRuntimeUnknownPreservesIndependentLag, plus the retained gateway
+method-error, historical-runtime and independent wrong-identity controls.
 
 Host lifecycle inspection is separate from lifecycle health. The native
 `systemctl is-active` output must agree with its command-specific result:

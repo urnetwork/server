@@ -196,6 +196,16 @@ type SubscriptionBalanceResult struct {
 	OnboardingOffer *OnboardingOfferResult `json:"onboarding_offer"`
 	// Experiments is the caller's variant per experiment surface.
 	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
+
+	// ----- crypto payments (crypto_pay_controller.go) -----
+	// CryptoAssets are the coins that are on and what each sells (the list of
+	// GET /pay/crypto/assets). Omitted when none is on, so a client older than
+	// crypto, or a deployment with crypto off, never shows a coin.
+	CryptoAssets []*CryptoPaymentAsset `json:"crypto_assets,omitempty"`
+	// CryptoTerm is the network's latest one-time crypto credit (Solana,
+	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice
+	// while term_end_time <= now < grace_end_time, and never before.
+	CryptoTerm *CryptoTerm `json:"crypto_term,omitempty"`
 }
 
 type Subscription struct {
@@ -273,8 +283,9 @@ func isGuestNetwork(
 
 // Stable machine codes for a refused checkout or payment intent
 // (/stripe/create-checkout-session, /stripe/payment-intent,
-// /subscription/stripe/payment-sheet, /solana/payment-intent, /pay/data/checkout
-// and /pay/data/solana-intent). Clients pick a localized message (or flow) from
+// /subscription/stripe/payment-sheet, /solana/payment-intent, /pay/data/checkout,
+// /pay/data/solana-intent and the crypto endpoints of crypto_pay_controller.go).
+// Clients pick a localized message (or flow) from
 // the code and fall back to `Message`, which every refusal still carries, so a
 // client older than a code reads the refusal as before.
 const (
@@ -304,6 +315,15 @@ const (
 	// the payment could not be started (Stripe or the database failed); a
 	// retry may work
 	PurchaseErrorCodeStartFailed = "start_failed"
+	// a crypto asset is switched off, or cannot be quoted right now (rates
+	// missing, stale or divergent, the node or the scanner lagging, the
+	// address pool empty). UI: "Temporarily unavailable"
+	PurchaseErrorCodeAssetUnavailable = "asset_unavailable"
+	// a crypto quote's time ran out with nothing received; the UI offers
+	// "Refresh quote"
+	PurchaseErrorCodeQuoteExpired = "quote_expired"
+	// a crypto invoice ended short of its quote; the UI shows the review copy
+	PurchaseErrorCodeUnderpaid = "underpaid"
 )
 
 const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
@@ -2498,6 +2518,23 @@ func solanaCreditPaymentIntentInConn(connOwner server.PgConn,
 	signature string,
 	tokenAmountReceivedUsd float64,
 ) (credited bool, returnErr error) {
+	// an intent of the generic crypto API (POST /pay/crypto/intent,
+	// /pay/data/crypto-intent) is credited through its invoice, which consumes
+	// this intent in the same transaction (crypto_pay_credit.go)
+	if linked, credited, err := cryptoCreditLinkedSolanaIntentInConn(
+		connOwner,
+		clientSession,
+		paymentSearchResult,
+		signature,
+		tokenAmountReceivedUsd,
+	); linked {
+		return credited, err
+	}
+	// only a linked intent can lack a network (a USDC code bought without one)
+	if paymentSearchResult.NetworkId == nil {
+		return false, fmt.Errorf("solana intent %s has no network", paymentSearchResult.PaymentReference)
+	}
+
 	// a data pack bought for a named network from the buy-data page: data only,
 	// no subscription (pay_data_solana_controller.go)
 	if solanaIsDataPackPlan(paymentSearchResult.SubscriptionPlan) {
@@ -2714,6 +2751,16 @@ func CreateSolanaPaymentIntent(
 			Error: &SolanaPaymentIntentError{
 				Code:    PurchaseErrorCodeGuestSignInRequired,
 				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
+	// the per-network budget shared with POST /pay/crypto/intent (decision
+	// 13: this endpoint had no limit)
+	if !allowNetworkIntent(clientSession.ByJwt.NetworkId) {
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodeRateLimited,
+				Message: "Too many payment attempts. Try again in a minute.",
 			},
 		}, nil
 	}

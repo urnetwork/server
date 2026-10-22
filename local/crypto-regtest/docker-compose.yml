@@ -1,0 +1,274 @@
+# The crypto regtest harness: the pinned monerod/monero-wallet-rpc and
+# zebrad/zecd release binaries on private regtest chains, for
+# controller/crypto_pay_regtest_test.go (build tag crypto_regtest).
+#
+# Don't run this directly. up.sh fetches and verifies the binaries, generates
+# the secrets and the test wallets, sets the CRYPTO_REGTEST_* variables below
+# (a bare `docker compose up` fails fast on them), and funds the chains;
+# down.sh removes every container, the network and every volume.
+#
+# Every container, volume and the network is named crypto-regtest-*. Ports are
+# published on 127.0.0.1 only. The binaries are x86_64 Linux builds run under
+# Docker Desktop's amd64 emulation, bind-mounted read-only from .cache/bin.
+
+name: crypto-regtest
+
+x-daemon: &daemon
+  image: ${CRYPTO_REGTEST_BASE_IMAGE:?run ./up.sh}
+  platform: linux/amd64
+  init: true
+  networks: [crypto-regtest]
+  stop_grace_period: 60s
+  restart: "no"
+
+x-monero-wallet: &monero-wallet
+  <<: *daemon
+  depends_on: [monerod]
+
+x-zecd: &zecd
+  <<: *daemon
+  depends_on: [zebrad]
+  environment:
+    # zecd's regtest NU6.3 (Ironwood) height; zebrad.toml names the same
+    ZECD_REGTEST_NU63_HEIGHT: ${CRYPTO_REGTEST_NU63_HEIGHT:?run ./up.sh}
+    NO_COLOR: "1"
+
+services:
+  # ----- Monero -----
+
+  monerod:
+    <<: *daemon
+    container_name: crypto-regtest-monerod
+    command:
+      - /opt/monero/monerod
+      - --regtest
+      - --offline
+      - --fixed-difficulty=1
+      - --non-interactive
+      - --data-dir=/data
+      - --rpc-bind-ip=0.0.0.0
+      - --confirm-external-bind
+      - --rpc-bind-port=18081
+      - --disable-rpc-ban
+      - --no-zmq
+      - --no-igd
+      - --p2p-bind-ip=127.0.0.1
+      - --log-file=/data/monerod.log
+      - --log-level=0
+      - --max-log-files=2
+    volumes:
+      - ${CRYPTO_REGTEST_MONERO_BIN:?run ./up.sh}:/opt/monero:ro
+      - monerod-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_MONEROD:?run ./up.sh}:18081"
+
+  # The funder: a spending wallet that mines to its own address and pays the
+  # wallet under test. --wallet-dir mode, so up.sh can create its wallet.
+  monero-funder:
+    <<: *monero-wallet
+    container_name: crypto-regtest-monero-funder
+    command:
+      - /opt/monero/monero-wallet-rpc
+      - --daemon-address=monerod:18081
+      - --trusted-daemon
+      # regtest jumps to the newest hard fork at height 1, and a wallet without
+      # a network flag checks the daemon against mainnet's schedule ("Unexpected
+      # hard fork version v16"); monero's own functional tests pass this too
+      - --allow-mismatched-daemon-version
+      - --wallet-dir=/data
+      - --shared-ringdb-dir=/data/ringdb
+      - --rpc-bind-ip=0.0.0.0
+      - --confirm-external-bind
+      - --rpc-bind-port=18082
+      - --log-file=/data/monero-wallet-rpc.log
+      - --log-level=0
+      - --max-log-files=2
+    env_file:
+      # RPC_LOGIN=<user>:<password> (HTTP digest), read when --rpc-login is absent
+      - path: ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/monero-funder.env
+        required: false
+    volumes:
+      - ${CRYPTO_REGTEST_MONERO_BIN:?run ./up.sh}:/opt/monero:ro
+      - monero-funder-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_MONERO_FUNDER:?run ./up.sh}:18082"
+
+  # The view-only wallet's one-time creation: --wallet-dir mode, where up.sh
+  # calls generate_from_keys with the test wallet's address and view key.
+  monero-view-bootstrap:
+    <<: *monero-wallet
+    container_name: crypto-regtest-monero-view-bootstrap
+    profiles: [bootstrap]
+    command:
+      - /opt/monero/monero-wallet-rpc
+      - --daemon-address=monerod:18081
+      - --trusted-daemon
+      # regtest jumps to the newest hard fork at height 1, and a wallet without
+      # a network flag checks the daemon against mainnet's schedule ("Unexpected
+      # hard fork version v16"); monero's own functional tests pass this too
+      - --allow-mismatched-daemon-version
+      - --wallet-dir=/data
+      - --rpc-bind-ip=0.0.0.0
+      - --confirm-external-bind
+      - --rpc-bind-port=18088
+      - --log-file=/data/monero-wallet-rpc-bootstrap.log
+      - --log-level=0
+      - --max-log-files=2
+    env_file:
+      - path: ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/monero-view.env
+        required: false
+    volumes:
+      - ${CRYPTO_REGTEST_MONERO_BIN:?run ./up.sh}:/opt/monero:ro
+      - monero-view-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_MONERO_VIEW:?run ./up.sh}:18088"
+
+  # The wallet under test: view-only, run the way production runs it
+  # (xops crypto-pay-wallet.service.j2): --wallet-file with --password-file,
+  # digest login from $RPC_LOGIN, --trusted-daemon, --no-initial-sync, and
+  # never --restricted-rpc.
+  monero-view:
+    <<: *monero-wallet
+    container_name: crypto-regtest-monero-view
+    command:
+      - /opt/monero/monero-wallet-rpc
+      - --daemon-address=monerod:18081
+      - --trusted-daemon
+      # regtest jumps to the newest hard fork at height 1, and a wallet without
+      # a network flag checks the daemon against mainnet's schedule ("Unexpected
+      # hard fork version v16"); monero's own functional tests pass this too
+      - --allow-mismatched-daemon-version
+      - --wallet-file=/data/wallet
+      - --password-file=/secrets/monero-view.wallet-password
+      - --rpc-bind-ip=0.0.0.0
+      - --confirm-external-bind
+      - --rpc-bind-port=18088
+      - --no-initial-sync
+      - --log-file=/data/monero-wallet-rpc.log
+      - --log-level=0
+      - --max-log-files=2
+    env_file:
+      - path: ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/monero-view.env
+        required: false
+    volumes:
+      - ${CRYPTO_REGTEST_MONERO_BIN:?run ./up.sh}:/opt/monero:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/monero-view.wallet-password:/secrets/monero-view.wallet-password:ro
+      - monero-view-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_MONERO_VIEW:?run ./up.sh}:18088"
+
+  # ----- Zcash -----
+
+  zebrad:
+    <<: *daemon
+    container_name: crypto-regtest-zebrad
+    command: [/opt/zebrad/zebrad, --config, /config/zebrad.toml, start]
+    volumes:
+      - ${CRYPTO_REGTEST_ZEBRAD_BIN:?run ./up.sh}:/opt/zebrad:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/zebrad.toml:/config/zebrad.toml:ro
+      - zebrad-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_ZEBRAD:?run ./up.sh}:18232"
+
+  # The funder: a spending zecd with the transparent pool on; Zebra mines to
+  # its transparent address.
+  zecd-funder:
+    <<: *zecd
+    container_name: crypto-regtest-zecd-funder
+    command: [/opt/zecd/zecd, --conf, /config/zecd.toml, --datadir, /data, run]
+    volumes:
+      - ${CRYPTO_REGTEST_ZECD_BIN:?run ./up.sh}:/opt/zecd:ro
+      - ./config/zecd-funder.toml:/config/zecd.toml:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/zecd-funder.rpc-password:/secrets/zecd-funder.rpc-password:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/zecd-funder.mnemonic:/secrets/zecd-funder.mnemonic:ro
+      - zecd-funder-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_ZECD_FUNDER:?run ./up.sh}:18252"
+
+  # The wallet under test: watch-only from a separate test wallet's UFVK,
+  # configured like production (xops zecd.toml.j2) but for the network, the
+  # upstream and the bind address (config/zecd-view.toml).
+  zecd-view:
+    <<: *zecd
+    container_name: crypto-regtest-zecd-view
+    command: [/opt/zecd/zecd, --conf, /config/zecd.toml, --datadir, /data, run]
+    volumes:
+      - ${CRYPTO_REGTEST_ZECD_BIN:?run ./up.sh}:/opt/zecd:ro
+      - ./config/zecd-view.toml:/config/zecd.toml:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/zecd-view.rpc-password:/secrets/zecd-view.rpc-password:ro
+      - zecd-view-data:/data
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_ZECD_VIEW:?run ./up.sh}:18262"
+
+  # One-shot zecd commands that run before the secrets they produce exist
+  # (keygen, derive-address), run by up.sh with `compose run --rm`. It sees the
+  # whole secrets directory; its datadir is container-local and discarded.
+  zecd-tool:
+    <<: *zecd
+    profiles: [tool]
+    container_name: crypto-regtest-zecd-tool
+    command: [/opt/zecd/zecd, --version]
+    volumes:
+      - ${CRYPTO_REGTEST_ZECD_BIN:?run ./up.sh}:/opt/zecd:ro
+      - ./config/zecd-funder.toml:/config/zecd-funder.toml:ro
+      - ./config/zecd-view.toml:/config/zecd-view.toml:ro
+      - ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets:/secrets
+
+  # ----- the end-to-end test's database (./up.sh --db) -----
+  # Disposable PostgreSQL and Redis of the harness's own, for a machine whose
+  # shared local stack (local/run-local.sh) is not up: the same images, init
+  # script and settings as local/docker-compose.yml, data in tmpfs. test-env.sh
+  # reaches them in its private portable mode (.state/test-env-portable.sh).
+
+  postgres:
+    image: postgres:18
+    container_name: crypto-regtest-postgres
+    profiles: [db]
+    networks: [crypto-regtest]
+    restart: "no"
+    env_file:
+      # POSTGRES_PASSWORD and APP_DB_PASSWORD, generated by up.sh
+      - path: ${CRYPTO_REGTEST_STATE:?run ./up.sh}/secrets/postgres.env
+        required: false
+    environment:
+      LANG: en_US.UTF-8
+      POSTGRES_INITDB_ARGS: --locale=en_US.UTF-8
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      APP_DB_USER: bringyour
+      APP_DB_NAME: bringyour
+    command: [postgres, -c, max_connections=512, -c, shared_buffers=256MB, -c, track_activity_query_size=16kB]
+    tmpfs: [/var/lib/postgresql]
+    volumes:
+      - ../postgres/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_POSTGRES:?run ./up.sh}:5432"
+
+  redis:
+    image: redis:8-alpine
+    container_name: crypto-regtest-redis
+    profiles: [db]
+    networks: [crypto-regtest]
+    restart: "no"
+    command: [redis-server, --save, "", --appendonly, "no"]
+    tmpfs: [/data]
+    ports:
+      - "127.0.0.1:${CRYPTO_REGTEST_PORT_REDIS:?run ./up.sh}:6379"
+
+networks:
+  crypto-regtest:
+    name: crypto-regtest-net
+
+volumes:
+  monerod-data:
+    name: crypto-regtest-monerod-data
+  monero-funder-data:
+    name: crypto-regtest-monero-funder-data
+  monero-view-data:
+    name: crypto-regtest-monero-view-data
+  zebrad-data:
+    name: crypto-regtest-zebrad-data
+  zecd-funder-data:
+    name: crypto-regtest-zecd-funder-data
+  zecd-view-data:
+    name: crypto-regtest-zecd-view-data

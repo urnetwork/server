@@ -11,7 +11,7 @@ import (
 
 func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 	for _, required := range []string{
-		"market IN ('apple', 'google', 'stripe', 'solana')",
+		"market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')",
 		"network_client.active = true",
 		"network_client.source_client_id IS NULL",
 		"metric_window.since_time <= network_client.auth_time",

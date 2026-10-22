@@ -80,7 +80,7 @@ func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, origi
 // This bounded reader retains only an exact original registration. Capacity is
 // optional only when row cleanup confirms no independent SQL/protocol failure.
 func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) (registration []byte, returnErr error) {
-	rows, err := tx.Query(ctx, `SELECT registration,registration_hash,evidence,evidence_hash
+	rows, err := tx.Query(ctx, `SELECT registration_hash,evidence,evidence_hash
  FROM st_client_key_history WHERE client_id=$1 AND domain_hash=$2
  ORDER BY generation DESC LIMIT $3`, server.Id(original.ClientId), original.DomainHash[:], MaxStClientKeyHistoryRegistrations+1)
 	if err != nil {
@@ -101,20 +101,25 @@ func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, origi
 		if count >= MaxStClientKeyHistoryRegistrations {
 			return nil, errOriginalCloseKeyCapacity
 		}
-		var registration, registrationHash, evidence []byte
+		var registrationHash, evidence []byte
 		var evidenceHash string
-		if err := rows.Scan(&registration, &registrationHash, &evidence, &evidenceHash); err != nil {
+		if err := rows.Scan(&registrationHash, &evidence, &evidenceHash); err != nil {
 			return nil, err
 		}
-		next := uint64(len(registration) + len(evidence))
+		// The budget also counts the registration copy the evidence payload
+		// carries, known once the row decodes. The evidence alone goes first.
+		if uint64(len(evidence)) > MaxStClientKeyHistoryBytes-used {
+			return nil, errOriginalCloseKeyCapacity
+		}
+		record, err := decodeStClientKeyHistoryRecord(registrationHash, evidence, evidenceHash)
+		if err != nil {
+			return nil, errors.Join(ErrContractCloseOriginalIntegrity, err)
+		}
+		next := uint64(len(record.RegistrationBytes) + len(evidence))
 		if next > MaxStClientKeyHistoryBytes-used {
 			return nil, errOriginalCloseKeyCapacity
 		}
 		used += next
-		record, err := decodeStClientKeyHistoryRecord(registration, registrationHash, evidence, evidenceHash)
-		if err != nil {
-			return nil, errors.Join(ErrContractCloseOriginalIntegrity, err)
-		}
 		domainHash, err := record.Registration.Domain.Digest()
 		if err != nil || domainHash != original.DomainHash || record.Registration.ClientID != original.ClientId {
 			return nil, errors.Join(ErrContractCloseOriginalIntegrity, err)
