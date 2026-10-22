@@ -260,25 +260,25 @@ func TestProxyMemoryObserveUdpBootInvalidBaselineIsDiscarded(t *testing.T) {
 		sample.bootID = bootId
 		sample.udpInDatagrams = 20_000
 		sample.udpRcvbufErrors = 750
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(time.Minute)); valid {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(time.Minute)); valid {
 			t.Fatal("UDP boot baseline authority: invalid cached identity authorized a counter delta")
 		}
 		if _, retained := probe.udpSamples["proxy-1"]; retained {
 			t.Fatal("UDP boot baseline authority: invalid cached identity remained reusable")
 		}
 		sample.bootID = proxyMemoryBootTestId
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(2*time.Minute)); valid {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(2*time.Minute)); valid {
 			t.Fatal("first known boot sample used an invalid cached baseline")
 		}
 		known := probe.udpSamples["proxy-1"]
 		sample.bootID = bootId
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(3*time.Minute)); valid || probe.udpSamples["proxy-1"] != known {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(3*time.Minute)); valid || probe.udpSamples["proxy-1"] != known {
 			t.Fatal("invalid current boot replaced or consumed a valid known baseline")
 		}
 		sample.bootID = proxyMemoryBootTestId
 		sample.udpInDatagrams += 20_000
 		sample.udpRcvbufErrors += 500
-		delta, valid := probe.observeUDP("proxy-1", sample, now.Add(4*time.Minute))
+		delta, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(4*time.Minute))
 		if !valid || delta.elapsed != 2*time.Minute || delta.inDatagrams != 20_000 || delta.rcvbufErrors != 500 {
 			t.Fatal("matching known boot endpoints lost the full authoritative elapsed interval")
 		}

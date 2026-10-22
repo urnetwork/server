@@ -74,7 +74,7 @@ func (self *proxyMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 			continue
 		}
 		findings = append(findings, evaluateProxyMemory(target.name, sample)...)
-		delta, observed := self.observeUDP(target.name, sample, observedAt)
+		delta, observed := self.observeUDP(ctx, target.name, sample, observedAt)
 		if sample.bootID == "" {
 			unavailable := cannotObserveFinding(target.name+"/proxy-udp-receive-drops", fmt.Errorf("proxy memory: invalid response for kernel boot_id"))
 			unavailable.observed += " boot_identity=unavailable"
@@ -234,9 +234,17 @@ type proxyUDPDelta struct {
 // Compares consecutive valid host samples. Unavailable boot identity preserves
 // the last known baseline; matching valid UUIDs prove the full elapsed interval.
 // First samples, generation/counter resets and immediate reruns remain warmups.
-func (self *proxyMemoryProbe) observeUDP(host string, sample proxyMemorySample, observedAt time.Time) (proxyUDPDelta, bool) {
+func (self *proxyMemoryProbe) observeUDP(ctx context.Context, host string, sample proxyMemorySample, observedAt time.Time) (proxyUDPDelta, bool) {
+	// Context callbacks stay outside the lock; only its captured channel is
+	// checked at the per-host publication checkpoint. This is not rollback.
+	done := ctx.Done()
 	self.udpLock.Lock()
 	defer self.udpLock.Unlock()
+	select {
+	case <-done:
+		return proxyUDPDelta{}, false
+	default:
+	}
 	if self.udpSamples == nil {
 		self.udpSamples = map[string]proxyUDPCounterSample{}
 	}

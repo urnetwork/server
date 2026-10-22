@@ -36903,6 +36903,24 @@ capacity owners while those joins remain open.
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
+UDP private-state cancellation boundary: a valid host frame whose context is
+already canceled at that host's locked publication checkpoint must not
+initialize, evict or replace its cached cumulative counters. Capture the context
+Done channel outside the mutex; the lock checks only that channel. The public
+adapter already withholds canceled findings, so advancing hidden history there
+would consume loss before the next accepted interval. A synthetic t0 zero pair,
+canceled t1 1000/1000 pair and live t2 same pair over 120 seconds must retain
+1000 delivered/1000 dropped, 50% loss and 500 drops/minute, hence PAGE.
+This is a per-host checkpoint, not atomic evaluation rollback: cancellation
+after the checkpoint, including a later host's cancellation, does not undo
+an earlier live host commit. First/reset/boot/clock warmups and independent
+memory/OOM predicates remain unchanged. False-positive qualifier: these are
+synthetic lifecycle/state controls, not observed Main loss, hidden baseline
+changes or notifier recovery. False-negative qualifier: zero canceled Alerts
+alone proves no private-state conservation; earlier accepted host commits and
+post-checkpoint cancellation remain outside this refusal guarantee. Kernel
+counters remain host-wide and do not identify a socket or loss cause.
+
 Proxy readiness is not host-capacity proof. Every proxy block normally owns a
 large resident Go process, and the old process remains live while its candidate
 restores clients and drains. Treat a deploy as an explicit host-memory budget:
