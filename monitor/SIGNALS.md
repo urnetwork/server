@@ -41729,6 +41729,24 @@ characters before an `Alert` can render it.
 
 Probe: `play-crashes`
 
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
+
 Read the Play Developer Reporting API v1beta1 for the package named by the
 existing `vault/<env>/google.yml` `webhook.package_name` value. The dedicated
 optional `vault/<env>/google-play-reporting.json` is an ordinary Google service
@@ -41829,6 +41847,24 @@ they do not require an API, Connect, Proxy, Grafana, or database deployment.
 ### 20.2 Apple App Crashes aggregate and corrections
 
 Probe: `apple-crashes`
+
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
 
 Read App Store Connect Analytics for the numeric app ID already stored at
 `vault/<env>/apple.yml` `app_store_notifications.app_apple_id`. Keep the team

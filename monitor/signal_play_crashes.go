@@ -61,11 +61,21 @@ func (*playCrashesSignal) ID() string             { return "mobile/play-crashes"
 func (*playCrashesSignal) Name() string           { return "Google Play crash reports" }
 func (*playCrashesSignal) Cadence() time.Duration { return 30 * time.Minute }
 
-func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (Alerts, error) {
+func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (alerts Alerts, runErr error) {
 	settings = settings.withDefaults()
 	configured := settings.GooglePlay
 	if !configured.Enabled {
 		return nil, nil
+	}
+	// A completed body may end its parent before cursor acceptance.
+	// A cancellation after commit cannot roll back that accepted state.
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			alerts, runErr = nil, err
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := validateGooglePlayReportingSettings(configured); err != nil {
 		return nil, newProviderVisibilityError(providerAuthenticationClass, providerErrorText(err))
@@ -108,7 +118,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 		return nil, providerDataError("google play crash issues", err)
 	}
 
-	alerts := s.metricAlerts(settings, metric, len(issues))
+	alerts = s.metricAlerts(settings, metric, len(issues))
 	next := playCrashState{Groups: map[string]playCrashCursor{}}
 	for key, cursor := range state.Groups {
 		if cursor.LastReportTime.After(now.Add(-playCrashStateRetention)) {
@@ -184,6 +194,9 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 		alerts = append(alerts, playIssueOverflowAlert(settings, configured.PackageName, len(advancing), visible))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := saveProviderState(settings.StateDir, s.Key(), playCrashStateVersion, next); err != nil {
 		return nil, err
 	}

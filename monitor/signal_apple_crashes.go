@@ -65,11 +65,21 @@ func (*appleCrashesSignal) ID() string             { return "mobile/apple-crashe
 func (*appleCrashesSignal) Name() string           { return "Apple crash reports" }
 func (*appleCrashesSignal) Cadence() time.Duration { return 6 * time.Hour }
 
-func (s *appleCrashesSignal) Run(ctx context.Context, settings SignalSettings) (Alerts, error) {
+func (s *appleCrashesSignal) Run(ctx context.Context, settings SignalSettings) (alerts Alerts, runErr error) {
 	settings = settings.withDefaults()
 	configured := settings.AppleReporting
 	if !configured.Enabled {
 		return nil, nil
+	}
+	// A completed body may end its parent before cursor acceptance.
+	// A cancellation after commit cannot roll back that accepted state.
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			alerts, runErr = nil, err
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := validateAppleReportingSettings(configured); err != nil {
 		return nil, newProviderVisibilityError(providerAuthenticationClass, providerErrorText(err))
@@ -154,7 +164,7 @@ func (s *appleCrashesSignal) Run(ctx context.Context, settings SignalSettings) (
 	if latest.processingTime.After(now.Add(24 * time.Hour)) {
 		return nil, providerDataError("apple crash report instances", fmt.Errorf("newest processingDate is implausibly in the future"))
 	}
-	alerts := Alerts{}
+	alerts = Alerts{}
 	if now.Sub(latest.processingTime) > appleCrashFreshnessTolerance {
 		alerts = append(alerts, appleVisibilityAlert(settings, "apple-crash-data-stale",
 			"Apple App Crashes data is stale",
@@ -204,6 +214,9 @@ func (s *appleCrashesSignal) Run(ctx context.Context, settings SignalSettings) (
 		alerts = append(alerts, appleBacklogAlert(settings, len(selected), backlog))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(selected) != 0 || !loaded {
 		if err := saveProviderState(settings.StateDir, s.Key(), appleCrashStateVersion, next); err != nil {
 			return nil, err
