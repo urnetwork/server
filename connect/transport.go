@@ -1367,6 +1367,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// fast and lands on a sibling service via the lb (CONNECTDRAIN2.md §3.3)
 	if self.exchange.settings.EnableDrainCoordination && self.exchange.IsDraining() {
 		h1Observation.result = connectH1ResultDraining
+		drainRefusalsCounter.WithLabelValues(drainRefusalCarrierH1).Inc()
 		http.Error(w, "draining", http.StatusServiceUnavailable)
 		return
 	}
@@ -2480,7 +2481,27 @@ func withObservedConnectQuicAuthFrame(
 	return use(auth, authFrameBytes)
 }
 
+// The error connectQuic returns for a connection a draining exchange refused.
+var errConnectQuicDraining = errors.New("connect is draining")
+
+// A draining exchange admits no new client transport on any QUIC carrier (H3,
+// DNS-carried H3 and the alt front), as the H1 handler answers 503, so the
+// client redials to a sibling instead of holding the drain open (MOVE.md
+// §2.3). The refusal precedes the handshake wait and every admission charge.
+func (self *ConnectHandler) refuseQuicWhileDraining(conn *quic.Conn) bool {
+	// admission tests drive connectQuic on a handler without an exchange
+	if self.exchange == nil || !self.exchange.settings.EnableDrainCoordination || !self.exchange.IsDraining() {
+		return false
+	}
+	drainRefusalsCounter.WithLabelValues(drainRefusalCarrierQuic).Inc()
+	_ = conn.CloseWithError(0, "draining")
+	return true
+}
+
 func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
+	if self.refuseQuicWhileDraining(conn) {
+		return errConnectQuicDraining
+	}
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	// H3, DNS-carried H3 and externally dispatched QUIC share this bounded
 	// admission path. Accepting the first stream consumes the same auth budget.

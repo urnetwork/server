@@ -282,6 +282,26 @@ var drainResidentsRemainingGauge = prometheus.NewGauge(
 	},
 )
 
+// the `carrier` label values of drainRefusalsCounter
+const (
+	drainRefusalCarrierH1       = "h1"
+	drainRefusalCarrierQuic     = "quic"
+	drainRefusalCarrierExchange = "exchange"
+)
+
+// Admissions a draining exchange refused: new client transports on each
+// carrier, and inbound exchange handshakes for a resident that is not here
+// (MOVE.md §2.3). These keep a drain from being held by arrivals.
+var drainRefusalsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_refusals_total",
+		Help:      "Admissions refused while the service drains: new client transports by carrier, and inbound exchange handshakes for a resident that is not here",
+	},
+	[]string{"carrier"},
+)
+
 // drainExcusesWrittenCounter minus drain_excuses_consumed is the clients that
 // did not return after a drain (real capacity loss, not a deploy artifact)
 var drainExcusesWrittenCounter = prometheus.NewCounter(
@@ -324,6 +344,10 @@ func init() {
 	prometheus.MustRegister(drainResidentsRemainingGauge)
 	prometheus.MustRegister(drainExcusesWrittenCounter)
 	prometheus.MustRegister(nominationRefusedCounter)
+	prometheus.MustRegister(drainRefusalsCounter)
+	for _, carrier := range []string{drainRefusalCarrierH1, drainRefusalCarrierQuic, drainRefusalCarrierExchange} {
+		drainRefusalsCounter.WithLabelValues(carrier).Add(0)
+	}
 
 	for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
 		for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
@@ -715,8 +739,13 @@ type Exchange struct {
 	// resident installation while retaining the poll timeout as a backstop.
 	residentChanges map[server.Id]chan struct{}
 
-	// client id -> connection id -> cancel func
+	// The client's transports on this process (H1 and every QUIC carrier):
+	// client id -> connection id -> cancel func. A drain waits for these.
 	connections map[server.Id]map[server.Id]context.CancelFunc
+	// client id -> accepted inbound exchange connections. An inbound exchange
+	// connection routes into a local resident and ends with it, so a drain
+	// does not wait for these (MOVE.md §2.3). Nil until the first one.
+	exchangeConnectionCounts map[server.Id]int
 	// client ids already given a drain excuse. Residents carry their own
 	// drained bit for teardown behavior, but connection-only split state has
 	// no Resident on which to store that bit.
@@ -1384,9 +1413,8 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		return
 	}
 
-	connectionId := server.NewId()
-	self.registerConnection(header.ClientId, connectionId, handleCancel)
-	defer self.unregisterConnection(header.ClientId, connectionId)
+	self.registerExchangeConnection(header.ClientId)
+	defer self.unregisterExchangeConnection(header.ClientId)
 
 	c := func() *Resident {
 		endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
@@ -1413,6 +1441,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				)
 				return nil
 			case exchangeResidentGenerationMissing:
+				// A draining exchange nominates no resident, so none can arrive.
+				// Refusing at once lets the dialer re-read the resident record
+				// instead of holding this socket through the drain. Drain wakes
+				// the handshakes already waiting so they reach this check.
+				if self.refusesMissingResidents() {
+					drainRefusalsCounter.WithLabelValues(drainRefusalCarrierExchange).Inc()
+					return nil
+				}
 				if afterMissing := self.afterResidentMissingForTest; afterMissing != nil {
 					afterMissing()
 				}
@@ -1799,11 +1835,52 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 		delete(handleCancels, connectionId)
 		if len(handleCancels) == 0 {
 			delete(self.connections, clientId)
-			// matchResidentGeneration only creates a change channel for an
-			// accepted connection. Once the last connection is gone, no waiter
-			// remains and an unchanged missing client must not retain map state.
-			delete(self.residentChanges, clientId)
 		}
+	}
+}
+
+// Counts one accepted inbound exchange connection of the client.
+func (self *Exchange) registerExchangeConnection(clientId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.exchangeConnectionCounts == nil {
+		self.exchangeConnectionCounts = map[server.Id]int{}
+	}
+	self.exchangeConnectionCounts[clientId] += 1
+}
+
+func (self *Exchange) unregisterExchangeConnection(clientId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	count := self.exchangeConnectionCounts[clientId] - 1
+	if 0 < count {
+		self.exchangeConnectionCounts[clientId] = count
+		return
+	}
+	delete(self.exchangeConnectionCounts, clientId)
+	// matchResidentGeneration only creates a change channel for an accepted
+	// exchange connection. Once the last one is gone, no waiter remains and an
+	// unchanged missing client must not retain map state.
+	delete(self.residentChanges, clientId)
+}
+
+// Whether an accepted exchange handshake for a missing resident is refused
+// instead of waiting: a draining exchange with coordination nominates no
+// resident (see nominateLocalResident).
+func (self *Exchange) refusesMissingResidents() bool {
+	return self.settings.EnableDrainCoordination && self.draining.Load()
+}
+
+// Wakes every accepted exchange handshake that waits for a missing resident,
+// so each rechecks against the draining gate.
+func (self *Exchange) wakeResidentWaiters() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	for clientId := range self.residentChanges {
+		self.notifyResidentChangedLocked(clientId)
 	}
 }
 
@@ -1865,7 +1942,8 @@ func (self *Exchange) sendResidentMigrate(
 // migrateResidents broadcasts migrate frames with migrate times jittered
 // across `DrainMigrateWindow`, then waits for the clients to move themselves:
 // a migrated client closes its old transport once its replacement is up, so
-// the wait watches only clients that actually received a migrate frame.
+// the wait watches the transports on this process of the clients that
+// actually received a migrate frame.
 // Bounded fanout and an aggregate broadcast deadline prevent a large number of
 // wedged send queues from serially consuming the migration window. Returns
 // when those connections are gone or the migrate window (bounded by the drain
@@ -2002,7 +2080,9 @@ func (self *Exchange) drainClientCountLocked() int {
 
 // Drain sheds this exchange's residents for shutdown (CONNECTDRAIN2.md):
 //  1. flip the admission gate, so evicted clients redial to a sibling service
-//     instead of bouncing on this one
+//     instead of bouncing on this one. With coordination on, every carrier
+//     refuses new client transports (H1 503s, QUIC closes) and an inbound
+//     exchange handshake for a resident that is not here is refused at once
 //  2. mark and excuse every current resident up front, so the reconnect is
 //     excused no matter when the client redials
 //  3. broadcast migrate frames with jittered migrate times and wait for
@@ -2010,9 +2090,17 @@ func (self *Exchange) drainClientCountLocked() int {
 //  4. evict the stragglers, paced to finish within
 //     `DrainStragglerSweepTimeout`
 //
+// Convergence counts the client transports on this process and the local
+// residents. Inbound exchange connections are not counted: each routes into a
+// local resident and ends with it, so routing keeps working until each
+// resident leaves or is swept (MOVE.md §2.3).
+//
 // The whole drain is bounded by `DrainAllTimeout`.
 func (self *Exchange) Drain() {
 	self.draining.Store(true)
+	if self.settings.EnableDrainCoordination {
+		self.wakeResidentWaiters()
+	}
 	drainEndTime := time.Now().Add(self.settings.DrainAllTimeout)
 
 	residents, connectionOnlyClientIds := func() ([]*Resident, []server.Id) {
