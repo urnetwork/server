@@ -49,6 +49,8 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyDeployOverlapPrewarmGate\n")
+		restoreHandoffKey := pushProxyTestHandoffKey()
+		defer restoreHandoffKey()
 		h := setupProxyTest(t)
 		defer h.close(t)
 
@@ -102,10 +104,8 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 
 		// main's exact post-readiness sequence: the handoff outcome first (in
 		// its own error scope), then identity release and pre-warm
-		prewarmed := make(chan int, 1)
-		go func() {
-			prewarmed <- wgB.CompleteDeploymentHandoff(bCtx)
-		}()
+		prewarm := startProxyTestDeploymentHandoff(bCtx, wgB.CompleteDeploymentHandoff)
+		defer closeProxyTestDeploymentHandoff(t, prewarm)
 
 		// B publishes its generation request at the gate (the real Prepare
 		// path, which A's drain-end export will read)
@@ -150,8 +150,8 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 			}
 		}
 		select {
-		case count := <-prewarmed:
-			t.Fatalf("pre-warm ran before the old instance's drain-end export (%d ready)", count)
+		case <-prewarm.done:
+			t.Fatalf("pre-warm returned before the old instance's drain-end export (%d ready, raise=%v)", prewarm.readyCount, prewarm.raised)
 		default:
 		}
 		if deviceCount := freshManager.DeviceCount(); deviceCount != 1 {
@@ -173,7 +173,11 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 
 		var readyCount int
 		select {
-		case readyCount = <-prewarmed:
+		case <-prewarm.done:
+			if prewarm.raised != nil {
+				t.Fatalf("post-export pre-warm failed: %v", prewarm.raised)
+			}
+			readyCount = prewarm.readyCount
 		case <-time.After(150 * time.Second):
 			t.Fatal("pre-warm did not run after the drain-end export")
 		}
