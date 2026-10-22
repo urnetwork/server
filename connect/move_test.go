@@ -814,10 +814,13 @@ func TestMoverArrivalNotes(t *testing.T) {
 	}
 }
 
-// The fleet cap stops the tick; a target cap sends the rest to the other
-// targets until each is spent. Each refusal is counted by its cap.
+// The fleet cap stops the tick, though another target remains; a target cap
+// sends the rest to the other targets until each is spent. Each refusal is
+// counted by its cap.
 func TestMoverBudgetRefusals(t *testing.T) {
 	fixture := newMoveTestFixture(t, 1000, 200)
+	fixture.store.loads = append(fixture.store.loads, moveTestLoad("edge-cool2.example", "g1", 200, 10, 0.3))
+	fixture.inventory.inventory["edge-cool2.example"] = moveTestInventoryHost("192.0.2.30", "2001:db8::30")
 	fixture.addIdleCandidates(20)
 	fixture.store.setControl(map[string]string{
 		model.ConnectMoveControlFieldMode:         "on",
