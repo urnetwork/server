@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -555,5 +556,139 @@ func TestContractCloseReportReapedBeforeSettlementKeepsReportResult(t *testing.T
 			t.Fatal("reaped contract reappeared")
 		}
 		assertCloseReportCounts(t, f.ctx, f.contractId, 2, 0)
+	})
+}
+
+// Two finals whose settlement attempts both read two finals contend for the
+// outcome under the contract lock, and exactly one claims it. When one attempt
+// reads a single final, it opens no transaction and the other settles.
+func TestContractCloseReportRacingFinalSettlementsClaimOnce(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportFixture(t)
+		commitFinal := func(contractId, clientId server.Id) {
+			report := f.report()
+			report.ContractId = contractId
+			report.ClientId = clientId
+			report.Checkpoint = false
+			server.Tx(f.ctx, func(tx server.PgTx) {
+				applied, err := closeContractReportInTx(f.ctx, tx, report)
+				server.Raise(err)
+				if !applied {
+					t.Fatal("final report was not admitted")
+				}
+			}, server.TxReadCommitted)
+		}
+		arrived := make(chan struct{}, 2)
+		release := make(chan struct{})
+		var attemptsMutex sync.Mutex
+		attempts := map[server.Id]int{}
+		ctx := context.WithValue(f.ctx, contractSettlementTxTestKey{}, func(contractId server.Id) {
+			func() {
+				attemptsMutex.Lock()
+				defer attemptsMutex.Unlock()
+				attempts[contractId]++
+			}()
+			if contractId == f.contractId {
+				arrived <- struct{}{}
+				select {
+				case <-release:
+				case <-time.After(time.Minute):
+				}
+			}
+		})
+		type settlement struct {
+			closed bool
+			err    error
+		}
+		settle := func(contractId server.Id) settlement {
+			var result settlement
+			server.HandleError(func() { result.closed, _, result.err = settleReportedContract(ctx, contractId, false) }, func(err error) { result.err = err })
+			return result
+		}
+		// Both read two finals before either begins its transaction.
+		commitFinal(f.contractId, f.sourceId)
+		commitFinal(f.contractId, f.destinationId)
+		results := make(chan settlement, 2)
+		for range 2 {
+			go func() { results <- settle(f.contractId) }()
+		}
+		for range 2 {
+			select {
+			case <-arrived:
+			case <-time.After(time.Minute):
+				t.Fatal("settlement attempts did not both read two finals")
+			}
+		}
+		close(release)
+		claims := 0
+		for range 2 {
+			result := <-results
+			if result.err != nil {
+				t.Fatal("racing settlement failed", result.err)
+			}
+			if result.closed {
+				claims++
+			}
+		}
+		// The first attempt reads one final and leaves the contract open.
+		commitFinal(f.otherContractId, f.sourceId)
+		if result := settle(f.otherContractId); result.closed || result.err != nil {
+			t.Fatal("single final settled", result.closed, result.err)
+		}
+		commitFinal(f.otherContractId, f.destinationId)
+		if result := settle(f.otherContractId); !result.closed || result.err != nil {
+			t.Fatal("later final did not settle", result.closed, result.err)
+		}
+		if claims != 1 || attempts[f.contractId] != 2 || attempts[f.otherContractId] != 1 {
+			t.Fatal("finals did not claim exactly one outcome", claims, attempts[f.contractId], attempts[f.otherContractId])
+		}
+		server.Db(f.ctx, func(conn server.PgConn) {
+			for _, contractId := range []server.Id{f.contractId, f.otherContractId} {
+				var outcome *ContractOutcome
+				server.Raise(conn.QueryRow(f.ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&outcome))
+				if outcome == nil || *outcome != ContractOutcomeSettled {
+					t.Fatal("finals did not settle their contract", outcome)
+				}
+			}
+		})
+	})
+}
+
+// A contract lock refused inside the admission batch raises its error and
+// writes nothing; the same report admits once the lock is free.
+func TestContractCloseReportRefusedLockWritesNothing(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newCloseReportFixture(t)
+		report := f.report()
+		ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
+		defer cancel()
+		server.Db(ctx, func(conn server.PgConn) {
+			holder, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			server.Raise(err)
+			defer rollbackCloseReportTestTransaction(ctx, holder)
+			server.RaisePgResult(holder.Exec(ctx, `SELECT 1 FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, f.contractId))
+			var refusal error
+			server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '100ms'`))
+					_, err := closeContractReportInTx(ctx, tx, report)
+					server.Raise(err)
+				}, server.TxReadCommitted, server.OptNoRetry())
+			}, func(err error) { refusal = err })
+			var pgErr *pgconn.PgError
+			if !errors.As(refusal, &pgErr) || pgErr.Code != "55P03" {
+				t.Fatal("refused contract lock did not raise from the batch", refusal)
+			}
+		})
+		assertCloseReportCounts(t, f.ctx, f.contractId, 0, 0)
+		assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 0)
+		if applied, err := CloseContractWithReport(f.ctx, report); !applied || err != nil {
+			t.Fatal("report did not admit after the lock was free", applied, err)
+		}
+		assertCloseReportCounts(t, f.ctx, f.contractId, 1, 20)
 	})
 }
