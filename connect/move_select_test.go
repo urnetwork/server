@@ -415,7 +415,8 @@ func TestChooseMoveTargetAddressesByDnsWeight(t *testing.T) {
 // A balance candidate is capable, resident at least MoveMinResidentAge,
 // payload-idle at least MoveIdleTimeout on every forward (an open contract
 // without payload is idle), has no open streams and only direct carriers
-// (D7). An arrival skips the age and idle tests (D9).
+// (D7). An arrival skips the age and idle tests (D9). Neither moves a resident
+// that arrived by a move intent (§6) or has a move outstanding.
 func TestMoveCandidateEligibility(t *testing.T) {
 	settings := DefaultExchangeSettings()
 	now := moveTestNodeTime
@@ -449,6 +450,8 @@ func TestMoveCandidateEligibility(t *testing.T) {
 		}), balance: moveEligible, arrival: moveEligible},
 		{name: "payload 9 min ago", candidate: with(func(c *MoveCandidate) { c.LastPayloadTime = now.Add(-9 * time.Minute) }), balance: moveIneligibleActive, arrival: moveEligible},
 		{name: "an unknown start", candidate: with(func(c *MoveCandidate) { c.ResidentStartTime = time.Time{} }), balance: moveIneligibleYoung, arrival: moveEligible},
+		{name: "arrived by a move intent", candidate: with(func(c *MoveCandidate) { c.ArrivedByMove = true }), balance: moveIneligibleArrivedByMove, arrival: moveIneligibleArrivedByMove},
+		{name: "a move outstanding", candidate: with(func(c *MoveCandidate) { c.MoveOutstanding = true }), balance: moveIneligibleMoveOutstanding, arrival: moveIneligibleMoveOutstanding},
 	}
 	for _, c := range cases {
 		if reason := balanceMoveIneligibility(c.candidate, now, &settings.ExchangeMoverSettings); reason != c.balance {

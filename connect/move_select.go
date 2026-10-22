@@ -418,6 +418,10 @@ const (
 	moveIneligibleStreams = "streams"
 	// a transport reaches the platform over DNS
 	moveIneligibleCarrier = "carrier"
+	// took over here by a move intent: never moved again (D9)
+	moveIneligibleArrivedByMove = "arrived_by_move"
+	// a move of the resident is outstanding
+	moveIneligibleMoveOutstanding = "move_outstanding"
 )
 
 // The time of the resident's latest payload, or its start when it has had
@@ -432,18 +436,12 @@ func moveCandidateLastActivity(candidate *MoveCandidate) time.Time {
 // Whether the resident at now is a balance candidate (MOVE.md §5.5 step 4,
 // D7): capable, resident at least MoveMinResidentAge, every forward
 // payload-idle at least MoveIdleTimeout (an open contract without payload is
-// idle), no open streams, and only direct carriers. The cooldown is checked
-// separately, in Redis. Empty for a candidate, else the first reason it is
-// not.
+// idle), no open streams, and only direct carriers; not an arrival by intent
+// (D9, §6) and no move outstanding. The cooldown is checked separately, in
+// Redis. Empty for a candidate, else the first reason it is not.
 func balanceMoveIneligibility(candidate *MoveCandidate, now time.Time, settings *ExchangeMoverSettings) string {
-	if candidate.MoveVersion < 1 {
-		return moveIneligibleLegacy
-	}
-	if !candidate.DirectCarrier {
-		return moveIneligibleCarrier
-	}
-	if 0 < candidate.OpenStreamCount {
-		return moveIneligibleStreams
+	if reason := arrivalMoveIneligibility(candidate); reason != moveEligible {
+		return reason
 	}
 	// an unknown start is not old enough
 	if candidate.ResidentStartTime.IsZero() || now.Sub(candidate.ResidentStartTime) < settings.MoveMinResidentAge {
@@ -458,6 +456,12 @@ func balanceMoveIneligibility(candidate *MoveCandidate, now time.Time, settings 
 // Whether a resident that just arrived is an arrival-time candidate (D9): the
 // balance tests without the age and idle tests.
 func arrivalMoveIneligibility(candidate *MoveCandidate) string {
+	if candidate.MoveOutstanding {
+		return moveIneligibleMoveOutstanding
+	}
+	if candidate.ArrivedByMove {
+		return moveIneligibleArrivedByMove
+	}
 	if candidate.MoveVersion < 1 {
 		return moveIneligibleLegacy
 	}

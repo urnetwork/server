@@ -80,6 +80,13 @@ type MoveCandidate struct {
 	// unknown, and the mover offers every family the target has.
 	Ipv4 bool
 	Ipv6 bool
+	// The resident took over here by a move intent (MOVE.md §5.3). Balance,
+	// arrival and emergency moves never move it again (D9, §6); an evacuation
+	// still does, since the host must empty.
+	ArrivedByMove bool
+	// A move of the resident is outstanding: no trigger sends another until
+	// it ends.
+	MoveOutstanding bool
 }
 
 // This process's residents. Implemented by the exchange.
@@ -559,7 +566,13 @@ func (self *Mover) plan(
 
 	switch {
 	case fleet.isEvacuating(ownHost):
-		ordered := evacuationMoveOrder(candidates)
+		pending := []*MoveCandidate{}
+		for _, candidate := range candidates {
+			if !candidate.MoveOutstanding {
+				pending = append(pending, candidate)
+			}
+		}
+		ordered := evacuationMoveOrder(pending)
 		return &movePlan{
 			trigger:       moveTriggerEvacuation,
 			kind:          protocol.ResidentMoveKind_ResidentMoveKindCompulsory,

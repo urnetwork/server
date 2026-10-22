@@ -410,7 +410,11 @@ func TestMoverBalanceSendsAdvisoryMoves(t *testing.T) {
 	streaming.OpenStreamCount = 2
 	overDns := fixture.idleCandidate()
 	overDns.DirectCarrier = false
-	fixture.residents.candidates = append(fixture.residents.candidates, young, legacy, streaming, overDns)
+	arrivedByMove := fixture.idleCandidate()
+	arrivedByMove.ArrivedByMove = true
+	outstanding := fixture.idleCandidate()
+	outstanding.MoveOutstanding = true
+	fixture.residents.candidates = append(fixture.residents.candidates, young, legacy, streaming, overDns, arrivedByMove, outstanding)
 
 	sentBefore := moveTestSent(moveKindAdvisory, moveTriggerBalance, moveTestCoolHost)
 	if outcome := fixture.mover.tick(); outcome != moverTickMoved {
@@ -679,11 +683,13 @@ func TestMoveEmergencyCount(t *testing.T) {
 }
 
 // A host listed in evacuateHosts moves every resident with a compulsory move,
-// legacy, active and DNS-carried ones too, the longest payload-idle first,
-// whatever their cooldown, MoveMaxPerTick a tick. A client with no family the
-// target offers still gets the move and migrates by name.
+// legacy, active, DNS-carried ones and arrivals by intent too, the longest
+// payload-idle first, whatever their cooldown, MoveMaxPerTick a tick; only a
+// resident with a move outstanding waits. A client with no family the target
+// offers still gets the move and migrates by name.
 func TestMoverEvacuationMovesEveryResident(t *testing.T) {
 	fixture := newMoveTestFixture(t, 1000, 200)
+	fixture.settings.MoveMaxPerTick = 11
 	fixture.inventory.inventory[moveTestCoolHost] = moveTestInventoryHost("192.0.2.20", "")
 	candidates := fixture.addIdleCandidates(5)
 	legacy := fixture.idleCandidate()
@@ -701,8 +707,14 @@ func TestMoverEvacuationMovesEveryResident(t *testing.T) {
 	young := fixture.idleCandidate()
 	young.ResidentStartTime = fixture.now.Add(-time.Minute)
 	young.LastPayloadTime = time.Time{}
-	candidates = append(candidates, legacy, active, overDns, cooling, ipv6Only, young)
-	fixture.residents.candidates = candidates
+	arrivedByMove := fixture.idleCandidate()
+	arrivedByMove.ArrivedByMove = true
+	arrivedByMove.LastPayloadTime = fixture.now.Add(-55 * time.Minute)
+	outstanding := fixture.idleCandidate()
+	outstanding.MoveOutstanding = true
+	outstanding.LastPayloadTime = fixture.now.Add(-2 * time.Hour)
+	candidates = append(candidates, legacy, active, overDns, cooling, ipv6Only, young, arrivedByMove)
+	fixture.residents.candidates = append(slices.Clone(candidates), outstanding)
 	fixture.store.cooldowns[cooling.ClientId] = server.NewId()
 	fixture.store.setControl(map[string]string{
 		model.ConnectMoveControlFieldMode:          "on",
@@ -730,13 +742,16 @@ func TestMoverEvacuationMovesEveryResident(t *testing.T) {
 	for _, request := range requests {
 		movedIds[request.ClientId] = true
 	}
-	for _, candidate := range []*MoveCandidate{legacy, overDns, cooling, ipv6Only, young} {
+	for _, candidate := range []*MoveCandidate{legacy, overDns, cooling, ipv6Only, young, arrivedByMove} {
 		if !movedIds[candidate.ClientId] {
 			t.Errorf("evacuation skipped a resident %+v", candidate)
 		}
 	}
 	if movedIds[active.ClientId] {
 		t.Error("evacuation reached the active client before idle ones")
+	}
+	if movedIds[outstanding.ClientId] {
+		t.Error("evacuation sent a second move to a resident with one outstanding")
 	}
 	if len(fixture.store.cooldownReads) != 0 {
 		t.Error("evacuation read cooldowns")
