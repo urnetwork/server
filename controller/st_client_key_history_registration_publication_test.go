@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/startifact"
 )
 
 // Each synchronous member reports after releasing its complete-operation slot.
@@ -145,8 +146,8 @@ func stClientKeyRegistrationAssertPublicationIdle(t testing.TB, parent *stClient
 // Context values identify callers, not authority or accepted publication results.
 type stClientKeyRegistrationPublicationContextKeyTest struct{}
 
-// Sixty-five already-ready clients require two real quota owners. Both routes
-// still create/read/close on each fresh write and exact collided retry.
+// Sixty-five already-ready clients require two real quota owners. The content
+// route still creates/reads/closes on each fresh write and exact collided retry.
 func TestStClientKeyRegistrationCohortPublicationUsesBoundedReadyWindows(t *testing.T) {
 	owner := newStClientKeyRegistrationPublicationQueueTest(t, stClientKeyRegistrationPublicationBatch+1)
 	contexts, stores, records := owner.inputs()
@@ -174,7 +175,7 @@ func TestStClientKeyRegistrationCohortPublicationUsesBoundedReadyWindows(t *test
 	}
 	owner.parent.afterPublicationForTest = func() {
 		contexts := owner.fixture.store.contexts
-		for _, ctx := range contexts[len(contexts)-2:] {
+		for _, ctx := range contexts[len(contexts)-startifact.ClientKeyEvidenceStoredObjects:] {
 			index, ok := ctx.Value(stClientKeyRegistrationPublicationContextKeyTest{}).(int)
 			deadline, bounded := ctx.Deadline()
 			if !ok || index < 0 || index >= len(deadlines) || !bounded || deadline != deadlines[index] {
@@ -207,15 +208,15 @@ func TestStClientKeyRegistrationCohortPublicationUsesBoundedReadyWindows(t *test
 	if !bytes.Equal(records[0].EvidenceBytes, mutated) {
 		t.Fatal("publisher changed borrowed caller bytes")
 	}
-	if len(owner.fixture.store.contexts) != 2*len(records) || owner.fixture.store.gets != 2*len(records) || owner.fixture.store.closes != owner.fixture.store.gets {
+	if len(owner.fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects*len(records) || owner.fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects*len(records) || owner.fixture.store.closes != owner.fixture.store.gets {
 		t.Fatal("finite publication omitted an immutable attempt or exact readback")
 	}
 	objects, err := owner.fixture.store.List(t.Context(), "")
-	if err != nil || len(objects) != 2*len(records) {
+	if err != nil || len(objects) != startifact.ClientKeyEvidenceStoredObjects*len(records) {
 		t.Fatal("fresh immutable object census", len(objects), err)
 	}
 	// A later completed authority reservation must acquire new live quota owners,
-	// and collisions still perform both independent exact readbacks.
+	// and collisions still perform their exact readback.
 	owner.parent.slots = 1
 	retry := &stClientKeyRegistrationReservation{cohort: &stClientKeyRegistrationCohort{parent: owner.parent, finished: true}}
 	record := owner.fixture.histories[0][0]
@@ -225,7 +226,7 @@ func TestStClientKeyRegistrationCohortPublicationUsesBoundedReadyWindows(t *test
 	if err != nil || len(windows) != 3 || windows[2] == windows[0] || windows[2] == windows[1] || counts[2] != 1 || observedErr != nil {
 		t.Fatal("collision reused a completed quota owner", err, counts, observedErr)
 	}
-	if len(owner.fixture.store.contexts) != 2*(len(records)+1) || owner.fixture.store.gets != 2*(len(records)+1) || owner.fixture.store.closes != owner.fixture.store.gets {
+	if len(owner.fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects*(len(records)+1) || owner.fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects*(len(records)+1) || owner.fixture.store.closes != owner.fixture.store.gets {
 		t.Fatal("collision omitted actual immutable attempts or readbacks")
 	}
 }
@@ -252,11 +253,11 @@ func TestStClientKeyRegistrationCohortPublicationPreservesLiveSibling(t *testing
 		if results[0] == nil || results[1] != nil || fault == "cancel" && !errors.Is(results[0], context.Canceled) {
 			t.Fatal("one member changed its sibling's publication result", fault, results)
 		}
-		if len(owner.fixture.store.contexts) != 2 || owner.fixture.store.gets != 2 || owner.fixture.store.closes != 2 {
+		if len(owner.fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects || owner.fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects || owner.fixture.store.closes != startifact.ClientKeyEvidenceStoredObjects {
 			t.Fatal("failed member skipped or duplicated its sibling's original routes", fault)
 		}
 		objects, err := owner.fixture.store.List(t.Context(), "")
-		if err != nil || len(objects) != 2 {
+		if err != nil || len(objects) != startifact.ClientKeyEvidenceStoredObjects {
 			t.Fatal("sibling object census", len(objects), err)
 		}
 	}
@@ -348,7 +349,7 @@ func TestStClientKeyRegistrationCohortPublicationSharesFinalCensusFailure(t *tes
 			t.Fatal("a member escaped final reconciliation", err)
 		}
 	}
-	if len(owner.fixture.store.contexts) != 4 || owner.fixture.store.gets != 4 || owner.fixture.store.closes != 4 {
+	if len(owner.fixture.store.contexts) != 2*startifact.ClientKeyEvidenceStoredObjects || owner.fixture.store.gets != 2*startifact.ClientKeyEvidenceStoredObjects || owner.fixture.store.closes != 2*startifact.ClientKeyEvidenceStoredObjects {
 		t.Fatal("final failure omitted a real signed route or readback")
 	}
 }
@@ -389,7 +390,7 @@ func TestStClientKeyRegistrationCohortPublicationJoinsPanickedWorkers(t *testing
 			}
 		}
 		if fault == "pending" && (successes != 0 || failures != 65 || len(owner.fixture.store.contexts) != 0) ||
-			fault == "active" && (successes != 1 || failures != 64 || windows != 2 || len(owner.fixture.store.contexts) != 2) {
+			fault == "active" && (successes != 1 || failures != 64 || windows != 2 || len(owner.fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects) {
 			t.Fatal("panic stranded members or erased a following independent window", fault, successes, failures, windows)
 		}
 		owner.parent.beforePublicationForTest, owner.parent.afterPublicationWindowForTest = nil, nil
@@ -448,7 +449,7 @@ func TestStClientKeyRegistrationCohortPublicationRejectsUnownedAndKeepsUnknownPa
 	member := &stClientKeyRegistrationReservation{cohort: &stClientKeyRegistrationCohort{parent: parent, finished: true}}
 	err := member.publish(t.Context(), &stClientKeyRegistrationPublicationUnknownTest{BlobStore: fixture.store}, record.EvidenceBytes, record.EvidenceHash)
 	member.release()
-	if err != nil || len(fixture.store.contexts) != 2 || fixture.store.gets != 2 || fixture.store.closes != 2 {
+	if err != nil || len(fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects || fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects || fixture.store.closes != startifact.ClientKeyEvidenceStoredObjects {
 		t.Fatal("unknown backend lost original signed publication", err)
 	}
 	stClientKeyRegistrationAssertPublicationIdle(t, parent)
@@ -456,7 +457,7 @@ func TestStClientKeyRegistrationCohortPublicationRejectsUnownedAndKeepsUnknownPa
 
 // This is the actual authenticated controller, not a copied publication call.
 // Both Sql rows are ready before any quota window; final reconciliation must
-// fail both responses even after all four real immutable routes were read back.
+// fail both responses even after both real immutable routes were read back.
 func TestStClientKeyRegistrationCohortPublicationActualControllerOwnsFinalFailure(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, credential, cfg, cohorts := newStClientKeyRegistrationFixture(tb, 1, 0)

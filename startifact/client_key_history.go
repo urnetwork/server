@@ -1,6 +1,6 @@
 // Typed client-key statements reuse the existing immutable evidence content
-// and history paths. The inner operator root signature is independent authority;
-// the outer artifact signature identifies the actual public storage publisher.
+// path. The inner operator root signature is independent authority; the outer
+// artifact signature identifies the actual public storage publisher.
 package startifact
 
 import (
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/urfoundation/sn/protocol"
@@ -22,6 +23,30 @@ const (
 	ClientKeyObservationEvidenceKind  = "client-key-observation-v1"
 	MaxClientKeyEvidenceBytes         = 16 * 1024
 )
+
+// Client-key evidence is stored only under its content key. Each registration
+// and observation used to be written a second time under one run-less history
+// prefix per kind. At one registration per hosted window identity those two
+// prefixes grew by tens of millions of tiny objects (2026-10-22) while nothing
+// read them: validators receive these bytes inline from the observation
+// routes, and /sn/evidence serves them by content hash.
+var evidenceHistoryUnindexedKinds = []string{ClientKeyRegistrationEvidenceKind, ClientKeyObservationEvidenceKind}
+
+// EvidenceHistoryIndexed reports whether evidence of this kind is also written
+// under its history key. Kinds that are not are refused by the history routes.
+func EvidenceHistoryIndexed(kind string) bool {
+	return !slices.Contains(evidenceHistoryUnindexedKinds, kind)
+}
+
+// EvidenceHistoryUnindexedKinds returns the kinds stored by content key only.
+func EvidenceHistoryUnindexedKinds() []string {
+	return slices.Clone(evidenceHistoryUnindexedKinds)
+}
+
+// ClientKeyEvidenceStoredObjects is the number of objects one client-key
+// evidence publication writes to a store: its content key only. Local write
+// batches reserve this many writes per envelope.
+const ClientKeyEvidenceStoredObjects = 1
 
 // Builds one exact signed wrapper for durable preparation. Callers retain
 // these bytes before publication and reuse them verbatim after any crash.

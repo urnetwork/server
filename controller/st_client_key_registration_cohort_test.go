@@ -226,7 +226,8 @@ func stClientKeyRegistrationRequest(ctx context.Context, endpoint, token string,
 	return nil
 }
 
-// Original independently signed Sql bytes must match both immutable paths.
+// Original independently signed Sql bytes must match the immutable content
+// path, and no history copy is written for client-key evidence.
 func stClientKeyRegistrationAssertStored(t testing.TB, fixture *stClientKeyRegistrationRpcFixture, cfg *StConfig, credential *session.ByJwt, key []byte, boundary protocol.ClientKeyEffectiveBoundary) model.StClientKeyHistoryRecord {
 	t.Helper()
 	base := fixture.snapshot()
@@ -258,16 +259,18 @@ func stClientKeyRegistrationAssertStored(t testing.TB, fixture *stClientKeyRegis
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{contentKey, historyKey} {
-		reader, err := store.Get(t.Context(), path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		actual, err := io.ReadAll(io.LimitReader(reader, startifact.MaxClientKeyEvidenceBytes+1))
-		err = errors.Join(err, reader.Close())
-		if err != nil || !bytes.Equal(actual, record.EvidenceBytes) {
-			t.Fatal("actual public original differs", path, err)
-		}
+	reader, err := store.Get(t.Context(), contentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := io.ReadAll(io.LimitReader(reader, startifact.MaxClientKeyEvidenceBytes+1))
+	err = errors.Join(err, reader.Close())
+	if err != nil || !bytes.Equal(actual, record.EvidenceBytes) {
+		t.Fatal("actual public original differs", contentKey, err)
+	}
+	if reader, err := store.Get(t.Context(), historyKey); err == nil {
+		reader.Close()
+		t.Fatal("client-key registration evidence wrote a history copy", historyKey)
 	}
 	return record
 }
@@ -406,8 +409,8 @@ func TestStClientKeyRegistrationCohortActualThousandClientsTwoOperators(t *testi
 				tb.Fatal("actual original store disappeared")
 			}
 			objects, err := store.List(ctx, store.Prefix())
-			if err != nil || len(objects) != 2*len(credentials) {
-				tb.Fatal("complete original content/history object census differs", len(objects), err)
+			if err != nil || len(objects) != startifact.ClientKeyEvidenceStoredObjects*len(credentials) {
+				tb.Fatal("complete original content-only object census differs", len(objects), err)
 			}
 			cohorts.stateLock.Lock()
 			closed := cohorts.slots == 0 && cohorts.pending == nil && cohorts.active == nil
