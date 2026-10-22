@@ -1,9 +1,10 @@
 # MOVE — server-directed connection placement
 
-Status: **design complete; decisions settled 2026-10-22 (§9, §10). Nothing here
-is implemented.** The one input still pending is edge-7/8's core counts and
-interfaces (Q2), which v27 needs but the design does not. Implementation starts
-with phase 0 (§7).
+Status: **design complete; decisions settled 2026-10-22 (§9, §10).
+Implementation in progress:** the protocol is on connect main (09d446ee), and
+the settings live in `connect/move_settings.go`. The one input still pending is
+edge-7/8's core counts and interfaces (Q2), which v27 needs but the design does
+not.
 
 The platform tells a connected client "reconnect to this exact edge IP", and the
 client opens the new transport (same hostname, SNI and certificate) before it
@@ -255,9 +256,9 @@ today's behavior.
 ```proto
 enum ResidentMoveKind {
     // legacy migrate semantics: same name, server-chosen time (drain)
-    ResidentMoveDrain = 0;
-    ResidentMoveAdvisory = 1;
-    ResidentMoveCompulsory = 2;
+    ResidentMoveKindDrain = 0;
+    ResidentMoveKindAdvisory = 1;
+    ResidentMoveKindCompulsory = 2;
 }
 
 message ResidentMoveTarget {
@@ -300,8 +301,8 @@ already visible as an arrival at the target.
 
 ```proto
 enum ResidentMoveOutcome {
-    ResidentMoveDeclined = 0;
-    ResidentMoveFailed = 1;
+    ResidentMoveOutcomeDeclined = 0;
+    ResidentMoveOutcomeFailed = 1;
 }
 
 enum ResidentMoveReason {
@@ -582,12 +583,17 @@ about the send window + 60 s + the sweep, instead of 15–30 min.
 
 ### 5.8 Settings
 
-All of these have code defaults; there are no globals. Server settings go in a
-new `ExchangeMoveSettings` embedded in `ExchangeSettings`.
+All of these have code defaults; there are no globals. Server settings live in
+`connect/move_settings.go` and are embedded in `ExchangeSettings`:
+`ExchangeMoveSettings` holds the move primitives, and `ExchangeMoverSettings`
+holds the mover. The code switch is the ceiling. The mover's mode is off until
+an operator sets the Redis control, so a deploy alone changes no placement.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `EnableMove` | false | master switch; the Redis control can only narrow it |
+| `EnableMove` | true | ceiling for every move behavior; the Redis control can only narrow it |
+| `EnableDrainMoves` | true | drains send compulsory same-host moves with intents (D13); the Redis control can turn it off |
+| `MoveDefaultMode` | off | the mover's mode while the Redis control is absent: off, dry_run or on |
 | `MoveLoadPublishInterval` | 15s | load record cadence |
 | `MoveLoadStaleTimeout` | 60s | ignore older records |
 | `MoveTickInterval` | 10s | mover cadence |
@@ -599,6 +605,8 @@ new `ExchangeMoveSettings` embedded in `ExchangeSettings`.
 | `MoveSourceMinCpu` | 0 (off) | optional extra source condition |
 | `MoveTargetMaxCpu` | 0.75 | never move onto a busier host |
 | `MoveEmergencyCpu` | 0.95 | emergency shedding threshold |
+| `MoveEmergencyTicks` | 3 | consecutive ticks at the threshold before shedding |
+| `EnableArrivalMoves` | false | arrival-time moves (D9), enabled after idle moves prove out |
 | `MoveIdleTimeout` | 10m | payload-idle requirement |
 | `MoveMinResidentAge` | 10m | skip fresh residents |
 | `MoveClientCooldown` | 6h | per-client minimum time between balance moves |
@@ -608,7 +616,8 @@ new `ExchangeMoveSettings` embedded in `ExchangeSettings`.
 | `MovePreferDuration` | 6h | stickiness sent to the client |
 | `MoveDbWaitPauseThreshold` | 50ms | pause when pool acquire wait exceeds this |
 | `MoveInventoryRefreshInterval` | 5m | reload `services.yml` |
-| `MoveTargetBreakerRatio` | 0.2 | failures ÷ sends to one target IP that opens its breaker (minimum 20 sends) |
+| `MoveTargetBreakerRatio` | 0.2 | failures ÷ sends to one target IP that opens its breaker |
+| `MoveTargetBreakerMinSends` | 20 | minimum sends in the window before the breaker can open |
 | `MoveTargetBreakerTimeout` | 10m | how long an open breaker skips that IP |
 
 Client settings go in the connect repo, in `PlatformTransportSettings` or
