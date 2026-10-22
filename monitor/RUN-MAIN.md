@@ -907,6 +907,16 @@ audit. Gate this helper with the actual tested interpreter:
 consumer's own admission/privacy/transport controls on its frozen successor.
 These local controls add no Main request or automatic activation.
 
+For a newly reviewed non-legacy unit, bind an immutable
+`process_identity.UnitAuthority` from the exact Root-approved unit literal and
+pass it as `unit_authority=` to the identity helper and read-only promotion
+identity calls. The process tuple must name that same unit. Omission preserves
+the historical cap2-only default; malformed, missing or mismatched explicit
+unit authority stays unavailable before contact. This does not authorize the
+legacy promoter for another unit: its binary/launcher paths and same-unit
+restart remain fixed. Current singleton retirement/start requires its separately
+reviewed Root-owned handoff plan, not a unit substitution or global monkeypatch.
+
 ## Alert validation loop
 
 Process each new alert identity and each material update in this order:
