@@ -180,7 +180,9 @@ check decides.
 transactions that refused to publish: `window_expired` and `released`. The
 connect controller reports them as contract failure and rejection causes
 `reservation_window_expired` and `reservation_released`, and answers clients
-with Setup, which they retry.
+with Setup, which they retry. Contract creation timing no longer nests
+`grant_selection` inside `transaction` for a Redis-admitted positive request:
+grant selection and the reservations precede it.
 
 The previous release's scripts run beside this one during a rolling deploy.
 Its recovery page reads only the recovery marker and its owned release
