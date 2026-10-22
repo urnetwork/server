@@ -92,13 +92,16 @@ func TestContractCloseOriginalHistoryCapacityKeepsObligation(t *testing.T) {
 
 // Replace only the optional read relation in the isolated test database. The
 // actual original table, immutable triggers and head foreign keys keep custody.
+// The function wraps evidence: readers take the registration from the
+// evidence payload and never name the registration column, which the view
+// omits so the fixture also holds once that column is dropped.
 func installCloseHistoryReadFunction(t testing.TB, functionBody string) func() {
 	t.Helper()
 	ctx := t.Context()
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE st_client_key_history RENAME TO synthetic_close_history_original;
    CREATE FUNCTION synthetic_close_history_read(value bytea) RETURNS bytea LANGUAGE plpgsql VOLATILE AS $$ `+functionBody+` $$;
-   CREATE VIEW st_client_key_history AS SELECT client_id,generation,domain_hash,registration_hash,synthetic_close_history_read(registration) AS registration,evidence_hash,evidence FROM synthetic_close_history_original;`))
+   CREATE VIEW st_client_key_history AS SELECT client_id,generation,domain_hash,registration_hash,evidence_hash,synthetic_close_history_read(evidence) AS evidence FROM synthetic_close_history_original;`))
 	})
 	restored := false
 	restore := func() {
