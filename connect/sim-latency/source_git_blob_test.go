@@ -115,6 +115,8 @@ func TestPinnedSourceBlobReadsRemoteManifestExactly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", scratch)
+	sourceTestForeignGit(t, fixture.controlRoot)
+	sourceTestUnscopedGitRefusal(t, fixture.controlRoot)
 	content, err := sourceGitBlobAtCommit(context.Background(), fixture.controlRoot, pin, "main/sim-latency.yml", maximumSourceConfigBytes)
 	if err != nil || !bytes.Equal(content, manifest) {
 		t.Fatalf("approved remote manifest changed: %q %v", content, err)
@@ -122,7 +124,7 @@ func TestPinnedSourceBlobReadsRemoteManifestExactly(t *testing.T) {
 	if _, err := sourceGitText(context.Background(), fixture.controlRoot, "cat-file", "-e", pin+"^{commit}"); err == nil {
 		t.Fatal("manifest fetch wrote a control-checkout object")
 	}
-	if refs := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)"); refs != refsBefore {
+	if refs, err := sourceGitText(context.Background(), fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)"); err != nil || refs != refsBefore {
 		t.Fatal("manifest fetch changed control refs")
 	}
 	entries, err := os.ReadDir(scratch)

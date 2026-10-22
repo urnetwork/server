@@ -252,7 +252,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err != nil || lock != "" {
 		fatalf("source stage requires host-only paths: %v", err)
 	}
-	root, err := os.MkdirTemp(stateDirectory, ".reviewed-source-")
+	root, origins, err := newSourceStage(ctx, stateDirectory, ".reviewed-source-", repositoriesRoot, "", current.Staging)
 	if err != nil {
 		fatalf("private source stage: %s", err)
 	}
@@ -263,10 +263,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
 		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, EvaluatedImageDigest: approved.EvaluatedImageDigest}
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
-		origin, err := sourceGitText(ctx, filepath.Join(repositoriesRoot, repository), "remote", "get-url", "origin")
-		if err != nil {
-			fatalf("source origin: %s", err)
-		}
+		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
 		if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 			fatalf("source clone: %s", err)

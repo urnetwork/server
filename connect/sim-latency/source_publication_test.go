@@ -255,9 +255,15 @@ func TestSourcePublicationVerifiesExactApprovedPatchTree(t *testing.T) {
 	intent := &sourcePublicationIntent{ApprovedPatchPath: patchPath, ApprovedPatchSha256: hex.EncodeToString(digest[:])}
 	ref := sourcePublicationRef{Repository: "server", Branch: "sim-latency", ExpectedCommit: base, Commit: commit, StagedRoot: repository}
 	backend := &gitSourcePublicationBackend{patchPolicy: controller.PatchPolicy{MaxPatchBytes: 4096, AllowedPaths: []string{"connect/*.go"}, ForbiddenPaths: []string{"connect/sim-latency/**"}}}
+	sourceTestGit(t, repository, "config", "user.name", "Synthetic Source")
+	sourceTestGit(t, repository, "config", "user.email", "source@account.example")
+	originalPath := os.Getenv("PATH")
+	sourceTestForeignGit(t, repository)
+	sourceTestUnscopedGitRefusal(t, repository)
 	if err := backend.Verify(context.Background(), ref, intent); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", originalPath)
 	if err := os.WriteFile(path, []byte("package connect\n\nvar synthetic = 3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -244,8 +243,11 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			defer os.RemoveAll(indexRoot)
 			indexPath := filepath.Join(indexRoot, "index")
 			runIndex := func(args ...string) ([]byte, error) {
-				command := exec.CommandContext(ctx, "git", append([]string{"-C", ref.StagedRoot}, args...)...)
-				command.Env = append(os.Environ(), "GIT_INDEX_FILE="+indexPath)
+				command, err := sourceGitCommand(ctx, ref.StagedRoot, args...)
+				if err != nil {
+					return nil, err
+				}
+				command.Env = append(command.Env, "GIT_INDEX_FILE="+indexPath)
 				writer := &sourceBoundedWriter{limit: 4096}
 				command.Stdout = writer
 				command.Stderr = &sourceBoundedWriter{limit: 4096}
@@ -292,7 +294,10 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 // Captures exact bounded Git bytes with cancellation; no whitespace
 // normalization is allowed at an authenticated-content boundary.
 func sourceGitBytes(ctx context.Context, repositoryRoot string, limit int, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"-C", repositoryRoot}, args...)...)
+	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	if err != nil {
+		return nil, err
+	}
 	writer := &sourceBoundedWriter{limit: limit}
 	command.Stdout = writer
 	command.Stderr = &sourceBoundedWriter{limit: 4096}

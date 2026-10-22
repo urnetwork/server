@@ -148,7 +148,7 @@ func runBootstrapSource(opts docopt.Opts) {
 		if err := validateBootstrapSource(manifest, settings); err != nil {
 			fatalf("approved baseline: %s", err)
 		}
-		root, err := os.MkdirTemp(stateDirectory, ".baseline-source-")
+		root, origins, err := newSourceStage(ctx, stateDirectory, ".baseline-source-", repositoriesRoot, sourceConfig, settings.AutomationPolicy.Staging)
 		if err != nil {
 			fatalf("baseline staging: %s", err)
 		}
@@ -164,15 +164,11 @@ func runBootstrapSource(opts docopt.Opts) {
 			EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256, PreparedAt: time.Now().UTC()}
 		publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: 1, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, Bootstrap: true}
 		for _, repository := range append(sourceRepositoryNamesForMode(intent.Staging), "config") {
-			localRoot := filepath.Join(repositoriesRoot, repository)
 			commit, branch := intent.Commits[repository], sourceBranch(intent.Staging)
 			if repository == "config" {
-				localRoot, commit, branch = configRoot, manifestCommit, "main"
+				commit, branch = manifestCommit, "main"
 			}
-			origin, err := sourceGitText(ctx, localRoot, "remote", "get-url", "origin")
-			if err != nil {
-				fatalf("baseline origin: %s", err)
-			}
+			origin := origins[repository]
 			stagedRoot := filepath.Join(root, repository)
 			if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 				fatalf("baseline clone: %s", err)

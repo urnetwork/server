@@ -183,7 +183,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	}
 	// Unpublished incomplete attempts remain private audit material. Only a
 	// complete, fsynced directory is atomically installed at the recovery path.
-	root, err := os.MkdirTemp(self.stateDirectory, ".source-"+strconv.FormatInt(generation, 10)+"-")
+	root, origins, err := newSourceStage(ctx, self.stateDirectory, ".source-"+strconv.FormatInt(generation, 10)+"-", self.repositoriesRoot, self.sourceConfig, current.Staging)
 	if err != nil {
 		return nil, err
 	}
@@ -297,10 +297,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	}
 	for _, repository := range sourceRepositoryNamesForMode(intent.Staging) {
 		stagedRoot := filepath.Join(root, repository)
-		origin, err := sourceGitText(ctx, filepath.Join(self.repositoriesRoot, repository), "remote", "get-url", "origin")
-		if err != nil {
-			return nil, err
-		}
+		origin := origins[repository]
 		cloneSource := origin
 		if proposal != nil {
 			cloneSource = proposal.StagedRoots[repository]
@@ -324,16 +321,8 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		intent.GitRefs[repository] = ref
 		publication.Refs = append(publication.Refs, sourcePublicationRef{Repository: repository, Branch: ref.Branch, ExpectedCommit: ref.ExpectedCommit, Commit: ref.Commit, StagedRoot: filepath.Join(finalRoot, repository)})
 	}
-	configRoot, err := sourceGitText(ctx, filepath.Dir(self.sourceConfig), "rev-parse", "--show-toplevel")
-	if err != nil {
-		return nil, err
-	}
-	configOrigin, err := sourceGitText(ctx, configRoot, "remote", "get-url", "origin")
-	if err != nil {
-		return nil, err
-	}
 	stagedConfig := filepath.Join(root, "config")
-	intent.ConfigExpectedCommit, intent.ManifestCommit, err = stageFreshSourceConfig(ctx, configOrigin, stagedConfig, current, manifestBytes, fmt.Sprintf("competition: %s for epoch %d", intent.Kind, intent.TargetEpoch))
+	intent.ConfigExpectedCommit, intent.ManifestCommit, err = stageFreshSourceConfig(ctx, origins["config"], stagedConfig, current, manifestBytes, fmt.Sprintf("competition: %s for epoch %d", intent.Kind, intent.TargetEpoch))
 	if err != nil {
 		return nil, err
 	}
