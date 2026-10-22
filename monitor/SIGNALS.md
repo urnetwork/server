@@ -32501,6 +32501,30 @@ never enter an alert. Emit `redis-latencystats-source-drift` for any live
 failed reducer, invalid reply, unreachable node, or incomplete census. These
 source findings do not suppress independently measured Mimir cardinality.
 
+The native CONFIG reducer validates the entire successful raw text reply
+before shell substitution: exactly `latency-tracking` and `yes` or `no`,
+with LF after each of the two records. A blank third record is not permission
+to discard a later nonempty record; extra blank-only tails, missing terminal
+LF, wrong keys/values and additional records are invalid, never disabled or
+enabled authority. The collector frames the original command exit after the
+raw stream so a nonzero/timeout result remains unreachable even if its stdout
+has a valid prefix. Only a fixed enum reaches shell state, then the unchanged
+five-count census; raw replies and private canaries remain host-local. A valid
+`no` still supplies disabled-source health, and a valid `yes` remains drift.
+Mixed valid-enabled and malformed nodes retain both drift and visibility;
+independent Mimir positives survive either case. Unknown source coverage,
+including held visibility, supplies no absence-based clearing. Normal complete
+source observations retain the existing notifier recovery policy.
+
+This reply grammar follows default RESP2 raw Redis CLI delimiter behavior,
+not the binary RESP wire framing or the adjacent key-events collector. The
+reviewed upstream formatter is a source contract, not proof of the deployed
+CLI version, actual malformed production output, a Redis outage, producer
+identity or fleet adoption. Unsupported/custom output must stay unknown until
+its own contract is reviewed. Synthetic generated-shell/public-run controls
+establish parser authority only; an actual prior incident/clear requires
+separate runtime evidence.
+
 Emit `taskworker-histogram-cardinality` whenever the exact
 `urnetwork_egress_probe_health_check_seconds_bucket` count is positive. The
 finite destination and class dimensions are legitimate, and the random
