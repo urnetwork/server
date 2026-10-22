@@ -28,15 +28,17 @@ import (
 // carry a pending marker, which recovery never reads, until the transaction
 // that publishes them has joined; the request then hands them to the SQL-fenced
 // recovery marker, acknowledges them, or releases them itself. A transaction
-// publishes only within redisPendingPublicationTimeout of the request's first
-// reservation, and recovery takes over the pending marker of a request that
-// died only after redisPendingRecoveryAge, measured by Redis. A live request's
-// tokens therefore never reach recovery before its publication window closes;
-// the margin between the two bounds absorbs clock steps.
+// publishes only within redisPendingPublicationTimeout of the attempt's first
+// reservation request, and recovery takes over the pending marker of a request
+// that died only after redisPendingRecoveryAge, measured by Redis. A live
+// request's tokens therefore never reach recovery before its publication window
+// closes. The window spans pooler waits for later grant pages and BEGIN; the
+// margin between the two bounds absorbs a step of the Redis clock, or a
+// failover to a replica whose clock leads, against the request's clock.
 const redisContractReservationLease = 24 * time.Hour
 const redisContractAdmissionTimeout = time.Second
-const redisPendingPublicationTimeout = 30 * time.Second
-const redisPendingRecoveryAge = 2 * time.Minute
+const redisPendingPublicationTimeout = 60 * time.Second
+const redisPendingRecoveryAge = 10 * time.Minute
 
 var errRedisReservationInsufficient = errors.New("Insufficient balance")
 var errRedisReservationNotPending = errors.New("Redis reservation request already owns a reservation that is not pending; reconcile its original contract")
@@ -324,7 +326,7 @@ type redisPendingReservation struct {
 	requested      ByteCount
 	selected       []*TransferEscrowBalance
 	priority       Priority
-	// taken before the attempt's first reservation request
+	// taken immediately before the attempt's first reservation request
 	startTime time.Time
 	epoch     uint64
 }
@@ -346,7 +348,6 @@ func (self *redisContractAdmission) startPendingReservation(payerNetworkId serve
 		admission:      self,
 		payerNetworkId: payerNetworkId,
 		requested:      requested,
-		startTime:      time.Now(),
 		epoch:          self.pendingEpoch.Load(),
 	}
 	var finish sync.Once
@@ -370,11 +371,24 @@ func (self *redisContractAdmission) retirePending(fn func(inFlight bool) error) 
 	return fn(0 < self.pendingWriters)
 }
 
+// Opens the publication window immediately before the attempt's first
+// reservation request. Grant reads before it reserve nothing, so their pooler
+// waits do not count. Every token of the attempt is reserved, or taken over,
+// after this time. A nil reservation, outside a creation, records nothing.
+func (self *redisPendingReservation) noteReservationRequest() {
+	if self != nil && self.startTime.IsZero() {
+		self.startTime = time.Now()
+	}
+}
+
 // Called with the request fence held, before anything is written. A live
 // request's pending tokens reach recovery no sooner than
 // redisPendingRecoveryAge after its reservation, measured by Redis; this
 // attempt's window closes well before.
 func (self *redisPendingReservation) requirePublishable() error {
+	if self.startTime.IsZero() {
+		return errRedisPendingReservationMissing
+	}
 	if self.admission.pendingEpoch.Load() != self.epoch {
 		return errRedisPendingReservationReleased
 	}
@@ -431,7 +445,7 @@ func reserveRedisTransferEscrowBeforeTx(ctx context.Context, sourceNetworkId, so
 			finish()
 		}
 	}()
-	selected, priority, err := selectRedisTransferBalances(ctx, admission, payerNetworkId, payerClientId, requested)
+	selected, priority, err := selectRedisTransferBalances(ctx, admission, reservation, payerNetworkId, payerClientId, requested)
 	if err != nil {
 		return ctx, func() {}, err
 	}

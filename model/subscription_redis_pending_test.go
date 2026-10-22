@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,11 +16,17 @@ import (
 )
 
 // A live request's tokens reach recovery only after its publication window
-// has closed, by a margin that absorbs clock steps between Redis and the
-// request's process.
+// has closed. The window is measured on the request's monotonic clock, the
+// marker age by the Redis slot master's TIME: a forward step of that clock, or
+// a failover to a replica whose clock leads, shortens the age by as much, so
+// the margin is minutes. The window itself spans pooler waits for keyset pages
+// after the first reservation and for BEGIN.
 func TestRedisPendingRecoveryAgeExceedsPublicationWindow(t *testing.T) {
-	if redisPendingRecoveryAge < redisPendingPublicationTimeout+time.Minute {
-		t.Fatalf("pending recovery age %s leaves no margin over the %s publication window", redisPendingRecoveryAge, redisPendingPublicationTimeout)
+	if redisPendingPublicationTimeout < time.Minute {
+		t.Fatalf("publication window %s is shorter than a minute of pooler waits", redisPendingPublicationTimeout)
+	}
+	if redisPendingRecoveryAge-redisPendingPublicationTimeout < 5*time.Minute {
+		t.Fatalf("pending recovery age %s leaves less than five minutes of clock margin over the %s publication window", redisPendingRecoveryAge, redisPendingPublicationTimeout)
 	}
 }
 
@@ -417,6 +424,54 @@ func TestRedisPendingSelectionPanicEndsAttempt(t *testing.T) {
 		}
 		for _, event := range observation.Events() {
 			t.Fatalf("compensation held a transaction across I/O: %s in %s from %s", event.Kind, event.TxSite, event.Site)
+		}
+	})
+}
+
+// Records when each grant read was issued.
+type redisSelectionReadTimes struct {
+	stateLock sync.Mutex
+	issued    []time.Time
+}
+
+func (self *redisSelectionReadTimes) observe(query server.PgCanQuery) server.PgCanQuery {
+	return &redisSelectionTimedQuery{query: query, times: self}
+}
+
+type redisSelectionTimedQuery struct {
+	query server.PgCanQuery
+	times *redisSelectionReadTimes
+}
+
+func (self *redisSelectionTimedQuery) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	func() {
+		self.times.stateLock.Lock()
+		defer self.times.stateLock.Unlock()
+		self.times.issued = append(self.times.issued, time.Now())
+	}()
+	return self.query.Query(ctx, sql, args...)
+}
+
+// The publication window opens immediately before the attempt's first
+// reservation request: pooler waits for the grant reads that precede it
+// reserve nothing, and must not shorten the window.
+func TestRedisPendingWindowStartsAtFirstReservation(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		times := &redisSelectionReadTimes{}
+		request := withRedisContractAdmission(context.WithValue(ctx, redisGrantReadContextKey{}, times.observe))
+		reserved, finish := reserveRedisAdmissionTestBeforeTx(t, request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
+		defer finish()
+		reservation := redisPendingReservationFromContext(reserved)
+		times.stateLock.Lock()
+		issued := append([]time.Time(nil), times.issued...)
+		times.stateLock.Unlock()
+		// the prober window read and the one keyset page precede the reservation
+		if len(issued) != 2 || reservation == nil || reservation.startTime.Before(issued[len(issued)-1]) {
+			t.Fatal("the publication window opened before the grant reads that precede the first reservation")
 		}
 	})
 }

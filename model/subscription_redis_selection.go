@@ -121,7 +121,7 @@ func redisGrantCounterHeld(err error) bool {
 // the fallback keyset; request-local counters do not serialize unrelated
 // payers or balances. Reservations are pending until the request's contract
 // transaction has joined.
-func selectRedisTransferBalances(ctx context.Context, admission *redisContractAdmission,
+func selectRedisTransferBalances(ctx context.Context, admission *redisContractAdmission, reservation *redisPendingReservation,
 	payerNetworkId, payerClientId server.Id, requested ByteCount) ([]*TransferEscrowBalance, Priority, error) {
 	limits, ok := ctx.Value(redisGrantSelectionContextKey{}).(redisGrantSelectionLimits)
 	if !ok {
@@ -164,6 +164,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			return false, nil
 		}
 		admission.noteBalance(balance.balanceId)
+		reservation.noteReservationRequest()
 		operation := "reserve-pending"
 		if whole {
 			operation = "reserve-pending-full"

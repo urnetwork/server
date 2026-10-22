@@ -156,21 +156,25 @@ transaction, which only rechecks its deadline after the client fence.
 Two bounds keep recovery away from a live request's tokens:
 
 - A transaction publishes only if it takes the request fence within
-  `redisPendingPublicationTimeout` (30s) of the attempt's first reservation,
-  measured on the creator's monotonic clock. A later one refuses and
+  `redisPendingPublicationTimeout` (60s) of the attempt's first reservation
+  request, measured on the creator's monotonic clock from immediately before
+  that request. Pooler waits for the grant reads before it do not count; waits
+  for later grant pages and for BEGIN do. A later fence refuses and
   compensates.
 - A recovery page moves another request's pending marker to the recovery
-  marker only when it is older than `redisPendingRecoveryAge` (2 minutes) by
+  marker only when it is older than `redisPendingRecoveryAge` (10 minutes) by
   Redis time. Only then can the fenced SQL custody check release it.
 
 A pending token can therefore reach recovery only after its request's window
-closed; the margin absorbs a Redis clock step of up to 90s. A request that
-died with pending tokens leaves them reserved for up to two minutes, then any
-request on the balance recovers them. Attempts of one request share its
-tokens: the request's own release or hand-off advances an in-process epoch
-first, and an attempt that reserved before it refuses to publish. Compensation
-releases a pending token directly only while no attempt is in flight and none
-has started publishing; otherwise the fenced SQL custody check decides.
+closed. Marker ages use the TIME of the slot's Redis master; the 9-minute
+margin absorbs a forward step of that clock, or a failover to a replica whose
+clock leads. A request that died with pending tokens leaves them reserved for
+up to ten minutes, then any request on the balance recovers them. Attempts of
+one request share its tokens: the request's own release or hand-off advances
+an in-process epoch first, and an attempt that reserved before it refuses to
+publish. Compensation releases a pending token directly only while no attempt
+is in flight and none has started publishing; otherwise the fenced SQL custody
+check decides.
 
 The previous release's scripts run beside this one during a rolling deploy.
 Its recovery page reads only the recovery marker and its owned release
