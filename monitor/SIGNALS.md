@@ -37732,7 +37732,23 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
 `urnetwork_proxy_device_memory_tracked_used_bytes` with the current
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
-Use the active services.yml Proxy host/block topology as denominator. Select
+Use the active services.yml Proxy host/block topology as denominator.
+Before any query, a positive authoritative Proxy placement count with zero
+joined active monitor Proxy rows is `proxy-device-target-unobservable`, frame
+`inventory`, WARN at sustain 1, rather than an empty healthy fleet. The same
+visibility boundary already applies to nonzero partial inventory joins.
+Known derived disabled Proxy rows retain intentional scope: when they account
+for every expected placement and none is active, the existing no-query empty
+applicability remains. A disabled subset cannot hide an additional unjoined
+placement. Operator exclusions keep their desired Proxy rows and their
+existing transport-denial/coverage policy; never delete them or contact a
+paused host to repair a count. A true zero-placement environment remains quiet
+without a query. Inventory uncertainty proves no private-target mismatch,
+shared admission gate, hardware shortage or process health; restore the
+inventory join before judging metrics. A fully joined current process with
+zero devices, zero target and zero tracked use remains a separate healthy
+control. No production inventory omission or false recovery is asserted.
+Select
 the newest generation from every current instantaneous cohort before checking
 target completeness. This query has no RSS dependency, prior-time cohort or
 range-rate series; its four required families and optional retired-budget
