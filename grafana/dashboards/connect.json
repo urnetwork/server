@@ -2296,6 +2296,471 @@
                     "legendFormat": "{{outcome}} {{host}}"
                 }
             ]
+        },
+        {
+            "id": 61,
+            "type": "row",
+            "title": "placement: server-directed moves (connect/MOVE.md)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 225
+            }
+        },
+        {
+            "id": 62,
+            "type": "timeseries",
+            "title": "normalized load by host and fleet mean",
+            "description": "Residents per unit of capacity (cores times the inventory move_weight) of each host, as its own movers compute it every tick from the Redis load table {connect_load}, and the fleet mean the mover balances around: all residents over the capacity of the hosts not being evacuated. Fresh, non-draining records only. A host above mean x (1 + tolerance) is a balance source; a host below the mean, under the CPU guard, is a target. Every process of a host computes the same value from the same table, so max by host shows it once. No-data while the movers cannot read the table, not zero. Host imbalance is max over min across hosts (SIGNALS.md section 24.1).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 226
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (host) (urnetwork_connect_move_host_normalized_load{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "max(urnetwork_connect_move_fleet_mean_load{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "fleet mean"
+                }
+            ]
+        },
+        {
+            "id": 63,
+            "type": "timeseries",
+            "title": "host excess above the band",
+            "description": "Residents each host holds above the band's upper edge, mean x (1 + tolerance) x capacity: what its balance moves shed. 0 within the band; all its residents while it is evacuated. Each process of the host sheds a share in proportion to its residents, at most MoveMaxPerTick a tick and within the Redis budget, so the excess falls over minutes, not at once. No-data while the movers cannot read the table.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 226
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (host) (urnetwork_connect_move_host_excess{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}}"
+                }
+            ]
+        },
+        {
+            "id": 64,
+            "type": "timeseries",
+            "title": "providers and residents by host",
+            "description": "Public provider connections and distinct residents per host, summed over its processes. Residents are the mover's unit (MOVE.md D3): once the mover is on, a host's share of them follows its share of capacity, not its DNS weight. Draining processes count here but not in the mover's load. Compare with the normalized load to tell a capacity difference from an imbalance.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 234
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host) (urnetwork_connect_provider_connections{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "providers {{host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (host) (urnetwork_connect_resident_clients{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "residents {{host}}"
+                }
+            ]
+        },
+        {
+            "id": 65,
+            "type": "timeseries",
+            "title": "host CPU busy, as the mover sees it",
+            "description": "The host CPU busy fraction each process measures from /proc/stat over its 15 s publish interval and writes into its load record: the CPU the mover's guards read. No host at or above MoveTargetMaxCpu (0.75) is a target, and a host at or above MoveEmergencyCpu (0.95) for MoveEmergencyTicks (3) ticks sheds idle clients with compulsory moves. max by host over its processes. No-data while a process cannot measure it, for example its first interval.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 234
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "min": 0,
+                    "max": 1
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (host) (urnetwork_connect_move_host_cpu_busy{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}}"
+                }
+            ]
+        },
+        {
+            "id": 66,
+            "type": "timeseries",
+            "title": "moves out and in / min by host",
+            "description": "Moves out: the moves each source host's movers sent. Sent to: the same sends by the host they named. Arrived: handoffs by intent at the target (urnetwork_connect_moves_arrived_total, counted by the move primitives at the target process). The host and block filters select the counting process: the source for sends, the target for arrivals. Sent minus arrived is declines, failures and intents that expired; the success ratio is SIGNALS.md section 24.2. Counter rates per process, summed.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 242
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (source_host) (rate(urnetwork_connect_moves_sent_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "out {{source_host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (target_host) (rate(urnetwork_connect_moves_sent_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "sent to {{target_host}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (target_host) (rate(urnetwork_connect_moves_arrived_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "arrived {{target_host}}"
+                }
+            ]
+        },
+        {
+            "id": 67,
+            "type": "timeseries",
+            "title": "moves sent / min by kind and trigger",
+            "description": "Moves the movers sent, by kind (advisory or compulsory) and trigger: balance, a host above the band; arrival, a client that just arrived on a source host (EnableArrivalMoves, off by default); evacuation, a host listed in the control's evacuateHosts; emergency, a host whose CPU stayed at or above MoveEmergencyCpu. Drain moves are the drain's, not the mover's, and do not appear here. The fleet budget is MoveMaxPerMinute, at most what the control's maxPerMinute allows.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 242
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (kind, trigger) (rate(urnetwork_connect_moves_sent_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "{{kind}} {{trigger}}"
+                }
+            ]
+        },
+        {
+            "id": 68,
+            "type": "timeseries",
+            "title": "mover mode",
+            "description": "Each process's effective mode after the Redis control {connect_move}control narrowed the code settings: 0 off, 1 dry run, 2 on. Off is the code default (MoveDefaultMode), so a deploy moves nothing until an operator sets the control; EnableMove off holds every process at 0 whatever the control says. A process that cannot read the control reports 0 for that tick. Mixed values across processes mean failing control reads or processes of another build.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 250
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0,
+                    "max": 2,
+                    "decimals": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (host, block) (urnetwork_connect_mover_mode{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}} {{block}}"
+                }
+            ]
+        },
+        {
+            "id": 69,
+            "type": "timeseries",
+            "title": "dry-run would-send and budget refusals / min",
+            "description": "Would send: the moves a dry-run mover chose and the budget reserved, by source and target, which it did not send (no cooldown, intent or frame). Compare with the host excess before turning the mover on. Refused: reservations the Redis per-minute budget refused, by the cap that refused: fleet (MoveMaxPerMinute, or the control's lower maxPerMinute), source (MoveMaxPerMinutePerSourceHost) or target (MoveMaxPerMinutePerTargetHost). A steady target refusal on one host is the arrival cap protecting a new or empty host.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 250
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (source_host, target_host) (rate(urnetwork_connect_moves_would_send_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "would send {{source_host}} to {{target_host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (cap) (rate(urnetwork_connect_move_budget_refused_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "refused by the {{cap}} cap"
+                }
+            ]
+        },
+        {
+            "id": 70,
+            "type": "timeseries",
+            "title": "move-capable residents",
+            "description": "Residents whose client declared resident move version 1 or later (D2), by host and as a share of all residents: the rollout adoption of the client library. Advisory moves only go to them. Counted by each mover tick, which runs in every mode; no-data on a process whose mover does not run.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 258
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (host) (urnetwork_connect_move_capable_residents{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(urnetwork_connect_move_capable_residents{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}) / sum(urnetwork_connect_resident_clients{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "share of all residents"
+                }
+            ]
+        },
+        {
+            "id": 71,
+            "type": "timeseries",
+            "title": "mover ticks, send errors and load publishes / min",
+            "description": "Mover ticks by outcome: off, draining, store_error (a Redis read or write failed and the tick failed closed), no_load (no fresh record of its own, or no fleet mean), in_band, db_paused (the Postgres pool acquire wait was above MoveDbWaitPauseThreshold), no_target, no_candidate, budget_refused, send_failed or moved. Send errors: moves the executor did not send after the budget reserved them, by kind and trigger. Load publishes: writes of each process's record into {connect_load}, published or failed; a host whose publishes fail drops out of the table and is neither a source nor a target.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 258
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (outcome) (rate(urnetwork_connect_mover_ticks_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "tick {{outcome}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (kind, trigger) (rate(urnetwork_connect_move_send_errors_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "send error {{kind}} {{trigger}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (outcome) (rate(urnetwork_connect_move_load_publishes_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "load publish {{outcome}}"
+                }
+            ]
         }
     ]
 }
