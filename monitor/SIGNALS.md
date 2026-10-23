@@ -251,8 +251,6 @@ active missing capability and must not be read as green.
 |---|---|---|
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
-| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
-| 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -306,7 +304,6 @@ active missing capability and must not be read as green.
 | 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
 | 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
 | 14.6 | Probe | `proxy-transport` plus `log-errors`, `proxy-pool`, `proxy-runtime` controls |
-| 14.8 | Coverage gap | `proxy-runtime` and `control-route-pressure` see proxy process health and control load; identity mint/retire rate, lifetime and refusal checks are missing. |
 | 15.2 | Shared contract | `key-publication`, `log-errors` |
 | 15.3 | Shared contract | `key-publication`, `log-errors` |
 | 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
@@ -330,7 +327,6 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
-| 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 24.1 | Coverage gap | `provider-connections` sees provider counts by host, not capacity-normalized placement; the max over min host-imbalance rule over the mover's normalized load gauge is missing. |
 | 24.2 | Coverage gap | `connection-rate` sees connection churn, not moves; the arrived over sent move success-ratio rule is missing. |
 | 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
@@ -18416,16 +18412,16 @@ sweep's naming four days old, and tomorrow's partition dropped — and assert
 exactly the sweep part each one is.
 
 ### 2.19d Country-specific egress site coverage and freshness
-Planned probe: `egress-country-sites`
+Probe: `egress-country-sites`
 
-Coverage status: no registered runtime probe currently implements this
-section. The country-site candidate helpers filter proposed websites; they
-do not publish a complete verified country-list manifest or attest per-country
-selection. The required country-list provenance/verification records,
-published country-pool generation and generation-linked URL-draw/skip
-receipts are missing from the current producer/storage contract. This is an
-explicit measurement coverage gap, not healthy country coverage. The
-requirements below remain the acceptance contract for implementation.
+Coverage status: `egress-country-sites` implements the structural and
+aggregate-receipt parts of this section. The country-site candidate helpers
+filter proposed websites; they do not publish a verified country-list
+manifest. The producer still publishes no country-list provenance or
+verification records, and the URL-draw counter has neither a country nor a
+pool-generation label, so source freshness, per-country skips and
+generation-linked draw evidence stay an explicit, alerted coverage defect
+(`egress-country-provenance-missing`), never healthy country coverage.
 
 The URL-only contract in `FP2FIX.md` supersedes the historical full-run 13/13
 batch: normal draws use equal general/country sampling when both compatible
@@ -18479,13 +18475,64 @@ provider failure. False-negative qualifiers: aggregate draw counts alone do not
 prove distinct domains, current source evidence, correct country selection,
 or successful load verification. Use source and pool generation together.
 
-Planned implementation convention: §2.19d (`egress-country-sites`) maps to
-`signal_egress_country_sites.go` and `signal_egress_country_sites_test.go`.
-Deterministic tests use synthetic countries and reserved example domains for
-all coverage, freshness, missing-source, disjointness, enabled/legacy,
-partial-metrics, healthy and alert-rendering cases. This section is the
-acceptance contract for the new probe; it does not assert that the current
-Main watcher, destination pool, or country list already implements it.
+Implementation (15-minute cadence; `signal_egress_country_sites.go` and
+`signal_egress_country_sites_test.go`). The signal reads three sources:
+
+- the configured `qualityprobe.yml` catalog through the API's own parser
+  (`controller.LoadProviderEgressSites`, the same catalog
+  `GetProviderEgressDestinationPool` publishes with the pool generation): the
+  global destinations and the per-country lists. A list's compatible sites are
+  those without a whole-country incompatible entry for that country; a
+  region-only exclusion still counts. Registrable domains come from the Public
+  Suffix List (`CanonicalSiteKey`), so `shop.example.co.uk` and
+  `www.example.co.uk` collide while `example.co.uk` never collapses to `co.uk`;
+- the denominator: the location table's country rows, which the seeder writes
+  from the GeoLite2 places export (`mmdb/places.yml`), read with one bounded
+  read-only query (`location_type = 'country'`, at most 512 codes);
+- the aggregate URL-draw receipts:
+  `sum by (source) (increase(urnetwork_url_probe_sources_total{job="taskworker"}[6h]))`
+  for `general`, `country`, `general_country_unavailable` and
+  `security_recheck`, through one loopback Mimir read evaluated two minutes
+  behind now, with per-slot freshness of the counter on every desired
+  Taskworker slot. A disabled URL workflow (`provider_egress_probe.yml`) has no
+  receipts to read.
+
+Classes (all WARN, sustain 1, target `<env>/egress-country-sites`; only country
+codes and counts are rendered):
+
+- `egress-country-list-missing`: denominator countries with no list or no
+  compatible site, with the normal-draw fallback share
+  (`general_country_unavailable` over normal draws) as active-use evidence and
+  the count of lists keyed outside the denominator;
+- `egress-country-list-underfilled`: country lists with fewer than 100
+  compatible sites, or a global list under 100;
+- `egress-country-list-overlap`: country sites sharing a registrable domain
+  with the global list, sites repeating a registrable domain within a list,
+  and country URLs that are not valid HTTPS sites;
+- `egress-country-draw-split`: at least 400 country-eligible normal draws
+  (`general` plus `country`) whose country share is six or more standard
+  deviations from an even split. Finite random imbalance stays quiet;
+- `egress-country-provenance-missing`: the standing producer gap, emitted
+  whenever the catalog reads: no source identity, source period, curation or
+  load-verification time per list, and no pool-generation or per-country draw
+  receipts. It is an incident class, not visibility, so structural repairs of
+  the other classes can still clear;
+- `egress-country-sites-unobservable` (visibility, sustain 2): an unreadable
+  catalog, denominator or URL workflow configuration, a failed or annotated
+  receipt read, an unrecognized or missing draw source, and a desired
+  Taskworker slot whose counter is missing, stale (older than three minutes),
+  duplicated or on an excluded or disabled host.
+
+Not implemented, because the server emits no measurement for it: the Radar,
+CrUX and verification freshness bands, the source-unavailable versus stale
+distinction, and the PAGE for new per-country skips or a generation-linked
+split violation. They need a provenance manifest for each country list and a
+bounded per-country draw and skip counter carrying the served pool
+generation. Deterministic tests use synthetic countries and reserved example
+domains for coverage, missing-source, disjointness, enabled/disabled,
+partial-metrics, healthy and alert-rendering cases. This section remains the
+acceptance contract for those parts; it does not assert that the current
+Main watcher, destination pool, or country list already satisfies it.
 
 ### 2.19e Control route pressure — distinguish setup from provider failure
 Probe: `control-route-pressure`
@@ -22080,8 +22127,7 @@ Rules added:
   14:00Z.
 
 ### 2.30 Contract-creation stage latency — the database reaching the data plane
-Probe: `contract-stage-latency` (catalog entry; a Grafana rule candidate, not
-implemented as of 2026-10-22)
+Probe: `contract-stage-latency`
 
 A client cannot carry traffic until its contract exists. When the database
 queues, every stage of contract creation slows together. That is the
@@ -22091,7 +22137,12 @@ user-visible cost of pool saturation, and it feeds the identity-churn loop
 Source: `urnetwork_contract_creation_completed_stage_seconds_total{stage}` over
 `urnetwork_contract_creation_completed_total{outcome="contract_reply"}`. The
 mean time per completed contract for each stage is the rate of the first over
-the rate of the second.
+the rate of the second. Both are summed over every producing process and
+ingress (api and the proxies' in-process `/connect/control` are `http`; the
+Connect resident controller and the Taskworker prober are `internal`). Stage
+seconds include canceled, failed, rejected and panicking calls, so a call that
+returns without a reply raises the mean, and returned calls with no reply at
+all are an unbounded mean.
 
 | Stage (mean ms per contract) | 10-15 (baseline) | 10-22 06:30Z |
 |---|---|---|
@@ -22113,10 +22164,46 @@ it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
 (`urnetwork_http_request_duration_seconds{job="api",route="POST ^/connect/control$"}`):
 2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22.
 
+Measurement (one-minute cadence): one bounded loopback Mimir instant query
+through a services gateway, evaluated two minutes behind now so the newest
+partial scrapes are not read as a loss. It returns the five-minute per-stage
+and per-outcome increases, the minimum of the five-minute per-reply mean over
+the last 10 minutes at one-minute steps (`min_over_time(...[10m:1m])`) with its
+point count against `count_over_time(vector(1)[10m:1m])`, the `/connect/control`
+mean and fresh queued PgBouncer clients as context, and each desired slot's
+`urnetwork_contract_creation_stage_timing_enabled` gauge. "For 10 minutes" is
+therefore Mimir history, not a process-local streak: a monitor restart cannot
+learn an active incident as healthy, and the alert carries sustain 1. The hold
+minimum is the verdict; the five-minute stages are attribution.
+
+`contract-stage-latency` (WARN over 250 ms, PAGE over 1 s, both exclusive) names
+the per-reply mean of each stage with its share of the total. A stage holding at
+least 70% of the total is reported as `concentrated_stage` and the alert says
+query or plan problem instead of pool queueing. `contract-stage-latency-unobservable`
+(visibility, sustain 2) reports a failed or annotated read, a hold with missing
+points, an idle hold (no calls, NaN), fewer than 100 returned calls in five
+minutes, an unrecognized stage or outcome label, and any desired api, connect,
+proxy, taskworker or alt slot whose capability gauge is missing, older than
+three minutes, not 1 (an artifact without the collector), duplicated or on an
+excluded or disabled host. Alt is optional: an Alt service without placement
+creates no requirement. Desired slots come from active `services.yml`
+placement, never from surviving series. A proven slow hold over the observed
+processes still alerts beside the coverage warning; a healthy mean on partial
+coverage is never certified. Only stage and outcome labels, counts and
+inventory slot names leave Mimir; no client, contract or query text does.
+
 False-positive qualifier: one stage rising alone (for example
 `companion_origin`) is a query or plan problem, not pool saturation; read the
 spread across stages. False-negative qualifier: means hide tails, and the code
 exports no per-stage histogram.
+
+ACTION: read §2.11a pool starvation, §2.2 wait events and §5.6 first. A
+concentrated stage is a query and plan investigation (§2.3, §5.8). A spread
+across stages is pool queueing: follow §5.12 and break the §14.8 churn loop on
+the database or client side. Do not restart Connect, API or the proxies
+fleet-wide: every restart recreates windows and contracts. Verify with a full
+10-minute hold at or under 250 ms on complete slot coverage, PgBouncer queued
+clients at 0 and the `/connect/control` mean back in single-digit milliseconds.
 
 ---
 
@@ -26142,17 +26229,15 @@ zombie dial-io-timeout tickets accumulated across one outage.
    PgBouncer waiting over 500, prober health halved) escalates it before
    continuing work on the monitor's own sampling and attribution.
 
-Catalog rows from this incident (none was implemented when the incident was
-cataloged; `storage-runway`, `minio-runway` and `retention-liveness` now are,
-in their sections):
+Catalog rows from this incident, none implemented when it closed on 2026-10-22; a row naming its probe is implemented now:
 
 | id | source | check | threshold |
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
 | retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
-| contract-stage-latency | Mimir | §2.30 total mean | WARN over 250 ms, PAGE over 1 s, 10 min |
-| identity-churn / identity-churn-loop | Mimir proxy metrics + pg | §14.8 | WARN on per-device mints, retire/mint ratio or refusals; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
+| contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
+| identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
 | modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |
 
 ---
@@ -38280,7 +38365,7 @@ with independent actual GO SHA-256
 `a570027ab36a073c97449a3caaf4a97954442883875ba8e54f765e7e2dbaa2dc`.
 
 ### 14.8 Hosted identity churn — the loop that fills both disks
-Probe: `identity-churn` (catalog entry; not implemented as of 2026-10-22)
+Probe: `identity-churn`
 
 How it works:
 - A hosted proxy device keeps multi-client windows. Every candidate exit is a
@@ -38367,6 +38452,47 @@ False-positive qualifier: a fleet rollout recreates windows for its duration,
 and a growing hosted fleet raises mints without raising per-device churn.
 False-negative qualifier: the admission bound caps mints, so read refusals
 beside them. Taskworker and api mints (probes, apps) are separate jobs.
+
+Implementation (five-minute cadence). One bounded loopback Mimir instant query
+over the proxy fleet (`job="proxy"`), evaluated two minutes behind now, returns:
+hosted mints and retires as
+`sum(rate(urnetwork_jwt_state_queries_total{caller="hosted",operation="mint"|"retire"}[30m]))`
+(one JWT-state query per admitted `AuthNetworkClient` or `RemoveNetworkClient`;
+retries count again), `sum(rate(urnetwork_hosted_mint_admission_refusals_total[15m]))`,
+`sum(urnetwork_proxy_devices_active)`, the per-device expression held over 30
+minutes at five-minute steps (`min_over_time(...[30m:5m])`) with its point
+count, its 7-day median at hourly steps (`quantile_over_time(0.5, ...[7d:1h])`)
+with its point count, primary discovery outcomes by `outcome` over 30 minutes,
+fresh queued PgBouncer clients, the five-minute §2.30 per-reply contract mean,
+and per-slot freshness of the devices, hosted-mint, refusal and
+native-source-schema families. The hold and the baseline are Mimir history, so
+a monitor restart learns neither. A read-only PostgreSQL aggregate samples the
+hosted identities (derived clients whose parent is a `proxy_device_config`
+client, across every network) created in the one-minute primary-key range that
+ended ten minutes ago, capped at 200,000 rows: identities, alive, retired
+without a connection row, never connected, and the retired median lifetime.
+No client, network or device id is selected or rendered.
+
+Classes: `identity-churn` (WARN, sustain 2) names its criteria:
+`per_device_mints` (held minimum over twice the weekly median, which needs at
+least 84 of 168 hourly points and a positive median), `retire_ratio` (over 0.8
+while mints exceed 150/s), `mint_refusals` (over 100/s), `discovery_unresolved`
+(exhausted plus unavailable over 30% of primary outcomes once outcomes reach
+1/s) and `short_lived` (at least 3,000 sampled identities, under 50% alive after
+ten minutes and at least 50% retired without connecting). Bands are exclusive
+except where written as at least. `identity-churn-loop` (PAGE, sustain 2) is any criterion together
+with queued PgBouncer clients over 500 or the §2.30 mean over 1 s, including an
+unbounded mean when calls return without replies; either side engages it on its
+own evidence. `identity-churn-unobservable` (visibility) reports a failed or
+annotated Mimir read, a failed or inconsistent lifetime row, a desired proxy
+slot whose families are missing, stale (older than three minutes), duplicated
+or on an excluded or disabled host, an incomplete hold, a short or zero
+baseline, unknown mint or refusal rates, an unrecognized discovery outcome, and
+proven churn while the database side of the loop is unread. Each source fails
+alone: churn proven by Mimir still alerts when the lifetime read fails, and the
+lifetime criterion still alerts when Mimir fails. The 10-15 discovery note
+reads 1–2/s per outcome at 2.9 discoveries/s; confirm the healthy primary share
+against production before tightening the 30% band.
 
 ACTION: break the loop on the database side (§2.30, §5.6) or the client side:
 discovery pacing (connect 8033a898), a lower hosted mint cap, racing 1× for
@@ -43284,6 +43410,7 @@ before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
 
 ### 23.3 Connect H1 session closes by carrier, and provider cohorts by app version
+Probe: `connect-close-cohorts`
 
 `urnetwork_connect_h1_sessions_closed_total{carrier,reason}` counts
 authenticated H1 transports by their first observed terminal event, for
@@ -43326,6 +43453,42 @@ bucket can hide several cohorts. A burst spread across carriers and cohorts is
 not this pattern: check the LB, network and Connect path (§2.7, §8.6). No
 server action is indicated for the client pattern; do not restart Connect for
 it.
+
+Implementation (one-minute cadence). Bursts are one-minute events, so every
+run reads the per-minute history of the last 15 minutes as one bounded loopback
+Mimir range query (`query_range`, one-minute steps ending two minutes behind
+now on a minute boundary); a watcher with a 15-minute probe floor still sees
+every minute, and a burst stays in view for one lookback. Each step returns
+`sum by (carrier, reason) (increase(urnetwork_connect_h1_sessions_closed_total{job="connect"}[1m]))`,
+`sum by (app_version) (urnetwork_connect_provider_connections{job="connect"})`,
+and per desired Connect slot the freshest process-start, close and cohort
+source timestamps plus its newest process start. A carrier and reason is a
+burst in a step when it has at least 1,000 closes and at least three times its
+lookback median (the median needs 10 of the 16 points and is robust to a few
+burst minutes; the 10-13 baseline was about 350). A cohort is struck when it
+lost at least 20% and at least 100 of its connections over the same step. A
+burst is the client pattern only when it is on websocket, h1plus is not also
+bursting, no desired slot's newest process started within two minutes of it,
+at least one cohort is struck, the struck cohorts carry at least 70% of the
+fleet's drop and held at most half the fleet before it, and the rest of the
+fleet lost under 5%.
+
+Classes: `connect-close-burst-cohort` (WARN, sustain 1, frame the struck
+release label with the largest drop) names the client pattern: no server
+action, do not restart Connect. `connect-close-burst-spread` (WARN, sustain 1)
+names a burst with `carriers_spread`, `connect_restarted`, `no_struck_cohort` or
+`drop_spread_across_cohorts`: check the LB, network and Connect path (§2.7,
+§8.6) and the rollout state (§8.2). Each reports its largest burst minute with
+closes and medians by carrier and reason, struck cohorts with drop and size,
+and the lookback's burst-minute counts. `connect-close-telemetry-unobservable`
+(visibility, sustain 2) reports a failed, annotated or off-step range read, a
+desired slot whose families are missing, stale (older than three minutes),
+duplicated or on an excluded or disabled host, no close or cohort series, a
+carrier and reason over the burst floor without enough lookback points, cohort
+points missing in a burst minute, and labels outside the server's bounded
+vocabulary (carrier `websocket` or `h1plus`; release `year.month.day`,
+`year.month`, `unknown` or `other`), which are dropped and never rendered.
+Provider supply itself remains §1.1a.
 
 ## 24. Connect placement (server-directed moves) — MOVE
 

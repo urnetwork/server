@@ -87,6 +87,7 @@ func NewSignals() []Signal {
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
 		NewPgBouncerPoolStarvationSignal(),
+		NewContractStageLatencySignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewWorkerCapSignal(),
@@ -102,6 +103,7 @@ func NewSignals() []Signal {
 		NewEgressCoverageSignal(),
 		NewEgressAdmissionSignal(),
 		NewEgressSitePoolSignal(),
+		NewEgressCountrySitesSignal(),
 		NewDerivedLocationsSignal(),
 		NewControlRoutePressureSignal(),
 		NewUrlProbeCoverageSignal(),
@@ -151,6 +153,7 @@ func NewSignals() []Signal {
 		NewProxyRuntimeSignal(),
 		NewProxyCacheSignal(),
 		NewProxyDeviceTargetSignal(),
+		NewIdentityChurnSignal(),
 		NewKeyPublicationSignal(),
 		NewPublicUdpSignal(),
 		NewSubtensorSignal(),
@@ -189,6 +192,7 @@ func NewSignals() []Signal {
 		NewSubnetArtifactsSignal(),
 		NewConnectH1PlusSignal(),
 		NewProxyH1PlusSignal(),
+		NewConnectCloseCohortsSignal(),
 	}
 }
 
