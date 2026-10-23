@@ -119,7 +119,7 @@ func TestProberShardContractPlansStayInsidePayerWithFalseZeroStats(t *testing.T)
 					contractRows, payerRanges := 0, 0
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if node["Relation Name"] == "transfer_contract" {
+						if planNodeContractTable(node) == "transfer_contract" {
 							rows := node["Actual Rows"].(float64)
 							if removed, ok := node["Rows Removed by Filter"].(float64); ok {
 								rows += removed
@@ -136,7 +136,7 @@ func TestProberShardContractPlansStayInsidePayerWithFalseZeroStats(t *testing.T)
 							}
 							payerRanges += int(node["Actual Loops"].(float64))
 						}
-						if query.name == "shard_scope_reported" && node["Relation Name"] == "contract_close" {
+						if query.name == "shard_scope_reported" && planNodeContractTable(node) == "contract_close" {
 							condition, _ := node["Index Cond"].(string)
 							partyEquality := strings.Contains(condition, "party =") || strings.Contains(condition, "(party)::text =")
 							if node["Index Name"] != "contract_close_pkey" || !strings.Contains(condition, "contract_id =") || !partyEquality {

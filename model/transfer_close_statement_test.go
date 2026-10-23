@@ -250,7 +250,7 @@ func assertTransferCloseStatementsBounded(t testing.TB, ctx context.Context, rea
 			server.Raise(json.Unmarshal(raw, &plans))
 			var inspect func(transferCloseStatementNode)
 			inspect = func(node transferCloseStatementNode) {
-				if node.Relation == "transfer_contract" {
+				if planContractTable(node.Relation) == "transfer_contract" {
 					contractReads += node.Loops * (node.Rows + node.Removed + node.Recheck)
 				}
 				for _, child := range node.Plans {

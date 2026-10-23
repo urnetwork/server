@@ -1132,6 +1132,10 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"transfer_contract",
 		"transfer_escrow",
 		"transfer_escrow_sweep",
+		"transfer_contract_legacy",
+		"transfer_escrow_w20261026",
+		"contract_close_report_legacy",
+		"contract_extender_w20261102",
 	} {
 		for _, prefix := range []string{"[db]maintenance reindex[1/22] ", "[db]maintenance table[1/22] reindex "} {
 			line := prefix + tableName
@@ -1151,6 +1155,13 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		`[db]maintenance table[1/22] reindex network_client took 300.00s`,
 		`[db]maintenance table[1/22] reindex network_client_ccnew`,
 		`[db]maintenance table[1/22] reindex`,
+		// A plain contract_extender stays in the rotation, cleanup of a
+		// contract partition is permitted, and a priority leaf rebuild is the
+		// bounded one.
+		`[db]maintenance table[1/22] reindex contract_extender`,
+		`[db]maintenance table[1/22] cleanup-before transfer_contract_legacy`,
+		`[db]maintenance priority index[1/2] reindex transfer_contract_outcome_null_l`,
+		`[db]maintenance table[1/22] reindex transfer_contract_w2026102`,
 		// Cleanup, ordinary tables, incomplete lines, and completion messages
 		// do not prove a new excluded-table rebuild was selected.
 		`[edge-3][taskworker][g2][cid:fixed][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:300][db]maintenance table[16/22] cleanup-before transfer_escrow`,

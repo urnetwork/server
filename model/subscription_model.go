@@ -2106,15 +2106,18 @@ var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companio
 // createCompanionTransferEscrow, which differ only in companion_contract_id.
 // $1 and $2 are the origin's source and destination, the companion's reverse;
 // $3 is the earliest close time of a lingering origin. Like those selections,
-// the closed branch is bounded by the contract id (see
-// CompanionOriginCloseLinger), so it reads only the pair's recent contracts.
-const companionOriginExistsSql = `
+// both branches are bounded by the contract id (see unexpiredContractIdAge),
+// so each reads only the pair's recent contracts.
+var companionOriginExistsSql = `
 	SELECT EXISTS (
 		SELECT 1 FROM transfer_contract
 		WHERE
 			-- equivalent to the generated open flag but opaque to legacy
 			-- false-zero open/outcome indexes
 			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			-- ids lead with their creation millisecond: an unexpired
+			-- contract's id is at least this bound
+			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2125,7 +2128,7 @@ const companionOriginExistsSql = `
 			$3 <= close_time AND
 			-- ids lead with their creation millisecond: an unexpired
 			-- contract's id is at least this bound
-			contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2255,13 +2258,14 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE open = false AND $3 <= close_time AND
-                                contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
@@ -2275,6 +2279,9 @@ func createCompanionTransferEscrow(
 							-- The CASE is equivalent to the generated open flag but
 							-- opaque to legacy false-zero open/outcome indexes.
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                            -- ids lead with their creation millisecond: an
+                            -- unexpired contract's id is at least this bound
+                            contract_id >= `+unexpiredContractIdFloorSql+` AND
                             COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
@@ -2295,7 +2302,7 @@ func createCompanionTransferEscrow(
                                 $3 <= close_time AND
                                 -- ids lead with their creation millisecond: an
                                 -- unexpired contract's id is at least this bound
-                                contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -2367,6 +2374,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2375,7 +2383,7 @@ func createCompanionTransferEscrow(
                                     source_network_id, destination_network_id
                                 FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
-                                    contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2399,6 +2407,9 @@ func createCompanionTransferEscrow(
 								-- Keep both generic open and outcome-null partial
 								-- indexes ineligible for this pair lookup.
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                -- ids lead with their creation millisecond: an
+                                -- unexpired contract's id is at least this bound
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -2419,7 +2430,7 @@ func createCompanionTransferEscrow(
                                 WHERE
                                     open = false AND
                                     $3 <= close_time AND
-                                    contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND
                                     destination_id = $2 AND
@@ -2542,6 +2553,8 @@ func createCompanionTransferEscrow(
 // - at least `contractTransferByteCount` available
 // - not closed by any party
 // - with transfer escrow
+// - unexpired, so inside the contract id bound (unexpiredContractIdAge), which
+// each joined table repeats
 func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	ctx context.Context,
 	sourceId server.Id,
@@ -2562,16 +2575,25 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 
                 FROM transfer_contract
 
+                -- the bound is part of the join: a close row of a contract
+                -- inside the bound is inside it too, so the anti-join is
+                -- unchanged, and PostgreSQL does not carry an inequality
+                -- across the join equality
                 LEFT OUTER JOIN contract_close ON
-                    contract_close.contract_id = transfer_contract.contract_id
+                    contract_close.contract_id = transfer_contract.contract_id AND
+                    contract_close.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 INNER JOIN transfer_escrow ON
-                    transfer_escrow.contract_id = transfer_contract.contract_id
+                    transfer_escrow.contract_id = transfer_contract.contract_id AND
+                    transfer_escrow.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 WHERE
 					-- This is equivalent to the generated-open expression but
 					-- remains opaque to false-zero legacy partial indexes.
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
+                    -- ids lead with their creation millisecond: an unexpired
+                    -- contract's id is at least this bound
+                    transfer_contract.contract_id >= `+unexpiredContractIdFloorSql+` AND
                     COALESCE(transfer_contract.expiration_time, transfer_contract.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
@@ -5927,10 +5949,11 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	//   - the straggler pass stamps now() on aged closed contracts that are not
 	//     owned by an active or otherwise ambiguous payment.
 	// The delete pass then removes every contract whose reap_time has passed,
-	// cascading contract_close/transfer_escrow/transfer_escrow_sweep for those same
-	// contract ids in one statement so dependents never linger as orphans. Every
-	// pass is index-driven, row-bounded, and committed one batch at a time, so a
-	// backlog is worked down without one long lock or transaction.
+	// with its contract_close_report/contract_close/transfer_escrow/
+	// transfer_escrow_sweep/contract_extender rows, by those same contract ids in
+	// one transaction so dependents never linger as orphans. Every pass is
+	// index-driven, row-bounded, and committed one batch at a time, so a backlog
+	// is worked down without one long lock or transaction.
 	//
 	// This replaces three prior reaper blocks: the sweep-driven completed reaper,
 	// the sweep-less reaper, and the straggler reaper. The last two ran a
@@ -5955,8 +5978,8 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// range-scan, not the anti-join it replaces.
 	assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), maxRowCount)
 
-	// delete pass: hard delete every contract whose reap_time is due, cascading
-	// its dependent rows. Bounded by the transfer_contract_reap_time partial index.
+	// delete pass: hard delete every contract whose reap_time is due, with its
+	// dependent rows. Bounded by the transfer_contract_reap_time partial index.
 	// This reaps both completed contracts (reap_time = complete_time +
 	// CompletedContractExpiration) and the stragglers just assigned above.
 	// Candidate contract_ids are distinct (from the transfer_contract primary
@@ -6068,11 +6091,22 @@ func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int
 // Classifying only the already-bounded slice avoids turning the safety checks
 // into an anti-join over contract history. The payment guard also covers
 // completed payments whose queued retention cursor has not finished yet.
+//
+// Every write names its contracts with contract_id = ANY(ids), which lets each
+// statement prune to the partitions holding them. The classification locks the
+// due contracts before their dependent rows are deleted. A close report or close
+// is written only under its contract's lock, so the deletes see every one
+// committed before that lock, and none can follow it. Close reports are deleted
+// here because the partition cutover drops their cascade from transfer_contract;
+// until then the cascade finds them already gone.
 func removeDueContractBatches(ctx context.Context, minTime time.Time, minStragglerCreateTime time.Time, maxRowCount int) {
 	budgetEnd := server.NowUtc().Add(reaperRunBudget)
 	for {
 		var processedCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// A cached generic plan cannot prune partitions by an array
+			// parameter, so plan every statement with its actual ids.
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
 			// Fix the bounded contract slice before shared balance ownership.
 			// The mutation below can only revisit these admitted identities;
 			// newly due contracts remain for the next pass.
@@ -6095,7 +6129,8 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 			if !admitted || len(contractIds) == 0 {
 				return
 			}
-			result, err := tx.Query(
+			var candidateIds []server.Id
+			server.Raise(tx.QueryRow(
 				ctx,
 				`
 				WITH due AS MATERIALIZED (
@@ -6109,6 +6144,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 						transfer_contract.contract_id=ANY($4::uuid[])
 					ORDER BY transfer_contract.reap_time
 					LIMIT $3
+					FOR UPDATE
 				), protected AS MATERIALIZED (
 					SELECT due.contract_id
 					FROM due
@@ -6150,63 +6186,74 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					UPDATE transfer_contract
 					SET reap_time = NULL
 					FROM protected
-					WHERE transfer_contract.contract_id = protected.contract_id
+					WHERE
+						transfer_contract.contract_id=ANY($4::uuid[]) AND
+						transfer_contract.contract_id = protected.contract_id
 					RETURNING transfer_contract.contract_id
-				), candidate AS MATERIALIZED (
-					SELECT due.contract_id
-					FROM due
-					WHERE NOT EXISTS (
-						SELECT 1
-						FROM protected
-						WHERE protected.contract_id = due.contract_id
-					)
-				), deleted_close AS (
-					DELETE FROM contract_close
-					USING candidate
-					WHERE contract_close.contract_id = candidate.contract_id
-				), deleted_escrow AS (
-					DELETE FROM transfer_escrow
-					USING candidate
-					WHERE transfer_escrow.contract_id = candidate.contract_id
-				), deleted_sweep AS (
-					DELETE FROM transfer_escrow_sweep
-					USING candidate
-					WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
-				), deleted_extender AS (
-					DELETE FROM contract_extender
-					USING candidate
-					WHERE contract_extender.contract_id = candidate.contract_id
-				), deleted_contract AS (
-					DELETE FROM transfer_contract
-					USING candidate
-					WHERE transfer_contract.contract_id = candidate.contract_id
-					RETURNING transfer_contract.contract_id, source_id, destination_id,
-						outcome IS NULL AS unresolved
 				)
-				SELECT (SELECT COUNT(*) FROM due), contract_id, source_id, destination_id, unresolved
-				FROM deleted_contract
-				UNION ALL
-				SELECT (SELECT COUNT(*) FROM due), NULL, NULL, NULL, false
-				WHERE NOT EXISTS (SELECT 1 FROM deleted_contract)
+				SELECT
+					(SELECT COUNT(*) FROM due),
+					ARRAY(
+						SELECT due.contract_id
+						FROM due
+						WHERE NOT EXISTS (
+							SELECT 1
+							FROM protected
+							WHERE protected.contract_id = due.contract_id
+						)
+						ORDER BY due.contract_id
+					)
 				`,
 				minTime.UTC(),
 				minStragglerCreateTime.UTC(),
 				maxRowCount,
 				contractIds,
+			).Scan(&processedCount, &candidateIds))
+			if len(candidateIds) == 0 {
+				return
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				WITH deleted_report AS (
+					DELETE FROM contract_close_report
+					WHERE contract_close_report.contract_id = ANY($1::uuid[])
+				), deleted_close AS (
+					DELETE FROM contract_close
+					WHERE contract_close.contract_id = ANY($1::uuid[])
+				), deleted_escrow AS (
+					DELETE FROM transfer_escrow
+					WHERE transfer_escrow.contract_id = ANY($1::uuid[])
+				), deleted_sweep AS (
+					DELETE FROM transfer_escrow_sweep
+					WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
+				)
+				DELETE FROM contract_extender
+				WHERE contract_extender.contract_id = ANY($1::uuid[])
+				`,
+				candidateIds,
+			))
+			result, err := tx.Query(
+				ctx,
+				`
+				DELETE FROM transfer_contract
+				WHERE transfer_contract.contract_id = ANY($1::uuid[])
+				RETURNING transfer_contract.contract_id, source_id, destination_id,
+					outcome IS NULL AS unresolved
+				`,
+				candidateIds,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					var contractId, sourceId, destinationId *server.Id
+					var contractId, sourceId, destinationId server.Id
 					var unresolved bool
-					server.Raise(result.Scan(&processedCount, &contractId, &sourceId, &destinationId, &unresolved))
-					if contractId != nil {
-						// Deleting unresolved custody is its terminal lifecycle event.
-						// Read the deleted version so a concurrent outcome wins once.
-						if unresolved {
-							server.AddTxCommitCount(tx, &contractClosedCounter, 1)
-						}
-						contractHoleEventInTx(ctx, tx, *contractId, *sourceId, *destinationId, "remove")
+					server.Raise(result.Scan(&contractId, &sourceId, &destinationId, &unresolved))
+					// Deleting unresolved custody is its terminal lifecycle event.
+					// Read the deleted version so a concurrent outcome wins once.
+					if unresolved {
+						server.AddTxCommitCount(tx, &contractClosedCounter, 1)
 					}
+					contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
 				}
 			})
 		}, server.TxReadCommitted, server.OptNoRetry())
@@ -6518,15 +6565,16 @@ func decodeSweepCursorKey(key []string, targets []any) (values []any, ok bool) {
 // Page a child table and advance past every examined key, including retained
 // rows. Each page has its own read-committed maintenance transaction. Contract
 // steps use firstSql(limit) or sql(cursor..., limit) to select and lock a page,
-// then deleteSql(locked tuple addresses) in the same transaction. The second
-// statement sees row versions returned after a concurrent update's lock wait.
+// then deleteSql(locked key arrays...) in the same transaction. The second
+// statement sees row versions returned after a concurrent update's lock wait,
+// and deletes by complete primary key, which stays exact across partitions.
 //
 // Legacy small-table steps omit firstSql and use sql(first, cursor..., limit).
-// Contract pages return (examined int8, locked tuple addresses text[], max key
-// columns...). Legacy pages return (examined int8, deleted int8, max keys...).
-// A nonempty page supplies its original cursor; no result row means EOF.
-// Nil startKey starts at the head; maxRowCount <= 0 pages to EOF, otherwise the
-// returned cursor resumes the next invocation without restarting the history.
+// Contract pages return (examined int8, one locked-key array per key column,
+// max key columns...). Legacy pages return (examined int8, deleted int8, max
+// keys...). A nonempty page supplies its original cursor; no result row means
+// EOF. Nil startKey starts at the head; maxRowCount <= 0 pages to EOF, otherwise
+// the returned cursor resumes the next invocation without restarting the history.
 func sweepOrphanCursor(
 	ctx context.Context,
 	step sweepOrphanStep,
@@ -6567,23 +6615,26 @@ func sweepOrphanCursor(
 			deletedCount = 0
 			gotRow = false
 			targets = step.newCursorTargets()
-			var lockedTuples []string
-			scanTargets := make([]any, 0, len(targets)+2)
-			scanTargets = append(scanTargets, &sliceCount)
-			if step.deleteSql != "" {
-				scanTargets = append(scanTargets, &lockedTuples)
-			} else {
-				scanTargets = append(scanTargets, &deletedCount)
-			}
-			scanTargets = append(scanTargets, targets...)
+			// One aligned array per key column, in key column order.
+			var lockedKeys []any
 			if step.table == "transfer_escrow" {
 				var admitted bool
-				sliceCount, lockedTuples, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
+				sliceCount, lockedKeys, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
 				if !admitted {
 					ownershipRefused = true
 					return
 				}
 			} else {
+				var lockedKeyTargets []any
+				scanTargets := make([]any, 0, 2*len(targets)+1)
+				scanTargets = append(scanTargets, &sliceCount)
+				if step.deleteSql != "" {
+					lockedKeyTargets = newSweepLockedKeyTargets(targets)
+					scanTargets = append(scanTargets, lockedKeyTargets...)
+				} else {
+					scanTargets = append(scanTargets, &deletedCount)
+				}
+				scanTargets = append(scanTargets, targets...)
 				result, err := tx.Query(ctx, query, args...)
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
@@ -6591,14 +6642,21 @@ func sweepOrphanCursor(
 						gotRow = true
 					}
 				})
+				if gotRow && lockedKeyTargets != nil {
+					lockedKeys = derefCursor(lockedKeyTargets)
+				}
+			}
+			lockedCount := 0
+			if 0 < len(lockedKeys) {
+				lockedCount = reflect.ValueOf(lockedKeys[0]).Len()
 			}
 			// WithPgResult closes the page before the fresh snapshot is taken.
 			// The acquired child locks stay held until this transaction commits.
-			if 0 < len(lockedTuples) {
-				if int64(len(lockedTuples)) > sliceCount {
+			if 0 < lockedCount {
+				if int64(lockedCount) > sliceCount {
 					panic("orphan sweep locked beyond its selected page")
 				}
-				tag, err := tx.Exec(ctx, step.deleteSql, lockedTuples)
+				tag, err := tx.Exec(ctx, step.deleteSql, lockedKeys...)
 				server.Raise(err)
 				deletedCount = tag.RowsAffected()
 			}
@@ -6633,18 +6691,6 @@ func derefCursor(ptrs []any) []any {
 		values[i] = reflect.ValueOf(ptr).Elem().Interface()
 	}
 	return values
-}
-
-// AddSweepDestinationIdColumn adds transfer_escrow_sweep.destination_id if it is
-// not already present (idempotent). The column must exist before the sweep
-// writer (settleEscrowInTx) is deployed, since the writer inserts it.
-func AddSweepDestinationIdColumn(ctx context.Context) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`ALTER TABLE transfer_escrow_sweep ADD COLUMN IF NOT EXISTS destination_id uuid NULL`,
-		))
-	}, server.TxReadCommitted)
 }
 
 // BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto

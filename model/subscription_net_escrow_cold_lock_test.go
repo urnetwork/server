@@ -64,7 +64,7 @@ func TestNetEscrowColdSettlementKeepsCensusOutsideFinancialLocks(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=8 WHERE contract_id=$1`, contract.ContractId))
 				if test.stale {
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, f.balanceId))
 				} else {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 				}

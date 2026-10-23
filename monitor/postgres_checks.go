@@ -763,18 +763,50 @@ const pgVacuumHealthSQL = `
 	          coalesce(xact_start,query_start) ASC NULLS LAST,
 	          pid
 	 LIMIT 1
-	), dead AS (
+	), dead_relation AS MATERIALIZED (
 	 SELECT s.relid, s.relname, s.n_dead_tup,
 	        coalesce(to_char(s.last_autovacuum,'MM-DD HH24:MI'),'never') AS last_autovacuum,
 	        coalesce((
 	          SELECT option_value::bigint
 	          FROM pg_options_to_table(c.reloptions)
 	          WHERE option_name = 'autovacuum_vacuum_threshold'
-	        ),0) AS configured_vacuum_threshold
+	        ),0) AS configured_vacuum_threshold,
+	        -- a contract partition reports under its partitioned contract table
+	        coalesce(contract_root.relname, s.relname) AS table_name
 	 FROM pg_stat_user_tables s
 	 INNER JOIN pg_class c ON c.oid = s.relid
-	 WHERE s.n_dead_tup > 10000000
-	 ORDER BY s.n_dead_tup DESC LIMIT 5
+	 LEFT JOIN pg_class contract_root
+	   ON c.relispartition
+	  AND contract_root.oid = pg_partition_root(c.oid)
+	  AND contract_root.relnamespace = c.relnamespace
+	  AND contract_root.relname IN ('transfer_contract', 'transfer_escrow', 'contract_close', 'transfer_escrow_sweep', 'contract_close_report', 'contract_extender')
+	 -- a partitioned parent has no storage, so no dead tuples of its own
+	 WHERE c.relkind <> 'p'
+	), dead AS (
+	 SELECT candidate.relid, candidate.relname, candidate.n_dead_tup, candidate.last_autovacuum,
+	        candidate.configured_vacuum_threshold, candidate.table_name,
+	        totals.table_dead_tup, totals.table_relations, totals.table_relations_over
+	 FROM (
+	  -- one row per table: its worst relation over its own line, else its worst
+	  SELECT dead_relation.*,
+	         row_number() OVER (
+	           PARTITION BY dead_relation.table_name
+	           ORDER BY (dead_relation.n_dead_tup > greatest(dead_relation.configured_vacuum_threshold, 10000000)) DESC,
+	                    dead_relation.n_dead_tup DESC, dead_relation.relname
+	         ) AS table_rank
+	  FROM dead_relation
+	  WHERE dead_relation.n_dead_tup > 10000000
+	 ) candidate
+	 INNER JOIN (
+	  SELECT table_name,
+	         sum(n_dead_tup)::bigint AS table_dead_tup,
+	         count(*) AS table_relations,
+	         count(*) FILTER (WHERE n_dead_tup > greatest(configured_vacuum_threshold, 10000000)) AS table_relations_over
+	  FROM dead_relation
+	  GROUP BY table_name
+	 ) totals ON totals.table_name = candidate.table_name
+	 WHERE candidate.table_rank = 1
+	 ORDER BY candidate.n_dead_tup DESC LIMIT 5
 	)
 	SELECT dead.relname, dead.n_dead_tup, dead.last_autovacuum,
 	       dead.configured_vacuum_threshold,
@@ -789,7 +821,9 @@ const pgVacuumHealthSQL = `
 	       coalesce(h.backend_xid,''), coalesce(h.backend_xmin,''),
 	       coalesce(h.age_s,0), coalesce(h.state,''),
 	       coalesce(h.backend_type,''), coalesce(h.application_name,''),
-	       coalesce(h.query,'')
+	       coalesce(h.query,''),
+	       dead.table_name, dead.table_dead_tup, dead.table_relations,
+	       dead.table_relations_over
 	FROM dead
 	LEFT JOIN pg_stat_progress_vacuum v ON v.relid = dead.relid
 	LEFT JOIN pg_stat_activity va ON va.pid = v.pid
@@ -872,9 +906,18 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			// policy, not an overdue vacuum.
 			continue
 		}
+		// A partitioned contract table reports once, under its own name, for
+		// its worst partition over that partition's line; each partition is
+		// vacuumed on its own with its own threshold.
+		relation := r.str(0)
+		table := relation
+		if grouped := r.str(21); grouped != "" {
+			table = grouped
+		}
+		partitioned := table != relation
 		recoveryTarget := fmt.Sprintf(
 			"%s returns below %s",
-			r.str(0),
+			relation,
 			vacuumDeadTupleThresholdLabel(alertThreshold),
 		)
 		vacuum := "no vacuum currently reported"
@@ -922,19 +965,26 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			context += " Treat this row as negative attribution evidence. Continuing dead-row growth with per-index progress points to writer churn and cleanup debt; use the retention, close-backlog, and active-query signals to name those writers."
 			action = "Do not cancel or tune around the fresh SELECT. Let the progressing vacuum continue and address only a separately proven high-row writer or genuinely old transaction."
 			verify = "The sampled read disappears normally, index progress continues, known high-row writers are bounded, and " + recoveryTarget + " on consecutive five-minute samples."
-		} else if isPureCascadeVacuumRelation(r.str(0)) && vacuumHasReportedWork(r) && !vacuumHasOldHorizon(r) {
+		} else if isPureCascadeVacuumRelation(table) && vacuumHasReportedWork(r) && !vacuumHasOldHorizon(r) {
 			mechanism = "This intentionally high-threshold pure-cascade table has an active paced autovacuum that has already reported heap or index work. A bounded trigger overshoot while ordinary writes continue is consistent with normal trigger-to-completion cleanup; this single sample does not prove that cleanup is stalled or that a writer is defective. The warning remains useful because debt can continue rising until the pass completes."
 			context = "The fixed threshold and paced vacuum trade bounded dead space for buffer-cache safety on a giant cascade victim. Compare heap, index, and phase counters across five-minute samples; only unchanged progress, an old horizon or lock, or failure to recover after completion establishes an overdue cleanup boundary."
 			action = "Preserve the active autovacuum and compare its heap and index counters at the next five-minute sample. Escalate only a separately identified writer or blocker if progress stops or the completed pass does not recover; do not run a manual vacuum, cancel the worker, or retune the table from one trigger overshoot."
 			verify = "Vacuum counters continue advancing, the pass completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		}
+		symptom := fmt.Sprintf("table %s has %s dead tuples (alert threshold > %d), last autovacuum %s", relation, r.str(1), alertThreshold, r.str(2))
+		observed := fmt.Sprintf("n_dead_tup=%s alert_threshold=%d configured_vacuum_threshold=%d last_autovacuum=%s vacuum_age_s=%s", r.str(1), alertThreshold, configuredThreshold, r.str(2), r.str(5))
+		if partitioned {
+			symptom = fmt.Sprintf("table %s has %s dead tuples in partition %s (alert threshold > %d), last autovacuum %s; %s dead tuples across its %s partitions, %s over their line",
+				table, r.str(1), relation, alertThreshold, r.str(2), r.str(22), r.str(23), r.str(24))
+			observed += fmt.Sprintf(" partition=%s table_n_dead_tup=%s partitions=%s partitions_over_line=%s", relation, r.str(22), r.str(23), r.str(24))
+		}
 		findings = append(findings, finding{
 			probeId: "pg/dead-tuples", tier: tierWarn,
-			class: "dead-tuples", target: target, frame: r.str(0), sustain: 1,
-			symptom:   fmt.Sprintf("table %s has %s dead tuples (alert threshold > %d), last autovacuum %s", r.str(0), r.str(1), alertThreshold, r.str(2)),
+			class: "dead-tuples", target: target, frame: table, sustain: 1,
+			symptom:   symptom,
 			mechanism: mechanism,
 			baseline:  "alert at 10M dead unless the table has an explicit larger fixed autovacuum threshold; default scale factors never fire promptly on giant tables (2.4)",
-			observed:  fmt.Sprintf("n_dead_tup=%s alert_threshold=%d configured_vacuum_threshold=%d last_autovacuum=%s vacuum_age_s=%s", r.str(1), alertThreshold, configuredThreshold, r.str(2), r.str(5)),
+			observed:  observed,
 			evidence:  vacuum + "\n" + horizon,
 			context:   context,
 			action:    action,
@@ -948,34 +998,46 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	return findings, nil
 }
 
-// pgStatsLandmineProbe is the daily §7 stats-landmine check. The three isolated
-// predicate/index families are the durable boundary for current readers; once
-// they exist, a bounded statistics target keeps ANALYZE itself from becoming
-// the next availability event.
-type pgStatsLandmineProbe struct{}
-
-func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
-func (self pgStatsLandmineProbe) tier() string           { return tierWarn }
-func (self pgStatsLandmineProbe) cadence() time.Duration { return 24 * time.Hour }
-
-func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	target := "pg"
-	if h := env.cfg.hostByRole("pg-primary"); h != nil {
-		target = h.name
-	}
-	rows, err := env.runner.pg(ctx, `
+// The stats-landmine read: transfer_contract's open statistics, its structural
+// index families and the open-column statistics target, aggregated across the
+// partitions once the table is partitioned.
+const pgStatsLandmineSQL = `
 		WITH transfer_contract_indexes AS (
 		 SELECT i.relname AS index_name,
 		        i.reltuples,
 		        x.indisvalid,
 		        x.indisready,
 		        pg_get_indexdef(i.oid) AS index_definition,
-		        pg_get_expr(x.indpred,x.indrelid) AS index_predicate
+		        pg_get_expr(x.indpred,x.indrelid) AS index_predicate,
+		        -- a partitioned index holds no tuples: its leaves' estimates are
+		        -- its own, unknown (-1) while any leaf is unestimated
+		        CASE WHEN i.relkind = 'I' THEN coalesce((
+		          SELECT CASE WHEN bool_and(leaf_index.reltuples >= 0) THEN sum(leaf_index.reltuples) ELSE -1 END
+		          FROM pg_partition_tree(i.oid) tree
+		          JOIN pg_class leaf_index ON leaf_index.oid = tree.relid
+		          WHERE tree.isleaf
+		        ), -1) ELSE i.reltuples END AS estimated_rows
 		 FROM pg_class i
 		 JOIN pg_index x ON x.indexrelid=i.oid
 		 JOIN pg_class t ON t.oid=x.indrelid
 		 JOIN pg_namespace n ON n.oid=t.relnamespace
 		 WHERE n.nspname=current_schema() AND t.relname='transfer_contract'
+		), transfer_contract_leaves AS (
+		 -- empty for the plain table; a partitioned table's leaves each keep
+		 -- their own open-column statistics target
+		 SELECT leaf.relname::text AS leaf_name,
+		        coalesce(leaf_attribute.attstattarget::text,'missing') AS leaf_target
+		 FROM pg_partition_tree(to_regclass(quote_ident(current_schema()) || '.transfer_contract')) tree
+		 JOIN pg_class leaf ON leaf.oid = tree.relid
+		 LEFT JOIN pg_attribute leaf_attribute ON leaf_attribute.attrelid = leaf.oid AND leaf_attribute.attname = 'open'
+		 WHERE tree.isleaf
+		), parent_target AS (
+		 SELECT coalesce((
+		   SELECT attribute_record.attstattarget::text
+		   FROM pg_attribute attribute_record
+		   WHERE attribute_record.attrelid='transfer_contract'::regclass
+		     AND attribute_record.attname='open'
+		 ),'missing') AS target
 		)
 		SELECT
 		 coalesce((SELECT n_distinct::text FROM pg_stats
@@ -984,7 +1046,7 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		  WHERE index_predicate IS NOT NULL
 		    AND (index_predicate ILIKE '%open%'
 		         OR index_name='transfer_contract_outcome_null')
-		    AND reltuples=0),
+		    AND estimated_rows=0),
 		 (SELECT count(*) FROM transfer_contract_indexes
 		  WHERE indisvalid AND indisready
 		    AND index_predicate ILIKE '%CASE%'
@@ -1003,13 +1065,35 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		       AND index_definition ILIKE '%(payer_network_id) INCLUDE (transfer_byte_count)%'
 		       AND index_predicate ILIKE '%payer_network_id IS NOT NULL%')
 		    )),
+		 (SELECT target FROM parent_target),
+		 (SELECT count(*) FROM transfer_contract_leaves),
+		 (SELECT count(*) FROM transfer_contract_leaves, parent_target
+		  WHERE transfer_contract_leaves.leaf_target <> parent_target.target),
 		 coalesce((
-		   SELECT attribute_record.attstattarget::text
-		   FROM pg_attribute attribute_record
-		   WHERE attribute_record.attrelid='transfer_contract'::regclass
-		     AND attribute_record.attname='open'
-		 ),'missing');
-	`)
+		   SELECT transfer_contract_leaves.leaf_name || '=' || transfer_contract_leaves.leaf_target
+		   FROM transfer_contract_leaves, parent_target
+		   WHERE transfer_contract_leaves.leaf_target <> parent_target.target
+		   ORDER BY transfer_contract_leaves.leaf_name
+		   LIMIT 1
+		 ),'');
+`
+
+// pgStatsLandmineProbe is the daily §7 stats-landmine check. The three isolated
+// predicate/index families are the durable boundary for current readers; once
+// they exist, a bounded statistics target keeps ANALYZE itself from becoming
+// the next availability event.
+type pgStatsLandmineProbe struct{}
+
+func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
+func (self pgStatsLandmineProbe) tier() string           { return tierWarn }
+func (self pgStatsLandmineProbe) cadence() time.Duration { return 24 * time.Hour }
+
+func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	target := "pg"
+	if h := env.cfg.hostByRole("pg-primary"); h != nil {
+		target = h.name
+	}
+	rows, err := env.runner.pg(ctx, pgStatsLandmineSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -1017,24 +1101,45 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	zeroLegacyPartialIndexes := 0
 	structuralIndexShapes := 0
 	statisticsTarget := ""
+	// once transfer_contract is partitioned: its leaf partitions, how many keep
+	// an open-column target other than the parent's, and the first of them
+	leaves, leafTargetMismatches, firstLeafTargetMismatch := 0, 0, ""
 	if len(rows) > 0 {
 		nDistinct = rows[0].str(0)
 		zeroLegacyPartialIndexes = atoiRow(rows[0], 1)
 		structuralIndexShapes = atoiRow(rows[0], 2)
 		statisticsTarget = rows[0].str(3)
+		leaves = atoiRow(rows[0], 4)
+		leafTargetMismatches = atoiRow(rows[0], 5)
+		firstLeafTargetMismatch = rows[0].str(6)
 	}
-	if structuralIndexShapes != 3 || statisticsTarget != "300" {
+	leafTargetsDiffer := 0 < leaves && 0 < leafTargetMismatches
+	if structuralIndexShapes != 3 || statisticsTarget != "300" || leafTargetsDiffer {
 		action := "Apply the pending database migrations before deploying the rewritten API and Connect readers. They build all three isolated indexes online, then cap the open-column statistics target at 300; do not put an unbounded large-table ANALYZE ahead of them."
 		if structuralIndexShapes == 3 && statisticsTarget != "300" {
 			action = "Apply the bounded open-statistics migration. If legacy readers need immediate relief first, temporarily set the open-column target to 300, run ANALYZE transfer_contract (open) with a measured deadline, verify the three legacy plans, and restore only the intended persistent settings."
+		} else if structuralIndexShapes == 3 && leafTargetsDiffer {
+			action = "Restore the parent's open-column target 300 on each differing partition (ALTER TABLE <partition> ALTER COLUMN open SET STATISTICS 300). New weekly partitions copy the parent's per-column targets when the maintenance task creates them, so a differing one was changed afterwards or made another way; find which before its next ANALYZE samples with the wrong target."
+		}
+		symptom := fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3 statistics target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget)
+		observed := fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d statistics_target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget)
+		mechanism := "A false-only sample makes every WHERE-open or outcome-null partial index look free, while target 10000 makes each corrective or automatic ANALYZE sample three million rows. Current pair/payer readers avoid both dependencies through opaque equivalent predicates, isolated index families, and the bounded target."
+		baseline := "three valid isolated source-pair, destination-pair, and payer indexes plus open-column statistics target 300; legacy partial estimates are no longer an availability boundary"
+		if 0 < leaves {
+			// the parent's statistics are inherited across the partitions; its
+			// indexes are valid only once every partition's leaf is
+			symptom += fmt.Sprintf(" partitions with another target=%d/%d", leafTargetMismatches, leaves)
+			observed += fmt.Sprintf(" partitions=%d partition_target_mismatches=%d first_partition_target_mismatch=%s", leaves, leafTargetMismatches, firstLeafTargetMismatch)
+			mechanism += " transfer_contract is partitioned: each partition is analyzed with its own target and estimated by its own statistics, so the bound must hold on every partition, and a partitioned index counts as a valid structural shape only once every partition's leaf of it is valid."
+			baseline += ", with the parent's target on every partition"
 		}
 		return []finding{{
 			probeId: "pg/stats-landmine", tier: tierWarn,
 			class: "stats-landmine", target: target, frame: "transfer_contract.open", sustain: 1,
-			symptom:   fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3 statistics target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget),
-			mechanism: "A false-only sample makes every WHERE-open or outcome-null partial index look free, while target 10000 makes each corrective or automatic ANALYZE sample three million rows. Current pair/payer readers avoid both dependencies through opaque equivalent predicates, isolated index families, and the bounded target.",
-			baseline:  "three valid isolated source-pair, destination-pair, and payer indexes plus open-column statistics target 300; legacy partial estimates are no longer an availability boundary",
-			observed:  fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d statistics_target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget),
+			symptom:   symptom,
+			mechanism: mechanism,
+			baseline:  baseline,
+			observed:  observed,
 			context:   "The 2026-09-08 recurrence proved statistics target 10000 was not durable: physical clustering still produced n_distinct=1 on a billion-row table, then both manual and automatic three-million-row samples became resource-starved behind the resulting read pileup. A temporary target-300 column-only sample restored plans; structural query predicates and access families are the root fix.",
 			action:    action,
 			verify:    "All three structural indexes are valid/ready, attstattarget is 300, pair and payer plans use their matching family even under a synthetic false-zero sample, active backends collapse, and repeated pair lookups do not scan the generic open/create-time index.",

@@ -1267,6 +1267,9 @@ cluster: %t`,
 
 	if self.ApplyDbMigrations {
 		ApplyDbMigrations(ctx)
+		if testContractPartitions() {
+			Testing_PartitionContracts(ctx)
+		}
 	}
 
 	if self.Warmup {

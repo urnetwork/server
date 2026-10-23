@@ -31,6 +31,18 @@ const legacySettlementOutcomeGuardBody = `
  END;
  `
 
+// On partitioned contract tables the published foreign key keeps its parent
+// constraint and triggers; PostgreSQL adds one clone per transfer_contract
+// partition (conparentid set), which must each stay enabled, as must the
+// owner guard's clone on every partition.
+var legacySettlementIntentKeyClonesArtifactQuery = migrationForeignKeyPartitionClones(
+	"legacy_settlement_intent",
+	"transfer_contract",
+	"FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)",
+	"('RI_FKey_noaction_del',9)",
+	"('RI_FKey_noaction_upd',17)",
+)
+
 var legacySettlementIntentArtifactQuery = `(` +
 	migrationFp2Table("legacy_settlement_intent") + ` AND ` +
 	financialColumnsArtifact("legacy_settlement_intent", `('contract_id','uuid','NO',NULL),('shard','smallint','NO',NULL),('outcome','text','NO',NULL),('clear_dispute','boolean','NO','false'),('create_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('next_attempt_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('failure_code','text','NO','''none''::text')`) + ` AND ` +
@@ -38,8 +50,10 @@ var legacySettlementIntentArtifactQuery = `(` +
 	financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_age", "shard, failure_code, create_time") + ` AND ` +
 	financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_due", "shard, next_attempt_time, contract_id") + ` AND ` +
 	financialGuardArtifact("transfer_contract", "transfer_contract_legacy_settlement_owner", "guard_legacy_settlement_intent_outcome", legacySettlementOutcomeGuardBody, 19, "outcome") + ` AND
+ ` + migrationContractLeafTriggers("transfer_contract", "transfer_contract_legacy_settlement_owner") + ` AND
  NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.legacy_settlement_intent') AND contype='f'
- AND pg_get_constraintdef(oid)<>'FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)') AND
+ AND conparentid=0 AND pg_get_constraintdef(oid)<>'FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)') AND
+ ` + legacySettlementIntentKeyClonesArtifactQuery + ` AND
  NOT EXISTS(SELECT 1 FROM (VALUES
   ('legacy_settlement_intent','RI_FKey_check_ins',5),
   ('legacy_settlement_intent','RI_FKey_check_upd',17),

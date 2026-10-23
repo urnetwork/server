@@ -39,6 +39,9 @@ func executeOnlineSqlMigrationOnConn(ctx context.Context, conn PgConn, migration
 			return err
 		})
 	}
+	if migration.contractIndex != nil {
+		return migration.contractIndex.execute(ctx, conn, execute)
+	}
 	completion := migration.completion
 	if completion == nil {
 		return execute()
@@ -104,8 +107,17 @@ func executeOnlineSqlMigrationOnConn(ctx context.Context, conn PgConn, migration
 // whose catalog predicate is NULL. Progress plus relation locks protect
 // surviving builders, including sessions whose progress details are
 // privilege-masked.
+//
+// A contract table that is partitioned (CONTRACT-PARTITION.md) carries the
+// published index as a partitioned index, which pg_get_indexdef renders "ON
+// ONLY" the parent and which is valid only once every partition has a valid
+// attached leaf; normalizeIndexDef removes that marker before the comparison.
+// Its builders work on the partitions, so their progress and locks are read
+// across the partition trees of the table and of the index.
 func (self *onlineIndexMigrationCompletion) inspect(ctx context.Context, conn PgConn) (complete, busy bool, err error) {
 	var resolved bool
+	var usable bool
+	var definition string
 	err = conn.QueryRow(ctx, `
 		WITH resolved AS (
 		 SELECT to_regclass('public.'||$1) AS table_oid,
@@ -113,6 +125,12 @@ func (self *onlineIndexMigrationCompletion) inspect(ctx context.Context, conn Pg
 		), target AS (
 		 SELECT resolved.*, catalog.indrelid AS actual_table_oid
 		 FROM resolved LEFT JOIN pg_index AS catalog ON catalog.indexrelid=resolved.index_oid
+		), member AS (
+		 -- pg_partition_tree lists nothing for a relation that is neither
+		 -- partitioned nor a partition
+		 SELECT own.relid FROM target CROSS JOIN LATERAL (VALUES (target.table_oid::oid),(target.index_oid::oid),(target.actual_table_oid)) AS own(relid)
+		 UNION SELECT tree.relid::oid FROM target CROSS JOIN LATERAL pg_partition_tree(target.table_oid) AS tree
+		 UNION SELECT tree.relid::oid FROM target CROSS JOIN LATERAL pg_partition_tree(target.index_oid) AS tree
 		)
 		SELECT
 		 (to_regclass($1) IS NOT DISTINCT FROM target.table_oid)
@@ -120,20 +138,21 @@ func (self *onlineIndexMigrationCompletion) inspect(ctx context.Context, conn Pg
 		 EXISTS(SELECT 1 FROM pg_index AS catalog
 		        WHERE catalog.indexrelid=target.index_oid AND catalog.indrelid=target.table_oid
 		          AND catalog.indisvalid AND catalog.indisready AND catalog.indislive
-		          AND pg_get_indexdef(catalog.indexrelid)=$3
-		          AND pg_get_expr(catalog.indpred,catalog.indrelid) IS NOT DISTINCT FROM NULLIF($4::text,'')),
+		          AND pg_get_expr(catalog.indpred,catalog.indrelid) IS NOT DISTINCT FROM NULLIF($3::text,'')),
+		 coalesce(pg_get_indexdef(target.index_oid),''),
 		 EXISTS(SELECT 1 FROM pg_stat_progress_create_index AS progress
 		        WHERE progress.pid<>pg_backend_pid()
 		          AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database())
-		          AND (progress.relid IN (target.table_oid,target.actual_table_oid) OR progress.index_relid=target.index_oid))
+		          AND (progress.relid IN (SELECT relid FROM member) OR progress.index_relid IN (SELECT relid FROM member)))
 		 OR EXISTS(SELECT 1 FROM pg_locks AS held
 		           WHERE held.pid IS DISTINCT FROM pg_backend_pid() AND held.locktype='relation'
 		             AND held.database=(SELECT oid FROM pg_database WHERE datname=current_database())
-		             AND held.relation IN (target.table_oid,target.index_oid,target.actual_table_oid)
+		             AND held.relation IN (SELECT relid FROM member)
 		             AND held.granted AND held.mode IN ('ShareUpdateExclusiveLock','ShareLock','ShareRowExclusiveLock','ExclusiveLock','AccessExclusiveLock'))
-		FROM target`, self.table, self.index, self.definition, self.predicate).Scan(&resolved, &complete, &busy)
+		FROM target`, self.table, self.index, self.predicate).Scan(&resolved, &usable, &definition, &busy)
 	if err == nil && !resolved {
 		err = fmt.Errorf("migration %d recovery search path does not resolve its exact public objects", self.version)
 	}
+	complete = err == nil && usable && normalizeIndexDef(definition) == normalizeIndexDef(self.definition)
 	return
 }

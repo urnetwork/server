@@ -70,7 +70,7 @@ func TestNetEscrowContractLookupRemainsPointScopedWithFalseZeroStats(t *testing.
 					pointScoped := true
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if node["Relation Name"] == "transfer_contract" {
+						if planNodeContractTable(node) == "transfer_contract" {
 							rows := node["Actual Rows"].(float64)
 							if removed, ok := node["Rows Removed by Filter"].(float64); ok {
 								rows += removed

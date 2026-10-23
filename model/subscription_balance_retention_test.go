@@ -398,7 +398,7 @@ func TestCompletedTransferBalanceRetentionPlansStayIndexed(t *testing.T) {
 					balanceRows, escrowRows, escrowProbes := 0, 0, 0
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if relation, _ := node["Relation Name"].(string); relation == "transfer_balance" || relation == "transfer_escrow" {
+						if relation, _ := node["Relation Name"].(string); relation == "transfer_balance" || planContractTable(relation) == "transfer_escrow" {
 							rows := node["Actual Rows"].(float64)
 							if removed, ok := node["Rows Removed by Filter"].(float64); ok {
 								rows += removed
@@ -414,7 +414,7 @@ func TestCompletedTransferBalanceRetentionPlansStayIndexed(t *testing.T) {
 									t.Fatalf("%s %s balance scan escaped index: %s", mode, q.name, raw)
 								}
 							}
-							if relation == "transfer_escrow" {
+							if planContractTable(relation) == "transfer_escrow" {
 								escrowRows += count
 								escrowProbes += int(node["Actual Loops"].(float64))
 								condition, _ := node["Index Cond"].(string)

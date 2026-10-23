@@ -183,7 +183,7 @@ func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
 					}
 					primaryProbe = true
 				}
-				if n["Relation Name"] == "transfer_contract" && strings.Contains(n["Node Type"].(string), "Index") {
+				if planNodeContractTable(n) == "transfer_contract" && strings.Contains(n["Node Type"].(string), "Index") {
 					orderedScan = true
 				}
 				if children, ok := n["Plans"].([]any); ok {

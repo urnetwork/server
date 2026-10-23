@@ -138,7 +138,7 @@ func TestNetEscrowRevisionTriggerUsesContractKeyAfterUpgrade(t *testing.T) {
 							rows, probes, buffers, pointScoped := 0, 0, 0, true
 							var inspect func(map[string]any)
 							inspect = func(node map[string]any) {
-								if node["Relation Name"] == "transfer_escrow" {
+								if planNodeContractTable(node) == "transfer_escrow" {
 									visited := node["Actual Rows"].(float64)
 									if removed, ok := node["Rows Removed by Filter"].(float64); ok {
 										visited += removed
