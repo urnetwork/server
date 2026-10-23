@@ -69,8 +69,13 @@ func migrationFp2Constraint(table, kind, definition string) string {
 		table, kind, strings.ReplaceAll(definition, "'", "''"))
 }
 
-// New evidence belongs in durable ordinary tables, not look-alike views.
+// New evidence belongs in durable ordinary tables, not look-alike views. A
+// contract table may also be a partitioned parent of durable ordinary leaves
+// (see migrationContractTable).
 func migrationFp2Table(table string) string {
+	if isMigrationContractTable(table) {
+		return migrationContractTable(table)
+	}
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class WHERE oid=to_regclass('public.%s')
 		AND relkind='r' AND relpersistence='p')`, table)
 }

@@ -276,10 +276,16 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
 			} {
+				// read as the signal's index catalog reads it, so a partitioned
+				// contract table's parent index compares without ONLY
 				var definition string
 				var predicate *string
-				server.Raise(conn.QueryRow(ctx, `SELECT pg_get_indexdef(indexrelid), pg_get_expr(indpred,indrelid)
- FROM pg_index WHERE indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
+				server.Raise(conn.QueryRow(ctx, `SELECT `+migrationIndexDefinitionSql("index_relation", "table_relation.relname")+`,
+ pg_get_expr(index_record.indpred,index_record.indrelid)
+ FROM pg_index index_record
+ JOIN pg_class index_relation ON index_relation.oid=index_record.indexrelid
+ JOIN pg_class table_relation ON table_relation.oid=index_record.indrelid
+ WHERE index_record.indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				for _, state := range []struct{ valid, ready, want bool }{
 					{valid: true, ready: true, want: true}, {valid: false, ready: true}, {valid: true, ready: false},

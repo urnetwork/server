@@ -28552,6 +28552,37 @@ and has a synthetic regression where 597/600 must alert. Apply versions
 598–600 from that exact binary commit, then require both taskworker generations
 to become ready before testing their task fixes.
 
+Partitioned contract tables (2026-10-23). After the contract cutover
+(`bringyourctl model migrate contract-partition`, `server/CONTRACT-PARTITION.md`)
+the six contract tables are partitioned parents, and their published artifacts
+hold in either layout (`migration_contract_partition.go`):
+- The index catalog compares a parent index of these six tables without the
+  `ON ONLY` that `pg_get_indexdef` renders for a partitioned index, here and in
+  the 748 and 764 checks. The parent must still be valid and ready, which
+  PostgreSQL grants only once every partition has an attached valid copy, so a
+  dropped, reshaped or never-attached parent index stays drift. Other
+  partitioned tables (`network_ping` and its tallies) keep their `ON ONLY`
+  contracts.
+- 635 pins the `open` statistics target 300 on the parent and the target and
+  the fixed analyze settings on every leaf: a partitioned parent holds no
+  storage settings.
+- 745–747, 763 and 814 also require each named guard on every leaf with the
+  parent's function, events and enabled state: the clone of a row trigger, or
+  the TRUNCATE guard the cutover repeats on each leaf. A guard disabled or
+  dropped on one week's partition is drift.
+- 763 leaves the per-partition clones of the legacy settlement foreign key out
+  of its census of other keys, and requires an enabled clone of both action
+  triggers on every `transfer_contract` partition.
+- 764 requires the cascade key from `contract_close_report` while the tables
+  are plain. Once `transfer_contract` is partitioned it requires the key absent
+  (the cutover drops it by owner decision, and a restored key would hold back
+  each week's drop), and its unique-index and trigger censuses cover every
+  report partition.
+
+`TestMigrationsContractPartitionedCatalog` and
+`TestMigrationsContractCloseReportKeyAbsentOnlyWhenPartitioned` build both
+layouts themselves and inject each of these faults.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 

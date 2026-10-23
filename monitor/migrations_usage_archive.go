@@ -9,6 +9,7 @@ import (
 )
 
 // Numeric migration progress alone cannot establish durable cleanup custody.
+// Partitioned, the capture and its TRUNCATE guard must cover every partition.
 var providerUsageArchiveArtifactQuery = `(
 	(SELECT count(*) = 4 FROM (VALUES
 		('contract_id','uuid','NO'), ('outcome','character varying','NO'),
@@ -45,4 +46,5 @@ var providerUsageArchiveArtifactQuery = `(
 			AND actual.tgtype=expected.kind AND actual.tgenabled='O'
 			AND actual.tgnargs=0 AND actual.tgqual IS NULL AND actual.tgattr=''::int2vector
 			AND NOT actual.tgisinternal))
+	AND ` + migrationContractLeafTriggers("transfer_contract", "transfer_contract_usage_archive_capture", "transfer_contract_usage_archive_truncate_guard") + `
 )`
