@@ -102,6 +102,10 @@ type SubnetReplaySettings struct {
 	IntentUnresolvedAge time.Duration
 	// Producer intents examined per run.
 	MaximumIntents int
+	// Producer mirror and task rows examined per run.
+	ProducerMaximumRows int
+	// Reschedule errors on one subnet task before liveness warns.
+	TaskRescheduleWarnCount int64
 
 	// Release owner's enrollment; see SIGNALS.md §22.0 and the family sections.
 	Schema string
@@ -170,6 +174,8 @@ func DefaultSubnetReplaySettings() *SubnetReplaySettings {
 		MirrorStaleAge:                 10 * time.Minute,
 		IntentUnresolvedAge:            30 * time.Minute,
 		MaximumIntents:                 256,
+		ProducerMaximumRows:            64,
+		TaskRescheduleWarnCount:        3,
 	}
 }
 
@@ -302,7 +308,7 @@ func (self *SubnetReplaySettings) budgetReason() string {
 		self.MaximumCensusEntries <= 0 || self.ApiReadTimeout <= 0 || self.ApiMaximumBodyBytes <= 0 ||
 		self.ApiMaximumHeaderBytes <= 0 || self.ApiMaximumConnectionsPerOrigin <= 0 || self.HistoryMaximumPages <= 0 || self.HistoryPageObjects <= 0 ||
 		self.ArtifactMaximumReads <= 0 || self.PayloadMaximumReads <= 0 || self.AnchorMaximumChecks <= 0 || self.MetadataMaximumBytes <= 0 || self.MaximumValidatorRows <= 0 ||
-		self.MaximumCreditChecks <= 0 || self.MaximumIntents <= 0 || self.WeightStaleTempos == 0 {
+		self.MaximumCreditChecks <= 0 || self.MaximumIntents <= 0 || self.ProducerMaximumRows <= 0 || self.TaskRescheduleWarnCount <= 0 || self.WeightStaleTempos == 0 {
 		return "budget-invalid"
 	}
 	return ""

@@ -46,6 +46,8 @@ type subnetReplayTestNode struct {
 	contracts   map[common.Address]*subnetReplayTestContract
 	logs        map[common.Address][]types.Log
 	native      func(method string, params []json.RawMessage) (any, *subnetReplayRpcFailure)
+	balances    map[common.Address]*big.Int
+	nonces      map[common.Address]uint64
 	failMethods map[string]bool
 	exchanges   int
 	calls       []string
@@ -60,6 +62,7 @@ func newSubnetReplayTestNode(t *testing.T, chainId uint64, genesis common.Hash, 
 		t: t, chainId: chainId, genesis: genesis, blocks: map[uint64]common.Hash{}, finalized: finalized,
 		contracts: map[common.Address]*subnetReplayTestContract{}, logs: map[common.Address][]types.Log{},
 		failMethods: map[string]bool{}, rpcPort: 9944,
+		balances: map[common.Address]*big.Int{}, nonces: map[common.Address]uint64{},
 	}
 	for number := uint64(0); number <= finalized+16; number++ {
 		node.blocks[number] = subnetReplayTestBlockHash(number, 0)
@@ -164,8 +167,9 @@ func (self *subnetReplayTestNode) answer(method string, params []json.RawMessage
 			}
 			number = parsed
 		}
+		// Like a real node, numbered reads also serve recent unfinalized blocks.
 		hash, ok := self.blocks[number]
-		if !ok || self.finalized < number {
+		if !ok {
 			return nil, nil
 		}
 		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": hash.Hex(), "parentHash": common.Hash{}.Hex()}, nil
@@ -189,6 +193,26 @@ func (self *subnetReplayTestNode) answer(method string, params []json.RawMessage
 			return "0x", nil
 		}
 		return "0x6080", nil
+	case "eth_getBalance", "eth_getTransactionCount":
+		var address common.Address
+		var selector struct {
+			BlockHash        common.Hash `json:"blockHash"`
+			RequireCanonical bool        `json:"requireCanonical"`
+		}
+		if len(params) != 2 || json.Unmarshal(params[0], &address) != nil || json.Unmarshal(params[1], &selector) != nil || !selector.RequireCanonical {
+			self.t.Fatalf("%s is not canonical hash pinned", method)
+		}
+		if _, ok := self.blockNumberOf(selector.BlockHash); !ok {
+			return nil, &subnetReplayRpcFailure{Code: -32000, Message: "unknown block"}
+		}
+		if method == "eth_getTransactionCount" {
+			return hexutil.EncodeUint64(self.nonces[address]), nil
+		}
+		balance, ok := self.balances[address]
+		if !ok {
+			balance = new(big.Int)
+		}
+		return hexutil.EncodeBig(balance), nil
 	case "eth_getLogs":
 		var filter struct {
 			Address   common.Address `json:"address"`

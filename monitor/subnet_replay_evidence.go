@@ -229,6 +229,9 @@ var subnetReplayClassKinds = map[string]alertClassKind{
 	"subnet-artifact-integrity":   incidentAlertClass,
 	"subnet-evidence-anchor":      incidentAlertClass,
 	"subnet-audit-replay-gap":     incidentAlertClass,
+	"subnet-runtime-liveness":     incidentAlertClass,
+	"subnet-state-durability":     incidentAlertClass,
+	"subnet-writer-funding":       incidentAlertClass,
 }
 
 func init() {

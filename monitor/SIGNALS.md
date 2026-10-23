@@ -331,7 +331,6 @@ active missing capability and must not be read as green.
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
-| 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
@@ -42919,6 +42918,7 @@ copies lost, accepted artifact fraud, chain commitment or a protocol deadline
 requires the remaining §22.8 and §22.10 readers and their retained evidence.
 
 ### 22.9 Process correctness, resources, and adversarial noise
+Probe: `subnet-process`
 
 Correlate real operator/API/connect, miner and validator generations with
 structured lifecycle/intent records, bounded queues and existing PG/Redis/MinIO,
@@ -42938,6 +42938,39 @@ diagnosed as permission to restart shared infrastructure.
 | `subnet-writer-funding` | Each scoped signer has enough available native TAO/EVM gas and intended alpha staging to complete its due work within the approved per-action/campaign ceilings; reserved, pending and confirmed spend reconcile. | Warn on insufficient funded runway, price/burn movement or an unresolved nonce/intent; page on cap overspend or a missed required transaction deadline. Never auto-fund, trade, restake or resend an ambiguous transaction. |
 | `subnet-adversarial-resilience` | Rejected attacks are counted by known vector while interleaved honest controls continue to complete with bounded latency, resource use and correct money/weight outcomes. | Page on an accepted exploit, honest-control starvation or escaped resource bound; warn on growing attack pressure. Expected testnet fault windows stay annotated and still require their negative/positive outcomes and recovery, never blanket alert suppression. |
 | `subnet-monitor-coverage` | Every required role, operator, validator, candidate group, epoch, artifact kind and capability has fresh observations; exporter/scrape/log absence is distinct from zero failures. | Warn immediately for unimplemented required probes or configuration gaps; sustain transient visibility loss for two cadences, page at a threatened/missed correctness deadline. Show the missing census/frontier and dependency cause, not a green empty dashboard. |
+
+`signal_subnet_process.go` implements the operator-service half of this
+family. With bounded constant SQL (no identity is interpolated; rows are
+filtered in memory) it reads the producer's finalized event mirror checkpoint
+(`st_chain_sync`: next block and the stored canonical hash of the block before
+it), its nonterminal `st_transaction_intent` rows for the pinned deployment,
+and its `pending_task` subnet tasks. At one finalized evm checkpoint it then
+compares the mirror boundary with the canonical hash at that height (PAGE
+`subnet-state-durability` when they differ; a boundary above the checkpoint is
+not compared), warns when the mirror lags by more than `MirrorLagWarnBlocks` or
+has not advanced within `MirrorStaleAge`, when `StSyncChain` is absent or
+overdue, and when subnet tasks reach `TaskRescheduleWarnCount` reschedule
+errors (`subnet-runtime-liveness`). It reads every scoped writer's finalized
+balance and nonce, hash pinned: each active operator's current root and deposit
+signer from `operatorAt`, and each producer intent sender. A zero balance warns;
+with the enrolled `writer_action_liability_wei` and `writer_minimum_actions` a
+runway below the minimum warns; uncertain intents, intents unresolved past
+`IntentUnresolvedAge`, and unresolved intents whose nonce the chain already
+consumed warn (`subnet-writer-funding`). An explicitly disabled producer is not
+judged, though its operators' chain signers still are. A missed required
+transaction deadline is decided by §22.7's epoch-progress rules.
+
+Missing today and therefore an explicit `subnet-monitor-coverage` gap on every
+run: validator and miner process, progress and resource exporters do not exist
+in the observability stack the monitor reads (the validator's progress file and
+`sn/mainnet` textfile metrics are not deployed to Mimir), so
+`subnet-capacity-margin`, `subnet-rpc-read-ownership`,
+`subnet-evidence-stream-capacity`, `subnet-adversarial-resilience` and the
+validator and miner roles of `subnet-runtime-liveness` stay unknown.
+`subnet-observation-quota` needs a bounded reader of the attempt-upload Redis
+counters against vault `st.yml` `attempt_upload` budgets and the configured
+client population; none exists. Writer cap overspend needs per-action spend
+receipts and stays unknown.
 
 Keep the live testnet adversarial catalogue mapped to these alert families:
 weight copying/Yuma gaming, ownership/UID churn, unauthorized or cross-domain
