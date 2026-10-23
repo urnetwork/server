@@ -285,13 +285,12 @@ active missing capability and must not be read as green.
 | 11.3 | Runbook | `grafana-node`, `log-errors` |
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
-| 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
-| 11.6b | Coverage gap | `minio-storage` reads percent bands, quotas and S3 errors from MinIO's own accounting; drive runway, raw-versus-logical divergence, put-surge and backup-reserve checks are missing. |
+| 11.6 | Shared contract | `minio-storage`, `minio-runway`, `mimir-index`, `grafana-node`, `backup-archives` |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage`, `minio-runway` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -30502,7 +30501,7 @@ quiet request counters and alert absence cannot supply missing health authority.
 
 
 ### 11.6b MinIO drive runway, accounting divergence and foreign data on its drives
-Probe: `minio-runway` (catalog entry; not implemented as of 2026-10-22)
+Probe: `minio-runway`
 
 MinIO on main is one node on edge-5: four 3.84 TB drives (`/mnt/blob1`..`4`)
 in one 2+2 erasure set, 7.68 TB usable. On 10-22 MinIO reported about 988 GB of
@@ -30573,10 +30572,68 @@ and scanner lag right after a MinIO restart.
 False-negative qualifier: raw cost per object varies with object size and
 filesystem; healing and replication write without S3 puts.
 
+Implementation (2026-10-22). Every fifteen minutes, for each enabled
+inventory host with the `minio` role, one bounded loopback Mimir `query_range`
+(eight days at a 15-minute step, two minutes behind now) returns fixed
+`monitor_check` partitions: `drive_avail` and `drive_size` from
+`node_filesystem_*_bytes{job="node"}` on mountpoints matching
+`/mnt/blob[0-9]+`, MinIO's own `minio_system_drive_count`, the summed
+`minio_cluster_usage_buckets_total_bytes`, the objects-path
+`minio_cluster_usage_objects_since_last_update_seconds` (seconds), and
+`sum by (host) (rate(minio_api_requests_total{name="PutObject"}[1h]))`.
+Series of hosts outside the `minio` inventory are discarded. The drive census
+is complete only when MinIO's fresh drive count equals the number of drive
+filesystems and every drive has a fresh, unique, whole-byte history with all
+decline windows and a fresh size. Classes, targets `<host>/<layer>`:
+
+- `minio-drive-runway` (target `<host>/drives`, sustain 2): the §2.4f
+  estimator per drive, counting down to 1% of the drive's size (MinIO's
+  `diskFillFraction` floor), judged on the drive with the shortest runway:
+  WARN at <= 14 days, PAGE at <= 3 days. The §2.4f pace floor does not apply
+  here. A violation needs only a fresh drive; healthy needs the full census.
+- `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
+  used bytes over the drives minus twice the logical bucket bytes (2+2
+  erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+- `minio-put-surge` (target `<host>/puts`, sustain 2): the 1-hour PutObject
+  rate above three times its median over the preceding seven days (the newest
+  hour excluded) and at least 10 per second warns; the median needs at least
+  three days of measured history.
+- `minio-backup-reserve` (target `<host>/backup`, sustain 1): on a host whose
+  `pg-basebackup.service` or `.timer` is loaded, a backup trigger (the service
+  active, a `pgbackup_*` replication slot counted on the primary, or the timer
+  due within 24 hours) while the drives keep less than 4 TB usable above the
+  1.5 TiB per-drive reserve warns before it writes. The unit states come from
+  one hostname-guarded `systemctl show --timestamp=unix` frame with only
+  `LoadState`, `ActiveState` and `NextElapseUSecRealtime`; the slot read is a
+  hostname- and primary-guarded count. The last generation's size is in
+  `backup-info.json` inside directories only the backup account can read, so
+  the required room is the backup's configured minimum
+  (`pg_basebackup_min_free_bytes`), a lower bound of its own admission
+  (`max(min_free, 1.25 x last generation)`).
+- `minio-runway-unobservable` (frames by target, sustain 2): a missing
+  gateway, a failed or invalid answer, an incomplete census, missing or stale
+  logical, usage or PutObject series, short put history, and failed or
+  malformed unit or slot reads. Each layer's gap is its own; one never clears
+  or masks another. The drive layer's unknown pages when a drive declined
+  more than 5 GB/h over the last six hours (emission rule 1), measured from
+  the remaining history or remembered by the signal instance.
+
+Public data: bytes, rates, fixed reasons, unit states and slot counts. Device
+names, slot names, unit text, raw answers and source errors stay private.
+Every tunable is a field of `MinioRunwaySettings`.
+
+Synthetic controls replay the 2026-10-22 shape (drive runway WARN at about
+8 days, divergence over 5 TB and a 520/s put surge over a 90/s median), one
+drive holding foreign data, every backup trigger with and without room, an
+incomplete census, a stale fast-declining drive layer, missing MinIO series,
+short put history, failed and malformed unit and slot reads, a retired
+store's series, inventory exclusion and cancellation.
+
 ACTION: cut object growth at its source (§14.8, plus skipping the
 history-key copy for client-key evidence and a lifecycle rule for the existing
 copies). Run backups only with room for two generations above the reserve. Add
-drives: a new pool needs at least 4 drives to keep 2+2 parity.
+drives: a new pool needs at least 4 drives to keep 2+2 parity. VERIFY: two
+consecutive complete observations outside every band.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
