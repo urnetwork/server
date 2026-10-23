@@ -42447,18 +42447,20 @@ continues until the boot journal changes.
 
 ## 22. Subnet continuous correctness — SUBNET1
 
-Status (2026-09-13): **required monitoring specification; the registered
-`subnet-coverage` sentinel makes missing coverage visible, but the nine subnet
-correctness families are not implemented or qualified**. Existing §17
+Status (2026-10-22): **required monitoring specification; the registered
+`subnet-coverage` sentinel makes missing coverage visible and retires a family
+once its reader is registered**. Registered readers are not yet qualified
+against testnet evidence or peer review (§22.10): their findings are production
+observations, but a page from an unqualified reader is checked against on-chain
+evidence before it drives an incident. Existing §17
 `subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
 or settlement correctness. The fixed-object availability slice in §22.8a is registered separately and
-does not satisfy a full family. Other `subnet-*` correctness identifiers below,
-except the sentinel's `subnet-monitor-coverage` and this slice's
-`subnet-history-availability`, remain reserved alert classes rather than metric
-names. Implement each family with its source adapter, deterministic
-tests and registry entry before claiming automated coverage. Until then, a
-deployed subnet requiring that family has an explicit alert, never a green
-result from an absent metric.
+does not satisfy a full family. The `subnet-*` classes of a registered family
+are emitted alert classes; those of an unregistered family remain reserved
+alert classes rather than metric names. Implement each family with its source
+adapter, deterministic tests and registry entry before claiming automated
+coverage. Until then, a deployed subnet requiring that family has an explicit
+alert, never a green result from an absent metric.
 
 Sources of requirements: sibling `sn/WHITEPAPER.md` version 1.0, `sn/VALIDATOR.md`,
 `sn/protocol`, `sn/validator`, `sn/evm/src`, and the real server `/verify` and
@@ -42474,9 +42476,12 @@ classification. When the subnet is explicitly disabled, the economic battery
 is correctly **not deployed**. For enabled, invalid, unavailable, or ambiguous
 state, it emits `subnet-monitor-coverage` with the nine missing reader families
 and their source prerequisites. It deliberately cannot certify any economic
-invariant. Retire this warning only as the real typed family readers below are
-registered and independently qualified; §17 node health and log silence are
-not substitutes.
+invariant. The warning retires family by family: a family leaves it once a
+signal with that section number is registered, and that reader then reports its
+own unavailable sources as unknown. A lettered partial reader such as §22.8a is
+never counted as its family. Independent qualification (§22.10) is a separate
+release gate, not a sentinel state; §17 node health and log silence are not
+substitutes.
 
 Observe the complete configured operator and validator census, all live native
 UIDs and eligible head candidates, every due operator/epoch, and every finalized
