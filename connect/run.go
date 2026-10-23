@@ -164,6 +164,10 @@ func runWithDependencies(
 		}()
 		exchange = NewExchangeFromEnv(runCtx, settings)
 		defer exchange.Close()
+		// the connect service's exchange takes part in the fleet's placement
+		// (MOVE.md §5.4, §5.5); alt's embedded exchange does not
+		stopMover := StartExchangeMover(runCtx, exchange)
+		defer stopMover()
 		connectRouter, err := newConnectRouterFromExchange(runCtx, cancel, exchange)
 		if err != nil {
 			return fmt.Errorf("initialize Connect ingress: %w", err)

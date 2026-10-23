@@ -331,6 +331,13 @@ active missing capability and must not be read as green.
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
+| 24.1 | Coverage gap | `provider-connections` sees provider counts by host, not capacity-normalized placement; the max over min host-imbalance rule over the mover's normalized load gauge is missing. |
+| 24.2 | Coverage gap | `connection-rate` sees connection churn, not moves; the arrived over sent move success-ratio rule is missing. |
+| 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
+| 24.4 | Coverage gap | `rollout-guard` and `provenance` see builds, not the mover's mode; the mover-mode rule over the mode gauge and the control hash is missing. |
+| 24.5 | Coverage gap | `redis-cluster` and `pgbouncer-pool-starvation` see the Redis and database pressure the mover pauses for; the mover tick-outcome rule is missing. |
+| 24.6 | Coverage gap | `log-errors` sees no move results; the per-target failure-ratio and breaker rules over the move result counters are missing. |
+| 24.7 | Coverage gap | `rollout-guard` sees drains, not their admission refusals or drain moves; the refusals-outside-a-drain rule is missing. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -43319,6 +43326,232 @@ bucket can hide several cohorts. A burst spread across carriers and cohorts is
 not this pattern: check the LB, network and Connect path (§2.7, §8.6). No
 server action is indicated for the client pattern; do not restart Connect for
 it.
+
+## 24. Connect placement (server-directed moves) — MOVE
+
+`connect/MOVE.md` is the design. Every connect process writes a load record
+into the Redis hash `{connect_load}` every 15 s and runs a mover. When an
+operator turns the mover on through the control hash `{connect_move}control`,
+it moves idle, move-capable clients from hosts above the band around the fleet
+mean to hosts below it, within a Redis per-minute budget (120 fleet, 60 per
+source host, 40 per target host). Load is residents per unit of capacity:
+cores times the inventory `move_weight`. The connect dashboard's placement row
+charts every series here.
+
+These signals are prospective. The mover is off until an operator sets the
+control, so the bands below are design targets, not measured production
+baselines. Every gauge is per process, rides the stats pusher's {env,
+service, block, host} labels, and has no series while its process cannot
+compute it. Missing series are unknown, never zero.
+
+The Redis state, read-only, from the redis host of §10.4:
+
+```
+redis-cli -c HGETALL '{connect_move}control'   # absent: the code default, off
+redis-cli -c HGETALL '{connect_load}'          # one field per process: <host>/<block>/<exchangeId>
+redis-cli -c HGETALL '{connect_move}budget'    # {window, count} of the fleet's current minute
+```
+
+The kill switch is `mode off` in the control; every process stops at its next
+tick, within 10 s. The monitor never writes the control.
+
+### 24.1 Host imbalance: max ÷ min normalized load
+
+```promql
+max(max by (host) (urnetwork_connect_move_host_normalized_load{env="main",service="connect"}))
+  / min(max by (host) (urnetwork_connect_move_host_normalized_load{env="main",service="connect"}))
+```
+
+- BEFORE THE MOVER (MOVE.md §1): on 10-22 at 13:30Z edge-4 held 45.8% of
+  providers on 72 cores and edge-0 12.6% on 96, about 5 to 1 per core. That is
+  derived from the provider shares, not read from this gauge.
+- TARGET with the mover on: no host above mean × 1.10 (the band), and hosts
+  below the mean filling at most 40 moves a minute each. About 10k moves take
+  about 85 minutes (D8), so the ratio falls over hours, not minutes.
+- PROPOSED ticket: the ratio above 1.5 for 2 h while §24.4 shows the mover on.
+  Then read `urnetwork_connect_mover_ticks_total` by outcome: `no_target` (no
+  host below the mean under the 0.75 CPU guard), `db_paused` (§24.5),
+  `budget_refused` (the budget is the bound), `store_error` (Redis), or
+  `in_band` (the band is wider than the imbalance).
+
+False-positive qualifiers: a new host (edge-7/8) starts at 0, so the ratio is
+infinite until it fills under the target cap; a host mid-deploy reads light
+for minutes, because draining processes are not in the load. False-negative
+qualifiers: a host whose load publishes fail
+(`urnetwork_connect_move_load_publishes_total{outcome="failed"}`) drops out of
+the table and out of this ratio; a host with no connect process has no series.
+
+### 24.2 Move success ratio: arrived ÷ sent
+
+```promql
+sum(increase(urnetwork_connect_moves_arrived_total{env="main",service="connect",kind=~"advisory|compulsory"}[1h]))
+  / sum(increase(urnetwork_connect_moves_sent_total{env="main",service="connect"}[1h]))
+sum by (target_host) (increase(urnetwork_connect_moves_arrived_total{env="main",service="connect",kind=~"advisory|compulsory"}[1h]))
+  / sum by (target_host) (increase(urnetwork_connect_moves_sent_total{env="main",service="connect"}[1h]))
+```
+
+`moves_sent_total` counts the mover's sends at the source: balance, arrival,
+evacuation and emergency. `moves_arrived_total` (the move primitives) counts
+handoffs by intent at the target, drain moves too, so the ratio keeps the
+mover's kinds. Arrivals lag sends by up to the intent TTL of 3 minutes: use
+windows of an hour or more.
+
+- EXPECTED below 1: clients decline advisory moves by design (MOVE.md §5.2:
+  memory budget, a recent move, a target that failed, mobile background or
+  metered network).
+- PROPOSED ticket: below 0.5 for 2 h. Localize by target host, then by
+  `urnetwork_connect_moves_failed_total{reason,target_host}`,
+  `urnetwork_connect_moves_declined_total{reason}` and the per-address breaker
+  gauge `urnetwork_connect_move_target_breaker_open` (all from the move
+  primitives).
+
+False-positive qualifiers: a move the budget refused was never sent, so it is
+in neither count; an unrelated reconnect that lands on the target consumes the
+intent and counts as an arrival, which is the placement wanted (MOVE.md §6).
+False-negative qualifier: dry run sends nothing; its would-send counter
+(`urnetwork_connect_moves_would_send_total`) has no arrivals to compare.
+
+### 24.3 Compulsory closes per drain
+
+```promql
+sum(increase(urnetwork_connect_moves_compulsory_closed_total{env="main",service="connect"}[1d]))
+  / count(max_over_time(urnetwork_connect_drain_residents_remaining{env="main",service="connect"}[1d]) > 0)
+```
+
+With drain moves (D13), a drain sends every resident a compulsory move to the
+same host. A client whose resident is still local at its deadline,
+`migrate_time` + 60 s, is closed with reason "moved" (H1 control close 6,
+WebSocket or QUIC code 4006). Closes per drain are the residents that did not
+make-before-break: legacy clients, which get the legacy migrate and then the
+close, and capable clients whose replacement did not connect in time. The
+count should fall as move-capable residents rise
+(`urnetwork_connect_move_capable_residents`). The denominator counts the
+processes whose drain gauge was nonzero in the window (§10.2), one per
+drained process.
+
+- PROPOSED ticket: closes per drain above the drained process's legacy
+  residents at drain start, which means capable clients are failing their
+  replacement too.
+
+False-positive qualifier: evacuation and emergency compulsory moves close
+clients too; separate them by time, or by
+`urnetwork_connect_moves_sent_total{kind="compulsory"}` by trigger in the
+same window. False-negative qualifiers: a process killed before its deadlines
+counts no close; the drain gauge is per process and is overwritten within one
+push by the replacement container (§10.2), so read it as a range.
+
+### 24.4 Mover mode
+
+```promql
+max by (host, block) (urnetwork_connect_mover_mode{env="main",service="connect"})
+min(urnetwork_connect_mover_mode{env="main",service="connect"})
+max(urnetwork_connect_mover_mode{env="main",service="connect"})
+```
+
+0 off, 1 dry run, 2 on: each process's mode after the control narrowed the
+code settings. The control can only narrow: the mode never goes above what
+`EnableMove` allows, `maxPerMinute` never above the code budget, and
+`tolerance` never below the code band (D14). "Mover on" is a max of 2.
+
+- min equal to max: the fleet agrees with the control.
+- A process at 0 while the others read 1 or 2: it cannot read the control
+  (`urnetwork_connect_mover_ticks_total{outcome="store_error"}`, it fails
+  closed) or it runs with `EnableMove` off. A process with no series runs a
+  build without the mover.
+- dry run (1): compare `urnetwork_connect_moves_would_send_total` by source
+  and target with the host excess (`urnetwork_connect_move_host_excess`)
+  before turning it on (MOVE.md §7 phase 3).
+
+### 24.5 Mover pauses and failures
+
+```promql
+sum by (outcome) (rate(urnetwork_connect_mover_ticks_total{env="main",service="connect"}[5m]))
+sum by (cap) (rate(urnetwork_connect_move_budget_refused_total{env="main",service="connect"}[5m]))
+sum by (kind, trigger) (rate(urnetwork_connect_move_send_errors_total{env="main",service="connect"}[5m]))
+```
+
+- `db_paused`: the process's Postgres pool acquire wait was above 50 ms, and
+  it moved nothing that tick, because every arrival writes to the database.
+  Fleet-wide `db_paused` while §2's pool signals are hot is the guard working;
+  read the database, not the mover.
+- `store_error`: a Redis read or write failed and the tick failed closed.
+  Correlate with §3.
+- budget refusals by `cap`: `fleet` and `source` are the pace by design; a
+  steady `target` refusal on one host is the arrival cap protecting a new or
+  empty host.
+- send errors: the executor sent nothing after the budget reserved the move,
+  usually because the resident left; a burst on every process at once points
+  at the move primitives.
+
+False-positive qualifier: every tick of a process at mode off or in the band
+counts `off` or `in_band`, so the outcome mix is per tick, not per move.
+
+### 24.6 Move results, expiries and the target breaker
+
+```promql
+sum by (reason) (increase(urnetwork_connect_moves_declined_total{env="main"}[1h]))
+sum by (reason, target_host) (increase(urnetwork_connect_moves_failed_total{env="main"}[1h]))
+sum by (cause) (increase(urnetwork_connect_move_results_dropped_total{env="main"}[1h]))
+sum by (kind) (increase(urnetwork_connect_moves_expired_total{env="main",service="connect"}[1h]))
+max by (host, interface, family) (urnetwork_connect_move_target_breaker_open{env="main",service="connect"})
+```
+
+A client reports a move it declined or whose replacement failed with one
+`ResidentMoveResult` to its control, and the platform accepts the report only
+when its move id matches the client's intent in Redis (MOVE.md §5.1). Reports
+arrive wherever the client's control path runs: the connect resident, the api's
+`/connect/control` and the proxy's in-process authority, so these three
+counters carry no service filter. A failure counts against the failed target
+address's breaker unless the move was a drain's. `moves_expired_total`
+counts moves whose arrival window (`MoveArrivalTimeout` past the migrate time)
+ended with the resident still at the source; the source keeps the resident and
+the client forwards as before.
+
+- EXPECTED: declines by `memory_budget`, `recent_move`, `move_in_progress` and
+  `mobile_background_or_metered` are the client's rules working (D11), and
+  most advisory moves that neither arrive nor fail expire.
+- PROPOSED ticket: failures for one `target_host` above a quarter of its sends
+  (§24.2's denominator by target) for 1 h, or a breaker held open on more than
+  one address of a host. Read `reason`: `connect_timeout` and `dial_error`
+  point at the path to the target, `tls_error` at its certificates, and
+  `auth_error` at the platform.
+- `move_results_dropped_total` by `cause`: `no_intent` follows an expiry or an
+  arrival that consumed the intent first; a steady `foreign_move` or
+  `invalid_move_id` is a client reporting a move it was not sent.
+
+False-positive qualifier: a client counts only failures of the carrier its old
+transport used, so a network that blocks one carrier is not blamed on the
+target. False-negative qualifiers: a report is best effort and sent once, so a
+client that loses its control path reports nothing; drain moves never feed the
+breaker.
+
+### 24.7 Drain gates and drain moves
+
+```promql
+sum by (carrier) (increase(urnetwork_connect_drain_refusals_total{env="main",service="connect"}[1h]))
+sum by (capable) (increase(urnetwork_connect_drain_moves_sent_total{env="main",service="connect"}[1h]))
+```
+
+A draining process refuses new client transports on every carrier (`h1`,
+`quic`) and inbound exchange handshakes for a resident it does not have
+(`exchange`), so a redialing client lands on a sibling at once (MOVE.md §2.3,
+phase 0). With drain moves on, every resident gets a compulsory move to this
+host's own addresses (`capable="true"`) or the legacy migrate
+(`capable="false"`), each with a drain intent, so the client takes over at the
+sibling as soon as it arrives. The Redis control's `drainMoves false` returns
+the next drain to the legacy migrate without a deploy.
+
+- EXPECTED: refusals only while a process drains, and drain moves sent once
+  per resident per drain; `capable="true"` grows as clients adopt the move
+  version (`urnetwork_connect_move_capable_residents`).
+- PROPOSED ticket: refusals outside any drain window (§10.2's
+  `urnetwork_connect_drain_residents_remaining` at zero), which means a process
+  is stuck draining while it still takes traffic from the lb.
+
+False-positive qualifier: a client that redials into the draining process
+before the lb drops it is refused by design. False-negative qualifier: a
+drain that cannot write intents falls back to the legacy migrate and counts
+`capable="false"` for capable clients too.
 
 ## Shared provider-egress dashboard refresh
 

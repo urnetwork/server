@@ -531,6 +531,11 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.PlatformTransportBudget = transportBudget
+		// A probe measures the provider it reaches through the edge it lands
+		// on, so it never follows the platform's connection moves
+		// (connect/MOVE.md D15). Without the capability it gets no advisory
+		// move, and a drain migrates it by name.
+		settings.EnableMove = false
 		return settings
 	}
 

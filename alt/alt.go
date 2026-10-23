@@ -330,8 +330,23 @@ func (self *Alt) listenQuic(
 			return fmt.Errorf("alt %s accept %s: %w", transport, listenAddress, err)
 		}
 		go server.HandleError(func() {
-			self.handleQuicConn(conn)
+			self.handleQuicConn(conn, transport)
 		})
+	}
+}
+
+// The carrier a connection accepted on the listener reaches its resident as
+// (MOVE.md §5.5): the H3 listener carries plain QUIC and the whodis listener
+// carries it inside dns messages. The mover moves only clients on direct
+// carriers.
+func connectCarrierForListener(transport string) connectserver.ResidentCarrier {
+	switch transport {
+	case ListenerTransportH3:
+		return connectserver.ResidentCarrierH3
+	case ListenerTransportWhodis:
+		return connectserver.ResidentCarrierH3Dns
+	default:
+		return connectserver.ResidentCarrierUnknown
 	}
 }
 
@@ -376,8 +391,9 @@ const (
 )
 
 // Routes one accepted connection to its front. Runs on its own goroutine and
-// returns when the connection is finished.
-func (self *Alt) handleQuicConn(conn *quic.Conn) {
+// returns when the connection is finished. transport is the listener that
+// accepted it.
+func (self *Alt) handleQuicConn(conn *quic.Conn, transport string) {
 	serverName := self.serverName(conn)
 	front := frontRefused
 	switch {
@@ -391,7 +407,7 @@ func (self *Alt) handleQuicConn(conn *quic.Conn) {
 	}
 	switch front {
 	case frontConnect:
-		self.handleConnectQuicConn(conn)
+		self.handleConnectQuicConn(conn, transport)
 	case frontApi:
 		self.handleApiQuicConn(conn)
 	default:
@@ -425,7 +441,7 @@ func (self *Alt) serverName(conn *quic.Conn) string {
 // The cap is charged to the source's address only once the handshake proves
 // the source receives packets there: a spoofed source never completes one, so
 // it cannot take a victim's slots.
-func (self *Alt) handleConnectQuicConn(conn *quic.Conn) {
+func (self *Alt) handleConnectQuicConn(conn *quic.Conn, transport string) {
 	if err := connectserver.AwaitQuicHandshake(self.ctx, conn); err != nil {
 		conn.CloseWithError(0, "")
 		return
@@ -445,7 +461,7 @@ func (self *Alt) handleConnectQuicConn(conn *quic.Conn) {
 		return
 	}
 	defer release()
-	if !self.connectHandler.HandleQuicConn(conn) {
+	if !self.connectHandler.HandleQuicConn(conn, connectCarrierForListener(transport)) {
 		glog.Infof("[alt]connect closing, refused %s\n", conn.RemoteAddr())
 	}
 }
