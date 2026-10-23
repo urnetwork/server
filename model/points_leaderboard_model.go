@@ -378,10 +378,11 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	return snapshot, nil
 }
 
-// The migration leaves older payments unprocessed. New plans mark completion
-// transactionally after their block rows are stored. A positive post-genesis
-// point whose linked payment is absent or unprocessed makes the entire weekly
-// metric unavailable until the bounded backfill catches up.
+// The migration leaves older payments unprocessed. A payout plan stores its
+// payments' block rows and marks them complete in its own transaction
+// (finalizePayments), so a payout leaves the metric available. A positive
+// post-genesis point whose linked payment is absent or unprocessed makes the
+// entire weekly metric unavailable until the bounded backfill catches up.
 func pointsBlockRollupComplete(ctx context.Context) (complete bool, returnErr error) {
 	complete = true
 	server.ReplicaDb(ctx, func(conn server.PgConn) {

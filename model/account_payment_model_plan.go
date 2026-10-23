@@ -1210,8 +1210,26 @@ const paymentPlanAssignSweepsSql = `
 				sweep.payment_id IS NOT DISTINCT FROM selected_escrow.previous_payment_id
 		`
 
+// Each payment's operator blocks, from the paid sweeps it selected and by the
+// history rollup's definition (pointsPaidSweepSql). The selection carries each
+// sweep's bytes and time, so this reads neither the sweep nor the contract
+// table.
+var paymentPlanBlocksSql = `
+	INSERT INTO account_payment_block (payment_id, block_number)
+	SELECT DISTINCT
+		payment_network_ids.payment_id,
+		` + pointsSweepBlockSql("selected_escrow", "$1", "$2") + `
+	FROM temp_account_payment AS selected_escrow
+	INNER JOIN temp_payment_network_ids AS payment_network_ids ON
+		payment_network_ids.network_id = selected_escrow.network_id
+	WHERE
+		` + pointsPaidSweepSql("selected_escrow") + ` AND
+		` + pointsSweepInBlocksSql("selected_escrow", "$1")
+
 func (self *PaymentPlanner) finalizePayments() {
 
+	// each payment's blocks are stored below, so it starts complete and the
+	// history rollup never visits it
 	server.BatchInTx(self.ctx, self.tx, func(batch server.PgBatch) {
 		for _, payment := range self.networkPayments {
 			batch.Queue(
@@ -1226,9 +1244,10 @@ func (self *PaymentPlanner) finalizePayments() {
 						subsidy_payout_nano_cents,
 						min_sweep_time,
 						create_time,
-						reliability_subsidy_nano_cents
+						reliability_subsidy_nano_cents,
+						block_rollup_complete
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
 				`,
 				payment.PaymentId,
 				payment.PaymentPlanId,
@@ -1255,10 +1274,17 @@ func (self *PaymentPlanner) finalizePayments() {
 		self.stageSweeps()
 	}
 
-	// The leaderboard's per-week paid-traffic attribution is processed by a
-	// separate bounded task after this payout transaction commits. A full plan
-	// can contain millions of sweeps; joining every contract here would hold
-	// the payout write lock for an unbounded duration.
+	// The leaderboard reads a payment's points with its operator blocks, so the
+	// blocks commit with the points: a payout never leaves its points waiting
+	// on a rollup, which made Blocks and Streak unavailable until a backfill of
+	// every payment caught up (pointsBlockRollupComplete). This aggregates the
+	// selection, like the plan's other reads of it, and joins no contract.
+	server.RaisePgResult(self.tx.Exec(
+		self.ctx,
+		paymentPlanBlocksSql,
+		SubnetBlockGenesis,
+		int64(SubnetBlockDuration/time.Second),
+	))
 }
 
 // points are proportional to payout
