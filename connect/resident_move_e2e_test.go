@@ -602,7 +602,26 @@ func TestResidentMoveLegacyClientGetsOnlyCompulsoryMoves(t *testing.T) {
 				}
 			}
 		})
-		transport := env.newTransport(byClientJwt, server.NewId(), client.RouteManager())
+		// a transport that declares no move version, as a client from before
+		// moves does
+		transportSettings := connect.DefaultPlatformTransportSettings()
+		transportSettings.EnableMove = false
+		transportSettings.QuicTlsConfig.InsecureSkipVerify = true
+		transportSettings.H3Port = env.h3Port
+		transportSettings.DnsPort = 0
+		transport := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			connect.NewClientStrategyWithDefaults(ctx),
+			client.RouteManager(),
+			fmt.Sprintf("ws://127.0.0.1:%d", env.port),
+			&connect.ClientAuth{
+				ByJwt:      byClientJwt,
+				InstanceId: connect.Id(server.NewId()),
+				AppVersion: "0.0.0",
+			},
+			connect.TransportModeH1,
+			transportSettings,
+		)
 		defer transport.Close()
 		resident := waitForResidentMoveTestResident(ctx, t, env.exchange, clientId, func(resident *Resident) bool {
 			return 0 < resident.TransportCount()
