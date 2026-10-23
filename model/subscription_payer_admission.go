@@ -71,24 +71,39 @@ func (q *payerAdmissionQueue) acquire(ctx context.Context, payer server.Id) (fun
 	}
 }
 
-// Acquire before opening any connection, retain the turn through transaction
+// Takes the payer's turn for a positive request on the PostgreSQL ledger path.
+// Acquire holding no connection, retain the turn through transaction
 // completion, and release on success, error or panic before post-commit work.
-// Zero-byte anchors need no financial serialization. A positive companion that
+// Reads that decide what the transaction funds follow the acquisition, so a
+// wait for the turn never separates them from the funding. Zero-byte anchors
+// need no financial serialization, and Redis admission locks no grant, so
+// neither takes a turn and its release does nothing. A positive companion that
 // is subsequently clamped to zero may harmlessly take a turn before that read.
-// The stream state the insert binds is read first, holding no turn or
-// connection (contract_stream_binding.go).
-func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
-	resolveContractStreamBinding(ctx)
-	if requested > 0 && redisAdmissionFromContext(ctx) == nil {
-		leaveGate := server.EnterContractCreationStage(ctx, server.ContractStagePayerGate)
-		release, err := transferEscrowAdmissionQueue.acquire(ctx, payer)
-		leaveGate()
-		if err != nil {
-			return err
-		}
-		defer release()
+func acquireTransferEscrowTurn(ctx context.Context, payer server.Id, requested ByteCount) (func(), error) {
+	if requested <= 0 || redisAdmissionFromContext(ctx) != nil {
+		return func() {}, nil
 	}
+	defer server.EnterContractCreationStage(ctx, server.ContractStagePayerGate)()
+	return transferEscrowAdmissionQueue.acquire(ctx, payer)
+}
+
+// The creation transaction of an owner that holds its payer's turn, or needs
+// none. It never reruns: a transient failure reaches the owner.
+func transferEscrowTxInTurn(ctx context.Context, callback func(server.PgTx)) {
 	defer server.EnterContractCreationStage(ctx, server.ContractStageTransaction)()
 	server.Tx(ctx, callback, server.TxReadCommitted, server.OptNoRetry())
+}
+
+// The stream state the insert binds is read first, holding no turn or
+// connection (contract_stream_binding.go). Then the transaction runs on the
+// payer's turn.
+func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
+	resolveContractStreamBinding(ctx)
+	release, err := acquireTransferEscrowTurn(ctx, payer, requested)
+	if err != nil {
+		return err
+	}
+	defer release()
+	transferEscrowTxInTurn(ctx, callback)
 	return nil
 }

@@ -2210,11 +2210,12 @@ func createCompanionTransferEscrow(
 	ctx = providerWorkSessionContext(ctx)
 	// An absent origin is decided by one read-only statement, before the
 	// payer's turn and before any transaction. Only when an origin exists
-	// is it selected, again outside any transaction, and the read committed
-	// write transaction rechecks its deadline after the client lifecycle
-	// fence. Selecting it inside that transaction cost two statements of
-	// pooler server time, and the selection decides the payer and the clamp
-	// that the Redis reservation preceding the transaction needs.
+	// is it selected, on the payer's turn and again outside any transaction,
+	// and the read committed write transaction rechecks its deadline after
+	// the client lifecycle fence. Selecting it inside that transaction cost
+	// two statements of pooler server time, and the selection decides the
+	// payer and the clamp that the Redis reservation preceding the
+	// transaction needs.
 	if !companionOriginExists(ctx, sourceId, destinationId, originContractTimeout) {
 		server.RecordContractCompanionOriginOutcome(ctx, server.ContractCompanionOriginMissing)
 		return nil, ErrMissingCompanionOrigin
@@ -2451,14 +2452,34 @@ func createCompanionTransferEscrow(
 	}
 	originOutcome := server.ContractCompanionOriginError
 	defer func() { server.RecordContractCompanionOriginOutcome(ctx, originOutcome) }()
+	// The stream state the insert binds is read before the payer's turn,
+	// holding no connection, and the origin is selected only after it
+	// (contract_stream_binding.go).
+	resolveContractStreamBinding(ctx)
+	// A ledger request selects the origin it funds only once admitted to
+	// the payer's turn. The origin, its payer or the preferred anchor may
+	// change during the wait, so an observation from before it never
+	// authorizes the funding after it.
+	release, err := acquireTransferEscrowTurn(ctx, payerNetworkId, requestedBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	server.Db(ctx, func(conn server.PgConn) {
 		selectOrigin(conn)
 	})
 	if companionContractId != nil && inheritedPayer != nil && payerNetworkId != *inheritedPayer {
-		// Hand off to the true payer before joining its turn or reserving its
-		// credit, and select again for that payer.
+		// Hand off to the true payer before reserving its credit: give back
+		// this payer's turn, wait for the true payer's, and select again
+		// once admitted to it.
 		server.RecordContractCompanionOriginOutcome(ctx, server.ContractCompanionOriginPayerHandoff)
+		release()
 		payerNetworkId = *inheritedPayer
+		release, err = acquireTransferEscrowTurn(ctx, payerNetworkId, requestedBytes)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 		server.Db(ctx, func(conn server.PgConn) {
 			selectOrigin(conn)
 		})
@@ -2481,7 +2502,7 @@ func createCompanionTransferEscrow(
 		return nil, err
 	}
 	defer finishReservation()
-	if err := transferEscrowTx(ctx, payerNetworkId, requestedBytes, func(tx server.PgTx) {
+	transferEscrowTxInTurn(ctx, func(tx server.PgTx) {
 		transferEscrow, posts, returnErr = createTransferEscrowInTx(
 			ctx,
 			tx,
@@ -2496,9 +2517,9 @@ func createCompanionTransferEscrow(
 		if returnErr == nil {
 			originOutcome = server.ContractCompanionOriginFound
 		}
-	}); err != nil {
-		return nil, err
-	}
+	})
+	// the turn ends with the transaction, before any post-commit work
+	release()
 
 	if returnErr != nil {
 		return

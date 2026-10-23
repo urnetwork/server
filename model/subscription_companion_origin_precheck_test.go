@@ -7,6 +7,7 @@ package model
 // test database and record the statements it issues.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -96,6 +97,76 @@ func TestCompanionWithOriginSelectsItBeforeTransaction(t *testing.T) {
 		}
 		if fence < begin || recheck < fence || end < recheck {
 			t.Fatalf("want the origin deadline recheck after the client fence, inside the transaction: %q", reads)
+		}
+	})
+}
+
+// The stream state the companion's insert binds is read after the existence
+// read and before the origin selection, holding no payer turn, on the Redis
+// and the PostgreSQL ledger admission paths (contract_stream_binding.go).
+func TestCompanionReadsStreamStateBeforeSelectingItsOrigin(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		clients := newEscrowSelectionTestClients(t, ctx)
+		addContractPayoutTestBalance(ctx, clients.payerNetworkId, 8192)
+		addContractPayoutTestBalance(ctx, clients.providerNetworkId, 8192)
+		origin, err := clients.create(ctx, 1024, false)
+		if err != nil || origin == nil {
+			t.Fatalf("origin creation failed: %v", err)
+		}
+
+		// each statement's leading words, enough to name it in a failure
+		summarize := func(statements []string) []string {
+			summaries := []string{}
+			for _, statement := range statements {
+				summaries = append(summaries, statement[:min(len(statement), 48)])
+			}
+			return summaries
+		}
+
+		observed, statements, closeScope := observePgStatements(t, ctx)
+		defer closeScope()
+		for _, public := range []bool{true, false} {
+			// statements issued before each stream state read, and the
+			// companion payer's turn references at that read
+			var readStatements [][]string
+			var readTurns []int
+			bound := context.WithValue(observed, contractStreamBindingContextKey{}, &contractStreamBinding{
+				read: func(context.Context) *server.Id {
+					readStatements = append(readStatements, statements.take())
+					readTurns = append(readTurns, payerQueueReferences(&transferEscrowAdmissionQueue, clients.payerNetworkId))
+					return nil
+				},
+			})
+			var companion *TransferEscrow
+			if public {
+				companion, err = clients.create(bound, 1024, true)
+			} else {
+				companion, err = createCompanionTransferEscrow(bound, clients.providerNetworkId, clients.providerId,
+					clients.payerNetworkId, clients.payerId, 1024, time.Hour)
+			}
+			afterRead := statements.take()
+			if err != nil || companion == nil || companion.CompanionContractId == nil || *companion.CompanionContractId != origin.ContractId {
+				t.Fatalf("public=%t: a companion with an origin = %+v, %v", public, companion, err)
+			}
+			if len(readStatements) != 1 {
+				t.Fatalf("public=%t: the stream state was read %d times, want once", public, len(readStatements))
+			}
+			if before := readStatements[0]; len(before) != 1 || !strings.HasPrefix(before[0], "SELECT EXISTS") {
+				t.Fatalf("public=%t: want only the existence read before the stream state read: %q", public, summarize(before))
+			}
+			if readTurns[0] != 0 {
+				t.Fatalf("public=%t: the stream state was read holding the payer's turn", public)
+			}
+			selection := -1
+			for i, statement := range afterRead {
+				if selection < 0 && strings.Contains(statement, "AS earliest_origin") {
+					selection = i
+				}
+			}
+			if selection < 0 {
+				t.Fatalf("public=%t: the origin was not selected after the stream state read: %q", public, summarize(afterRead))
+			}
 		}
 	})
 }
