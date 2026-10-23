@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -49,29 +50,34 @@ type SchemaSnapshot struct {
 	columns     map[string][]auditColumn
 	indexes     map[string]auditIndex
 	constraints map[string][]auditConstraint
+	// the tables that are partitioned (relkind p)
+	partitioned map[string]bool
 }
 
 // introspectSchema reads the public-schema shape of the database the global
 // pool currently points at. Partition children (relispartition) are excluded --
 // they are created at runtime, not by a migration, so they are not part of the
-// expected schema. Constraint-backed indexes (PRIMARY KEY / UNIQUE / exclusion)
-// are excluded from the index set too: they are reconciled through their
-// constraint (a missing table's CREATE TABLE recreates them), so emitting them
-// as standalone CREATE INDEX would double-create -- and a constraint's index
-// cannot be dropped with DROP INDEX either.
+// expected schema -- and so are the constraints PostgreSQL derives from a
+// parent constraint for them (conparentid). Constraint-backed indexes (PRIMARY
+// KEY / UNIQUE / exclusion) are excluded from the index set too: they are
+// reconciled through their constraint (a missing table's CREATE TABLE
+// recreates them), so emitting them as standalone CREATE INDEX would
+// double-create -- and a constraint's index cannot be dropped with DROP INDEX
+// either.
 func introspectSchema(ctx context.Context) *SchemaSnapshot {
 	s := &SchemaSnapshot{
 		tables:      map[string]bool{},
 		columns:     map[string][]auditColumn{},
 		indexes:     map[string]auditIndex{},
 		constraints: map[string][]auditConstraint{},
+		partitioned: map[string]bool{},
 	}
 
 	MaintenanceDb(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-            SELECT c.relname
+            SELECT c.relname, c.relkind = 'p'
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition
@@ -81,8 +87,12 @@ func introspectSchema(ctx context.Context) *SchemaSnapshot {
 		WithPgResult(result, err, func() {
 			for result.Next() {
 				var table string
-				Raise(result.Scan(&table))
+				var partitioned bool
+				Raise(result.Scan(&table, &partitioned))
 				s.tables[table] = true
+				if partitioned {
+					s.partitioned[table] = true
+				}
 			}
 		})
 	})
@@ -160,7 +170,12 @@ func introspectSchema(ctx context.Context) *SchemaSnapshot {
                 n.nspname = 'public' AND
                 t.relkind IN ('r', 'p') AND NOT t.relispartition AND
                 t.relname <> 'migration_audit' AND
-                con.contype IN ('p', 'u', 'c', 'f')
+                con.contype IN ('p', 'u', 'c', 'f') AND
+                -- a constraint derived from a parent constraint is a clone
+                -- PostgreSQL keeps in step with it, such as the one a foreign
+                -- key holds for each partition of a partitioned table it
+                -- references; no migration defines it
+                con.conparentid = 0
             ORDER BY t.relname, con.contype, con.conname
             `,
 		)
@@ -416,6 +431,8 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 		d.extraIdx = kept
 	}
 
+	d.acceptContractPartitionCutover()
+
 	sort.Strings(d.missingTables)
 	sort.Strings(d.extraTables)
 	sort.Strings(d.missingIdx)
@@ -423,6 +440,47 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	sort.Slice(d.changedIdx, func(i, j int) bool { return d.changedIdx[i].name < d.changedIdx[j].name })
 
 	return d
+}
+
+// The contract partition cutover (CONTRACT-PARTITION.md) is not drift. Once
+// transfer_contract is partitioned, the cascade foreign key from
+// contract_close_report is gone by design (a week's reports are dropped with
+// its contracts), and recreating it, as a fix would, validates every partition
+// under lock and then blocks retention. While a cutover is prepared, the
+// staged parents with their indexes and the legacy bound checks are its own
+// work in progress; finalize or abort removes them. The same foreign key
+// missing from a plain table is still drift.
+func (d *SchemaDiff) acceptContractPartitionCutover() {
+	if d.actual.partitioned["transfer_contract"] {
+		missing := slices.DeleteFunc(d.missingConstraints["contract_close_report"], func(con auditConstraint) bool {
+			return con.name == contractCloseReportForeignKeyName
+		})
+		if len(missing) == 0 {
+			delete(d.missingConstraints, "contract_close_report")
+		} else {
+			d.missingConstraints["contract_close_report"] = missing
+		}
+	}
+	staged := map[string]bool{}
+	for _, table := range ContractPartitionTables {
+		if name := contractStagedParentName(table); d.actual.partitioned[name] && !d.expected.tables[name] {
+			staged[name] = true
+		}
+		extra := slices.DeleteFunc(d.extraConstraints[table], func(name string) bool {
+			return name == contractLegacyBoundName(table)
+		})
+		if len(extra) == 0 {
+			delete(d.extraConstraints, table)
+		} else {
+			d.extraConstraints[table] = extra
+		}
+	}
+	d.extraTables = slices.DeleteFunc(d.extraTables, func(table string) bool {
+		return staged[table]
+	})
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return staged[d.actual.indexes[name].table]
+	})
 }
 
 // normalizeIndexDef canonicalizes an index definition for comparison: it

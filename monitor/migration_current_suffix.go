@@ -722,9 +722,11 @@ func migrationIndexRemoved(table, name string) string {
 
 // The 814 guard fires only for payment_id changes, so tgattr names that column
 // rather than being empty like the other row triggers in this suffix.
-const paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
+// Partitioned, every partition's clone of the guard is pinned too.
+var paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
  WHERE t.tgrelid=to_regclass('public.transfer_escrow_sweep') AND t.tgname='payment_plan_sweep_owner_guard'
  AND t.tgfoid=to_regprocedure('public.payment_plan_sweep_owner_guard()') AND NOT t.tgisinternal
  AND t.tgenabled IN ('O','A') AND t.tgtype=19 AND t.tgqual IS NULL AND t.tgnargs=0
  AND t.tgattr=(SELECT a.attnum::text::int2vector FROM pg_attribute a
-  WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))`
+  WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))
+ AND ` + migrationContractLeafTriggers("transfer_escrow_sweep", "payment_plan_sweep_owner_guard")

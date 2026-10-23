@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -127,28 +128,46 @@ WITH source AS MATERIALIZED (
         CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END AS recovery,
         coalesce((SELECT floor(extract(epoch FROM stats_reset) * 1000000)::bigint FROM pg_stat_database WHERE datname = current_database()), 0) AS stats_reset_us,
         coalesce((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.client_reliability')), '') AS parent_kind,
-        (SELECT floor(extract(epoch FROM max(end_time)) * 1000000)::bigint FROM subsidy_payment) AS frontier_us
+        (SELECT floor(extract(epoch FROM max(end_time)) * 1000000)::bigint FROM subsidy_payment) AS frontier_us,
+        coalesce((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.transfer_contract')), '') AS contract_kind
 ), partitions AS MATERIALIZED (
  SELECT c.relname::text AS name, pg_relation_size(c.oid)::bigint AS heap_bytes
  FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
  WHERE i.inhparent = to_regclass('public.client_reliability')
  ORDER BY c.relname LIMIT {partition_limit}
-), growth AS MATERIALIZED (
- SELECT c.oid::bigint AS relation_oid, c.relname::text AS name, pg_total_relation_size(c.oid)::bigint AS total_bytes,
-        coalesce(st.n_tup_ins, 0)::bigint AS inserted, coalesce(st.n_tup_del, 0)::bigint AS deleted
+), growth_relation AS MATERIALIZED (
+ -- a contract partition counts toward its partitioned contract table
+ SELECT coalesce(contract_root.oid, c.oid)::bigint AS relation_oid, coalesce(contract_root.relname, c.relname)::text AS name,
+        pg_total_relation_size(c.oid)::bigint AS total_bytes,
+        coalesce(st.n_tup_ins, 0)::bigint AS inserted, coalesce(st.n_tup_del, 0)::bigint AS deleted,
+        contract_root.oid IS NOT NULL AS partitioned
  FROM pg_class c JOIN pg_stat_all_tables st ON st.relid = c.oid
+ LEFT JOIN pg_class contract_root
+   ON c.relispartition
+  AND contract_root.oid = pg_partition_root(c.oid)
+  AND contract_root.relnamespace = c.relnamespace
+  AND contract_root.relname IN ({contract_tables})
  WHERE c.relkind = 'r' AND c.relnamespace = 'public'::regnamespace
-   AND pg_total_relation_size(c.oid) >= {growth_minimum_bytes}
+   AND (contract_root.oid IS NOT NULL OR pg_total_relation_size(c.oid) >= {growth_minimum_bytes})
+), growth AS MATERIALIZED (
+ SELECT relation_oid, name, sum(total_bytes)::bigint AS total_bytes,
+        sum(inserted)::bigint AS inserted, sum(deleted)::bigint AS deleted, bool_or(partitioned) AS partitioned
+ FROM growth_relation
+ GROUP BY relation_oid, name
+ HAVING sum(total_bytes) >= {growth_minimum_bytes}
  ORDER BY 3 DESC, 1 LIMIT {growth_limit}
 )
 SELECT 'meta', s.hostname, s.observed_us::text, s.started_us::text, s.recovery, s.stats_reset_us::text, s.parent_kind,
-       coalesce(s.frontier_us::text, 'none'), '', '' FROM source s
+       coalesce(s.frontier_us::text, 'none'), s.contract_kind, '' FROM source s
 UNION ALL SELECT 'partition', p.name, p.heap_bytes::text, '', '', '', '', '', '', '' FROM partitions p
-UNION ALL SELECT 'growth', g.name, g.relation_oid::text, g.total_bytes::text, g.inserted::text, g.deleted::text, '', '', '', '' FROM growth g
+UNION ALL SELECT 'growth', g.name, g.relation_oid::text, g.total_bytes::text, g.inserted::text, g.deleted::text,
+       CASE WHEN g.partitioned THEN '1' ELSE '' END, '', '', '' FROM growth g
 UNION ALL SELECT 'end', (SELECT count(*) FROM partitions)::text, (SELECT count(*) FROM growth)::text, '', '', '', '', '', '', '';
 `
 
 // One sampled-page read of transfer_contract; only counts leave the database.
+// On a partitioned transfer_contract the sample reads the same share of the
+// pages of every partition.
 const retentionLivenessReapTemplate = `{hostname_guard}
 SELECT 'reap', :'monitor_primary_hostname'::text, floor(extract(epoch FROM statement_timestamp()) * 1000000)::bigint::text,
        count(*)::text,
@@ -166,6 +185,7 @@ func (self retentionLivenessProbe) catalogQuery() string {
 		"{partition_limit}", strconv.Itoa(settings.MaxPartitions+1),
 		"{growth_minimum_bytes}", strconv.FormatFloat(settings.GrowthRelationMinimumBytes, 'f', 0, 64),
 		"{growth_limit}", strconv.Itoa(settings.GrowthListLimit+1),
+		"{contract_tables}", "'"+strings.Join(server.ContractPartitionTables, "','")+"'",
 	).Replace(retentionLivenessCatalogTemplate)
 }
 
@@ -181,15 +201,17 @@ func (self retentionLivenessProbe) reapQuery() string {
 
 // The validated catalog read.
 type retentionLivenessCatalog struct {
-	observed    time.Time
-	started     time.Time
-	statsReset  time.Time
-	parentKind  string
-	frontier    time.Time
-	hasFrontier bool
-	partitions  []retentionLivenessPartition
-	growth      []retentionLivenessRelation
-	growthOver  bool
+	observed   time.Time
+	started    time.Time
+	statsReset time.Time
+	parentKind string
+	// transfer_contract's kind: p once the contract tables are partitioned
+	contractKind string
+	frontier     time.Time
+	hasFrontier  bool
+	partitions   []retentionLivenessPartition
+	growth       []retentionLivenessRelation
+	growthOver   bool
 	// the partition census exceeded its bound and was discarded
 	partitionsOver bool
 }
@@ -205,6 +227,8 @@ type retentionLivenessRelation struct {
 	totalBytes int64
 	inserted   int64
 	deleted    int64
+	// a partitioned contract table, summed over its partitions
+	partitioned bool
 }
 
 // The model's partition scheme: one client_reliability partition per UTC day
@@ -261,6 +285,7 @@ func (self retentionLivenessProbe) parseCatalog(rows []pgRow, primary string, no
 				return catalog, "source-clock-unavailable"
 			}
 			catalog.observed, catalog.started, catalog.statsReset, catalog.parentKind = observed, started, statsReset, row[6]
+			catalog.contractKind = row[8]
 			if row[7] != "none" {
 				frontier, ok := retentionLivenessMicros(row[7])
 				if !ok {
@@ -282,7 +307,7 @@ func (self retentionLivenessProbe) parseCatalog(rows []pgRow, primary string, no
 			if !okId || !okTotal || !okInserted || !okDeleted {
 				return catalog, "invalid-growth-row"
 			}
-			catalog.growth = append(catalog.growth, retentionLivenessRelation{name: row[1], relationId: relationId, totalBytes: total, inserted: inserted, deleted: deleted})
+			catalog.growth = append(catalog.growth, retentionLivenessRelation{name: row[1], relationId: relationId, totalBytes: total, inserted: inserted, deleted: deleted, partitioned: row[6] == "1"})
 		case "end":
 			ends++
 			end = row
@@ -332,7 +357,12 @@ func (self retentionLivenessProbe) appendOnly(catalog retentionLivenessCatalog, 
 		if !retentionLivenessRelationNamePattern.MatchString(name) {
 			name = "relation-" + strconv.FormatInt(relation.relationId, 10)
 		}
-		parts = append(parts, fmt.Sprintf("%s total_gb=%.1f inserted_rows=%d", name, gb(float64(relation.totalBytes)), relation.inserted))
+		part := fmt.Sprintf("%s total_gb=%.1f inserted_rows=%d", name, gb(float64(relation.totalBytes)), relation.inserted)
+		if relation.partitioned {
+			// a dropped week's deletes leave with its partition's statistics
+			part += " partitioned=true reclaimed_by=partition-drops"
+		}
+		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
 		return "append_only_relations=none"
@@ -412,7 +442,7 @@ func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]
 	if lifecycleErr != nil {
 		return nil, lifecycleErr
 	}
-	findings = append(findings, self.reap(primary.name, reapRows, reapErr, now, list)...)
+	findings = append(findings, self.reap(primary.name, reapRows, reapErr, now, list, catalogReason == "" && catalog.contractKind == "p")...)
 	return findings, nil
 }
 
@@ -522,7 +552,9 @@ func (self retentionLivenessProbe) partitions(target string, catalog retentionLi
 }
 
 // Sampled pages of transfer_contract: the share of old rows with reap_time.
-func (self retentionLivenessProbe) reap(primary string, rows []pgRow, err error, now time.Time, list string) []finding {
+// contractsPartitioned says the contract tables are partitioned, so whole
+// weeks leave by partition drops (§2.4i) besides reap_time.
+func (self retentionLivenessProbe) reap(primary string, rows []pgRow, err error, now time.Time, list string, contractsPartitioned bool) []finding {
 	settings := self.settings
 	target := primary + "/contract-reap"
 	if err != nil {
@@ -554,6 +586,10 @@ func (self retentionLivenessProbe) reap(primary string, rows []pgRow, err error,
 			healthyFinding(retentionLivenessProbeId, tierWarn, "retention-liveness-unobservable", target),
 		}
 	}
+	reapContext := "False-positive qualifier: a page sample clusters rows of similar age, so one run can over- or under-state the share; the sustain covers that. The sample is random per run. Correlate retention-frontier-pinned: a stopped payout is the usual cause."
+	if contractsPartitioned {
+		reapContext += " transfer_contract is partitioned: the sample reads pages of every partition, and weeks past the retention horizon leave by partition drops (§2.4i), so unstamped rows only wait for their week to expire."
+	}
 	return []finding{
 		{
 			probeId: retentionLivenessProbeId, tier: tierWarn, class: "contract-reap-stalled", target: target, sustain: settings.ReapSustain,
@@ -562,7 +598,7 @@ func (self retentionLivenessProbe) reap(primary string, rows []pgRow, err error,
 			baseline:  fmt.Sprintf("At least %.0f%% of sampled rows older than %.0f days have reap_time, judged on at least %d such rows.", 100*settings.ReapMinimumStampedShare, settings.ReapMinimumAge.Hours()/24, settings.ReapMinimumOldRows),
 			observed:  fmt.Sprintf("sampled_rows=%d old_rows=%d old_rows_with_reap_time=%d stamped_share_pct=%.2f sample_percent=%s", sampled, old, stamped, 100*share, strconv.FormatFloat(settings.ReapSamplePercent, 'f', -1, 64)),
 			evidence:  "One primary-guarded read-only TABLESAMPLE SYSTEM read of transfer_contract pages; only row counts leave SQL. " + list,
-			context:   "False-positive qualifier: a page sample clusters rows of similar age, so one run can over- or under-state the share; the sustain covers that. The sample is random per run. Correlate retention-frontier-pinned: a stopped payout is the usual cause.",
+			context:   reapContext,
 			action:    "Retention horizons are owner decisions: have the payout owner confirm whether payments will resume, and size the contract tables' growth against the storage runway (§2.4f, server/CONTRACT-PARTITION.md). Do not stamp or delete contract rows by hand.",
 			verify:    "Completed payments stamp reap_time again and two consecutive samples show the stamped share at or above the line.",
 			playbook:  "SIGNALS.md §2.4g",

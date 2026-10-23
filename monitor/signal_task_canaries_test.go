@@ -2029,6 +2029,66 @@ func TestTaskCanariesSignalExplainsUnfundedPayoutWallet(t *testing.T) {
 	}
 }
 
+// On partitioned contract tables maintenance rebuilds leaf indexes; the
+// progress row names the leaf relation and, while building, the leaf's _ccnew
+// copy, and the query resolves the partitioned index it belongs to. A priority
+// leaf is the bounded rebuild on either kind of partition; only a whole-table
+// rebuild of the legacy partition, which an older worker could still select,
+// is the whole-table one.
+func TestTaskCanariesSignalClassifiesContractPartitionRebuilds(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		relation   string
+		index      string
+		published  string
+		wholeTable bool
+	}{
+		{name: "legacy priority leaf", relation: "transfer_escrow_legacy", index: "transfer_escrow_unsettled_balance_contract_l_ccnew", published: "transfer_escrow_unsettled_balance_contract"},
+		{name: "weekly priority leaf", relation: "transfer_escrow_w20261026", index: "transfer_escrow_w20261026_balance_id_contract_id_balance_b_ccnew", published: "transfer_escrow_unsettled_balance_contract"},
+		{name: "legacy whole table", relation: "transfer_escrow_legacy", index: "transfer_escrow_pkey_l_ccnew", published: "transfer_escrow_pkey", wholeTable: true},
+		{name: "weekly whole table", relation: "transfer_escrow_w20261026", index: "transfer_escrow_w20261026_pkey_ccnew", published: "transfer_escrow_pkey"},
+	} {
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"DbMaintenance", "9120", "1800", "f", "86400"}}, nil
+			case strings.Contains(query, "pg_stat_progress_create_index"):
+				if !strings.Contains(query, "JOIN pg_inherits inheritance ON inheritance.inhrelid = original.indexrelid") ||
+					!strings.Contains(query, "WHERE in_progress.indexrelid = p.index_relid") {
+					t.Fatal("the progress read lost its published-index resolution")
+				}
+				return []Row{{
+					test.relation, test.index,
+					"building index: scanning table", "190", "IO", "DataFileRead", "0", "none", "-",
+					"-1", "-1", "-", "-", "false", "48213", "1081742992", test.published,
+				}}, nil
+			default:
+				return nil, nil
+			}
+		}}
+		alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
+		if !strings.Contains(markdown, "relation="+test.relation+" index="+test.index+" ") ||
+			!strings.Contains(markdown, "blocks_done=48213 blocks_total=1081742992 table=transfer_escrow published_index="+test.published) {
+			t.Fatalf("%s: evidence lost the leaf or its table: %s", test.name, markdown)
+		}
+		if whole := strings.Contains(markdown, "selected transfer_escrow for REINDEX TABLE CONCURRENTLY"); whole != test.wholeTable {
+			t.Fatalf("%s: whole-table diagnosis %t, want %t: %s", test.name, whole, test.wholeTable, markdown)
+		}
+		if test.wholeTable && !strings.Contains(markdown, "the legacy partition that holds every escrow from before the contract partition cutover") {
+			t.Fatalf("%s: the legacy partition was not named: %s", test.name, markdown)
+		}
+		if !test.wholeTable && !strings.Contains(markdown, "actively executing REINDEX CONCURRENTLY") {
+			t.Fatalf("%s: the bounded rebuild lost its diagnosis: %s", test.name, markdown)
+		}
+	}
+}
+
 // Maintenance rebuilds a bloated transfer_escrow partial index on its own; the
 // overdue alert must not call that the whole-table rebuild the rotation skips.
 func TestTaskCanariesSignalDoesNotCallAPriorityIndexRebuildAWholeTableRebuild(t *testing.T) {

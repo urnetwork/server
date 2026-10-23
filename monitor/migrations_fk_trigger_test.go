@@ -34,7 +34,8 @@ func (source *migrationFKTriggerProjectionSource) PostgreSQL(ctx context.Context
  SELECT actual.oid, actual.tgrelid, actual.tgname, actual.tgfoid, actual.tgtype,
   CASE WHEN actual.oid=%d THEN '%s'::"char" ELSE actual.tgenabled END AS tgenabled,
   actual.tgisinternal, actual.tgconstraint, actual.tgdeferrable, actual.tginitdeferred,
-  actual.tgnargs, actual.tgattr, actual.tgqual, actual.tgargs, actual.tgoldtable, actual.tgnewtable
+  actual.tgnargs, actual.tgattr, actual.tgqual, actual.tgargs, actual.tgoldtable, actual.tgnewtable,
+  actual.tgparentid
  FROM pg_catalog.pg_trigger actual
  )`, source.oid, source.enabled)
 	return source.migrationPingDatabaseSource.PostgreSQL(ctx, "WITH "+projection+", "+strings.TrimPrefix(trimmed, "WITH "))

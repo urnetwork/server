@@ -11,13 +11,16 @@ const providerUsageTimeIndexDefinition = "CREATE INDEX transfer_contract_usage_m
 // renderings, never a weaker predicate or differently ordered index.
 const providerUsageTimeRestoredIndexDefinition = "CREATE INDEX transfer_contract_usage_missing_time ON public.transfer_contract USING btree (contract_id) WHERE ((close_time IS NULL) AND ((outcome)::text = ANY ((ARRAY['settled'::character varying, 'dispute_resolved_to_source'::character varying, 'dispute_resolved_to_destination'::character varying])::text[])))"
 
+// On partitioned contract tables the parent index is compared without ONLY
+// (migrationIndexDefinitionSql); it is valid only once every partition has its
+// copy.
 var providerUsageTimeIndexArtifactQuery = `EXISTS (
 	SELECT 1 FROM pg_index AS index_record
 	JOIN pg_class AS index_relation ON index_relation.oid = index_record.indexrelid
 	WHERE index_record.indrelid = to_regclass('public.transfer_contract')
 		AND index_relation.relname = 'transfer_contract_usage_missing_time'
 		AND index_record.indisvalid AND index_record.indisready AND index_record.indislive
-		AND regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g')
+		AND ` + migrationIndexDefinitionSql("index_relation", "'transfer_contract'") + `
 			IN ('` + strings.ReplaceAll(providerUsageTimeIndexDefinition, "'", "''") + `',
 				'` + strings.ReplaceAll(providerUsageTimeRestoredIndexDefinition, "'", "''") + `')
 )`
