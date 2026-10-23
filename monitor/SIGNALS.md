@@ -331,7 +331,6 @@ active missing capability and must not be read as green.
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
-| 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
@@ -42787,6 +42786,7 @@ declared settlement v2 deployment is not read and reports a coverage gap; no
 claimant or keeper SLO is configured.
 
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
+Probe: `subnet-evidence`
 
 Existing read surfaces are `/sn/epoch`, `/sn/head`, `/sn/artifact`,
 `/sn/attempt-artifact`, `/sn/artifacts`, `/sn/evidence`,
@@ -42814,6 +42814,52 @@ Activation attribution is not the parked validator effort bounty.
 `FINAL.md` and its independently replayed on-chain evidence are the acceptance
 baseline, not perpetual health certificates. Continue checking new epochs and
 the availability of that historical evidence after the simulator stops.
+
+`signal_subnet_evidence.go` implements this family and extends the §22.8a
+fixed-object reader with complete history; it never re-reads enrolled objects.
+At one finalized evm checkpoint it reuses the §22.7 state census for every
+committed root and epoch clock. **History:** it pages the complete
+`/sn/artifacts` index for the pinned deployment at both enrolled origins and
+checks each page independently of the server's own validation: one shared
+prefix under `st/v1/history/<deployment>/<netuid>/`, numeric epoch and operator
+segments, a content-hash filename equal to its `content_hash`, strict ordering,
+exact page cardinality and cursor continuity. A served page that breaks this is
+accepted index tampering (`subnet-artifact-integrity`, PAGE); a page bound or
+read failure leaves that origin's history unknown. Two complete indexes that
+differ warn. Every chain-committed artifact must be listed and readable at both
+origins; its bytes are verified once per origin by the full canonical rebuild,
+and two different verified encodings of one content hash, or bytes that do not
+reproduce the hash, page. A second verified artifact for one epoch and operator
+is equivocation. **Anchors:** `coordinator.validatorEvidence()` must name a
+journal (an unfixed journal is a WARN, the approved profile being delayed) whose
+immutables are the pinned domain (`deploymentIdHash = sha256(deployment_id)`).
+The journal's `ActivationPublished`/`EvidenceCommitted` events are replayed from
+the enrolled `evidence_from_block` with the same proven start, canonical-block
+and commit-after-recheck rules as §22.7. Each new anchor is read back through
+`commitment(slot)` once (write-once): its stored header must equal the event and
+the pinned domain, name a published activation, carry that epoch's policy and,
+for a closed census, the terminal boundary `epochEnd − 1`. Every activation must
+anchor the closed census of each closed epoch of its active operator; the slot is
+derived with `protocol.ValidatorEvidenceHeader.SlotKey`, so absence is decided
+without trusting any listing. A missing anchor warns inside
+`AnchorAtRiskBlocks` of the enrolled `anchor_deadline_blocks` and pages after
+it; an enrolled validator without an activation warns. Anchored payloads are
+read as `GET /sn/attempt-artifact?kind=metadata&hash=0x…` at both origins and
+must be exactly the anchored length and sha256.
+
+A 404 at every enrolled origin is definitive loss: PAGE for a finalized
+entitlement's artifact or any anchored payload, WARN for an artifact no claim
+depends on yet. One origin's gap is a WARN; two origins may share one storage
+failure domain. Past `AuditReplaySloBlocks`, a completed epoch whose committed
+artifact, required census anchor or anchored payload is definitively absent is a
+`subnet-audit-replay-gap` WARN naming the missing requirements; unread objects
+stay pending, never green. The family always reports one coverage gap
+(`semantic-replay`): payload contents are hash-verified, but the secretless
+semantic traversal of attempt prefixes, quality/head decisions and native
+application is not implemented. Missing today: the `subnet_replay` enrollment
+(`api_origins`, `evidence_from_block`, `anchor_deadline_blocks`) is not
+provisioned, and `/sn/evidence/history` is not enumerated because its public
+contract requires a known kind and run id.
 
 ### 22.8a Enrolled payout artifact availability — partial reader
 Probe: `subnet-artifacts`

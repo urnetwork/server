@@ -76,6 +76,14 @@ type SubnetReplaySettings struct {
 	HistoryPageObjects int
 	// Chain-committed artifacts fetched per origin per run.
 	ArtifactMaximumReads int
+	// Anchored payloads fetched per origin per run.
+	PayloadMaximumReads int
+	// New write-once anchors read back per run.
+	AnchorMaximumChecks int
+	// Remaining anchor deadline blocks below which a missing anchor is delayed.
+	AnchorAtRiskBlocks uint64
+	// Blocks after an epoch end before its audit replay must be complete.
+	AuditReplaySloBlocks uint64
 	// Runtime metadata bytes accepted for native storage decoding.
 	MetadataMaximumBytes int
 	// Permitted validator rows read per run.
@@ -149,6 +157,10 @@ func DefaultSubnetReplaySettings() *SubnetReplaySettings {
 		HistoryMaximumPages:            16,
 		HistoryPageObjects:             256,
 		ArtifactMaximumReads:           8,
+		PayloadMaximumReads:            8,
+		AnchorMaximumChecks:            256,
+		AnchorAtRiskBlocks:             300,
+		AuditReplaySloBlocks:           7200,
 		MetadataMaximumBytes:           8 * 1024 * 1024,
 		MaximumValidatorRows:           64,
 		RevealOverdueEpochs:            1,
@@ -289,7 +301,7 @@ func (self *SubnetReplaySettings) budgetReason() string {
 		self.LogMaximumRangesPerRun <= 0 || self.LogMaximumEntriesPerRange <= 0 || self.MaximumOperators <= 0 ||
 		self.MaximumCensusEntries <= 0 || self.ApiReadTimeout <= 0 || self.ApiMaximumBodyBytes <= 0 ||
 		self.ApiMaximumHeaderBytes <= 0 || self.ApiMaximumConnectionsPerOrigin <= 0 || self.HistoryMaximumPages <= 0 || self.HistoryPageObjects <= 0 ||
-		self.ArtifactMaximumReads <= 0 || self.MetadataMaximumBytes <= 0 || self.MaximumValidatorRows <= 0 ||
+		self.ArtifactMaximumReads <= 0 || self.PayloadMaximumReads <= 0 || self.AnchorMaximumChecks <= 0 || self.MetadataMaximumBytes <= 0 || self.MaximumValidatorRows <= 0 ||
 		self.MaximumCreditChecks <= 0 || self.MaximumIntents <= 0 || self.WeightStaleTempos == 0 {
 		return "budget-invalid"
 	}

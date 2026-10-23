@@ -436,9 +436,10 @@ func (self *subnetSettlementReplay) creditOf(coldkey [32]byte) *big.Int {
 	return value
 }
 
-// Proves the enrolled start precedes the vault: the canonical block before
-// it has no vault code. Pinned by that block's hash with requireCanonical.
-func proveSubnetSettlementJournalStart(ctx context.Context, rpc *subnetReplayRpc, address common.Address, fromBlock uint64) error {
+// Proves an enrolled journal start precedes the contract: the canonical block
+// before it has no contract code. Pinned by that block's hash with
+// requireCanonical.
+func proveSubnetReplayJournalStart(ctx context.Context, rpc *subnetReplayRpc, address common.Address, fromBlock uint64) error {
 	if fromBlock == 0 {
 		return newSubnetReplayUnknown("journal-start-unproven", nil)
 	}
@@ -479,19 +480,12 @@ func readSubnetSettlementJournalWindows(ctx context.Context, rpc *subnetReplayRp
 		return nil, newSubnetReplayUnknown("finality-regressed", nil)
 	}
 	if !proven {
-		if err := proveSubnetSettlementJournalStart(ctx, rpc, address, fromBlock); err != nil {
+		if err := proveSubnetReplayJournalStart(ctx, rpc, address, fromBlock); err != nil {
 			return nil, err
 		}
 		journal.Prove(address, fromBlock)
 	}
-	windows := []*subnetReplayLogWindow{}
-	for start := next; start <= checkpoint.number && len(windows) < settings.LogMaximumRangesPerRun; start += settings.LogRangeBlocks {
-		end := start + settings.LogRangeBlocks - 1
-		if checkpoint.number < end {
-			end = checkpoint.number
-		}
-		windows = append(windows, &subnetReplayLogWindow{from: start, to: end})
-	}
+	windows := subnetReplayLogWindows(next, checkpoint, settings)
 	if len(windows) == 0 {
 		return nil, nil
 	}
@@ -502,6 +496,19 @@ func readSubnetSettlementJournalWindows(ctx context.Context, rpc *subnetReplayRp
 		return nil, err
 	}
 	return windows, nil
+}
+
+// The next bounded windows from the frontier toward the checkpoint.
+func subnetReplayLogWindows(next uint64, checkpoint subnetReplayEvmCheckpoint, settings *SubnetReplaySettings) []*subnetReplayLogWindow {
+	windows := []*subnetReplayLogWindow{}
+	for start := next; start <= checkpoint.number && len(windows) < settings.LogMaximumRangesPerRun; start += settings.LogRangeBlocks {
+		end := start + settings.LogRangeBlocks - 1
+		if checkpoint.number < end {
+			end = checkpoint.number
+		}
+		windows = append(windows, &subnetReplayLogWindow{from: start, to: end})
+	}
+	return windows
 }
 
 // Every log must come from the canonical block at its height.

@@ -21,6 +21,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/urfoundation/sn/ss58"
 )
 
 // A contract view handler: outputs, or the name of a custom error to revert with.
@@ -449,4 +451,14 @@ func subnetReplayTestTx(value uint64) common.Hash {
 	hash[0] = 0x7a
 	big.NewInt(0).SetUint64(value).FillBytes(hash[16:])
 	return hash
+}
+
+// Encodes a synthetic public key as a Bittensor ss58 hotkey for enrollment.
+func subnetReplayTestSs58(t *testing.T, pubkey [32]byte) string {
+	t.Helper()
+	address, err := ss58.Encode(pubkey, ss58.BittensorPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return address
 }
