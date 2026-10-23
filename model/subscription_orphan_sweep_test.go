@@ -118,6 +118,11 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 		defer cancel()
+		if server.IsContractPartitioned(ctx) {
+			// the whole-relation check reads plain-table plans; on partitioned
+			// test tables the planner rightly seq-scans the tiny partitions
+			t.Skip("plain contract tables only")
+		}
 		const parents, orphans, limit = 20000, 100, 128
 		seedOrphanSweepTestHistory(t, ctx, parents, orphans)
 		// Both a retained and an orphan leading key have a dense suffix. The
@@ -581,6 +586,10 @@ func TestSweepOrphanContractPagesDeleteByKeyAcrossPartitions(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		defer cancel()
+		if server.IsContractPartitioned(ctx) {
+			// this test builds its own partitioned children from plain tables
+			t.Skip("plain contract tables only")
+		}
 		clients := newEscrowSelectionTestClients(t, ctx)
 		// The high ids repeat the low ids' tails, so the eight keys sort as
 		// low[0..3] < high[0..3] and fill each partition in the same order.

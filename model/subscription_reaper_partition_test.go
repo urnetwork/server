@@ -93,7 +93,7 @@ func TestRemoveDueContractsDeleteCloseReportsWithoutCascade(t *testing.T) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		dueIds, retainedId, now := newReaperDependentTestContracts(t, ctx, f)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE contract_close_report DROP CONSTRAINT contract_close_report_contract_id_fkey`))
+			server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE contract_close_report DROP CONSTRAINT IF EXISTS contract_close_report_contract_id_fkey`))
 		}, server.TxReadCommitted, server.OptNoRetry())
 		server.Db(ctx, func(conn server.PgConn) {
 			var foreignKeys int
