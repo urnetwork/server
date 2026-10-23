@@ -125,7 +125,8 @@ func TestSubnetArtifactsReadsOriginalSignedObjectsAtBothOrigins(t *testing.T) {
 	if artifact.CreatedAt >= settings.SubnetArtifacts.ReviewFrom {
 		t.Fatal("fixture stopped exercising old historical content")
 	}
-	coverage, err := NewSubnetCoverageSignal().Run(context.Background(), settings)
+	// The partial §22.8a reader never counts as the §22.8 family.
+	coverage, err := subnetCoverageSignalWith("22.8a").Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
