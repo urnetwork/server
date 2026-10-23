@@ -511,7 +511,9 @@ func TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum(t *testing.T) {
 							if node["Node Type"] == "Aggregate" {
 								aggregateLoops += loops
 							}
-							if node["Relation Name"] == "transfer_contract" {
+							// a partition of transfer_contract counts as the table
+							relation, _ := node["Relation Name"].(string)
+							if table, _, _, ok := server.ParseContractPartitionName(relation); relation == "transfer_contract" || (ok && table == "transfer_contract") {
 								rows, _ := node["Actual Rows"].(float64)
 								removed, _ := node["Rows Removed by Filter"].(float64)
 								contractRows += (rows + removed) * loops

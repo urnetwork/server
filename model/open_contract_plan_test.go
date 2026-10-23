@@ -388,6 +388,12 @@ func seedFalseZeroOpenContractStats(
 	payerNetworkId server.Id,
 ) {
 	t.Helper()
+	if server.IsContractPartitioned(ctx) {
+		// the false-zero sample is a plain-table statistics hazard; a
+		// partitioned parent has no storage parameters, and each partition
+		// keeps its own statistics
+		t.Skip("plain contract tables only")
+	}
 	server.Db(ctx, func(writerConn server.PgConn) {
 		server.RaisePgResult(writerConn.Exec(ctx, `ALTER TABLE transfer_contract SET (autovacuum_enabled = false)`))
 		server.RaisePgResult(writerConn.Exec(ctx, `
