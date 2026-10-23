@@ -7,7 +7,6 @@ package monitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -55,6 +54,8 @@ type PgAutovacuumDiscardSettings struct {
 	MaintenanceFunction string
 	MaintenanceLookback time.Duration
 	MaxMaintenanceRuns  int
+	// The longest text cell the frame may carry.
+	MaxCellBytes int
 }
 
 // The §2.4a defaults: the 100 GB relation line of §2.4g, half the heap
@@ -72,6 +73,7 @@ func DefaultPgAutovacuumDiscardSettings() *PgAutovacuumDiscardSettings {
 		MaintenanceFunction:  "github.com/urnetwork/server/taskworker/work.DbMaintenance",
 		MaintenanceLookback:  time.Hour,
 		MaxMaintenanceRuns:   32,
+		MaxCellBytes:         256,
 	}
 }
 
@@ -186,19 +188,9 @@ func (self *pgAutovacuumDiscardProbe) trackedRelationIds() []int64 {
 // One primary-guarded statement: current-database vacuum progress with
 // worker generations, completion evidence for big and tracked relations, and
 // maintenance task windows. Fifteen text cells per row; the end row binds
-// the counts. Names, SQL and application text never leave SQL.
-func (self *pgAutovacuumDiscardProbe) query(trackedRelationIds []int64) string {
-	settings := self.settings
-	tracked := make([]string, 0, len(trackedRelationIds))
-	for _, relationId := range trackedRelationIds {
-		tracked = append(tracked, strconv.FormatInt(relationId, 10))
-	}
-	function := strings.ReplaceAll(settings.MaintenanceFunction, "'", "''")
-	lookback := strconv.FormatInt(int64(settings.MaintenanceLookback/time.Second), 10)
-	empty := func(count int) string {
-		return strings.TrimSuffix(strings.Repeat("'', ", count), ", ")
-	}
-	return "\\set monitor_primary_hostname `hostname -s 2>/dev/null || printf ' unavailable'`\n" + `
+// the counts. Relation names, statement and application text never leave the
+// database.
+const pgAutovacuumDiscardTemplate = `{hostname_guard}
 WITH source AS MATERIALIZED (
  SELECT :'monitor_primary_hostname'::text AS hostname,
         floor(extract(epoch FROM statement_timestamp()) * 1000000)::bigint AS observed_us,
@@ -228,37 +220,57 @@ WITH source AS MATERIALIZED (
  LEFT JOIN pg_stat_activity a ON a.pid = v.pid
  LEFT JOIN pg_stat_all_tables st ON st.relid = v.relid
  WHERE v.datid = (SELECT database_oid FROM source)
- ORDER BY v.relid, v.pid LIMIT ` + strconv.Itoa(settings.MaxPasses+1) + `
+ ORDER BY v.relid, v.pid LIMIT {pass_limit}
 ), relations AS MATERIALIZED (
  SELECT c.oid::bigint AS relation_oid, pg_relation_size(c.oid)::bigint AS heap_bytes,
         coalesce(st.autovacuum_count, -1)::bigint AS autovacuum_count,
         coalesce(floor(extract(epoch FROM st.last_autovacuum) * 1000000)::bigint, 0) AS last_autovacuum_us
  FROM pg_class c LEFT JOIN pg_stat_all_tables st ON st.relid = c.oid
  WHERE c.relkind IN ('r', 't', 'm')
-   AND (pg_relation_size(c.oid) >= ` + strconv.FormatFloat(settings.BigRelationHeapBytes, 'f', 0, 64) +
-		` OR c.oid = ANY(ARRAY[` + strings.Join(tracked, ",") + `]::oid[]))
- ORDER BY c.oid LIMIT ` + strconv.Itoa(settings.MaxCensus+1) + `
+   AND (pg_relation_size(c.oid) >= {big_relation_bytes} OR c.oid = ANY(ARRAY[{tracked_relations}]::oid[]))
+ ORDER BY c.oid LIMIT {census_limit}
 ), maintenance AS MATERIALIZED (
  SELECT * FROM (
   SELECT floor(extract(epoch FROM f.run_start_time) * 1000000)::bigint AS start_us,
          floor(extract(epoch FROM f.run_end_time) * 1000000)::bigint AS end_us
   FROM finished_task f
-  WHERE f.run_end_time >= (statement_timestamp() AT TIME ZONE 'UTC') - ` + lookback + ` * interval '1 second'
-    AND f.function_name = '` + function + `'
+  WHERE f.run_end_time >= (statement_timestamp() AT TIME ZONE 'UTC') - {lookback_seconds} * interval '1 second'
+    AND f.function_name = '{maintenance_function}'
   UNION ALL
   SELECT floor(extract(epoch FROM p.claim_time) * 1000000)::bigint, 0::bigint
   FROM pending_task p
-  WHERE (statement_timestamp() AT TIME ZONE 'UTC') < p.release_time AND p.function_name = '` + function + `'
- ) windows ORDER BY start_us LIMIT ` + strconv.Itoa(settings.MaxMaintenanceRuns+1) + `
+  WHERE (statement_timestamp() AT TIME ZONE 'UTC') < p.release_time AND p.function_name = '{maintenance_function}'
+ ) windows ORDER BY start_us LIMIT {maintenance_limit}
 )
-SELECT 'meta', s.hostname, s.observed_us::text, s.started_us::text, s.database_oid::text, s.recovery, s.block_size::text, ` + empty(8) + ` FROM source s
+SELECT 'meta', s.hostname, s.observed_us::text, s.started_us::text, s.database_oid::text, s.recovery, s.block_size::text,
+       '', '', '', '', '', '', '', '' FROM source s
 UNION ALL SELECT 'pass', p.relation_oid::text, p.pid::text, p.backend_started_us::text, p.query_started_us::text, p.mode, p.phase,
        p.heap_total::text, p.heap_scanned::text, p.heap_vacuumed::text, p.index_cycles::text, p.indexes_processed::text,
        p.indexes_total::text, p.heap_bytes::text, p.autovacuum_count::text FROM passes p
-UNION ALL SELECT 'relation', r.relation_oid::text, r.heap_bytes::text, r.autovacuum_count::text, r.last_autovacuum_us::text, ` + empty(10) + ` FROM relations r
-UNION ALL SELECT 'maintenance', m.start_us::text, m.end_us::text, ` + empty(12) + ` FROM maintenance m
-UNION ALL SELECT 'end', (SELECT count(*) FROM passes)::text, (SELECT count(*) FROM relations)::text, (SELECT count(*) FROM maintenance)::text, ` + empty(11) + `;
+UNION ALL SELECT 'relation', r.relation_oid::text, r.heap_bytes::text, r.autovacuum_count::text, r.last_autovacuum_us::text,
+       '', '', '', '', '', '', '', '', '', '' FROM relations r
+UNION ALL SELECT 'maintenance', m.start_us::text, m.end_us::text, '', '', '', '', '', '', '', '', '', '', '', '' FROM maintenance m
+UNION ALL SELECT 'end', (SELECT count(*) FROM passes)::text, (SELECT count(*) FROM relations)::text, (SELECT count(*) FROM maintenance)::text,
+       '', '', '', '', '', '', '', '', '', '', '';
 `
+
+// The statement with this instance's bounds and tracked relations.
+func (self *pgAutovacuumDiscardProbe) query(trackedRelationIds []int64) string {
+	settings := self.settings
+	tracked := make([]string, 0, len(trackedRelationIds))
+	for _, relationId := range trackedRelationIds {
+		tracked = append(tracked, strconv.FormatInt(relationId, 10))
+	}
+	return strings.NewReplacer(
+		"{hostname_guard}", pgPrimaryHostnameMetaCommand,
+		"{pass_limit}", strconv.Itoa(settings.MaxPasses+1),
+		"{big_relation_bytes}", strconv.FormatFloat(settings.BigRelationHeapBytes, 'f', 0, 64),
+		"{tracked_relations}", strings.Join(tracked, ","),
+		"{census_limit}", strconv.Itoa(settings.MaxCensus+1),
+		"{lookback_seconds}", strconv.FormatInt(int64(settings.MaintenanceLookback/time.Second), 10),
+		"{maintenance_function}", strings.ReplaceAll(settings.MaintenanceFunction, "'", "''"),
+		"{maintenance_limit}", strconv.Itoa(settings.MaxMaintenanceRuns+1),
+	).Replace(pgAutovacuumDiscardTemplate)
 }
 
 // Fixed framing, the primary's identity and role, a near source clock and
@@ -277,7 +289,7 @@ func (self *pgAutovacuumDiscardProbe) parse(rows []pgRow, primary string, now ti
 			return observation, "invalid-frame-width"
 		}
 		for _, cell := range row {
-			if len(cell) > 256 {
+			if len(cell) > settings.MaxCellBytes {
 				return observation, "overbound-cell"
 			}
 		}
@@ -429,8 +441,8 @@ func (self *pgAutovacuumDiscardProbe) maintenanceOverlap(observation pgAutovacuu
 // Classify every tracked pass that ended, update the bounded tracking, and
 // report open harmful discards until a later pass completes.
 func (self *pgAutovacuumDiscardProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	primaries := env.cfg.hostsWithRole("pg-primary")
 	if len(primaries) != 1 {
@@ -438,14 +450,8 @@ func (self *pgAutovacuumDiscardProbe) check(ctx context.Context, env *probeEnv) 
 	}
 	primary := primaries[0]
 	rows, err := env.runner.pg(ctx, self.query(self.trackedRelationIds()))
-	if ctx.Err() != nil {
-		if err != nil {
-			return nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}
-		}
-		return nil, ctx.Err()
-	}
-	if errors.Is(err, context.Canceled) {
-		return nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
+	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+		return nil, lifecycleErr
 	}
 	if err != nil {
 		return []finding{self.unknown(primary.name, "source-unavailable", err, 2)}, nil
@@ -454,8 +460,8 @@ func (self *pgAutovacuumDiscardProbe) check(ctx context.Context, env *probeEnv) 
 	if reason != "" {
 		return []finding{self.unknown(primary.name, reason, nil, 2)}, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	return self.reduce(observation), nil
 }

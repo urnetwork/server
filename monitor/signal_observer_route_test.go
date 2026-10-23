@@ -86,7 +86,7 @@ func TestObserverRouteMissingContractIsConfiguredUnknown(t *testing.T) {
 }
 
 // Every overlay address through the contract interface or gateway is healthy;
-// a route to the LAN or default interface and a missing route are diverted,
+// a route to the lan or default interface and a missing route are diverted,
 // and only inventory host names and interface names leave the host.
 func TestObserverRouteDarwinContract(t *testing.T) {
 	for _, test := range []struct {

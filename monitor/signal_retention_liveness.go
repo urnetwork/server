@@ -7,7 +7,6 @@ package monitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -43,11 +42,11 @@ type RetentionLivenessSettings struct {
 	RunBudget time.Duration
 	// The primary's statement clock may differ from the monitor's by this.
 	ClockTolerance time.Duration
-	// WARN when the newest subsidy_payment end_time is older than this.
+	// Warn when the newest subsidy_payment end_time is older than this.
 	FrontierMaxAge  time.Duration
 	FrontierSustain int
-	// Contract reap stamping: TABLESAMPLE SYSTEM percent of transfer_contract
-	// pages; WARN when, among at least ReapMinimumOldRows sampled rows older
+	// Contract reap stamping: the system page-sample percent of
+	// transfer_contract; warn when, among at least ReapMinimumOldRows sampled rows older
 	// than ReapMinimumAge, under ReapMinimumStampedShare have reap_time. A
 	// sample under ReapMinimumSampledRows rows is unknown.
 	ReapSamplePercent       float64
@@ -73,6 +72,8 @@ type RetentionLivenessSettings struct {
 	GrowthRelationMinimumBytes float64
 	GrowthStatsWindow          time.Duration
 	GrowthListLimit            int
+	// The longest text cell either frame may carry.
+	MaxCellBytes int
 }
 
 // The §2.4g defaults, with the reliability horizon from the model's own
@@ -100,6 +101,7 @@ func DefaultRetentionLivenessSettings() *RetentionLivenessSettings {
 		GrowthRelationMinimumBytes: 100 * 1000 * 1000 * 1000,
 		GrowthStatsWindow:          7 * 24 * time.Hour,
 		GrowthListLimit:            16,
+		MaxCellBytes:               256,
 	}
 }
 
@@ -117,9 +119,7 @@ const retentionLivenessColumns = 10
 
 // The primary-guarded catalog read: frontier, partitions and the append-only
 // candidates. Ten text cells per row; counts in the end row bind the rows.
-func (self retentionLivenessProbe) catalogQuery() string {
-	settings := self.settings
-	return "\\set monitor_primary_hostname `hostname -s 2>/dev/null || printf ' unavailable'`\n" + `
+const retentionLivenessCatalogTemplate = `{hostname_guard}
 WITH source AS MATERIALIZED (
  SELECT :'monitor_primary_hostname'::text AS hostname,
         floor(extract(epoch FROM statement_timestamp()) * 1000000)::bigint AS observed_us,
@@ -132,14 +132,14 @@ WITH source AS MATERIALIZED (
  SELECT c.relname::text AS name, pg_relation_size(c.oid)::bigint AS heap_bytes
  FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
  WHERE i.inhparent = to_regclass('public.client_reliability')
- ORDER BY c.relname LIMIT ` + strconv.Itoa(settings.MaxPartitions+1) + `
+ ORDER BY c.relname LIMIT {partition_limit}
 ), growth AS MATERIALIZED (
  SELECT c.oid::bigint AS relation_oid, c.relname::text AS name, pg_total_relation_size(c.oid)::bigint AS total_bytes,
         coalesce(st.n_tup_ins, 0)::bigint AS inserted, coalesce(st.n_tup_del, 0)::bigint AS deleted
  FROM pg_class c JOIN pg_stat_all_tables st ON st.relid = c.oid
  WHERE c.relkind = 'r' AND c.relnamespace = 'public'::regnamespace
-   AND pg_total_relation_size(c.oid) >= ` + strconv.FormatFloat(settings.GrowthRelationMinimumBytes, 'f', 0, 64) + `
- ORDER BY 3 DESC, 1 LIMIT ` + strconv.Itoa(settings.GrowthListLimit+1) + `
+   AND pg_total_relation_size(c.oid) >= {growth_minimum_bytes}
+ ORDER BY 3 DESC, 1 LIMIT {growth_limit}
 )
 SELECT 'meta', s.hostname, s.observed_us::text, s.started_us::text, s.recovery, s.stats_reset_us::text, s.parent_kind,
        coalesce(s.frontier_us::text, 'none'), '', '' FROM source s
@@ -147,18 +147,36 @@ UNION ALL SELECT 'partition', p.name, p.heap_bytes::text, '', '', '', '', '', ''
 UNION ALL SELECT 'growth', g.name, g.relation_oid::text, g.total_bytes::text, g.inserted::text, g.deleted::text, '', '', '', '' FROM growth g
 UNION ALL SELECT 'end', (SELECT count(*) FROM partitions)::text, (SELECT count(*) FROM growth)::text, '', '', '', '', '', '', '';
 `
+
+// One sampled-page read of transfer_contract; only counts leave the database.
+const retentionLivenessReapTemplate = `{hostname_guard}
+SELECT 'reap', :'monitor_primary_hostname'::text, floor(extract(epoch FROM statement_timestamp()) * 1000000)::bigint::text,
+       count(*)::text,
+       (count(*) FILTER (WHERE create_time < (statement_timestamp() AT TIME ZONE 'UTC') - {minimum_age_seconds} * interval '1 second'))::text,
+       (count(*) FILTER (WHERE create_time < (statement_timestamp() AT TIME ZONE 'UTC') - {minimum_age_seconds} * interval '1 second' AND reap_time IS NOT NULL))::text,
+       CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END
+FROM transfer_contract TABLESAMPLE SYSTEM ({sample_percent});
+`
+
+// The catalog read with this instance's bounds.
+func (self retentionLivenessProbe) catalogQuery() string {
+	settings := self.settings
+	return strings.NewReplacer(
+		"{hostname_guard}", pgPrimaryHostnameMetaCommand,
+		"{partition_limit}", strconv.Itoa(settings.MaxPartitions+1),
+		"{growth_minimum_bytes}", strconv.FormatFloat(settings.GrowthRelationMinimumBytes, 'f', 0, 64),
+		"{growth_limit}", strconv.Itoa(settings.GrowthListLimit+1),
+	).Replace(retentionLivenessCatalogTemplate)
 }
 
-// One sampled-page read of transfer_contract; only counts leave SQL.
+// The sampled read with this instance's age line and sample size.
 func (self retentionLivenessProbe) reapQuery() string {
 	settings := self.settings
-	age := strconv.FormatInt(int64(settings.ReapMinimumAge/time.Second), 10)
-	old := "create_time < (statement_timestamp() AT TIME ZONE 'UTC') - " + age + " * interval '1 second'"
-	return "\\set monitor_primary_hostname `hostname -s 2>/dev/null || printf ' unavailable'`\n" +
-		"SELECT 'reap', :'monitor_primary_hostname'::text, floor(extract(epoch FROM statement_timestamp()) * 1000000)::bigint::text, " +
-		"count(*)::text, (count(*) FILTER (WHERE " + old + "))::text, (count(*) FILTER (WHERE " + old + " AND reap_time IS NOT NULL))::text, " +
-		"CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END " +
-		"FROM transfer_contract TABLESAMPLE SYSTEM (" + strconv.FormatFloat(settings.ReapSamplePercent, 'f', -1, 64) + ");\n"
+	return strings.NewReplacer(
+		"{hostname_guard}", pgPrimaryHostnameMetaCommand,
+		"{minimum_age_seconds}", strconv.FormatInt(int64(settings.ReapMinimumAge/time.Second), 10),
+		"{sample_percent}", strconv.FormatFloat(settings.ReapSamplePercent, 'f', -1, 64),
+	).Replace(retentionLivenessReapTemplate)
 }
 
 // The validated catalog read.
@@ -189,7 +207,12 @@ type retentionLivenessRelation struct {
 	deleted    int64
 }
 
+// The model's partition scheme: one client_reliability partition per UTC day
+// named client_reliability_pYYYYMMDD.
 var retentionLivenessPartitionPattern = regexp.MustCompile(`^client_reliability_p([0-9]{8})$`)
+
+const retentionLivenessPartitionWidth = 24 * time.Hour
+
 var retentionLivenessRelationNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 
 // Positive microsecond epoch cells.
@@ -214,7 +237,7 @@ func (self retentionLivenessProbe) parseCatalog(rows []pgRow, primary string, no
 			return catalog, "invalid-frame-width"
 		}
 		for _, cell := range row {
-			if len(cell) > 256 {
+			if len(cell) > settings.MaxCellBytes {
 				return catalog, "overbound-cell"
 			}
 		}
@@ -341,8 +364,8 @@ func (self retentionLivenessProbe) reliabilityCutoff(catalog retentionLivenessCa
 // checks, the sampled read feeds reap stamping. A failure in one leaves only
 // its checks unknown.
 func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	primaries := env.cfg.hostsWithRole("pg-primary")
 	if len(primaries) != 1 {
@@ -355,14 +378,8 @@ func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]
 	primary := primaries[0]
 	read := func(query string) ([]pgRow, error, error) {
 		rows, err := env.runner.pg(ctx, query)
-		if ctx.Err() != nil {
-			if err != nil {
-				return nil, nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}
-			}
-			return nil, nil, ctx.Err()
-		}
-		if errors.Is(err, context.Canceled) {
-			return nil, nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
+		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+			return nil, nil, lifecycleErr
 		}
 		return rows, err, nil
 	}
@@ -482,7 +499,7 @@ func (self retentionLivenessProbe) partitions(target string, catalog retentionLi
 		return healthy
 	}
 	cutoff := self.reliabilityCutoff(catalog)
-	upper := oldestDay.Add(24 * time.Hour)
+	upper := oldestDay.Add(retentionLivenessPartitionWidth)
 	if !upper.Before(cutoff.Add(-settings.PartitionStuckGrace)) {
 		return healthy
 	}

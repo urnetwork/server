@@ -6,7 +6,6 @@ package monitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -41,7 +40,7 @@ type MinioRunwaySettings struct {
 	RunBudget time.Duration
 	// Consecutive observations before a runway, divergence or surge alert.
 	Sustain int
-	// Drive runway: WARN at or under WarnRunway, PAGE at or under PageRunway.
+	// Drive runway: warn at or under WarnRunway, page at or under PageRunway.
 	// Longer than §2.4f's because adding drives takes days.
 	WarnRunway time.Duration
 	PageRunway time.Duration
@@ -54,10 +53,10 @@ type MinioRunwaySettings struct {
 	DriveFloorFraction float64
 	// Raw bytes per logical byte of the erasure coding: two for 2+2.
 	ErasureOverhead float64
-	// WARN when raw used bytes exceed ErasureOverhead times MinIO's logical
+	// Warn when raw used bytes exceed ErasureOverhead times MinIO's logical
 	// bucket bytes by more than this.
 	DivergenceWarnBytes float64
-	// WARN when the PutObject rate over PutRateWindow exceeds PutSurgeMultiple
+	// Warn when the PutObject rate over PutRateWindow exceeds PutSurgeMultiple
 	// times its median over PutSurgeHistory and is at least
 	// PutSurgeMinimumRate per second. The median needs PutSurgeMinimumHistory
 	// of measured history.
@@ -77,8 +76,11 @@ type MinioRunwaySettings struct {
 	BackupReserveBytesPerDrive float64
 	BackupMinimumFreeBytes     float64
 	BackupTimerHorizon         time.Duration
-	BackupCommandTimeout       time.Duration
-	BackupMaxOutputBytes       int
+	// Bounds on the unit read: each systemctl call (whole seconds, at least
+	// one), the whole command, and its output.
+	BackupUnitTimeout    time.Duration
+	BackupCommandTimeout time.Duration
+	BackupMaxOutputBytes int
 }
 
 // The §11.6b defaults on the 2026-10-22 main store: four 3.84 TB drives in
@@ -107,6 +109,7 @@ func DefaultMinioRunwaySettings() *MinioRunwaySettings {
 		BackupReserveBytesPerDrive: 1536 * 1024 * 1024 * 1024,
 		BackupMinimumFreeBytes:     4 * 1000 * 1000 * 1000 * 1000,
 		BackupTimerHorizon:         24 * time.Hour,
+		BackupUnitTimeout:          5 * time.Second,
 		BackupCommandTimeout:       15 * time.Second,
 		BackupMaxOutputBytes:       4 * 1024,
 	}
@@ -264,8 +267,8 @@ type minioRunwayDriveEstimate struct {
 // Each layer is reduced independently: one layer's gap never clears or
 // masks another layer's measured state.
 func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	settings := self.settings
 	minioHosts := []*host{}
@@ -273,8 +276,8 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	for _, configured := range env.cfg.hostsWithRole("minio") {
 		if isScoped {
 			if err := scoped.guardHost(ctx, configured); err != nil {
-				if contextErr := ctx.Err(); contextErr != nil {
-					return nil, contextErr
+				if probeEnded(ctx) {
+					return nil, ctx.Err()
 				}
 				continue
 			}
@@ -313,14 +316,8 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	grid := settings.Estimator.grid(now)
 	command := storageRunwayRangeCommand("monitor-minio-runway", minioRunwayQuery(env.cfg.env, hostNames, settings), grid, settings.Estimator)
 	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
-	if ctx.Err() != nil {
-		if err != nil {
-			return nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}
-		}
-		return nil, ctx.Err()
-	}
-	if errors.Is(err, context.Canceled) {
-		return nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
+	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+		return nil, lifecycleErr
 	}
 	if err != nil {
 		return unknownAll("source-command-unavailable", err), nil
@@ -569,15 +566,25 @@ type minioRunwayBackupUnits struct {
 	timerNext     time.Time
 }
 
-// Fixed lines from the configured backup units. No path, argv or journal
-// text leaves the host.
+// Fixed lines from the configured backup units behind a hostname guard. No
+// path, argv or journal text leaves the host.
+const minioRunwayBackupCommandTemplate = `[ "$(hostname -s)" = {host} ] || exit 74
+printf 'monitor-unit service\n'
+timeout {unit_timeout}s systemctl show --no-pager --timestamp=unix -p LoadState -p ActiveState -- {service_unit}
+printf 'monitor-unit timer\n'
+timeout {unit_timeout}s systemctl show --no-pager --timestamp=unix -p LoadState -p ActiveState -p NextElapseUSecRealtime -- {timer_unit}
+printf 'monitor-unit end\n'
+`
+
+// The backup-unit read for one inventory host.
 func minioRunwayBackupCommand(hostName string, settings *MinioRunwaySettings) string {
 	shortName, _, _ := strings.Cut(hostName, ".")
-	show := "timeout 5s systemctl show --no-pager --timestamp=unix -p LoadState -p ActiveState"
-	return "[ \"$(hostname -s)\" = " + shellSingleQuote(shortName) + " ] || exit 74\n" +
-		"printf 'monitor-unit service\\n'\n" + show + " -- " + shellSingleQuote(settings.BackupServiceUnit) + "\n" +
-		"printf 'monitor-unit timer\\n'\n" + show + " -p NextElapseUSecRealtime -- " + shellSingleQuote(settings.BackupTimerUnit) + "\n" +
-		"printf 'monitor-unit end\\n'\n"
+	return strings.NewReplacer(
+		"{host}", shellSingleQuote(shortName),
+		"{unit_timeout}", strconv.Itoa(max(int(settings.BackupUnitTimeout/time.Second), 1)),
+		"{service_unit}", shellSingleQuote(settings.BackupServiceUnit),
+		"{timer_unit}", shellSingleQuote(settings.BackupTimerUnit),
+	).Replace(minioRunwayBackupCommandTemplate)
 }
 
 // Exactly the framed properties, once each, in the framed units.
@@ -657,11 +664,19 @@ func parseMinioRunwayBackupUnits(output string, maxBytes int) (minioRunwayBackup
 }
 
 // The primary's backup replication slots, as counts only.
+const minioRunwayBackupSlotTemplate = `{hostname_guard}
+SELECT 'slots', :'monitor_primary_hostname'::text, (count(*) FILTER (WHERE slot_name LIKE '{slot_pattern}'))::text,
+       CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END
+FROM pg_replication_slots;
+`
+
+// The slot count query for a validated prefix; its underscores match only
+// themselves.
 func minioRunwayBackupSlotQuery(prefix string) string {
-	pattern := strings.ReplaceAll(prefix, "_", `\_`) + "%"
-	return "\\set monitor_primary_hostname `hostname -s 2>/dev/null || printf ' unavailable'`\n" +
-		"SELECT 'slots', :'monitor_primary_hostname'::text, (count(*) FILTER (WHERE slot_name LIKE '" + pattern + "'))::text, " +
-		"CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END FROM pg_replication_slots;\n"
+	return strings.NewReplacer(
+		"{hostname_guard}", pgPrimaryHostnameMetaCommand,
+		"{slot_pattern}", strings.ReplaceAll(prefix, "_", `\_`)+"%",
+	).Replace(minioRunwayBackupSlotTemplate)
 }
 
 var minioRunwayBackupSlotPrefixPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
@@ -672,18 +687,9 @@ var minioRunwayBackupSlotPrefixPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,4
 func (self *minioRunwayProbe) backup(ctx context.Context, env *probeEnv, configured *host, drives []minioRunwayDriveEstimate, census bool, censusReason string) ([]finding, error) {
 	settings := self.settings
 	target := configured.name + "/backup"
-	contextError := func(err error) error {
-		if err != nil {
-			return &signalContextError{contextErr: ctx.Err(), sourceErr: err}
-		}
-		return ctx.Err()
-	}
 	output, err := env.runner.sshTimeout(ctx, configured, minioRunwayBackupCommand(configured.name, settings), "", settings.BackupCommandTimeout)
-	if ctx.Err() != nil {
-		return nil, contextError(err)
-	}
-	if errors.Is(err, context.Canceled) {
-		return nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
+	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+		return nil, lifecycleErr
 	}
 	if err != nil {
 		return []finding{self.unknown(target, "backup", "backup-unit-unavailable", tierWarn, "", err)}, nil
@@ -709,13 +715,11 @@ func (self *minioRunwayProbe) backup(ctx context.Context, env *probeEnv, configu
 		slotReason = "primary-inventory-unavailable-or-ambiguous"
 	} else {
 		rows, err := env.runner.pg(ctx, minioRunwayBackupSlotQuery(settings.BackupSlotPrefix))
-		if ctx.Err() != nil {
-			return nil, contextError(err)
+		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+			return nil, lifecycleErr
 		}
 		shortName, _, _ := strings.Cut(primaries[0].name, ".")
 		switch {
-		case errors.Is(err, context.Canceled):
-			return nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
 		case err != nil:
 			return []finding{self.unknown(target, "backup", "replication-slots-unavailable", tierWarn, "", err)}, nil
 		case len(rows) != 1 || len(rows[0]) != 4 || rows[0][0] != "slots" || rows[0][1] != shortName || rows[0][3] != "0":

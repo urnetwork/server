@@ -165,7 +165,7 @@ func TestStorageRunwayHealthyFlatVolumes(t *testing.T) {
 }
 
 // The 2026-10-20/21 edge-2 backtest from SIGNALS.md §2.4f: free above the
-// 100 GB floor and the fastest decline select WARN, WARN and PAGE.
+// 100 GB floor and the fastest decline select warn, warn and page.
 func TestStorageRunwayDatabaseBacktest(t *testing.T) {
 	floor := 100.0 * storageRunwayTestGigabyte
 	for _, test := range []struct {
@@ -416,7 +416,7 @@ func TestStorageRunwayFailedReadRemembersRecentDecline(t *testing.T) {
 	}
 }
 
-// A failed API answer, a warning, a resampled vector or an oversized body is
+// A failed answer, a warning, a resampled vector or an oversized body is
 // one fixed reason for every volume, never a healthy zero.
 func TestStorageRunwayInvalidAnswerIsUnknownForEveryVolume(t *testing.T) {
 	valid := storageRunwayTestBody(t, storageRunwayTestGrid(), storageRunwayTestFlat()...)

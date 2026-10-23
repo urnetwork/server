@@ -94,15 +94,20 @@ func (self StorageRunwayEstimatorSettings) grid(now time.Time) storageRunwayGrid
 
 // One loopback query_range request. Raw selectors keep their own labels; the
 // answer is bounded in bytes before it is parsed.
+const storageRunwayRangeCommandTemplate = `# {marker}
+curl -fsS --max-time {timeout} --max-filesize {max_bytes} --data-urlencode {query} --data-urlencode {start} --data-urlencode {end} --data-urlencode {step} 'http://127.0.0.1:3100/prometheus/api/v1/query_range'`
+
+// The range request for one query on one grid.
 func storageRunwayRangeCommand(marker, query string, grid storageRunwayGrid, settings StorageRunwayEstimatorSettings) string {
-	timeoutSeconds := max(int(settings.QueryTimeout/time.Second), 1)
-	return "# " + marker + "\n" +
-		"curl -fsS --max-time " + strconv.Itoa(timeoutSeconds) + " --max-filesize " + strconv.Itoa(settings.MaxResponseBytes) +
-		" --data-urlencode " + shellSingleQuote("query="+query) +
-		" --data-urlencode " + shellSingleQuote("start="+strconv.FormatInt(grid.start.Unix(), 10)) +
-		" --data-urlencode " + shellSingleQuote("end="+strconv.FormatInt(grid.end.Unix(), 10)) +
-		" --data-urlencode " + shellSingleQuote("step="+strconv.FormatInt(int64(grid.step/time.Second), 10)) +
-		" 'http://127.0.0.1:3100/prometheus/api/v1/query_range'"
+	return strings.NewReplacer(
+		"{marker}", marker,
+		"{timeout}", strconv.Itoa(max(int(settings.QueryTimeout/time.Second), 1)),
+		"{max_bytes}", strconv.Itoa(settings.MaxResponseBytes),
+		"{query}", shellSingleQuote("query="+query),
+		"{start}", shellSingleQuote("start="+strconv.FormatInt(grid.start.Unix(), 10)),
+		"{end}", shellSingleQuote("end="+strconv.FormatInt(grid.end.Unix(), 10)),
+		"{step}", shellSingleQuote("step="+strconv.FormatInt(int64(grid.step/time.Second), 10)),
+	).Replace(storageRunwayRangeCommandTemplate)
 }
 
 // An anchored alternation of exact values for a PromQL regex matcher.

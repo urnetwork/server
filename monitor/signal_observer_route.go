@@ -65,7 +65,7 @@ type ObserverRouteSettings struct {
 	MaxRouteOutputBytes int
 }
 
-// Five-minute local lookups; two observations ride out a VPN reconnect.
+// Five-minute local lookups; two observations ride out a tunnel reconnect.
 func DefaultObserverRouteSettings() *ObserverRouteSettings {
 	return &ObserverRouteSettings{
 		Cadence:             5 * time.Minute,
@@ -114,7 +114,7 @@ func (self observerRouteProbe) lookup(ctx context.Context, runner probeRunner, a
 			family = "-inet6"
 		}
 		output, err := runner.local(ctx, "/sbin/route", "-n", "get", family, address.String())
-		if ctx.Err() != nil || len(output) > self.settings.MaxRouteOutputBytes {
+		if probeEnded(ctx) || len(output) > self.settings.MaxRouteOutputBytes {
 			return unknown
 		}
 		// Darwin can write its not-in-table diagnostic with a zero exit.
@@ -152,7 +152,7 @@ func (self observerRouteProbe) lookup(ctx context.Context, runner probeRunner, a
 			args = []string{"-j", "-6", "route", "get", address.String()}
 		}
 		output, err := runner.local(ctx, "ip", args...)
-		if ctx.Err() != nil || len(output) > self.settings.MaxRouteOutputBytes {
+		if probeEnded(ctx) || len(output) > self.settings.MaxRouteOutputBytes {
 			return unknown
 		}
 		if err != nil {
@@ -228,11 +228,12 @@ func observerRouteLinux(output string, address netip.Addr) observerRoute {
 // Every enabled overlay destination is classified against the contract. An
 // excluded host is neither looked up nor certified.
 func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	if env.cfg.addressMode != addressModeOverlay {
-		// LAN mode dials LAN addresses; the overlay contract does not apply.
+		// The lan address mode dials lan addresses; the overlay contract does
+		// not apply.
 		return nil, nil
 	}
 	settings := self.settings
@@ -262,8 +263,8 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 	for _, configured := range env.cfg.hosts {
 		if isScoped {
 			if err := scoped.guardHost(ctx, configured); err != nil {
-				if contextErr := ctx.Err(); contextErr != nil {
-					return nil, contextErr
+				if probeEnded(ctx) {
+					return nil, ctx.Err()
 				}
 				continue
 			}
@@ -275,8 +276,8 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 		}
 		looked++
 		route := self.lookup(ctx, env.runner, address.Unmap())
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if probeEnded(ctx) {
+			return nil, ctx.Err()
 		}
 		if route.state == "" {
 			route.state = observerRouteDiverted

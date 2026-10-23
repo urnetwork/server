@@ -5,7 +5,6 @@ package monitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -36,12 +35,12 @@ type StorageRunwaySettings struct {
 	// failover.
 	Cadence   time.Duration
 	RunBudget time.Duration
-	// WARN at or under WarnRunway and PAGE at or under PageRunway, each after
+	// Warn at or under WarnRunway and page at or under PageRunway, each after
 	// Sustain consecutive observations.
 	WarnRunway time.Duration
 	PageRunway time.Duration
 	Sustain    int
-	// PAGE when the free bytes above the floor are under this multiple of the
+	// Page when the free bytes above the floor are under this multiple of the
 	// largest pace-window decline in the pace history: a floor scaled to the
 	// volume's own pace. Non-positive disables it.
 	PaceFloorMultiple float64
@@ -61,7 +60,7 @@ type StorageRunwayVolumeSettings struct {
 	FloorBytes float64
 }
 
-// The §2.4f defaults: WARN at 72 hours, PAGE at 24 hours, two observations
+// The §2.4f defaults: warn at 72 hours, page at 24 hours, two observations
 // at a 15-minute cadence; the database root keeps the §2.4b 100 GB line, and
 // every other root and the Redis data volumes count down to full.
 func DefaultStorageRunwaySettings() *StorageRunwaySettings {
@@ -125,8 +124,8 @@ func storageRunwayQuery(environment string, hosts, mountpoints []string) string 
 // finding. Cancellation keeps the parent verdict and the original source
 // cause, and never publishes a completed observation.
 func (self *storageRunwayProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if probeEnded(ctx) {
+		return nil, ctx.Err()
 	}
 	settings := self.settings
 	scoped, isScoped := env.runner.(*hostScopeRunner)
@@ -148,8 +147,8 @@ func (self *storageRunwayProbe) check(ctx context.Context, env *probeEnv) ([]fin
 			// An excluded host's volumes stay unknown through the shared
 			// host-scope coverage finding; its series are never read.
 			if err := scoped.guardHost(ctx, configured); err != nil {
-				if contextErr := ctx.Err(); contextErr != nil {
-					return nil, contextErr
+				if probeEnded(ctx) {
+					return nil, ctx.Err()
 				}
 				continue
 			}
@@ -194,14 +193,8 @@ func (self *storageRunwayProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	grid := settings.Estimator.grid(now)
 	command := storageRunwayRangeCommand("monitor-storage-runway", storageRunwayQuery(env.cfg.env, hostNames, mountpoints), grid, settings.Estimator)
 	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
-	if ctx.Err() != nil {
-		if err != nil {
-			return nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}
-		}
-		return nil, ctx.Err()
-	}
-	if errors.Is(err, context.Canceled) {
-		return nil, &signalContextError{contextErr: context.Canceled, sourceErr: err}
+	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
+		return nil, lifecycleErr
 	}
 	if err != nil {
 		return unknownAll("source-command-unavailable", err), nil
