@@ -31,7 +31,7 @@ func NewMoveOutcomesSignal() Signal {
 	return NewMoveOutcomesSignalWithSettings(DefaultConnectMoveSettings())
 }
 
-// The signal with explicit thresholds.
+// The signal with explicit thresholds; settings must not be nil.
 func NewMoveOutcomesSignalWithSettings(settings *ConnectMoveSettings) Signal {
 	return &signalAdapter{
 		number: "24.2", key: "move-outcomes", name: "Connect move success, target failures and breakers",
@@ -47,9 +47,9 @@ type moveOutcomesProbe struct {
 // The alert id of every finding.
 const moveOutcomesProbeId = "mimir/connect-move-outcomes"
 
-func (moveOutcomesProbe) id() string             { return moveOutcomesProbeId }
-func (moveOutcomesProbe) tier() string           { return tierWarn }
-func (moveOutcomesProbe) cadence() time.Duration { return 5 * time.Minute }
+func (moveOutcomesProbe) id() string                  { return moveOutcomesProbeId }
+func (moveOutcomesProbe) tier() string                { return tierWarn }
+func (self moveOutcomesProbe) cadence() time.Duration { return self.settings.Cadence }
 
 // The tagged series of one move-outcomes query, by tag.
 var moveOutcomesShape = connectMoveShape{

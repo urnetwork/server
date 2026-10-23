@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -91,6 +92,7 @@ type connectMoveTestSource struct {
 	control       []string
 	controlErr    error
 	queries       []string
+	commands      []string
 	queryTimes    []string
 	controlReads  [][]string
 	queryErr      error
@@ -114,6 +116,7 @@ func (self *connectMoveTestSource) Host(_ context.Context, hostSettings HostSett
 		return rest[:strings.Index(rest, "'")]
 	}
 	query := extract("query=")
+	self.commands = append(self.commands, command)
 	self.queries = append(self.queries, query)
 	self.queryTimes = append(self.queryTimes, extract("time="))
 	if self.cancelOnQuery != nil {
@@ -202,6 +205,10 @@ func TestConnectMoveSettingsDefaultsAreValidAndEveryBoundIsChecked(t *testing.T)
 	}
 	for name, mutate := range map[string]func(*ConnectMoveSettings){
 		"zero window":          func(s *ConnectMoveSettings) { s.SuccessWindow = 0 },
+		"zero cadence":         func(s *ConnectMoveSettings) { s.Cadence = 0 },
+		"fractional timeout":   func(s *ConnectMoveSettings) { s.QueryTimeout = 1500 * time.Millisecond },
+		"zero clock skew":      func(s *ConnectMoveSettings) { s.ClockSkew = 0 },
+		"zero label bound":     func(s *ConnectMoveSettings) { s.MaxLabelBytes = 0 },
 		"fractional window":    func(s *ConnectMoveSettings) { s.ImbalanceWindow = 90*time.Minute + time.Millisecond },
 		"window under step":    func(s *ConnectMoveSettings) { s.SuccessSustain = time.Minute },
 		"hold under its step":  func(s *ConnectMoveSettings) { s.BreakerHold = 30 * time.Second },
@@ -291,6 +298,9 @@ func TestConnectMoveParseRejectsEveryUnqualifiedAnswer(t *testing.T) {
 		"duplicate series": {reason: "duplicate_series", mutate: func(a *connectMoveTestAnswer) {
 			a.add("refused", map[string]string{"cap": "fleet"}, 4)
 		}},
+		"label over the bound": {reason: "invalid_series_labels", mutate: func(a *connectMoveTestAnswer) {
+			a.add("refused", map[string]string{"cap": strings.Repeat("x", settings.MaxLabelBytes+1)}, 1)
+		}},
 	}
 	for name, test := range mutations {
 		answer := valid()
@@ -344,6 +354,9 @@ func TestConnectMoveCensusSelectsTheNewestFreshProcessPerSlot(t *testing.T) {
 		"start after push": func(a *connectMoveTestAnswer) {
 			a.process("alpha-edge-1.example", "blue", "future", at.Add(time.Hour), at.Add(-10*time.Second))
 		},
+		"start past the skew": func(a *connectMoveTestAnswer) {
+			a.process("alpha-edge-1.example", "blue", "skewed", at.Add(30*time.Second), at.Add(-10*time.Second))
+		},
 	}
 	for name, mutate := range cases {
 		answer := newConnectMoveTestAnswer()
@@ -353,6 +366,17 @@ func TestConnectMoveCensusSelectsTheNewestFreshProcessPerSlot(t *testing.T) {
 		if reason != "" || census.complete() || len(census.slotProcesses) != 3 {
 			t.Errorf("%s: a slot without one fresh newest process was certified: reason=%q coverage=%s", name, reason, census.coverage())
 		}
+	}
+
+	// a wider skew setting admits the same start
+	skewed := newConnectMoveTestAnswer()
+	skewed.fleet()
+	skewed.process("alpha-edge-1.example", "blue", "skewed", at.Add(30*time.Second), at.Add(-10*time.Second))
+	widened := DefaultConnectMoveSettings()
+	widened.ClockSkew = time.Minute
+	census, reason = newConnectMoveCensus(frameOf(skewed), "synthetic", scope, widened)
+	if reason != "" || !census.complete() || census.slotProcesses[connectMoveSlot("alpha-edge-1.example", "blue")].instance != "skewed" {
+		t.Fatalf("the clock skew setting was not applied: reason=%q coverage=%s", reason, census.coverage())
 	}
 
 	missing := newConnectMoveTestAnswer()
@@ -418,5 +442,28 @@ func TestConnectMoveScopeKeepsDesiredSlotsAndSkipsExcludedGateways(t *testing.T)
 	}
 	if _, reason := newConnectMoveScope(env, DefaultConnectMoveSettings()); reason != "slot_inventory_incomplete" {
 		t.Fatalf("repeated host: reason=%q", reason)
+	}
+}
+
+// The probes' cadence and the query's transfer bound are the settings'.
+func TestConnectMoveCadenceAndQueryBoundFollowTheSettings(t *testing.T) {
+	settings := DefaultConnectMoveSettings()
+	settings.Cadence = 7 * time.Minute
+	settings.QueryTimeout = 9 * time.Second
+	for _, signal := range []Signal{NewMoverSignalWithSettings(settings), NewMoveOutcomesSignalWithSettings(settings), NewDrainMovesSignalWithSettings(settings)} {
+		if signal.Cadence() != 7*time.Minute {
+			t.Fatalf("%s cadence=%s", signal.Key(), signal.Cadence())
+		}
+	}
+	source := newConnectMoveTestSource()
+	source.queryErr = errors.New("synthetic capture")
+	if _, err := NewDrainMovesSignalWithSettings(settings).Run(context.Background(), connectMoveTestSettings(source)); err != nil {
+		t.Fatal(err)
+	}
+	if len(source.commands) != 1 || !strings.HasPrefix(source.commands[0], "curl -fsS --max-time 9 --max-filesize ") {
+		t.Fatalf("query transfer bound is not the setting's: %d commands", len(source.commands))
+	}
+	if DefaultConnectMoveSettings().Cadence != 5*time.Minute {
+		t.Fatal("default cadence changed")
 	}
 }

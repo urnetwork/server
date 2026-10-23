@@ -31,7 +31,7 @@ func NewDrainMovesSignal() Signal {
 	return NewDrainMovesSignalWithSettings(DefaultConnectMoveSettings())
 }
 
-// The signal with explicit thresholds.
+// The signal with explicit thresholds; settings must not be nil.
 func NewDrainMovesSignalWithSettings(settings *ConnectMoveSettings) Signal {
 	return &signalAdapter{
 		number: "24.7", key: "drain-moves", name: "Connect drain gates and compulsory closes per drain",
@@ -47,9 +47,9 @@ type drainMovesProbe struct {
 // The alert id of every finding.
 const drainMovesProbeId = "mimir/connect-drain-moves"
 
-func (drainMovesProbe) id() string             { return drainMovesProbeId }
-func (drainMovesProbe) tier() string           { return tierWarn }
-func (drainMovesProbe) cadence() time.Duration { return 5 * time.Minute }
+func (drainMovesProbe) id() string                  { return drainMovesProbeId }
+func (drainMovesProbe) tier() string                { return tierWarn }
+func (self drainMovesProbe) cadence() time.Duration { return self.settings.Cadence }
 
 // The tagged series of one drain-moves query, by tag.
 var drainMovesShape = connectMoveShape{

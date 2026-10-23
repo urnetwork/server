@@ -34,7 +34,7 @@ func NewMoverSignal() Signal {
 	return NewMoverSignalWithSettings(DefaultConnectMoveSettings())
 }
 
-// The signal with explicit thresholds.
+// The signal with explicit thresholds; settings must not be nil.
 func NewMoverSignalWithSettings(settings *ConnectMoveSettings) Signal {
 	return &signalAdapter{
 		number: "24.4", key: "mover", name: "Connect mover mode, pauses and host imbalance",
@@ -50,9 +50,9 @@ type moverProbe struct {
 // The alert id of every finding.
 const moverProbeId = "mimir/connect-mover"
 
-func (moverProbe) id() string             { return moverProbeId }
-func (moverProbe) tier() string           { return tierWarn }
-func (moverProbe) cadence() time.Duration { return 5 * time.Minute }
+func (moverProbe) id() string                  { return moverProbeId }
+func (moverProbe) tier() string                { return tierWarn }
+func (self moverProbe) cadence() time.Duration { return self.settings.Cadence }
 
 // The control hash every connect process reads each mover tick
 // (model.connectMoveControlKey).
@@ -109,11 +109,13 @@ func readMoverControl(ctx context.Context, env *probeEnv, settings *ConnectMoveS
 		return control, nil
 	}
 	output, err := env.runner.redis(ctx, redisHost, redisHost.redisEntryPort, "-c", "--json", "HGETALL", moverControlKey)
-	if contextErr := ctx.Err(); contextErr != nil {
+	select {
+	case <-ctx.Done():
 		if err != nil {
-			return nil, &signalContextError{contextErr: contextErr, sourceErr: err}
+			return nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}
 		}
-		return nil, contextErr
+		return nil, ctx.Err()
+	default:
 	}
 	if err != nil {
 		control.reason = "redis_read_failed"

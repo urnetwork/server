@@ -34,12 +34,20 @@ import (
 // name them, with their defaults. The bands are design targets
 // (connect/MOVE.md §5.8), not measured production baselines.
 type ConnectMoveSettings struct {
+	// How often each probe runs; a watcher's cadence floor can only slow it.
+	Cadence time.Duration
 	// Mimir is read this far behind now: the newest pushes are partial while
 	// the receiver catches up (RUN-MAIN.md, tier-0 vitals).
 	EvaluationLag time.Duration
+	// The bound on one query's transfer through the services host.
+	QueryTimeout time.Duration
 	// A process is current while its newest push is at most this old. The
 	// stats pusher pushes every 15 s.
 	ProcessFreshness time.Duration
+	// How far a push may read ahead of the evaluation instant, or a process
+	// start ahead of its push, before either is invalid: the receiver's clock
+	// and the process's clock are not one clock.
+	ClockSkew time.Duration
 	// The step of every sustained window.
 	SustainStep time.Duration
 	// The largest query, the largest answer and the most answer rows one read
@@ -48,6 +56,8 @@ type ConnectMoveSettings struct {
 	MaxResponseBytes int
 	MaxRows          int
 	MaxSlots         int
+	// The longest label value an answer may carry.
+	MaxLabelBytes int
 	// The most hosts or drains one alert lists by name.
 	MaxListed int
 
@@ -106,13 +116,17 @@ type ConnectMoveSettings struct {
 // The defaults of SIGNALS.md §24.
 func DefaultConnectMoveSettings() *ConnectMoveSettings {
 	return &ConnectMoveSettings{
+		Cadence:          5 * time.Minute,
 		EvaluationLag:    2 * time.Minute,
+		QueryTimeout:     15 * time.Second,
 		ProcessFreshness: 90 * time.Second,
+		ClockSkew:        30 * time.Second,
 		SustainStep:      5 * time.Minute,
 		MaxQueryBytes:    64 * 1024,
 		MaxResponseBytes: 4 * 1024 * 1024,
 		MaxRows:          16384,
 		MaxSlots:         64,
+		MaxLabelBytes:    256,
 		MaxListed:        8,
 
 		DefaultMode:       "off",
@@ -153,7 +167,7 @@ func (self *ConnectMoveSettings) valid() bool {
 		return false
 	}
 	for _, window := range []time.Duration{
-		self.EvaluationLag, self.ProcessFreshness, self.SustainStep, self.TickWindow,
+		self.Cadence, self.EvaluationLag, self.QueryTimeout, self.ProcessFreshness, self.ClockSkew, self.SustainStep, self.TickWindow,
 		self.ImbalanceWindow, self.SuccessWindow, self.SuccessSustain, self.TargetFailureSustain,
 		self.BreakerHold, self.BreakerStep, self.RefusalWindow, self.DrainWindow,
 	} {
@@ -174,7 +188,7 @@ func (self *ConnectMoveSettings) valid() bool {
 			return false
 		}
 	}
-	for _, count := range []int{self.MaxQueryBytes, self.MaxResponseBytes, self.MaxRows, self.MaxSlots, self.MaxListed, self.DivergenceSustain, self.MinActingTicks, self.SendErrorMinProcesses, self.MinSends, self.BreakerMinOpenAddresses, self.MinExcessCloses} {
+	for _, count := range []int{self.MaxQueryBytes, self.MaxResponseBytes, self.MaxRows, self.MaxSlots, self.MaxLabelBytes, self.MaxListed, self.DivergenceSustain, self.MinActingTicks, self.SendErrorMinProcesses, self.MinSends, self.BreakerMinOpenAddresses, self.MinExcessCloses} {
 		if count <= 0 {
 			return false
 		}
@@ -342,16 +356,18 @@ func readConnectMoveFrame(
 	if settings.MaxQueryBytes < len(query) {
 		return nil, "query_bound", nil
 	}
-	command := "curl -fsS --max-time 15 --max-filesize " + strconv.Itoa(settings.MaxResponseBytes) +
+	command := "curl -fsS --max-time " + strconv.FormatInt(int64(settings.QueryTimeout/time.Second), 10) + " --max-filesize " + strconv.Itoa(settings.MaxResponseBytes) +
 		" --data-urlencode " + shellSingleQuote("query="+query) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(at.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
 	output, err := env.runner.shell(ctx, scope.gateway, command)
-	if contextErr := ctx.Err(); contextErr != nil {
+	select {
+	case <-ctx.Done():
 		if err != nil {
-			return nil, "", &signalContextError{contextErr: contextErr, sourceErr: err}
+			return nil, "", &signalContextError{contextErr: ctx.Err(), sourceErr: err}
 		}
-		return nil, "", contextErr
+		return nil, "", ctx.Err()
+	default:
 	}
 	if err != nil {
 		return nil, "bounded_source_unavailable", nil
@@ -419,7 +435,7 @@ func parseConnectMoveFrame(raw string, at time.Time, settings *ConnectMoveSettin
 		values := make([]string, len(labelNames))
 		for i, name := range labelNames {
 			value, present := series.Metric[name]
-			if !present || value == "" || 256 < len(value) || strings.ContainsAny(value, "\x00\r\n") {
+			if !present || value == "" || settings.MaxLabelBytes < len(value) || strings.ContainsAny(value, "\x00\r\n") {
 				return nil, "invalid_series_labels"
 			}
 			values[i] = value
@@ -493,7 +509,7 @@ func newConnectMoveCensus(frame *connectMoveFrame, environment string, scope *co
 		if invalid != "" {
 			return
 		}
-		if values[0] != environment || values[1] != "connect" || values[2] != "connect" || !desiredSlots[connectMoveSlot(values[3], values[4])] || 128 < len(values[5]) {
+		if values[0] != environment || values[1] != "connect" || values[2] != "connect" || !desiredSlots[connectMoveSlot(values[3], values[4])] {
 			invalid = "invalid_process_identity"
 			return
 		}
@@ -512,7 +528,7 @@ func newConnectMoveCensus(frame *connectMoveFrame, environment string, scope *co
 	if len(frame.tagSeries["start_time"]) != len(frame.tagSeries["start"]) {
 		return nil, "process_timestamp_companion_missing"
 	}
-	at := float64(frame.at.Unix())
+	at, skew := float64(frame.at.Unix()), settings.ClockSkew.Seconds()
 	for _, hostName := range scope.hosts {
 		for _, block := range scope.blocks {
 			slot := connectMoveSlot(hostName, block)
@@ -539,9 +555,9 @@ func newConnectMoveCensus(frame *connectMoveFrame, environment string, scope *co
 			switch {
 			case ambiguous:
 				census.reasonCounts["ambiguous"]++
-			case current.start <= 0 || current.pushedAt+30 < current.start:
+			case current.start <= 0 || current.pushedAt+skew < current.start:
 				census.reasonCounts["invalid_start"]++
-			case settings.ProcessFreshness.Seconds() < age || age < -30:
+			case settings.ProcessFreshness.Seconds() < age || age < -skew:
 				census.reasonCounts["stale"]++
 			default:
 				census.slotProcesses[slot] = current
