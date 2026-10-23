@@ -19,10 +19,11 @@ type controlFrameMetrics struct {
 
 var controlFrameMessages = [...]string{
 	"create_contract", "close_contract", "provide", "encrypted_key",
-	"client_key", "control_ping", "provide_ping", "other",
+	"client_key", "control_ping", "provide_ping", "resident_move_result",
+	"other",
 }
 
-// Exactly 64 completion cells and 16 duration/inflight children. Source is
+// Exactly 72 completion cells and 18 duration/inflight children. Source is
 // stamped by the HTTP entry point, never inferred from client-supplied data.
 func newControlFrameMetrics(registerer prometheus.Registerer) *controlFrameMetrics {
 	metrics := &controlFrameMetrics{
