@@ -38,9 +38,9 @@ func seedAdmissionCacheHistory(t testing.TB, ctx context.Context, count, credit 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=$2,balance_byte_count=$2 WHERE balance_id=$1`, f.balanceId, count+credit))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,transfer_byte_count)
-   SELECT md5($5::uuid::text||'-cache-contract-'||n)::uuid,$1,$2,$3,$4,$1,1 FROM generate_series(1,$6)n`, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.balanceId, count))
+   SELECT overlay(md5($5::uuid::text||'-cache-contract-'||n)::uuid::text placing left($5::uuid::text,13) from 1 for 13)::uuid,$1,$2,$3,$4,$1,1 FROM generate_series(1,$6)n`, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.balanceId, count))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count)
-   SELECT md5($1::uuid::text||'-cache-contract-'||n)::uuid,$1,1 FROM generate_series(1,$2)n`, f.balanceId, count))
+   SELECT overlay(md5($1::uuid::text||'-cache-contract-'||n)::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid,$1,1 FROM generate_series(1,$2)n`, f.balanceId, count))
 	})
 	return f
 }
@@ -217,7 +217,7 @@ func TestNetEscrowAdmissionCacheLegacyMutationAndRollback(t *testing.T) {
 		// Simulates an older writer: it knows no cache, but mandatory triggers
 		// advance the durable revision atomically with the escrow amount.
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=5 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=5 WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, f.balanceId))
 		})
 		var reads atomic.Int64
 		if _, err := cacheTestCreate(ctx, f, &reads, false); err != nil {
@@ -284,9 +284,9 @@ func TestNetEscrowAdmissionCacheOutcomeDeleteAndIdentityReuse(t *testing.T) {
 			sql  string
 			want ByteCount
 		}{
-			{`UPDATE transfer_escrow SET settled=true WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, 2},
-			{`UPDATE transfer_contract SET outcome='canceled',close_time=now() WHERE contract_id=md5($1::uuid::text||'-cache-contract-2')::uuid`, 1},
-			{`DELETE FROM transfer_escrow WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-3')::uuid`, 0},
+			{`UPDATE transfer_escrow SET settled=true WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, 2},
+			{`UPDATE transfer_contract SET outcome='canceled',close_time=now() WHERE contract_id=overlay(md5($1::uuid::text||'-cache-contract-2')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, 1},
+			{`DELETE FROM transfer_escrow WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-3')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, 0},
 		} {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, c.sql, f.balanceId)) })
 			if got, n := lockedAdmissionCacheTestRead(ctx, f); got.reserved != c.want || n != 1 {
@@ -352,7 +352,7 @@ func admissionCacheThirdMutationHook(ctx context.Context, tx server.PgTx, balanc
 			if !admissionEscrowInsertBatch(queued) {
 				return
 			}
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, balanceId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4 WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, balanceId))
 		},
 	}
 }
@@ -424,7 +424,7 @@ func TestNetEscrowAdmissionCacheCustomGenericPointPlans(t *testing.T) {
 				var visit func(map[string]any)
 				visit = func(n map[string]any) {
 					if relation, ok := n["Relation Name"].(string); ok {
-						if relation == "transfer_escrow" || relation == "transfer_contract" {
+						if planContractTable(relation) == "transfer_escrow" || planContractTable(relation) == "transfer_contract" {
 							t.Fatal("cache hit planned history access")
 						}
 						cond, _ := n["Index Cond"].(string)

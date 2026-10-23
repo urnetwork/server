@@ -177,7 +177,7 @@ func TestNetEscrowPostCacheInvalidationAndTerminalSource(t *testing.T) {
 				case "missing":
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, f.balanceId))
 				case "legacy_amount":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=7 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=7 WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, f.balanceId))
 				case "settled":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET settled=true WHERE contract_id=$1`, first.ContractId))
 				case "terminal", "current_after_terminal":
@@ -227,7 +227,7 @@ func TestNetEscrowPostCacheCustomGenericPointPlans(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_balance_net_escrow_revision(balance_id,revision)
 				SELECT md5('unrelated-post-cache-'||n)::uuid,1 FROM generate_series(1,100000)n`))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,transfer_byte_count)
-				SELECT md5('unrelated-post-contract-'||n)::uuid,$1,$2,$3,$4,$1,1 FROM generate_series(1,100000)n`, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId))
+				SELECT overlay(md5('unrelated-post-contract-'||n)::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid,$1,$2,$3,$4,$1,1 FROM generate_series(1,100000)n`, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId))
 		})
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `PREPARE creation_cache_point AS `+netEscrowCreatedSnapshotSQL))
@@ -242,11 +242,11 @@ func TestNetEscrowPostCacheCustomGenericPointPlans(t *testing.T) {
 				var visit func(map[string]any)
 				visit = func(n map[string]any) {
 					if relation, ok := n["Relation Name"].(string); ok {
-						if relation == "transfer_escrow" {
+						if planContractTable(relation) == "transfer_escrow" {
 							t.Fatal("creation cache hit planned escrow history access")
 						}
 						key := "balance_id ="
-						if relation == "transfer_contract" {
+						if planContractTable(relation) == "transfer_contract" {
 							key = "contract_id ="
 						}
 						condition, _ := n["Index Cond"].(string)

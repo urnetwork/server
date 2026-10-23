@@ -227,7 +227,7 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 										cursorRange = true
 									}
 								}
-								if node.Relation == "transfer_contract" {
+								if planContractTable(node.Relation) == "transfer_contract" {
 									index := "transfer_contract_pkey"
 									if keys[0] == "stream_id" {
 										index = "transfer_contract_stream_id"

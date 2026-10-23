@@ -329,7 +329,7 @@ func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
 					var rows, scans int
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if node["Relation Name"] == "transfer_contract" {
+						if planNodeContractTable(node) == "transfer_contract" {
 							condition, _ := node["Index Cond"].(string)
 							filter, _ := node["Filter"].(string)
 							index, _ := node["Index Name"].(string)

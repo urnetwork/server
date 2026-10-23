@@ -557,6 +557,11 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
    validates the outside foreign key.
 5. Watch contract creation, the runway probe and the task's `[cp]` log lines.
    Until the cutover week starts, `--rollback` undoes the swap.
+   - Rollback restores `contract_close_report_contract_id_fkey` NOT VALID.
+     The monitor's migration-coherence check pages until it is validated off
+     peak: `ALTER TABLE contract_close_report VALIDATE CONSTRAINT contract_close_report_contract_id_fkey`.
+   - Once partitioned, the monitor requires that key to stay absent: a key
+     restored by hand, or by `db audit --fix`, would block each week's drop.
 
 ## Related: MinIO and client-key history
 

@@ -368,7 +368,7 @@ func TestClosedCompanionOriginReadIsBoundedByContractId(t *testing.T) {
 					indexNames := []string{}
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if node["Relation Name"] == "transfer_contract" {
+						if planNodeContractTable(node) == "transfer_contract" {
 							loops, _ := node["Actual Loops"].(float64)
 							rows, _ := node["Actual Rows"].(float64)
 							removed, _ := node["Rows Removed by Filter"].(float64)

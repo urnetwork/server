@@ -35,7 +35,8 @@ func TestDeadlineCloseWritesOneContractRowVersion(t *testing.T) {
 			var posts []server.PostFunction
 			server.Tx(ctx, func(tx server.PgTx) {
 				contractUpdateCount := func() (updateCount int64) {
-					server.Raise(tx.QueryRow(ctx, `SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relid='transfer_contract'::regclass`).Scan(&updateCount))
+					server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(sum(n_tup_upd), 0) FROM pg_stat_xact_user_tables
+						WHERE relid = 'transfer_contract'::regclass OR relid IN (SELECT relid FROM pg_partition_tree('transfer_contract'))`).Scan(&updateCount))
 					return
 				}
 				before := contractUpdateCount()

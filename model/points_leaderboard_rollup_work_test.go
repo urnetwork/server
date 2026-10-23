@@ -32,7 +32,7 @@ func (self pointsRollupWorkPlan) producer(name string) (pointsRollupWorkPlan, fl
 		var visit func(pointsRollupWorkPlan) float64
 		visit = func(node pointsRollupWorkPlan) float64 {
 			var rows float64
-			if node.Relation == "transfer_escrow_sweep" {
+			if planContractTable(node.Relation) == "transfer_escrow_sweep" {
 				rows = (node.Rows + node.Filtered + node.Rechecked) * node.Loops
 			}
 			for _, child := range node.Plans {
