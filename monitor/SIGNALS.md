@@ -42786,7 +42786,12 @@ mover is off, in dry run or not sending, is a standing state of its own:
 Each is reported every run as a configured-off WARN: never posted to Slack,
 never healthy, and, as an unknown state, it keeps its signal's other incidents
 from clearing while it lasts. Healthy is reported only for a rule judged on
-complete evidence.
+complete evidence. The PromQL of all three probes is qualified against the
+pinned Mimir 3.1.1 engine by `TestConnectMovePromqlEngine`
+(`MONITOR_PROMQL_ENGINE_SOURCE`, fixture
+`testdata/connect_move_promql_engine_test.go.txt`): raw synthetic series, the
+probes' exact queries, and the native vectors through the probes' public
+adapters.
 
 The Redis state, read-only, from the redis host of §10.4:
 
