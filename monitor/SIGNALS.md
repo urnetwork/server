@@ -41221,8 +41221,22 @@ to 15 minutes apart, with the same boot and desired artifact. The exact
 neighbor must be FAILED or INCOMPLETE in both, have nonzero resolution probes,
 and have both use and update ages at most 30 seconds. Historical probes alone
 are not active-path proof. This paired predicate supplies sustain; the emitted
-finding has sustain 1. Missing/failed captures invalidate the pair. Evidence
-contains aggregate expected/reachable/unknown/active-failed counts only.
+finding has sustain 1. Missing/failed captures accepted while the parent is
+live invalidate the pair. Evidence contains aggregate
+expected/reachable/unknown/active-failed counts only.
+
+The owning pair-cache lock checks the previously captured parent cancellation
+channel before reading, deleting or replacing that router's accepted sample.
+A parent already ended at this checkpoint leaves the entire cache unchanged;
+its frame cannot count toward a neighbor failure pair. The channel is captured
+outside the lock; no context callback runs under that lock. Live-parent capture
+or parse failures still reset only that router's pair and remain unknown.
+Earlier live commits remain accepted, and cancellation after this checkpoint
+is not retroactive: this is no whole-run atomic rollback guarantee. Rejected
+or absent frames do not establish health or recovery. Synthetic public-Run
+controls force a live shared-check read followed by actual parent cancellation
+before the owning callback; this does not validate hardware or generic lock
+scheduling.
 
 False positives remain possible from narrowly sampled resolution churn or
 firmware age semantics; this does not identify ISP, cable, firewall or whole
@@ -41266,6 +41280,20 @@ zero delta. WARN `router-conntrack-drops` (sustain 2) preserves positive
 duplicate insertion/races and is an unknown-cause qualifier, not packet-loss
 proof. Concrete capacity or pressure findings survive an unknown counter
 pair; private counters are reduced to fixed scalar summaries only.
+
+Before reading, deleting or replacing a router's pair, the owning cache lock
+checks a parent cancellation channel captured outside the lock. A parent
+already ended at this checkpoint leaves the entire cache unchanged, so its
+frame cannot consume an accepted counter delta or evict a prior pair. No
+context callback runs under the lock. Under a live parent, capture/required
+scalar parse failures and unavailable counters retain their existing reset
+and unknown policy; independent capacity and pressure findings survive valid
+partial counter observations. Earlier live commits are preserved, and a later
+cancellation does not roll back this acceptance checkpoint or the whole run.
+Unknown or rejected frames never establish zero drops or recovery. Synthetic
+public-Run controls force cancellation after a live shared-check read and
+compare the next delta with an independent accepted-only pair; they do not
+prove target kernel semantics or general lock scheduling.
 
 An optional unprivileged kernel-ring read reduces only exact timestamped
 `nf_conntrack: table full, dropping packet` messages to a retained count and
