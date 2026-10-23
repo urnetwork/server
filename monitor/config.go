@@ -1468,41 +1468,38 @@ func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6Int
 	return byHost, nil
 }
 
+// The public edge interfaces by host, under the inventory rules connect's
+// server-directed moves read too (server.ActiveEdgeLbInterfaces).
 func activePublicLBFromServices(services servicesYaml) (map[string][]PublicLBInterfaceSettings, error) {
 	if len(services.Versions) == 0 {
 		return nil, fmt.Errorf("services.yml: no active version")
 	}
-	domain := strings.TrimSpace(services.Domain)
-	if domain == "" {
-		return nil, fmt.Errorf("services.yml: domain is required for public LB inventory")
+	configured := map[string]map[string]server.ServicesLbInterfaceConfig{}
+	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
+		configuredInterfaces := map[string]server.ServicesLbInterfaceConfig{}
+		for interfaceName, interfaceConfig := range interfaces {
+			configuredInterfaces[interfaceName] = server.ServicesLbInterfaceConfig{
+				Ipv4:        interfaceConfig.IPv4,
+				Ipv6:        interfaceConfig.IPv6,
+				Transparent: interfaceConfig.Transparent,
+			}
+		}
+		configured[configuredHost] = configuredInterfaces
+	}
+	edgeInterfaces, err := server.ActiveEdgeLbInterfaces(services.Domain, configured)
+	if err != nil {
+		return nil, err
 	}
 
 	byHost := map[string][]PublicLBInterfaceSettings{}
-	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
-		host := strings.TrimSuffix(configuredHost, "."+domain)
-		if !strings.Contains(host, "-edge-") {
-			continue
-		}
-		for interfaceName, configured := range interfaces {
-			if configured.Transparent {
-				continue
-			}
-			ipv4 := strings.TrimSpace(configured.IPv4)
-			ipv6 := strings.TrimSpace(configured.IPv6)
-			if ipv4 == "" && ipv6 == "" {
-				continue
-			}
+	for host, interfaces := range edgeInterfaces {
+		for _, edgeInterface := range interfaces {
 			byHost[host] = append(byHost[host], PublicLBInterfaceSettings{
-				Interface:   interfaceName,
-				IPv4Address: ipv4,
-				IPv6Address: ipv6,
+				Interface:   edgeInterface.Interface,
+				IPv4Address: edgeInterface.Ipv4,
+				IPv6Address: edgeInterface.Ipv6,
 			})
 		}
-	}
-	for host := range byHost {
-		sort.Slice(byHost[host], func(i, j int) bool {
-			return byHost[host][i].Interface < byHost[host][j].Interface
-		})
 	}
 	return byHost, nil
 }

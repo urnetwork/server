@@ -180,6 +180,8 @@ func controlFrameMessageLabel(message any) string {
 		return "control_ping"
 	case *protocol.ProvidePing:
 		return "provide_ping"
+	case *protocol.ResidentMoveResult:
+		return "resident_move_result"
 	default:
 		return "other"
 	}
@@ -530,6 +532,11 @@ func ConnectControlFrames(
 				// sender waits for, and receipt already refreshes resident
 				// activity. Older clients ping the control destination
 				// constantly, so treating these as unhandled floods the log.
+
+			case *protocol.ResidentMoveResult:
+				// validated against the client's move intent in Redis, since
+				// any control path can carry it (resident_move_result.go)
+				err = ReportResidentMoveResult(ctx, clientId, v)
 
 			default:
 				err = fmt.Errorf("Cannot handle oob control message: %T", message)
