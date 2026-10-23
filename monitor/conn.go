@@ -205,6 +205,8 @@ type monitorConfig struct {
 	pgQuerySampleUntil      time.Time
 	pgQuerySampleContinuous bool
 	publicUdp               PublicUdpSettings
+	// the operator's observer overlay route contract (§1.7)
+	observerOverlay ObserverOverlaySettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

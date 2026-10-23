@@ -429,9 +429,13 @@ type SignalSettings struct {
 
 	Hosts []HostSettings
 	// Routers are explicitly enrolled read-only targets, never Linux hosts.
-	Routers       []RouterSettings
-	PublicUdp     PublicUdpSettings
-	disabledHosts []HostSettings
+	Routers   []RouterSettings
+	PublicUdp PublicUdpSettings
+	// ObserverOverlay is the operator's contract for the monitor host's own
+	// route to inventory overlay addresses (SIGNALS.md §1.7). Empty leaves
+	// overlay route attribution explicitly unknown.
+	ObserverOverlay ObserverOverlaySettings
+	disabledHosts   []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
@@ -516,6 +520,7 @@ func (s SignalSettings) withDefaults() SignalSettings {
 	s.SubnetDeployment = cloneSubnetReplayPin(s.SubnetDeployment)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
+	s.ObserverOverlay = cloneObserverOverlaySettings(s.ObserverOverlay)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -766,6 +771,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgQuerySampleUntil:        settings.PGQuerySampleUntil,
 		pgQuerySampleContinuous:   settings.PGQuerySampleContinuous,
 		publicUdp:                 clonePublicUdpSettings(settings.PublicUdp),
+		observerOverlay:           cloneObserverOverlaySettings(settings.ObserverOverlay),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,
@@ -782,6 +788,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		startup.SubnetDeployment = cloneSubnetReplayPin(settings.SubnetDeployment)
 		startup.Routers = cloneRouterSettings(settings.Routers)
 		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)
+		startup.ObserverOverlay = cloneObserverOverlaySettings(settings.ObserverOverlay)
 		cfg.routerGenerationCheck = func(ctx context.Context) (bool, error) {
 			return startup.SettingsGenerationCheck(ctx, startup)
 		}

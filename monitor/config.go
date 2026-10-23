@@ -34,7 +34,9 @@ type monitorYaml struct {
 	AddressMode string            `yaml:"address_mode"`
 	Routers     []RouterSettings  `yaml:"routers"`
 	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
-	Hosts       []struct {
+	// observer_overlay: the operator's observer route contract (SIGNALS.md §1.7)
+	ObserverOverlay ObserverOverlaySettings `yaml:"observer_overlay"`
+	Hosts           []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -293,6 +295,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	settings := SignalSettings{
 		Routers:                   cloneRouterSettings(y.Routers),
 		PublicUdp:                 clonePublicUdpSettings(y.PublicUdp),
+		ObserverOverlay:           cloneObserverOverlaySettings(y.ObserverOverlay),
 		Environment:               env,
 		PublicDomain:              strings.TrimSpace(services.Domain),
 		WebsiteDomain:             activeWebsiteDomainFromServices(services),
