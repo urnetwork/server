@@ -2553,6 +2553,8 @@ func createCompanionTransferEscrow(
 // - at least `contractTransferByteCount` available
 // - not closed by any party
 // - with transfer escrow
+// - unexpired, so inside the contract id bound (unexpiredContractIdAge), which
+// each joined table repeats
 func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	ctx context.Context,
 	sourceId server.Id,
@@ -2573,16 +2575,25 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 
                 FROM transfer_contract
 
+                -- the bound is part of the join: a close row of a contract
+                -- inside the bound is inside it too, so the anti-join is
+                -- unchanged, and PostgreSQL does not carry an inequality
+                -- across the join equality
                 LEFT OUTER JOIN contract_close ON
-                    contract_close.contract_id = transfer_contract.contract_id
+                    contract_close.contract_id = transfer_contract.contract_id AND
+                    contract_close.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 INNER JOIN transfer_escrow ON
-                    transfer_escrow.contract_id = transfer_contract.contract_id
+                    transfer_escrow.contract_id = transfer_contract.contract_id AND
+                    transfer_escrow.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 WHERE
 					-- This is equivalent to the generated-open expression but
 					-- remains opaque to false-zero legacy partial indexes.
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
+                    -- ids lead with their creation millisecond: an unexpired
+                    -- contract's id is at least this bound
+                    transfer_contract.contract_id >= `+unexpiredContractIdFloorSql+` AND
                     COALESCE(transfer_contract.expiration_time, transfer_contract.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND

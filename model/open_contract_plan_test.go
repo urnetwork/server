@@ -63,6 +63,40 @@ func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 	return "", false
 }
 
+// The one statement a model function in subscription_model.go queries, as it
+// runs (see modelSqlExpressionValue).
+func modelFunctionStatement(t testing.TB, functionName string) string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != functionName || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			if selector, ok := call.Fun.(*ast.SelectorExpr); !ok || selector.Sel.Name != "Query" {
+				return true
+			}
+			if sql, ok := modelSqlExpressionValue(call.Args[1]); ok {
+				statements = append(statements, sql)
+			}
+			return true
+		})
+	}
+	if len(statements) != 1 {
+		t.Fatalf("%s queries %d statements, want one", functionName, len(statements))
+	}
+	return statements[0]
+}
+
 // Resolve the real query owner only through the public wrapper's returned
 // call. A dead helper or an unused callback cannot satisfy the SQL guard.
 func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
@@ -299,20 +333,9 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			assertPlanUsesAnyIndex(t, existencePlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, existencePlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
-			escrowPlan := explainOpenContractPlan(t, ctx, conn, `
-				SELECT transfer_contract.contract_id,
-				       transfer_contract.transfer_byte_count,
-				       transfer_contract.priority
-				FROM transfer_contract
-				LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
-				INNER JOIN transfer_escrow ON transfer_escrow.contract_id = transfer_contract.contract_id
-				WHERE (CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END)
-				  AND transfer_contract.source_id = $1
-				  AND transfer_contract.destination_id = $2
-				  AND transfer_contract.transfer_byte_count <= $3
-				  AND contract_close.contract_id IS NULL
-				ORDER BY transfer_contract.priority DESC, transfer_contract.create_time ASC
-			`, sourceId, destinationId, ByteCount(1024))
+			// the executed open escrow read, with its contract id bounds
+			escrowPlan := explainOpenContractPlan(t, ctx, conn,
+				modelFunctionStatement(t, "GetOpenTransferEscrowsOrderedByPriorityCreateTime"), sourceId, destinationId, ByteCount(1024))
 			assertPlanUsesAnyIndex(t, escrowPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, escrowPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 

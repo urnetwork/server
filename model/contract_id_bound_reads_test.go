@@ -219,3 +219,47 @@ func TestZeroEscrowCompanionOriginSkipsIdsBeforeUnexpiredBound(t *testing.T) {
 		}
 	})
 }
+
+// Copies a contract's escrow rows to its copy, so the copy is funded as the
+// contract is.
+func insertContractIdBoundEscrowCopy(t testing.TB, ctx context.Context, contractId server.Id, copyId server.Id) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO transfer_escrow (contract_id, balance_id, balance_byte_count, redis_reserved)
+			SELECT $2, balance_id, balance_byte_count, redis_reserved
+			FROM transfer_escrow
+			WHERE contract_id = $1
+		`, contractId, copyId))
+		if tag.RowsAffected() == 0 {
+			t.Fatalf("contract %s has no escrow to copy", contractId)
+		}
+	})
+}
+
+// The reusable escrows of a pair are its open escrowed contracts that no party
+// has closed. A funded copy minted before the bound is skipped, and a current
+// contract that one party closed is still excluded through the bounded join.
+func TestOpenTransferEscrowsSkipIdsBeforeUnexpiredBound(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		current := createRedisAdmissionTest(ctx, f, 100)
+		partial := createRedisAdmissionTest(ctx, f, 100)
+		server.Raise(CloseContract(ctx, partial.ContractId, f.sourceId, 0, false))
+		copyId := contractIdBeforeUnexpiredBound()
+		insertContractIdBoundCopy(t, ctx, current.ContractId, copyId, server.NowUtc().Add(-3*time.Minute), 100, nil)
+		insertContractIdBoundEscrowCopy(t, ctx, current.ContractId, copyId)
+
+		escrows := GetOpenTransferEscrowsOrderedByPriorityCreateTime(ctx, f.sourceId, f.destinationId, 100)
+		contractIds := []server.Id{}
+		for _, escrow := range escrows {
+			contractIds = append(contractIds, escrow.ContractId)
+		}
+		if len(contractIds) != 1 || contractIds[0] != current.ContractId {
+			t.Fatalf("open escrows %v, want only the current contract %s", contractIds, current.ContractId)
+		}
+	})
+}
