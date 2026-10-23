@@ -43,6 +43,9 @@ type OnlineSqlMigration struct {
 	sql         string
 	auditSql    string
 	completion  *onlineIndexMigrationCompletion
+	// an index on a contract table, built per partition once the table is
+	// partitioned (newContractIndexMigration)
+	contractIndex *contractIndexMigration
 }
 
 func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
