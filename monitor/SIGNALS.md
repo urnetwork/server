@@ -40256,11 +40256,20 @@ returns a separate `cannot-observe` WARN at the fixed target
 its unobservable marker prevents healthy/recovery inference for the signal,
 even while below Sustain. It is returned without a fatal signal error because
 the public adapter discards findings on error. No operator health or failed
-layer's product conclusion is emitted. A fresh snapshot with no established
-positive retains the existing fatal observation-error contract. An ended
-parent, failed original snapshot read, or malformed original snapshot cannot
-publish a stale positive or healthy result; known snapshot absence retains
-its existing unavailable warning. Source-local cancellation/deadline errors
+layer's product conclusion is emitted. With a true physical-schema preflight,
+an internal `points-epoch-availability-drift` PAGE is also independent of the
+later operator-source read: false availability with affirmative payload, or
+true availability without a 1-based block number, remains PAGE alongside
+`cannot-observe` when that source fails or is malformed. Its evidence renders
+only validated snapshot counts, never invented calendar or rollup zeros.
+Calendar-ahead comparisons still require a valid operator source. An absent,
+malformed or unreadable preflight does not newly authorize availability PAGE;
+this does not infer a version policy for old compatibility fields. A fresh
+snapshot with no established positive retains the existing fatal
+observation-error contract. An ended parent, failed original snapshot read, or
+malformed original snapshot cannot publish a positive or healthy result;
+known snapshot absence retains its existing unavailable warning. Source-local
+cancellation/deadline errors
 with a live parent are dependency failures, not proof the parent ended.
 
 When the preflight passes, a third single-output-row, command-deadline-bounded
@@ -40355,6 +40364,15 @@ Main attribution nor readiness; missing runtime evidence remains unknown.
   the completed operator calendar. Verify source-version and application-clock
   boundaries before attributing this to stored-data corruption.
 
+False-positive qualifier: these snapshot-only contradictions are admitted only
+after the existing physical-schema prerequisite passes; schema presence does
+not attest deployed writer ancestry or prove a current Main incident. Ordinary
+pending rollup, measured zero, an open period and an older valid snapshot with
+new pending work retain their existing interpretation. False-negative
+qualifier: freshness does not make an internally contradictory snapshot valid;
+a later read/parse failure must not erase its PAGE. Without calendar evidence,
+no block-ahead or missing-rollup conclusion is inferred.
+
 The source-version boundary matters during rollout. The owning rollup
 migrations and operator-source rebuild must be verified before claiming that
 the operator readiness boundary is deployed. Migration 686 supplies the
@@ -40397,6 +40415,10 @@ controls in `signal_points_partial_test.go` cover stale/future snapshots crossed
 with later read/parse failures, exact dependency stopping points, public
 one-shot/execution-loop held results, actual parent cancellation, private-cell
 and source-error rendering, and no incident clear until complete recovery.
+The public-entry controls in `signal_points_contradiction_partial_test.go`
+pin fresh and stale internal availability PAGE with a later unavailable source,
+schema uncertainty, source-dependent calendar comparisons, complete-source
+controls, actual owner cancellation and private-source rendering.
 These controls do not establish a production incidence or repair the external
 points product's writer, rollout, accounting or task boundaries.
 
