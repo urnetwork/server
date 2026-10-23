@@ -151,7 +151,7 @@ func (self contractPartitionRetentionProbe) check(ctx context.Context, env *prob
 				len(blocked), partitions, oldest.label, oldest.upper.Format(time.DateOnly), contractPartitionDays(pastLine), strings.Join(byTable, " "), weekList),
 			evidence: "One primary-guarded read-only catalog query of the attached partitions of " + contractPartitionTableList() + " and their bounds; the upper bound of the legacy partition is the cutover week.",
 			context:  "The task reports each blocked week's reason (an unresolved contract, an unsettled escrow, a sweep of a pending payment, a legacy settlement intent) in its [cp] log lines and run report. Retention keeps growing storage while a week is blocked (§2.4f).",
-			action:   "Read the task's reason for the oldest blocked week and resolve that blocker at its owner: close or settle the contracts, complete or cancel the pending payment, or finish the legacy settlement. Check that the task runs at all (task canaries). Never drop or detach a contract partition by hand: the drop bypasses the usage archive capture and the preconditions.",
+			action:   "Read the task's reason for the oldest blocked week and resolve that blocker at its owner: close or settle the contracts, reconcile external payment attempts, finish payment retention stamping, or finish the legacy settlement. Cancellation alone does not release an external payment attempt's hold. Check that the task runs at all (task canaries). Never drop or detach a contract partition by hand: the drop bypasses the usage archive capture and the preconditions.",
 			verify:   "The next maintenance runs drop the week and a complete observation shows no partition past the horizon plus grace.",
 			playbook: "SIGNALS.md §2.4i and §5.14",
 		},

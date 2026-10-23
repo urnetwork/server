@@ -40,6 +40,8 @@ type ContractPartitionMigrateOptions struct {
 	Rollback    bool
 	Abort       bool
 	Logf        func(string, ...any)
+	// nil uses the default rollback lock and retry budgets.
+	RollbackSettings *ContractPartitionRollbackSettings
 }
 
 // The foreign key that the cutover drops for good (owner decision
@@ -78,7 +80,7 @@ func MigrateContractsToPartitions(ctx context.Context, options ContractPartition
 	case options.Finalize:
 		return finalizeContractPartitionCutover(ctx, options.DryRun, logf)
 	case options.Rollback:
-		return rollbackContractPartitionCutover(ctx, options.DryRun, logf)
+		return rollbackContractPartitionCutover(ctx, options.DryRun, logf, options.RollbackSettings)
 	case options.Abort:
 		return abortContractPartitionCutover(ctx, options.DryRun, logf)
 	default:
@@ -115,14 +117,22 @@ func contractPartitionLockBusy(err error) bool {
 	return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
 }
 
-// A transaction older than this that holds a lock on a contract table would
-// keep an ACCESS EXCLUSIVE request queued, and every new statement on the
-// table queues behind that request.
-const contractLockMaxTransactionAge = 5 * time.Second
+// Admission policy for operations that take exclusive contract table locks.
+type ContractPartitionLockSettings struct {
+	// Maximum transaction age before deferring a lock request. The default
+	// avoids queuing application traffic behind long transactions. Must be positive.
+	MaxTransactionAge time.Duration
+}
+
+func DefaultContractPartitionLockSettings() *ContractPartitionLockSettings {
+	return &ContractPartitionLockSettings{
+		MaxTransactionAge: 5 * time.Second,
+	}
+}
 
 // The transactions that would stall an ACCESS EXCLUSIVE request on the contract
-// tables: older than contractLockMaxTransactionAge and holding a lock on one.
-func contractTablesBusy(ctx context.Context) (busy int, err error) {
+// tables: older than maxTransactionAge and holding a lock on one.
+func contractTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (busy int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%v", r)
@@ -144,7 +154,7 @@ func contractTablesBusy(ctx context.Context) (busy int, err error) {
 				AND activity.xact_start < now() - make_interval(secs => $2)
 			`,
 			relations,
-			contractLockMaxTransactionAge.Seconds(),
+			maxTransactionAge.Seconds(),
 		).Scan(&busy))
 	})
 	return
@@ -162,17 +172,29 @@ func contractPartitionExecQuietRetry(ctx context.Context, statements []string, a
 	return contractPartitionExecRetryWhen(ctx, true, statements, attempts, wait, logf)
 }
 
-func contractPartitionExecRetryWhen(ctx context.Context, quiet bool, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) (err error) {
+func contractPartitionExecRetryWhen(ctx context.Context, quiet bool, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) error {
+	var lockSettings *ContractPartitionLockSettings
+	if quiet {
+		lockSettings = DefaultContractPartitionLockSettings()
+	}
+	return contractPartitionRetryWhen(ctx, lockSettings, func() error {
+		return contractPartitionExec(ctx, statements)
+	}, attempts, wait, logf)
+}
+
+// Repeats the entire operation so each attempt can read authoritative state
+// after taking its locks, rather than reusing a previously checked catalog.
+func contractPartitionRetryWhen(ctx context.Context, lockSettings *ContractPartitionLockSettings, run func() error, attempts int, wait time.Duration, logf func(string, ...any)) (err error) {
 	for attempt := 1; attempt <= attempts; attempt += 1 {
 		busy := 0
-		if quiet {
+		if lockSettings != nil {
 			var busyErr error
-			if busy, busyErr = contractTablesBusy(ctx); busyErr != nil {
+			if busy, busyErr = contractTablesBusy(ctx, lockSettings.MaxTransactionAge); busyErr != nil {
 				return busyErr
 			}
 		}
 		if 0 < busy {
-			logf("%d transaction(s) older than %s hold contract table locks (attempt %d/%d)", busy, contractLockMaxTransactionAge, attempt, attempts)
+			logf("%d transaction(s) older than %s hold contract table locks (attempt %d/%d)", busy, lockSettings.MaxTransactionAge, attempt, attempts)
 			err = fmt.Errorf("%d long transaction(s) hold contract table locks", busy)
 			select {
 			case <-ctx.Done():
@@ -181,7 +203,7 @@ func contractPartitionExecRetryWhen(ctx context.Context, quiet bool, statements 
 			}
 			continue
 		}
-		err = contractPartitionExec(ctx, statements)
+		err = run()
 		if err == nil || !contractPartitionLockBusy(err) {
 			return
 		}
@@ -196,15 +218,21 @@ func contractPartitionExecRetryWhen(ctx context.Context, quiet bool, statements 
 }
 
 func readContractShapes(ctx context.Context, name func(string) string) (shapes map[string]*contractTableShape) {
-	shapes = map[string]*contractTableShape{}
 	MaintenanceDb(ctx, func(conn PgConn) {
-		for _, table := range ContractPartitionTables {
-			if shape := readContractTableShape(ctx, conn, name(table)); shape != nil {
-				shapes[table] = shape
-			}
-		}
+		shapes = readContractShapesInConn(ctx, conn, name)
 	})
 	return
+}
+
+// Uses the caller's connection, including its transaction and table locks.
+func readContractShapesInConn(ctx context.Context, conn contractCatalogQuerier, name func(string) string) map[string]*contractTableShape {
+	shapes := map[string]*contractTableShape{}
+	for _, table := range ContractPartitionTables {
+		if shape := readContractTableShape(ctx, conn, name(table)); shape != nil {
+			shapes[table] = shape
+		}
+	}
+	return shapes
 }
 
 func contractTableName(table string) string {
@@ -224,46 +252,52 @@ var contractPartitionUpperPattern = regexp.MustCompile(`TO \('([0-9a-f-]{36})'\)
 
 func listContractPartitions(ctx context.Context, parent string) (partitions []contractPartition, err error) {
 	MaintenanceDb(ctx, func(conn PgConn) {
-		result, queryErr := conn.Query(
-			ctx,
-			`
+		partitions, err = listContractPartitionsInConn(ctx, conn, parent)
+	})
+	return
+}
+
+// Reads the current children through the connection that owns the parent lock.
+func listContractPartitionsInConn(ctx context.Context, conn contractCatalogQuerier, parent string) (partitions []contractPartition, err error) {
+	result, queryErr := conn.Query(
+		ctx,
+		`
 			SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
 			FROM pg_inherits i
 			JOIN pg_class c ON c.oid = i.inhrelid
 			WHERE i.inhparent = to_regclass($1)
 			ORDER BY c.relname
 			`,
-			"public."+parent,
-		)
-		WithPgResult(result, queryErr, func() {
-			for result.Next() {
-				var name string
-				var bound string
-				Raise(result.Scan(&name, &bound))
-				_, weekStart, legacy, ok := ParseContractPartitionName(name)
-				if !ok {
-					err = fmt.Errorf("unexpected partition %s of %s", name, parent)
+		"public."+parent,
+	)
+	WithPgResult(result, queryErr, func() {
+		for result.Next() {
+			var name string
+			var bound string
+			Raise(result.Scan(&name, &bound))
+			_, weekStart, legacy, ok := ParseContractPartitionName(name)
+			if !ok {
+				err = fmt.Errorf("unexpected partition %s of %s", name, parent)
+				return
+			}
+			partition := contractPartition{name: name, legacy: legacy, weekStart: weekStart}
+			if legacy {
+				groups := contractPartitionUpperPattern.FindStringSubmatch(bound)
+				if groups == nil {
+					err = fmt.Errorf("unexpected bound of %s: %s", name, bound)
 					return
 				}
-				partition := contractPartition{name: name, legacy: legacy, weekStart: weekStart}
-				if legacy {
-					groups := contractPartitionUpperPattern.FindStringSubmatch(bound)
-					if groups == nil {
-						err = fmt.Errorf("unexpected bound of %s: %s", name, bound)
-						return
-					}
-					upper, parseErr := ParseId(groups[1])
-					if parseErr != nil {
-						err = parseErr
-						return
-					}
-					partition.upper = ContractIdTime(upper)
-				} else {
-					partition.upper = weekStart.Add(contractPartitionWeek)
+				upper, parseErr := ParseId(groups[1])
+				if parseErr != nil {
+					err = parseErr
+					return
 				}
-				partitions = append(partitions, partition)
+				partition.upper = ContractIdTime(upper)
+			} else {
+				partition.upper = weekStart.Add(contractPartitionWeek)
 			}
-		})
+			partitions = append(partitions, partition)
+		}
 	})
 	return
 }
@@ -543,8 +577,7 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 		return err
 	}
 	logf("cutover week %s: contract ids below %s stay in the legacy partitions", cutoverWeek.Format(time.DateOnly), floor)
-	logf("finalize must complete before %s; the maintenance task abandons the cutover at %s",
-		cutoverWeek.Add(-contractCutoverFinalizeMargin).Format(time.RFC3339),
+	logf("finalize must complete before %s; unfinished preparation is then abandoned",
 		cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
 	)
 
@@ -666,7 +699,7 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 	if dryRun {
 		logf("dry run: nothing changed")
 	} else {
-		logf("prepared; run --finalize before %s", cutoverWeek.Add(-contractCutoverFinalizeMargin).Format(time.RFC3339))
+		logf("prepared; run --finalize before %s", cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339))
 	}
 	return nil
 }
@@ -967,12 +1000,11 @@ func analyzeAndValidateContractParents(ctx context.Context, external []contractF
 	return nil
 }
 
-func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf func(string, ...any)) error {
-	if !IsContractPartitioned(ctx) {
-		return errors.New("the contract tables are not partitioned")
-	}
-	parents := readContractShapes(ctx, contractTableName)
-	legacies := readContractShapes(ctx, ContractLegacyPartitionName)
+// Builds rollback from the caller's catalog snapshot. Execution requires the
+// caller to hold exclusive locks on every parent and its inherited children.
+func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalogQuerier) (statements []string, external []contractForeignKey, err error) {
+	parents := readContractShapesInConn(ctx, conn, contractTableName)
+	legacies := readContractShapesInConn(ctx, conn, ContractLegacyPartitionName)
 	var problems []string
 	weekly := map[string][]string{}
 	for _, table := range ContractPartitionTables {
@@ -984,7 +1016,7 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 			problems = append(problems, fmt.Sprintf("%s has no legacy partition", table))
 			continue
 		}
-		partitions, err := listContractPartitions(ctx, table)
+		partitions, err := listContractPartitionsInConn(ctx, conn, table)
 		if err != nil {
 			problems = append(problems, err.Error())
 			continue
@@ -994,8 +1026,11 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 				continue
 			}
 			var empty bool
-			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(conn.QueryRow(ctx, fmt.Sprintf(`SELECT NOT EXISTS (SELECT 1 FROM public.%s)`, quoteIdentifier(partition.name))).Scan(&empty))
+			rows, queryErr := conn.Query(ctx, fmt.Sprintf(`SELECT NOT EXISTS (SELECT 1 FROM public.%s)`, quoteIdentifier(partition.name)))
+			WithPgResult(rows, queryErr, func() {
+				if rows.Next() {
+					Raise(rows.Scan(&empty))
+				}
 			})
 			if !empty {
 				problems = append(problems, fmt.Sprintf("%s holds rows; the swap can no longer be undone", partition.name))
@@ -1004,22 +1039,17 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 		}
 	}
 	if 0 < len(problems) {
-		for _, problem := range problems {
-			logf("problem: %s", problem)
-		}
-		return fmt.Errorf("%d problem(s) block the rollback", len(problems))
+		return nil, nil, fmt.Errorf("rollback preconditions: %s", strings.Join(problems, "; "))
 	}
 
-	statements := []string{`SET LOCAL lock_timeout = '3s'`, `SET LOCAL statement_timeout = '30s'`}
-	external, _ := contractExternalForeignKeys(parents)
+	external, _ = contractExternalForeignKeys(parents)
 	locked := []string{}
-	for _, table := range ContractPartitionTables {
-		locked = append(locked, "public."+quoteIdentifier(table))
-	}
 	for _, foreignKey := range external {
 		locked = append(locked, "public."+quoteIdentifier(foreignKey.table))
 	}
-	statements = append(statements, fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(locked, ", ")))
+	if 0 < len(locked) {
+		statements = append(statements, fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(locked, ", ")))
+	}
 	for _, foreignKey := range external {
 		statements = append(statements, fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT %s", quoteIdentifier(foreignKey.table), quoteIdentifier(foreignKey.name)))
 	}
@@ -1071,26 +1101,7 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 			foreignKey.definition,
 		))
 	}
-	if dryRun {
-		logf("would roll back in one transaction:\n%s", strings.Join(statements, ";\n"))
-		logf("dry run: nothing changed")
-		return nil
-	}
-	if err := contractPartitionExecQuietRetry(ctx, statements, 60, 10*time.Second, logf); err != nil {
-		return fmt.Errorf("rollback: %w", err)
-	}
-	logf("rolled back: the contract tables are plain tables again")
-	for _, foreignKey := range external {
-		statement := fmt.Sprintf("ALTER TABLE public.%s VALIDATE CONSTRAINT %s", quoteIdentifier(foreignKey.table), quoteIdentifier(foreignKey.name))
-		if err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '15s'`, `SET LOCAL statement_timeout = 0`, statement}, 10, 10*time.Second, logf); err != nil {
-			return fmt.Errorf("validate %s: %w", foreignKey.name, err)
-		}
-	}
-	logf("%s is restored NOT VALID; validate it off-peak with: ALTER TABLE contract_close_report VALIDATE CONSTRAINT %s",
-		contractCloseReportForeignKeyName,
-		contractCloseReportForeignKeyName,
-	)
-	return nil
+	return statements, external, nil
 }
 
 // The prepared cutover week, if a cutover is prepared and not finalized.

@@ -6157,18 +6157,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 								account_payment.payment_id = transfer_escrow_sweep.payment_id
 							WHERE
 								transfer_escrow_sweep.contract_id = due.contract_id AND
-								(
-									account_payment.contract_retention_pending OR
-									(
-										NOT account_payment.completed AND
-										(
-											NOT account_payment.canceled OR
-											account_payment.circle_idempotency_key IS NOT NULL OR
-											account_payment.payment_record IS NOT NULL OR
-											account_payment.tx_hash IS NOT NULL
-										)
-									)
-								)
+								`+server.ContractPaymentRetentionHoldSql+`
 						) OR
 						(
 							due.create_time >= $2 AND
@@ -6309,18 +6298,7 @@ WITH batch AS (
 				account_payment.payment_id = transfer_escrow_sweep.payment_id
 			WHERE
 				transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
-				(
-					account_payment.contract_retention_pending OR
-					(
-						NOT account_payment.completed AND
-						(
-							NOT account_payment.canceled OR
-							account_payment.circle_idempotency_key IS NOT NULL OR
-							account_payment.payment_record IS NOT NULL OR
-							account_payment.tx_hash IS NOT NULL
-						)
-					)
-				)
+				` + server.ContractPaymentRetentionHoldSql + `
 		)
 	ORDER BY transfer_contract.create_time
 	LIMIT $2

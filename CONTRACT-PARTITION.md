@@ -6,7 +6,7 @@ exists, where the build differs from this plan, and the production runbook.
 
 ## Decisions (settled 2026-10-23)
 
-- **Retention horizon R: 13 weeks (90 days).** A weekly partition is dropped
+- **Retention horizon R: 13 weeks (91 days).** A weekly partition is dropped
   once its upper bound is older than R and it passes the preconditions in
   "Retention".
 - **Granularity: weekly**, Monday 00:00 UTC bounds, the same on every table.
@@ -370,7 +370,7 @@ dropping it. Do not export as one object per row; see the MinIO note below.
 Each table drops its partition for week W in one transaction, children
 first. A week whose precondition fails stays, and the task reports it.
 
-Space at a horizon of 13 weeks (90 days): about 2.7 TB at the long-run
+Space at a horizon of 13 weeks (91 days): about 2.7 TB at the long-run
 average of 30 GB a day. At the 2026-10-22 churn (about 155 GB a day for these
 tables) it would be about 14 TB. Identity churn therefore has to come down
 whatever the horizon.
@@ -487,7 +487,9 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
    it `NOT VALID`.
 7. **The swap can be undone.** Between the swap and the cutover week every new
    contract still lands in the legacy partition, so `--rollback` can undo the
-   swap until a weekly partition holds a row.
+   swap until a weekly partition holds a row. Rollback takes exclusive locks
+   on all six parents and their children before reading the current inventory
+   and checking emptiness. These checks and every drop share one transaction.
 8. **A stale prepare is abandoned.** The prepared check refuses ids from the
    cutover week on. The task therefore abandons a cutover that is still
    unfinalized 6 hours before that week, dropping the staged parents and the
@@ -500,9 +502,12 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
 
 - **Dropping a week.** A week's partitions are dropped once the week ended
   more than 13 weeks ago and none of these blockers holds: an unresolved
-  contract, an unsettled escrow, a sweep of a pending payment, or a legacy
-  settlement intent. Each check reads a partial or key index of the week's
-  own partitions.
+  contract, an unsettled escrow, a payment hold on a sweep, or a legacy
+  settlement intent. Payment holds match the row reaper: pending retention
+  stamping, or an incomplete payment that is uncanceled or carries an external
+  attempt's idempotency key, payment record, or transaction hash. Canceling an
+  external attempt alone does not release its hold. Each check reads a partial
+  or key index of the week's own partitions.
 - **Usage proof is archived by deleting contracts.** All three outcomes carry
   usage credit. So archiving a week means deleting every one of its contracts,
   10,000 at a time, through the parent. The capture trigger archives each row
@@ -552,9 +557,11 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
    prints every statement and checks for invalid indexes.
 3. Run the same command without `--dry-run`, off-peak, to prepare. It is
    resumable.
-4. Before the cutover week minus 10 minutes, run `--finalize --dry-run` and
-   then `--finalize`. Finalize probes, swaps, analyzes the parents and
-   validates the outside foreign key.
+4. Complete `--finalize --dry-run` and then `--finalize` before the cutover
+   week minus 6 hours, allowing time for verification. Maintenance abandons an
+   unfinished prepare at that boundary. The command's 10-minute final refusal
+   margin is an additional safeguard, not the operating deadline. Finalize
+   probes, swaps, analyzes the parents and validates the outside foreign key.
 5. Watch contract creation, the runway probe and the task's `[cp]` log lines.
    Until the cutover week starts, `--rollback` undoes the swap.
    - Rollback restores `contract_close_report_contract_id_fkey` NOT VALID.
