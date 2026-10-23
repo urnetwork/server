@@ -25,6 +25,14 @@ const (
 
 var alertClassKinds = map[string]alertClassKind{
 	// unknown states
+	"move-host-filling":                                visibilityAlertClass,
+	"move-host-load-incomplete":                        visibilityAlertClass,
+	"mover-control-unobservable":                       visibilityAlertClass,
+	"mover-dry-run":                                    visibilityAlertClass,
+	"mover-not-deployed":                               visibilityAlertClass,
+	"mover-off":                                        visibilityAlertClass,
+	"mover-telemetry-incomplete":                       visibilityAlertClass,
+	"mover-warming":                                    visibilityAlertClass,
 	"pg-disk-space-unobservable":                       visibilityAlertClass,
 	"pg-disk-runway-unobservable":                      visibilityAlertClass,
 	"pg-huge-pages-unobservable":                       visibilityAlertClass,
@@ -168,6 +176,12 @@ var alertClassKinds = map[string]alertClassKind{
 	"worker-scheduler-unobservable":                    visibilityAlertClass,
 
 	// measured states
+	"move-host-imbalance":                                 incidentAlertClass,
+	"move-send-errors-fleetwide":                          incidentAlertClass,
+	"mover-control-invalid":                               incidentAlertClass,
+	"mover-db-paused":                                     incidentAlertClass,
+	"mover-mode-divergent":                                incidentAlertClass,
+	"mover-store-errors":                                  incidentAlertClass,
 	"pg-disk-space-low":                                   incidentAlertClass,
 	"pg-huge-pages-disabled":                              incidentAlertClass,
 	"pg-freeze-age-risk":                                  incidentAlertClass,
