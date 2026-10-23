@@ -1,7 +1,8 @@
 # Contract table partitioning plan
 
-Status: IN PROGRESS. Planned 2026-10-22; the owner settled every **Decision**
-on 2026-10-23 (below).
+Status: BUILT, NOT CUT OVER. Planned 2026-10-22; the owner settled every
+**Decision** on 2026-10-23 (below). See "Implementation (2026-10-23)" for what
+exists, where the build differs from this plan, and the production runbook.
 
 ## Decisions (settled 2026-10-23)
 
@@ -421,6 +422,141 @@ reduces write amplification right away.
 6. Cut over after edge-2's storage expansion. The cutover itself needs no
    copy space, but the margin matters if it has to be rolled back.
 7. Turn on retention drops once the first weekly partition passes R.
+
+## Implementation (2026-10-23)
+
+Steps 1-5 are done. Step 6 waits for the owner (see "Production runbook").
+Step 7 needs no action: the maintenance task drops each week once it qualifies.
+
+### What exists
+
+- Migration 856 adds `contract_id_floor(timestamptz)`.
+- Migration 857 replaces the close evidence guard. A transaction that sets
+  `urnetwork.close_evidence_retention = 'on'` may delete evidence accepted
+  more than 91 days ago (13 weeks). Updates, truncates and newer rows stay
+  refused.
+- The monitor's migration registry covers 855-857.
+- The cutover and retention code is in the `server` package:
+  - `db_contract_partition.go`: naming, bounds, catalog shapes.
+  - `db_contract_partition_cutover.go`: prepare, finalize, rollback, abort.
+  - `db_contract_partition_maintenance.go`: the task's body.
+- The operator command is
+  `bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]`.
+- The task `maintain_contract_partitions` runs every 15 minutes, or a minute
+  after a run that left work behind. Each run has a 10-minute budget: two
+  thirds for the partitions, a third for the close evidence. On plain tables
+  it only removes evidence and guards a prepared cutover, so it is safe to
+  deploy before the cutover.
+- `URNETWORK_TEST_CONTRACT_PARTITIONS=1` cuts every test database over to
+  partitioned tables (the current week as the cutover week) right after its
+  migrations. Any suite can then run against the partitioned layout.
+
+### Where the build differs from the plan above
+
+1. **Parent indexes are cloned, not rebuilt from their definitions.**
+   - On PostgreSQL 18 the printed definition of
+     `transfer_contract_usage_missing_time` parses into a different expression
+     tree: the varchar array cast moves into each element.
+   - ATTACH adopts a legacy index only when the trees are equal. Otherwise it
+     would have built that index on the whole legacy table, under the swap's
+     lock.
+   - So each staged parent is created with `LIKE ... INCLUDING INDEXES`, which
+     copies the stored trees.
+   - Before the swap, finalize proves the match: it attaches an empty `LIKE`
+     clone of each table to the staged parent, in a transaction it rolls back,
+     and checks that every parent index adopted one of the clone's indexes.
+2. **Checks keep their validity.** A `NOT VALID` check stays `NOT VALID` on
+   the parent, because a valid parent check cannot adopt a `NOT VALID` one
+   (`transfer_contract_provider_usage_shape`,
+   `transfer_escrow_sweep_provider_payouts_shape`).
+3. **Locks wait for a quiet table.** Every step that takes ACCESS EXCLUSIVE
+   (the legacy bound, the swap, rollback, abort, a week's drop) first waits
+   until no transaction older than 5 s holds a lock on a contract table.
+   Each lock wait is then at most 3 s, and a statement that would scan or
+   build is cut off after 30 s. With about 600 idle-in-transaction sessions
+   on main today, the swap would wait until the transaction fixes (escrow
+   out of the transaction, the shorter close-report transaction) are
+   deployed.
+4. **TRUNCATE guards stay on every leaf.** They are kept on the legacy
+   partition and repeated on each weekly partition, because a parent's
+   statement trigger does not fire for a statement that names a partition.
+5. **The outside foreign key is validated at once.**
+   `legacy_settlement_intent`'s foreign key is recreated `NOT VALID` on the
+   parent and validated right after the swap; that table is small.
+6. **The close report foreign key is dropped**, as decided. Rollback restores
+   it `NOT VALID`.
+7. **The swap can be undone.** Between the swap and the cutover week every new
+   contract still lands in the legacy partition, so `--rollback` can undo the
+   swap until a weekly partition holds a row.
+8. **A stale prepare is abandoned.** The prepared check refuses ids from the
+   cutover week on. The task therefore abandons a cutover that is still
+   unfinalized 6 hours before that week, dropping the staged parents and the
+   checks.
+9. **The legacy partition covers the weeks before the cutover week** until
+   that week starts. Maintenance neither creates partitions for those weeks
+   nor counts them as missing.
+
+### Retention as built
+
+- **Dropping a week.** A week's partitions are dropped once the week ended
+  more than 13 weeks ago and none of these blockers holds: an unresolved
+  contract, an unsettled escrow, a sweep of a pending payment, or a legacy
+  settlement intent. Each check reads a partial or key index of the week's
+  own partitions.
+- **Usage proof is archived by deleting contracts.** All three outcomes carry
+  usage credit. So archiving a week means deleting every one of its contracts,
+  10,000 at a time, through the parent. The capture trigger archives each row
+  in the same transaction, as the reaper does. Archive and delete must stay
+  atomic: the subnet usage reader fails any window that sees a contract both
+  live and archived. Each delete repeats the week's range, so it prunes to
+  that week's partition.
+- **The drop transaction.** The week's six partitions are then detached and
+  dropped in one transaction, children first. The blockers are checked again
+  on the detached partitions, which no statement can reach.
+- **The legacy partition** retires the same way once the cutover week plus 13
+  weeks has passed. Archiving its contracts row by row would take weeks.
+  Splitting it by copy into monthly partitions after the storage expansion is
+  still the faster way to reclaim it.
+- **Close evidence** is deleted once accepted more than 91 days ago, if its
+  contract is resolved or gone. The oldest evidence on main is from
+  2026-10-06, so deletes begin around 2027-01-05.
+- **Archive growth needs its own decision.** `st_provider_usage_archive` is
+  1.5 GB for 8.7 M rows today, about 176 bytes a row. Once retention archives
+  every contract, it grows about as fast as contracts are created: about
+  20 GB a week at the 2026-10-22 churn.
+
+### Rehearsals
+
+- **Migrated schema.** The lifecycle and maintenance DB tests run on
+  PostgreSQL 18 with the migrated schema. They cover dry runs, resumable
+  prepare, routing by id, the usage guard and archive capture through the
+  parent, the leaf TRUNCATE guards, rollback, abort, every blocker, archiving,
+  the drop, the evidence deletes and the abandoned cutover.
+- **Production schema.** Main's schema (a schema-only dump taken 2026-10-23,
+  with its extensions stripped) was restored locally. Prepare, the probe, the
+  swap (220 ms), maintenance, rollback, prepare again and abort all passed.
+  Main has one contract index that no migration creates:
+  `transfer_escrow_unsettled_legacy_balance_contract` (204 MB). `LIKE` stages
+  it like the rest.
+- **Volume.** With 1 M contracts and escrows the swap took 188 ms, the same as
+  on empty tables. Validation is the step that scales. Main has about 1.5 TB
+  of heap in these tables, so expect hours at edge-2's current I/O. Reads and
+  writes continue during it, but it holds back the vacuum horizon, so run
+  prepare off-peak.
+
+### Production runbook
+
+1. Deploy a build with this code and apply migrations 856-857. Also deploy
+   the transaction fixes.
+2. `bringyourctl model migrate contract-partition --cutover-week=<Monday at least 2 days ahead> --dry-run`
+   prints every statement and checks for invalid indexes.
+3. Run the same command without `--dry-run`, off-peak, to prepare. It is
+   resumable.
+4. Before the cutover week minus 10 minutes, run `--finalize --dry-run` and
+   then `--finalize`. Finalize probes, swaps, analyzes the parents and
+   validates the outside foreign key.
+5. Watch contract creation, the runway probe and the task's `[cp]` log lines.
+   Until the cutover week starts, `--rollback` undoes the swap.
 
 ## Related: MinIO and client-key history
 
