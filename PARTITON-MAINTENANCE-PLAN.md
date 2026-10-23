@@ -1,9 +1,9 @@
 # Partitioning and maintenance plan: ongoing bloat
 
 Status: PLAN, written 2026-10-23 during the edge-2 disk-full outage. It was
-revised the same day after a code review of each table and a design review of
-the first draft. Nothing here is implemented. **Decision** marks an item that
-needs the owner.
+revised the same day after a code review of each table and a design review,
+whose findings are folded in throughout. Nothing here is implemented.
+**Decision** marks an item that needs the owner.
 
 Companion to `CONTRACT-PARTITION.md`, which covers the six contract tables
 (built, not cut over). This plan covers the rest of the database, plus the
@@ -195,6 +195,13 @@ Schedule it in `taskworker/work/maintenance_work.go` and implement it beside
     then logs the oldest holder instead of vacuuming harder.
 - **Retire the daily step:** remove the `pending_task` vacuum from
   `DbMaintenance`. This task supersedes it.
+- **Tests:**
+  - a locked table followed by an eligible one: the skip must not stall the
+    run;
+  - a statement that times out on every run: the warning fires, and later
+    tables still get their turn;
+  - a pinned horizon: rows are reported as not yet removable, and the holder
+    is logged.
 
 An explicit vacuum does not need an autovacuum worker, so a pass over a large
 table can no longer starve these tables. Compact, they are each under 10 GB,
@@ -250,8 +257,9 @@ Extend it to every index of the A1 tables:
     all-visible pages but reads every other page, so a heavily updated table
     still costs a scan. Resume next week where the budget ran out, and record
     the share scanned.
-  - **Indexes:** the btree estimate the priority rebuild already uses.
-    `pgstattuple_approx` covers only the heap.
+  - **Indexes and TOAST:** measured separately. `pgstattuple_approx` covers
+    only the relation it is given. Indexes use the btree estimate the
+    priority rebuild already uses.
   - **Tables over 50 GB:** the statistics estimate the 2026-10-23 driver used
     (live rows × average width, against heap size).
   - Subtract the free space a fillfactor leaves on purpose.
@@ -265,21 +273,37 @@ Extend it to every index of the A1 tables:
   - A1–A3 and Part B stop new bloat.
   - Existing heap bloat is reused in place, or removed in a maintenance window.
   - Nothing external (owner decision).
-- **After the upgrade, `REPACK (CONCURRENTLY)`.** Its documented costs set the
-  requirements for any automation:
-  - Room for the table, all its indexes and the WAL of the copy, beyond the
-    disk reserve.
-  - It holds a snapshot for its whole run. That holds back cleanup in every
-    other table: the horizon A6 bounds.
-  - A final exclusive lock, and some tables it cannot process.
+- **After the upgrade, `REPACK (CONCURRENTLY)`.** The PostgreSQL 19
+  documentation sets the requirements for running it on main:
+  - **Disk:** room for a copy of the table and all its indexes, plus every
+    change made during the run, which it stores on disk separately. Add the
+    WAL of the copy, beyond the disk reserve.
+  - **Horizon:** it counts as one long transaction for its whole run, so it
+    holds back cleanup in every other table: the horizon A6 bounds. Watch its
+    `backend_xid`.
+  - **Visibility:** it is not MVCC-safe. Once it commits, a transaction whose
+    snapshot predates the run sees the table as empty. `server.Tx` defaults to
+    REPEATABLE READ, so any application transaction that outlives a run and
+    first reads the table after the swap is exposed.
+  - **Locks:** SHARE UPDATE EXCLUSIVE for most of the run, so no vacuum or
+    concurrent index build on that table meanwhile. Then ACCESS EXCLUSIVE for
+    the swap. Concurrent DDL can make it fail.
+  - **Eligibility:** not a partitioned parent (only its leaves), and not a
+    table without a primary key or an index-based replica identity. It runs
+    outside a transaction block.
+  - **Replication:** it captures changes with logical decoding through a
+    replication slot (`max_repack_replication_slots`). Confirm what it needs
+    from `wal_level` at the upgrade.
 
   Pin the release's behavior at the upgrade. Then define eligibility,
   headroom, lock and runtime bounds, cancellation and retry, and horizon
   monitoring while it runs.
 
-  Start by reporting candidates for an operator. Automate only after that:
-  one table at a time, under the rotation's load deferrals, with its own
-  budget apart from routine vacuum.
+  Start by reporting candidates for an operator. Because of the visibility
+  hazard, run it with the application drained, or only on a table that no
+  long REPEATABLE READ transaction reads. Automate only after that: one table
+  at a time, under the rotation's load deferrals, with its own budget apart
+  from routine vacuum.
   - **Decision:** whether it ever runs on its own.
 - **Hand-off:** a table over 50 GB with persistent bloat goes to Part C or D,
   not to repeated compaction.
@@ -314,6 +338,11 @@ change the pacing first, then add workers:
 A setting change alone doesn't show it worked. Judge the result by measured
 pass durations, dead-row growth, wraparound margin, and whether the A1 tables
 keep finishing their vacuums.
+
+Check each table's trigger arithmetic too. A table qualifies once its dead
+rows pass min(`autovacuum_vacuum_max_threshold`, base threshold + scale factor
+× rows). At scale 0.2, the 100M cap applies to every table over 500M rows, so
+raising a large table's base threshold alone changes nothing.
 
 **Decision:** the cost budget and worker count. Set them in a trial after the
 storage expansion, with the §2.4 signals watched.
@@ -376,10 +405,22 @@ Move them into one registry beside `db_maintenance`. Each table declares:
 The registry keeps each family's own rules:
 
 - late writes into old ranges;
-- leaves that keep changing after their range closes, which need analyzing
-  again;
+- leaves that keep changing after their range closes. They need analyzing
+  again, and may need index rebuilds, as the contract legacy leaf's priority
+  indexes do;
 - families that are never dropped;
 - the contract checks, unchanged.
+
+It also needs, for every family:
+
+- **Parent statistics:** autovacuum never analyzes a partitioned parent, so
+  the registry analyzes each parent on a schedule, not only each leaf.
+- **Create-ahead on its own cadence,** apart from slow archive or compaction
+  work, and catching up after downtime. An outage must not leave an insert
+  with no partition.
+- **A drop that rechecks its precondition** in the same transaction that
+  detaches the partition.
+- **Resume state,** so an interrupted pass continues where it stopped.
 
 A new family does not wait for the registry. It ships with its own
 maintenance, as C2 would, and moves into the registry later.
@@ -434,8 +475,8 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 - **Size:** 130 GB after VACUUM FULL (134 GB before), so it is live, not
   bloated.
 - **Writes:** one `INSERT ... ON CONFLICT (run_id) DO NOTHING` per probe result
-  (`model/provider_egress_health_model.go:SetProviderEgressHealth`), about 60
-  wide jsonb rows per provider a day.
+  (`model/provider_egress_health_model.go:SetProviderEgressHealth`, the only
+  writer), about 60 wide jsonb rows per provider a day.
   - When the insert inserts nothing, the result is not published to health or
     cycle progress again. The conflict is the deduplication.
   - A delayed result keeps its original `measured_at`.
@@ -454,6 +495,11 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
   - `run_id` cannot be the key. A submission without a run id gets one derived
     from a SHA-256 of the client and the measurement time, which has no time
     order. Production submitters send their own.
+- **Replays with a new time:** the composite key catches a replay only if it
+  repeats `measured_at`. Before the cutover, confirm that every submitter's
+  retry does. If any can resend a run id with a new time, check `run_id`
+  across the retained partitions under a per-run advisory lock before
+  inserting.
 - **Ingest:** today it rejects only future timestamps
   (`controller/provider_egress_ingest_controller.go:SubmitProviderEgressHealth`).
   Add a lower bound of about a day, because without a DEFAULT partition an
@@ -475,6 +521,9 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 
   Until the drop, renaming back is the rollback, after copying back the rows
   written since the swap.
+- **Monitor:** `monitor/migration_fp2.go` pins this table's exact columns and
+  indexes. Update that catalog contract for the partitioned shape in the same
+  change, as the contract work did for its tables.
 - **Tests:**
   - a result with no run id, before and after the cutover;
   - a delayed result;
@@ -509,7 +558,8 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
       allows two rows for one task, even in the same partition.
     - The fenced move inserts once per completion. The design must prove that
       for every writer, the cutover and every retry, or keep identity in a
-      separate relation.
+      separate relation. A unique `task_id` index on each leaf does not stop a
+      duplicate in another leaf.
 - **Key:** `run_end_time`, not `task_id`. A task's id is minted when it is
   scheduled, and one task finished 96 days later.
 - **Options:**
@@ -524,8 +574,14 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 - **Tests:**
   - with a fixed clock, a 25-hour-old and a 6-day-old failed Post that still
     retry successfully;
-  - a drop racing a Post retry;
-  - one task id with two end times, both in one partition and across two.
+  - a drop racing a Post retry, and a 7-day-old row whose finished owner is
+    held while the drop runs: the drop waits or defers;
+  - one task id with two end times, both in one partition and across two;
+  - an interrupted cutover overlapping a live completion, and a completion
+    repeated after an unacknowledged commit: one durable row and one Post
+    effect;
+  - the existing `task/task_queue_retention_test.go` cases, against the
+    partitioned schema.
 
 After B1, B2 and A1, the table stays small without this, so C3 is optional.
 
@@ -579,6 +635,11 @@ Deletes start about 91 days after the oldest evidence rows.
     would go.
   - Partition by `event_time`, not `event_id`: backfills mint fresh ids for
     historical event times (`model/audit_provider_sweep_model.go`).
+  - A backfill or rollup can write an `event_time` older than the oldest
+    partition. Without a DEFAULT partition the insert fails, so refuse or skip
+    such rows explicitly.
+  - Tests: a historical event with a fresh id; a daily rollup rerun across a
+    partition boundary, contributing once; pruning in the stats queries.
   - Name the event tables one by one:
     - The other event feeds are small.
     - `audit_provider_state` and `audit_device_state` are mutable state, not
@@ -596,6 +657,9 @@ Deletes start about 91 days after the oldest evidence rows.
   - Archive writes land in contract weeks long past, so partitions must exist
     for historical ranges.
   - While retention is undecided, nothing drops it automatically.
+  - Tests, if it is partitioned: an archived row whose contract is gone, and a
+    terminal contract archived during the migration. Compare proof fields and
+    usage totals before and after, and restart the migration midway.
   - **Decision:** archive retention.
 
 ### C7. Not partitioned
@@ -643,7 +707,10 @@ Changes:
   - Original-close verification reads this history
     (`model/contract_close_original.go`). So the horizon must outlast every
     close report that can still arrive for the client's contracts.
-  - Delete the head first, since `st_client_key_head` references history.
+  - Delete the heads first. `st_client_key_head` references history, and a
+    retained head marks a complete archived history
+    (`db_client_key_policy_history.go`), so a client's history goes only after
+    all of its heads.
 - **Decision:**
   - the horizons;
   - whether to bring the mint rate down at the source, which is a protocol and
@@ -656,6 +723,8 @@ Every table swap or partition cutover in this plan needs:
 - a write fence or change capture, and an exact-copy check under it;
 - bounded lock waits (`lock_timeout` and retry), never an unbounded queue;
 - restart behavior for each step;
+- a task drain, where one is used, that covers running completions and Post
+  retries, not only new claims;
 - a rollback point that keeps writes made after the swap;
 - tests with fixed clocks and barriers: concurrent writers, a crash before and
   after the swap, and the first partition boundary.
