@@ -523,7 +523,7 @@ func RebuildPointsLeaderboard(
 	clientSession *session.ClientSession,
 ) (*RebuildPointsLeaderboardResult, error) {
 	ctx := clientSession.Ctx
-	rollupBatches, err := model.AdvancePointsBlockRollup(ctx)
+	rollupBatches, err := model.AdvancePointsBlockRollup(ctx, model.DefaultPointsBlockRollupSettings())
 	if err != nil {
 		return nil, err
 	}

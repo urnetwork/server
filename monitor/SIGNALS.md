@@ -40703,6 +40703,14 @@ A missing linked payment is not silently equated with a resumable linked-payment
 backfill. Only counts, ages, block numbers and booleans are returned; no
 network, payment, chain deployment or contract identity is rendered.
 
+A payout plan stores its own payments' blocks, from the paid sweeps it
+selected and by the rollup's definition (`model.pointsPaidSweepSql`), and
+inserts those payments complete, all in its own transaction
+(`finalizePayments`, 2026-10-23). A payout therefore leaves this predicate
+true. Before that, every Sunday payout made block metrics unavailable until the
+rollup had visited each new payment. The rollup now finishes only payments
+planned before that change, so a pending payment planned after it was written
+by an older planner binary.
 The rollup uses bounded resumable batches outside payout write transactions.
 Its payment/contract index bounds exclude completed cursor history in both
 custom and generic prepared plans. The inclusive zero-UUID floor keeps a null

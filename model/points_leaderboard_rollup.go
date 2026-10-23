@@ -8,24 +8,73 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const (
-	pointsBlockRollupBatchContracts = 1000
-	pointsBlockRollupMaxBatches     = 12
-	pointsBlockRollupRunBudget      = 45 * time.Second
-)
+// The one definition of the operator blocks a payment earns in. The payout
+// plan (paymentPlanBlocksSql) and the history rollup (pointsBlockRollupSql)
+// both build from it, so the two cannot disagree. Every sweep the payment pays
+// that carries payout bytes is paid traffic, and it places the payment in the
+// operator block that contains its sweep time; a sweep before the genesis is
+// in no block. `sweep` is the sweep row's alias; `genesis` and `blockSeconds`
+// are the statement's parameters for SubnetBlockGenesis and
+// SubnetBlockDuration in seconds.
+
+// The sweep is paid traffic.
+func pointsPaidSweepSql(sweep string) string {
+	return sweep + ".payout_byte_count > 0"
+}
+
+// The sweep is in an operator block.
+func pointsSweepInBlocksSql(sweep string, genesis string) string {
+	return sweep + ".sweep_time >= " + genesis + "::timestamp"
+}
+
+// The 1-based operator block of a sweep in pointsSweepInBlocksSql.
+func pointsSweepBlockSql(sweep string, genesis string, blockSeconds string) string {
+	return "1 + floor(extract(epoch FROM (" + sweep + ".sweep_time - " + genesis + "::timestamp)) / " + blockSeconds + "::numeric)::bigint"
+}
+
+// The bounds of one history rollup run. A run is part of a leaderboard
+// rebuild, which runs again a minute later while the rollup is incomplete
+// (controller.RebuildPointsLeaderboardPost), so a backfill takes many short
+// runs instead of holding payout transactions or a taskworker for hours.
+type PointsBlockRollupSettings struct {
+	// The most distinct contracts of one payment a batch reads, in one
+	// transaction. A payment with fewer contracts left completes in that
+	// batch. It bounds the batch's output, not its sweep reads: a contract can
+	// have many sweeps. Must be positive.
+	BatchContracts int
+	// The most batches a run commits. Non-positive commits none.
+	MaxBatches int
+	// No batch starts after a run has used this long; it is not a statement
+	// deadline, so the batch in flight runs to its end. Non-positive starts
+	// none.
+	RunBudget time.Duration
+}
+
+// The bounds the history backfill has run with since the rollup shipped
+// (2026-09-23).
+func DefaultPointsBlockRollupSettings() *PointsBlockRollupSettings {
+	return &PointsBlockRollupSettings{
+		BatchContracts: 1000,
+		MaxBatches:     12,
+		RunBudget:      45 * time.Second,
+	}
+}
 
 // AdvancePointsBlockRollup materializes earning weeks from paid contracts in
-// bounded, resumable transactions. It is deliberately outside payout planning:
-// a large historical plan must not extend the payment write transaction.
-// Each paid sweep's settlement time is the operator's established payout
-// reporting clock. A contract with sweeps on both sides of Sunday earns in
-// both blocks; its final close time alone is not sufficient evidence.
-func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnErr error) {
-	deadline := server.NowUtc().Add(pointsBlockRollupRunBudget)
-	for advancedBatches < pointsBlockRollupMaxBatches && server.NowUtc().Before(deadline) {
+// bounded, resumable transactions, for the payments planned before plans
+// stored their own blocks (finalizePayments). A plan's payments are complete
+// when it commits, so this visits only that history. It is deliberately
+// outside payout planning: a large historical plan must not extend the
+// payment write transaction. Each paid sweep's settlement time is the
+// operator's established payout reporting clock. A contract with sweeps on
+// both sides of Sunday earns in both blocks; its final close time alone is
+// not sufficient evidence.
+func AdvancePointsBlockRollup(ctx context.Context, settings *PointsBlockRollupSettings) (advancedBatches int, returnErr error) {
+	deadline := server.NowUtc().Add(settings.RunBudget)
+	for advancedBatches < settings.MaxBatches && server.NowUtc().Before(deadline) {
 		var batchCount int64 = -1
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			result, err := tx.Query(ctx, pointsBlockRollupSql, pointsBlockRollupBatchContracts, SubnetBlockGenesis, int64(SubnetBlockDuration/time.Second))
+			result, err := tx.Query(ctx, pointsBlockRollupSql, settings.BatchContracts, SubnetBlockGenesis, int64(SubnetBlockDuration/time.Second))
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(&batchCount))
@@ -41,7 +90,7 @@ func AdvancePointsBlockRollup(ctx context.Context) (advancedBatches int, returnE
 }
 
 // The production statement is shared with the native plan and accounting regression.
-const pointsBlockRollupSql = `
+var pointsBlockRollupSql = `
 				WITH payment AS MATERIALIZED (
 					SELECT payment_id, block_rollup_cursor
 					FROM account_payment
@@ -88,13 +137,13 @@ const pointsBlockRollupSql = `
 						-- batches give null bounds and cannot read paid history.
 						AND sweep.contract_id >= (SELECT contract_id FROM batch ORDER BY contract_id LIMIT 1)
 						AND sweep.contract_id <= (SELECT contract_id FROM batch ORDER BY contract_id DESC LIMIT 1)
-						AND sweep.payout_byte_count > 0
+						AND ` + pointsPaidSweepSql("sweep") + `
 				), inserted AS (
 					INSERT INTO account_payment_block (payment_id, block_number)
 					SELECT DISTINCT payment.payment_id,
-						1 + floor(extract(epoch FROM (paid.sweep_time - $2::timestamp)) / $3::numeric)::bigint
+						` + pointsSweepBlockSql("paid", "$2", "$3") + `
 					FROM payment, paid
-					WHERE paid.sweep_time >= $2::timestamp
+					WHERE ` + pointsSweepInBlocksSql("paid", "$2") + `
 					ON CONFLICT DO NOTHING
 					RETURNING block_number
 				), advanced AS (
