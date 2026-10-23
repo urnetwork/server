@@ -64,7 +64,7 @@ type vpnSessionsObservation struct {
 	statusObserved  bool
 	journalObserved bool
 	clients         map[string]vpnSessionClient
-	reachable       map[string]bool
+	reachable       map[string]string
 	timeouts        map[string]vpnSessionTimeout
 }
 
@@ -170,6 +170,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 
 	missing := make([]*host, 0)
 	unreachable := make([]*host, 0)
+	findings := make([]finding, 0, len(clients)*2)
 	reachableClients := 0
 	reachableByGroup := map[int]int{}
 	for _, client := range clients {
@@ -178,11 +179,19 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		if !reachabilityObserved {
 			return nil, fmt.Errorf("vpn sessions: parse %s: missing reachability for %s", server.name, client.name)
 		}
+		// Execution uncertainty cannot certify a failed path or a control,
+		// but complete status can independently prove missing membership.
+		if reachable == "unknown" {
+			findings = append(findings, cannotObserveFinding(client.name, fmt.Errorf("vpn sessions: bounded ICMP execution unavailable")))
+		}
 		if !present {
 			missing = append(missing, client)
 			continue
 		}
-		if reachable {
+		if reachable == "unknown" {
+			continue
+		}
+		if reachable == "true" {
 			reachableClients++
 			reachableByGroup[observation.clients[client.overlayIp].group]++
 		} else {
@@ -190,7 +199,6 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 	}
 
-	findings := make([]finding, 0, len(missing)+len(unreachable))
 	if !observation.journalObserved {
 		findings = append(findings, vpnSessionsProducerUnavailable(server.name, "journal"))
 	}
@@ -462,12 +470,14 @@ printf 'status_mtime_epoch %%s\n' "$status_mtime"
     print "journal_observed", (journal_complete==1 && journal_failed==0 ? "true" : "false")
   }
 '
+# iputils ping: 0 is a reply, 1 is no reply; other exits do not measure the path.
 for address in $expected_addresses; do
 	if ping -n -c 1 -W 1 "$address" >/dev/null 2>&1; then
-		printf 'reach %%s true\n' "$address"
+		reach=true
 	else
-		printf 'reach %%s false\n' "$address"
+		case "$?" in 1) reach=false ;; *) reach=unknown ;; esac
 	fi
+	printf 'reach %%s %%s\n' "$address" "$reach"
 done`, vpnSessionsMarker, strings.Join(names, " "), strings.Join(addresses, " "), vpnSessionActiveStates, vpnSessionSubStates), nil
 }
 
@@ -482,7 +492,7 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 	observation := vpnSessionsObservation{
 		restarts:  "unknown",
 		clients:   map[string]vpnSessionClient{},
-		reachable: map[string]bool{},
+		reachable: map[string]string{},
 		timeouts:  map[string]vpnSessionTimeout{},
 	}
 	seen := map[string]bool{}
@@ -553,13 +563,13 @@ func parseVPNSessionsObservation(output string) (vpnSessionsObservation, error) 
 			}
 			observation.clients[fields[1]] = vpnSessionClient{connectedAt: time.Unix(epoch, 0).UTC(), group: group}
 		case "reach":
-			if len(fields) != 3 || net.ParseIP(fields[1]) == nil || (fields[2] != "true" && fields[2] != "false") {
+			if len(fields) != 3 || net.ParseIP(fields[1]) == nil || (fields[2] != "true" && fields[2] != "false" && fields[2] != "unknown") {
 				return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid reachability row", lineNumber+1)
 			}
 			if _, duplicate := observation.reachable[fields[1]]; duplicate {
 				return vpnSessionsObservation{}, fmt.Errorf("line %d: duplicate reachability address", lineNumber+1)
 			}
-			observation.reachable[fields[1]] = fields[2] == "true"
+			observation.reachable[fields[1]] = fields[2]
 		case "timeout":
 			if len(fields) != 4 || !vpnSessionNamePattern.MatchString(fields[1]) {
 				return vpnSessionsObservation{}, fmt.Errorf("line %d: invalid timeout row", lineNumber+1)

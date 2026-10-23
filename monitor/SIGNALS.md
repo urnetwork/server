@@ -5225,6 +5225,18 @@ call and no second gateway. Their earlier unscoped PAGE/source-only assertions
 are deliberately superseded by this live-entry policy, rather than reclassified
 as pre-canceled compatibility or borrowed as notifier-incident evidence.
 
+A directly returned, nonnil signalContextError whose own context verdict is
+exactly the current ended parent is already canonical: preserve that wrapper
+and its immediate source cause instead of adding another context wrapper.
+A nested errors.Is match or a different child context is not this authority.
+Both public live-entry paths use the parent lifecycle taxonomy and safe error
+text while every original source identity remains reachable. Direct collectors
+and probes retain their owning contracts. Even an independently established
+migration fault retained by a probe is withheld at the public adapter after
+its owner ends; live faults/unknowns and pre-canceled no-policy compatibility
+remain separately tested. No ended result is authority to publish an observer
+write or to clear an incident; previously begun writes cannot be rolled back.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -13620,7 +13632,13 @@ when all three members are rejected, that returned runtime remains incomplete;
 a complete sibling must not make global visibility healthy. Keep independently
 complete siblings' capacity findings. Invalid values and rejected runtime
 identities stay out of the aggregate visibility alert; malformed scalar shape
-or parsing remains a whole-probe source error.
+or parsing remains a whole-probe source error. Rejection also makes that exact
+runtime's tuple unusable for the observation: one rejected member beside a
+complete valid tuple is still unknown in either response order. Appending only
+that rejected metric row is the control; duplicating the full tuple would hide
+this boundary behind other accepted duplicates. Complete quiet and pressured
+siblings retain their own verdicts. This is a source-level correctness boundary,
+not evidence that Main returned such duplicates.
 
 The denominator is returned safe runtime identities, not an authoritative census
 of active Taskworkers. The query can filter stale raw exports before returning
@@ -19782,6 +19800,23 @@ Signals:
   chain again within ten minutes, and its sweep starts over. Find the
   taskworkers whose disabled total is above zero, confirm their hosts
   publish the current config (`WARP_CONFIG_VERSION`) and restart them.
+  The disabled-result current counter is initialized when a taskworker
+  registers its metrics, even before a pass. With the desired probe enabled,
+  an absent current aggregate is unknown (`cannot-observe`), never a measured
+  zero, unless either disabled arm independently proves a positive finding.
+  A positive current total or retained 30-minute increase remains WARN when
+  the counterpart is absent; its observed value says `unknown`, not zero.
+  Current zero with absent range increase remains a narrow healthy control:
+  `increase` can lack two samples after startup. It does not prove that no
+  exited process ran a disabled pass, nor that every fleet exporter was
+  scraped. Recent last-pass history cannot substitute for the initialized
+  current counter. Missing current evidence cannot grant notifier recovery;
+  corrected measured zero must satisfy the normal complete-run clear policy.
+  Invalid, repeated, nonfinite, negative or stale-evaluation samples retain
+  their existing refusal; unsupported payload clocks leave stall age unknown
+  while an independent positive disabled count remains visible. Desired-off
+  still skips the query. Aggregate absence identifies no host or process,
+  and this qualifier asserts no production omission or incident.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
   The outcome says where: `tunnel_failed` is the probe's own setup (shard
@@ -25823,7 +25858,14 @@ the five-minute healthy-band check where specified, and record recovery
 confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
 (MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
 incident on (probe, class, target) per the identity discipline below, and its
-`[CLEARED]` means only that two complete runs no longer reported the incident.
+`[CLEARED]` means only that two uninterrupted complete executions of each
+reporting signal no longer reported the incident. An incomplete execution
+preserves incidents and resets only that signal's absence streak; it supplies
+no recovery credit and does not change another signal's streak. For example,
+a complete absence followed by an unknown execution and another complete
+absence leaves the incident active with one recovery run; one further complete
+absence permits a clear. Reported or held affirmative findings also reset their
+incident's streak. This transition policy does not establish source recovery.
 Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
 which can repeat earlier announcements; it does not date the incidents. A
 state the configuration chose, such as the PG query sample without its flag,
@@ -30273,8 +30315,10 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
 - `minio-drive-offline`. One erasure set at EC:2 over four drives needs three
   drives to write and two to read. Any drive with health 0, or a node offline
   count above zero, pages after two observations (a restart brings drives back
-  within about a minute); a negative erasure-set write tolerance means writes
-  are already failing and pages immediately. A healing drive warns after two.
+  within about a minute). A qualified fresh negative erasure-set write tolerance
+  pages immediately, independently of offline or healing drive counts. It reports
+  failed cached write health, not proof of a current application write failure.
+  A healing drive without that negative evidence warns after two.
 - `minio-bucket-quota`. MinIO rejects every PUT once the scanner's usage figure
   plus the object reaches the hard quota, with 400
   `XMinioAdminBucketQuotaExceeded`, which raises no 5xx. Usage at or over the
@@ -30379,6 +30423,26 @@ lost write quorum, quota bands including a quota raised within the window,
 request-error bands, missing/stale/incomplete drive and usage layers,
 malformed Mimir responses, foreign-host series, a dark inventory, and the
 query's freshness bounds.
+
+The configured MinIO source at `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a`
+computes write tolerance as healthy plus healing drives minus write quorum;
+a negative result also sets write health false. Erasure health and local drive
+metrics use independent caches. Fresh scraped timestamps do not attest one
+underlying cache generation or deployed producer identity. Complete online local
+drives cannot veto a qualified erasure-health negative; it also survives a
+missing drive layer beside the original visibility finding. Integer tolerance
+is reduced over distinct observed pool/set pairs. Fractional, nonfinite,
+unlabelled or duplicate-set input cannot qualify a negative or recovery.
+Missing/stale tolerance and zero spare write reserve cannot clear an otherwise
+healthy-looking store; they retain scoped `write-tolerance` visibility while
+independent capacity, bucket and request positives remain. Existing offline
+and healing positives retain their normal bands. Observed sets do not prove a
+complete erasure-set census. Recovery needs fresh unambiguous tolerance at least
+one plus the complete healthy drive layer. False-positive qualifier: cached
+negative health does not prove current failed writes or a physical Main outage.
+False-negative qualifier: missing sets or stale/ambiguous caches can hide loss;
+quiet request counters and alert absence cannot supply missing health authority.
+
 
 ### 11.6b MinIO drive runway, accounting divergence and foreign data on its drives
 Probe: `minio-runway` (catalog entry; not implemented as of 2026-10-22)
@@ -31699,6 +31763,24 @@ dropped-stream/EOF signals remain clear.
 
 ### 11.20 Mimir historical sample continuity across restarts
 
+A completed source result is accepted into this probe's comparison history
+only if its invocation cancellation channel is still open at the owning
+publication checkpoint. Rejected late gap results cannot seed or advance a
+comparator, and rejected late healthy results cannot erase one. The next live
+classification uses only accepted history. Already-ended continuity invocations also refuse history publication; this
+rule belongs to the continuity state owner. Live healthy reset, source/parse refusal, movement,
+regression, repeated observations and store-age rules are unchanged. Capture
+the cancellation channel outside the history lock; no caller Context method
+runs while that lock is held. Cancellation recorded after this checkpoint can
+still suppress the outer public result; the checkpoint is not atomic with
+later cancellation or shared-adapter return, and supplies no rollback guarantee.
+False-positive qualifier: a source-backed rejected interleaving reproduces a
+local comparator defect, not native/runtime incidence or permanent data loss.
+False-negative qualifier: public cancellation or zero Alerts alone cannot prove
+history conservation. Monitor-parent shutdown returns before cadence/Handle;
+no notifier false-clear, incident resolution or Main recovery is inferred from
+this repair.
+
 Probe: `mimir-continuity`
 
 The public `live throughput` panel is a fleet-wide rate over
@@ -32507,6 +32589,30 @@ never enter an alert. Emit `redis-latencystats-source-drift` for any live
 `yes`. Emit `redis-latencystats-source-unobservable` for a missing host/port,
 failed reducer, invalid reply, unreachable node, or incomplete census. These
 source findings do not suppress independently measured Mimir cardinality.
+
+The native CONFIG reducer validates the entire successful raw text reply
+before shell substitution: exactly `latency-tracking` and `yes` or `no`,
+with LF after each of the two records. A blank third record is not permission
+to discard a later nonempty record; extra blank-only tails, missing terminal
+LF, wrong keys/values and additional records are invalid, never disabled or
+enabled authority. The collector frames the original command exit after the
+raw stream so a nonzero/timeout result remains unreachable even if its stdout
+has a valid prefix. Only a fixed enum reaches shell state, then the unchanged
+five-count census; raw replies and private canaries remain host-local. A valid
+`no` still supplies disabled-source health, and a valid `yes` remains drift.
+Mixed valid-enabled and malformed nodes retain both drift and visibility;
+independent Mimir positives survive either case. Unknown source coverage,
+including held visibility, supplies no absence-based clearing. Normal complete
+source observations retain the existing notifier recovery policy.
+
+This reply grammar follows default RESP2 raw Redis CLI delimiter behavior,
+not the binary RESP wire framing or the adjacent key-events collector. The
+reviewed upstream formatter is a source contract, not proof of the deployed
+CLI version, actual malformed production output, a Redis outage, producer
+identity or fleet adoption. Unsupported/custom output must stay unknown until
+its own contract is reviewed. Synthetic generated-shell/public-run controls
+establish parser authority only; an actual prior incident/clear requires
+separate runtime evidence.
 
 Emit `taskworker-histogram-cardinality` whenever the exact
 `urnetwork_egress_probe_health_check_seconds_bucket` count is positive. The
@@ -36910,6 +37016,41 @@ capacity owners while those joins remain open.
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
+**Applicability census authority:** a quiet `proxy_host 0` requires a successful
+complete unit census and a successful whole-process census (`ps -e` with
+explicit pid, RSS and command-name fields). An exact fixed name filter makes
+no proxy match an ordinary successful empty result; any failed census status,
+including 1 with empty stdout, remains `cannot-observe`, not healthy absence.
+Failed partial stdout is discarded. The same filtered PID rows are reused
+for cgroup inspection, without a second selection call. Collection does not
+rely on inherited shell pipeline flags. A failed unit list
+with independently observed live proxy processes retains memory, kernel OOM,
+and same-boot UDP evidence while emitting unit-coverage visibility; the unit
+count is explicitly unknown, and process-versus-unit overlap is withheld.
+Successful empty censuses remain quiet services-only scope. Held and emitted
+visibility block notifier recovery credit; complete healthy absence retains the
+existing two-observation recovery policy. These source controls prove no live
+host census failure, OOM or production clear and change no threshold, cadence,
+lease marker or rollout guidance. UDP cancellation/state ownership is separate.
+
+UDP private-state cancellation boundary: a valid host frame whose context is
+already canceled at that host's locked publication checkpoint must not
+initialize, evict or replace its cached cumulative counters. Capture the context
+Done channel outside the mutex; the lock checks only that channel. The public
+adapter already withholds canceled findings, so advancing hidden history there
+would consume loss before the next accepted interval. A synthetic t0 zero pair,
+canceled t1 1000/1000 pair and live t2 same pair over 120 seconds must retain
+1000 delivered/1000 dropped, 50% loss and 500 drops/minute, hence PAGE.
+This is a per-host checkpoint, not atomic evaluation rollback: cancellation
+after the checkpoint, including a later host's cancellation, does not undo
+an earlier live host commit. First/reset/boot/clock warmups and independent
+memory/OOM predicates remain unchanged. False-positive qualifier: these are
+synthetic lifecycle/state controls, not observed Main loss, hidden baseline
+changes or notifier recovery. False-negative qualifier: zero canceled Alerts
+alone proves no private-state conservation; earlier accepted host commits and
+post-checkpoint cancellation remain outside this refusal guarantee. Kernel
+counters remain host-wide and do not identify a socket or loss cause.
+
 Proxy readiness is not host-capacity proof. Every proxy block normally owns a
 large resident Go process, and the old process remains live while its candidate
 restores clients and drains. Treat a deploy as an explicit host-memory budget:
@@ -37680,7 +37821,23 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
 `urnetwork_proxy_device_memory_tracked_used_bytes` with the current
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
-Use the active services.yml Proxy host/block topology as denominator. Select
+Use the active services.yml Proxy host/block topology as denominator.
+Before any query, a positive authoritative Proxy placement count with zero
+joined active monitor Proxy rows is `proxy-device-target-unobservable`, frame
+`inventory`, WARN at sustain 1, rather than an empty healthy fleet. The same
+visibility boundary already applies to nonzero partial inventory joins.
+Known derived disabled Proxy rows retain intentional scope: when they account
+for every expected placement and none is active, the existing no-query empty
+applicability remains. A disabled subset cannot hide an additional unjoined
+placement. Operator exclusions keep their desired Proxy rows and their
+existing transport-denial/coverage policy; never delete them or contact a
+paused host to repair a count. A true zero-placement environment remains quiet
+without a query. Inventory uncertainty proves no private-target mismatch,
+shared admission gate, hardware shortage or process health; restore the
+inventory join before judging metrics. A fully joined current process with
+zero devices, zero target and zero tracked use remains a separate healthy
+control. No production inventory omission or false recovery is asserted.
+Select
 the newest generation from every current instantaneous cohort before checking
 target completeness. This query has no RSS dependency, prior-time cohort or
 range-rate series; its four required families and optional retired-budget
@@ -40124,11 +40281,20 @@ returns a separate `cannot-observe` WARN at the fixed target
 its unobservable marker prevents healthy/recovery inference for the signal,
 even while below Sustain. It is returned without a fatal signal error because
 the public adapter discards findings on error. No operator health or failed
-layer's product conclusion is emitted. A fresh snapshot with no established
-positive retains the existing fatal observation-error contract. An ended
-parent, failed original snapshot read, or malformed original snapshot cannot
-publish a stale positive or healthy result; known snapshot absence retains
-its existing unavailable warning. Source-local cancellation/deadline errors
+layer's product conclusion is emitted. With a true physical-schema preflight,
+an internal `points-epoch-availability-drift` PAGE is also independent of the
+later operator-source read: false availability with affirmative payload, or
+true availability without a 1-based block number, remains PAGE alongside
+`cannot-observe` when that source fails or is malformed. Its evidence renders
+only validated snapshot counts, never invented calendar or rollup zeros.
+Calendar-ahead comparisons still require a valid operator source. An absent,
+malformed or unreadable preflight does not newly authorize availability PAGE;
+this does not infer a version policy for old compatibility fields. A fresh
+snapshot with no established positive retains the existing fatal
+observation-error contract. An ended parent, failed original snapshot read, or
+malformed original snapshot cannot publish a positive or healthy result;
+known snapshot absence retains its existing unavailable warning. Source-local
+cancellation/deadline errors
 with a live parent are dependency failures, not proof the parent ended.
 
 When the preflight passes, a third single-output-row, command-deadline-bounded
@@ -40223,6 +40389,15 @@ Main attribution nor readiness; missing runtime evidence remains unknown.
   the completed operator calendar. Verify source-version and application-clock
   boundaries before attributing this to stored-data corruption.
 
+False-positive qualifier: these snapshot-only contradictions are admitted only
+after the existing physical-schema prerequisite passes; schema presence does
+not attest deployed writer ancestry or prove a current Main incident. Ordinary
+pending rollup, measured zero, an open period and an older valid snapshot with
+new pending work retain their existing interpretation. False-negative
+qualifier: freshness does not make an internally contradictory snapshot valid;
+a later read/parse failure must not erase its PAGE. Without calendar evidence,
+no block-ahead or missing-rollup conclusion is inferred.
+
 The source-version boundary matters during rollout. The owning rollup
 migrations and operator-source rebuild must be verified before claiming that
 the operator readiness boundary is deployed. Migration 686 supplies the
@@ -40265,6 +40440,10 @@ controls in `signal_points_partial_test.go` cover stale/future snapshots crossed
 with later read/parse failures, exact dependency stopping points, public
 one-shot/execution-loop held results, actual parent cancellation, private-cell
 and source-error rendering, and no incident clear until complete recovery.
+The public-entry controls in `signal_points_contradiction_partial_test.go`
+pin fresh and stale internal availability PAGE with a later unavailable source,
+schema uncertainty, source-dependent calendar comparisons, complete-source
+controls, actual owner cancellation and private-source rendering.
 These controls do not establish a production incidence or repair the external
 points product's writer, rollout, accounting or task boundaries.
 
@@ -41153,8 +41332,22 @@ to 15 minutes apart, with the same boot and desired artifact. The exact
 neighbor must be FAILED or INCOMPLETE in both, have nonzero resolution probes,
 and have both use and update ages at most 30 seconds. Historical probes alone
 are not active-path proof. This paired predicate supplies sustain; the emitted
-finding has sustain 1. Missing/failed captures invalidate the pair. Evidence
-contains aggregate expected/reachable/unknown/active-failed counts only.
+finding has sustain 1. Missing/failed captures accepted while the parent is
+live invalidate the pair. Evidence contains aggregate
+expected/reachable/unknown/active-failed counts only.
+
+The owning pair-cache lock checks the previously captured parent cancellation
+channel before reading, deleting or replacing that router's accepted sample.
+A parent already ended at this checkpoint leaves the entire cache unchanged;
+its frame cannot count toward a neighbor failure pair. The channel is captured
+outside the lock; no context callback runs under that lock. Live-parent capture
+or parse failures still reset only that router's pair and remain unknown.
+Earlier live commits remain accepted, and cancellation after this checkpoint
+is not retroactive: this is no whole-run atomic rollback guarantee. Rejected
+or absent frames do not establish health or recovery. Synthetic public-Run
+controls force a live shared-check read followed by actual parent cancellation
+before the owning callback; this does not validate hardware or generic lock
+scheduling.
 
 False positives remain possible from narrowly sampled resolution churn or
 firmware age semantics; this does not identify ISP, cable, firewall or whole
@@ -41198,6 +41391,20 @@ zero delta. WARN `router-conntrack-drops` (sustain 2) preserves positive
 duplicate insertion/races and is an unknown-cause qualifier, not packet-loss
 proof. Concrete capacity or pressure findings survive an unknown counter
 pair; private counters are reduced to fixed scalar summaries only.
+
+Before reading, deleting or replacing a router's pair, the owning cache lock
+checks a parent cancellation channel captured outside the lock. A parent
+already ended at this checkpoint leaves the entire cache unchanged, so its
+frame cannot consume an accepted counter delta or evict a prior pair. No
+context callback runs under the lock. Under a live parent, capture/required
+scalar parse failures and unavailable counters retain their existing reset
+and unknown policy; independent capacity and pressure findings survive valid
+partial counter observations. Earlier live commits are preserved, and a later
+cancellation does not roll back this acceptance checkpoint or the whole run.
+Unknown or rejected frames never establish zero drops or recovery. Synthetic
+public-Run controls force cancellation after a live shared-check read and
+compare the next delta with an independent accepted-only pair; they do not
+prove target kernel semantics or general lock scheduling.
 
 An optional unprivileged kernel-ring read reduces only exact timestamped
 `nf_conntrack: table full, dropping packet` messages to a retained count and
@@ -41282,6 +41489,23 @@ SHA-256 signing fingerprint; the Apple document must authorize
 application failures into one `web-association-files` alert. Curl exit 7/28 on
 an exact edge remains owned by §18.1 so one transport incident does not open a
 second static-file ticket.
+Transport exclusions do not establish metadata completeness. If any enabled
+edge/path is unobserved because curl returned 7/28, this signal also reports one
+metadata-scoped `cannot-observe` finding with expected/checked/unobserved counts.
+It does not open a new `web-association-files` product incident or diagnose the
+transport, responder, or bundle. Its ready or held visibility marker makes the
+execution incomplete: prior metadata incidents do not receive healthy absence
+credit merely because their required documents were not observed. Independently
+observed HTTP/status or content failures remain present beside that marker.
+Only complete semantic observations on all enabled exact edge/path checks supply
+ordinary absence credit under the shared notifier policy. An unconfigured website
+or empty enabled target set remains a separate applicability case. Unknown error,
+body and endpoint bytes are not copied into the metadata availability finding;
+the existing bounded evidence policy for an observed product failure is unchanged.
+A valid sibling does not prove the skipped contract, and this local completeness
+repair does not establish canonical CDN recovery, responder identity, deployed
+artifact adoption or the separate ten-minute ENOENT verification below.
+
 
 2026-08-31 root cause: the authoritative files were tracked under
 `mmm/ur.io/astro/public/.well-known` and present in `astro/dist/.well-known`.
@@ -41370,6 +41594,23 @@ Scope the diagnosis to the actual responses. One exact-edge 404 does not prove
 every edge lacks the image; retain successful peers as controls. Exact-edge
 transport checks omitted under §18.1 leave image contents unknown and prevent
 an all-edges-healthy conclusion, even when the remaining checked edges pass.
+
+Excluded exact-edge transport must remain explicit metadata incompleteness, not
+healthy absence. If any required exact-edge image check has curl exit 7/28, this
+signal retains one metadata-scoped `cannot-observe` finding with fixed
+expected/checked/unobserved counts, without opening a new image-product or edge
+transport incident. Ready or held visibility withholds recovery credit from prior
+image incidents; healthy public or exact-edge siblings do not prove an omitted
+required check. Independently observed HTTP/content failures remain present.
+The existing public-path `web-email-assets-transport` identity is itself a
+visibility class, including while held below its two-cadence sustain; its working
+recovery protection and classification remain unchanged. Only complete measured
+public and enabled exact-edge contracts supply ordinary shared-notifier absence
+credit. No configured website remains inapplicable; a configured website without
+exact edges still checks its public image URLs. Skipped error, response and
+endpoint bytes are not copied into the availability finding. This completeness
+rule does not establish recipient impact, responder identity, deployment adoption,
+cache ownership or the separate ten-minute operational verification below.
 
 Retired contract history: before 2026-09-01 the templates referenced six
 `https://bringyour.com/res/emails/...` assets through a CloudFront
@@ -41661,6 +41902,24 @@ characters before an `Alert` can render it.
 
 Probe: `play-crashes`
 
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
+
 Read the Play Developer Reporting API v1beta1 for the package named by the
 existing `vault/<env>/google.yml` `webhook.package_name` value. The dedicated
 optional `vault/<env>/google-play-reporting.json` is an ordinary Google service
@@ -41761,6 +42020,24 @@ they do not require an API, Connect, Proxy, Grafana, or database deployment.
 ### 20.2 Apple App Crashes aggregate and corrections
 
 Probe: `apple-crashes`
+
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
 
 Read App Store Connect Analytics for the numeric app ID already stored at
 `vault/<env>/apple.yml` `app_store_notifications.app_apple_id`. Keep the team
@@ -41872,6 +42149,20 @@ inactivity timeouts. Status rows are joined to clients by the exact configured
 virtual IPv4 address, not by a possibly different certificate common name. The ICMP
 check is part of this inventory's established host contract: every enabled
 client currently answers it from the VPN server.
+
+The supported Linux observer contract is iputils `ping -n -c 1 -W 1`:
+exit 0 proves a reply and exit 1 proves no reply. Other exits, including
+command unavailable, permission/argument errors, and termination, produce a
+fixed per-client unknown result, not a failed path or a reachable control.
+That client emits the existing `cannot-observe` visibility warning (two
+cadences). Unknown ping execution does not erase independently complete
+missing-session or unit-state evidence, or another client's qualified path
+failure/control. It cannot add a client to shared-source loss correlation.
+A missing reachability row remains malformed; `unknown` is an explicit
+execution result. No retry, privilege change, alternate endpoint, or extra
+probe is introduced. Qualification must establish the selected remote ping
+implementation's exit contract; this source change does not attest its
+installation or demonstrate a client outage or recovery.
 
 Before command assembly, admit both each client's exact inventory name and its
 overlay endpoint through the immutable host-scope policy. Excluded clients and

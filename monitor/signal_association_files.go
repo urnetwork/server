@@ -1,3 +1,4 @@
+// Required metadata failures remain independent of unobserved exact-edge contracts.
 package monitor
 
 import (
@@ -265,18 +266,21 @@ func containsString(values []string, wanted string) bool {
 	return false
 }
 
-// Preserve observed response/content failures without assigning an unobserved serving cause.
+// Preserve observed response/content failures and mark skipped contracts unknown.
+// Transport ownership stays separate from the static-file product incident.
 func associationFilesFindings(hostname string, results []associationProbeResult) []finding {
 	failures := []string{}
 	missing := 0
 	invalid := 0
 	responseFailures := 0
 	checked := 0
+	unobserved := 0
 	for _, result := range results {
 		exitCode := result.public.values["monitor_exitcode"]
 		// A dead exact-address transport is already localized by §18.1. It
 		// must not create a second static-file incident with no new evidence.
 		if exitCode == "7" || exitCode == "28" {
+			unobserved++
 			continue
 		}
 		checked++
@@ -318,8 +322,18 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 			associationBodyPrefix(result.public.body),
 		))
 	}
+	findings := []finding{}
+	if unobserved > 0 {
+		unknown := cannotObserveFinding("association-files/"+hostname, fmt.Errorf("required association metadata was not observed"))
+		unknown.mechanism = "Required association documents were not observed on every enabled exact edge/path. Transport ownership remains with the edge IPv6 signal; this metadata execution cannot establish contract recovery."
+		unknown.observed = fmt.Sprintf("expected=%d checked=%d unobserved=%d", len(results), checked, unobserved)
+		unknown.action = "Retain prior metadata incidents, preserve independent response/content findings, and use the separately owned transport evidence before choosing a repair. Do not infer a missing static file or synthesize fallback metadata."
+		unknown.verify = "Every enabled exact edge/path returns a complete association response that can be classified and semantically validated."
+		unknown.playbook = "SIGNALS.md §19.1 and §18.1"
+		findings = append(findings, unknown)
+	}
 	if len(failures) == 0 {
-		return nil
+		return findings
 	}
 
 	mechanism := "At least one exact edge/path check did not return usable Android/Apple ownership metadata. A failed HTTP or transport response leaves the responding component and bundle contents unknown; ordinary page health cannot substitute for the required contract."
@@ -333,7 +347,7 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 		action += " For invalid HTTP 200 responses, compare the returned media type and semantic authorization with the tracked document and its serving artifact before selecting the content or route repair."
 	}
 
-	return []finding{{
+	return append(findings, finding{
 		probeId: "synthetic/web-association-files", tier: tierWarn,
 		class: "web-association-files", target: hostname, sustain: 1,
 		symptom:   fmt.Sprintf("%s mobile association metadata fails on %d exact edge/path checks", hostname, len(failures)),
@@ -345,7 +359,7 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 		action:    action,
 		verify:    "Require both paths to return HTTP 200 application/json with the expected semantic authorization on every enabled exact edge address and through the canonical CDN hostname. Then require zero exact-path nginx ENOENT lines for ten minutes.",
 		playbook:  "SIGNALS.md §19.1",
-	}}
+	})
 }
 
 func associationBodyPrefix(body string) string {

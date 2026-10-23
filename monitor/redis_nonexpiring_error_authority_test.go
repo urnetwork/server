@@ -165,8 +165,8 @@ func TestRedisNonexpiringAuthorityErrorLiveParent(t *testing.T) {
 }
 
 // Ending the actual caller inside the source does not erase its returned
-// cause. The existing scoped adapter adds the parent verdict; direct and
-// unscoped paths retain the producer's returned failure without an override.
+// cause. Both live-entry adapter paths add the canonical parent verdict;
+// direct collection and probe entry keep their existing source authority.
 func TestRedisNonexpiringAuthorityErrorEndedParent(t *testing.T) {
 	for _, mode := range []string{"collector", "probe", "unscoped", "scoped"} {
 		for _, sourceContext := range []error{context.Canceled, context.DeadlineExceeded} {
@@ -192,12 +192,13 @@ func TestRedisNonexpiringAuthorityErrorEndedParent(t *testing.T) {
 			if calls != 1 || len(alerts) != 0 {
 				t.Fatal("ended parent changed source count or published a verdict")
 			}
+			adapter := mode == "unscoped" || mode == "scoped"
 			wantClass := observationErrorClassCanceled
-			if sourceContext == context.DeadlineExceeded && mode != "scoped" {
+			if sourceContext == context.DeadlineExceeded && !adapter {
 				wantClass = observationErrorClassTimeout
 			}
 			causes := []error{sourceErr, sourceContext, admission, privateCause}
-			if mode == "scoped" {
+			if adapter {
 				causes = append(causes, context.Canceled)
 			}
 			requireRedisNonexpiringErrorIdentity(t, settings, err, wantClass, "release", causes...)

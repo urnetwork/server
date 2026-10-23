@@ -173,7 +173,17 @@ func TestRedisShardSubscriptionsPartialScopeCannotClearExistingPage(t *testing.T
 				t.Fatal("excluded observation contacted a source during notifier retention")
 			}
 			if completeRecovery {
-				postSignalRunsThroughTheGate(t, signal, settings, 1, func(int) {}, notifier)
+				postSignalRunsThroughTheGate(t, signal, settings, 2, func(next int) {
+					if next == 1 {
+						notifier.stateLock.Lock()
+						incident, present := notifier.keyIncidents[slackIncidentKey(existing)]
+						retained := present && incident.severity == SeverityPage && incident.signalKeyAbsentRuns[signal.Key()] == 1
+						notifier.stateLock.Unlock()
+						if !retained {
+							t.Fatal("first complete observation after partial scope did not retain PAGE with one recovery run")
+						}
+					}
+				}, notifier)
 			}
 			closeSlackNotifier(t, notifier)
 			texts := webhook.posted()

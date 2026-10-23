@@ -94,6 +94,10 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alert
 		}
 		if resultErr == nil || resultErr == contextErr {
 			resultErr = contextErr
+		} else if interrupted, ok := resultErr.(*signalContextError); ok && interrupted != nil && interrupted.contextErr == contextErr {
+			// The owning probe already retained this exact parent and source.
+			// Keep its direct wrapper identity instead of adding another layer.
+			return
 		} else {
 			resultErr = &signalContextError{contextErr: contextErr, sourceErr: resultErr}
 		}

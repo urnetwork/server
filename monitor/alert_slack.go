@@ -108,7 +108,8 @@ type SlackAlertNotifierSettings struct {
 	Environment string
 	// sliding one-minute cap on messages, the rate-limit summary included
 	MaxMessagesPerMinute int
-	// consecutive complete executions without an incident before it clears
+	// uninterrupted complete executions without an incident before it clears;
+	// an incomplete execution resets only its reporting signal's streak
 	ClearAfterCompleteRuns int
 	// how long the start digest collects raises after its first before it
 	// posts; a page posts it at once
@@ -532,6 +533,12 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 		}
 	}
 	if !complete {
+		// Unknown evidence breaks this signal's consecutive absence streak.
+		for _, incident := range self.keyIncidents {
+			if _, owned := incident.signalKeyAbsentRuns[signalKey]; owned {
+				incident.signalKeyAbsentRuns[signalKey] = 0
+			}
+		}
 		return transitions
 	}
 

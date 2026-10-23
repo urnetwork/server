@@ -141,9 +141,16 @@ func routerNeighborActiveFailure(entry routerNeighborEntry) bool {
 }
 
 func (self *routerNeighborsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	parentDone := ctx.Done()
 	return routerTargets(ctx, env, "neighbors", func(h *host, observed routerObservation, err error) []finding {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		// Accept this frame only while its parent is live at this checkpoint.
+		select {
+		case <-parentDone:
+			return nil
+		default:
+		}
 		previous := self.previous[h.name]
 		delete(self.previous, h.name)
 		if err != nil {

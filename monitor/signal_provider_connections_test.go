@@ -383,7 +383,8 @@ func TestProviderConnectionsThresholdAndFractionalPercentile(t *testing.T) {
 }
 
 // The real run loop retains a page through unknowns and one complete recovery
-// observation. Two complete recoveries clear it; a later unknown cannot revive it.
+// observation. Two uninterrupted complete recoveries clear it; an unknown
+// resets a retained incident's credit and cannot revive an already cleared one.
 func TestProviderConnectionsNotifierDoesNotRecoverOnUnknown(t *testing.T) {
 	for _, c := range []struct {
 		completeRuns int
@@ -450,7 +451,7 @@ func TestProviderConnectionsNotifierDoesNotRecoverOnUnknown(t *testing.T) {
 			}
 		}, notifier)
 		if c.wantClears == 0 {
-			checkIncident(lastRun+1, true, 1)
+			checkIncident(lastRun+1, true, 0)
 		} else {
 			checkIncident(lastRun+1, false, 0)
 		}

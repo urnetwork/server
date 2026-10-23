@@ -72,7 +72,16 @@ func (proxyDeviceTargetProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		}
 	}
 	if len(expectedHosts) == 0 {
-		return []finding{healthyFinding("runtime/proxy-device-target", tierWarn, "proxy-device-target-mismatch", "proxy-fleet")}, nil
+		// Disabled derived placements are intentional scope, not a failed join.
+		disabledProxyHosts := 0
+		for _, host := range env.cfg.disabledHosts {
+			if host.proxy != nil {
+				disabledProxyHosts++
+			}
+		}
+		if env.cfg.proxyPathExpectedHosts <= 0 || disabledProxyHosts == env.cfg.proxyPathExpectedHosts {
+			return []finding{healthyFinding("runtime/proxy-device-target", tierWarn, "proxy-device-target-mismatch", "proxy-fleet")}, nil
+		}
 	}
 	blocks := env.cfg.logServiceBlocks["proxy"]
 	if len(blocks) == 0 || env.cfg.proxyPathExpectedHosts > 0 && len(expectedHosts) != env.cfg.proxyPathExpectedHosts {
