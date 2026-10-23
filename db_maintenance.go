@@ -1,7 +1,8 @@
 // Scheduled database maintenance: a hash rotation rebuilds each public table's
 // indexes once per DbReindexEpochs epochs with REINDEX CONCURRENTLY, measures
 // each named high-churn partial index of a table too large for the rotation
-// and, once an operator enables it, rebuilds it whenever it is bloated, removes
+// (each partition's leaf of it, once the table is partitioned) and, once an
+// operator enables it, rebuilds it whenever it is bloated, removes
 // the invalid copies an interrupted concurrent rebuild leaves behind, and
 // refreshes planner statistics.
 //
@@ -112,7 +113,10 @@ const dbMaintenanceFailedReindexCleanupTimeout = 20 * time.Second
 // not reused and the index grows with its churn rather than its live rows (on
 // 2026-10-12 these held about 310 GB beyond their 55 GB of live entries). Each
 // is rebuilt on its own whenever it is bloated; see
-// dbMaintenancePriorityIndex.bloated.
+// dbMaintenancePriorityIndex.bloated. Once the contract tables are partitioned
+// (CONTRACT-PARTITION.md) each name is a partitioned index, which is never
+// rebuilt as a whole: each partition's leaf index is measured and rebuilt on
+// its own, so a bloated legacy leaf never drags the weekly ones along.
 var priorityReindexIndexes = []string{
 	"transfer_contract_open_partial_create_time",
 	"transfer_contract_outcome_null",
@@ -259,15 +263,27 @@ func dbMaintenanceEstimateBtreeBytes(
 	return (leafPages + 1) * blockSize, true
 }
 
-// A priority index's size against its estimated compact size.
+// A priority index's size against its estimated compact size. On a partitioned
+// table each leaf index is its own priority index: indexName and tableName name
+// the leaf and its partition, and priorityName the partitioned index it belongs
+// to. On an ordinary table priorityName is indexName.
 type dbMaintenancePriorityIndex struct {
-	indexName  string
-	tableName  string
-	indexBytes int64
+	priorityName string
+	indexName    string
+	tableName    string
+	indexBytes   int64
 	// the main fork of the owning table, which a rebuild reads twice
 	heapBytes int64
 	// zero when the compact size cannot be estimated
 	compactBytes int64
+}
+
+// The index's name in the log: a leaf also names its partitioned index.
+func (self *dbMaintenancePriorityIndex) label() string {
+	if self.priorityName == "" || self.priorityName == self.indexName {
+		return self.indexName
+	}
+	return fmt.Sprintf("%s (leaf of %s)", self.indexName, self.priorityName)
 }
 
 // Whether a rebuild is due: the index is at least the bloat factor times its
@@ -305,11 +321,34 @@ func dbMaintenanceSelectPriorityIndexes(
 	return selectedIndexes
 }
 
-// One row per column of each named index that is a valid btree index on an
-// ordinary public table, in index column order. A column's statistics come
+// One row per column of each candidate of the named indexes that is a valid
+// btree index on an ordinary public table, in index column order, with the
+// named index it stands for. A named index on an ordinary table is its own
+// candidate; a named partitioned index (relkind I) resolves to the leaf index
+// of each partition, which is measured against that partition alone. A
+// partitioned index or table is never a candidate. A column's statistics come
 // from its table column, or from the index for an expression column.
 const dbMaintenancePriorityIndexColumnsQuery = `
+	WITH named_index AS (
+		SELECT index_class.oid, index_class.relname, index_class.relkind
+		FROM pg_class index_class
+		INNER JOIN pg_namespace index_namespace ON index_namespace.oid = index_class.relnamespace
+		WHERE index_namespace.nspname = 'public'
+		  AND index_class.relname = ANY($1::text[])
+	), candidate AS (
+		SELECT named_index.relname AS priority_name, named_index.oid AS index_oid
+		FROM named_index
+		WHERE named_index.relkind = 'i'
+		UNION
+		-- pg_partition_tree lists nothing for an index that is neither
+		-- partitioned nor a partition
+		SELECT named_index.relname, tree.relid
+		FROM named_index
+		CROSS JOIN LATERAL pg_partition_tree(named_index.oid) tree
+		WHERE tree.isleaf
+	)
 	SELECT
+		candidate.priority_name,
 		index_class.relname,
 		table_class.relname,
 		pg_relation_size(index_class.oid),
@@ -325,8 +364,8 @@ const dbMaintenancePriorityIndexColumnsQuery = `
 		index_attribute.attalign::text,
 		column_stats.avg_width::int,
 		column_stats.null_frac::float8
-	FROM pg_class index_class
-	INNER JOIN pg_namespace index_namespace ON index_namespace.oid = index_class.relnamespace
+	FROM candidate
+	INNER JOIN pg_class index_class ON index_class.oid = candidate.index_oid
 	INNER JOIN pg_am index_am ON index_am.oid = index_class.relam
 	INNER JOIN pg_index index_state ON index_state.indexrelid = index_class.oid
 	INNER JOIN pg_class table_class ON table_class.oid = index_state.indrelid
@@ -344,18 +383,18 @@ const dbMaintenancePriorityIndexColumnsQuery = `
 			(column_stats.tablename = table_class.relname AND column_stats.attname = table_attribute.attname)
 			OR (table_attribute.attname IS NULL AND column_stats.tablename = index_class.relname AND column_stats.attname = index_attribute.attname)
 		)
-	WHERE index_namespace.nspname = 'public'
-	  AND index_class.relname = ANY($1::text[])
-	  AND index_am.amname = 'btree'
+	WHERE index_am.amname = 'btree'
 	  AND index_state.indisvalid
 	  AND table_class.relkind = 'r'
 	ORDER BY index_class.relname, index_attribute.attnum
 `
 
-// The size and compact estimate of each named index that exists as a valid
-// btree index on an ordinary public table; a dropped or renamed name is
-// skipped. An index whose compact size cannot be estimated has compactBytes 0
-// and is never bloated.
+// The size and compact estimate of each candidate of the named indexes (see
+// dbMaintenancePriorityIndexColumnsQuery): the index itself on an ordinary
+// public table, or each leaf of a partitioned index; a dropped or renamed name
+// is skipped. A leaf's name is accepted too and measures that leaf alone. An
+// index whose compact size cannot be estimated has compactBytes 0 and is never
+// bloated.
 func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (priorityIndexes []dbMaintenancePriorityIndex, returnErr error) {
 	type indexState struct {
 		priorityIndex dbMaintenancePriorityIndex
@@ -376,6 +415,7 @@ func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (
 					var averageWidth *int32
 					var nullFraction *float64
 					Raise(result.Scan(
+						&state.priorityIndex.priorityName,
 						&state.priorityIndex.indexName,
 						&state.priorityIndex.tableName,
 						&state.priorityIndex.indexBytes,
@@ -441,9 +481,37 @@ var dbMaintenanceSkipReindexTablePattern = sync.OnceValue(func() *regexp.Regexp 
 	return regexp.MustCompile(`^client_reliability_p[0-9]{8}$`)
 })
 
+// The contract partitions (CONTRACT-PARTITION.md) are never rebuilt as a
+// whole either: a weekly partition is dropped whole at retention, and the
+// legacy partition holds every contract from before the cutover, terabytes
+// that one rebuild would read for days. Their bloated priority indexes are
+// rebuilt one leaf at a time instead. The staged parents of a prepared cutover
+// are empty until the swap.
+func dbMaintenanceIsContractPartitionTable(tableName string) bool {
+	if _, _, _, ok := ParseContractPartitionName(tableName); ok {
+		return true
+	}
+	for _, table := range ContractPartitionTables {
+		if tableName == contractStagedParentName(table) {
+			return true
+		}
+	}
+	return false
+}
+
 func dbMaintenanceShouldReindexTable(tableName string) bool {
 	return !dbMaintenanceSkipReindexTables[tableName] &&
-		!dbMaintenanceSkipReindexTablePattern().MatchString(tableName)
+		!dbMaintenanceSkipReindexTablePattern().MatchString(tableName) &&
+		!dbMaintenanceIsContractPartitionTable(tableName)
+}
+
+// Whether the rotation may rebuild a table as a whole. REINDEX TABLE on a
+// partitioned table rebuilds every partition, so a contract table that is
+// partitioned stays out with its partitions, while the same table before the
+// cutover keeps its place.
+func dbMaintenanceShouldReindexRelation(tableName string, partitioned bool) bool {
+	return dbMaintenanceShouldReindexTable(tableName) &&
+		!(partitioned && slices.Contains(ContractPartitionTables, tableName))
 }
 
 // Returns the ChooseRelationName label that ends a REINDEX CONCURRENTLY
@@ -899,7 +967,11 @@ func dbMaintenanceTableLocked(ctx context.Context, tableName string) (locked boo
 // toast tables. $2 restricts the list to one index for the recheck before a
 // drop. An index is omitted while a CREATE INDEX or REINDEX is in progress on
 // its table, because its suffixed siblings may be that operation's live
-// copies.
+// copies. A partitioned index (relkind I) is never a candidate: REINDEX
+// CONCURRENTLY copies only leaf indexes, a partitioned index is invalid
+// whenever one of its partitions lacks a valid attached index (an index
+// migration builds them one partition at a time), and DROP INDEX
+// CONCURRENTLY cannot drop one.
 const dbMaintenanceReindexDebrisQuery = `
 	WITH owner_table AS (
 		SELECT table_class.oid
@@ -958,6 +1030,7 @@ const dbMaintenanceReindexDebrisQuery = `
 		AND (SELECT relam FROM pg_class WHERE oid = original.indexrelid) = candidate_class.relam
 	LEFT JOIN pg_class original_class ON original_class.oid = original.indexrelid
 	WHERE NOT candidate.indisvalid
+	  AND candidate_class.relkind = 'i'
 	  AND candidate_class.relname ~ '_cc(new|old)([1-9][0-9]*)?$'
 	  AND ($2::bigint IS NULL OR candidate_class.oid = $2::bigint)
 	  AND NOT EXISTS (
@@ -1260,24 +1333,33 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 
 	tableNames := []string{}
 	reindexTableNames := []string{}
+	// partitioned tables, which information_schema lists as base tables too
+	partitionedTableNames := map[string]bool{}
 
 	MaintenanceDb(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 			SELECT
-				table_name
-			FROM information_schema.tables
+				tables.table_name,
+				coalesce(table_class.relkind = 'p', false)
+			FROM information_schema.tables tables
+			LEFT JOIN pg_class table_class
+				ON table_class.oid = to_regclass(format('%I.%I', tables.table_schema, tables.table_name))
 			WHERE
-				table_schema = 'public' AND
-				table_type = 'BASE TABLE'
+				tables.table_schema = 'public' AND
+				tables.table_type = 'BASE TABLE'
 			`,
 		)
 		WithPgResult(result, err, func() {
 			for result.Next() {
 				var tableName string
-				Raise(result.Scan(&tableName))
+				var partitioned bool
+				Raise(result.Scan(&tableName, &partitioned))
 				tableNames = append(tableNames, tableName)
+				if partitioned {
+					partitionedTableNames[tableName] = true
+				}
 			}
 		})
 
@@ -1310,7 +1392,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		for _, measuredIndex := range measuredIndexes {
 			glog.Infof(
 				"[db]maintenance priority index %s on %s is %d bytes (compact estimate %d bytes, heap %d bytes)\n",
-				measuredIndex.indexName,
+				measuredIndex.label(),
 				measuredIndex.tableName,
 				measuredIndex.indexBytes,
 				measuredIndex.compactBytes,
@@ -1323,7 +1405,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 			bloatedIndexNames := []string{}
 			for _, measuredIndex := range measuredIndexes {
 				if measuredIndex.bloated() {
-					bloatedIndexNames = append(bloatedIndexNames, measuredIndex.indexName)
+					bloatedIndexNames = append(bloatedIndexNames, measuredIndex.label())
 				}
 			}
 			glog.Infof(
@@ -1335,7 +1417,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	}
 	priorityIndexNames := []string{}
 	for _, priorityIndex := range priorityIndexes {
-		priorityIndexNames = append(priorityIndexNames, priorityIndex.indexName)
+		priorityIndexNames = append(priorityIndexNames, priorityIndex.label())
 	}
 	glog.Infof(
 		"[db]maintenance %d/%d tables (in random order): %s; priority indexes: %s\n",
@@ -1561,7 +1643,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				glog.Infof(
 					"[db]maintenance %s %s is %d bytes, was %d (compact estimate %d bytes, still bloated %t)\n",
 					prefix,
-					rebuiltIndex.indexName,
+					priorityIndex.label(),
 					rebuiltIndex.indexBytes,
 					priorityIndex.indexBytes,
 					rebuiltIndex.compactBytes,
@@ -1580,7 +1662,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 			break
 		}
 		reindexStatement := ""
-		if opts.Reindex && dbMaintenanceShouldReindexTable(tableName) {
+		if opts.Reindex && dbMaintenanceShouldReindexRelation(tableName, partitionedTableNames[tableName]) {
 			reindexStatement = `REINDEX TABLE CONCURRENTLY ` + pgx.Identifier{"public", tableName}.Sanitize()
 			if !opts.IncludeLargeTables {
 				bytes, err := dbMaintenanceTableBytes(ctx, tableName)
