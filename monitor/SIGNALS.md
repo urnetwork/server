@@ -310,7 +310,6 @@ active missing capability and must not be read as green.
 | 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
 | 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
 | 14.6 | Probe | `proxy-transport` plus `log-errors`, `proxy-pool`, `proxy-runtime` controls |
-| 14.8 | Coverage gap | `proxy-runtime` and `control-route-pressure` see proxy process health and control load; identity mint/retire rate, lifetime and refusal checks are missing. |
 | 15.2 | Shared contract | `key-publication`, `log-errors` |
 | 15.3 | Shared contract | `key-publication`, `log-errors` |
 | 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
@@ -25960,7 +25959,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
 | retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
-| identity-churn / identity-churn-loop | Mimir proxy metrics + pg | §14.8 | WARN on per-device mints, retire/mint ratio or refusals; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
+| identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
 | modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |
 
 ---
@@ -38009,7 +38008,7 @@ with independent actual GO SHA-256
 `a570027ab36a073c97449a3caaf4a97954442883875ba8e54f765e7e2dbaa2dc`.
 
 ### 14.8 Hosted identity churn — the loop that fills both disks
-Probe: `identity-churn` (catalog entry; not implemented as of 2026-10-22)
+Probe: `identity-churn`
 
 How it works:
 - A hosted proxy device keeps multi-client windows. Every candidate exit is a
@@ -38096,6 +38095,47 @@ False-positive qualifier: a fleet rollout recreates windows for its duration,
 and a growing hosted fleet raises mints without raising per-device churn.
 False-negative qualifier: the admission bound caps mints, so read refusals
 beside them. Taskworker and api mints (probes, apps) are separate jobs.
+
+Implementation (five-minute cadence). One bounded loopback Mimir instant query
+over the proxy fleet (`job="proxy"`), evaluated two minutes behind now, returns:
+hosted mints and retires as
+`sum(rate(urnetwork_jwt_state_queries_total{caller="hosted",operation="mint"|"retire"}[30m]))`
+(one JWT-state query per admitted `AuthNetworkClient` or `RemoveNetworkClient`;
+retries count again), `sum(rate(urnetwork_hosted_mint_admission_refusals_total[15m]))`,
+`sum(urnetwork_proxy_devices_active)`, the per-device expression held over 30
+minutes at five-minute steps (`min_over_time(...[30m:5m])`) with its point
+count, its 7-day median at hourly steps (`quantile_over_time(0.5, ...[7d:1h])`)
+with its point count, primary discovery outcomes by `outcome` over 30 minutes,
+fresh queued PgBouncer clients, the five-minute §2.30 per-reply contract mean,
+and per-slot freshness of the devices, hosted-mint, refusal and
+native-source-schema families. The hold and the baseline are Mimir history, so
+a monitor restart learns neither. A read-only PostgreSQL aggregate samples the
+hosted identities (derived clients whose parent is a `proxy_device_config`
+client, across every network) created in the one-minute primary-key range that
+ended ten minutes ago, capped at 200,000 rows: identities, alive, retired
+without a connection row, never connected, and the retired median lifetime.
+No client, network or device id is selected or rendered.
+
+Classes: `identity-churn` (WARN, sustain 2) names its criteria:
+`per_device_mints` (held minimum over twice the weekly median, which needs at
+least 84 of 168 hourly points and a positive median), `retire_ratio` (over 0.8
+while mints exceed 150/s), `mint_refusals` (over 100/s), `discovery_unresolved`
+(exhausted plus unavailable over 30% of primary outcomes once outcomes reach
+1/s) and `short_lived` (at least 3,000 sampled identities, under 50% alive after
+ten minutes and at least 50% retired without connecting). Every band is
+exclusive. `identity-churn-loop` (PAGE, sustain 2) is any criterion together
+with queued PgBouncer clients over 500 or the §2.30 mean over 1 s, including an
+unbounded mean when calls return without replies; either side engages it on its
+own evidence. `identity-churn-unobservable` (visibility) reports a failed or
+annotated Mimir read, a failed or inconsistent lifetime row, a desired proxy
+slot whose families are missing, stale (older than three minutes), duplicated
+or on an excluded or disabled host, an incomplete hold, a short or zero
+baseline, unknown mint or refusal rates, an unrecognized discovery outcome, and
+proven churn while the database side of the loop is unread. Each source fails
+alone: churn proven by Mimir still alerts when the lifetime read fails, and the
+lifetime criterion still alerts when Mimir fails. The 10-15 discovery note
+reads 1–2/s per outcome at 2.9 discoveries/s; confirm the healthy primary share
+against production before tightening the 30% band.
 
 ACTION: break the loop on the database side (§2.30, §5.6) or the client side:
 discovery pacing (connect 8033a898), a lower hosted mint cap, racing 1× for
