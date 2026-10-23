@@ -11,7 +11,6 @@ import (
 	"go/parser"
 	"go/token"
 	"math"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -401,13 +400,9 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 			return true
 		}
 		receiver, ok := method.X.(*ast.Ident)
-		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "conn" || !literalOk || literal.Kind != token.STRING {
+		sql, sqlOk := modelSqlExpressionValue(call.Args[1])
+		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
-		}
-		sql, err := strconv.Unquote(literal.Value)
-		if err != nil {
-			t.Fatal(err)
 		}
 		for _, branch := range []string{"earliest_origin", "earliest_companion_origin"} {
 			if !strings.Contains(sql, "AS "+branch) {
@@ -457,10 +452,13 @@ func TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				// The density rows exercise only the read plan. Financial
 				// qualification above uses public creators with actual escrow.
+				// Their ids lead with their creation millisecond, as minted ids
+				// do, so the reads' contract id bound keeps every one eligible.
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
 					(contract_id,source_network_id,source_id,destination_network_id,destination_id,
 					 transfer_byte_count,companion_contract_id,payer_network_id,create_time,expiration_time)
-					SELECT md5(c.contract_id::text||i::text)::uuid,c.source_network_id,c.source_id,
+					SELECT (lpad(to_hex((extract(epoch FROM now()-interval '30 seconds')*1000)::bigint),12,'0')||
+					 substr(md5(c.contract_id::text||i::text),1,20))::uuid,c.source_network_id,c.source_id,
 					 c.destination_network_id,c.destination_id,512,c.companion_contract_id,c.payer_network_id,
 					 now()-interval '30 seconds'+i*interval '1 microsecond',c.expiration_time
 					FROM transfer_contract c CROSS JOIN generate_series(1,4096) i WHERE c.contract_id=$1`, f.anchor.ContractId))

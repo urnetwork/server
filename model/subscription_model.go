@@ -2106,15 +2106,18 @@ var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companio
 // createCompanionTransferEscrow, which differ only in companion_contract_id.
 // $1 and $2 are the origin's source and destination, the companion's reverse;
 // $3 is the earliest close time of a lingering origin. Like those selections,
-// the closed branch is bounded by the contract id (see
-// CompanionOriginCloseLinger), so it reads only the pair's recent contracts.
-const companionOriginExistsSql = `
+// both branches are bounded by the contract id (see unexpiredContractIdAge),
+// so each reads only the pair's recent contracts.
+var companionOriginExistsSql = `
 	SELECT EXISTS (
 		SELECT 1 FROM transfer_contract
 		WHERE
 			-- equivalent to the generated open flag but opaque to legacy
 			-- false-zero open/outcome indexes
 			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			-- ids lead with their creation millisecond: an unexpired
+			-- contract's id is at least this bound
+			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2125,7 +2128,7 @@ const companionOriginExistsSql = `
 			$3 <= close_time AND
 			-- ids lead with their creation millisecond: an unexpired
 			-- contract's id is at least this bound
-			contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2255,13 +2258,14 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE open = false AND $3 <= close_time AND
-                                contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
@@ -2275,6 +2279,9 @@ func createCompanionTransferEscrow(
 							-- The CASE is equivalent to the generated open flag but
 							-- opaque to legacy false-zero open/outcome indexes.
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                            -- ids lead with their creation millisecond: an
+                            -- unexpired contract's id is at least this bound
+                            contract_id >= `+unexpiredContractIdFloorSql+` AND
                             COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
@@ -2295,7 +2302,7 @@ func createCompanionTransferEscrow(
                                 $3 <= close_time AND
                                 -- ids lead with their creation millisecond: an
                                 -- unexpired contract's id is at least this bound
-                                contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -2367,6 +2374,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2375,7 +2383,7 @@ func createCompanionTransferEscrow(
                                     source_network_id, destination_network_id
                                 FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
-                                    contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2399,6 +2407,9 @@ func createCompanionTransferEscrow(
 								-- Keep both generic open and outcome-null partial
 								-- indexes ineligible for this pair lookup.
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                -- ids lead with their creation millisecond: an
+                                -- unexpired contract's id is at least this bound
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -2419,7 +2430,7 @@ func createCompanionTransferEscrow(
                                 WHERE
                                     open = false AND
                                     $3 <= close_time AND
-                                    contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND
                                     destination_id = $2 AND
@@ -2542,6 +2553,8 @@ func createCompanionTransferEscrow(
 // - at least `contractTransferByteCount` available
 // - not closed by any party
 // - with transfer escrow
+// - unexpired, so inside the contract id bound (unexpiredContractIdAge), which
+// each joined table repeats
 func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	ctx context.Context,
 	sourceId server.Id,
@@ -2562,16 +2575,25 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 
                 FROM transfer_contract
 
+                -- the bound is part of the join: a close row of a contract
+                -- inside the bound is inside it too, so the anti-join is
+                -- unchanged, and PostgreSQL does not carry an inequality
+                -- across the join equality
                 LEFT OUTER JOIN contract_close ON
-                    contract_close.contract_id = transfer_contract.contract_id
+                    contract_close.contract_id = transfer_contract.contract_id AND
+                    contract_close.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 INNER JOIN transfer_escrow ON
-                    transfer_escrow.contract_id = transfer_contract.contract_id
+                    transfer_escrow.contract_id = transfer_contract.contract_id AND
+                    transfer_escrow.contract_id >= `+unexpiredContractIdFloorSql+`
 
                 WHERE
 					-- This is equivalent to the generated-open expression but
 					-- remains opaque to false-zero legacy partial indexes.
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
+                    -- ids lead with their creation millisecond: an unexpired
+                    -- contract's id is at least this bound
+                    transfer_contract.contract_id >= `+unexpiredContractIdFloorSql+` AND
                     COALESCE(transfer_contract.expiration_time, transfer_contract.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
