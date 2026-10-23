@@ -255,7 +255,6 @@ active missing capability and must not be read as green.
 | 2.4f | Coverage gap | `pg-disk-space` (absolute 100 GB floor) and `pg-disk-runway` (visibility-only unknown) are the registered boundaries; the max-of-windows runway estimator for edge-2 and every other stateful volume is missing. |
 | 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
-| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -18184,16 +18183,16 @@ sweep's naming four days old, and tomorrow's partition dropped — and assert
 exactly the sweep part each one is.
 
 ### 2.19d Country-specific egress site coverage and freshness
-Planned probe: `egress-country-sites`
+Probe: `egress-country-sites`
 
-Coverage status: no registered runtime probe currently implements this
-section. The country-site candidate helpers filter proposed websites; they
-do not publish a complete verified country-list manifest or attest per-country
-selection. The required country-list provenance/verification records,
-published country-pool generation and generation-linked URL-draw/skip
-receipts are missing from the current producer/storage contract. This is an
-explicit measurement coverage gap, not healthy country coverage. The
-requirements below remain the acceptance contract for implementation.
+Coverage status: `egress-country-sites` implements the structural and
+aggregate-receipt parts of this section. The country-site candidate helpers
+filter proposed websites; they do not publish a verified country-list
+manifest. The producer still publishes no country-list provenance or
+verification records, and the URL-draw counter has neither a country nor a
+pool-generation label, so source freshness, per-country skips and
+generation-linked draw evidence stay an explicit, alerted coverage defect
+(`egress-country-provenance-missing`), never healthy country coverage.
 
 The URL-only contract in `FP2FIX.md` supersedes the historical full-run 13/13
 batch: normal draws use equal general/country sampling when both compatible
@@ -18247,13 +18246,64 @@ provider failure. False-negative qualifiers: aggregate draw counts alone do not
 prove distinct domains, current source evidence, correct country selection,
 or successful load verification. Use source and pool generation together.
 
-Planned implementation convention: §2.19d (`egress-country-sites`) maps to
-`signal_egress_country_sites.go` and `signal_egress_country_sites_test.go`.
-Deterministic tests use synthetic countries and reserved example domains for
-all coverage, freshness, missing-source, disjointness, enabled/legacy,
-partial-metrics, healthy and alert-rendering cases. This section is the
-acceptance contract for the new probe; it does not assert that the current
-Main watcher, destination pool, or country list already implements it.
+Implementation (15-minute cadence; `signal_egress_country_sites.go` and
+`signal_egress_country_sites_test.go`). The signal reads three sources:
+
+- the configured `qualityprobe.yml` catalog through the API's own parser
+  (`controller.LoadProviderEgressSites`, the same catalog
+  `GetProviderEgressDestinationPool` publishes with the pool generation): the
+  global destinations and the per-country lists. A list's compatible sites are
+  those without a whole-country incompatible entry for that country; a
+  region-only exclusion still counts. Registrable domains come from the Public
+  Suffix List (`CanonicalSiteKey`), so `shop.example.co.uk` and
+  `www.example.co.uk` collide while `example.co.uk` never collapses to `co.uk`;
+- the denominator: the location table's country rows, which the seeder writes
+  from the GeoLite2 places export (`mmdb/places.yml`), read with one bounded
+  read-only query (`location_type = 'country'`, at most 512 codes);
+- the aggregate URL-draw receipts:
+  `sum by (source) (increase(urnetwork_url_probe_sources_total{job="taskworker"}[6h]))`
+  for `general`, `country`, `general_country_unavailable` and
+  `security_recheck`, through one loopback Mimir read evaluated two minutes
+  behind now, with per-slot freshness of the counter on every desired
+  Taskworker slot. A disabled URL workflow (`provider_egress_probe.yml`) has no
+  receipts to read.
+
+Classes (all WARN, sustain 1, target `<env>/egress-country-sites`; only country
+codes and counts are rendered):
+
+- `egress-country-list-missing`: denominator countries with no list or no
+  compatible site, with the normal-draw fallback share
+  (`general_country_unavailable` over normal draws) as active-use evidence and
+  the count of lists keyed outside the denominator;
+- `egress-country-list-underfilled`: country lists with fewer than 100
+  compatible sites, or a global list under 100;
+- `egress-country-list-overlap`: country sites sharing a registrable domain
+  with the global list, sites repeating a registrable domain within a list,
+  and country URLs that are not valid HTTPS sites;
+- `egress-country-draw-split`: at least 400 country-eligible normal draws
+  (`general` plus `country`) whose country share is six or more standard
+  deviations from an even split. Finite random imbalance stays quiet;
+- `egress-country-provenance-missing`: the standing producer gap, emitted
+  whenever the catalog reads: no source identity, source period, curation or
+  load-verification time per list, and no pool-generation or per-country draw
+  receipts. It is an incident class, not visibility, so structural repairs of
+  the other classes can still clear;
+- `egress-country-sites-unobservable` (visibility, sustain 2): an unreadable
+  catalog, denominator or URL workflow configuration, a failed or annotated
+  receipt read, an unrecognized or missing draw source, and a desired
+  Taskworker slot whose counter is missing, stale (older than three minutes),
+  duplicated or on an excluded or disabled host.
+
+Not implemented, because the server emits no measurement for it: the Radar,
+CrUX and verification freshness bands, the source-unavailable versus stale
+distinction, and the PAGE for new per-country skips or a generation-linked
+split violation. They need a provenance manifest for each country list and a
+bounded per-country draw and skip counter carrying the served pool
+generation. Deterministic tests use synthetic countries and reserved example
+domains for coverage, missing-source, disjointness, enabled/disabled,
+partial-metrics, healthy and alert-rendering cases. This section remains the
+acceptance contract for those parts; it does not assert that the current
+Main watcher, destination pool, or country list already satisfies it.
 
 ### 2.19e Control route pressure — distinguish setup from provider failure
 Probe: `control-route-pressure`

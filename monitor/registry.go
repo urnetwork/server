@@ -99,6 +99,7 @@ func NewSignals() []Signal {
 		NewEgressCoverageSignal(),
 		NewEgressAdmissionSignal(),
 		NewEgressSitePoolSignal(),
+		NewEgressCountrySitesSignal(),
 		NewDerivedLocationsSignal(),
 		NewControlRoutePressureSignal(),
 		NewUrlProbeCoverageSignal(),
