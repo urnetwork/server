@@ -6518,15 +6518,16 @@ func decodeSweepCursorKey(key []string, targets []any) (values []any, ok bool) {
 // Page a child table and advance past every examined key, including retained
 // rows. Each page has its own read-committed maintenance transaction. Contract
 // steps use firstSql(limit) or sql(cursor..., limit) to select and lock a page,
-// then deleteSql(locked tuple addresses) in the same transaction. The second
-// statement sees row versions returned after a concurrent update's lock wait.
+// then deleteSql(locked key arrays...) in the same transaction. The second
+// statement sees row versions returned after a concurrent update's lock wait,
+// and deletes by complete primary key, which stays exact across partitions.
 //
 // Legacy small-table steps omit firstSql and use sql(first, cursor..., limit).
-// Contract pages return (examined int8, locked tuple addresses text[], max key
-// columns...). Legacy pages return (examined int8, deleted int8, max keys...).
-// A nonempty page supplies its original cursor; no result row means EOF.
-// Nil startKey starts at the head; maxRowCount <= 0 pages to EOF, otherwise the
-// returned cursor resumes the next invocation without restarting the history.
+// Contract pages return (examined int8, one locked-key array per key column,
+// max key columns...). Legacy pages return (examined int8, deleted int8, max
+// keys...). A nonempty page supplies its original cursor; no result row means
+// EOF. Nil startKey starts at the head; maxRowCount <= 0 pages to EOF, otherwise
+// the returned cursor resumes the next invocation without restarting the history.
 func sweepOrphanCursor(
 	ctx context.Context,
 	step sweepOrphanStep,
@@ -6567,23 +6568,26 @@ func sweepOrphanCursor(
 			deletedCount = 0
 			gotRow = false
 			targets = step.newCursorTargets()
-			var lockedTuples []string
-			scanTargets := make([]any, 0, len(targets)+2)
-			scanTargets = append(scanTargets, &sliceCount)
-			if step.deleteSql != "" {
-				scanTargets = append(scanTargets, &lockedTuples)
-			} else {
-				scanTargets = append(scanTargets, &deletedCount)
-			}
-			scanTargets = append(scanTargets, targets...)
+			// One aligned array per key column, in key column order.
+			var lockedKeys []any
 			if step.table == "transfer_escrow" {
 				var admitted bool
-				sliceCount, lockedTuples, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
+				sliceCount, lockedKeys, targets, gotRow, admitted = ownedTransferEscrowOrphanPageInTx(ctx, tx, firstSlice, cursor, sliceSize)
 				if !admitted {
 					ownershipRefused = true
 					return
 				}
 			} else {
+				var lockedKeyTargets []any
+				scanTargets := make([]any, 0, 2*len(targets)+1)
+				scanTargets = append(scanTargets, &sliceCount)
+				if step.deleteSql != "" {
+					lockedKeyTargets = newSweepLockedKeyTargets(targets)
+					scanTargets = append(scanTargets, lockedKeyTargets...)
+				} else {
+					scanTargets = append(scanTargets, &deletedCount)
+				}
+				scanTargets = append(scanTargets, targets...)
 				result, err := tx.Query(ctx, query, args...)
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
@@ -6591,14 +6595,21 @@ func sweepOrphanCursor(
 						gotRow = true
 					}
 				})
+				if gotRow && lockedKeyTargets != nil {
+					lockedKeys = derefCursor(lockedKeyTargets)
+				}
+			}
+			lockedCount := 0
+			if 0 < len(lockedKeys) {
+				lockedCount = reflect.ValueOf(lockedKeys[0]).Len()
 			}
 			// WithPgResult closes the page before the fresh snapshot is taken.
 			// The acquired child locks stay held until this transaction commits.
-			if 0 < len(lockedTuples) {
-				if int64(len(lockedTuples)) > sliceCount {
+			if 0 < lockedCount {
+				if int64(lockedCount) > sliceCount {
 					panic("orphan sweep locked beyond its selected page")
 				}
-				tag, err := tx.Exec(ctx, step.deleteSql, lockedTuples)
+				tag, err := tx.Exec(ctx, step.deleteSql, lockedKeys...)
 				server.Raise(err)
 				deletedCount = tag.RowsAffected()
 			}
