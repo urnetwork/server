@@ -88,6 +88,10 @@ type SubnetReplaySettings struct {
 	MetadataMaximumBytes int
 	// Permitted validator rows read per run.
 	MaximumValidatorRows int
+	// Native storage keys requested per page while enumerating a map.
+	NativeKeysPerPage int
+	// Native key pages per enumerated map per run.
+	NativeMaximumKeyPages int
 	// Native epochs a finalized commit may remain unrevealed past its reveal epoch.
 	RevealOverdueEpochs uint64
 	// Tempo multiples without a weight update before a permitted validator is stale.
@@ -167,6 +171,8 @@ func DefaultSubnetReplaySettings() *SubnetReplaySettings {
 		AuditReplaySloBlocks:           7200,
 		MetadataMaximumBytes:           8 * 1024 * 1024,
 		MaximumValidatorRows:           64,
+		NativeKeysPerPage:              64,
+		NativeMaximumKeyPages:          8,
 		RevealOverdueEpochs:            1,
 		WeightStaleTempos:              3,
 		ValidatorTrustCollapse:         6554,
@@ -307,7 +313,7 @@ func (self *SubnetReplaySettings) budgetReason() string {
 		self.LogMaximumRangesPerRun <= 0 || self.LogMaximumEntriesPerRange <= 0 || self.MaximumOperators <= 0 ||
 		self.MaximumCensusEntries <= 0 || self.ApiReadTimeout <= 0 || self.ApiMaximumBodyBytes <= 0 ||
 		self.ApiMaximumHeaderBytes <= 0 || self.ApiMaximumConnectionsPerOrigin <= 0 || self.HistoryMaximumPages <= 0 || self.HistoryPageObjects <= 0 ||
-		self.ArtifactMaximumReads <= 0 || self.PayloadMaximumReads <= 0 || self.AnchorMaximumChecks <= 0 || self.MetadataMaximumBytes <= 0 || self.MaximumValidatorRows <= 0 ||
+		self.ArtifactMaximumReads <= 0 || self.PayloadMaximumReads <= 0 || self.AnchorMaximumChecks <= 0 || self.MetadataMaximumBytes <= 0 || self.MaximumValidatorRows <= 0 || self.NativeKeysPerPage <= 0 || self.NativeMaximumKeyPages <= 0 ||
 		self.MaximumCreditChecks <= 0 || self.MaximumIntents <= 0 || self.ProducerMaximumRows <= 0 || self.TaskRescheduleWarnCount <= 0 || self.WeightStaleTempos == 0 {
 		return "budget-invalid"
 	}

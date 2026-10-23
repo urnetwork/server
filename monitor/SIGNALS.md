@@ -330,7 +330,6 @@ active missing capability and must not be read as green.
 | 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
-| 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
@@ -42676,6 +42675,7 @@ or require independently measured lists to be identical.
 | `subnet-promotion-economics` | Realized head/tail pay and churn are visible over aligned mature windows; the policy goal is lowest-paid qualified head >= highest-paid comparable tail provider. | Warn if promotion persistently becomes a pay cut or head/pool eviction thrashes. Report theta, breadth, coverage, immunity and realized per-tier pay; governance decides changes, the monitor does not. |
 
 ### 22.6 Native weight lifecycle, consensus, and validator dividends
+Probe: `subnet-weights`
 
 Trace each durable decision through its signed CRv4 payload/commit extrinsic,
 canonical finalized success, drand reveal, runtime application and subsequent
@@ -42696,6 +42696,46 @@ and exact runtime arithmetic intervene. Replay the pinned native algorithm and
 report intended versus realized split separately. Non-selected zero **new
 weight** also does not erase already-earned/still-pending emission from an older
 valid cycle. Preserve that chronology in any apparent unexpected-payment alert.
+
+`signal_subnet_weights.go` implements the chain half of this family at one
+finalized native block (`chain_getFinalizedHead`, with genesis checked against
+the pin and the block rechecked canonical at its height before any verdict). It
+derives every storage key from that block's own runtime metadata
+(`state_getMetadata`, decoded once per spec version) and first verifies each
+item's key and value shape against the runtime's type registry, so a runtime
+that changes `Weights`, `Keys`, `Uids`, `LastUpdate`, `ValidatorPermit`,
+`Dividends`, `ValidatorTrust`, `SubnetworkN`, `Tempo`, `RevealPeriodEpochs`,
+`TimelockedWeightCommits` or `Drand.LastStoredRound` is unknown rather than
+misdecoded; values must decode with every byte consumed, and an absent value
+takes the runtime-declared default. Every recorded mainnet runtime from 455
+through 483 passes. The census is the chain's own permitted validator set
+(hotkey and applied row per permitted UID), the enrolled `validators` (their
+UIDs), the main mechanism's pending timelocked commits enumerated by prefix, and
+the vault escrow's UID from a hash-pinned evm `escrowHotkey` view.
+
+Rules: an enrolled validator's applied row pages on a repeated recipient, an
+unregistered recipient, a positive self weight, a positive weight on the claims
+escrow UID, or, with the enrolled signed `maximum_weight_limit_u16`, a largest
+share above the cap (`max × 65535 > sum × cap`; the runtime's reported cap is
+not the authority). It pages on a missed required cycle (no applied row within
+`WeightStaleTempos` tempos and no pending commit), on two pending commits in one
+tempo window, and when a commit past its reveal epoch plus
+`RevealOverdueEpochs` is still pending although the chain stores its drand
+round; a census validator's unapplied reveal only warns, and a reveal waiting
+for an unstored drand round is a dependency WARN. An active enrolled validator
+whose trust falls below `ValidatorTrustCollapse` warns
+(`subnet-consensus-divergence`), and an eligible one seen with zero dividends
+across a full tempo of this watcher's observations warns
+(`subnet-validator-native-payout`). Census validators' rows are not judged by
+the enrolled policy.
+
+Missing today and therefore explicit coverage gaps: the validators' signed
+decisions are not published (the steering intent is private until its reveal,
+and the progress file carries only a vector hash), so an applied row cannot be
+replayed against its demand, quality, head and theta inputs (`decision-replay`);
+the Yuma bond, clipping and stake-weighted adoption replay is not implemented
+(`yuma-replay`). The `subnet_replay` enrollment (`validators`,
+`maximum_weight_limit_u16`) is not provisioned.
 
 ### 22.7 Pool emission capture, roots, claims, carry, and conservation
 Probe: `subnet-settlement`

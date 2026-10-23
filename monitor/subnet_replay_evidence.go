@@ -219,19 +219,23 @@ func subnetReplayOrdinal(prefix string, value uint64) string {
 // whose state is unknown sets unobservable itself, and the family's missing
 // capability uses the existing visibility class subnet-monitor-coverage.
 var subnetReplayClassKinds = map[string]alertClassKind{
-	"subnet-capture-delta":        incidentAlertClass,
-	"subnet-carry-isolation":      incidentAlertClass,
-	"subnet-claim-correctness":    incidentAlertClass,
-	"subnet-claim-credit-payment": incidentAlertClass,
-	"subnet-epoch-progress":       incidentAlertClass,
-	"subnet-payout-root":          incidentAlertClass,
-	"subnet-vault-conservation":   incidentAlertClass,
-	"subnet-artifact-integrity":   incidentAlertClass,
-	"subnet-evidence-anchor":      incidentAlertClass,
-	"subnet-audit-replay-gap":     incidentAlertClass,
-	"subnet-runtime-liveness":     incidentAlertClass,
-	"subnet-state-durability":     incidentAlertClass,
-	"subnet-writer-funding":       incidentAlertClass,
+	"subnet-capture-delta":           incidentAlertClass,
+	"subnet-carry-isolation":         incidentAlertClass,
+	"subnet-claim-correctness":       incidentAlertClass,
+	"subnet-claim-credit-payment":    incidentAlertClass,
+	"subnet-epoch-progress":          incidentAlertClass,
+	"subnet-payout-root":             incidentAlertClass,
+	"subnet-vault-conservation":      incidentAlertClass,
+	"subnet-artifact-integrity":      incidentAlertClass,
+	"subnet-evidence-anchor":         incidentAlertClass,
+	"subnet-audit-replay-gap":        incidentAlertClass,
+	"subnet-runtime-liveness":        incidentAlertClass,
+	"subnet-state-durability":        incidentAlertClass,
+	"subnet-writer-funding":          incidentAlertClass,
+	"subnet-weight-vector":           incidentAlertClass,
+	"subnet-crv4-lifecycle":          incidentAlertClass,
+	"subnet-consensus-divergence":    incidentAlertClass,
+	"subnet-validator-native-payout": incidentAlertClass,
 }
 
 func init() {
