@@ -95,6 +95,15 @@ func testContractPartitionOf(t testing.TB, ctx context.Context, table string, co
 	)
 }
 
+// The failure of an expected error, without logging its stack.
+func testContractPartitionRecover(callback func()) (err any) {
+	defer func() {
+		err = recover()
+	}()
+	callback()
+	return
+}
+
 func testContractPartitionLogf(t testing.TB) func(string, ...any) {
 	return func(format string, args ...any) {
 		t.Logf(format, args...)
@@ -230,13 +239,13 @@ func TestContractPartitionCutover(t *testing.T) {
 		}
 		// past the last partition an insert fails
 		farContractId := testContractIdAt(cutoverWeek.Add(time.Duration(ContractPartitionAheadWeeks+1) * contractPartitionWeek))
-		connect.AssertEqual(t, HandleError(func() {
+		connect.AssertEqual(t, testContractPartitionRecover(func() {
 			testInsertContractRows(t, ctx, farContractId, false)
 		}) != nil, true)
 
 		// the usage guard fires through the parent on both kinds of partition
 		for _, contractId := range []Id{testContractIdAt(cutoverWeek.Add(2 * time.Hour)), NewId()} {
-			err := HandleError(func() {
+			err := testContractPartitionRecover(func() {
 				Tx(ctx, func(tx PgTx) {
 					RaisePgResult(tx.Exec(
 						ctx,
@@ -269,7 +278,7 @@ func TestContractPartitionCutover(t *testing.T) {
 
 		// a TRUNCATE that names a partition is refused
 		for _, name := range []string{ContractLegacyPartitionName("transfer_contract"), ContractPartitionName("transfer_contract", cutoverWeek), ContractLegacyPartitionName("transfer_escrow")} {
-			err := HandleError(func() {
+			err := testContractPartitionRecover(func() {
 				MaintenanceTx(ctx, func(tx PgTx) {
 					RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`TRUNCATE public.%s`, quoteIdentifier(name))))
 				}, OptNoRetry())

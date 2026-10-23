@@ -403,6 +403,11 @@ func retireExpiredContractWeeks(ctx context.Context, now time.Time, cursor Contr
 func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string, err error) {
 	tables := slices.Clone(ContractPartitionTables)
 	slices.Reverse(tables)
+	if busy, busyErr := contractTablesBusy(ctx); busyErr != nil {
+		return nil, busyErr
+	} else if 0 < busy {
+		return nil, fmt.Errorf("%d long transaction(s) hold contract table locks; retried next run", busy)
+	}
 	err = contractPartitionTx(ctx, func(tx PgTx) {
 		RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
 		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = '60s'`))
