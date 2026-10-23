@@ -135,6 +135,8 @@ func (workerCapProbe) check(ctx context.Context, env *probeEnv) (result []findin
 		// Retain returned runtime coverage even when every scalar is rejected.
 		if age := now.Sub(observedAt); age > workerCapFreshness || age < -30*time.Second ||
 			math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			// A valid duplicate cannot repair a rejected member in either order.
+			worker.ambiguous = true
 			continue
 		}
 		switch kind {
@@ -187,13 +189,13 @@ func (workerCapProbe) check(ctx context.Context, env *probeEnv) (result []findin
 			probeId: "runtime/worker-scheduler-capacity", tier: tierWarn,
 			class: "worker-scheduler-unobservable", target: env.cfg.env + "/taskworker", sustain: 2,
 			symptom:   "Taskworker CPU/GOMAXPROCS capacity is not observable for every returned runtime.",
-			mechanism: "Missing, stale, malformed, or different-generation process metrics cannot establish a scheduler-capacity ratio. A healthy host CPU panel is not a substitute.",
+			mechanism: "Missing, stale, invalid, duplicate, or different-generation process metrics cannot establish a scheduler-capacity ratio. A healthy host CPU panel is not a substitute.",
 			baseline:  "Every reported Taskworker runtime has one fresh CPU rate, GOMAXPROCS gauge, and goroutine gauge with the same host/block/instance identity.",
 			observed:  fmt.Sprintf("paired_runtimes=%d incomplete_runtimes=%d", paired, incomplete),
 			evidence:  "Only fixed metric names and aggregate runtime counts enter the alert; raw series and source errors remain private.",
 			context:   "This is a visibility gap, not a declaration that probe throughput is healthy or unhealthy.",
-			action:    "Restore complete source-fresh runtime exports and inspect exact process generations before evaluating CPU headroom.",
-			verify:    "Every active Taskworker runtime has the complete exact-instance metric tuple on two cadences.",
+			action:    "Restore complete, unique source-fresh runtime exports and inspect exact process generations before evaluating CPU headroom.",
+			verify:    "Every active Taskworker runtime has the complete, unique exact-instance metric tuple on two cadences.",
 			playbook:  "SIGNALS.md §2.12b",
 		})
 	} else {

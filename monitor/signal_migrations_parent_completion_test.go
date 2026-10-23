@@ -168,8 +168,9 @@ func TestMigrationsParentCompletionEndedSourceErrorKeepsPrivateCause(t *testing.
 }
 
 // Healthy and interrupted executions use identical bounded rows. The owning
-// completion guard must not erase independently established drift or unknowns
-// on the unscoped API; the scoped API retains its existing cancellation policy.
+// probe may retain independently established faults, but both live-entry public
+// adapters withhold publication after their owner ends. Live controls keep the
+// original positive/unknown classes, severity and sustain unchanged.
 func TestMigrationsParentCompletionPreservesPositiveAndUnknownControls(t *testing.T) {
 	for _, kind := range []string{"artifact-fault", "identity-fault", "unknown-successor"} {
 		for _, scoped := range []bool{false, true} {
@@ -196,9 +197,9 @@ func TestMigrationsParentCompletionPreservesPositiveAndUnknownControls(t *testin
 				}
 				alerts, err := NewMigrationsSignal().Run(ctx, source.settings(scoped))
 				source.requireCompleteReads()
-				if interrupted && scoped {
+				if interrupted {
 					if !errors.Is(err, context.Canceled) || len(alerts) != 0 {
-						t.Fatal("scoped migration cancellation policy changed")
+						t.Fatal("live-entry migration cancellation policy changed")
 					}
 				} else {
 					if err != nil || len(alerts) != 1 {

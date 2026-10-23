@@ -320,7 +320,7 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 
 	// The public adapter discards findings on error. Keep a validated snapshot
-	// warning when a later independent layer is unknown, without asserting
+	// finding when a later independent layer is unknown, without asserting
 	// operator readiness or treating an ended parent as a partial observation.
 	dependencyFailure := func(layer string, err error) ([]finding, error) {
 		if contextErr := ctx.Err(); contextErr != nil {
@@ -350,6 +350,33 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		return append(findings, pointsOperatorSchemaFinding(target)), nil
 	}
 
+	// The admitted snapshot establishes these contradictions without source counts.
+	appendSnapshotFinding := func(symptom, mechanism, action string) {
+		f := pointsOperatorFinding(target, tierPage, "points-epoch-availability-drift", symptom, mechanism, action, snapshot, pointsOperatorSourceState{})
+		f.observed = fmt.Sprintf(
+			"snapshot_epoch_metrics_available=%t snapshot_latest_epoch=%d snapshot_age_seconds=%d total_ranked=%d positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
+			snapshot.epochAvailable, snapshot.latestEpoch, snapshot.ageSeconds, snapshot.totalRanked,
+			snapshot.positiveBlocks, snapshot.positiveStreak, snapshot.positiveLongest,
+		)
+		f.evidence = "The bounded snapshot statement returned a complete header/row census, and the physical completion-column preflight passed. This contradiction uses only the same immutable snapshot; no operator-calendar or rollup count is inferred."
+		f.context = "The availability bit and affirmative payload must agree within this immutable snapshot. Physical schema readiness does not attest the deployed operator-rollup artifact or its source-version boundary; verify those separately. A later operator-source failure leaves that independent layer unknown."
+		findings = append(findings, f)
+	}
+	payloadPresent := snapshot.latestEpoch != 0 || snapshot.positiveBlocks != 0 || snapshot.positiveStreak != 0 || snapshot.positiveLongest != 0
+	snapshotContradiction := (!snapshot.epochAvailable && payloadPresent) || (snapshot.epochAvailable && snapshot.latestEpoch == 0)
+	switch {
+	case !snapshot.epochAvailable && payloadPresent:
+		appendSnapshotFinding(
+			"The snapshot marks operator-block metrics unavailable but carries an affirmative block payload.",
+			"The same immutable snapshot's availability bit and payload contradict each other, independently of current rollup progress.",
+			"Preserve the snapshot and inspect the transactional rebuild and availability write. Repair that boundary, then publish through a normal rebuild.")
+	case snapshot.epochAvailable && snapshot.latestEpoch == 0:
+		appendSnapshotFinding(
+			"The snapshot marks operator-block metrics available without a completed operator block number.",
+			"Operator blocks are 1-based; a true availability bit requires at least one completed block. This is distinct from a valid measured zero Blocks or Streak value.",
+			"Verify the operator-rollup release boundary and rebuild source, then let the normal rebuild replace the snapshot.")
+	}
+
 	sourceRows, err := env.runner.pg(ctx, pointsOperatorSourceQuery())
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
@@ -364,18 +391,9 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	appendFinding := func(tier, class, symptom, mechanism, action string) {
 		findings = append(findings, pointsOperatorFinding(target, tier, class, symptom, mechanism, action, snapshot, source))
 	}
-	payloadPresent := snapshot.latestEpoch != 0 || snapshot.positiveBlocks != 0 || snapshot.positiveStreak != 0 || snapshot.positiveLongest != 0
 	switch {
-	case !snapshot.epochAvailable && payloadPresent:
-		appendFinding(tierPage, "points-epoch-availability-drift",
-			"The snapshot marks operator-block metrics unavailable but carries an affirmative block payload.",
-			"The same immutable snapshot's availability bit and payload contradict each other, independently of current rollup progress.",
-			"Preserve the snapshot and inspect the transactional rebuild and availability write. Repair that boundary, then publish through a normal rebuild.")
-	case snapshot.epochAvailable && snapshot.latestEpoch == 0:
-		appendFinding(tierPage, "points-epoch-availability-drift",
-			"The snapshot marks operator-block metrics available without a completed operator block number.",
-			"Operator blocks are 1-based; a true availability bit requires at least one completed block. This is distinct from a valid measured zero Blocks or Streak value.",
-			"Verify the operator-rollup release boundary and rebuild source, then let the normal rebuild replace the snapshot.")
+	case snapshotContradiction:
+		// The independent snapshot contradiction is already retained.
 	case source.closedBlocks < snapshot.latestEpoch:
 		appendFinding(tierPage, "points-epoch-snapshot-drift",
 			"The snapshot block number is ahead of the completed operator calendar.",

@@ -131,8 +131,9 @@ func TestAccountMessagesErrorLiveParentPreservesWrappedSourceCauses(t *testing.T
 	}
 }
 
-// The actual parent ends synchronously inside the first source callback. Its
-// returned cause remains reachable, and no next gateway observation occurs.
+// The actual parent ends synchronously inside the first source callback.
+// Both live-entry adapters give that verdict canonical public authority while
+// preserving every private source cause and refusing another gateway read.
 func TestAccountMessagesErrorEndedParentPreservesReturnedCauseAndStopsFallback(t *testing.T) {
 	for _, scoped := range []bool{false, true} {
 		for _, sourceContext := range []error{context.Canceled, context.DeadlineExceeded} {
@@ -159,15 +160,10 @@ func TestAccountMessagesErrorEndedParentPreservesReturnedCauseAndStopsFallback(t
 			if calls != 1 || len(alerts) != 0 {
 				t.Fatal("ended parent admitted fallback or published findings")
 			}
-			wantClass, wantText := observationErrorClassCanceled, "account messages: query Mimir failed"
-			if sourceContext == context.DeadlineExceeded {
-				wantClass = observationErrorClassTimeout
-			}
-			if scoped {
-				wantClass, wantText = observationErrorClassCanceled, context.Canceled.Error()
-				if !errors.Is(err, context.Canceled) {
-					t.Fatal("scoped adapter lost the parent lifecycle verdict")
-				}
+			wantClass, wantText := observationErrorClassCanceled, context.Canceled.Error()
+			var interrupted *signalContextError
+			if !errors.Is(err, context.Canceled) || !errors.As(err, &interrupted) {
+				t.Fatal("live-entry adapter lost the parent lifecycle verdict")
 			}
 			requireAccountMessagesErrorIdentity(t, settings, signal, err, wantText, wantClass, "release", sourceErr, sourceContext, admission, privateCause)
 		}

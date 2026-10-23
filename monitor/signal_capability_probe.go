@@ -120,6 +120,10 @@ type capabilityProbeObservation struct {
 	// have run since they started
 	disabledIncrease float64
 	disabledRunning  float64
+	// The current child is initialized even before a pass. Range increase
+	// may be absent until two scrapes; neither absence is a measured zero.
+	disabledRunningKnown  bool
+	disabledIncreaseKnown bool
 	// the newest pass finished in the lookback, zero for none
 	lastPass time.Time
 	// An invalid or future payload cannot establish stall age.
@@ -184,10 +188,12 @@ func (self capabilityProbeProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		return []finding{cannotObserveFinding("capability-probe/metrics", err)}, nil
 	}
 	if observation.payloadClockInvalid {
-		return []finding{
-			capabilityProbeDisabledPassFinding(observation),
-			cannotObserveFinding("capability-probe/metrics", errors.New("taskworker timestamp payload does not establish a supported age")),
-		}, nil
+		visibility := cannotObserveFinding("capability-probe/metrics", errors.New("taskworker timestamp payload does not establish a supported age"))
+		disabled := capabilityProbeDisabledPassFinding(observation)
+		if disabled.isUnobservable() {
+			return []finding{visibility}, nil
+		}
+		return []finding{disabled, visibility}, nil
 	}
 	if observation.oldestStart.IsZero() {
 		return []finding{cannotObserveFinding("capability-probe/metrics", errors.New("Mimir holds no running taskworker process series"))}, nil
@@ -246,8 +252,10 @@ func parseCapabilityProbeObservation(output string, now time.Time) (capabilityPr
 		switch name {
 		case "disabled_increase":
 			observation.disabledIncrease = value
+			observation.disabledIncreaseKnown = true
 		case "disabled_running":
 			observation.disabledRunning = value
+			observation.disabledRunningKnown = true
 		case "last_pass":
 			observation.lastPass = unixTime()
 		case "exporting":
@@ -269,7 +277,18 @@ func parseCapabilityProbeObservation(output string, now time.Time) (capabilityPr
 // pass before the process's first scrape.
 func capabilityProbeDisabledPassFinding(observation capabilityProbeObservation) finding {
 	if observation.disabledIncrease <= 0 && observation.disabledRunning <= 0 {
+		if !observation.disabledRunningKnown {
+			return cannotObserveFinding("capability-probe/metrics", errors.New("Mimir holds no initialized current disabled-pass counter"))
+		}
 		return healthyFinding(capabilityProbeProbeId, tierWarn, "capability-probe-disabled-pass", capabilityProbeTarget)
+	}
+	// Retained history and the current child are independent positive arms.
+	// Do not render an absent counterpart as a measured zero.
+	count := func(value float64, known bool) string {
+		if !known {
+			return "unknown"
+		}
+		return strconv.FormatFloat(value, 'g', -1, 64)
 	}
 	return finding{
 		probeId: capabilityProbeProbeId, tier: tierWarn,
@@ -277,7 +296,7 @@ func capabilityProbeDisabledPassFinding(observation capabilityProbeObservation) 
 		symptom:   "A taskworker ran a capability probe pass with settings that switch the probe off, while capability_probe.yml switches it on",
 		mechanism: "A taskworker container keeps the config it started with. One that started before capability_probe.yml switched the probe on, or before its host published that config, reads the probe as off, and a pass it claims ends the probe's chain: it schedules no successor. The taskworkers that read it as on schedule the chain again within ten minutes, but the stale one ends it again at each pass it claims, and the sweep restarts each time.",
 		baseline:  "While capability_probe.yml switches the probe on, no running taskworker has run a disabled pass, and none has in the last 30 minutes: every taskworker started with the probe switched on.",
-		observed:  fmt.Sprintf("disabled_passes_30m=%g disabled_passes_running_taskworkers=%g", observation.disabledIncrease, observation.disabledRunning),
+		observed:  fmt.Sprintf("disabled_passes_30m=%s disabled_passes_running_taskworkers=%s", count(observation.disabledIncrease, observation.disabledIncreaseKnown), count(observation.disabledRunning, observation.disabledRunningKnown)),
 		evidence:  "Only fleet sums of urnetwork_capability_probe_passes_total{result=\"disabled\"} leave Mimir; no host, task or provider identity is included.",
 		action:    "Find the taskworkers whose urnetwork_capability_probe_passes_total{result=\"disabled\"} is above zero, confirm their hosts publish the current config (WARP_CONFIG_VERSION), and restart them (capprobe/README.md, \"Switching it on\"). Then check that the probe's pending_task row exists (run_once_key capability_probe).",
 		verify:    "Every running taskworker reports zero disabled passes, the probe's pending_task row exists, and passes_total{result=~\"measured|waiting\"} advances.",
