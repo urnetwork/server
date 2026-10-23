@@ -49,6 +49,7 @@ type monitorOptions struct {
 	pgQuerySampleContinuous bool
 	urlProbeCoverageOutput  string
 	providerSelectionOutput string
+	settingsWitnessOutput   string
 	sshAdmissionDirectory   string
 	slackAlerts             bool
 }
@@ -96,7 +97,17 @@ func configureSharedSshAdmission(ctx context.Context, settings servermonitor.Sig
 	return settings.WithSharedSshAdmission(ctx, directory)
 }
 
+// Bind the optional witness to actual local identity in ordinary CLI runs.
 func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error)) (resultErr error) {
+	return runWithSettingsAdmissionAndWitness(args, stdout, loadSettings, configureAdmission,
+		func(ctx context.Context, settings servermonitor.SignalSettings, path string) (servermonitor.SignalSettings, io.Closer, error) {
+			return settings.WithSettingsGenerationWitness(ctx, path, servermonitor.DefaultSettingsGenerationWitnessSettings())
+		})
+}
+
+// Keep configuration and owner seams explicit for synthetic CLI controls;
+// the optional witness sees the same validated post-override startup value.
+func runWithSettingsAdmissionAndWitness(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error), configureWitness func(context.Context, servermonitor.SignalSettings, string) (servermonitor.SignalSettings, io.Closer, error)) (resultErr error) {
 	opts, err := parseMonitorOptions(args)
 	if err != nil {
 		return err
@@ -139,6 +150,15 @@ func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSetting
 		}
 		if !selected {
 			return errors.New("monitor: selection output requires the provider-selection signal")
+		}
+	}
+	if opts.settingsWitnessOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "settings-freshness"
+		}
+		if !selected {
+			return errors.New("monitor: settings witness output requires the settings-freshness signal")
 		}
 	}
 
@@ -208,6 +228,17 @@ func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSetting
 		settings.ProviderSelectionObserver = func(observation servermonitor.ProviderSelectionObservation) error {
 			return observation.WriteJsonl(output)
 		}
+	}
+	if opts.settingsWitnessOutput != "" {
+		var owner io.Closer
+		settings, owner, err = configureWitness(context.Background(), settings, opts.settingsWitnessOutput)
+		if err != nil {
+			return err
+		}
+		if owner == nil {
+			return errors.New("monitor: settings witness owner unavailable")
+		}
+		defer func() { resultErr = errors.Join(resultErr, owner.Close()) }()
 	}
 	monitor := servermonitor.NewWithSignals(settings, signals...)
 
@@ -307,6 +338,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
 	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
 	flags.StringVar(&opts.providerSelectionOutput, "provider-selection-output", "", "append every bounded selection reason observation per existing signal execution, including nonempty and unavailable results, as JSONL")
+	flags.StringVar(&opts.settingsWitnessOutput, "settings-witness-output", "", "create a private same-process settings witness stream for existing freshness invocations; requires an owned Linux user unit")
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
@@ -331,6 +363,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.providerSelectionOutput != "" && (opts.listSignals || opts.providerSelectionOutput == opts.output || opts.providerSelectionOutput == opts.urlProbeCoverageOutput) {
 		return monitorOptions{}, errors.New("monitor: selection output requires a distinct observation file and cannot be used with -list-signals")
+	}
+	if opts.settingsWitnessOutput != "" && (opts.listSignals || opts.settingsWitnessOutput == opts.output || opts.settingsWitnessOutput == opts.urlProbeCoverageOutput || opts.settingsWitnessOutput == opts.providerSelectionOutput) {
+		return monitorOptions{}, errors.New("monitor: settings witness output requires a distinct new private file and cannot be used with -list-signals")
 	}
 	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
 		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")

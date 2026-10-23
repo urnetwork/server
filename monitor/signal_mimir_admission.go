@@ -508,6 +508,29 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		), nil
 	}
 	priorState := self.snapshotState()
+	// The immutable startup inventory may no longer describe current desired
+	// state. A stale or unavailable generation cannot authorize contact or a
+	// fleet recovery. Manually assembled library settings may omit the checker.
+	checkGeneration := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if env.cfg.routerGenerationCheck == nil {
+			return nil
+		}
+		current, err := env.cfg.routerGenerationCheck(ctx)
+		if ended := ctx.Err(); ended != nil {
+			return ended
+		}
+		if err != nil {
+			return fmt.Errorf("settings generation unavailable")
+		}
+		if !current {
+			return fmt.Errorf("settings generation stale")
+		}
+		return nil
+	}
+	generationErr := checkGeneration()
 
 	command := mimirAdmissionCommand(env.cfg.env, env.cfg.logServiceBlocks)
 	resultValues := make(chan mimirAdmissionHostResult, len(hosts))
@@ -515,6 +538,10 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	var wait sync.WaitGroup
 	for _, configuredHost := range hosts {
 		target := configuredHost
+		if generationErr != nil {
+			resultValues <- mimirAdmissionHostResult{host: target, err: generationErr}
+			continue
+		}
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -528,6 +555,11 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 				return
 			}
 
+			// Recheck after the fanout wait, immediately before source contact.
+			if err := checkGeneration(); err != nil {
+				resultValues <- mimirAdmissionHostResult{host: target, err: err}
+				return
+			}
 			output, err := env.runner.shell(ctx, target, command)
 			if err != nil {
 				resultValues <- mimirAdmissionHostResult{host: target, err: err}
@@ -543,6 +575,23 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	results := make([]mimirAdmissionHostResult, 0, len(hosts))
 	for result := range resultValues {
 		results = append(results, result)
+	}
+	if generationErr == nil {
+		generationErr = checkGeneration()
+	}
+	if generationErr != nil {
+		// Discard results from a changed scope before they can advance history
+		// or clear an incident. Normal incomplete-observation reduction retains
+		// prior counters and resets both independent quiet windows durably.
+		for i := range results {
+			if results[i].err != nil {
+				// An already failed observation cannot advance state. Preserve
+				// its exact lifecycle/transport cause for the existing reducer.
+				continue
+			}
+			results[i].sample = mimirAdmissionHostSample{}
+			results[i].err = generationErr
+		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].host.name < results[j].host.name })
 

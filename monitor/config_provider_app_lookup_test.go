@@ -37,7 +37,7 @@ func requireProviderAppLookupVisibility(t *testing.T, root string) {
 		t.Error("missing configured app identity silently disarmed a provider")
 	}
 	alerts, err := NewWithSignals(settings,
-		NewPlayCrashesSignal(), NewAppleCrashesSignal(), NewSubnetCoverageSignal(),
+		NewPlayCrashesSignal(), NewAppleCrashesSignal(), subnetCoverageSignalWith(),
 	).Run(context.Background())
 	if err == nil || len(alerts) != 3 {
 		t.Error("app-identity failure lost provider visibility or an independent finding")

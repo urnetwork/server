@@ -3052,6 +3052,27 @@ resolve either.
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`
 
+`port-exhaustion` retains its legacy class name and exact
+`connect: cannot assign requested address` text match, WARN threshold at
+100 matching diagnostic lines per service/class window, and existing
+precedence/replay/sample/frame behavior. This is an affirmative log-signature
+rate, not a native emitter, numeric error code, unique-attempt count, exhausted
+allocation resource or single-destination diagnosis. The stable target names
+the selected log stream; a legacy first-exemplar address frame is only a text
+hint. Neither can identify a process or network namespace by itself.
+
+False-positive qualifier: relayed or quoted diagnostic text and mixed-
+destination volume can enter this bucket without native allocation authority.
+The rule cannot distinguish local-address availability from measured
+ephemeral-port/tuple pressure; that requires original-event, artifact, process,
+namespace and same-window native limit/usage evidence. The rule does not prove
+a target-node fault, redial cause or a fixed self-drain deadline. False-negative
+qualifier: other error text, class precedence, replay filtering and incomplete
+collection can hide failures. Below-threshold or absent logs establish neither
+native allocation health nor recovery. Preserve the positive count and its
+unknown cause; collect no broader logs or changes without a bounded authority
+plan. The retained historical rendered clock is not an original attempt clock.
+
 Generic TCP dial-timeout frame qualification: a caller or metadata address
 earlier in a line can misattribute a true positive class count when a generic
 first-address matcher is used. The dial class instead uses its own regexp
@@ -4788,6 +4809,50 @@ manually assembled library settings may omit it for compatibility.
   Alert.
 - Context cancellation is watcher lifecycle, not settings loss, and returns
   `context.Canceled` without an Alert.
+
+Optional `-settings-witness-output` creates one new private JSONL stream for
+this watcher's existing scheduled freshness invocations. It does not add a
+settings load, request, probe or cadence. The output requires a private parent
+directory and a new exclusive file, plus an owned Linux user unit. Startup
+identity is taken from the actual process/start/boot/unit invocation and
+bracketed local owner checks around hashing the actual `/proc/self/exe`;
+supplied PID, path, version tag or environment fields are not owner proof.
+Only executable provenance is hashed; settings and credentials never are.
+
+Each bounded fixed-schema record retains the actual callback result, its
+clocks, opaque random process/snapshot associations, sequence and validated
+process/artifact identity. Complete settings equality includes the effective
+inventory and immutable CLI overrides in memory; counts are context, never a
+membership denominator or fingerprint. The launch binding owns independent
+in-memory collections, so mutating a caller's aliased settings cannot forge an
+association. The process-only writer is excluded from generation comparison.
+Other probes' checker calls do not emit freshness witnesses, and manually
+assembled settings can continue to omit this output and the optional checker.
+
+An unavailable callback produces a nonaffirmative `unavailable` record;
+settings drift produces `stale`. Cancellation observed before the final
+pre-write context check publishes no witness. Once that check admits the
+irreversible write, a successful full record remains committed even if
+cancellation arrives inside `Write` and the enclosing signal subsequently
+returns canceled. The record attests the completed callback and its startup
+association, never completion of the enclosing signal or another attempt;
+no post-write check can retract bytes already accepted by the sink. Missing
+startup/identity association, malformed clocks, sequence exhaustion, an
+oversized record, a partial/failed write or a closed output cannot authorize a
+successful witness. Output failure reports fixed `cannot-observe` at
+`monitor-settings/witness`, preserving the independent stale/unobservable
+freshness alert. A failed stream is not retried; partial bytes and any failed
+output remain unqualified until independently reviewed. Never infer equality
+from absent records or from merely parseable bytes of an unqualified stream.
+
+False-positive qualifier: a successful witness attests only its own bound
+freshness callback. It cannot certify another Mimir attempt, reconstruct a
+previous watcher's loaded settings, prove intended inventory from counts, or
+establish ingestion recovery. Root must independently bind the retained stream
+to the exact running artifact and intended loader/environment/operator scope.
+False-negative qualifier: missing, stale, partial or unavailable witnesses
+leave authority unknown and may conceal genuine inventory changes or loss.
+The independent complete comparable exact-child quiet windows still apply.
 
 False-positive qualifier: the URL coverage writer introduced in `9cf0f197c`
 attached a process-local callback after loading the startup settings. Before
@@ -23201,9 +23266,15 @@ Probe: `redis-connections`
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the
   process looks alive).
-- Client-side (edge hosts): `cannot assign requested address` in logs =
-  ephemeral port exhaustion toward one dst (~41k tuples / 60s TIME_WAIT ≈
-  680 sustainable dials/sec per destination); drains ~60s after the storm.
+- `connect: cannot assign requested address` at rate is the §1.5
+  `port-exhaustion` log-signature warning. It does not establish a Redis target,
+  client process, exhausted port range, one destination or a recovery timer.
+  Bind the original attempt to its source process/artifact/network namespace,
+  then compare local-address availability and measured socket/tuple limits and
+  usage before selecting a remedy. No fixed tuple budget or self-drain period
+  is inferred from the text; do not restart clients, raise limits or change
+  routes on this signature alone. Complete native controls and comparable
+  source coverage remain required to verify recovery.
 
 ### 3.6 Cluster topology hygiene
 Probe: `redis-topology`
@@ -23603,7 +23674,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
-| `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
+| `connect: cannot assign requested address` (`port-exhaustion`) | The selected stream reported this text at rate. It does not identify a native emitter, error code, resource namespace, exhausted port range, unique attempts or one destination. A frame is only the first exemplar's textual address hint. | Preserve the WARN at >=100 matching lines/window. Bind the original event to its artifact/process/attempt/network namespace and compare same-window local-address and socket/tuple limit/usage evidence. Ephemeral-port pressure is a candidate, not a diagnosis; do not infer a target-node fault, restart clients, raise limits, change routes or promise a fixed self-drain timer. Complete comparable logs plus independent native controls are required for recovery. |
 | `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
 | `proxy protocol header required but not found` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="missing_header"}` | A previously unseen LB source tuple sent a headerless datagram: a bypassing/old LB path or broken UDP pseudo-session/header behavior. Current Connect drops it inside `PpPacketConn`; it does not escape as a listener-fatal `ReadFrom` error. | Correlate the exact Connect/LB rollout boundary and remove the incompatible sender. Verify listener gauges and sockets instead of inferring death from one rejected datagram. Do not diagnose JWT/auth or SNAT first. See §16.2/§16.5. |
 | `[c]h3 listener <transport>/<port> failed stage=<stage> ... restart in ...` | A supervised QUIC listener exited or failed bind/transform/ListenEarly/accept. `/status` is 503 and `h3_listener_up=0` until the retry succeeds. | Use `stage`, `h3_listener_failures_total`, and `h3_listener_restarts_total`; fix persistent bind/allocation or transform errors. Warp must not activate an LB while any required listener is down. |
@@ -26035,7 +26106,7 @@ Tier-1 (warn):
 | connect-tls-disabled | logs | exact legacy Connect TLS-loader fallback that binds transport with no usable identity | any |
 | tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |
 | e2e-key-coverage | pg | 15.1 coverage vs trailing 24h median (armed ≥ 5%) | < 50% of median, 3 probes |
-| port-exhaustion | logs | cannot-assign rate | any burst > 100/min |
+| port-exhaustion | logs | matching cannot-assign diagnostic lines per selected service/class window; native allocation cause unknown | >= 100/min, WARN; no unique-attempt or fixed self-drain inference |
 | new-panic-frame | logs | unseen innermost app frame at rate | > 5/min |
 | phantom-nodes | redis | noaddr/:0 entries in CLUSTER NODES | > 0 for 1h |
 | zombie-tx | pg | idle-in-tx xact age | > 30 min |
@@ -32519,6 +32590,31 @@ incident when complete child counters remain flat. FALSE NEGATIVE QUALIFIER:
 an unknown host can conceal real sample loss, and unrecognized causes remain
 unclassified. Keep its prior baseline and incidents, retain positive sibling
 pages, and require the complete comparable two-hour quiet window for recovery.
+
+The complete effective settings generation is checked before collection,
+again after each host's fanout wait before source contact, and after all host
+results are joined before accepting the fleet observation. An armed checker
+that reports stale or unavailable settings makes the observation
+`cannot-observe`: no startup host is contacted after a failed pre-contact
+check, and results from a changed generation cannot replace counter history
+or authorize healthy recovery. The normal incomplete-observation reducer
+retains armed series and rate incidents and durably resets both quiet windows.
+An unavailable state save still follows the independent state-failure rule.
+The §1.6 global freshness alert remains separate. Manually assembled library
+settings may omit the optional checker, preserving the §1.6 compatibility
+contract; production settings always arm it.
+
+False-positive qualifier: settings drift or loader failure does not prove a
+Mimir fault, fresh rejection or the cause of an existing held PAGE. This local
+guard cannot reconstruct historical loaded settings or missing attempt frames.
+False-negative qualifier: a changed inventory can conceal loss on a newly
+enabled child, and stale complete-looking startup observations could otherwise
+clear an incident. Missing generation authority cannot accrue quiet time or
+prove health. The deterministic controls cover stale and unavailable settings
+before contact, drift before aggregate acceptance, preserved counters and
+independent armed incidents, full-window recovery under unchanged settings,
+privacy, and optional-checker compatibility. They do not attest any production
+watcher's artifact or loaded snapshot.
 
 Mimir 3.1.1 source revision `a3d6c90f25` registers a separate
 `cortex_discarded_samples_total` CounterVec for each discard reason but does
