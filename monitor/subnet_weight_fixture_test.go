@@ -115,8 +115,8 @@ func newHealthySubnetWeightChain(t *testing.T, number uint64) *subnetWeightTestC
 	chain.set("Uids", types.U16(0), netuid, subnetWeightTestEnrolled[:])
 	chain.set("Uids", types.U16(1), netuid, subnetWeightTestCensus[:])
 	chain.set("Uids", types.U16(7), netuid, subnetWeightTestEscrow[:])
-	chain.set("Weights", []subnetWeightPair{{Uid: 2, Value: 30000}, {Uid: 3, Value: 65535}}, netuid, subnetWeightLittleEndian16(0))
-	chain.set("Weights", []subnetWeightPair{{Uid: 4, Value: 65535}}, netuid, subnetWeightLittleEndian16(1))
+	chain.set("Weights", []subnetWeightEntry{{Uid: 2, Value: 30000}, {Uid: 3, Value: 65535}}, netuid, subnetWeightLittleEndian16(0))
+	chain.set("Weights", []subnetWeightEntry{{Uid: 4, Value: 65535}}, netuid, subnetWeightLittleEndian16(1))
 	chain.commits(subnetWeightTestCommit(subnetWeightTestEnrolled, number-10, 1500))
 	return chain
 }

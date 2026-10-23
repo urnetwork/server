@@ -30,7 +30,7 @@ func (self subnetWeightCheckpoint) runtimeIdentity() string {
 }
 
 // The SCALE tuple (u16, u16) of one applied weight.
-type subnetWeightPair struct {
+type subnetWeightEntry struct {
 	Uid   types.U16
 	Value types.U16
 }
@@ -47,7 +47,7 @@ type subnetWeightCommit struct {
 type subnetWeightValidator struct {
 	uid        uint16
 	hotkey     [32]byte
-	row        []subnetWeightPair
+	row        []subnetWeightEntry
 	lastUpdate uint64
 	dividends  uint16
 	trust      uint16

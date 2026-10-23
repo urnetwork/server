@@ -38,12 +38,12 @@ func TestSubnetWeightsHealthySubnetHasOnlyReplayGaps(t *testing.T) {
 func TestSubnetWeightsEnrolledRowCounterexamplesPage(t *testing.T) {
 	cases := []struct {
 		frame string
-		row   []subnetWeightPair
+		row   []subnetWeightEntry
 	}{
-		{frame: "self-weight", row: []subnetWeightPair{{Uid: 0, Value: 100}, {Uid: 3, Value: 65535}}},
-		{frame: "escrow-recipient", row: []subnetWeightPair{{Uid: 7, Value: 100}, {Uid: 3, Value: 65535}}},
-		{frame: "unregistered-recipient", row: []subnetWeightPair{{Uid: 9, Value: 100}, {Uid: 3, Value: 65535}}},
-		{frame: "cap-breach", row: []subnetWeightPair{{Uid: 2, Value: 1000}, {Uid: 3, Value: 65535}}},
+		{frame: "self-weight", row: []subnetWeightEntry{{Uid: 0, Value: 100}, {Uid: 3, Value: 65535}}},
+		{frame: "escrow-recipient", row: []subnetWeightEntry{{Uid: 7, Value: 100}, {Uid: 3, Value: 65535}}},
+		{frame: "unregistered-recipient", row: []subnetWeightEntry{{Uid: 9, Value: 100}, {Uid: 3, Value: 65535}}},
+		{frame: "cap-breach", row: []subnetWeightEntry{{Uid: 2, Value: 1000}, {Uid: 3, Value: 65535}}},
 	}
 	for _, c := range cases {
 		chain, _, settings := newSubnetWeightsFixture(t)
@@ -60,7 +60,7 @@ func TestSubnetWeightsEnrolledRowCounterexamplesPage(t *testing.T) {
 func TestSubnetWeightsCapUnknownWithoutEnrollment(t *testing.T) {
 	chain, _, settings := newSubnetWeightsFixture(t)
 	settings.SubnetReplay.MaximumWeightLimitU16 = 0
-	chain.set("Weights", []subnetWeightPair{{Uid: 2, Value: 1000}, {Uid: 3, Value: 65535}}, subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(0))
+	chain.set("Weights", []subnetWeightEntry{{Uid: 2, Value: 1000}, {Uid: 3, Value: 65535}}, subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(0))
 	alerts := runSubnetWeights(t, NewSubnetWeightsSignal(), settings)
 	requireSubnetReplayAlert(t, alerts, "subnet-monitor-coverage", "subnet-weights/coverage", "weight-cap")
 	if len(subnetReplayAlerts(alerts, "subnet-weight-vector")) != 0 {
@@ -71,7 +71,7 @@ func TestSubnetWeightsCapUnknownWithoutEnrollment(t *testing.T) {
 // A census validator's row is not judged by the enrolled policy.
 func TestSubnetWeightsCensusRowsAreNotPolicyJudged(t *testing.T) {
 	chain, _, settings := newSubnetWeightsFixture(t)
-	chain.set("Weights", []subnetWeightPair{{Uid: 1, Value: 65535}}, subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(1))
+	chain.set("Weights", []subnetWeightEntry{{Uid: 1, Value: 65535}}, subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(1))
 	alerts := runSubnetWeights(t, NewSubnetWeightsSignal(), settings)
 	requireSubnetWeightsOnlyReplayGaps(t, alerts)
 }
@@ -280,9 +280,9 @@ func init() {
 		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
 			chain, _, settings := newSubnetWeightsFixture(t)
 			netuid, uid := subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(0)
-			chain.set("Weights", []subnetWeightPair{{Uid: 0, Value: 100}, {Uid: 3, Value: 65535}}, netuid, uid)
+			chain.set("Weights", []subnetWeightEntry{{Uid: 0, Value: 100}, {Uid: 3, Value: 65535}}, netuid, uid)
 			return NewSubnetWeightsSignal(), settings, func() {
-				chain.set("Weights", []subnetWeightPair{{Uid: 2, Value: 30000}, {Uid: 3, Value: 65535}}, netuid, uid)
+				chain.set("Weights", []subnetWeightEntry{{Uid: 2, Value: 30000}, {Uid: 3, Value: 65535}}, netuid, uid)
 			}
 		},
 		violatedClass: "subnet-weight-vector",
