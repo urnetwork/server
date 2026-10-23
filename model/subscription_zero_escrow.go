@@ -85,10 +85,10 @@ func init() {
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
 // earliest is the earlier of each branch's earliest, and each branch is a
-// bounded index range; the closed branch is bounded by the contract id (see
-// CompanionOriginCloseLinger). $1 and $2 are the origin's source and
-// destination, the companion's reverse; $3 is the earliest close time of a
-// lingering origin.
+// bounded index range; both branches are bounded by the contract id (see
+// unexpiredContractIdAge). $1 and $2 are the origin's source and destination,
+// the companion's reverse; $3 is the earliest close time of a lingering
+// origin.
 var zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
@@ -99,6 +99,9 @@ var zeroEscrowPlainOriginSql = `
 				-- equivalent to the generated open flag but opaque to legacy
 				-- false-zero open/outcome indexes
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+				-- ids lead with their creation millisecond: an unexpired
+				-- contract's id is at least this bound
+				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND
@@ -154,6 +157,9 @@ var zeroEscrowChainedOriginSql = `
 				-- equivalent to the generated open flag but opaque to legacy
 				-- false-zero open/outcome indexes
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+				-- ids lead with their creation millisecond: an unexpired
+				-- contract's id is at least this bound
+				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND

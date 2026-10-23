@@ -2106,8 +2106,8 @@ var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companio
 // createCompanionTransferEscrow, which differ only in companion_contract_id.
 // $1 and $2 are the origin's source and destination, the companion's reverse;
 // $3 is the earliest close time of a lingering origin. Like those selections,
-// the closed branch is bounded by the contract id (see
-// CompanionOriginCloseLinger), so it reads only the pair's recent contracts.
+// both branches are bounded by the contract id (see unexpiredContractIdAge),
+// so each reads only the pair's recent contracts.
 var companionOriginExistsSql = `
 	SELECT EXISTS (
 		SELECT 1 FROM transfer_contract
@@ -2115,6 +2115,9 @@ var companionOriginExistsSql = `
 			-- equivalent to the generated open flag but opaque to legacy
 			-- false-zero open/outcome indexes
 			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			-- ids lead with their creation millisecond: an unexpired
+			-- contract's id is at least this bound
+			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2255,6 +2258,7 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
@@ -2275,6 +2279,9 @@ func createCompanionTransferEscrow(
 							-- The CASE is equivalent to the generated open flag but
 							-- opaque to legacy false-zero open/outcome indexes.
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                            -- ids lead with their creation millisecond: an
+                            -- unexpired contract's id is at least this bound
+                            contract_id >= `+unexpiredContractIdFloorSql+` AND
                             COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
@@ -2367,6 +2374,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2399,6 +2407,9 @@ func createCompanionTransferEscrow(
 								-- Keep both generic open and outcome-null partial
 								-- indexes ineligible for this pair lookup.
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                -- ids lead with their creation millisecond: an
+                                -- unexpired contract's id is at least this bound
+                                contract_id >= `+unexpiredContractIdFloorSql+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND

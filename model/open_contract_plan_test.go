@@ -250,6 +250,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 	if testing.Short() {
 		t.Skip("open-contract query-plan test seeds 100k rows; skipped in -short")
 	}
+	runtimeQueries := coveredCompanionRuntimeQueries(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		sourceId := server.NewId()
@@ -274,37 +275,24 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			assertPlanUsesAnyIndex(t, pairPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, pairPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
-			originPlan := explainOpenContractPlan(t, ctx, conn, `
-				SELECT contract_id
-				FROM (
-					(
-						SELECT contract_id, create_time
-						FROM transfer_contract
-						WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-						  AND source_id = $1
-						  AND destination_id = $2
-						  AND companion_contract_id IS NULL
-						ORDER BY create_time ASC
-						LIMIT 1
-					)
-					UNION ALL
-					(
-						SELECT contract_id, create_time
-						FROM transfer_contract
-						WHERE open = false
-						  AND $3 <= close_time
-						  AND source_id = $1
-						  AND destination_id = $2
-						  AND companion_contract_id IS NULL
-						ORDER BY create_time ASC
-						LIMIT 1
-					)
-					ORDER BY create_time ASC
-					LIMIT 1
-				) AS earliest_origin
-			`, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
-			assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
-			assertPlanAvoidsIndexes(t, originPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
+			// the executed plain origin reads, with their contract id bounds:
+			// the escrow companion's, which also reads the prober maximum, and
+			// zero escrow's
+			plainOriginArgs := []any{sourceId, destinationId, server.NowUtc().Add(-time.Hour), payerNetworkId}
+			if runtimeQueries["earliest_origin"].binds == 5 {
+				plainOriginArgs = append(plainOriginArgs, ByteCount(1024))
+			}
+			for _, origin := range []struct {
+				sql  string
+				args []any
+			}{
+				{sql: runtimeQueries["earliest_origin"].sql, args: plainOriginArgs},
+				{sql: zeroEscrowPlainOriginSql, args: plainOriginArgs[:3]},
+			} {
+				originPlan := explainOpenContractPlan(t, ctx, conn, origin.sql, origin.args...)
+				assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
+				assertPlanAvoidsIndexes(t, originPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
+			}
 
 			// the actual companion origin existence read, before any transaction
 			existencePlan := explainOpenContractPlan(t, ctx, conn, companionOriginExistsSql, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
