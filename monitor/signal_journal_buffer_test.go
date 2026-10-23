@@ -686,11 +686,19 @@ func TestJournalBufferRestartGraceUsesMonotonicClockAfterSuspend(t *testing.T) {
 				testCase.wantAge, testCase.wantChecked)
 		}
 		short := false
+		held := false
 		for _, finding := range evaluateJournalBuffer("synthetic-edge", sample) {
-			short = short || finding.class == "journal-buffer-short" && !finding.healthy
+			if finding.class == "journal-buffer-short" {
+				short = short || !finding.healthy && !finding.clearHold
+				held = held || finding.clearHold
+			}
 		}
 		if short != testCase.wantChecked {
 			t.Fatalf("%s: short-buffer finding=%t, want %t", testCase.name, short, testCase.wantChecked)
+		}
+		wantHeld := !testCase.wantChecked
+		if held != wantHeld {
+			t.Fatalf("%s: short-buffer clear hold=%t, want %t", testCase.name, held, wantHeld)
 		}
 	}
 }
