@@ -325,7 +325,6 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
 | 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
@@ -42862,6 +42861,7 @@ policy document.
   validators' cuts.
 
 ### 22.5 Top-200 promotion, zero weight, demotion, and tier isolation
+Probe: `subnet-head`
 
 For **each validator independently**, replay its full eligible candidate census,
 active dual-signed bindings and verified non-seed prefix observations. Each
@@ -42880,6 +42880,48 @@ or require independently measured lists to be identical.
 | `subnet-tier-double-pay` | Each client belongs to exactly one payout tier at the effective boundary. Active head clients are absent from every NO tail artifact; valid demoted clients re-enter their permitted pools without duplicating historical credit. | Page on double pay, wrong-epoch exclusion/re-entry or head rewards entering the vault. Compare bindings, client-level payout inputs and native ownership, not only aggregated coldkey totals. |
 | `subnet-head-native-payout` | Actual applied incentive and attributable native emission accrue to the selected head's own coldkey/hotkey, not an operator, escrow, reserve or a former UID owner. | Page on proved wrong recipient/amount; warn on missing expected native payment after the applicable emission cycle. Separate registration funding, user transfers, delegation, dividends and share rounding from incentive. |
 | `subnet-promotion-economics` | Realized head/tail pay and churn are visible over aligned mature windows; the policy goal is lowest-paid qualified head >= highest-paid comparable tail provider. | Warn if promotion persistently becomes a pay cut or head/pool eviction thrashes. Report theta, breadth, coverage, immunity and realized per-tier pay; governance decides changes, the monitor does not. |
+
+Implementation (2026-10-23, `signal_subnet_head.go`), at the §22.1 agreed
+checkpoint. The binding census replays `FleetBound`, `FleetBindingRevoked` and
+`FleetBindingCleaned` from the deployment block with the coordinator's own
+rules (a revocation ends a version before its effective epoch; a cleanup ends
+the latest version at its epoch; `bindingAt` reads the latest version already
+valid). It is complete only once the published frontier reaches the
+checkpoint; until then every census check is unknown.
+
+- `subnet-head-weight-bypass`: for each permitted validator independently
+  (reviewed validators by ordinal, the rest aggregated), PAGE, Sustain 1, when
+  its applied row gives positive weight to the validator itself or to a UID
+  that is no operator pool, no fleet bound in the current or previous epoch, no
+  reviewed treasury recipient and not the subnet owner. With no reviewed
+  treasury, an unexplained UID stays unknown rather than paged.
+- `subnet-head-selection`: PAGE when a row weights more bound head fleets than
+  the policy's `maximum_head_fleets` (200 without the document); otherwise a
+  standing unknown, because the full candidate census, split-adjusted breadth,
+  EMA and tie break live in each validator's private release measurement.
+- `subnet-head-native-payout`: PAGE when a bound head UID with positive
+  `Incentive` is held by a hotkey its binding does not name, or by a pool,
+  deposit, escrow, reserve or treasury hotkey, the subnet owner, or a hotkey
+  owned by a custody or operator coldkey.
+- `subnet-promotion-churn`: WARN, Sustain 2, when more bound head UIDs changed
+  hotkey between published observations than `max_head_churn_per_run`.
+- `subnet-tier-double-pay`: for each operator's committed source-epoch artifact
+  (read by its chain-committed content hash), the candidate providers (tail
+  providers ever bound once the census is complete, every tail and head-excluded
+  provider otherwise, at most `max_artifact_providers`) are checked with the
+  coordinator's own `bindingAt` at the artifact's Start and End boundary block
+  hashes. PAGE when a tail provider is active at either boundary; WARN when a
+  head-excluded provider is active at neither; unknown when that historical
+  state or the artifact is unreadable.
+- `subnet-promotion-economics` is a standing unknown: it needs an aligned,
+  mature per-epoch ledger of realized head and tail pay.
+
+- **False-positive qualifier:** rows are judged against the current and the
+  previous epoch's bound fleets, so a row decided before a binding expired is
+  not a bypass; already-earned emission is not new weight.
+- **False-negative qualifier:** authorized burn ceilings and the promotion SLO
+  need the fleets' authorization records; a demoted client's duplicate
+  historical credit is not judged; historical `bindingAt` needs archive state.
 
 ### 22.6 Native weight lifecycle, consensus, and validator dividends
 
