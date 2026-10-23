@@ -338,6 +338,13 @@ func (self *Exchange) isLocalMoveHost(host string) bool {
 	return false
 }
 
+// The name of this process's host in the edge inventory, which intents and
+// arrival counts use, or WARP_HOST when the inventory has no match. The load
+// table should key the host by it so the table joins the inventory.
+func (self *Exchange) MoveHost() string {
+	return self.localMoveHost()
+}
+
 // The inventory name of this process's host for intents, WARP_HOST when the
 // inventory has no match.
 func (self *Exchange) localMoveHost() string {

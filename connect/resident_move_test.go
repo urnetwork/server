@@ -212,6 +212,10 @@ func TestResidentMoveIntentMatchesTargetAndResident(t *testing.T) {
 	source := intent(model.ResidentMoveKindDrain, "alpha-edge-1")
 	source.FromExchangeId = target.exchangeId
 	connect.AssertEqual(t, false, target.matchesResidentMoveIntent(source, current))
+	// the host name intents and the load table use is the inventory's
+	connect.AssertEqual(t, "alpha-edge-1", target.MoveHost())
+	target.edgeInventory = nil
+	connect.AssertEqual(t, "host0", target.MoveHost())
 	// a disabled exchange takes over nothing, and reads no intent
 	target.settings.EnableMove = false
 	connect.AssertEqual(t, false, target.takeOverMovedResident(ctx, server.NewId(), server.NewId(), current, false))
