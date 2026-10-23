@@ -42005,6 +42005,20 @@ virtual IPv4 address, not by a possibly different certificate common name. The I
 check is part of this inventory's established host contract: every enabled
 client currently answers it from the VPN server.
 
+The supported Linux observer contract is iputils `ping -n -c 1 -W 1`:
+exit 0 proves a reply and exit 1 proves no reply. Other exits, including
+command unavailable, permission/argument errors, and termination, produce a
+fixed per-client unknown result, not a failed path or a reachable control.
+That client emits the existing `cannot-observe` visibility warning (two
+cadences). Unknown ping execution does not erase independently complete
+missing-session or unit-state evidence, or another client's qualified path
+failure/control. It cannot add a client to shared-source loss correlation.
+A missing reachability row remains malformed; `unknown` is an explicit
+execution result. No retry, privilege change, alternate endpoint, or extra
+probe is introduced. Qualification must establish the selected remote ping
+implementation's exit contract; this source change does not attest its
+installation or demonstrate a client outage or recovery.
+
 Before command assembly, admit both each client's exact inventory name and its
 overlay endpoint through the immutable host-scope policy. Excluded clients and
 shared endpoints with an excluded owner must appear in neither the ICMP target
