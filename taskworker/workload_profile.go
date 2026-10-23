@@ -183,6 +183,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.SweepProviderAuditEvents), schedule: work.ScheduleSweepProviderAuditEvents},
 		{target: task.NewTaskTarget(work.RollupTransferAuditEvents), schedule: work.ScheduleRollupTransferAuditEvents},
 		{target: task.NewTaskTarget(work.RemoveOldClientReliabilityStats), schedule: work.ScheduleRemoveOldClientReliabilityStats},
+		{target: task.NewTaskTarget(work.MaintainContractPartitions), schedule: work.ScheduleMaintainContractPartitions},
 		{target: task.NewTaskTarget(work.RollupClientReliabilityStats), schedule: work.ScheduleRollupClientReliabilityStats},
 		{target: task.NewTaskTarget(work.RollupClientDataUsage), schedule: work.ScheduleRollupClientDataUsage},
 		// creates contracts too; seeded only while degraded.yml enables it
