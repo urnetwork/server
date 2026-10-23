@@ -471,6 +471,11 @@ type ExchangeSettings struct {
 	// Nil in production. Tests publish instance-owned barriers after the real
 	// header succeeds and before any connection worker starts, outside locks.
 	beforeExchangeConnectionRunForTest func(*ExchangeConnection)
+	// Nil and empty in production. Tests give the edge inventory a synthetic
+	// services.yml and the process host it matches, instead of the vault's
+	// and WARP_HOST.
+	edgeInventoryLoadForTest        func() ([]byte, error)
+	edgeInventoryProcessHostForTest string
 
 	ExchangeResidentTtl time.Duration
 
@@ -689,6 +694,9 @@ type Exchange struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// identifies this exchange instance in move intents (MOVE.md §5.3)
+	exchangeId server.Id
+
 	host    string
 	service string
 	block   string
@@ -697,6 +705,9 @@ type Exchange struct {
 	// since each port allows at most 65k connections from another connect instance
 	hostToServicePorts map[int]int
 	routes             map[string]string
+
+	// the edge inventory moves target; nil while moves are disabled
+	edgeInventory *EdgeInventory
 
 	settings              *ExchangeSettings
 	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
@@ -742,6 +753,14 @@ type Exchange struct {
 	// The client's transports on this process (H1 and every QUIC carrier):
 	// client id -> connection id -> cancel func. A drain waits for these.
 	connections map[server.Id]map[server.Id]context.CancelFunc
+	// connection id -> the moved close of one of those transports, for a
+	// compulsory move's deadline. Nil until the first one.
+	connectionMovedCloses map[server.Id]func()
+	// decides at drain time whether drains may send moves; nil allows
+	// (SetDrainMovesAllowed)
+	drainMovesAllowed func(context.Context) bool
+	// hears of each new local resident (SetResidentArrivalListener)
+	residentArrivalListener func(clientId server.Id, byIntent bool)
 	// client id -> accepted inbound exchange connections. An inbound exchange
 	// connection routes into a local resident and ends with it, so a drain
 	// does not wait for these (MOVE.md §2.3). Nil until the first one.
@@ -820,6 +839,7 @@ func newExchange(
 	exchange := &Exchange{
 		ctx:                   cancelCtx,
 		cancel:                cancel,
+		exchangeId:            server.NewId(),
 		host:                  host,
 		service:               service,
 		block:                 block,
@@ -842,6 +862,22 @@ func newExchange(
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
+	if settings.EnableMove {
+		inventoryProcessHost := host
+		if settings.edgeInventoryProcessHostForTest != "" {
+			inventoryProcessHost = settings.edgeInventoryProcessHostForTest
+		}
+		inventoryLoad := loadVaultServicesYaml
+		if settings.edgeInventoryLoadForTest != nil {
+			inventoryLoad = settings.edgeInventoryLoadForTest
+		}
+		exchange.edgeInventory = newEdgeInventory(
+			cancelCtx,
+			inventoryProcessHost,
+			settings.MoveInventoryRefreshInterval,
+			inventoryLoad,
+		)
+	}
 
 	// Run only starts the listeners and waits, and each listener cancels the
 	// exchange when it stops. A raise in Run leaves the started listeners
@@ -948,8 +984,18 @@ func (self *Exchange) NominateLocalResidentWithContext(
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
 ) bool {
-	nominated, _ := self.nominateLocalResident(callerCtx, clientId, instanceId, residentIdToReplace, false)
+	nominated, _ := self.nominateLocalResident(callerCtx, clientId, instanceId, residentIdToReplace, residentNominationArgs{})
 	return nominated
+}
+
+// What a nomination carries beyond the resident to replace.
+type residentNominationArgs struct {
+	// the transport declared provide intent: its provider intent check decides
+	// the client limit (model.CanConnectNetworkPeer)
+	provideIntent bool
+	// the move whose intent this nomination takes over by (MOVE.md §5.3);
+	// zero for an ordinary nomination
+	arrivedMoveId server.Id
 }
 
 // Nominates for a transport that may have declared provide intent. Returns
@@ -960,7 +1006,7 @@ func (self *Exchange) nominateLocalResident(
 	clientId server.Id,
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
-	provideIntent bool,
+	args residentNominationArgs,
 ) (bool, bool) {
 	admissionCtx, admissionCancel := context.WithCancel(callerCtx)
 	stopExchangeCancel := context.AfterFunc(self.ctx, admissionCancel)
@@ -1016,7 +1062,7 @@ func (self *Exchange) nominateLocalResident(
 	// already-connected client is not a new connection (see
 	// model.CanConnectNetworkPeer). This is a no-op while
 	// enforce_concurrent_clients is false in pro.yml.
-	if !model.CanConnectNetworkPeer(admissionCtx, clientId, provideIntent) {
+	if !model.CanConnectNetworkPeer(admissionCtx, clientId, args.provideIntent) {
 		nominationRefusedCounter.WithLabelValues("concurrent_client_limit").Inc()
 		if glog.V(1) {
 			glog.Infof(
@@ -1074,6 +1120,7 @@ func (self *Exchange) nominateLocalResident(
 		}
 		return false, false
 	}
+	resident.arrivedMoveId = args.arrivedMoveId
 	// Publish before any lifecycle worker can remove this generation. A worker
 	// that retires immediately must not leave a later insertion behind it.
 	var replacedResident *Resident
@@ -1109,11 +1156,12 @@ func (self *Exchange) nominateLocalResident(
 			// RemoveNetworkPeer no-ops (no publish) when this resident never
 			// registered, so churny residents that died before announcing
 			// emit nothing here.
-			// a drained teardown skips the disconnect marker entirely: the
-			// member registration ttl converts a non-returning client to a
-			// disconnect anyway, and a returning client refreshes the entry
-			// with no visible blip (CONNECTDRAIN2.md §3.2)
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() {
+			// a drained or moved teardown skips the disconnect marker
+			// entirely: the member registration ttl converts a non-returning
+			// client to a disconnect anyway, and a returning client refreshes
+			// the entry with no visible blip (CONNECTDRAIN2.md §3.2, MOVE.md
+			// §5.7)
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -1169,6 +1217,7 @@ func (self *Exchange) nominateLocalResident(
 	if afterStarted := self.afterResidentWorkersStartedForTest; afterStarted != nil {
 		afterStarted(resident)
 	}
+	self.notifyResidentArrival(resident)
 
 	return true, false
 }
@@ -1795,8 +1844,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	switch header.Op {
 	case ExchangeOpTransport:
-		send, receive, closeTransport, err := resident.AddTransportWithProperties(
+		send, receive, closeTransport, err := resident.addTransportWithEdge(
 			header.transferCarrierProperties(),
+			header.transportEdge(),
 		)
 		if err == nil {
 			runTransport(send, receive, closeTransport)
@@ -1815,6 +1865,18 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 }
 
 func (self *Exchange) registerConnection(clientId server.Id, connectionId server.Id, handleCancel context.CancelFunc) {
+	self.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, nil)
+}
+
+// Registers one client transport on this process. closeMoved closes it with
+// the moved close at a compulsory move's deadline; nil cancels it instead.
+// Neither may block.
+func (self *Exchange) registerConnectionWithMovedClose(
+	clientId server.Id,
+	connectionId server.Id,
+	handleCancel context.CancelFunc,
+	closeMoved func(),
+) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -1824,6 +1886,12 @@ func (self *Exchange) registerConnection(clientId server.Id, connectionId server
 		self.connections[clientId] = handleCancels
 	}
 	handleCancels[connectionId] = handleCancel
+	if closeMoved != nil {
+		if self.connectionMovedCloses == nil {
+			self.connectionMovedCloses = map[server.Id]func(){}
+		}
+		self.connectionMovedCloses[connectionId] = closeMoved
+	}
 }
 
 func (self *Exchange) unregisterConnection(clientId server.Id, connectionId server.Id) {
@@ -1837,6 +1905,7 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 			delete(self.connections, clientId)
 		}
 	}
+	delete(self.connectionMovedCloses, connectionId)
 }
 
 // Counts one accepted inbound exchange connection of the client.
@@ -1931,32 +2000,40 @@ func (self *Exchange) sendResidentMigrate(
 	if err != nil {
 		return false
 	}
-	return resident.client.SendWithTimeout(
+	if resident.client.SendWithTimeout(
 		frame,
 		connect.Id(resident.clientId),
 		nil,
 		timeout,
-	)
+	) {
+		return true
+	}
+	// an unsent frame still belongs to the caller
+	connect.MessagePoolReturn(frame.MessageBytes)
+	return false
 }
 
-// migrateResidents broadcasts migrate frames with migrate times jittered
-// across `DrainMigrateWindow`, then waits for the clients to move themselves:
-// a migrated client closes its old transport once its replacement is up, so
-// the wait watches the transports on this process of the clients that
-// actually received a migrate frame.
-// Bounded fanout and an aggregate broadcast deadline prevent a large number of
-// wedged send queues from serially consuming the migration window. Returns
-// when those connections are gone or the migrate window (bounded by the drain
-// deadline) elapses; whatever remains falls to the straggler sweep.
-func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.Time) {
-	if len(residents) == 0 {
-		return
-	}
-
+// broadcastResidentMigrates sends one migrate (or move) per resident with
+// migrate times jittered across `DrainMigrateWindow`. Bounded fanout and an
+// aggregate broadcast deadline prevent a large number of wedged send queues
+// from serially consuming the migration window; residents that cannot be
+// attempted inside the budget fall through to the straggler sweep. send
+// reports whether the client was sent a frame. Returns the attempted count,
+// the clients sent a frame, and the end of the migrate window (bounded by the
+// drain deadline).
+func (self *Exchange) broadcastResidentMigrates(
+	residents []*Resident,
+	drainEndTime time.Time,
+	send func(resident *Resident, migrateTime time.Time, sendTimeout time.Duration) bool,
+) (int, map[server.Id]struct{}, time.Time) {
 	startTime := time.Now()
 	migrateEndTime := startTime.Add(self.settings.DrainMigrateWindow)
 	if drainEndTime.Before(migrateEndTime) {
 		migrateEndTime = drainEndTime
+	}
+	sentClientIds := map[server.Id]struct{}{}
+	if len(residents) == 0 {
+		return 0, sentClientIds, migrateEndTime
 	}
 
 	broadcastEndTime := startTime.Add(self.settings.DrainMigrateBroadcastTimeout)
@@ -1964,7 +2041,7 @@ func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.
 		broadcastEndTime = migrateEndTime
 	}
 	if !startTime.Before(broadcastEndTime) {
-		return
+		return 0, sentClientIds, migrateEndTime
 	}
 
 	fanout := self.settings.DrainMigrateFanout
@@ -2002,7 +2079,7 @@ func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.
 				}
 				results <- migrateResult{
 					clientId: resident.clientId,
-					sent:     self.sendResidentMigrate(resident, migrateTime, sendTimeout),
+					sent:     send(resident, migrateTime, sendTimeout),
 				}
 			}
 		}()
@@ -2024,12 +2101,26 @@ sendLoop:
 	workers.Wait()
 	close(results)
 
-	sentClientIds := map[server.Id]struct{}{}
 	for result := range results {
 		if result.sent {
 			sentClientIds[result.clientId] = struct{}{}
 		}
 	}
+	return attemptedCount, sentClientIds, migrateEndTime
+}
+
+// migrateResidents broadcasts migrate frames (broadcastResidentMigrates), then
+// waits for the clients to move themselves: a migrated client closes its old
+// transport once its replacement is up, so the wait watches the transports on
+// this process of the clients that actually received a migrate frame. Returns
+// when those transports are gone or the migrate window (bounded by the drain
+// deadline) elapses; whatever remains falls to the straggler sweep.
+func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.Time) {
+	attemptedCount, sentClientIds, migrateEndTime := self.broadcastResidentMigrates(
+		residents,
+		drainEndTime,
+		self.sendResidentMigrate,
+	)
 	if len(sentClientIds) == 0 {
 		return
 	}
@@ -2086,7 +2177,10 @@ func (self *Exchange) drainClientCountLocked() int {
 //  2. mark and excuse every current resident up front, so the reconnect is
 //     excused no matter when the client redials
 //  3. broadcast migrate frames with jittered migrate times and wait for
-//     clients to move themselves (make-before-break, when coordination is on)
+//     clients to move themselves (make-before-break, when coordination is on).
+//     With drain moves on (EnableMove, EnableDrainMoves and the move control)
+//     the frames are compulsory moves to this host with intents, and the wait
+//     enforces each move's deadline (MOVE.md §5.6)
 //  4. evict the stragglers, paced to finish within
 //     `DrainStragglerSweepTimeout`
 //
@@ -2123,7 +2217,13 @@ func (self *Exchange) Drain() {
 	}
 
 	if self.settings.EnableDrainCoordination {
-		self.migrateResidents(residents, drainEndTime)
+		if self.drainMovesEnabled() {
+			// compulsory moves to this host with intents, so a migrated client
+			// takes over at a sibling as soon as it arrives (MOVE.md §5.6, D13)
+			self.moveResidentsForDrain(residents, drainEndTime)
+		} else {
+			self.migrateResidents(residents, drainEndTime)
+		}
 	}
 
 	// straggler sweep: evict whatever remains, adapting the pace so the sweep
@@ -2529,6 +2629,13 @@ type ExchangeHeader struct {
 	UnreliableTransferMaxMessageByteCount int
 	UnreliableFlowIsolation               bool
 	UnreliableFlowReserve                 bool
+	// What the client's edge connection declared and how it arrived
+	// (ResidentTransportEdge). Gob decodes these as zero from a peer that
+	// predates them, and that peer ignores them.
+	ResidentMoveVersion uint32
+	Carrier             ResidentCarrier
+	IpFamily            uint8
+	ProvideIntent       bool
 }
 
 func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
@@ -2537,6 +2644,15 @@ func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierPr
 		UnreliableMaxMessageByteCount: self.UnreliableTransferMaxMessageByteCount,
 		UnreliableFlowIsolation:       self.UnreliableFlowIsolation,
 		UnreliableFlowReserve:         self.UnreliableFlowReserve,
+	}
+}
+
+func (self ExchangeHeader) transportEdge() ResidentTransportEdge {
+	return ResidentTransportEdge{
+		ResidentMoveVersion: self.ResidentMoveVersion,
+		Carrier:             self.Carrier,
+		IpFamily:            self.IpFamily,
+		ProvideIntent:       self.ProvideIntent,
 	}
 }
 
@@ -3230,12 +3346,38 @@ func NewResidentTransportWithAdmission(
 	properties connect.TransferCarrierProperties,
 	admission ResidentTransportAdmission,
 ) *ResidentTransport {
+	return NewResidentTransportWithEdge(
+		ctx,
+		exchange,
+		clientId,
+		instanceId,
+		properties,
+		admission,
+		ResidentTransportEdge{},
+	)
+}
+
+// Adds what the edge connection declared and how it arrived, which the
+// exchange header carries to the resident wherever it lives.
+func NewResidentTransportWithEdge(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	properties connect.TransferCarrierProperties,
+	admission ResidentTransportAdmission,
+	edge ResidentTransportEdge,
+) *ResidentTransport {
 	header := ExchangeHeader{
 		Op:                                    ExchangeOpTransport,
 		UnreliableTransfer:                    properties.Unreliable,
 		UnreliableTransferMaxMessageByteCount: properties.UnreliableMaxMessageByteCount,
 		UnreliableFlowIsolation:               properties.UnreliableFlowIsolation,
 		UnreliableFlowReserve:                 properties.UnreliableFlowReserve,
+		ResidentMoveVersion:                   edge.ResidentMoveVersion,
+		Carrier:                               edge.Carrier,
+		IpFamily:                              edge.IpFamily,
+		ProvideIntent:                         edge.ProvideIntent,
 	}
 	transport := newResidentTransport(ctx, exchange, header, clientId, instanceId)
 	transport.admission = admission
@@ -3380,6 +3522,17 @@ func (self *ResidentTransport) Run() {
 		// Routing does not own the registration heartbeat. Failed dialing must
 		// not keep a departed resident's registration alive.
 		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
+		// A client arriving by a move takes over its resident here instead of
+		// forwarding to it (MOVE.md §5.3); then route to the local resident.
+		if resident != nil && self.exchange.takeOverMovedResident(
+			self.ctx,
+			self.clientId,
+			self.instanceId,
+			resident,
+			self.admission.ProvideIntent,
+		) {
+			resident = model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
+		}
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			headerCopy := self.header
@@ -3447,7 +3600,9 @@ func (self *ResidentTransport) Run() {
 				self.clientId,
 				self.instanceId,
 				residentIdToReplace,
-				self.admission.ProvideIntent,
+				residentNominationArgs{
+					provideIntent: self.admission.ProvideIntent,
+				},
 			)
 			if clientLimitExceeded && self.admission.ClientLimitExceeded != nil {
 				// the connection closes with the signal; until then this keeps
@@ -3834,6 +3989,23 @@ type Resident struct {
 	// disconnect anyway, and a returning client refreshes the entry with no
 	// visible blip (CONNECTDRAIN2.md §3.2)
 	drained atomic.Bool
+	// set when a move retires the resident: another resident took over, or a
+	// compulsory deadline closed the client. The teardown skips the peer
+	// disconnect marker as for drained (MOVE.md §5.7)
+	moved atomic.Bool
+
+	// when this exchange created the resident
+	createTime time.Time
+	// the highest move version any of the client's transports declared over
+	// the resident's life (MOVE.md D2)
+	moveVersion atomic.Uint32
+	// the client's open stream hops, from the latest stream snapshot
+	streamHopCount atomic.Int64
+	// the outstanding move of this resident, or nil (resident_move.go)
+	move atomic.Pointer[residentMove]
+	// the move whose intent this resident took over by; zero for an ordinary
+	// nomination. Set before the resident is published, then read only.
+	arrivedMoveId server.Id
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
@@ -3928,6 +4100,7 @@ func newResidentDuringAdmission(
 		transports:              map[*clientTransport]bool{},
 		forwards:                map[server.Id]*ResidentForward{},
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
+		createTime:              time.Now(),
 	}
 	resident.lastActivityNanos.Store(time.Now().UnixNano())
 	constructed := false
@@ -4279,6 +4452,7 @@ func (self *Resident) Run() {
 		self.runStreamAuthorizations(hopSnapshots)
 	}()
 	streamHopListener := model.NewStreamHopListener(self.ctx, self.clientId, func(event *model.StreamHopEvent) {
+		self.streamHopCount.Store(int64(len(event.StreamHops)))
 		snapshot := append([]model.StreamHop(nil), event.StreamHops...)
 		select {
 		case hopSnapshots <- snapshot:
@@ -4777,14 +4951,31 @@ func (self *Resident) AddTransportWithProperties(
 	closeTransport func(),
 	returnErr error,
 ) {
+	return self.addTransportWithEdge(properties, ResidentTransportEdge{})
+}
+
+// Publishes one resident route and records what its edge connection declared
+// (the move version and carrier, MOVE.md D2). Closing the route wakes the
+// watcher of an outstanding move to re-read the resident record (§5.3).
+func (self *Resident) addTransportWithEdge(
+	properties connect.TransferCarrierProperties,
+	edge ResidentTransportEdge,
+) (
+	send chan []byte,
+	receive chan []byte,
+	closeTransport func(),
+	returnErr error,
+) {
 	send = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 	receive = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	self.observeTransportEdge(edge)
 
 	// in `connect` the transport is bidirectional
 	// in the resident, each transport is a single direction
 	transport := &clientTransport{
 		sendTransport:    connect.NewSendClientTransport(connect.DestinationId(connect.Id(self.clientId))),
 		receiveTransport: connect.NewReceiveGatewayTransport(),
+		edge:             edge,
 	}
 
 	routeManager := self.client.RouteManager()
@@ -4817,6 +5008,9 @@ func (self *Resident) AddTransportWithProperties(
 			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
 		}()
+		if move := self.move.Load(); move != nil {
+			move.notifyTransportClosed()
+		}
 
 		// note `send` is not closed. This channel is left open.
 		// it used to be closed after a delay, but it is not needed to close it.
@@ -5073,6 +5267,8 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 type clientTransport struct {
 	sendTransport    connect.Transport
 	receiveTransport connect.Transport
+	// what the transport's edge connection declared and how it arrived
+	edge ResidentTransportEdge
 }
 
 type limiter struct {

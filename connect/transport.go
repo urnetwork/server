@@ -1497,7 +1497,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						}
 						return 0
 					}(),
-					IpFamily: ipFamilyIntentFromHeader(headerIpFamily),
+					IpFamily:            ipFamilyIntentFromHeader(headerIpFamily),
+					ResidentMoveVersion: residentMoveVersionFromHeader(r.Header.Get(HeaderResidentMoveVersion)),
 				}, transportVersion
 			} else {
 				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
@@ -1665,18 +1666,35 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	clientId := *byJwt.ClientId
 	var authorizationCloseCode atomic.Int32
+	// a compulsory move's deadline closes this transport with the moved close
+	// (transport_moved_close.go); an authorization close takes precedence
+	var movedCloseRequested atomic.Bool
+	// the typed close the sole writer sends before the socket closes
+	writeTypedClose := func() bool {
+		if code := int(authorizationCloseCode.Load()); code != 0 {
+			writeConnectAuthorizationClose(ws, code)
+			return true
+		}
+		if movedCloseRequested.Load() {
+			_ = writeConnectH1Moved(ws, self.settings.WriteTimeout)
+			return true
+		}
+		return false
+	}
 	writerStarted := false
 	// Retirement can arrive just after 101, before the serving writer exists.
 	// In that interval the handler is still the sole write owner.
 	defer func() {
 		if !writerStarted && ws != nil {
-			if code := int(authorizationCloseCode.Load()); code != 0 {
-				writeConnectAuthorizationClose(ws, code)
-			}
+			writeTypedClose()
 		}
 	}()
 	connectionId := server.NewId()
-	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
+		movedCloseRequested.Store(true)
+		h1Observation.close(connectH1CloseMoved)
+		handleCancel()
+	})
 	defer self.exchange.unregisterConnection(clientId, connectionId)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1758,10 +1776,19 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// the declared family rides with the connection record; the observed
 	// family is re-derived from the same address at the model
-	_, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
+	ipVersion, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
 
 	// the header, or the frame field of a first-frame auth
 	provideIntent := provideIntentFromHeader(r.Header) || auth.ProvideIntent
+	edge := ResidentTransportEdge{
+		ResidentMoveVersion: max(
+			residentMoveVersionFromHeader(r.Header.Get(HeaderResidentMoveVersion)),
+			auth.ResidentMoveVersion,
+		),
+		Carrier:       ResidentCarrierH1,
+		IpFamily:      residentTransportIpFamily(ipVersion),
+		ProvideIntent: provideIntent,
+	}
 	defer trackProvideIntentConnection(connectTransportH1, provideIntent)()
 
 	c := func() {
@@ -1831,13 +1858,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				kickClientLimit(clientLimitKickCauseConcurrentClientLimit)
 			}
 		}
-		residentTransport := NewResidentTransportWithAdmission(
+		residentTransport := NewResidentTransportWithEdge(
 			handleCtx,
 			self.exchange,
 			clientId,
 			instanceId,
 			connect.TransferCarrierProperties{},
 			admission,
+			edge,
 		)
 		var workers connectHandlerWorkers
 		writerDone := make(chan struct{})
@@ -1850,7 +1878,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// The sole writer sends the typed close before the socket owner tears
 			// down reads. A blocked peer still cannot hold retirement indefinitely.
 			var authorizationWriterDone <-chan struct{}
-			if writerStarted && authorizationCloseCode.Load() != 0 {
+			if writerStarted && (authorizationCloseCode.Load() != 0 || movedCloseRequested.Load()) {
 				authorizationWriterDone = writerDone
 			}
 			closeH1AuthorizationSocket(authorizationWriterDone, func() { _ = ws.Close() })
@@ -1963,11 +1991,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		workers.start(func() {
 			defer close(writerDone)
 			defer handleCancel()
-			defer func() {
-				if code := int(authorizationCloseCode.Load()); code != 0 {
-					writeConnectAuthorizationClose(ws, code)
-				}
-			}()
+			defer writeTypedClose()
 
 			recordWriteError := func(err error) {
 				h1Observation.close(connectH1CloseWriteError)
@@ -2304,7 +2328,7 @@ func (self *ConnectHandler) listenQuic(
 
 		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
 		if !self.startHandle(func() {
-			self.serveQuicConn(conn, listenAddress)
+			self.serveQuicConn(conn, listenAddress, residentCarrierForQuicListener(key.transport))
 		}) {
 			conn.CloseWithError(0, "")
 			return handleCtx.Err()
@@ -2315,15 +2339,15 @@ func (self *ConnectHandler) listenQuic(
 // Serves one accepted QUIC connection on the caller's goroutine and closes it
 // on return. Admission is the caller's: the handler's own listener holds a
 // started worker for it, and HandleQuicConn takes one for an external
-// dispatch.
-func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string) {
+// dispatch. carrier is the listener's, which the resident sees.
+func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string, carrier ResidentCarrier) {
 	// Declared before the close so it runs after it: releasing the connection's
 	// granted window while it could still attempt an increase would leave that
 	// increase charged to the aggregate with nothing left to release it.
 	defer self.quicWindowBudget.release(conn)
 	defer conn.CloseWithError(0, "")
 
-	err := self.connectQuic(conn)
+	err := self.connectQuicWithCarrier(conn, carrier)
 	if err != nil {
 		glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
 	} else {
@@ -2342,7 +2366,8 @@ func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn) bool {
 		return false
 	}
 	defer self.endHandle()
-	self.serveQuicConn(conn, conn.LocalAddr().String())
+	// the external front does not tell which of its listeners accepted conn
+	self.serveQuicConn(conn, conn.LocalAddr().String(), ResidentCarrierUnknown)
 	return true
 }
 
@@ -2498,7 +2523,12 @@ func (self *ConnectHandler) refuseQuicWhileDraining(conn *quic.Conn) bool {
 	return true
 }
 
+// Serves one QUIC connection of unknown carrier.
 func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
+	return self.connectQuicWithCarrier(conn, ResidentCarrierUnknown)
+}
+
+func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier ResidentCarrier) error {
 	if self.refuseQuicWhileDraining(conn) {
 		return errConnectQuicDraining
 	}
@@ -2571,7 +2601,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var clientId server.Id
 	var instanceId server.Id
 	var connectionId server.Id
+	ipVersion := 0
 	ipFamilyIntent := 0
+	residentMoveVersion := uint32(0)
 	appVersion := ""
 	clientInfo := session.UnknownClientInfo()
 	var lease *session.AuthorizationLease
@@ -2622,17 +2654,21 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 			clientId = *byJwt.ClientId
 
-			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
+			ipVersion, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 			clientInfo = session.ParseClientInfo(auth.ClientInfo, auth.AppVersion)
 			appVersion = clientInfo.AppVersion
 			provideIntent = auth.ProvideIntent
+			residentMoveVersion = auth.ResidentMoveVersion
 
 			if authCtx.Err() != nil {
 				return authCtx.Err()
 			}
 
 			connectionId = server.NewId()
-			self.exchange.registerConnection(clientId, connectionId, handleCancel)
+			self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
+				_ = closeConnectQuicMoved(conn)
+				handleCancel()
+			})
 			connectionRegistered = true
 			var leaseErr error
 			if self.settings.testingBeforeAuthorizationLease != nil {
@@ -2771,7 +2807,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				kickClientLimit(clientLimitKickCauseConcurrentClientLimit)
 			}
 		}
-		residentTransport := NewResidentTransportWithAdmission(
+		residentTransport := NewResidentTransportWithEdge(
 			handleCtx,
 			self.exchange,
 			clientId,
@@ -2782,6 +2818,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				maxDatagramByteCount,
 			),
 			admission,
+			ResidentTransportEdge{
+				ResidentMoveVersion: residentMoveVersion,
+				Carrier:             carrier,
+				IpFamily:            residentTransportIpFamily(ipVersion),
+				ProvideIntent:       provideIntent,
+			},
 		)
 		var datagramFragmenter *connect.H3DatagramFragmenter
 		var datagramReassembler *connect.H3DatagramReassembler

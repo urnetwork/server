@@ -21,7 +21,9 @@ type ExchangeMoveSettings struct {
 	// off for the next drain without a deploy.
 	EnableDrainMoves bool
 	// The intent TTL: the `migrate_time` jitter plus the client connect timeout
-	// plus a margin. A client that arrives after this forwards as today.
+	// plus a margin. A client that arrives after this forwards as today. The
+	// source's poll of a balance move stops with it. Non-positive writes no
+	// intent, so no move is sent.
 	MoveArrivalTimeout time.Duration
 	// How often the source re-reads `ncr_` for each of its outstanding balance
 	// moves, to retire a resident the target took over (MOVE.md §5.3). Zero or
@@ -30,7 +32,8 @@ type ExchangeMoveSettings struct {
 	MoveIntentPollInterval time.Duration
 	// The deadline of a compulsory move after its `migrate_time` (MOVE.md §5.6,
 	// D12). The source closes the client's transports with reason "moved" when
-	// its resident is still local at the deadline.
+	// its resident is still local at the deadline. A drain's deadlines are no
+	// later than the drain's own. Non-positive closes at `migrate_time`.
 	MoveCompulsoryTimeout time.Duration
 	// Sent to the client as `prefer_duration`: how long it prefers the target
 	// address for reconnects after a successful move (D10). Zero sends none.
@@ -99,10 +102,17 @@ type ExchangeMoverSettings struct {
 	MoveInventoryRefreshInterval time.Duration
 	// A target IP's breaker opens when failure reports over sends exceed this
 	// ratio with at least `MoveTargetBreakerMinSends` sends in the window, and
-	// stays open for `MoveTargetBreakerTimeout` (MOVE.md §5.5).
+	// stays open for `MoveTargetBreakerTimeout` (MOVE.md §5.5). A non-positive
+	// minimum requires no minimum; a non-positive timeout never opens a breaker.
 	MoveTargetBreakerRatio    float64
 	MoveTargetBreakerMinSends int
 	MoveTargetBreakerTimeout  time.Duration
+	// The window a target IP's sends and failure reports are counted in,
+	// starting with its first send. It must cover the client's connect timeout
+	// (60 s), since a failure is reported only after it. Ten minutes holds the
+	// minimum sample at moderate send rates. Non-positive counts no sends, so no
+	// breaker opens.
+	MoveTargetBreakerWindow time.Duration
 }
 
 func DefaultExchangeMoverSettings() *ExchangeMoverSettings {
@@ -129,5 +139,6 @@ func DefaultExchangeMoverSettings() *ExchangeMoverSettings {
 		MoveTargetBreakerRatio:        0.2,
 		MoveTargetBreakerMinSends:     20,
 		MoveTargetBreakerTimeout:      10 * time.Minute,
+		MoveTargetBreakerWindow:       10 * time.Minute,
 	}
 }
