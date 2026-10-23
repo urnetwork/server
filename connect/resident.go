@@ -521,6 +521,9 @@ type ExchangeSettings struct {
 	ContractManagerSettings *connect.ContractManagerSettings
 
 	ExchangeChaosSettings
+
+	ExchangeMoveSettings
+	ExchangeMoverSettings
 }
 
 type ExchangeChaosSettings struct {
@@ -619,6 +622,9 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ContractManagerSettings: connect.DefaultContractManagerSettings(),
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
+
+		ExchangeMoveSettings:  *DefaultExchangeMoveSettings(),
+		ExchangeMoverSettings: *DefaultExchangeMoverSettings(),
 	}
 }
 

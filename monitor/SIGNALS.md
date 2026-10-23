@@ -32501,6 +32501,30 @@ never enter an alert. Emit `redis-latencystats-source-drift` for any live
 failed reducer, invalid reply, unreachable node, or incomplete census. These
 source findings do not suppress independently measured Mimir cardinality.
 
+The native CONFIG reducer validates the entire successful raw text reply
+before shell substitution: exactly `latency-tracking` and `yes` or `no`,
+with LF after each of the two records. A blank third record is not permission
+to discard a later nonempty record; extra blank-only tails, missing terminal
+LF, wrong keys/values and additional records are invalid, never disabled or
+enabled authority. The collector frames the original command exit after the
+raw stream so a nonzero/timeout result remains unreachable even if its stdout
+has a valid prefix. Only a fixed enum reaches shell state, then the unchanged
+five-count census; raw replies and private canaries remain host-local. A valid
+`no` still supplies disabled-source health, and a valid `yes` remains drift.
+Mixed valid-enabled and malformed nodes retain both drift and visibility;
+independent Mimir positives survive either case. Unknown source coverage,
+including held visibility, supplies no absence-based clearing. Normal complete
+source observations retain the existing notifier recovery policy.
+
+This reply grammar follows default RESP2 raw Redis CLI delimiter behavior,
+not the binary RESP wire framing or the adjacent key-events collector. The
+reviewed upstream formatter is a source contract, not proof of the deployed
+CLI version, actual malformed production output, a Redis outage, producer
+identity or fleet adoption. Unsupported/custom output must stay unknown until
+its own contract is reviewed. Synthetic generated-shell/public-run controls
+establish parser authority only; an actual prior incident/clear requires
+separate runtime evidence.
+
 Emit `taskworker-histogram-cardinality` whenever the exact
 `urnetwork_egress_probe_health_check_seconds_bucket` count is positive. The
 finite destination and class dimensions are legitimate, and the random
@@ -36903,6 +36927,41 @@ capacity owners while those joins remain open.
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
+**Applicability census authority:** a quiet `proxy_host 0` requires a successful
+complete unit census and a successful whole-process census (`ps -e` with
+explicit pid, RSS and command-name fields). An exact fixed name filter makes
+no proxy match an ordinary successful empty result; any failed census status,
+including 1 with empty stdout, remains `cannot-observe`, not healthy absence.
+Failed partial stdout is discarded. The same filtered PID rows are reused
+for cgroup inspection, without a second selection call. Collection does not
+rely on inherited shell pipeline flags. A failed unit list
+with independently observed live proxy processes retains memory, kernel OOM,
+and same-boot UDP evidence while emitting unit-coverage visibility; the unit
+count is explicitly unknown, and process-versus-unit overlap is withheld.
+Successful empty censuses remain quiet services-only scope. Held and emitted
+visibility block notifier recovery credit; complete healthy absence retains the
+existing two-observation recovery policy. These source controls prove no live
+host census failure, OOM or production clear and change no threshold, cadence,
+lease marker or rollout guidance. UDP cancellation/state ownership is separate.
+
+UDP private-state cancellation boundary: a valid host frame whose context is
+already canceled at that host's locked publication checkpoint must not
+initialize, evict or replace its cached cumulative counters. Capture the context
+Done channel outside the mutex; the lock checks only that channel. The public
+adapter already withholds canceled findings, so advancing hidden history there
+would consume loss before the next accepted interval. A synthetic t0 zero pair,
+canceled t1 1000/1000 pair and live t2 same pair over 120 seconds must retain
+1000 delivered/1000 dropped, 50% loss and 500 drops/minute, hence PAGE.
+This is a per-host checkpoint, not atomic evaluation rollback: cancellation
+after the checkpoint, including a later host's cancellation, does not undo
+an earlier live host commit. First/reset/boot/clock warmups and independent
+memory/OOM predicates remain unchanged. False-positive qualifier: these are
+synthetic lifecycle/state controls, not observed Main loss, hidden baseline
+changes or notifier recovery. False-negative qualifier: zero canceled Alerts
+alone proves no private-state conservation; earlier accepted host commits and
+post-checkpoint cancellation remain outside this refusal guarantee. Kernel
+counters remain host-wide and do not identify a socket or loss cause.
+
 Proxy readiness is not host-capacity proof. Every proxy block normally owns a
 large resident Go process, and the old process remains live while its candidate
 restores clients and drains. Treat a deploy as an explicit host-memory budget:
@@ -37673,7 +37732,23 @@ Once per minute, join fresh `urnetwork_proxy_devices_live`,
 `urnetwork_proxy_device_memory_target_bytes`, and
 `urnetwork_proxy_device_memory_tracked_used_bytes` with the current
 `process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
-Use the active services.yml Proxy host/block topology as denominator. Select
+Use the active services.yml Proxy host/block topology as denominator.
+Before any query, a positive authoritative Proxy placement count with zero
+joined active monitor Proxy rows is `proxy-device-target-unobservable`, frame
+`inventory`, WARN at sustain 1, rather than an empty healthy fleet. The same
+visibility boundary already applies to nonzero partial inventory joins.
+Known derived disabled Proxy rows retain intentional scope: when they account
+for every expected placement and none is active, the existing no-query empty
+applicability remains. A disabled subset cannot hide an additional unjoined
+placement. Operator exclusions keep their desired Proxy rows and their
+existing transport-denial/coverage policy; never delete them or contact a
+paused host to repair a count. A true zero-placement environment remains quiet
+without a query. Inventory uncertainty proves no private-target mismatch,
+shared admission gate, hardware shortage or process health; restore the
+inventory join before judging metrics. A fully joined current process with
+zero devices, zero target and zero tracked use remains a separate healthy
+control. No production inventory omission or false recovery is asserted.
+Select
 the newest generation from every current instantaneous cohort before checking
 target completeness. This query has no RSS dependency, prior-time cohort or
 range-rate series; its four required families and optional retired-budget
@@ -41654,6 +41729,24 @@ characters before an `Alert` can render it.
 
 Probe: `play-crashes`
 
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
+
 Read the Play Developer Reporting API v1beta1 for the package named by the
 existing `vault/<env>/google.yml` `webhook.package_name` value. The dedicated
 optional `vault/<env>/google-play-reporting.json` is an ordinary Google service
@@ -41754,6 +41847,24 @@ they do not require an API, Connect, Proxy, Grafana, or database deployment.
 ### 20.2 Apple App Crashes aggregate and corrections
 
 Probe: `apple-crashes`
+
+Parent-lifecycle acceptance: this custom signal checks its actual parent before
+persistent cursor commit and immediately before returning a verdict. A valid
+complete response whose final body close ends that parent cannot consume its
+new issue/instance or publish crash/recovery evidence. At that tested boundary,
+the entire existing cursor JSON remains byte-identical; a first cursor JSON
+stays absent, although state directories and lock files may exist. The same
+report is eligible on the next live call, then deduplicates after acceptance.
+A live parent's child/provider failure retains its existing classification;
+an inner cancellation-like error alone does not mean that the parent ended.
+Previously accepted state stays durable. These checks do not make cancellation
+and atomic rename one transaction: cancellation after the last precommit check
+can race with saving, and a final ended-parent return cannot roll that commit
+back. False-positive qualifier: fully read valid data is not malformed or lost
+solely because this invocation ended. False-negative qualifier: outer-loop
+output rejection cannot undo a cursor already persisted by a custom signal.
+Synthetic body-close controls establish no actual crash loss, provider
+publication completeness, current Main incidence or runtime adoption.
 
 Read App Store Connect Analytics for the numeric app ID already stored at
 `vault/<env>/apple.yml` `app_store_notifications.app_apple_id`. Keep the team
