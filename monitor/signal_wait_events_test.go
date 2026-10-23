@@ -363,6 +363,8 @@ func TestWaitEventsSignalAttributesOnlyWholeTransferEscrowRebuilds(t *testing.T)
 		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow"`, whole: true},
 		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_legacy"`, whole: true},
 		{sample: `REINDEX TABLE CONCURRENTLY transfer_escrow;`, whole: true},
+		{sample: `REINDEX TABLE CONCURRENTLY transfer_escrow /* a trailing comment */`, whole: true},
+		{sample: `REINDEX TABLE CONCURRENTLY transfer_escrow_sweep /* transfer_escrow */`},
 		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_w20261026"`},
 		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_sweep"`},
 		{sample: `REINDEX INDEX CONCURRENTLY "public"."transfer_escrow_unsettled_balance_contract"`},

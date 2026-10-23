@@ -116,8 +116,9 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 // index, or of one partition's leaf of it, and a weekly partition is one week
 // of rows.
 func transferEscrowWholeTableReindexQuery(sample string) bool {
+	// the sample may carry a trailing comment after the relation
 	fields := strings.Fields(strings.ToLower(sample))
-	if len(fields) != 4 || fields[0] != "reindex" || fields[1] != "table" || fields[2] != "concurrently" {
+	if len(fields) < 4 || fields[0] != "reindex" || fields[1] != "table" || fields[2] != "concurrently" {
 		return false
 	}
 	relation := strings.ReplaceAll(strings.TrimSuffix(fields[3], ";"), `"`, "")
