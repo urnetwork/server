@@ -171,7 +171,7 @@ func newSettingsGenerationWitness(startup SignalSettings, output io.Writer, iden
 		}
 	}
 	bound := clone(reflect.ValueOf(comparableSignalSettings(startup))).Interface().(SignalSettings)
-	bound.disabledHosts = clone(reflect.ValueOf(startup.disabledHosts)).Interface().([]HostSettings)
+	bound.disabledHosts = clone(reflect.ValueOf(bound.disabledHosts)).Interface().([]HostSettings)
 	for _, hosts := range [][]HostSettings{bound.Hosts, bound.disabledHosts} {
 		for i := range hosts {
 			hosts[i].scopeEndpoints = clone(reflect.ValueOf(hosts[i].scopeEndpoints)).Interface().([]string)
