@@ -286,6 +286,12 @@ func TestContractPartitionCutover(t *testing.T) {
 			connect.AssertEqual(t, err != nil, true)
 		}
 
+		// before the cutover week the legacy partition covers the weeks ahead
+		// of it: maintenance creates nothing there and counts them as covered
+		report, _ := MaintainContractPartitions(ctx, now, ContractRetentionCursor{}, time.Minute)
+		connect.AssertEqual(t, len(report.Created), 0)
+		connect.AssertEqual(t, ContractPartitionAheadWeeks <= report.FutureWeeks, true)
+
 		// rollback refuses while a weekly partition holds a row
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Rollback: true, Logf: logf}) != nil, true)
 		Tx(ctx, func(tx PgTx) {

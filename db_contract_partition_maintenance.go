@@ -108,7 +108,8 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 }
 
 // Creates the missing partitions of the current week and the weeks ahead, and
-// counts the weeks after the current one that have one in every table.
+// counts the weeks after the current one that have one in every table. Until
+// the cutover week starts, the legacy partition covers the weeks before it.
 func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created []string, futureWeeks int, err error) {
 	currentWeek := ContractPartitionWeekStart(now)
 	futureWeeks = -1
@@ -118,23 +119,29 @@ func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created [
 			return created, 0, listErr
 		}
 		existing := map[string]bool{}
+		var legacyUpper time.Time
 		// new partitions take the newest partition's storage settings, so a
 		// setting changed there carries forward
 		template := ContractLegacyPartitionName(table)
 		var newest time.Time
 		for _, partition := range partitions {
 			existing[partition.name] = true
-			if !partition.legacy && newest.Before(partition.weekStart) {
+			if partition.legacy {
+				legacyUpper = partition.upper
+			} else if newest.Before(partition.weekStart) {
 				newest = partition.weekStart
 				template = partition.name
 			}
+		}
+		covered := func(weekStart time.Time) bool {
+			return existing[ContractPartitionName(table, weekStart)] || !legacyUpper.Before(weekStart.Add(contractPartitionWeek))
 		}
 		var parentShape *contractTableShape
 		var templateShape *contractTableShape
 		for week := 0; week <= ContractPartitionAheadWeeks; week += 1 {
 			weekStart := currentWeek.Add(time.Duration(week) * contractPartitionWeek)
 			name := ContractPartitionName(table, weekStart)
-			if existing[name] {
+			if covered(weekStart) {
 				continue
 			}
 			if parentShape == nil {
@@ -159,10 +166,7 @@ func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created [
 			created = append(created, name)
 		}
 		tableFutureWeeks := 0
-		for week := 1; ; week += 1 {
-			if !existing[ContractPartitionName(table, currentWeek.Add(time.Duration(week)*contractPartitionWeek))] {
-				break
-			}
+		for week := 1; covered(currentWeek.Add(time.Duration(week) * contractPartitionWeek)); week += 1 {
 			tableFutureWeeks += 1
 		}
 		if futureWeeks < 0 || tableFutureWeeks < futureWeeks {
