@@ -43208,7 +43208,7 @@ sum by (reason) (increase(urnetwork_connect_moves_declined_total{env="main"}[1h]
 sum by (reason, target_host) (increase(urnetwork_connect_moves_failed_total{env="main"}[1h]))
 sum by (cause) (increase(urnetwork_connect_move_results_dropped_total{env="main"}[1h]))
 sum by (kind) (increase(urnetwork_connect_moves_expired_total{env="main",service="connect"}[1h]))
-max by (host, interface, family) (urnetwork_connect_move_target_breaker_open{env="main",service="connect"})
+max by (target_host, interface, family) (urnetwork_connect_move_target_breaker_open{env="main",service="connect"})
 ```
 
 A client reports a move it declined or whose replacement failed with one

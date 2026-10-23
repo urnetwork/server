@@ -176,7 +176,10 @@ var residentMovesCompulsoryClosedCounter = prometheus.NewCounter(
 )
 
 // A target ip's breaker as the mover last read it: 1 open, 0 closed. Labeled
-// by the inventory host, interface and family the ip belongs to.
+// by the inventory host (`target_host`, as the move counters name it),
+// interface and family the ip belongs to. A label named `host` would collide
+// with the stats pusher's grouping label, which refuses every later push of
+// the process.
 var residentMoveTargetBreakerOpenGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -184,7 +187,7 @@ var residentMoveTargetBreakerOpenGauge = prometheus.NewGaugeVec(
 		Name:      "move_target_breaker_open",
 		Help:      "Whether the move target breaker of an inventory interface address was open at its last read",
 	},
-	[]string{"host", "interface", "family"},
+	[]string{"target_host", "interface", "family"},
 )
 
 func init() {
