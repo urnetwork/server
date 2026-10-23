@@ -365,6 +365,6 @@ func init() {
 			}
 			return NewSubnetEvidenceSignal(), settings, ctx
 		},
-		fixedGaps: []string{"semantic-replay"},
+		fixedGaps: []subnetFamilyAcceptanceGap{{class: "subnet-monitor-coverage", frame: "semantic-replay"}},
 	}
 }

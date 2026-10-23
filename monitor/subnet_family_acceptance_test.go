@@ -24,8 +24,14 @@ type subnetFamilyAcceptanceCase struct {
 	violatedClass string
 	unknown       func(t *testing.T) (Signal, SignalSettings)
 	canceled      func(t *testing.T) (Signal, SignalSettings, context.Context)
-	// Frames of the family's permanent capability gaps in a healthy run.
-	fixedGaps []string
+	// The family's permanent capability gaps that a healthy run still reports.
+	fixedGaps []subnetFamilyAcceptanceGap
+}
+
+// One standing gap: always an unobservable warn of this class and frame.
+type subnetFamilyAcceptanceGap struct {
+	class string
+	frame string
 }
 
 // Populated by each family's own test file.
@@ -87,12 +93,9 @@ func TestSubnetFamilyAcceptanceHealthyControl(t *testing.T) {
 			t.Fatalf("§%s healthy run failed: %v", number, err)
 		}
 		for _, alert := range alerts {
-			allowed := alert.Class == "subnet-monitor-coverage" && alert.Severity == SeverityWarn
-			if allowed {
-				allowed = false
-				for _, frame := range acceptance.fixedGaps {
-					allowed = allowed || alert.Frame == frame
-				}
+			allowed := false
+			for _, gap := range acceptance.fixedGaps {
+				allowed = allowed || alert.Class == gap.class && alert.Frame == gap.frame && alert.Severity == SeverityWarn && alert.unobservable
 			}
 			if !allowed {
 				t.Errorf("§%s healthy control alerted: %s %s %s", number, alert.Class, alert.Target, alert.Frame)

@@ -302,6 +302,6 @@ func init() {
 			}
 			return NewSubnetWeightsSignal(), settings, ctx
 		},
-		fixedGaps: []string{"decision-replay", "yuma-replay"},
+		fixedGaps: []subnetFamilyAcceptanceGap{{class: "subnet-monitor-coverage", frame: "decision-replay"}, {class: "subnet-monitor-coverage", frame: "yuma-replay"}},
 	}
 }

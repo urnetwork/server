@@ -292,6 +292,6 @@ func init() {
 			}
 			return NewSubnetProcessSignal(), settings, ctx
 		},
-		fixedGaps: []string{"process-telemetry", "role-liveness"},
+		fixedGaps: []subnetFamilyAcceptanceGap{{class: "subnet-monitor-coverage", frame: "process-telemetry"}, {class: "subnet-monitor-coverage", frame: "role-liveness"}},
 	}
 }
