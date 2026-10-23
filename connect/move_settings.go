@@ -20,10 +20,12 @@ type ExchangeMoveSettings struct {
 	// D13) instead of the legacy migrate. The Redis move control can turn this
 	// off for the next drain without a deploy.
 	EnableDrainMoves bool
-	// The intent TTL: the `migrate_time` jitter plus the client connect timeout
-	// plus a margin. A client that arrives after this forwards as today. The
-	// source's poll of a balance move stops with it. Non-positive writes no
-	// intent, so no move is sent.
+	// How long a move's intent lives past its `migrate_time` (past the send
+	// when the migrate time is already past): the client connect timeout plus
+	// a margin. Measured from the migrate time, so a drain's jitter never eats
+	// into it. A client that arrives after this forwards as today. The source's
+	// poll of a balance move stops with it. Non-positive writes no intent, so
+	// no move is sent.
 	MoveArrivalTimeout time.Duration
 	// How often the source re-reads `ncr_` for each of its outstanding balance
 	// moves, to retire a resident the target took over (MOVE.md §5.3). Zero or

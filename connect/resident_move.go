@@ -238,7 +238,8 @@ type residentMove struct {
 	migrateTime time.Time
 	// the deadline of a compulsory or drain move; zero for an advisory move
 	closeTime time.Time
-	// the intent ends here, and with it the poll
+	// the intent ends here, and with it the poll: MoveArrivalTimeout after the
+	// migrate time, or after the send when the migrate time is past
 	expireTime time.Time
 
 	// a transport of the resident closed: re-read the resident record now
@@ -265,7 +266,7 @@ func (self *Exchange) newResidentMove(
 		targetHost:      targetHost,
 		targets:         slices.Clone(targets),
 		migrateTime:     migrateTime,
-		expireTime:      time.Now().Add(self.settings.MoveArrivalTimeout),
+		expireTime:      residentMoveExpireTime(time.Now(), migrateTime, self.settings.MoveArrivalTimeout),
 		transportClosed: make(chan struct{}, 1),
 		superseded:      make(chan struct{}),
 	}
@@ -273,6 +274,18 @@ func (self *Exchange) newResidentMove(
 		move.closeTime = migrateTime.Add(self.settings.MoveCompulsoryTimeout)
 	}
 	return move
+}
+
+// When a move's arrival window ends: arrivalTimeout after its migrate time,
+// or after now when the migrate time is past. A client that starts its move at
+// a drain's latest jittered migrate time gets the same window as one that
+// starts at once.
+func residentMoveExpireTime(now time.Time, migrateTime time.Time, arrivalTimeout time.Duration) time.Time {
+	start := now
+	if migrateTime.After(now) {
+		start = migrateTime
+	}
+	return start.Add(arrivalTimeout)
 }
 
 // Wakes the watcher to re-read the resident record. Does not block.
@@ -399,10 +412,11 @@ func (self *Exchange) validateResidentMove(move ResidentMove) error {
 //     no local resident (or not the chosen generation), an advisory move
 //     meets a client without a move version, or a move of the resident is
 //     already outstanding.
-//   - Otherwise the move intent is written (MoveArrivalTimeout), then the drain
-//     excuse markers, then the frame is sent. A client that declared no move
-//     version receives only `migrate_time` (a compulsory move to such a client
-//     is the legacy migrate plus the deadline). When the send fails the intent
+//   - Otherwise the move intent is written, to live MoveArrivalTimeout past
+//     the migrate time, then the drain excuse markers, then the frame is
+//     sent. A client that declared no move version receives only
+//     `migrate_time` (a compulsory move to such a client is the legacy
+//     migrate plus the deadline). When the send fails the intent
 //     is removed and ErrResidentMoveNotSent returned.
 //   - On success the source watches the move as the file header describes and
 //     the target breaker counts one send per target.
@@ -479,7 +493,9 @@ func (self *Exchange) sendResidentMoveFrame(
 	if capable {
 		intent.Targets = move.targets
 	}
-	if err := model.SetResidentMoveIntent(ctx, resident.clientId, intent, self.settings.MoveArrivalTimeout); err != nil {
+	// the intent lives until the move's window ends, so a client whose
+	// migrate time a drain jittered late still arrives within it
+	if err := model.SetResidentMoveIntent(ctx, resident.clientId, intent, time.Until(move.expireTime)); err != nil {
 		return fmt.Errorf("%w: %w", ErrResidentMoveIntent, err)
 	}
 	if writeExcuse && self.settings.EnableDrainExcuse {
