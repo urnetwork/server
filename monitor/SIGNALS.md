@@ -31756,6 +31756,24 @@ dropped-stream/EOF signals remain clear.
 
 ### 11.20 Mimir historical sample continuity across restarts
 
+A completed source result is accepted into this probe's comparison history
+only if its invocation cancellation channel is still open at the owning
+publication checkpoint. Rejected late gap results cannot seed or advance a
+comparator, and rejected late healthy results cannot erase one. The next live
+classification uses only accepted history. Already-ended continuity invocations also refuse history publication; this
+rule belongs to the continuity state owner. Live healthy reset, source/parse refusal, movement,
+regression, repeated observations and store-age rules are unchanged. Capture
+the cancellation channel outside the history lock; no caller Context method
+runs while that lock is held. Cancellation recorded after this checkpoint can
+still suppress the outer public result; the checkpoint is not atomic with
+later cancellation or shared-adapter return, and supplies no rollback guarantee.
+False-positive qualifier: a source-backed rejected interleaving reproduces a
+local comparator defect, not native/runtime incidence or permanent data loss.
+False-negative qualifier: public cancellation or zero Alerts alone cannot prove
+history conservation. Monitor-parent shutdown returns before cadence/Handle;
+no notifier false-clear, incident resolution or Main recovery is inferred from
+this repair.
+
 Probe: `mimir-continuity`
 
 The public `live throughput` panel is a fleet-wide rate over
