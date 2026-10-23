@@ -54,6 +54,7 @@ func NewSignals() []Signal {
 		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),
 		NewSettingsFreshnessSignal(),
+		NewObserverRouteSignal(),
 		NewActiveQueriesSignal(),
 		NewPgQuerySampleSignal(),
 		NewWaitEventsSignal(),

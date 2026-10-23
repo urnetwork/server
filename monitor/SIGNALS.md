@@ -249,7 +249,6 @@ active missing capability and must not be read as green.
 <!-- numbered-coverage-start -->
 | Section | Kind | Executable boundary |
 |---|---|---|
-| 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
@@ -4879,6 +4878,7 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 `signal_settings_freshness.go` and `signal_settings_freshness_test.go`.
 
 ### 1.7 Shared observation failures and observer-overlay route coverage
+Probe: `observer-route`
 
 The shared SSH transport retains its execution source and native process exit
 status. A real SSH child exit status 255 becomes the fixed observation field
@@ -5084,18 +5084,65 @@ evidence and its timestamp; a later route sample cannot establish incident
 onset or prove that every earlier failure had the same cause. Never contact
 disabled hosts or mutate a VPN merely to improve the discriminator.
 
-**Active coverage gap:** no automatic observer-overlay route-health signal is
-implemented. Current inventory provides destination addresses but is missing
-an inventory/configured observer-interface or gateway contract that defines
-the intended path and distinguishes a broken local tunnel from a deliberately
-LAN-routed overlay. The monitor/workstation operator owns this prerequisite;
-agree that contract before adding an automatic route-causality probe. The
-public-IPv6 observer helper used by `edge-ipv6` and public TLS probes does not
-define the overlay path. `vpn-sessions` observes remote OpenVPN server/client
-sessions over SSH, not the monitor workstation's session, and
-`settings-freshness` checks configuration generation rather than route health.
-The implemented status taxonomy does not close this missing capability or
-turn unavailable observations green.
+**Observer overlay route conformance (`observer-route`, 2026-10-22).** The
+operator declares the intended observer path in `vault/<env>/monitor.yml`:
+
+```yaml
+observer_overlay:
+  interfaces: [wg0]          # exact interface names a route may leave through
+  gateways: [198.51.100.1]   # next-hop gateways a route may use
+```
+
+Either list qualifies a route. macOS tunnel interface names change across
+reconnects, so a gateway is the stable contract there. The schema and its
+values are operator-owned; until they are set the probe reports the missing
+contract instead of guessing from interface names, because a LAN-routed
+overlay can be deliberate.
+
+Every five minutes in `overlay` address mode, for each enabled inventory host
+with an overlay address, one monitor-local native route lookup
+(`/sbin/route -n get -inet|-inet6` on macOS, `ip -j [-6] route get` on Linux)
+selects the interface and gateway the monitor host would use. No host is
+contacted. `-exclude-host` hosts are neither looked up nor certified and stay
+unknown through `monitor-host-scope-partial`; `lan` mode has no overlay path
+to judge and returns nothing.
+
+- `observer-route-contract-missing` (target `monitor-host/overlay`,
+  sustain 1): no contract is configured. It is a configured standing state:
+  kept in the alert file, never posted to Slack, and no lookup runs.
+- `observer-route-diverted` (same target, sustain 2): one or more overlay
+  addresses route through an interface or gateway outside the contract (a
+  broken tunnel falling back to the LAN or default route), or have no route.
+  Its evidence names the affected inventory hosts by state and the exit
+  interfaces; cannot-observe and stale-tail findings for those hosts in the
+  same minutes are local observation-path candidates, not production faults.
+- `observer-route-unobservable` (same target, sustain 2): an invalid contract,
+  a host without a parseable overlay address, a platform without a route
+  adapter, or a failed or unparsed lookup. The Linux adapter accepts exactly
+  one route object with unique keys for exactly the looked-up address; the
+  macOS adapter needs exactly one interface line and classifies its
+  not-in-table diagnostic as no route even with a zero exit.
+
+All three are visibility classes: while one lasts, this signal's executions
+are incomplete. Addresses, gateways and raw route output never enter alerts;
+inventory host names and plain interface names do. Every tunable (cadence,
+sustain, the route adapter and its output bound) is a field of
+`ObserverRouteSettings`.
+
+False-positive qualifier: a conforming route does not prove the tunnel
+delivers packets or that a remote host is up. False-negative qualifiers: a
+route sample cannot establish when the path broke or that every earlier
+failure shared it; a contract that names the wrong interface certifies the
+wrong path. The public-IPv6 observer helper used by `edge-ipv6` and public TLS
+probes does not define the overlay path, `vpn-sessions` observes remote
+OpenVPN server/client sessions over SSH, not the monitor workstation's
+session, and `settings-freshness` checks configuration generation rather than
+route health. The implemented status taxonomy does not turn unavailable
+observations green. Synthetic controls cover both adapters, interface and
+gateway contracts, the default-route fallback, a missing route, duplicate
+keys and foreign destinations, failed lookups, an invalid contract, a missing
+overlay address, an unsupported platform, the missing contract, LAN mode,
+exclusion, monitor.yml decoding and cancellation.
 
 When corroboration establishes a local observation-path loss, the workstation
 operator restores the intended route/session under the required authority;
