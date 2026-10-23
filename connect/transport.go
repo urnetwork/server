@@ -2359,15 +2359,16 @@ func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string,
 // returns when it is finished, reporting false when the handler is closing.
 // The alt front terminates QUIC on its own sockets and dispatches by sni, so
 // this is the same admission and teardown the handler's own listener applies,
-// without its accept loop.
-func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn) bool {
+// without its accept loop. carrier is the front listener's, which the resident
+// sees (MOVE.md §5.5): ResidentCarrierH3 for plain QUIC, ResidentCarrierH3Dns
+// under the dns translation.
+func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn, carrier ResidentCarrier) bool {
 	if !self.beginHandle() {
 		conn.CloseWithError(0, "")
 		return false
 	}
 	defer self.endHandle()
-	// the external front does not tell which of its listeners accepted conn
-	self.serveQuicConn(conn, conn.LocalAddr().String(), ResidentCarrierUnknown)
+	self.serveQuicConn(conn, conn.LocalAddr().String(), carrier)
 	return true
 }
 
