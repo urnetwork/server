@@ -26135,7 +26135,9 @@ zombie dial-io-timeout tickets accumulated across one outage.
    PgBouncer waiting over 500, prober health halved) escalates it before
    continuing work on the monitor's own sampling and attribution.
 
-Catalog rows from this incident, none implemented as of 2026-10-22:
+Catalog rows from this incident (none was implemented when the incident was
+cataloged; `storage-runway`, `minio-runway` and `retention-liveness` now are,
+in their sections):
 
 | id | source | check | threshold |
 |---|---|---|---|
