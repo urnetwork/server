@@ -249,11 +249,7 @@ active missing capability and must not be read as green.
 <!-- numbered-coverage-start -->
 | Section | Kind | Executable boundary |
 |---|---|---|
-| 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
-| 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
-| 2.4f | Coverage gap | `pg-disk-space` (absolute 100 GB floor) and `pg-disk-runway` (visibility-only unknown) are the registered boundaries; the max-of-windows runway estimator for edge-2 and every other stateful volume is missing. |
-| 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
@@ -269,7 +265,7 @@ active missing capability and must not be read as green.
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
-| 5.14 | Runbook | `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution, guarded partition drops and the payout-frontier check are direct operator steps |
+| 5.14 | Runbook | `storage-runway`, `retention-liveness`, `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution and guarded partition drops are direct operator steps |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
 | 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
@@ -286,13 +282,12 @@ active missing capability and must not be read as green.
 | 11.3 | Runbook | `grafana-node`, `log-errors` |
 | 11.4 | Runbook | `log-errors`, `grafana-node` |
 | 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
-| 11.6 | Shared contract | `minio-storage`, `mimir-index`, `grafana-node`, `backup-archives` |
-| 11.6b | Coverage gap | `minio-storage` reads percent bands, quotas and S3 errors from MinIO's own accounting; drive runway, raw-versus-logical divergence, put-surge and backup-reserve checks are missing. |
+| 11.6 | Shared contract | `minio-storage`, `minio-runway`, `mimir-index`, `grafana-node`, `backup-archives` |
 | 11.7 | Runbook | `rollout-guard`, `log-errors` |
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper`, `minio-storage`, `minio-runway` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -4890,6 +4885,7 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 `signal_settings_freshness.go` and `signal_settings_freshness_test.go`.
 
 ### 1.7 Shared observation failures and observer-overlay route coverage
+Probe: `observer-route`
 
 The shared SSH transport retains its execution source and native process exit
 status. A real SSH child exit status 255 becomes the fixed observation field
@@ -5095,18 +5091,65 @@ evidence and its timestamp; a later route sample cannot establish incident
 onset or prove that every earlier failure had the same cause. Never contact
 disabled hosts or mutate a VPN merely to improve the discriminator.
 
-**Active coverage gap:** no automatic observer-overlay route-health signal is
-implemented. Current inventory provides destination addresses but is missing
-an inventory/configured observer-interface or gateway contract that defines
-the intended path and distinguishes a broken local tunnel from a deliberately
-LAN-routed overlay. The monitor/workstation operator owns this prerequisite;
-agree that contract before adding an automatic route-causality probe. The
-public-IPv6 observer helper used by `edge-ipv6` and public TLS probes does not
-define the overlay path. `vpn-sessions` observes remote OpenVPN server/client
-sessions over SSH, not the monitor workstation's session, and
-`settings-freshness` checks configuration generation rather than route health.
-The implemented status taxonomy does not close this missing capability or
-turn unavailable observations green.
+**Observer overlay route conformance (`observer-route`, 2026-10-22).** The
+operator declares the intended observer path in `vault/<env>/monitor.yml`:
+
+```yaml
+observer_overlay:
+  interfaces: [wg0]          # exact interface names a route may leave through
+  gateways: [198.51.100.1]   # next-hop gateways a route may use
+```
+
+Either list qualifies a route. macOS tunnel interface names change across
+reconnects, so a gateway is the stable contract there. The schema and its
+values are operator-owned; until they are set the probe reports the missing
+contract instead of guessing from interface names, because a LAN-routed
+overlay can be deliberate.
+
+Every five minutes in `overlay` address mode, for each enabled inventory host
+with an overlay address, one monitor-local native route lookup
+(`/sbin/route -n get -inet|-inet6` on macOS, `ip -j [-6] route get` on Linux)
+selects the interface and gateway the monitor host would use. No host is
+contacted. `-exclude-host` hosts are neither looked up nor certified and stay
+unknown through `monitor-host-scope-partial`; `lan` mode has no overlay path
+to judge and returns nothing.
+
+- `observer-route-contract-missing` (target `monitor-host/overlay`,
+  sustain 1): no contract is configured. It is a configured standing state:
+  kept in the alert file, never posted to Slack, and no lookup runs.
+- `observer-route-diverted` (same target, sustain 2): one or more overlay
+  addresses route through an interface or gateway outside the contract (a
+  broken tunnel falling back to the LAN or default route), or have no route.
+  Its evidence names the affected inventory hosts by state and the exit
+  interfaces; cannot-observe and stale-tail findings for those hosts in the
+  same minutes are local observation-path candidates, not production faults.
+- `observer-route-unobservable` (same target, sustain 2): an invalid contract,
+  a host without a parseable overlay address, a platform without a route
+  adapter, or a failed or unparsed lookup. The Linux adapter accepts exactly
+  one route object with unique keys for exactly the looked-up address; the
+  macOS adapter needs exactly one interface line and classifies its
+  not-in-table diagnostic as no route even with a zero exit.
+
+All three are visibility classes: while one lasts, this signal's executions
+are incomplete. Addresses, gateways and raw route output never enter alerts;
+inventory host names and plain interface names do. Every tunable (cadence,
+sustain, the route adapter and its output bound) is a field of
+`ObserverRouteSettings`.
+
+False-positive qualifier: a conforming route does not prove the tunnel
+delivers packets or that a remote host is up. False-negative qualifiers: a
+route sample cannot establish when the path broke or that every earlier
+failure shared it; a contract that names the wrong interface certifies the
+wrong path. The public-IPv6 observer helper used by `edge-ipv6` and public TLS
+probes does not define the overlay path, `vpn-sessions` observes remote
+OpenVPN server/client sessions over SSH, not the monitor workstation's
+session, and `settings-freshness` checks configuration generation rather than
+route health. The implemented status taxonomy does not turn unavailable
+observations green. Synthetic controls cover both adapters, interface and
+gateway contracts, the default-route fallback, a missing route, duplicate
+keys and foreign destinations, failed lookups, an invalid contract, a missing
+overlay address, an unsupported platform, the missing contract, LAN mode,
+exclusion, monitor.yml decoding and cancellation.
 
 When corroboration establishes a local observation-path loss, the workstation
 operator restores the intended route/session under the required authority;
@@ -7169,7 +7212,7 @@ to establish the effective trigger and advancing/completed cleanup, retaining
 statistics and source-clock limits. Require consecutive covered below-floor
 samples after completion; honor any configured cadence floor rather than
 adding five-minute readers. This qualification changes no probe, caller cap,
-threshold or production setting and leaves the separate §2.4a gap open.
+threshold or production setting; §2.4a's discarded-pass reader stays independent.
 
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
@@ -7357,6 +7400,7 @@ make the completed vacuum stuck. Keep the bounded writer/close fixes and use
 the new vacuum's consecutive progress samples as the next cleanup check.
 
 ### 2.4a Canceled autovacuum and anti-wraparound progress
+Probe: `pg-autovacuum-discard`
 
 The Taskworker's daily maintenance rotation (`db_maintenance.go`) runs
 `VACUUM (ANALYZE) pending_task`, a database-wide `ANALYZE` and
@@ -7389,12 +7433,11 @@ LIMIT 10;
 - HEALTHY: big-table passes complete and `last_autovacuum` advances; no
   cancellation outside deliberate maintenance; every table stays under
   `autovacuum_freeze_max_age`, or its anti-wraparound pass is advancing.
-- CANCELLATION ALERT (proposed; not implemented): a cancellation that
-  discards a big table's pass in its index or late heap phase. The bare log
+- DISCARD ALERT (`pg-autovacuum-discard`, below): a big table's pass that
+  ended without completing in its index or late heap phase. The bare log
   line proves an observed cancellation, not the discarded work or its cost;
-  require authoritative relation/pass and at-cancellation phase context.
-  Generic big-table size, late-heap cutoff and deliberate-maintenance
-  authority remain explicit policy/source gaps.
+  the progress view supplies the relation, the pass and its last observed
+  phase, and the completion evidence proves the pass did not finish.
 - AGE RISK: `pg-freeze-age` (§2.4d) implements the separately approved
   configured-age risk warning. It does not infer a stalled pass from
   unchanged counters, identify a cancellation, or complete this section.
@@ -7409,13 +7452,76 @@ table looks like ordinary progress unless `heap_blks_scanned` is compared
 across samples, and `last_autovacuum` moves only on completion. The log line is
 the authority; an unreadable or rotated log leaves cancellations unknown.
 
-Observed cancellation now has the narrower `pg-autovacuum-cancel` reader
+Observed cancellation has the narrower `pg-autovacuum-cancel` reader
 (§2.4e): WARN on exact structured PG18 cancellation records from a qualified
-JSON source, without attributing a maintenance fault or discarded work. Its quiet verdict covers only the
-bounded observed file. Generic big-table size, late-heap cutoff, exact
-relation/pass and completion joins, deliberate-maintenance intent and lost-work
-quantity remain missing. This section is still a coverage gap; the new
-observation does not implement its proposed harmful-cancellation policy.
+JSON source, without attributing a maintenance fault or discarded work. Its
+quiet verdict covers only the bounded observed file.
+
+**Discarded passes (`pg-autovacuum-discard`, 2026-10-22).** Every five
+minutes one bounded read-only statement on the single enabled `pg-primary`,
+behind a `hostname -s`, primary-role and 30-second statement-clock guard,
+returns fixed fifteen-cell frames bound by an end row:
+
+- every current-database `pg_stat_progress_vacuum` row (at most 64) with its
+  worker's PID, backend start and query start, a fixed mode (`antiwrap`,
+  `ordinary`, `manual`, `unknown`) and phase, heap and index counters (`-1`
+  when the server version lacks a field), heap bytes and the relation's
+  `autovacuum_count`;
+- the completion evidence (`autovacuum_count`, `last_autovacuum`, heap
+  bytes) of every relation whose heap is at least 100 GB, plus every relation
+  this instance is tracking even if it shrank (at most 4,096);
+- the database maintenance task's windows: `finished_task` runs of
+  `work.DbMaintenance` that ended within the last hour and its claimed
+  `pending_task` rows (at most 32).
+
+Relation and pass correlation: the instance tracks every autovacuum pass on a
+relation of at least 100 GB by relation, PID and backend and query start.
+When a tracked pass leaves the progress view, it completed if the relation's
+`autovacuum_count` grew or its `last_autovacuum` is later than the pass's last
+observation (no pass completes on a relation while another vacuums it, and
+the completion time still works after a statistics reset); otherwise it was
+discarded. A dropped relation lost nothing. A discarded pass is harmful when
+it was last seen past heap scanning or with at least half the heap scanned
+(initial policy: the 10-13 pass was at 82%); smaller, earlier and manual
+discards are counted, not alerted.
+
+- WARN `pg-autovacuum-discard` (target
+  `<primary>/database-<oid>/relation-<oid>`, sustain 1): one harmful discard,
+  with the last observed phase, `heap_scanned_pct_at_least`,
+  `lost_heap_gb_at_least` (heap blocks scanned times the block size, a lower
+  bound because progress continued after the last observation), index
+  progress, the relation's heap size, the discard window, a repeat count,
+  any replacement pass and `maintenance_overlap`: `db-maintenance` when a
+  DbMaintenance run overlapped the window, `none-observed`, or unknown when
+  the window reaches past the lookback or the run list hit its bound. The
+  finding stays open until the relation's counter advances or its
+  completion time passes the discarded pass.
+- WARN `pg-autovacuum-discard-unobservable` (target the primary, sustain 2):
+  no or several primaries, a failed read, a wrong host, role or clock, a
+  malformed or over-cap frame, and bounded tracking overflow. A postmaster or
+  database change with tracked passes is a one-run unknown (sustain 1) that
+  names how many passes it could not classify; it never invents a discard.
+
+Public data: relation and database OIDs, counters, fixed modes, phases and
+reasons. Relation names, SQL and application text never leave SQL. Tracking
+is per signal instance and starts empty at every watcher start, so a pass
+seen only by an earlier watcher is unclassified. Every tunable is a field of
+`PgAutovacuumDiscardSettings`.
+
+False-positive qualifiers: the discard cause is not this reader's to name;
+correlate §2.4e records in the same window (a qualified cancellation record
+means a lock-conflict cancel; none with complete log coverage points to a
+termination, an error or a crash). False-negative qualifiers: a pass that
+starts and ends between observations is never seen; the true phase at the
+end can be later than the last observation; operator-run maintenance is not
+recorded in the task tables and shows as `none-observed`; the canceling
+statement's identity is not in the cancellation record. Synthetic controls
+replay the 10-13 discard at 51.2M of 62.7M heap blocks under a running
+maintenance task through to the replacement pass's completion, and cover
+completed, small, early, manual and dropped-relation passes, the index
+phase, every maintenance-overlap branch, the tracked-relation census, a
+postmaster restart, malformed frames, failed reads, inventory and
+cancellation.
 
 ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
 `pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
@@ -7539,14 +7645,19 @@ filesystem fell from about 700 GB to 145 GB, and it never became a forecast.
 replace this visibility-only observation with it. A perfect net-growth model is
 not a precondition for warning: the raw max-of-windows decline would have
 warned from 10-20 and paged at about 15:00Z on 10-21.
+`storage-runway` (§2.4f) now measures that raw max-of-windows runway for the
+database root against the same 100,000,000,000-byte line. This
+visibility-only observation still reports the qualified net-growth forecast of
+this section (temp, WAL and vacuum netted out) as unknown; retiring it in favor
+of §2.4f is an owner decision.
 
 ### 2.4d Configured freeze-age risk
 Probe: `pg-freeze-age`
 
 This is the bounded age-risk portion of §2.4a. Observed cancellation records
-use the separate conditional reader in §2.4e; relation/pass correlation at
-cancellation, generic big-table classification, late-heap lost work and
-deliberate-maintenance attribution remain missing.
+use the separate conditional reader in §2.4e; relation/pass correlation,
+big-table and late-phase discards, lost work and maintenance overlap are
+`pg-autovacuum-discard` (§2.4a).
 `vacuum-health` (§2.4) keeps its existing debt-only trigger, five-minute cadence,
 MVCC context and privacy boundary.
 
@@ -7628,7 +7739,7 @@ ACTION: have the existing PostgreSQL owner verify the effective settings,
 source scope and current pass. Let independently progressing work finish and
 use §2.4 for the separate writer/horizon/debt investigation. VERIFY fresh
 complete below-limit age or positively observed same-pass advancement, and
-retain explicit §2.4a gaps until their source and policy contracts are supplied.
+use §2.4a's discard findings for passes that ended without completing.
 
 ### 2.4e Observed autovacuum cancellation records
 Probe: `pg-autovacuum-cancel`
@@ -7705,9 +7816,10 @@ does not independently attest the deployed build, runtime or historical
 configuration. False-negative qualifier: missing/rotated/capped history,
 unflushed records, unsupported schema/locale, unseen worker events, fatal
 termination and cancellations under another message remain outside this
-predicate. The full big-table, late-phase, intent, same-pass completion/reset
-and lost-work attribution policy remains missing in §2.4a. No thresholds for
-those unresolved properties are inferred from this count.
+predicate. The big-table, late-phase, maintenance-overlap, same-pass
+completion and lost-work attribution is `pg-autovacuum-discard` (§2.4a), which
+correlates a discarded pass with these records by its window. No thresholds
+for those properties are inferred from this count.
 
 The primary predicate and string separation follow PostgreSQL 18's
 [worker cancellation emitter](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/tcop/postgres.c),
@@ -7725,7 +7837,7 @@ can clear this event finding through the existing notifier; neither quiet logs
 nor a replacement pass alone proves recovery of an unobserved historical cause.
 
 ### 2.4f Storage runway — one estimator for every stateful volume
-Probe: `storage-runway` (catalog entry; not implemented as of 2026-10-22)
+Probe: `storage-runway`
 
 Why: edge-2's root filesystem ran to within hours of full on 10-12/13 and
 again on 10-21. Both times the only implemented check was the §2.4b absolute
@@ -7739,6 +7851,10 @@ Volumes (from inventory roles): edge-2 `/` (PostgreSQL data, WAL and temp),
 edge-5 `/mnt/blob1`..`/mnt/blob4` (one MinIO erasure set: judge the drive with
 the least free space, since one full drive fails every write), the Redis data
 volumes (`/mnt/data` on edge-5 and edge-6), and every host's `/`.
+
+The MinIO drives use this estimator with §11.6b's longer thresholds
+(`minio-runway`), because adding drives takes days; `storage-runway` does not
+report them a second time.
 
 Estimator:
 - `free = avail - floor` for the volume's floor: 100 GB on edge-2 `/` (the
@@ -7800,10 +7916,66 @@ absent node-exporter series, which is unknown, never healthy (§7, 2026-10-22
 rules). A planned large write (a base backup, §11.6b) can arrive faster than
 the 15-minute cadence.
 
-ACTION: §5.14.
+Implementation (2026-10-22). Every fifteen minutes, one bounded loopback
+Mimir `query_range` through the first reachable `services` gateway reads
+`node_filesystem_avail_bytes{env,job="node"}` for every configured volume over
+the last eight days (seven days of pace history plus one pace window) at a
+15-minute step, ending two minutes behind now. The volumes come from
+`StorageRunwaySettings.Volumes`: every enabled inventory host's `/` with floor
+0 (time to full), the `pg-primary` host's `/` with the §2.4b
+100,000,000,000-byte floor, and each `redis-cluster` host's `/mnt/data` with
+floor 0; the largest floor wins when rules overlap. Inventory-disabled and
+`-exclude-host` hosts are never read; an excluded host's volumes stay unknown
+through the shared `monitor-host-scope-partial` finding.
+
+- Source authority: one series per volume with exactly the `env`, `job`,
+  `host`, `device`, `fstype`, `mountpoint` and optional `instance` labels,
+  whole-byte values on the query grid in strictly increasing order, and the
+  newest grid point present (Mimir fills it only from a raw sample inside its
+  lookback). Each window endpoint is the sample nearest it within 15 minutes
+  and the decline divides by the actual elapsed time.
+- `storage-runway` (target `<host>/root` or `<host><mountpoint>`, sustain 2):
+  PAGE `band=page` at runway <= 24 h, PAGE `band=pace-floor` when free above
+  the floor is under twice the largest 24-hour decline of the last seven days,
+  WARN `band=warn` at runway <= 72 h. No positive decline means no runway
+  band, so a flat volume pages only through its pace floor. With some windows
+  missing, the measured rate is a lower bound and a band it already reaches
+  still holds; only a complete estimate is healthy.
+- `storage-runway-unobservable` (same target, sustain 2): no gateway, a failed
+  or invalid answer (status, warnings, matrix shape, byte bound), and a
+  missing, stale, ambiguous, unowned, off-grid or non-whole-byte series, or a
+  missing decline window. Following the 2026-10-22 emission rule 1, it pages
+  when the volume declined more than 5 GB/h over the last six hours, measured
+  from the history that is still present or remembered by this signal
+  instance from a run inside those six hours; otherwise it warns. The memory
+  is process-local and starts empty at every watcher start.
+- Public data: bytes, decimal GB per hour, hours, fixed reasons and error
+  classes. Device names, label values, raw answers and source errors stay
+  private.
+- Every tunable (windows, step, lag, tolerance, thresholds, pace multiple,
+  unknown page line, volume rules, response bounds, cadence and the 40-second
+  run budget) is a field of `StorageRunwaySettings`.
+- False-positive qualifiers in addition to those above: the pace floor pages
+  on a steady decline once free space is under two days of it (runway under
+  48 h), by design; a one-off large write inside the last seven days keeps the
+  pace floor up until it leaves the history. False-negative qualifiers: a
+  volume that filled more than seven days ago and stays flat at its floor has
+  neither runway nor pace; §2.4b covers the database root's absolute floor.
+  The 15-minute step can miss a spike that recovers between grid points.
+
+Synthetic controls replay the edge-2 backtest above, an acceleration only the
+1 h window sees, a cleanup inside the newest hour, a flat volume paging on its
+pace floor, band edges, missing, stale, ambiguous and malformed series, the
+measured and remembered unknown-severity rule, failed and invalid answers,
+inventory exclusion and cancellation.
+
+ACTION: §5.14 for the database root; for other volumes find what is growing
+and remove avoidable growth at its source. Storage additions and retention
+changes are owner decisions. VERIFY: two consecutive complete observations
+outside both bands.
 
 ### 2.4g Retention liveness — tables whose retention stopped reclaiming
-Probe: `retention-liveness` (catalog entry; not implemented as of 2026-10-22)
+Probe: `retention-liveness`
 
 Retention that silently stops looks like growth, and a runway alert (§2.4f)
 only says how long is left, not why. Facts on 10-22:
@@ -7834,9 +8006,59 @@ Checks, all cheap and read-only:
 4. Per relation over 100 GB: report net growth over 7 days with no deletes
    (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
 
+Implementation (2026-10-22). Hourly, two bounded read-only queries run on
+the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
+30-second statement-clock guard. A catalog read returns the newest
+`subsidy_payment.end_time`, the `client_reliability` parent's kind and every
+attached partition's name and heap size (at most 4,096), the statistics reset
+and postmaster start, and the public relations of at least 100 GB with their
+insert and delete counters, in fixed ten-cell frames bound by an end row. A
+second read counts `transfer_contract TABLESAMPLE SYSTEM (0.0002)` rows, rows
+older than 14 days, and those with `reap_time`. A failure in one read leaves
+only its own checks unknown. Targets are the primary's name plus a fixed
+check name; only counts, ages and fixed names leave SQL.
+
+- `retention-frontier-pinned` (target `<primary>/subsidy-frontier`, sustain
+  1): the frontier is more than 10 days old. `holding_reliability_retention`
+  says whether the frontier minus one day already holds the 21-day
+  reliability retention back, and `days_until_hold` when it will. No
+  subsidy payment at all holds nothing and is healthy.
+- `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
+  because the page sample is random per run): fewer than 5% of at least 20
+  sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
+  unknown; fewer than 20 old rows is a young table and healthy.
+- `partition-retention-stuck` (target
+  `<primary>/client-reliability-partitions`, sustain 1): the oldest
+  `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
+  upper bound more than 2 days before the cutoff the drop pass computes: 21
+  days, held back to the frontier minus one day, never past 30 days (the
+  model's `ClientReliabilityRetention`, `clientReliabilityRetentionCutoffBlock`
+  and `ClientExpiration`). Empty partitions and names the drop pass did not
+  create are not counted; a frontier-held cutoff is the frontier finding,
+  not a stuck drop. A parent that is missing or not partitioned, or an
+  over-cap census, is unknown.
+- Check 4's list rides in the evidence of every retention finding as
+  `append_only_relations`: relations of at least 100 GB with inserts and no
+  deletes over a statistics window (since the last reset, else since the
+  postmaster start) of at least 7 days, at most 16, names rendered only when
+  plain lowercase identifiers. A shorter window is
+  `unqualified-stats-window`; old deletes outside the window can hide a
+  relation, so the list is a lower bound.
+- `retention-liveness-unobservable` (per check target, sustain 2): no or
+  several primaries, a failed read, a wrong host or role, a skewed clock, an
+  incomplete or malformed frame.
+
+Every tunable, including the mirrored reliability horizon, is a field of
+`RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
+(frontier 17.5 days old and 2.5 days from holding, 0.75% stamped, the
+`st_client_key_history` append-only list), every partition cutoff branch,
+reap share edges and sample sufficiency, malformed frames and failed reads,
+the list's window and name rules, inventory authority and cancellation.
+
 ACTION: retention horizons are owner decisions. Never drop data inside a
 payout frontier without the owner: the code's own comment notes that a missing
-reliability block silently cuts provider credit.
+reliability block silently cuts provider credit. VERIFY: a complete
+observation inside each line on the next runs (two for the sampled check).
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -25920,7 +26142,9 @@ zombie dial-io-timeout tickets accumulated across one outage.
    PgBouncer waiting over 500, prober health halved) escalates it before
    continuing work on the monitor's own sampling and attribution.
 
-Catalog rows from this incident, none implemented as of 2026-10-22:
+Catalog rows from this incident (none was implemented when the incident was
+cataloged; `storage-runway`, `minio-runway` and `retention-liveness` now are,
+in their sections):
 
 | id | source | check | threshold |
 |---|---|---|---|
@@ -30445,7 +30669,7 @@ quiet request counters and alert absence cannot supply missing health authority.
 
 
 ### 11.6b MinIO drive runway, accounting divergence and foreign data on its drives
-Probe: `minio-runway` (catalog entry; not implemented as of 2026-10-22)
+Probe: `minio-runway`
 
 MinIO on main is one node on edge-5: four 3.84 TB drives (`/mnt/blob1`..`4`)
 in one 2+2 erasure set, 7.68 TB usable. On 10-22 MinIO reported about 988 GB of
@@ -30516,10 +30740,71 @@ and scanner lag right after a MinIO restart.
 False-negative qualifier: raw cost per object varies with object size and
 filesystem; healing and replication write without S3 puts.
 
+Implementation (2026-10-22). Every fifteen minutes, for each enabled
+inventory host with the `minio` role, one bounded loopback Mimir `query_range`
+(eight days at a 15-minute step, two minutes behind now) returns fixed
+`monitor_check` partitions: `drive_avail` and `drive_size` from
+`node_filesystem_*_bytes{job="node"}` on mountpoints matching
+`/mnt/blob[0-9]+`, MinIO's own `minio_system_drive_count`, the summed
+`minio_cluster_usage_buckets_total_bytes`, the objects-path
+`minio_cluster_usage_objects_since_last_update_seconds` (seconds), and
+`sum by (host) (rate(minio_api_requests_total{name="PutObject"}[1h]))`.
+Series of hosts outside the `minio` inventory are discarded. The drive census
+is complete only when MinIO's fresh drive count equals the number of drive
+filesystems and every drive has a fresh, unique, whole-byte history with all
+decline windows and a fresh size. Classes, targets `<host>/<layer>`:
+
+- `minio-drive-runway` (target `<host>/drives`, sustain 2): the §2.4f
+  estimator per drive, counting down to 1% of the drive's size (MinIO's
+  `diskFillFraction` floor), judged on the drive with the shortest runway:
+  WARN at <= 14 days, PAGE at <= 3 days. The §2.4f pace floor does not apply
+  here. A violation needs only a fresh drive; healthy needs the full census.
+- `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
+  used bytes over the drives minus twice the logical bucket bytes (2+2
+  erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+  MinIO's logical bytes are cluster-wide, so the per-host comparison holds
+  for a single-node store like main's; a multi-node store needs each node's
+  share before this layer can judge it.
+- `minio-put-surge` (target `<host>/puts`, sustain 2): the 1-hour PutObject
+  rate above three times its median over the preceding seven days (the newest
+  hour excluded) and at least 10 per second warns; the median needs at least
+  three days of measured history.
+- `minio-backup-reserve` (target `<host>/backup`, sustain 1): on a host whose
+  `pg-basebackup.service` or `.timer` is loaded, a backup trigger (the service
+  active, a `pgbackup_*` replication slot counted on the primary, or the timer
+  due within 24 hours) while the drives keep less than 4 TB usable above the
+  1.5 TiB per-drive reserve warns before it writes. The unit states come from
+  one hostname-guarded `systemctl show --timestamp=unix` frame with only
+  `LoadState`, `ActiveState` and `NextElapseUSecRealtime`; the slot read is a
+  hostname- and primary-guarded count. The last generation's size is in
+  `backup-info.json` inside directories only the backup account can read, so
+  the required room is the backup's configured minimum
+  (`pg_basebackup_min_free_bytes`), a lower bound of its own admission
+  (`max(min_free, 1.25 x last generation)`).
+- `minio-runway-unobservable` (frames by target, sustain 2): a missing
+  gateway, a failed or invalid answer, an incomplete census, missing or stale
+  logical, usage or PutObject series, short put history, and failed or
+  malformed unit or slot reads. Each layer's gap is its own; one never clears
+  or masks another. The drive layer's unknown pages when a drive declined
+  more than 5 GB/h over the last six hours (emission rule 1), measured from
+  the remaining history or remembered by the signal instance.
+
+Public data: bytes, rates, fixed reasons, unit states and slot counts. Device
+names, slot names, unit text, raw answers and source errors stay private.
+Every tunable is a field of `MinioRunwaySettings`.
+
+Synthetic controls replay the 2026-10-22 shape (drive runway WARN at about
+8 days, divergence over 5 TB and a 520/s put surge over a 90/s median), one
+drive holding foreign data, every backup trigger with and without room, an
+incomplete census, a stale fast-declining drive layer, missing MinIO series,
+short put history, failed and malformed unit and slot reads, a retired
+store's series, inventory exclusion and cancellation.
+
 ACTION: cut object growth at its source (§14.8, plus skipping the
 history-key copy for client-key evidence and a lifecycle rule for the existing
 copies). Run backups only with room for two generations above the reserve. Add
-drives: a new pool needs at least 4 drives to keep 2+2 parity.
+drives: a new pool needs at least 4 drives to keep 2+2 parity. VERIFY: two
+consecutive complete observations outside every band.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
