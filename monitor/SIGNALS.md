@@ -327,13 +327,6 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
-| 24.1 | Coverage gap | `provider-connections` sees provider counts by host, not capacity-normalized placement; the max over min host-imbalance rule over the mover's normalized load gauge is missing. |
-| 24.2 | Coverage gap | `connection-rate` sees connection churn, not moves; the arrived over sent move success-ratio rule is missing. |
-| 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
-| 24.4 | Coverage gap | `rollout-guard` and `provenance` see builds, not the mover's mode; the mover-mode rule over the mode gauge and the control hash is missing. |
-| 24.5 | Coverage gap | `redis-cluster` and `pgbouncer-pool-starvation` see the Redis and database pressure the mover pauses for; the mover tick-outcome rule is missing. |
-| 24.6 | Coverage gap | `log-errors` sees no move results; the per-target failure-ratio and breaker rules over the move result counters are missing. |
-| 24.7 | Coverage gap | `rollout-guard` sees drains, not their admission refusals or drain moves; the refusals-outside-a-drain rule is missing. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -43507,6 +43500,38 @@ baselines. Every gauge is per process, rides the stats pusher's {env,
 service, block, host} labels, and has no series while its process cannot
 compute it. Missing series are unknown, never zero.
 
+Three probes own the seven entries: `mover` (§24.1, §24.4, §24.5),
+`move-outcomes` (§24.2, §24.6) and `drain-moves` (§24.3, §24.7), in
+`signal_mover.go`, `signal_move_outcomes.go` and `signal_drain_moves.go`, with
+the shared reader `connect_move_metrics.go`. Each runs one bounded instant query
+every 5 minutes through one services host's loopback Mimir, evaluated two
+minutes behind now, and `mover` also reads the control once. Every threshold
+and window below is a field of `ConnectMoveSettings`, with the default the
+entry names. A desired connect host/block slot (the services.yml placement)
+without a fresh current process, its newest start pushed within 90 s, leaves
+its probe's rules unknown (`mover-telemetry-incomplete`,
+`move-outcomes-telemetry-incomplete`, `drain-moves-telemetry-incomplete`): a
+draining sibling never stands in for it, and a host the monitor may not
+contact keeps its slots, unknown. Answers are parsed strictly: an annotation,
+an unknown tag, a label or label value outside the code's closed sets, a
+non-finite value or a repeated series rejects the answer. Only inventory host
+and block names, fixed label values and counts reach an alert; process
+instance nonces, control values and response bodies do not.
+
+A fleet without the move code, or a rule with nothing to judge because the
+mover is off, in dry run or not sending, is a standing state of its own:
+`mover-not-deployed`, `mover-off`, `mover-dry-run`, `mover-warming`,
+`move-host-filling`, `move-outcomes-dormant` and `drain-moves-not-deployed`.
+Each is reported every run as a configured-off WARN: never posted to Slack,
+never healthy, and, as an unknown state, it keeps its signal's other incidents
+from clearing while it lasts. Healthy is reported only for a rule judged on
+complete evidence. The PromQL of all three probes is qualified against the
+pinned Mimir 3.1.1 engine by `TestConnectMovePromqlEngine`
+(`MONITOR_PROMQL_ENGINE_SOURCE`, fixture
+`testdata/connect_move_promql_engine_test.go.txt`): raw synthetic series, the
+probes' exact queries, and the native vectors through the probes' public
+adapters.
+
 The Redis state, read-only, from the redis host of §10.4:
 
 ```
@@ -43519,6 +43544,7 @@ The kill switch is `mode off` in the control; every process stops at its next
 tick, within 10 s. The monitor never writes the control.
 
 ### 24.1 Host imbalance: max ÷ min normalized load
+Probe: `mover`
 
 ```promql
 max(max by (host) (urnetwork_connect_move_host_normalized_load{env="main",service="connect"}))
@@ -43537,14 +43563,37 @@ max(max by (host) (urnetwork_connect_move_host_normalized_load{env="main",servic
   `budget_refused` (the budget is the bound), `store_error` (Redis), or
   `in_band` (the band is wider than the imbalance).
 
+`mover` implements the ticket as `move-host-imbalance` (WARN, sustain 1): the
+busiest host's normalized load over the least loaded host's stays above
+`ImbalanceRatio` 1.5 at every 5-minute step (`SustainStep`) of
+`ImbalanceWindow` 2 h, with the fleet's widest mode 2 and every load host's
+series present at every step. The minimum takes only hosts above zero load; a
+host at zero load at every step is `move-host-imbalance` too, an infinite
+ratio that never filled. The alert carries the window's tick outcome shares
+for the reading the ticket names. Until the mover has been on for the whole
+window the state is `mover-warming`; a step without the mode gauge or without
+every load host makes the window `move-host-load-incomplete` (unknown), with
+the failed load publishes by host. While the control is unreadable the rule is
+not judged (`mover-control-unobservable`, §24.4).
+
 False-positive qualifiers: a new host (edge-7/8) starts at 0, so the ratio is
-infinite until it fills under the target cap; a host mid-deploy reads light
-for minutes, because draining processes are not in the load. False-negative
-qualifiers: a host whose load publishes fail
+infinite until it fills under the target cap. While the least loaded host's
+load rose over the window and at least `FillingMinArrivalsPerMinute` 10
+arrivals a minute of the window reached it, the probe reports
+`move-host-filling` instead; a host empty at every step has no arrivals and
+stays an imbalance. A host mid-deploy reads light for minutes, because
+draining processes are not in the load; it cannot hold the ratio high for the
+whole window alone. A host the control's `evacuateHosts` lists empties by
+design (MOVE.md §12) and is left out of the load. False-negative qualifiers: a
+host whose load publishes fail
 (`urnetwork_connect_move_load_publishes_total{outcome="failed"}`) drops out of
-the table and out of this ratio; a host with no connect process has no series.
+the table and out of this ratio, which the probe reports as
+`move-host-load-incomplete`; a host with no connect process has no series; a
+step at which every process read mode 0, such as one fleet-wide control read
+failure, restarts the window.
 
 ### 24.2 Move success ratio: arrived ÷ sent
+Probe: `move-outcomes`
 
 ```promql
 sum(increase(urnetwork_connect_moves_arrived_total{env="main",service="connect",kind=~"advisory|compulsory"}[1h]))
@@ -43568,13 +43617,27 @@ windows of an hour or more.
   gauge `urnetwork_connect_move_target_breaker_open` (all from the move
   primitives).
 
+`move-outcomes` implements the ticket as `move-success-low` (WARN, sustain 1):
+the ratio, each side an `increase` over `SuccessWindow` 1 h, stays below
+`SuccessRatioFloor` 0.5 at every 5-minute step of `SuccessSustain` 2 h. A step
+is judged only with at least `MinSends` 20 sends in its window and every
+desired slot current; the alert localizes by target host, failure and decline
+reasons, dropped reports and expiries. No sends is not health:
+`move-outcomes-dormant` names why the ratio has nothing to judge
+(`not_deployed`, `mover_off`, `dry_run`, `no_sends` or `below_minimum_sends`).
+A step with a slot gap is `move-outcomes-telemetry-incomplete`, because a
+process that stops publishing removes its sends or arrivals from the sums.
+
 False-positive qualifiers: a move the budget refused was never sent, so it is
 in neither count; an unrelated reconnect that lands on the target consumes the
-intent and counts as an arrival, which is the placement wanted (MOVE.md §6).
+intent and counts as an arrival, which is the placement wanted (MOVE.md §6),
+so a ratio above 1 is no error.
 False-negative qualifier: dry run sends nothing; its would-send counter
-(`urnetwork_connect_moves_would_send_total`) has no arrivals to compare.
+(`urnetwork_connect_moves_would_send_total`) has no arrivals to compare, and
+the state is `move-outcomes-dormant` with `dry_run`.
 
 ### 24.3 Compulsory closes per drain
+Probe: `drain-moves`
 
 ```promql
 sum(increase(urnetwork_connect_moves_compulsory_closed_total{env="main",service="connect"}[1d]))
@@ -43596,14 +43659,33 @@ drained process.
   residents at drain start, which means capable clients are failing their
   replacement too.
 
+`drain-moves` judges each drained process on its own, the series of one
+instance nonce: a process whose drain gauge rose above zero, or that sent
+drain moves, within `DrainWindow` 24 h, including the drained processes that
+have since exited. Its closes and its drain moves by `capable` are exact
+counts, the maximum less the minimum within the window, never an extrapolated
+increase. Its legacy residents at drain start are its
+`urnetwork_connect_drain_moves_sent_total{capable="false"}`, one per legacy
+resident of the drain. `drain-closes-excess` (WARN, sustain 1) lists the
+drained processes whose closes, less every compulsory move the mover sent from
+that process, exceed their legacy residents by at least `MinExcessCloses` 1. A
+drain without drain moves (the control's `drainMoves false`, `EnableDrainMoves`
+off, or every intent write failing) has no deadline closes and is counted, not
+judged; a build from before drain moves has neither drain-move series and is
+not counted.
+
 False-positive qualifier: evacuation and emergency compulsory moves close
 clients too; separate them by time, or by
 `urnetwork_connect_moves_sent_total{kind="compulsory"}` by trigger in the
-same window. False-negative qualifiers: a process killed before its deadlines
-counts no close; the drain gauge is per process and is overwritten within one
-push by the replacement container (§10.2), so read it as a range.
+same window. The probe takes the lifetime maximum of the drained process's
+`moves_sent_total{kind="compulsory"}`, an upper bound of the window's mover
+compulsory moves, off its closes first. False-negative qualifiers: a process
+killed before its deadlines counts no close, and a drained process whose final
+push did not land is missing, so the count can only be low; the drain gauge is
+per process, so read it as a range, per instance.
 
 ### 24.4 Mover mode
+Probe: `mover`
 
 ```promql
 max by (host, block) (urnetwork_connect_mover_mode{env="main",service="connect"})
@@ -43625,7 +43707,32 @@ code settings. The control can only narrow: the mode never goes above what
   and target with the host excess (`urnetwork_connect_move_host_excess`)
   before turning it on (MOVE.md §7 phase 3).
 
+`mover` compares every current process's mode with the others and with the
+control, read once with `HGETALL {connect_move}control` and narrowed as the
+mover narrows it (`model.NarrowConnectMoveControl`) under the code defaults
+(`DefaultMode` off). `mover-mode-divergent` (WARN, sustain
+`DivergenceSustain` 3 runs, which covers a control change in flight and a
+rollout step) reports processes that disagree, a process without the mode
+gauge while the mover is in dry run or on, or a fleet whose modes differ from
+the control's. Its observed values name the slots below the fleet's mode and
+how many of them failed closed on `store_error` ticks, the discriminator
+between an unreadable control and `EnableMove` off. A control field that does
+not parse narrows silently (mode off, a fleet budget of zero, an infinite band,
+drain moves off): `mover-control-invalid` (WARN, sustain 1) names the field,
+never its value. An unreadable control is `mover-control-unobservable` and
+leaves §24.1 unjudged.
+
+The states are configured-off (above): `mover-not-deployed` while no current
+process exports the mode gauge, `mover-off` while the fleet's widest mode is 0
+(with the instant load ratio: the load model runs with the mover off, MOVE.md
+§7 phase 1), and `mover-dry-run` while it is 1, with each source host's
+would-sends beside each host's excess for the phase 3 comparison. A divergent
+fleet reports its state too, so a rule it leaves unjudged cannot clear. An
+incomplete census (`mover-telemetry-incomplete`) still reports divergence it
+can prove among the processes it sees, but no state.
+
 ### 24.5 Mover pauses and failures
+Probe: `mover`
 
 ```promql
 sum by (outcome) (rate(urnetwork_connect_mover_ticks_total{env="main",service="connect"}[5m]))
@@ -43646,10 +43753,31 @@ sum by (kind, trigger) (rate(urnetwork_connect_move_send_errors_total{env="main"
   usually because the resident left; a burst on every process at once points
   at the move primitives.
 
+`mover` judges every current process's tick outcomes over `TickWindow` 15 min:
+
+- `mover-store-errors` (WARN, sustain 2): while the mover is meant to act (the
+  fleet's widest mode or the control's is at least dry run), a process's
+  `store_error` ticks are at least `StoreErrorShare` 0.5 of its ticks. With the
+  mover meant to be off, store errors are only observed values of `mover-off`.
+- `mover-db-paused` (WARN, sustain 2): with the mover in dry run or on,
+  `db_paused` is at least `DbPausedShare` 0.5 of the fleet's acting ticks
+  (`db_paused`, `no_target`, `budget_refused`, `send_failed` and `moved`: the
+  ticks that wanted to move), over at least `MinActingTicks` 30. Its action
+  reads the database, not the mover.
+- `move-send-errors-fleetwide` (WARN, sustain 1): every process that attempted
+  sends (sends plus send errors), at least `SendErrorMinProcesses` 2 of them,
+  had send errors of at least `SendErrorMinShare` 0.5 of its attempts.
+
+Budget refusals by `cap` and the outcome mix are observed values; the pace a
+refusal shows is the design, not an alert.
+
 False-positive qualifier: every tick of a process at mode off or in the band
-counts `off` or `in_band`, so the outcome mix is per tick, not per move.
+counts `off` or `in_band`, so the outcome mix is per tick, not per move; the
+pause share is judged over acting ticks, which ticks within the band do not
+dilute.
 
 ### 24.6 Move results, expiries and the target breaker
+Probe: `move-outcomes`
 
 ```promql
 sum by (reason) (increase(urnetwork_connect_moves_declined_total{env="main"}[1h]))
@@ -43682,13 +43810,54 @@ the client forwards as before.
   arrival that consumed the intent first; a steady `foreign_move` or
   `invalid_move_id` is a client reporting a move it was not sent.
 
-False-positive qualifier: a client counts only failures of the carrier its old
-transport used, so a network that blocks one carrier is not blamed on the
-target. False-negative qualifiers: a report is best effort and sent once, so a
-client that loses its control path reports nothing; drain moves never feed the
-breaker.
+`move-outcomes` implements both tickets per target host (target
+`<env>/connect-moves/<host>`, a desired connect host):
+
+- `move-target-failures` (WARN, sustain 1): the host's replacement failures
+  over the mover's sends to it, each an `increase` over `SuccessWindow` 1 h,
+  stay above `TargetFailureShare` 0.25 at every 5-minute step of
+  `TargetFailureSustain` 1 h, each step with at least `MinSends` 20 sends to
+  the host and every desired slot current.
+- `move-target-breakers-open` (WARN, sustain 1): at least
+  `BreakerMinOpenAddresses` 2 addresses of the host read open at every
+  1-minute step (`BreakerStep`) of `BreakerHold` 10 min, the maximum over every
+  process that read them. It is judged whether or not the mover sends: a host
+  whose every address is held open receives no sends at all.
+
+False-positive qualifiers: a client counts only failures of the carrier its
+old transport used, so a network that blocks one carrier is not blamed on the
+target. A drain's moves point at the draining host's own addresses, and their
+failure reports count against that host's `target_host` with no kind label
+(`controller/resident_move_result.go`), so a deploy whose new container comes
+up late can push a host's share over a quarter: the probe takes every capable
+drain move of the host in the window
+(`urnetwork_connect_drain_moves_sent_total{capable="true"}`, the most failures
+those moves can report) off the host's failures first. False-negative
+qualifiers: a report is best effort and sent once, so a client that loses its
+control path reports nothing; drain moves never feed the breaker; taking a
+large drain's moves off can hide a mover failure in the same window; a target
+the mover stops sending to, for example because its addresses' breakers
+opened, is no longer judged and its failure alert clears, so read the breaker
+ticket beside it.
+
+As built at the move integration (2026-10-22, feat/resident-move-integrate
+9f797790e), the breaker gauge's own `host` label, the target's inventory host,
+collides with the stats pusher's `host` grouping label. The Prometheus push
+client refuses a push whose metric already carries a grouping label, so the
+first breaker read in a process (a source with candidates, in dry run or on)
+makes every later push of that process fail, and the breaker series never
+reach Mimir. A local reproduction with the module's push client accepted the
+first push and refused the next with `already contains grouping label host`.
+Until the running artifact carries a fix that moves the target host to its
+own label, a source process goes stale right after the mover leaves off,
+which the §24 probes report as unknown slots, never as health. The probe reads
+the target host from `target_host`, the label the move counters use, and
+reports a breaker series without `target_host`, `interface` and a family of 4
+or 6 as `move-outcomes-telemetry-incomplete`, never grouping it by the
+pusher's host.
 
 ### 24.7 Drain gates and drain moves
+Probe: `drain-moves`
 
 ```promql
 sum by (carrier) (increase(urnetwork_connect_drain_refusals_total{env="main",service="connect"}[1h]))
@@ -43711,10 +43880,24 @@ the next drain to the legacy migrate without a deploy.
   `urnetwork_connect_drain_residents_remaining` at zero), which means a process
   is stuck draining while it still takes traffic from the lb.
 
-False-positive qualifier: a client that redials into the draining process
-before the lb drops it is refused by design. False-negative qualifier: a
-drain that cannot write intents falls back to the legacy migrate and counts
-`capable="false"` for capable clients too.
+`drain-moves` implements the ticket per slot (target
+`<env>/connect-drains/<host>/<block>`) as `drain-refusals-outside-drain`
+(WARN, sustain 2): a current process refused within `RefusalWindow` 1 h while
+its drain gauge stayed at zero throughout that window. A current process
+without `urnetwork_connect_drain_refusals_total` runs a build from before the
+drain gates; while no current process has it, the state is
+`drain-moves-not-deployed`. Drain moves run whatever the mover's mode is, so
+these rules apply as soon as the build runs.
+
+False-positive qualifiers: a client that redials into the draining process
+before the lb drops it is refused by design. A process whose drain found no
+residents never sets the gauge above zero, but it exits within the drain's
+bound, so the alert needs two consecutive runs of a current process that
+still publishes. False-negative qualifier: a drain that cannot write a
+resident's intent sends the legacy migrate without one and counts no drain
+move for that client (`sendDrainResidentMove`; an earlier reading here, that
+it counts `capable="false"`, does not match the code). The straggler sweep,
+not the deadline, closes such a client, so neither count of §24.3 sees it.
 
 ## Shared provider-egress dashboard refresh
 

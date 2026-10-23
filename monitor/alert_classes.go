@@ -25,6 +25,18 @@ const (
 
 var alertClassKinds = map[string]alertClassKind{
 	// unknown states
+	"drain-moves-not-deployed":                         visibilityAlertClass,
+	"drain-moves-telemetry-incomplete":                 visibilityAlertClass,
+	"move-host-filling":                                visibilityAlertClass,
+	"move-host-load-incomplete":                        visibilityAlertClass,
+	"move-outcomes-dormant":                            visibilityAlertClass,
+	"move-outcomes-telemetry-incomplete":               visibilityAlertClass,
+	"mover-control-unobservable":                       visibilityAlertClass,
+	"mover-dry-run":                                    visibilityAlertClass,
+	"mover-not-deployed":                               visibilityAlertClass,
+	"mover-off":                                        visibilityAlertClass,
+	"mover-telemetry-incomplete":                       visibilityAlertClass,
+	"mover-warming":                                    visibilityAlertClass,
 	"pg-disk-space-unobservable":                       visibilityAlertClass,
 	"pg-disk-runway-unobservable":                      visibilityAlertClass,
 	"storage-runway-unobservable":                      visibilityAlertClass,
@@ -179,6 +191,17 @@ var alertClassKinds = map[string]alertClassKind{
 	"worker-scheduler-unobservable":                    visibilityAlertClass,
 
 	// measured states
+	"drain-closes-excess":                                 incidentAlertClass,
+	"drain-refusals-outside-drain":                        incidentAlertClass,
+	"move-host-imbalance":                                 incidentAlertClass,
+	"move-send-errors-fleetwide":                          incidentAlertClass,
+	"move-success-low":                                    incidentAlertClass,
+	"move-target-breakers-open":                           incidentAlertClass,
+	"move-target-failures":                                incidentAlertClass,
+	"mover-control-invalid":                               incidentAlertClass,
+	"mover-db-paused":                                     incidentAlertClass,
+	"mover-mode-divergent":                                incidentAlertClass,
+	"mover-store-errors":                                  incidentAlertClass,
 	"pg-disk-space-low":                                   incidentAlertClass,
 	"storage-runway":                                      incidentAlertClass,
 	"retention-frontier-pinned":                           incidentAlertClass,
