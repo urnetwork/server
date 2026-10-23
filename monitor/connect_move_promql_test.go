@@ -154,6 +154,20 @@ func connectMoveEngineCases(t *testing.T) []*connectMoveEngineCase {
 		f.movers(on, "in_band")
 		f.loads(map[string]func(int64) (float64, bool){"alpha-edge-1.example": steady(110), "beta-edge-2.example": steady(95)})
 	})
+	// false-positive qualifier: a host mid-deploy reads light for minutes, and
+	// cannot hold the ratio high for the whole window alone
+	mover("mover-host-mid-deploy-reads-light", nil, nil, func(f *connectMoveEngineFleet) {
+		f.movers(on, "in_band")
+		f.loads(map[string]func(int64) (float64, bool){
+			"alpha-edge-1.example": func(sample int64) (float64, bool) {
+				if at-3600 <= sample && sample < at-3000 {
+					return 20, true
+				}
+				return 110, true
+			},
+			"beta-edge-2.example": steady(95),
+		})
+	})
 	mover("mover-imbalanced-on", []string{"move-host-imbalance"}, []string{"move-host-filling", "mover-warming"}, func(f *connectMoveEngineFleet) {
 		f.movers(on, "no_target")
 		f.loads(map[string]func(int64) (float64, bool){"alpha-edge-1.example": steady(300), "beta-edge-2.example": steady(100)})
