@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
+	"reflect"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -187,13 +188,23 @@ func subnetReplayRevertData(failure *subnetReplayRpcFailure) ([]byte, bool) {
 	return raw, true
 }
 
-// Converts one decoded abi output to the binding's typed value. The abi
-// decoder produces exactly these Go types for the pinned bindings.
+// Converts one decoded abi output to the binding's typed value. Scalars decode
+// to exactly the binding's type; a decoded tuple converts into the binding's
+// named struct only when the two shapes correspond field by field, because the
+// abi converter recurses without bound on some mismatched pairs (an array
+// target with a big integer source), which no recover can catch.
 func subnetReplayValue[T any](view *subnetReplayView, index int) (value T, resultErr error) {
 	if index < 0 || len(view.values) <= index || view.values[index] == nil {
 		return value, newSubnetReplayUnknown("view-shape-invalid", nil)
 	}
-	// The abi converter panics on an unexpected shape; that is a gap, not a crash.
+	if typed, ok := view.values[index].(T); ok {
+		return typed, nil
+	}
+	target := reflect.TypeOf((*T)(nil)).Elem()
+	if target.Kind() != reflect.Struct || !subnetReplayShapeCorresponds(reflect.TypeOf(view.values[index]), target) {
+		return value, newSubnetReplayUnknown("view-shape-invalid", nil)
+	}
+	// Any remaining converter panic is a gap, not a crash.
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			var zero T
@@ -205,6 +216,31 @@ func subnetReplayValue[T any](view *subnetReplayView, index int) (value T, resul
 		return value, newSubnetReplayUnknown("view-shape-invalid", nil)
 	}
 	return *converted, nil
+}
+
+// Whether a decoded type maps onto a binding type: identical types, or
+// structs, slices and arrays whose members correspond in order and name.
+func subnetReplayShapeCorresponds(source reflect.Type, target reflect.Type) bool {
+	if source == target {
+		return true
+	}
+	switch {
+	case source.Kind() == reflect.Struct && target.Kind() == reflect.Struct:
+		if source.NumField() != target.NumField() {
+			return false
+		}
+		for i := 0; i < source.NumField(); i += 1 {
+			if source.Field(i).Name != target.Field(i).Name || !subnetReplayShapeCorresponds(source.Field(i).Type, target.Field(i).Type) {
+				return false
+			}
+		}
+		return true
+	case source.Kind() == reflect.Slice && target.Kind() == reflect.Slice:
+		return subnetReplayShapeCorresponds(source.Elem(), target.Elem())
+	case source.Kind() == reflect.Array && target.Kind() == reflect.Array:
+		return source.Len() == target.Len() && subnetReplayShapeCorresponds(source.Elem(), target.Elem())
+	}
+	return false
 }
 
 // One inclusive finalized log window for one contract address.
