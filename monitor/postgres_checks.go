@@ -780,6 +780,8 @@ const pgVacuumHealthSQL = `
 	  AND contract_root.oid = pg_partition_root(c.oid)
 	  AND contract_root.relnamespace = c.relnamespace
 	  AND contract_root.relname IN ('transfer_contract', 'transfer_escrow', 'contract_close', 'transfer_escrow_sweep', 'contract_close_report', 'contract_extender')
+	 -- a partitioned parent has no storage, so no dead tuples of its own
+	 WHERE c.relkind <> 'p'
 	), dead AS (
 	 SELECT candidate.relid, candidate.relname, candidate.n_dead_tup, candidate.last_autovacuum,
 	        candidate.configured_vacuum_threshold, candidate.table_name,

@@ -152,11 +152,16 @@ func TestVacuumHealthNativeGroupsContractPartitions(t *testing.T) {
 			}
 			server.Testing_PartitionContracts(ctx)
 		}
-		// ids of the current millisecond land in the current week's partition
+		// ids of the current millisecond land in the current week's partition;
+		// a plain table's dead tuples stay with it as the legacy partition
 		churn()
-		row := await(func(row Row) bool { return row[21] == "transfer_contract" })
-		if table, _, legacy, ok := server.ParseContractPartitionName(row[0]); !ok || legacy || table != "transfer_contract" || row[23] == "1" {
-			t.Fatalf("partitioned vacuum row %v", row)
+		var leaves string
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*)::text FROM pg_partition_tree('public.transfer_contract'::regclass) WHERE isleaf`).Scan(&leaves))
+		})
+		row := await(func(row Row) bool { return row[21] == "transfer_contract" && row[0] != "transfer_contract" })
+		if table, _, _, ok := server.ParseContractPartitionName(row[0]); !ok || table != "transfer_contract" || row[23] != leaves {
+			t.Fatalf("partitioned vacuum row %v, want a transfer_contract partition of %s", row, leaves)
 		}
 		for _, other := range postgresNativeRows(t, ctx, query) {
 			if table, _, _, ok := server.ParseContractPartitionName(other[0]); ok && other[21] != table {
@@ -164,4 +169,42 @@ func TestVacuumHealthNativeGroupsContractPartitions(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The unchanged data reads of contract tables (the open-contract set, the
+// creation rate, contracts to inactive destinations) run on the partitioned
+// parents as on the plain tables: each signal completes a real read.
+func TestContractDataReadsNativeOnBothLayouts(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		observe := func(layout string) {
+			for _, signal := range []Signal{NewOpenContractsSignal(), NewContractRateSignal(), NewStaleContractsSignal()} {
+				reads := 0
+				source := &postgresNativeCountingSource{postgresNativeSource: postgresNativeSource{syntheticSource: &syntheticSource{}, t: t}, reads: &reads}
+				settings := syntheticSettings(source)
+				settings.Now = time.Now
+				if _, err := signal.Run(ctx, settings); err != nil || reads == 0 {
+					t.Fatalf("%s: %s did not complete a read: %v", layout, signal.Key(), err)
+				}
+			}
+		}
+		if !server.IsContractPartitioned(ctx) {
+			observe("plain")
+			server.Testing_PartitionContracts(ctx)
+		}
+		observe("partitioned")
+	})
+}
+
+// Counts the reads the signal makes.
+type postgresNativeCountingSource struct {
+	postgresNativeSource
+	reads *int
+}
+
+func (self *postgresNativeCountingSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
+	*self.reads += 1
+	return self.postgresNativeSource.PostgreSQL(ctx, query)
 }
