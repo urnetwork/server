@@ -325,7 +325,6 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
 | 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
@@ -42800,6 +42799,7 @@ is read again.
   covers the epoch; one operator's failure zeroing every pool is not judged.
 
 ### 22.4 Real validation paths, attempt completeness, and pool quality
+Probe: `subnet-validation`
 
 Sources: `/verify/keys`, `/verify/stats`, `/verify/proofs`, signed attempt/cut
 artifacts and the validators' durable decision history. Independently verify
@@ -42815,6 +42815,51 @@ an HTTP 200 or a server-reported count does not establish correctness.
 | `subnet-pool-quality-mismatch` | Replayed non-seed, server-assigned transitions, Wilson/latency statistics, EMA carry/fold and exact exposure-weighted tail PPM produce the published Q_n; head members are excluded. | Page on signed/computed quality divergence, seed credit, repeated fold, wrong failure attribution or floating-point rounding substituted for the required integer rule. Retain the input cut and prior EMA. |
 | `subnet-egress-attribution` | Exact source-IP attribution is unique, forwarded headers are trusted only at the authorized ingress, allocation/release churn is reflected, and IPv4/IPv6 keyed scoring prefixes match policy. | Page if an ambiguous/spoofed/stale address is credited or raw IP/key material leaks in public evidence. Warn on growth of excluded mappings; investigate source attribution before blaming providers. |
 | `subnet-measurement-bias` | Independent-validator coverage and outcome distributions are visible by provider/NO/time cohort; adversarial abandonment, too-perfect single-validator clusters and selective `/verify` service are investigated. | Warn on statistically supported outliers with sample sizes and controls. Do not label collusion/slashing proved from correlation or promise proof-of-routing: the stronger `VALIDATOR.md` §10 defenses remain outside v1. |
+
+Implementation (2026-10-23, `signal_subnet_validation.go`). This reader needs no
+chain: it reads the public `/verify/keys`, `/verify/proofs` with
+`originals=true` and `/verify/stats` at both enrolled origins through the
+server's own response types, under the §22.1 enrollment and the reviewed
+policy document.
+
+- `subnet-path-proof-invalid`: PAGE, Sustain 1, when the origins publish
+  different server keys or a key id observed by a published run maps to another
+  key or disappears; and, over the proof window (`proof_window_minutes`,
+  `max_proof_rows` up to 256 rows per page, four pages, trail ids deduplicated),
+  for a row's shape or status, a completed depth other than the policy's
+  `trail_depth`, duplicate or unordered hops, an unpublished server key, a
+  failing server FINAL or validator EXTEND signature, a trail id that forks, or
+  an original transition failing `protocol.ValidateProviderAttemptReceipt`
+  (SEED/EXTEND/ASSIGN/FINAL under its historical server key) or naming another
+  deployment scope. WARN frame `publication`, Sustain 2, when the origins
+  return different windows or a policy other than sn.yml's.
+- `subnet-attempt-history-gap`: PAGE when two different valid receipts claim one
+  trail depth; unknown when the transition census is truncated; otherwise a
+  standing unknown, because the validators' signed attempt cuts and closures
+  stay in their private state directories.
+- `subnet-measurement-coverage`: WARN, Sustain 2, for statistics older than
+  `stats_max_age_minutes`, a row not reproducing `protocol.ReliabilityPPM`
+  with the policy's `a_min`, another policy or egress hash key, fewer than
+  `coverage_min_eligible_percent` of the latest period's active providers at
+  `a_min`, or a reviewed validator with no trail in a complete window.
+- `subnet-measurement-bias`: WARN, Sustain 2, when a validator with at least
+  `bias_min_trails` trails completes them at a rate whose two-proportion z
+  against the others reaches `bias_z_score_tenths / 10`.
+- `subnet-egress-attribution`: PAGE when a public string is a raw address, a
+  completed hop carries an unexpected field, or a completed hop has no keyed
+  egress hash (the leaked value is never copied into the alert); otherwise a
+  standing unknown, because the source-IP to provider mapping is private.
+- `subnet-verify-poisoning` and `subnet-pool-quality-mismatch` are standing
+  unknowns: the first needs a separately authorized bounded canary, the second
+  each validator's signed release measurement and steering intent, whose
+  version 2 verifier also needs its independently authenticated inputs.
+
+- **False-positive qualifier:** validators are permissionless; trails from
+  keys outside the reviewed census are counted, not invalid. A statistical
+  outlier is never proof of collusion.
+- **False-negative qualifier:** two origins can share one store; the public
+  index holds only terminal trails, so completeness beyond it needs the
+  validators' cuts.
 
 ### 22.5 Top-200 promotion, zero weight, demotion, and tier isolation
 
