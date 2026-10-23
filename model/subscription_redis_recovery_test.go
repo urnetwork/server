@@ -17,31 +17,65 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Retain the actual v2 Redis marker after the SQL owner rolls back. The next
-// public caller receives neither this context nor any in-memory recovery state.
+// Retain the actual Redis pending marker after the SQL owner rolls back, aged
+// as if the request died long enough ago for any recovery page to take it
+// over. The next public caller receives neither this context nor any
+// in-memory recovery state.
 func redisRecoveryAbandonedTestRequest(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, amount ByteCount) server.Id {
 	t.Helper()
 	request := withRedisContractAdmission(ctx)
+	published, finish := reserveRedisAdmissionTestBeforeTx(t, request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, amount)
+	defer finish()
 	conn := acquireContractLifecycleTestConnection(t, ctx)
 	defer conn.Release()
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	server.Raise(err)
 	defer tx.Rollback(context.Background())
-	escrow, _, err := createTransferEscrowInTx(request, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, amount, nil)
+	escrow, _, err := createTransferEscrowInTx(published, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, amount, nil)
 	if err != nil || escrow == nil {
 		t.Fatal("abandoned request did not reach real SQL publication", err)
 	}
 	server.Raise(tx.Rollback(ctx))
+	redisRecoveryAgePendingMarker(t, ctx, f.balanceId, escrow.ContractId)
 	redisRecoveryRequireMarker(t, ctx, f.balanceId, escrow.ContractId, true)
 	return escrow.ContractId
 }
 
+// Ages the request's pending marker past redisPendingRecoveryAge by Redis
+// time, as if its request had died that long ago. No attempt of a live
+// request can publish so late (redisPendingPublicationTimeout).
+func redisRecoveryAgePendingMarker(t testing.TB, ctx context.Context, balance, contract server.Id) {
+	t.Helper()
+	server.Redis(ctx, func(client server.RedisClient) {
+		now, err := client.Time(ctx).Result()
+		server.Raise(err)
+		changed, err := client.ZAddArgs(ctx, redisContractReservationKeys(balance)[5], redis.ZAddArgs{
+			XX:      true,
+			Ch:      true,
+			Members: []redis.Z{{Score: float64(now.Add(-redisPendingRecoveryAge - time.Second).UnixMilli()), Member: contract.String()}},
+		}).Result()
+		server.Raise(err)
+		if changed != 1 {
+			t.Fatal("the request has no pending marker to age")
+		}
+	})
+}
+
+// Either marker retains the request's token: the pending marker until its
+// attempts have joined, then the recovery marker.
 func redisRecoveryRequireMarker(t testing.TB, ctx context.Context, balance, contract server.Id, present bool) {
 	t.Helper()
 	server.Redis(ctx, func(client server.RedisClient) {
-		_, err := client.ZScore(ctx, redisContractReservationKeys(balance)[4], contract.String()).Result()
-		if (err == nil) != present || err != nil && !errors.Is(err, redis.Nil) {
-			t.Fatalf("retained recovery marker present=%v want=%v err=%v", err == nil, present, err)
+		found := false
+		for _, key := range redisContractReservationKeys(balance)[4:6] {
+			_, err := client.ZScore(ctx, key, contract.String()).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				t.Fatal("retained marker read failed", err)
+			}
+			found = found || err == nil
+		}
+		if found != present {
+			t.Fatalf("retained recovery marker present=%v want=%v", found, present)
 		}
 	})
 }
@@ -165,18 +199,22 @@ func TestRedisRecoveryLostReserveAcknowledgementSurvivesCallerState(t *testing.T
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		request := withRedisContractAdmission(ctx)
 		id := redisAdmissionFromContext(request).contractId
+		published, finish := reserveRedisAdmissionTestBeforeTx(t, request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
 		value := server.HandleError(func() {
-			server.Tx(request, func(tx server.PgTx) {
+			server.Tx(published, func(tx server.PgTx) {
 				wrapped := &redisRefusalTestTx{PgTx: tx, beforeFence: func() {
 					redisRecoveryRequireMarker(t, ctx, f.balanceId, id, true)
 					panic(io.EOF) // Real reserve succeeded; caller loses its reply/state.
 				}}
-				_, _, _ = createTransferEscrowInTx(request, wrapped, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
+				_, _, _ = createTransferEscrowInTx(published, wrapped, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
+		finish()
 		if value != io.EOF {
 			t.Fatal("lost reserve fixture did not reach its real acknowledgement boundary", value)
 		}
+		// The caller died with its state; its marker passes to recovery once aged.
+		redisRecoveryAgePendingMarker(t, ctx, f.balanceId, id)
 		_ = createRedisAdmissionTest(ctx, f, 29)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 29 {
 			t.Fatal("fresh caller needed lost in-memory reserve outcome", got)
@@ -199,12 +237,13 @@ func TestRedisRecoveryLivePublicationAndLostCommitStayReserved(t *testing.T) {
 		peer.sourceId = server.NewId()
 		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{peer.sourceId: peer.sourceNetworkId})
 		request := withRedisContractAdmission(ctx)
+		published, finish := reserveRedisAdmissionTestBeforeTx(t, request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
 		held, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
 		defer held.Rollback(context.Background())
-		first, _, err := createTransferEscrowInTx(request, held, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
+		first, _, err := createTransferEscrowInTx(published, held, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
 		if err != nil || first == nil {
 			t.Fatal("held publication fixture failed", err)
 		}
@@ -214,6 +253,7 @@ func TestRedisRecoveryLivePublicationAndLostCommitStayReserved(t *testing.T) {
 		}
 		redisRecoveryRequireMarker(t, ctx, f.balanceId, first.ContractId, true)
 		server.Raise(held.Commit(ctx)) // Treat its success reply as lost to the caller.
+		finish()
 		if err := recoverRedisReservationRequest(ctx, f.balanceId, first.ContractId); err != nil {
 			t.Fatal("actual SQL custody could not reconcile lost commit acknowledgement", err)
 		}
@@ -221,7 +261,9 @@ func TestRedisRecoveryLivePublicationAndLostCommitStayReserved(t *testing.T) {
 			t.Fatal("lost commit acknowledgement became absent SQL", got)
 		}
 		redisRecoveryRequireMarker(t, ctx, f.balanceId, first.ContractId, false)
-		if repeated, err := CreateTransferEscrow(request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 23); err == nil || repeated != nil || !strings.Contains(err.Error(), "already has SQL custody") {
+		// The same request's reservation finds its published token no longer
+		// pending and refuses before any transaction.
+		if repeated, err := CreateTransferEscrow(request, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 23); err == nil || repeated != nil || !errors.Is(err, errRedisReservationNotPending) {
 			t.Fatal("same request replaced original committed authority", repeated, err)
 		}
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 52 {
@@ -243,7 +285,9 @@ func TestRedisRecoveryMissingMarkerAndForeignTokenRemainUntouched(t *testing.T) 
 		}
 		lost := redisRecoveryAbandonedTestRequest(t, ctx, f, 23)
 		server.Redis(ctx, func(client server.RedisClient) {
-			server.Raise(client.ZRem(ctx, redisContractReservationKeys(f.balanceId)[4], lost.String()).Err())
+			for _, key := range redisContractReservationKeys(f.balanceId)[4:6] {
+				server.Raise(client.ZRem(ctx, key, lost.String()).Err())
+			}
 		})
 		if err := recoverRedisReservationRequest(ctx, f.balanceId, lost); err == nil || !strings.Contains(err.Error(), "missing owned reservation marker") {
 			t.Fatal("missing recovery marker was enrolled or released", err)

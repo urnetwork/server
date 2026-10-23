@@ -139,12 +139,15 @@ func TestRedisRecoveryRequestReusesTransactionFence(t *testing.T) {
 		// A committed publication with a retained marker models a lost commit
 		// acknowledgement. Recovery may forget its marker, but not its token.
 		request := withRedisContractAdmission(ctx)
+		reserved, finish := reserveRedisAdmissionTestBeforeTx(t, request, fixture.sourceNetworkId, fixture.sourceId,
+			fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 23)
 		var published *TransferEscrow
 		var publicationErr error
 		server.Tx(ctx, func(tx server.PgTx) {
-			published, _, publicationErr = createTransferEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
+			published, _, publicationErr = createTransferEscrowInTx(reserved, tx, fixture.sourceNetworkId, fixture.sourceId,
 				fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 23, nil)
 		}, server.TxReadCommitted, server.OptNoRetry())
+		finish()
 		if publicationErr != nil || published == nil {
 			t.Fatal("committed publication fixture failed", publicationErr)
 		}

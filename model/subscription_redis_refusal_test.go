@@ -168,20 +168,22 @@ func TestRedisAdmissionExpiredPostReserveClockCompensates(t *testing.T) {
 			t.Fatal("live shard reservation fixture failed", err)
 		}
 		requestCtx := withRedisContractAdmission(ctx)
+		reserved, finish := reserveRedisAdmissionTestBeforeTx(t, requestCtx, owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId, owner.NetworkId, 23)
 		var failure error
 		var reads int
-		server.Tx(requestCtx, func(tx server.PgTx) {
+		server.Tx(reserved, func(tx server.PgTx) {
 			wrapped := &redisRefusalTestTx{PgTx: tx, beforeFence: func() {
 				if got := Testing_NetEscrowByteCount(ctx, owner.BalanceId); got != 40 {
 					t.Fatal("expiry seam preceded actual reservation", got)
 				}
 			}}
-			escrow, _, err := createTransferEscrowInTx(requestCtx, wrapped, owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId, owner.NetworkId, 23, nil)
+			escrow, _, err := createTransferEscrowInTx(reserved, wrapped, owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId, owner.NetworkId, 23, nil)
 			failure, reads = err, wrapped.deadlineReads
 			if escrow != nil {
 				t.Fatal("expired shard produced an escrow", escrow)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		finish()
 		if err := redisAdmissionFromContext(requestCtx).compensate(ctx); err != nil {
 			t.Fatal("expired request compensation failed after SQL joined", err)
 		}
@@ -203,16 +205,18 @@ func TestRedisAdmissionPrePublicationPanicCompensatesAndPropagates(t *testing.T)
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		neighbor := createRedisAdmissionTest(ctx, f, 17)
 		requestCtx := withRedisContractAdmission(ctx)
+		reserved, finish := reserveRedisAdmissionTestBeforeTx(t, requestCtx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23)
 		const marker = "synthetic-pre-publication-panic"
 		value := server.HandleError(func() {
-			server.Tx(requestCtx, func(tx server.PgTx) {
+			defer finish()
+			server.Tx(reserved, func(tx server.PgTx) {
 				wrapped := &redisRefusalTestTx{PgTx: tx, beforeFence: func() {
 					if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 40 {
 						t.Fatal("panic seam preceded actual reservation", got)
 					}
 					panic(marker)
 				}}
-				_, _, _ = createTransferEscrowInTx(requestCtx, wrapped, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
+				_, _, _ = createTransferEscrowInTx(reserved, wrapped, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 23, nil)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 		if value != marker {

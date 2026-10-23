@@ -18,6 +18,18 @@ func createRedisAdmissionTest(ctx context.Context, f netEscrowOrderingTestFixtur
 	return escrow
 }
 
+// Reserves before the caller's transaction, as the public owners do before
+// BEGIN: the returned context publishes the reservation inside it. The caller
+// ends the attempt with finish once that transaction has joined.
+func reserveRedisAdmissionTestBeforeTx(t testing.TB, request context.Context, sourceNetworkId, sourceId, destinationNetworkId, destinationId, payerNetworkId server.Id, amount ByteCount) (context.Context, func()) {
+	t.Helper()
+	published, finish, err := reserveRedisTransferEscrowBeforeTx(request, sourceNetworkId, sourceId, destinationNetworkId, destinationId, payerNetworkId, amount)
+	if err != nil {
+		t.Fatal("pending reservation failed", err)
+	}
+	return published, finish
+}
+
 // A settled Redis admission keeps its whole reservation until the durable debit
 // worker applies the journal entry its settlement committed; since 403b9c55 no
 // settlement post releases it. Run that worker's per-balance step, as the
@@ -166,6 +178,7 @@ func TestRedisAdmissionRollbackExpiresWithoutDatabaseLocks(t *testing.T) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		ctx = withRedisContractAdmission(ctx)
+		published, finish := reserveRedisAdmissionTestBeforeTx(t, ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 17)
 		conn, err := server.AcquireMaintenanceDbConn(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -175,12 +188,13 @@ func TestRedisAdmissionRollbackExpiresWithoutDatabaseLocks(t *testing.T) {
 			conn.Release()
 			t.Fatal(err)
 		}
-		escrow, _, err := createTransferEscrowInTx(ctx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 17, nil)
+		escrow, _, err := createTransferEscrowInTx(published, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 17, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		server.Raise(tx.Rollback(ctx))
 		conn.Release()
+		finish()
 		var durable bool
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1)`, escrow.ContractId).Scan(&durable))

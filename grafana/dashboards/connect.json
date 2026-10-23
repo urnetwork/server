@@ -1703,7 +1703,7 @@
             "id": 48,
             "type": "timeseries",
             "title": "Redis contract reservations / s",
-            "description": "Reservation operations by outcome, including token replays; not committed contract throughput.",
+            "description": "Reservation operations by outcome, including token replays; not committed contract throughput. Creation reserves with reserve-pending and reserve-pending-full before its transaction begins, and a request that published nothing releases with release-pending; reserve-owned and reserve-owned-full come only from releases that reserve inside the transaction and go flat once those are retired. The second query counts creation transactions that refused to publish a pending reservation, by reason (window_expired, released).",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -1737,6 +1737,11 @@
                     "refId": "A",
                     "expr": "sum by (service, operation, result) (rate(urnetwork_redis_contract_reservation_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "{{service}} {{operation}} {{result}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, reason) (rate(urnetwork_redis_contract_publication_refusals_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} publication refused {{reason}}"
                 }
             ]
         },

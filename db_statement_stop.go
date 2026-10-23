@@ -83,6 +83,9 @@ const (
 // transaction is not server-owned, the caller cannot stop, or it has already
 // stopped, in which case pgx refuses the statement without writing it.
 func (self *postCommitPgTx) beginStatement(ctx context.Context) (statementCtx context.Context, end func() pgStatementStop, bounded bool) {
+	if observations := txIoObservations(); observations[0] != nil || observations[1] != nil {
+		observeTxIoStatement(self)
+	}
 	if !self.statementStopBounded || ctx.Done() == nil {
 		return ctx, nil, false
 	}

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,10 +22,29 @@ import (
 // old unmarked reservation may under-admit until its 24-hour lease expires.
 // New request markers support bounded SQL-fenced recovery before lease expiry.
 // Neither case puts creators behind a shared PostgreSQL financial row lock.
+//
+// A request reserves before its contract transaction begins, so the
+// transaction holds no pooler server across a Redis round trip. Its tokens
+// carry a pending marker, which recovery never reads, until the transaction
+// that publishes them has joined; the request then hands them to the SQL-fenced
+// recovery marker, acknowledges them, or releases them itself. A transaction
+// publishes only within redisPendingPublicationTimeout of the attempt's first
+// reservation request, and recovery takes over the pending marker of a request
+// that died only after redisPendingRecoveryAge, measured by Redis. A live
+// request's tokens therefore never reach recovery before its publication window
+// closes. The window spans pooler waits for later grant pages and BEGIN; the
+// margin between the two bounds absorbs a step of the Redis clock, or a
+// failover to a replica whose clock leads, against the request's clock.
 const redisContractReservationLease = 24 * time.Hour
 const redisContractAdmissionTimeout = time.Second
+const redisPendingPublicationTimeout = 60 * time.Second
+const redisPendingRecoveryAge = 10 * time.Minute
 
 var errRedisReservationInsufficient = errors.New("Insufficient balance")
+var errRedisReservationNotPending = errors.New("Redis reservation request already owns a reservation that is not pending; reconcile its original contract")
+var ErrRedisPendingReservationExpired = errors.New("Redis reservation outlived its pending publication window")
+var ErrRedisPendingReservationReleased = errors.New("Redis reservation was released by its own request before publication")
+var errRedisPendingReservationMissing = errors.New("Redis reservation must precede its contract transaction")
 
 var redisContractReservationResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_redis_contract_reservation_total",
@@ -42,8 +62,16 @@ var redisGrantSelectionFraction = prometheus.NewHistogramVec(prometheus.Histogra
 	Buckets: []float64{0.1, 0.25, 0.5, 0.75, 0.8, 0.9, 1},
 }, []string{"resource"})
 
+var redisPendingPublicationRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_redis_contract_publication_refusals_total",
+	Help: "Creation transactions that refused to publish their pending Redis reservation, by reason: window_expired when the request fence came after the publication window, released when the request's own release came first.",
+}, []string{"reason"})
+
 func init() {
-	prometheus.MustRegister(redisContractReservationResults, redisGrantSelectionLimitsMetric, redisGrantSelectionFraction)
+	for _, reason := range []string{"window_expired", "released"} {
+		redisPendingPublicationRefusals.WithLabelValues(reason)
+	}
+	prometheus.MustRegister(redisContractReservationResults, redisGrantSelectionLimitsMetric, redisGrantSelectionFraction, redisPendingPublicationRefusals)
 }
 
 type redisAdmissionContextKey struct{}
@@ -58,6 +86,15 @@ type redisContractAdmission struct {
 	attemptedBalanceKVs  map[server.Id]bool
 	compensationAttempts map[server.Id]uint64
 	publicationStarted   bool
+
+	// Serializes an attempt starting a pending reservation with this
+	// request's own releases and enrollments of its pending tokens, which
+	// advance the epoch first. Concurrent attempts of one request share its
+	// tokens: an attempt that started before an epoch advance never publishes,
+	// and one that starts after it finds the tokens already gone.
+	pendingLock    sync.Mutex
+	pendingWriters int
+	pendingEpoch   atomic.Uint64
 }
 
 func (self *redisContractAdmission) noteBalance(balanceId server.Id) {
@@ -116,9 +153,11 @@ func withRedisContractAdmission(ctx context.Context) context.Context {
 	return context.WithValue(ctx, redisAdmissionContextKey{}, &redisContractAdmission{contractId: server.NewId()})
 }
 
+// The sixth key holds pending markers. Releases that predate it accept five
+// keys and never read or remove a pending marker; recovery removes a stale one.
 func redisContractReservationKeys(balanceId server.Id) []string {
 	base := fmt.Sprintf("{escrow_%s}", balanceId)
-	return []string{base + "approx_reserved", base + "approx_contracts", base + "approx_expiry", netEscrowKey(balanceId), base + "approx_recovery_v2"}
+	return []string{base + "approx_reserved", base + "approx_contracts", base + "approx_expiry", netEscrowKey(balanceId), base + "approx_recovery_v2", base + "approx_pending_v3"}
 }
 
 // All keys occupy one Redis cluster slot. Monetary arithmetic uses decimal
@@ -126,6 +165,12 @@ func redisContractReservationKeys(balanceId server.Id) []string {
 // Each operation expires at most 32 abandoned reservations; no history scan or
 // database census occurs in admission. Successful release removes its token,
 // so replay cannot release another contract after eviction/reconciliation.
+//
+// reserve-pending and reserve-pending-full mark a new token pending, and a
+// retry of the same request may take over only a token that is still pending,
+// restarting its pending age. release-pending releases a token only while it
+// is pending. Every release and acknowledgement also removes a pending marker;
+// the recovery page moves pending markers to the recovery marker.
 const redisContractReservationScript = `
 local function valid(s)
  return s and string.match(s, '^%d+$') and (s == '0' or string.sub(s,1,1) ~= '0') and
@@ -146,7 +191,7 @@ end
 local rawTotal=redis.call('GET',KEYS[1])
 local total=rawTotal or '0'
 local legacy=redis.call('GET',KEYS[4]) or '0'
-for _,entry in ipairs({{2,'hash'},{3,'zset'},{5,'zset'}}) do
+for _,entry in ipairs({{2,'hash'},{3,'zset'},{5,'zset'},{6,'zset'}}) do
  local kind=redis.call('TYPE',KEYS[entry[1]]).ok
  if kind~='none' and kind~=entry[2] then return redis.error_reply('invalid reservation key type') end
 end
@@ -158,7 +203,7 @@ if not lease or lease<1 or lease>86400000 then return redis.error_reply('invalid
 -- Partial key eviction starts a new approximate generation too. Old releases
 -- then find no token and cannot subtract a newly admitted neighbor's bytes.
 if not rawTotal or (total~='0' and (redis.call('EXISTS',KEYS[2])==0 or redis.call('EXISTS',KEYS[3])==0)) then
- redis.call('DEL',KEYS[2],KEYS[3],KEYS[5]);total='0'
+ redis.call('DEL',KEYS[2],KEYS[3],KEYS[5],KEYS[6]);total='0'
 end
 local now=redis.call('TIME'); local milliseconds=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000)
 local expired=redis.call('ZRANGEBYSCORE',KEYS[3],'-inf',milliseconds,'LIMIT',0,32)
@@ -168,23 +213,27 @@ for _,token in ipairs(expired) do
   if not valid(amount) then return redis.error_reply('invalid reservation token') end
   total=sub(total,amount); redis.call('HDEL',KEYS[2],token)
  end
- redis.call('ZREM',KEYS[3],token); redis.call('ZREM',KEYS[5],token)
+ redis.call('ZREM',KEYS[3],token); redis.call('ZREM',KEYS[5],token); redis.call('ZREM',KEYS[6],token)
 end
 local existing=redis.call('HGET',KEYS[2],ARGV[2])
 if existing and not valid(existing) then return redis.error_reply('invalid reservation token') end
+local pending=redis.call('ZSCORE',KEYS[6],ARGV[2])
 local amount='0'
-if ARGV[1]=='release-owned' and existing and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
+if ARGV[1]=='release-owned' and existing and not pending and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
  return redis.error_reply('missing owned reservation marker')
+end
+if (ARGV[1]=='release-pending' or ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full') and existing and not pending then
+ return redis.error_reply('reservation is not pending')
 end
 if (ARGV[1]=='release-owned' or ARGV[1]=='published') and existing and ARGV[4]~='0' and existing~=ARGV[4] then
  return redis.error_reply('reservation recovery amount changed')
 end
-if ARGV[1]=='release' or ARGV[1]=='release-owned' then
+if ARGV[1]=='release' or ARGV[1]=='release-owned' or ARGV[1]=='release-pending' then
  if existing then
-  if ARGV[1]=='release-owned' then amount=existing end
+  if ARGV[1]~='release' then amount=existing end
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
- redis.call('ZREM',KEYS[5],ARGV[2])
+ redis.call('ZREM',KEYS[5],ARGV[2]); redis.call('ZREM',KEYS[6],ARGV[2])
 elseif ARGV[1]=='settle' then
  -- Never resurrect a token after the durable batch already released it.
  -- A missing/expired Redis generation retains its documented approximation.
@@ -193,20 +242,25 @@ elseif ARGV[1]=='settle' then
   total=sub(total,sub(existing,ARGV[4])); amount=ARGV[4]
   redis.call('HSET',KEYS[2],ARGV[2],amount)
  end
-elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' or ARGV[1]=='restore' then
+elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' or
+ ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or ARGV[1]=='restore' then
+ local owned=ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full'
+ local marked=ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full'
  if existing then
-  if (ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full') and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
+  if owned and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
    return redis.error_reply('missing owned reservation marker')
   end
   if less(ARGV[4],existing) then return redis.error_reply('reservation retry changed amount') end
   amount=existing
+  -- the retry's publication window starts now
+  if marked then redis.call('ZADD',KEYS[6],milliseconds,ARGV[2]) end
  else
   local available=sub(sub(ARGV[3],legacy),total)
   if ARGV[1]=='restore' then available=sub('9223372036854775807',total) end
   amount=ARGV[4]; if less(available,amount) then
    if ARGV[1]=='restore' then return redis.error_reply('reservation recovery overflow') end
    amount=available
-   if ARGV[1]=='reserve-owned-full' then amount='0' end
+   if ARGV[1]=='reserve-owned-full' or ARGV[1]=='reserve-pending-full' then amount='0' end
   end
   if amount~='0' then
    -- The total remains <= the supplied signed-int64 credit, so INCRBY is exact.
@@ -214,12 +268,13 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned
    redis.call('INCRBY',KEYS[1],amount); total=redis.call('GET',KEYS[1])
    redis.call('HSET',KEYS[2],ARGV[2],amount)
    redis.call('ZADD',KEYS[3],milliseconds+lease,ARGV[2])
-   if ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' then redis.call('ZADD',KEYS[5],milliseconds,ARGV[2]) end
+   if owned then redis.call('ZADD',KEYS[5],milliseconds,ARGV[2]) end
+   if marked then redis.call('ZADD',KEYS[6],milliseconds,ARGV[2]) end
   end
  end
- if ARGV[1]=='restore' then redis.call('ZREM',KEYS[5],ARGV[2]) end
+ if ARGV[1]=='restore' then redis.call('ZREM',KEYS[5],ARGV[2]); redis.call('ZREM',KEYS[6],ARGV[2]) end
 elseif ARGV[1]=='published' then
- redis.call('ZREM',KEYS[5],ARGV[2])
+ redis.call('ZREM',KEYS[5],ARGV[2]); redis.call('ZREM',KEYS[6],ARGV[2])
 else return redis.error_reply('invalid reservation operation') end
 -- Recovery may restore an older token with only a short lease remaining.
 -- Never let that operation shorten the shared keys beneath younger tokens.
@@ -227,6 +282,7 @@ redis.call('SET',KEYS[1],total,'PX',90000000)
 redis.call('PEXPIRE',KEYS[2],90000000)
 redis.call('PEXPIRE',KEYS[3],90000000)
 redis.call('PEXPIRE',KEYS[5],90000000)
+redis.call('PEXPIRE',KEYS[6],90000000)
 return amount
 `
 
@@ -238,6 +294,10 @@ func redisContractReservation(ctx context.Context, operation string, balanceId, 
 	err := server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 		value, err := r.Eval(bounded, redisContractReservationScript, redisContractReservationKeys(balanceId),
 			operation, contractId.String(), strconv.FormatInt(credit, 10), strconv.FormatInt(requested, 10), lease.Milliseconds()).Text()
+		var reply redis.Error
+		if errors.As(err, &reply) && reply.Error() == "reservation is not pending" {
+			return errRedisReservationNotPending
+		}
 		if err != nil {
 			return err
 		}
@@ -250,7 +310,8 @@ func redisContractReservation(ctx context.Context, operation string, balanceId, 
 	result := "accepted"
 	if err != nil {
 		result = "error"
-	} else if (operation == "reserve" || operation == "reserve-owned" || operation == "reserve-owned-full") && amount == 0 {
+	} else if (operation == "reserve" || operation == "reserve-owned" || operation == "reserve-owned-full" ||
+		operation == "reserve-pending" || operation == "reserve-pending-full") && amount == 0 {
 		result = "refused"
 	}
 	redisContractReservationResults.WithLabelValues(operation, result).Inc()
@@ -264,32 +325,172 @@ func releaseRedisContractReservations(ctx context.Context, contractId server.Id,
 	}
 }
 
+// One attempt's pending reservation, made before its contract transaction
+// begins (reserveRedisTransferEscrowBeforeTx) and published by it
+// (createRedisTransferEscrowInTx).
+type redisPendingReservation struct {
+	admission      *redisContractAdmission
+	payerNetworkId server.Id
+	requested      ByteCount
+	selected       []*TransferEscrowBalance
+	priority       Priority
+	// taken immediately before the attempt's first reservation request
+	startTime time.Time
+	epoch     uint64
+}
+
+type redisPendingReservationContextKey struct{}
+
+func redisPendingReservationFromContext(ctx context.Context) *redisPendingReservation {
+	reservation, _ := ctx.Value(redisPendingReservationContextKey{}).(*redisPendingReservation)
+	return reservation
+}
+
+// Starts one attempt's pending reservation. The returned function ends the
+// attempt once its transaction has joined, or when it reserved nothing.
+func (self *redisContractAdmission) startPendingReservation(payerNetworkId server.Id, requested ByteCount) (*redisPendingReservation, func()) {
+	self.pendingLock.Lock()
+	defer self.pendingLock.Unlock()
+	self.pendingWriters++
+	reservation := &redisPendingReservation{
+		admission:      self,
+		payerNetworkId: payerNetworkId,
+		requested:      requested,
+		epoch:          self.pendingEpoch.Load(),
+	}
+	var finish sync.Once
+	return reservation, func() {
+		finish.Do(func() {
+			self.pendingLock.Lock()
+			defer self.pendingLock.Unlock()
+			self.pendingWriters--
+		})
+	}
+}
+
+// Runs fn as this request's own release or enrollment of its pending tokens,
+// with no attempt able to start meanwhile. inFlight reports an attempt that
+// started earlier and has not joined its transaction; the epoch advance
+// keeps it from publishing unless it already holds the request fence.
+func (self *redisContractAdmission) retirePending(fn func(inFlight bool) error) error {
+	self.pendingLock.Lock()
+	defer self.pendingLock.Unlock()
+	self.pendingEpoch.Add(1)
+	return fn(0 < self.pendingWriters)
+}
+
+// Opens the publication window immediately before the attempt's first
+// reservation request. Grant reads before it reserve nothing, so their pooler
+// waits do not count. Every token of the attempt is reserved, or taken over,
+// after this time. A nil reservation, outside a creation, records nothing.
+func (self *redisPendingReservation) noteReservationRequest() {
+	if self != nil && self.startTime.IsZero() {
+		self.startTime = time.Now()
+	}
+}
+
+// Called with the request fence held, before anything is written. A live
+// request's pending tokens reach recovery no sooner than
+// redisPendingRecoveryAge after its reservation, measured by Redis; this
+// attempt's window closes well before.
+func (self *redisPendingReservation) requirePublishable() error {
+	if self.startTime.IsZero() {
+		return errRedisPendingReservationMissing
+	}
+	if self.admission.pendingEpoch.Load() != self.epoch {
+		redisPendingPublicationRefusals.WithLabelValues("released").Inc()
+		return ErrRedisPendingReservationReleased
+	}
+	if redisPendingPublicationTimeout <= time.Since(self.startTime) {
+		redisPendingPublicationRefusals.WithLabelValues("window_expired").Inc()
+		return ErrRedisPendingReservationExpired
+	}
+	return nil
+}
+
+// The drain and data-cap refusals precede any reservation, as they precede
+// the legacy ledger read. Both decide from in-memory snapshots; a pooled
+// connection is taken only for a snapshot refresh or a payer that may be
+// drained or capped.
+func redisAdmissionRefusal(ctx context.Context, payerNetworkId, payerClientId server.Id, requested ByteCount) (refusal error) {
+	now := server.NowUtc()
+	if !testBalanceDrainGates.current().mayDrain(payerNetworkId) && !clientDataCapActive.mayCap(payerNetworkId, now) {
+		return nil
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		refusal = testBalanceDrainEscrowError(testBalanceDrainActive(ctx, conn, payerNetworkId, now), requested)
+		if refusal == nil {
+			refusal = clientDataCapEscrowError(ctx, conn, payerNetworkId, payerClientId, requested, now)
+		}
+	})
+	return
+}
+
+// Reserves a positive Redis-admitted request before its contract transaction
+// begins and returns the context its transaction publishes the reservation
+// from, with the function that ends the attempt once that transaction has
+// joined. Grant discovery runs autocommit reads on pooled connections, so no
+// transaction is open across a Redis round trip. Other requests return the
+// context unchanged.
+func reserveRedisTransferEscrowBeforeTx(ctx context.Context, sourceNetworkId, sourceId, destinationNetworkId, destinationId, payerNetworkId server.Id,
+	requested ByteCount) (context.Context, func(), error) {
+	admission := redisAdmissionFromContext(ctx)
+	if admission == nil || requested <= 0 {
+		return ctx, func() {}, nil
+	}
+	defer server.EnterContractCreationStage(ctx, server.ContractStageGrantSelection)()
+	payerClientId := sourceId
+	if sourceNetworkId != payerNetworkId {
+		payerClientId = destinationId
+	}
+	if err := redisAdmissionRefusal(ctx, payerNetworkId, payerClientId, requested); err != nil {
+		return ctx, func() {}, err
+	}
+	reservation, finish := admission.startPendingReservation(payerNetworkId, requested)
+	// A selection that fails or panics, as a grant read can, ends the attempt
+	// here; one handed to its transaction ends after that transaction joins.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			finish()
+		}
+	}()
+	selected, priority, err := selectRedisTransferBalances(ctx, admission, reservation, payerNetworkId, payerClientId, requested)
+	if err != nil {
+		return ctx, func() {}, err
+	}
+	reservation.selected, reservation.priority = selected, priority
+	handedOff = true
+	return context.WithValue(ctx, redisPendingReservationContextKey{}, reservation), finish, nil
+}
+
+// Publishes the attempt's pending reservation. Only SQL runs here: the
+// reservation preceded BEGIN, and its acknowledgement follows commit.
 func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admission *redisContractAdmission,
 	sourceNetworkId, sourceId, destinationNetworkId, destinationId, payerNetworkId server.Id,
 	requested ByteCount, companionId *server.Id) (*TransferEscrow, []func() any, error) {
-	// The v2 marker is recoverable only while all writers of this exact request
-	// hold this transaction-scoped fence. No shared payer/balance lock is added.
+	reservation := redisPendingReservationFromContext(ctx)
+	if reservation == nil || reservation.admission != admission || reservation.payerNetworkId != payerNetworkId || reservation.requested != requested {
+		return nil, nil, errRedisPendingReservationMissing
+	}
+	// Recovery of this exact request's tokens holds this transaction-scoped
+	// fence. No shared payer/balance lock is added.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, redisContractAdmissionLock(admission.contractId)))
+	if err := reservation.requirePublishable(); err != nil {
+		return nil, nil, err
+	}
 	var published bool
 	server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1)`, admission.contractId).Scan(&published))
 	if published {
-		admission.notePublication()
+		// This attempt's pending tokens are not the published contract's,
+		// whose tokens are no longer pending. Compensation releases them.
 		return nil, nil, errors.New("Redis reservation request already has SQL custody; reconcile its original contract")
 	}
 	deadline, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, payerNetworkId)
 	if err != nil {
 		return nil, nil, err
 	}
-	leave := server.EnterContractCreationStage(ctx, server.ContractStageGrantSelection)
-	payerClientId := sourceId
-	if sourceNetworkId != payerNetworkId {
-		payerClientId = destinationId
-	}
-	selected, priority, err := selectRedisTransferBalances(ctx, tx, admission, payerNetworkId, payerClientId, requested)
-	leave()
-	if err != nil {
-		return nil, nil, err
-	}
+	selected, priority := slices.Clone(reservation.selected), reservation.priority
 	if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
 		return nil, nil, err
 	}

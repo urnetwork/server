@@ -22,6 +22,11 @@ import (
 
 var errRedisPublicationLostCommitReply = errors.New("synthetic acknowledged-publication commit reply loss")
 
+// A public positive creation reads its grants before its transaction, each
+// read on its own pooled connection: for these single-grant fixtures the
+// prober window and one keyset page. Custody reads and fences stay exact.
+const redisPublicationDiscoveryAcquisitions = 2
+
 // Recover through the typed handler so sentinel errors retain their identity.
 func redisPublicationHandleError(action func()) (returnErr error) {
 	server.HandleError(action, func(err error) { returnErr = err })
@@ -327,10 +332,10 @@ func TestRedisConfirmedPublicationAvoidsRetainedTransaction(t *testing.T) {
 		observer.stateLock.Lock()
 		acquisitions := observer.acquisitions
 		observer.stateLock.Unlock()
-		if acquisitions != 1 {
-			t.Fatalf("acknowledged request reacquired PostgreSQL for its own retained marker: got %d want 1", acquisitions)
+		if acquisitions != 1+redisPublicationDiscoveryAcquisitions {
+			t.Fatalf("acknowledged request reacquired PostgreSQL for its own retained marker: got %d want %d", acquisitions, 1+redisPublicationDiscoveryAcquisitions)
 		}
-		observer.require(t, 1, 0)
+		observer.require(t, 1+redisPublicationDiscoveryAcquisitions, 0)
 		hook.require(t, 0)
 	})
 }
@@ -354,7 +359,7 @@ func testRedisPublicationReplyBoundary(t *testing.T, mode string) {
 			t.Fatal("optional acknowledgement changed a committed success", err)
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, neighbor.ContractId, escrow.ContractId, 40, 2)
-		observer.require(t, 2, 1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t, 0, 1)
 	})
 }
@@ -393,7 +398,7 @@ func TestRedisConfirmedPublicationPreservesLostCommitReply(t *testing.T) {
 			t.Fatal("fixture did not withhold the actual successful commit reply", panicErr, returnErr)
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, neighbor.ContractId, owner.contractId, 40, 2)
-		observer.require(t, 2, 1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t, 1)
 	})
 }
@@ -417,8 +422,11 @@ func TestRedisConfirmedPublicationPreservesRollbackRecovery(t *testing.T) {
 		failure := errors.New("synthetic publication rollback")
 		panicErr := redisPublicationHandleError(func() {
 			_, _ = runRedisContractAdmission(owned, func(attempt context.Context) (*TransferEscrow, error) {
-				server.Tx(attempt, func(tx server.PgTx) {
-					created, _, err := createTransferEscrowInTx(attempt, tx, fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 23, nil)
+				reserved, finish, err := reserveRedisTransferEscrowBeforeTx(attempt, fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 23)
+				server.Raise(err)
+				defer finish()
+				server.Tx(reserved, func(tx server.PgTx) {
+					created, _, err := createTransferEscrowInTx(reserved, tx, fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 23, nil)
 					server.Raise(err)
 					if created == nil {
 						panic(errors.New("rollback fixture did not write its escrow"))
@@ -436,7 +444,7 @@ func TestRedisConfirmedPublicationPreservesRollbackRecovery(t *testing.T) {
 			t.Fatal("rollback recovery changed the live neighbor")
 		}
 		requireRedisRefusalOnlyContract(t, ctx, fixture, neighbor.ContractId)
-		observer.require(t, 2, 1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t)
 	})
 }
@@ -462,7 +470,7 @@ func TestRedisConfirmedPublicationStillRecoversUnrelatedMarker(t *testing.T) {
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, neighbor.ContractId, escrow.ContractId, 40, 2)
 		redisRecoveryRequireMarker(t, ctx, fixture.balanceId, abandoned, false)
-		observer.require(t, 2, 1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t, 0)
 	})
 }
@@ -514,7 +522,7 @@ func TestRedisConfirmedPublicationPreservesCollectedPageBound(t *testing.T) {
 		if completed := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("recovery", "completed")) - completedBefore; completed != redisReservationRecoveryBatch {
 			t.Fatal("acknowledgement changed the collected page outcome count", completed)
 		}
-		observer.require(t, 2, redisReservationRecoveryBatch-1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, redisReservationRecoveryBatch-1)
 	})
 }
 
@@ -539,7 +547,9 @@ func TestRedisConfirmedPublicationPreservesInsufficientRetryPageCount(t *testing
 		}
 		redisRecoveryRequireMarker(t, ctx, fixture.balanceId, abandoned, false)
 		redisRecoveryRequireMarker(t, ctx, fixture.balanceId, escrow.ContractId, true)
-		observer.require(t, 3, 1)
+		// The first attempt is refused before any transaction; the recovery
+		// page and the retry's transaction follow both attempts' discovery.
+		observer.require(t, 2+2*redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t)
 		if err := recoverRedisReservationRequest(ctx, fixture.balanceId, escrow.ContractId); err != nil {
 			t.Fatal("retained retry marker lost ordinary recovery", err)
@@ -577,7 +587,7 @@ func TestRedisConfirmedPublicationForeignResultKeepsSqlProof(t *testing.T) {
 			t.Fatal("foreign result boundary did not execute", err)
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, neighbor.ContractId, own.ContractId, 40, 2)
-		observer.require(t, 2, 1)
+		observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 		hook.require(t, 1)
 	})
 }
@@ -643,7 +653,7 @@ func TestRedisConfirmedPublicationCanceledAfterCommitRetainsRecovery(t *testing.
 			t.Fatal("acknowledged commit lost its canceled success boundary", err)
 		}
 		redisRecoveryRequireMarker(t, ctx, fixture.balanceId, escrow.ContractId, true)
-		observer.require(t, 1, 0)
+		observer.require(t, 1+redisPublicationDiscoveryAcquisitions, 0)
 		hook.require(t)
 		if err := recoverRedisReservationRequest(ctx, fixture.balanceId, escrow.ContractId); err != nil {
 			t.Fatal("later owner could not recover canceled publication", err)
@@ -701,14 +711,14 @@ func testRedisPublicationPendingDebit(t *testing.T, consumed ByteCount, reduceTo
 			if Testing_NetEscrowByteCount(ctx, fixture.balanceId) != 17+consumed {
 				t.Fatal("changed token lost its pending consumption hold")
 			}
-			observer.require(t, 2, 1)
+			observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 			hook.require(t)
 		} else {
 			redisRecoveryRequireMarker(t, ctx, fixture.balanceId, escrow.ContractId, false)
 			if Testing_NetEscrowByteCount(ctx, fixture.balanceId) != 40 {
 				t.Fatal("acknowledgement released unapplied consumption")
 			}
-			observer.require(t, 1, 0)
+			observer.require(t, 1+redisPublicationDiscoveryAcquisitions, 0)
 			hook.require(t, 0)
 		}
 		n, released, busy, flushErr := flushTransferDebitBalance(ctx, fixture.balanceId)
@@ -762,9 +772,9 @@ func TestRedisConfirmedCompanionPublicationAvoidsRetainedTransaction(t *testing.
 			t.Fatal("companion publication lost its origin authority", err)
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, origin.ContractId, escrow.ContractId, 40, 2)
-		// the origin existence read releases its connection before the
-		// transaction acquires one
-		observer.require(t, 2, 0)
+		// the origin existence and selection reads and the grant discovery
+		// each release their connection before the transaction acquires one
+		observer.require(t, 3+redisPublicationDiscoveryAcquisitions, 0)
 		hook.require(t, 0)
 	})
 }
@@ -830,14 +840,14 @@ func testRedisPublicationAfterCollection(t *testing.T, releaseDebit bool) {
 			t.Fatal("late acknowledgement changed committed creation", got.err)
 		}
 		if releaseDebit {
-			observer.require(t, 1, 0)
+			observer.require(t, 1+redisPublicationDiscoveryAcquisitions, 0)
 		} else {
 			redisRecoveryRequireMarker(t, ctx, fixture.balanceId, own, true)
 			credit, pending, applied := asyncDebitTestState(t, ctx, fixture.balanceId)
 			if credit != 1000 || pending != 1 || applied != 0 || Testing_NetEscrowByteCount(ctx, fixture.balanceId) != 28 {
 				t.Fatal("stale acknowledgement released a changed pending debit")
 			}
-			observer.require(t, 2, 1)
+			observer.require(t, 2+redisPublicationDiscoveryAcquisitions, 1)
 			applied, released, busy, flushErr := flushTransferDebitBalance(ctx, fixture.balanceId)
 			if flushErr != nil || applied != 1 || released != 1 || busy {
 				t.Fatal("changed pending debit lost its release owner", flushErr)

@@ -996,6 +996,7 @@ func (self *TestEnv) runWithSetup(
 					}
 				}
 			}()
+			defer testTxIoAudit(t.Name())()
 			callback(tb)
 			attemptReturned = true
 		}()

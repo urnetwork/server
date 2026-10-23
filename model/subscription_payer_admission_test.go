@@ -188,6 +188,60 @@ func TestPayerAdmissionQueueCompanionUsesDestinationPayer(t *testing.T) {
 	})
 }
 
+// An ordinary companion selects its origin on its payer's turn, not before
+// waiting for it. An origin disputed while the companion waits for the turn
+// is no longer an origin, so it cannot fund the companion.
+func TestPayerAdmissionQueueCompanionSelectsOriginOnItsTurn(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		origin, err := payerQueueCreate(ctx, f, 1)
+		if err != nil || origin == nil {
+			t.Fatal("origin failed", err)
+		}
+		release, err := transferEscrowAdmissionQueue.acquire(ctx, f.sourceNetworkId)
+		server.Raise(err)
+		defer release()
+		done := make(chan error, 1)
+		go func() {
+			// the companion's destination, the origin's source, pays
+			var err error
+			server.HandleError(func() {
+				_, err = createCompanionTransferEscrow(ctx, f.destinationNetworkId, f.destinationId,
+					f.sourceNetworkId, f.sourceId, 1, time.Minute)
+			}, func(panicErr error) { err = panicErr })
+			done <- err
+		}()
+		awaitPayerQueueReferences(t, ctx, &transferEscrowAdmissionQueue, f.sourceNetworkId, 2)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, origin.ContractId))
+		})
+		release()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrMissingCompanionOrigin) {
+				t.Fatalf("a companion funded an origin disputed while it waited for its payer's turn: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("the queued companion did not finish")
+		}
+		var companions, escrows int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM transfer_contract WHERE source_id=$1 AND destination_id=$2),
+				(SELECT count(*) FROM transfer_escrow WHERE balance_id=$3)`,
+				f.destinationId, f.sourceId, f.balanceId).Scan(&companions, &escrows))
+		})
+		if companions != 0 || escrows != 1 {
+			t.Fatalf("the refused companion wrote financial state: companions=%d escrows=%d", companions, escrows)
+		}
+		awaitPayerQueueReferences(t, ctx, &transferEscrowAdmissionQueue, f.sourceNetworkId, 0)
+	})
+}
+
 func TestPayerAdmissionQueueRollbackRetryAndPosts(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0

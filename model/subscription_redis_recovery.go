@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"runtime"
 	"strconv"
@@ -34,7 +35,25 @@ func redisContractAdmissionLock(contractId server.Id) string {
 // A bounded page rotates after observation, so busy or unknown entries cannot
 // monopolize the next page. Rotation changes no token amount or lease. A marker
 // with no token is stale and removable; an unmarked token is never enrolled.
+// Before discovery the page enrolls the calling request's own pending markers,
+// ARGV[2], and up to 32 pending markers older than ARGV[1] milliseconds by
+// Redis time: their requests died or are past their publication window.
 const redisReservationRecoveryPageScript = `
+local now=redis.call('TIME')
+local milliseconds=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000)
+local age=tonumber(ARGV[1])
+if not age or age<0 then return redis.error_reply('invalid pending recovery age') end
+local enrolled=false
+local function enroll(token,score)
+ redis.call('ZADD',KEYS[5],'NX',score,token); redis.call('ZREM',KEYS[6],token); enrolled=true
+end
+if ARGV[2]~='' then
+ local score=redis.call('ZSCORE',KEYS[6],ARGV[2])
+ if score then enroll(ARGV[2],score) end
+end
+local aged=redis.call('ZRANGEBYSCORE',KEYS[6],'-inf',milliseconds-age,'WITHSCORES','LIMIT',0,32)
+for index=1,#aged,2 do enroll(aged[index],aged[index+1]) end
+if enrolled then redis.call('PEXPIRE',KEYS[5],90000000) end
 local candidates=redis.call('ZRANGE',KEYS[5],0,31)
 local tail=redis.call('ZRANGE',KEYS[5],-1,-1,'WITHSCORES')
 local score=0; if #tail==2 then score=tonumber(tail[2]) end
@@ -58,12 +77,15 @@ type redisReservationRecoveryCandidate struct {
 	amount     ByteCount
 }
 
-func redisReservationRecoveryPage(ctx context.Context, balanceId server.Id) ([]redisReservationRecoveryCandidate, error) {
+// own names the calling request, whose pending markers this page enrolls; it
+// is empty for a page that enrolls only aged markers.
+func redisReservationRecoveryPage(ctx context.Context, balanceId server.Id, own string) ([]redisReservationRecoveryCandidate, error) {
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
 	var result []redisReservationRecoveryCandidate
 	err := server.RedisWithDeadline(bounded, func(client server.RedisClient) error {
-		values, err := client.Eval(bounded, redisReservationRecoveryPageScript, redisContractReservationKeys(balanceId)).StringSlice()
+		values, err := client.Eval(bounded, redisReservationRecoveryPageScript, redisContractReservationKeys(balanceId),
+			redisPendingRecoveryAge.Milliseconds(), own).StringSlice()
 		if err != nil {
 			return err
 		}
@@ -142,7 +164,7 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 	admission := redisAdmissionFromContext(ctx)
 	recoveryAttempted := false
 	compensatedCurrent := false
-	cleanup := defaultRedisReservationCleanup()
+	cleanup := admission.reservationCleanup()
 	var cleanupCtx context.Context
 	var cleanupCancel context.CancelFunc
 	var cleanupEnd time.Time
@@ -255,22 +277,33 @@ func (self *redisContractAdmission) recoverRetainedPageWithPublication(page cont
 		candidate redisReservationRecoveryCandidate
 	}
 	retained := make([]retainedCandidate, 0, redisReservationRecoveryBatch)
-	for _, balanceId := range ids {
-		if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
-			break
+	// This request's attempts have joined their transactions, so its own
+	// pending tokens pass to recovery with this page, as tokens reserved
+	// inside the transaction always did. An attempt of the same request still
+	// in flight keeps them pending.
+	self.retirePending(func(inFlight bool) error {
+		own := self.contractId.String()
+		if inFlight {
+			own = ""
 		}
-		candidates, err := redisReservationRecoveryPage(page, balanceId)
-		if err != nil {
-			redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
-			continue
-		}
-		for _, candidate := range candidates {
+		for _, balanceId := range ids {
 			if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
 				break
 			}
-			retained = append(retained, retainedCandidate{balanceId: balanceId, candidate: candidate})
+			candidates, err := redisReservationRecoveryPage(page, balanceId, own)
+			if err != nil {
+				redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+				continue
+			}
+			for _, candidate := range candidates {
+				if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
+					break
+				}
+				retained = append(retained, retainedCandidate{balanceId: balanceId, candidate: candidate})
+			}
 		}
-	}
+		return nil
+	})
 	if page.Err() != nil {
 		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 		return false
@@ -407,7 +440,43 @@ func (self *redisContractAdmission) compensate(ctx context.Context) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return defaultRedisReservationCleanup().run(ctx, self.contractId, ids)
+	return self.reservationCleanup().run(ctx, self.contractId, ids)
+}
+
+// Compensation releases this request's own tokens, pending ones in Redis alone.
+func (self *redisContractAdmission) reservationCleanup() redisReservationCleanup {
+	cleanup := defaultRedisReservationCleanup()
+	cleanup.recover = func(ctx context.Context, balanceId, _ server.Id) error {
+		return self.releaseReservation(ctx, balanceId)
+	}
+	return cleanup
+}
+
+// Releases this request's possibly reserved token on one balance once its
+// attempts' transactions have joined. No transaction can publish a pending
+// token that no attempt in flight holds, so it is released in Redis alone,
+// with no SQL custody check or transaction. A token that is no longer
+// pending, one an attempt in flight may hold, and one an attempt may have
+// published since compensation began keep the fenced SQL custody check that
+// recovery applies to any request. A published token stays pending until its
+// attempt's own page acknowledges it.
+func (self *redisContractAdmission) releaseReservation(ctx context.Context, balanceId server.Id) error {
+	return self.retirePending(func(inFlight bool) error {
+		if !inFlight && !self.publicationHasStarted() {
+			_, err := redisContractReservation(ctx, "release-pending", balanceId, self.contractId, 0, math.MaxInt64, redisContractReservationLease)
+			if !errors.Is(err, errRedisReservationNotPending) {
+				return err
+			}
+		}
+		return recoverRedisReservationRequest(ctx, balanceId, self.contractId)
+	})
+}
+
+// Read again on each compensation attempt: compensationIds checks it only once.
+func (self *redisContractAdmission) publicationHasStarted() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.publicationStarted
 }
 
 func defaultRedisReservationCleanup() redisReservationCleanup {

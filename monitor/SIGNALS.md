@@ -2485,9 +2485,20 @@ Marked escrow reservations use atomic same-slot Redis admission, without the loc
 payer permit or common balance/revision/snapshot writes. Exact legacy censuses
 and their cache metrics cover unmarked rows; do not interpret them as the total
 new reservation balance. `urnetwork_redis_contract_reservation_total` counts
-finite `operation=reserve|release|restore`, `result=accepted|refused|error`
-operations, including retries, not financial commits. Missing release/source
-coverage, command errors or absent counters remain unknown, not healthy.
+finite `operation`/`result=accepted|refused|error` operations, including
+retries, not financial commits. Creation reserves before its transaction with
+`reserve-pending` and `reserve-pending-full`, and a request that published
+nothing releases with `release-pending`; `reserve-owned` and
+`reserve-owned-full` come only from releases that reserve inside the
+transaction and go flat once those retire. `release`, `release-owned`,
+`published`, `restore` and `settle` keep their meaning, and `selection`,
+`recovery` and `compensation` count their bounded outcomes.
+`urnetwork_redis_contract_publication_refusals_total{reason=window_expired|released}`
+counts creation transactions that refused to publish a pending reservation;
+the connect controller classifies the same refusals as contract failure and
+rejection causes `reservation_window_expired` and `reservation_released`.
+Missing release/source coverage, command errors or absent counters remain
+unknown, not healthy.
 
 The bridge's owning controls hold the entire retired policy table while a
 contract must still complete, and create/settle origin and companion contracts
@@ -18737,7 +18748,11 @@ One synchronous CreateContract owns the exclusive wall-time partition. Nested
 model stages replace, rather than add to, their parent stage. `transaction`
 includes connection acquisition, retries, SQL and commit remaining outside its
 named child stages; `grant_selection` includes discovery and grant-lock waits,
-excluding the nested reservation snapshot. `post_commit` includes notification
+excluding the nested reservation snapshot. A Redis-admitted positive creation
+selects and reserves its grants before its transaction begins, so its
+`grant_selection` is no longer nested inside `transaction`, and a companion's
+origin reads precede it too; the legacy and zero-byte paths still select inside
+the transaction. `post_commit` includes notification
 and joined posts, whose parallel workers do not create extra stage owners.
 Current occupancy includes unfinished calls; completed seconds omit their
 unfinished residence. Completion outcomes are `contract_reply`,
