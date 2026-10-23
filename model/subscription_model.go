@@ -6671,18 +6671,6 @@ func derefCursor(ptrs []any) []any {
 	return values
 }
 
-// AddSweepDestinationIdColumn adds transfer_escrow_sweep.destination_id if it is
-// not already present (idempotent). The column must exist before the sweep
-// writer (settleEscrowInTx) is deployed, since the writer inserts it.
-func AddSweepDestinationIdColumn(ctx context.Context) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`ALTER TABLE transfer_escrow_sweep ADD COLUMN IF NOT EXISTS destination_id uuid NULL`,
-		))
-	}, server.TxReadCommitted)
-}
-
 // BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto
 // transfer_escrow_sweep for rows created before the column existed, in bounded
 // batches (one maintenance tx each) until a batch comes up short. New sweeps are
