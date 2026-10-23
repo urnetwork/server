@@ -251,7 +251,6 @@ active missing capability and must not be read as green.
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
-| 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
@@ -7159,7 +7158,7 @@ to establish the effective trigger and advancing/completed cleanup, retaining
 statistics and source-clock limits. Require consecutive covered below-floor
 samples after completion; honor any configured cadence floor rather than
 adding five-minute readers. This qualification changes no probe, caller cap,
-threshold or production setting and leaves the separate §2.4a gap open.
+threshold or production setting; §2.4a's discarded-pass reader stays independent.
 
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
@@ -7347,6 +7346,7 @@ make the completed vacuum stuck. Keep the bounded writer/close fixes and use
 the new vacuum's consecutive progress samples as the next cleanup check.
 
 ### 2.4a Canceled autovacuum and anti-wraparound progress
+Probe: `pg-autovacuum-discard`
 
 The Taskworker's daily maintenance rotation (`db_maintenance.go`) runs
 `VACUUM (ANALYZE) pending_task`, a database-wide `ANALYZE` and
@@ -7379,12 +7379,11 @@ LIMIT 10;
 - HEALTHY: big-table passes complete and `last_autovacuum` advances; no
   cancellation outside deliberate maintenance; every table stays under
   `autovacuum_freeze_max_age`, or its anti-wraparound pass is advancing.
-- CANCELLATION ALERT (proposed; not implemented): a cancellation that
-  discards a big table's pass in its index or late heap phase. The bare log
+- DISCARD ALERT (`pg-autovacuum-discard`, below): a big table's pass that
+  ended without completing in its index or late heap phase. The bare log
   line proves an observed cancellation, not the discarded work or its cost;
-  require authoritative relation/pass and at-cancellation phase context.
-  Generic big-table size, late-heap cutoff and deliberate-maintenance
-  authority remain explicit policy/source gaps.
+  the progress view supplies the relation, the pass and its last observed
+  phase, and the completion evidence proves the pass did not finish.
 - AGE RISK: `pg-freeze-age` (§2.4d) implements the separately approved
   configured-age risk warning. It does not infer a stalled pass from
   unchanged counters, identify a cancellation, or complete this section.
@@ -7399,13 +7398,76 @@ table looks like ordinary progress unless `heap_blks_scanned` is compared
 across samples, and `last_autovacuum` moves only on completion. The log line is
 the authority; an unreadable or rotated log leaves cancellations unknown.
 
-Observed cancellation now has the narrower `pg-autovacuum-cancel` reader
+Observed cancellation has the narrower `pg-autovacuum-cancel` reader
 (§2.4e): WARN on exact structured PG18 cancellation records from a qualified
-JSON source, without attributing a maintenance fault or discarded work. Its quiet verdict covers only the
-bounded observed file. Generic big-table size, late-heap cutoff, exact
-relation/pass and completion joins, deliberate-maintenance intent and lost-work
-quantity remain missing. This section is still a coverage gap; the new
-observation does not implement its proposed harmful-cancellation policy.
+JSON source, without attributing a maintenance fault or discarded work. Its
+quiet verdict covers only the bounded observed file.
+
+**Discarded passes (`pg-autovacuum-discard`, 2026-10-22).** Every five
+minutes one bounded read-only statement on the single enabled `pg-primary`,
+behind a `hostname -s`, primary-role and 30-second statement-clock guard,
+returns fixed fifteen-cell frames bound by an end row:
+
+- every current-database `pg_stat_progress_vacuum` row (at most 64) with its
+  worker's PID, backend start and query start, a fixed mode (`antiwrap`,
+  `ordinary`, `manual`, `unknown`) and phase, heap and index counters (`-1`
+  when the server version lacks a field), heap bytes and the relation's
+  `autovacuum_count`;
+- the completion evidence (`autovacuum_count`, `last_autovacuum`, heap
+  bytes) of every relation whose heap is at least 100 GB, plus every relation
+  this instance is tracking even if it shrank (at most 4,096);
+- the database maintenance task's windows: `finished_task` runs of
+  `work.DbMaintenance` that ended within the last hour and its claimed
+  `pending_task` rows (at most 32).
+
+Relation and pass correlation: the instance tracks every autovacuum pass on a
+relation of at least 100 GB by relation, PID and backend and query start.
+When a tracked pass leaves the progress view, it completed if the relation's
+`autovacuum_count` grew or its `last_autovacuum` is later than the pass's last
+observation (no pass completes on a relation while another vacuums it, and
+the completion time still works after a statistics reset); otherwise it was
+discarded. A dropped relation lost nothing. A discarded pass is harmful when
+it was last seen past heap scanning or with at least half the heap scanned
+(initial policy: the 10-13 pass was at 82%); smaller, earlier and manual
+discards are counted, not alerted.
+
+- WARN `pg-autovacuum-discard` (target
+  `<primary>/database-<oid>/relation-<oid>`, sustain 1): one harmful discard,
+  with the last observed phase, `heap_scanned_pct_at_least`,
+  `lost_heap_gb_at_least` (heap blocks scanned times the block size, a lower
+  bound because progress continued after the last observation), index
+  progress, the relation's heap size, the discard window, a repeat count,
+  any replacement pass and `maintenance_overlap`: `db-maintenance` when a
+  DbMaintenance run overlapped the window, `none-observed`, or unknown when
+  the window reaches past the lookback or the run list hit its bound. The
+  finding stays open until the relation's counter advances or its
+  completion time passes the discarded pass.
+- WARN `pg-autovacuum-discard-unobservable` (target the primary, sustain 2):
+  no or several primaries, a failed read, a wrong host, role or clock, a
+  malformed or over-cap frame, and bounded tracking overflow. A postmaster or
+  database change with tracked passes is a one-run unknown (sustain 1) that
+  names how many passes it could not classify; it never invents a discard.
+
+Public data: relation and database OIDs, counters, fixed modes, phases and
+reasons. Relation names, SQL and application text never leave SQL. Tracking
+is per signal instance and starts empty at every watcher start, so a pass
+seen only by an earlier watcher is unclassified. Every tunable is a field of
+`PgAutovacuumDiscardSettings`.
+
+False-positive qualifiers: the discard cause is not this reader's to name;
+correlate §2.4e records in the same window (a qualified cancellation record
+means a lock-conflict cancel; none with complete log coverage points to a
+termination, an error or a crash). False-negative qualifiers: a pass that
+starts and ends between observations is never seen; the true phase at the
+end can be later than the last observation; operator-run maintenance is not
+recorded in the task tables and shows as `none-observed`; the canceling
+statement's identity is not in the cancellation record. Synthetic controls
+replay the 10-13 discard at 51.2M of 62.7M heap blocks under a running
+maintenance task through to the replacement pass's completion, and cover
+completed, small, early, manual and dropped-relation passes, the index
+phase, every maintenance-overlap branch, the tracked-relation census, a
+postmaster restart, malformed frames, failed reads, inventory and
+cancellation.
 
 ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
 `pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
@@ -7539,9 +7601,9 @@ of §2.4f is an owner decision.
 Probe: `pg-freeze-age`
 
 This is the bounded age-risk portion of §2.4a. Observed cancellation records
-use the separate conditional reader in §2.4e; relation/pass correlation at
-cancellation, generic big-table classification, late-heap lost work and
-deliberate-maintenance attribution remain missing.
+use the separate conditional reader in §2.4e; relation/pass correlation,
+big-table and late-phase discards, lost work and maintenance overlap are
+`pg-autovacuum-discard` (§2.4a).
 `vacuum-health` (§2.4) keeps its existing debt-only trigger, five-minute cadence,
 MVCC context and privacy boundary.
 
@@ -7623,7 +7685,7 @@ ACTION: have the existing PostgreSQL owner verify the effective settings,
 source scope and current pass. Let independently progressing work finish and
 use §2.4 for the separate writer/horizon/debt investigation. VERIFY fresh
 complete below-limit age or positively observed same-pass advancement, and
-retain explicit §2.4a gaps until their source and policy contracts are supplied.
+use §2.4a's discard findings for passes that ended without completing.
 
 ### 2.4e Observed autovacuum cancellation records
 Probe: `pg-autovacuum-cancel`
@@ -7700,9 +7762,10 @@ does not independently attest the deployed build, runtime or historical
 configuration. False-negative qualifier: missing/rotated/capped history,
 unflushed records, unsupported schema/locale, unseen worker events, fatal
 termination and cancellations under another message remain outside this
-predicate. The full big-table, late-phase, intent, same-pass completion/reset
-and lost-work attribution policy remains missing in §2.4a. No thresholds for
-those unresolved properties are inferred from this count.
+predicate. The big-table, late-phase, maintenance-overlap, same-pass
+completion and lost-work attribution is `pg-autovacuum-discard` (§2.4a), which
+correlates a discarded pass with these records by its window. No thresholds
+for those properties are inferred from this count.
 
 The primary predicate and string separation follow PostgreSQL 18's
 [worker cancellation emitter](https://github.com/postgres/postgres/blob/REL_18_0/src/backend/tcop/postgres.c),

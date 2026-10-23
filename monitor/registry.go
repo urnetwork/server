@@ -57,6 +57,7 @@ func NewSignals() []Signal {
 		NewActiveQueriesSignal(),
 		NewPgQuerySampleSignal(),
 		NewWaitEventsSignal(),
+		NewPgAutovacuumDiscardSignal(),
 		NewPgAutovacuumCancelSignal(),
 		NewReindexDebrisSignal(),
 		NewPgFreezeSignal(),
