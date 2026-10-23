@@ -325,7 +325,6 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
@@ -42718,6 +42717,7 @@ unreviewed one on chain warns (target `subnet-identity/census`, frame
   here; measurement-key activation is attributed in §22.8.
 
 ### 22.3 Operator demand deposits, conviction, and reserve
+Probe: `subnet-deposits`
 
 Reconstruct `Deposit`, `ConvictionAdded`, `ReservePrincipalAdded`, nonces and
 caps from complete finalized logs; compare counters only as cross-checks. Read
@@ -42742,6 +42742,62 @@ trustless revenue/usage oracle. Economic suspicion remains separately labeled.
 | `subnet-reserve-principal` | `liveStake() >= principal`; global/per-NO principal and cumulative conviction reconcile; reserve coldkey/hotkey stay immutable and separate from claims. No path sources a reserve withdrawal. | Page on any proved deficit, unauthorized outflow or custody drift. Check exact runtime share accounting; never fund an escrow discrepancy from the reserve. |
 | `subnet-reserve-credit-delta` | A deposit's reserve receipt covers its full principal, with only the pinned zero-to-two-rao surplus; principal is not reduced to conceal a runtime rounding loss. | Page on a receipt/state delta outside the exact allowed interval or a failed move recorded as funded. Retain both destination share-pool transitions. |
 | `subnet-reserve-yield` | Reserve delegate take is zero; observed dividends compound under the correct coldkey. Publish deposits, voluntary conviction, rounding donations and yield separately. | Page on unauthorized take/custody change; warn on unexplained yield loss across eligible completed tempos. A low demand ratio is an economic warning, not by itself a protocol invariant failure. |
+
+Implementation (2026-10-23, `signal_subnet_deposits.go`), at the §22.1 agreed
+checkpoint. Observation state (the reserve as last seen, each operator's last
+nonce, the receipt chains and per-epoch event totals) is a probe-owned census
+that a run copies and publishes only with its own findings, so a withheld run
+is read again.
+
+- `subnet-reserve-principal`: PAGE, Sustain 1, when the sink's `liveStake` is
+  below `principal`, the staking precompile's `getStake(reserveHotkey,
+  sinkColdkey, netuid)` differs from it, the operators' `operatorPrincipal`
+  values do not sum to `principal`, an operator's `cumulativeConviction`
+  differs from its principal, or, across published observations, live stake
+  fell beyond the coordinator's runtime share rounding allowance, principal
+  decreased or the reserve hotkey changed.
+- `subnet-reserve-yield`: PAGE when the reserve hotkey's effective delegate take
+  or childkey take is nonzero (an unset take is the runtime's nonzero default)
+  or the sink coldkey is not its own mirrored account.
+- `subnet-deposit-attribution`: over the bounded frontier every `Deposit` and
+  `ConvictionAdded` must consume exactly one same-transaction
+  `ReservePrincipalAdded` with the same operator, epoch and amount; name its
+  block's epoch, that epoch's policy hash and a registered operator; and
+  advance its operator's one shared nonce by exactly one. When the frontier
+  reaches the checkpoint the next nonce must follow the last one read, and when
+  the published frontier covers the whole current epoch its event totals must
+  equal `epochDeposits`/`epochConvictionAdded` within the epoch cap. Any
+  failure pages.
+- `subnet-reserve-credit-delta`: PAGE when consecutive receipts do not add
+  exactly their amounts to the total and operator principal, a receipt's live
+  stake is below its total principal, the stake-over-principal surplus falls
+  beyond runtime rounding, or the last receipt of a complete frontier differs
+  from the sink's principal. The per-move zero-to-two rao upper bound is not
+  judged across blocks, because tempo yield also raises the surplus.
+- `subnet-operator-deposit-mismatch`: for the current epoch each operator's
+  audit is the validators' own `validator.EvaluateDepositArtifact`, replayed
+  against the committed source-epoch artifact read by its chain-committed
+  content hash at both origins (`/sn/artifact`), sn.yml's identity, the source
+  epoch's EVM boundaries, the reviewed artifact signer and the source epoch's
+  root signer, with `epochDeposits` observed and conviction before the epoch
+  derived exactly. The reviewed zero-price policy is compliant by
+  `ZeroPriceDepositAudit`; a missing commitment before the root window closes is
+  pending. WARN per operator for a mismatch (under or over), an invalid or
+  equivocating artifact, or an artifact unavailable after its deadline; PAGE
+  when every operator fails after the deadline. Unknown when the policy
+  document is absent or unpinned, a signer is not reviewed or the artifact is
+  unreadable.
+- `subnet-deposit-penalty-bypass`: for each decided noncompliant operator, any
+  permitted validator's applied `Weights` row whose `LastUpdate` is at or after
+  the artifact deadline plus `(RevealPeriodEpochs + 1) * Tempo` and gives the
+  pool positive weight pages. Earlier rows are old applied weights.
+
+- **False-positive qualifier:** a pending artifact and an authorized bootstrap
+  epoch are not dishonesty; the audit proves consistency with the signed claim,
+  not a trustless usage oracle.
+- **False-negative qualifier:** events before the first frontier window are
+  not replayed, so epoch counters are judged only once the published frontier
+  covers the epoch; one operator's failure zeroing every pool is not judged.
 
 ### 22.4 Real validation paths, attempt completeness, and pool quality
 
