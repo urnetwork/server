@@ -1005,3 +1005,105 @@ or use drains to rebalance?
 
 **Other consumers:** rebuild with the new library: server/proxy hosted windows,
 the sn miner and validator, and connectctl.
+
+## 12. Implementation notes (2026-10-23)
+
+What landed differs from the sections above in these places. The sections
+above are the design as decided; these notes record what the code does and
+why.
+
+**Where it lives:**
+- connect `main` 9c9f9f42: the client (`resident_move.go`,
+  `transport_move.go`, the dial overrides in `net.go` and
+  `transport_family.go`, the window generator's `MoveClientTransport`).
+- sdk `main` 99758df1: the provider's moves, the H3 migration fix and the
+  mobile decline.
+- server: the primitives (`connect/resident_move.go`,
+  `connect/transport_moved_close.go`, `connect/edge_inventory.go`,
+  `model/resident_move_*.go`, `controller/resident_move_result.go`), the mover
+  (`connect/move*.go`, `model/connect_move_*.go`), and the wiring
+  (`connect/move_exchange.go`, `connect/run.go`).
+
+**Alt (decided during implementation):**
+- H3 and whodis are canonical on alt (connect `EXTENDER.md` L1, L4), and
+  every deployed space derives an alt url. A move redirects only the platform
+  host's edges: a carrier the alt url sends to alt never dials a move's target
+  or a preference. A strict move's replacement parks those carriers, so it
+  arrives at the target over H1, and they dial alt again once the move
+  concludes.
+- A resident on an edge whose client reaches it only through alt is still a
+  candidate. Moving it moves the resident's CPU, and the client's alt
+  carriers then forward to the new resident.
+- Alt names each listener's carrier to the connect handler (plain QUIC is H3,
+  whodis is H3 under dns), so those residents are direct carriers only when
+  they really are.
+- Only the connect service runs the mover and the load publisher. Alt's
+  embedded exchange runs neither, and its hosts carry no `-edge-` name, so
+  they are never targets.
+
+**Load model and mover:**
+- Evacuation: an evacuating host's residents stay in the fleet mean but its
+  capacity does not. With the §5.4 mean as written, a balanced fleet has no
+  host below the mean, so an evacuation could never find a target.
+- The control's tolerance can only widen the band, since a narrower band moves
+  more clients.
+- Emergency moves go only to capable idle clients. A legacy client re-resolves
+  the same name, which §1 shows lands mostly on the hot hosts again.
+- Arrival-time moves (D9) are noted at nomination and sent at the next tick,
+  first within the tick's share. Arrivals by intent are never moved again; an
+  evacuation still moves them.
+- Dry run reserves budget, so its would-send counts show real pacing, but
+  writes no cooldown, intent or frame.
+- New settings: `MoveLoadCleanupTimeout` (10 min) for stale load records and
+  `MoveTargetBreakerWindow` (10 min) for the breaker's send window.
+- `move_weight` is `versions[0].lb.move_weights.<host>`, beside
+  `lb.interfaces`: warp reads every key under `lb.interfaces.<host>` as an
+  interface.
+- A process keys its load record by its inventory host name
+  (`Exchange.MoveHost`), resolved after the inventory's first load, so the
+  table joins the inventory whether `WARP_HOST` carries the domain or not.
+- `providerResidents` counts residents with a transport that declared provide
+  intent. The edge carries the declaration across exchange connections.
+- Payload idleness (D7) is read from the resident's forwards: any forwarded
+  frame is activity. An idle client has no forwards, so it reads as idle.
+- DB guard: the mean acquire wait of the main pool between ticks. A pool with
+  every connection checked out and no acquire completing reads as having
+  waited the whole interval.
+
+**Primitives:**
+- The intent also stores the targets: a failure report names only an IP
+  family, so the intent is where the failed IP is found.
+- The intent lives `MoveArrivalTimeout` past the move's `migrate_time`, not
+  past its write, so a drain client jittered late in the window still finds
+  it.
+- Drain moves do not feed the target breaker: they point clients at the
+  draining host's own addresses, and counting them would open every host's
+  breakers on each deploy.
+- A drain's deadlines are capped at the drain's own, and a drain move replaces
+  any balance move still outstanding on the resident.
+- The drain's switch is the Redis control's `drainMoves`; a drain that cannot
+  read the control keeps the code switches, since its clients must still
+  leave.
+- Probes (capprobe, qualityprobe, the egress probe) open their tunnels through
+  `qualityprobe/providertunnel`, which turns moves off, so no probe declares
+  the capability (D15). Evacuations and drains still reach them as the legacy
+  migrate.
+
+**Client:**
+- The sdk H3→H3 make-before-break fix is not possible as stated: when the
+  memory budget is blocked, connect forbids holding two full H3 working sets.
+  Instead a migration the platform directs never breaks: the old carrier
+  stays, the replacement closes, and the platform closes the old carrier at
+  its own deadline. An advisory move in that state is declined with
+  `MemoryBudget`.
+- Only a failure in the carrier the old transport used holds the target or
+  fails the move, so a target is not blamed for a carrier blocked on the
+  client's own network.
+- One report per move, sent when the move concludes. A compulsory move refused
+  for the memory budget sends none, so the intent stays for the reconnect.
+- The stickiness fallback to the name happens on the next dial attempt.
+- VLESS is a relay like an extender: strict dials skip it, and a move it
+  carries is declined with `ExtenderCarrier`.
+- The sdk's `SetAppBackgrounded` and `SetNetworkMetered` exist on
+  `DeviceLocal`. Until the android and apple apps call them, no device
+  declines for that reason.
