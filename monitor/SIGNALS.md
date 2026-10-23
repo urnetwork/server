@@ -42588,8 +42588,9 @@ enrolls only `api_origins` (exactly two bare https origins), `replay_from_block`
 unknown, a malformed block is itself a coverage gap, and enrollment never
 attests health. A family's missing source emits `subnet-monitor-coverage` with
 the classes it leaves undecided; an undecided invariant emits its own class with
-an unknown state. Proved custody, authorization, finalized-proof and accounting
-counterexamples are retained for the watcher's lifetime (§22.10).
+an unknown state. Proved custody, authorization, finalized-proof, accounting
+and state-durability counterexamples are retained for the watcher's lifetime
+(§22.10).
 
 All probes are **read-only**. Share the existing four-probe admission and
 two-SSH-commands-per-destination bounds; add one shared endpoint RPC budget,
