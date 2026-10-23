@@ -22,7 +22,12 @@ type originalCloseCatalogTripwire struct {
 
 // Count attempted catalog reads even when the statement itself fails.
 func (self *originalCloseCatalogTripwire) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	sql := strings.ToLower(data.SQL)
+	self.observe(data.SQL)
+	return ctx
+}
+
+func (self *originalCloseCatalogTripwire) observe(statement string) {
+	sql := strings.ToLower(statement)
 	for _, catalog := range []string{"pg_catalog", "information_schema", "pg_attribute", "pg_class", "pg_namespace", "pg_constraint", "pg_index", "pg_type", "to_regclass", "to_regprocedure"} {
 		if strings.Contains(sql, catalog) {
 			self.catalogReads.Add(1)
@@ -32,11 +37,25 @@ func (self *originalCloseCatalogTripwire) TraceQueryStart(ctx context.Context, _
 	if strings.Contains(sql, "from st_client_key_history") {
 		self.historyReads.Add(1)
 	}
-	return ctx
 }
 
 // Admission assertions use attempts, so success cannot hide a catalog check.
 func (self *originalCloseCatalogTripwire) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+
+// A batched statement is a query from the same entry. Count every queued
+// statement as an attempt before the batch is sent.
+func (self *originalCloseCatalogTripwire) TraceBatchStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
+	for _, query := range data.Batch.QueuedQueries {
+		self.observe(query.SQL)
+	}
+	return ctx
+}
+
+func (self *originalCloseCatalogTripwire) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {
+}
+
+func (self *originalCloseCatalogTripwire) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {
 }
 
 // An exact history read is still required for each newly signed admission;

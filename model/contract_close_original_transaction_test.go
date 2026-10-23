@@ -1,5 +1,6 @@
-// Original-history reads belong to the close transaction, including its
-// uncommitted history. Missing required schema aborts the complete owner.
+// An in-transaction close reads original history in its caller's transaction,
+// including its uncommitted history; the public close reads it before BEGIN.
+// Missing required schema aborts the complete owner.
 package model
 
 import (

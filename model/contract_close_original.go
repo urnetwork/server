@@ -48,39 +48,50 @@ func validateContractCloseOriginal(report ContractCloseReport) (*coreprotocol.Or
 	return &original, nil
 }
 
+// One finished read of a report's original key registration. Admission
+// consults it where it would otherwise read, so a refusal decided earlier
+// keeps its precedence over a failed read. Its error aborts the report's
+// transaction.
+type originalCloseKeyRead struct {
+	registration []byte
+	issue        string
+	err          error
+}
+
 // Key history is independently immutable. Select an exact historical key from
 // the report's own domain, never today's Redis projection or another policy.
 // Migrations own the required schema. Missing history remains unknown; any SQL
-// error, including absent schema, aborts the caller's transaction.
-func originalCloseKeyRegistrationInTx(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) ([]byte, string, error) {
+// error, including absent schema, aborts the report's transaction. An unsigned
+// report reads nothing.
+func readOriginalCloseKey(ctx context.Context, conn server.PgCanQuery, original *coreprotocol.OriginalCloseReport) originalCloseKeyRead {
 	if original == nil {
-		return nil, "", nil
+		return originalCloseKeyRead{}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, "", err
+		return originalCloseKeyRead{err: err}
 	}
-	registration, readErr := readOriginalCloseKeyRegistration(ctx, tx, original)
+	registration, readErr := readOriginalCloseKeyRegistration(ctx, conn, original)
 	if ownerErr := ctx.Err(); ownerErr != nil {
 		// The enclosing owner rolls back the whole transaction with bounded cleanup.
-		return nil, "", errors.Join(ownerErr, readErr)
+		return originalCloseKeyRead{err: errors.Join(ownerErr, readErr)}
 	}
 	if readErr != nil {
 		// Capacity alone is optional; a joined drain failure still aborts.
 		if readErr == errOriginalCloseKeyCapacity {
-			return nil, originalCloseKeyCapacity, nil
+			return originalCloseKeyRead{issue: originalCloseKeyCapacity}
 		}
-		return nil, "", readErr
+		return originalCloseKeyRead{err: readErr}
 	}
 	if len(registration) == 0 {
-		return nil, originalCloseKeyMissing, nil
+		return originalCloseKeyRead{issue: originalCloseKeyMissing}
 	}
-	return registration, "", nil
+	return originalCloseKeyRead{registration: registration}
 }
 
 // This bounded reader retains only an exact original registration. Capacity is
 // optional only when row cleanup confirms no independent SQL/protocol failure.
-func readOriginalCloseKeyRegistration(ctx context.Context, tx server.PgTx, original *coreprotocol.OriginalCloseReport) (registration []byte, returnErr error) {
-	rows, err := tx.Query(ctx, `SELECT registration_hash,evidence,evidence_hash
+func readOriginalCloseKeyRegistration(ctx context.Context, conn server.PgCanQuery, original *coreprotocol.OriginalCloseReport) (registration []byte, returnErr error) {
+	rows, err := conn.Query(ctx, `SELECT registration_hash,evidence,evidence_hash
  FROM st_client_key_history WHERE client_id=$1 AND domain_hash=$2
  ORDER BY generation DESC LIMIT $3`, server.Id(original.ClientId), original.DomainHash[:], MaxStClientKeyHistoryRegistrations+1)
 	if err != nil {

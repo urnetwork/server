@@ -2876,15 +2876,14 @@ func closeContractReport(
 	terminalReplay := false
 	receiverFollowsSenderFinal := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		applied, terminalReplay, addedByteCount, returnErr = applyContractCloseReportUsageInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
+		var followsSenderFinal bool
+		applied, terminalReplay, addedByteCount, followsSenderFinal, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
 		// An applied id-less report may be a retransmission of an earlier one,
 		// sent before the sender's final. Only a report that raised the party's
 		// retained count was never applied before, so only that one can be
 		// ordered after the sender's final. One that adds nothing leaves the
 		// contract to the receiver's next report or the expiry task.
-		if applied && returnErr == nil && (reportId != nil || 0 < addedByteCount) {
-			receiverFollowsSenderFinal = contractReportFollowsSenderFinalInTx(ctx, tx, contractId, clientId)
-		}
+		receiverFollowsSenderFinal = followsSenderFinal && returnErr == nil && (reportId != nil || 0 < addedByteCount)
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if terminalReplay {
@@ -2902,19 +2901,6 @@ func closeContractReport(
 	if closed && !completedCheckpoint {
 		RemoveFromStream(ctx, contractId)
 	}
-	return
-}
-
-// Whether the client that just applied a report is the contract's receiver and
-// the sender's final close had already committed. The caller holds the
-// contract lock that serializes every report, so this orders the two reports
-// without comparing the clocks of the servers that accepted them.
-func contractReportFollowsSenderFinalInTx(ctx context.Context, tx server.PgTx, contractId, clientId server.Id) (follows bool) {
-	server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract
-        JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
-        WHERE transfer_contract.contract_id = $1 AND transfer_contract.destination_id = $2 AND transfer_contract.source_id <> $2
-            AND contract_close.party = $3 AND NOT contract_close.checkpoint)`,
-		contractId, clientId, ContractPartySource).Scan(&follows))
 	return
 }
 
@@ -2948,8 +2934,18 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 ) (applied, terminalReplay bool, addedByteCount ByteCount, returnErr error) {
+	applied, terminalReplay, addedByteCount, _, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry)
+	return
+}
+
+// Also reports whether an applied report is the receiver's, ordered after the
+// sender's final close committed.
+func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
+	contractId, clientId server.Id, usedTransferByteCount ByteCount,
+	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
+) (applied, terminalReplay bool, addedByteCount ByteCount, followsSenderFinal bool, returnErr error) {
 	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
-		return false, false, 0, fmt.Errorf("expiry report continuation lacks retained ownership")
+		return false, false, 0, false, fmt.Errorf("expiry report continuation lacks retained ownership")
 	}
 	found := false
 	var sourceId server.Id
@@ -3030,7 +3026,24 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 		return
 	}
 
-	result, err = tx.Query(ctx, `WITH prior AS MATERIALIZED (
+	applied, addedByteCount, followsSenderFinal = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId)
+	return
+}
+
+// Accumulates one report under the contract lock the caller holds. One
+// statement applies the increment, publishes an identified report's receipt and
+// reads the sender's final. Every close of the contract takes the lock before
+// it writes, so the statement's snapshot orders this report against the
+// sender's final without comparing the clocks of the servers that accepted
+// them. Only the receiver's report can follow it.
+func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
+	contractId, sourceId, destinationId server.Id, party ContractParty,
+	usedTransferByteCount ByteCount, checkpoint bool, reportId *server.Id,
+) (applied bool, addedByteCount ByteCount, followsSenderFinal bool) {
+	// The existing contract row lock serializes the receipt with its party
+	// increment. No shared payer/network row is acquired here.
+	var senderFinal bool
+	result, err := tx.Query(ctx, `WITH prior AS MATERIALIZED (
 		SELECT used_transfer_byte_count,legacy_checkpoint_byte_count,identified_checkpoint_byte_count
 		FROM contract_close WHERE contract_id=$1 AND party=$2
 	), identified AS MATERIALIZED (
@@ -3063,21 +3076,22 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 			close_time=$4, checkpoint=$5
 		WHERE contract_close.checkpoint
 		RETURNING used_transfer_byte_count
-	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0) FROM changed`,
-		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil)
+	), receipt AS (
+		INSERT INTO contract_close_report (contract_id,party,report_id,used_transfer_byte_count,checkpoint)
+		SELECT $1,$2,$7::uuid,$3::bigint,$5 FROM changed WHERE $7::uuid IS NOT NULL
+	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0),
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint)
+	FROM changed`,
+		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&addedByteCount))
+			server.Raise(result.Scan(&addedByteCount, &senderFinal))
 			applied = true
 		}
 	})
-	if reportId != nil && applied {
-		// The existing contract row lock serializes this receipt with its
-		// party increment. No shared payer/network row is acquired here.
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
- (contract_id,party,report_id,used_transfer_byte_count,checkpoint) VALUES($1,$2,$3,$4,$5)`,
-			contractId, party, *reportId, usedTransferByteCount, checkpoint))
-	}
+	// The read predates this statement's own write, which reaches the
+	// sender's row only for the sender's own report, and that never follows.
+	followsSenderFinal = applied && party == ContractPartyDestination && senderFinal
 	// A checkpoint permits resuming the same contract. A final party close
 	// revokes transport permission even when financial settlement is deferred.
 	if !checkpoint {
@@ -3110,6 +3124,65 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 
 // Rolls back a completed receiver checkpoint with its failed settlement.
 type contractCoveredCheckpointAbort struct{ cause error }
+
+// One party's retained close, checkpoint or final.
+type contractCloseRecord struct {
+	usedTransferByteCount ByteCount
+	checkpoint            bool
+	conservative          bool
+}
+
+// Party -> retained close. Without the contract lock the read is a hint.
+func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contractId server.Id) map[ContractParty]contractCloseRecord {
+	closes := map[ContractParty]contractCloseRecord{}
+	result, err := conn.Query(
+		ctx,
+		`
+            SELECT
+                party,
+                used_transfer_byte_count,
+                checkpoint,
+                legacy_checkpoint_byte_count IS NOT NULL
+            FROM contract_close
+            WHERE
+                contract_id = $1
+            `,
+		contractId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var closeParty ContractParty
+			var close contractCloseRecord
+			server.Raise(result.Scan(
+				&closeParty,
+				&close.usedTransferByteCount,
+				&close.checkpoint,
+				&close.conservative,
+			))
+			closes[closeParty] = close
+		}
+	})
+	return closes
+}
+
+// Whether a report's settlement can act on these closes: two finals settle,
+// and a receiver checkpoint ordered after the sender's final may complete.
+// Anything else leaves the contract to a later report or the expiry task.
+func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, receiverFollowsSenderFinal bool) bool {
+	source, sourceOk := closes[ContractPartySource]
+	destination, destinationOk := closes[ContractPartyDestination]
+	return sourceOk && destinationOk && !source.checkpoint && (!destination.checkpoint || receiverFollowsSenderFinal)
+}
+
+// A private test seam observes each settlement transaction a report opens.
+// Production contexts carry none.
+type contractSettlementTxTestKey struct{}
+
+func observeContractSettlementTxForTest(ctx context.Context, contractId server.Id) {
+	if observe, ok := ctx.Value(contractSettlementTxTestKey{}).(func(server.Id)); ok {
+		observe(contractId)
+	}
+}
 
 // Settlement fires when both parties have done a non-checkpoint close. A
 // checkpoint means the sender may send again on this contract
@@ -3148,6 +3221,20 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 	var posts []func() any
 	var clockTransferByteCount ByteCount
 
+	// The transaction's first read is a read-committed hint, so taking it
+	// before BEGIN changes nothing. A report that can neither settle nor
+	// complete the receiver's checkpoint then opens no transaction; the later
+	// of two finals settles after its own commit.
+	var hint map[ContractParty]contractCloseRecord
+	if scope == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			hint = readContractCloseRecords(ctx, conn, contractId)
+		})
+		if !contractClosesMaySettle(hint, receiverFollowsSenderFinal) {
+			return false, false, nil
+		}
+	}
+
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			abort, ok := recovered.(contractCoveredCheckpointAbort)
@@ -3157,45 +3244,17 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 			closed, completedCheckpoint, returnErr = false, false, abort.cause
 		}
 	}()
+	observeContractSettlementTxForTest(ctx, contractId)
 	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
-		type closeRecord struct {
-			usedTransferByteCount ByteCount
-			checkpoint            bool
-			conservative          bool
+		readCloses := func() map[ContractParty]contractCloseRecord {
+			return readContractCloseRecords(ctx, tx, contractId)
 		}
-		// party -> close record, checkpoint or not
-		readCloses := func() map[ContractParty]closeRecord {
-			closes := map[ContractParty]closeRecord{}
-			result, err := tx.Query(
-				ctx,
-				`
-            SELECT
-                party,
-                used_transfer_byte_count,
-                checkpoint,
-                legacy_checkpoint_byte_count IS NOT NULL
-            FROM contract_close
-            WHERE
-                contract_id = $1
-            `,
-				contractId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var closeParty ContractParty
-					var close closeRecord
-					server.Raise(result.Scan(
-						&closeParty,
-						&close.usedTransferByteCount,
-						&close.checkpoint,
-						&close.conservative,
-					))
-					closes[closeParty] = close
-				}
-			})
-			return closes
+		// A final close never changes, and the checkpoint completion below
+		// re-reads under the contract lock.
+		closes := hint
+		if closes == nil {
+			closes = readCloses()
 		}
-		closes := readCloses()
 		sourceClose, sourceOk := closes[ContractPartySource]
 		destinationClose, destinationOk := closes[ContractPartyDestination]
 
@@ -3279,7 +3338,14 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 				// The report transaction has ended. Take the outcome owner's
 				// lock before interpreting absent escrow as a free close.
 				var currentOutcome *ContractOutcome
-				server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
+				outcomeErr := tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome)
+				if errors.Is(outcomeErr, pgx.ErrNoRows) {
+					// The reaper takes no contract lock before it removes the
+					// closes and the contract. One removed after its closes were
+					// read leaves nothing to settle.
+					return
+				}
+				server.Raise(outcomeErr)
 				if currentOutcome != nil {
 					return
 				}
