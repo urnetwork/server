@@ -102,13 +102,13 @@ func TestMigrationsRuntimeBlobSchemaFaultsReachSignal(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{name: "previous runtime capability body restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2RoundInsertGuardBody + `$regression$`, want: "exact competition runtime-blob capability guard@v851"},
-		{name: "unrecognized runtime capability admitted", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedCapability + `$regression$`, want: "exact competition runtime-blob capability guard@v851"},
-		{name: "zero-fee stage condition removed", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedFee + `$regression$`, want: "exact competition runtime-blob capability guard@v851"},
-		{name: "runtime guard privilege changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() SECURITY DEFINER`, want: "exact competition runtime-blob capability guard@v851"},
-		{name: "runtime guard volatility changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() STABLE`, want: "exact competition runtime-blob capability guard@v851"},
+		{name: "previous runtime capability body restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2RoundInsertGuardBody + `$regression$`, want: competitionWinnerReviewOwner},
+		{name: "unrecognized runtime capability admitted", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedCapability + `$regression$`, want: competitionWinnerReviewOwner},
+		{name: "zero-fee stage condition removed", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedFee + `$regression$`, want: competitionWinnerReviewOwner},
+		{name: "runtime guard privilege changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() SECURITY DEFINER`, want: competitionWinnerReviewOwner},
+		{name: "runtime guard volatility changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() STABLE`, want: competitionWinnerReviewOwner},
 		{name: "runtime guard trigger disabled", sql: `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_source`, want: "competition source authority and atomic outbox custody@v844"},
-		{name: "retained source graph guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: "staging source graph of ten repositories@v850"},
+		{name: "retained source graph guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: competitionWinnerReviewOwner},
 		{name: "retained seal guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_seal_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`, want: "isolated automation staging and current lifecycle guards@v847"},
 	}
 	var observations [][]Alert
