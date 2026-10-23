@@ -325,7 +325,6 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.2 | Coverage gap | `subnet-coverage` reports missing pool, validator, fleet, and commitment readers |
 | 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
@@ -42659,6 +42658,7 @@ verified metadata. Every family reads at this one checkpoint.
   replayed; the checkpoint state remains the authority.
 
 ### 22.2 Pool registration, validator identity, and fleet ownership
+Probe: `subnet-identity`
 
 Use the complete metagraph plus block-pinned `Keys`, reverse `Uids`, `Owner`,
 stake and `ValidatorPermit`; compare native commitments with coordinator
@@ -42671,6 +42671,51 @@ do not prove historical UID ownership.
 | `subnet-validator-eligibility` | Each expected active validator has its actual historical hotkey/coldkey, sufficient stake, permit and supported weight version at the scoring/application block; declared measurement key/activation is attributable to that identity. | Warn on permit/stake loss or a stopped eligible validator; page if ineligible/forged identity evidence is accepted. Retain stake ranking and native registration/permit changes. |
 | `subnet-fleet-binding-invalid` | Client Ed25519 consent and hotkey sr25519 authorization bind chain, netuid, coordinator, fleet, generation, epoch interval and finalized manifest commitment. Both directions of live UID mapping and membership/revocation history agree. | Page if an invalid, expired, revoked, stolen, overlapping or wrong-generation binding receives credit. Rejected hostile requests are counted, not themselves a custody breach. |
 | `subnet-commitment-mirror-lag` | Native commitment and finalized mirror match with the configured freshness; cleanup/version history cannot leave a deregistered or reassigned hotkey eligible. | Warn on stale/missing mirror; page on a false mirror being used or deadline-wide loss of valid membership. Preserve native inclusion plus EVM mirror receipt and effective versions. |
+
+Implementation (2026-10-23, `signal_subnet_identity.go`), at the §22.1 agreed
+checkpoint and enrollment. The operator census is the coordinator's own
+`operatorCount`/`operatorIdAt`; a reviewed operator missing on chain or an
+unreviewed one on chain warns (target `subnet-identity/census`, frame
+`census`).
+
+- `subnet-pool-custody-identity`: PAGE, Sustain 1, per active operator when the
+  vault pool hotkey differs from the coordinator's,
+  `Keys(netuid, uid)` names another hotkey (a reused UID), `Uids(netuid,
+  hotkey)` is absent or another UID, `Owner(hotkey)` is not the vault coldkey,
+  pool, deposit, escrow and reserve hotkeys or the participant coldkey overlap,
+  the deposit and root signers coincide, or two operators share a pool or
+  deposit hotkey; and for the escrow when it is unregistered, owned by another
+  coldkey or its UID is reassigned. An active operator's inactive vault pool
+  warns (frame `pool-inactive`): capture stops but ownership holds. One
+  operator's unreadable views stay unknown for that operator only; an inactive
+  operator is not checked.
+- `subnet-validator-eligibility`: WARN, Sustain 1, per reviewed validator
+  (target ordinal) for an unregistered hotkey, an inconsistent UID mapping, no
+  permit in the `ValidatorPermit` vector, an owner other than the reviewed
+  coldkey or stake below `StakeThreshold`. Accepting evidence from an ineligible
+  identity is a §22.8 anchor finding.
+- `subnet-commitment-mirror-lag`: every native `Commitments.CommitmentOf` entry
+  of the netuid, enumerated with `state_getKeysPaged` under the Identity-hashed
+  netuid prefix (the hasher is checked in metadata), each key re-derived and
+  bounded by `max_commitments`, against the coordinator's `mirroredCommitments`.
+  PAGE when a mirror names a newer block, another hash or a non-canonical block
+  hash, or a commitment expired unmirrored past the policy's
+  `CommitmentMaxAgeBlocks`; WARN frame `lag`, Sustain 2, when it waits longer
+  than sixteen times `max_finality_lag_blocks`. One-field legacy commitments
+  are counted, not judged.
+- `subnet-fleet-binding-invalid`: every `FleetBound` over the bounded frontier
+  is re-verified from its original `bindFleetMember` calldata (read with
+  `eth_getTransactionByHash`): shape, chain/netuid/coordinator domain, the
+  event fields, the client Ed25519 consent, the hotkey sr25519 authorization, a
+  future effective epoch and the policy's validity span. Any accepted failure
+  pages; a binding sent through a contract wallet, an unreadable transaction or
+  a frontier behind the checkpoint is unknown.
+
+- **False-positive qualifier:** a pending commitment inside the lag is not late;
+  an inactive operator's pool is not an active custody obligation.
+- **False-negative qualifier:** the binding frontier begins at the reviewed
+  initial window, not deployment; contract-wallet calldata is unverifiable
+  here; measurement-key activation is attributed in §22.8.
 
 ### 22.3 Operator demand deposits, conviction, and reserve
 

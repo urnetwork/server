@@ -182,6 +182,7 @@ func NewSignals() []Signal {
 		NewHostpowerSignal(),
 		NewSubnetCoverageSignal(),
 		NewSubnetChainSignal(),
+		NewSubnetIdentitySignal(),
 		NewSubnetArtifactsSignal(),
 		NewConnectH1PlusSignal(),
 		NewProxyH1PlusSignal(),
