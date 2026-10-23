@@ -336,9 +336,7 @@ active missing capability and must not be read as green.
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
-| 24.2 | Coverage gap | `connection-rate` sees connection churn, not moves; the arrived over sent move success-ratio rule is missing. |
 | 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
-| 24.6 | Coverage gap | `log-errors` sees no move results; the per-target failure-ratio and breaker rules over the move result counters are missing. |
 | 24.7 | Coverage gap | `rollout-guard` sees drains, not their admission refusals or drain moves; the refusals-outside-a-drain rule is missing. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
@@ -42765,14 +42763,17 @@ baselines. Every gauge is per process, rides the stats pusher's {env,
 service, block, host} labels, and has no series while its process cannot
 compute it. Missing series are unknown, never zero.
 
-The `mover` probe owns §24.1, §24.4 and §24.5, in `signal_mover.go`, with the
-shared reader `connect_move_metrics.go`. It runs one bounded instant query
-every 5 minutes through one services host's loopback Mimir, evaluated two
-minutes behind now, and reads the control once. Every threshold
+Two probes own five of the seven entries: `mover` (§24.1, §24.4, §24.5) and
+`move-outcomes` (§24.2, §24.6), in `signal_mover.go` and
+`signal_move_outcomes.go`, with the shared reader `connect_move_metrics.go`.
+Each runs one bounded instant query every 5 minutes through one services host's
+loopback Mimir, evaluated two minutes behind now, and `mover` also reads the
+control once. Every threshold
 and window below is a field of `ConnectMoveSettings`, with the default the
 entry names. A desired connect host/block slot (the services.yml placement)
 without a fresh current process, its newest start pushed within 90 s, leaves
-its rules unknown (`mover-telemetry-incomplete`): a
+its probe's rules unknown (`mover-telemetry-incomplete`,
+`move-outcomes-telemetry-incomplete`): a
 draining sibling never stands in for it, and a host the monitor may not
 contact keeps its slots, unknown. Answers are parsed strictly: an annotation,
 an unknown tag, a label or label value outside the code's closed sets, a
@@ -42781,9 +42782,9 @@ and block names, fixed label values and counts reach an alert; process
 instance nonces, control values and response bodies do not.
 
 A fleet without the move code, or a rule with nothing to judge because the
-mover is off, in dry run or on for less than its window, is a standing state
-of its own: `mover-not-deployed`, `mover-off`, `mover-dry-run`, `mover-warming`
-and `move-host-filling`.
+mover is off, in dry run or not sending, is a standing state of its own:
+`mover-not-deployed`, `mover-off`, `mover-dry-run`, `mover-warming`,
+`move-host-filling` and `move-outcomes-dormant`.
 Each is reported every run as a configured-off WARN: never posted to Slack,
 never healthy, and, as an unknown state, it keeps its signal's other incidents
 from clearing while it lasts. Healthy is reported only for a rule judged on
@@ -42850,6 +42851,7 @@ step at which every process read mode 0, such as one fleet-wide control read
 failure, restarts the window.
 
 ### 24.2 Move success ratio: arrived ÷ sent
+Probe: `move-outcomes`
 
 ```promql
 sum(increase(urnetwork_connect_moves_arrived_total{env="main",service="connect",kind=~"advisory|compulsory"}[1h]))
@@ -42873,11 +42875,24 @@ windows of an hour or more.
   gauge `urnetwork_connect_move_target_breaker_open` (all from the move
   primitives).
 
+`move-outcomes` implements the ticket as `move-success-low` (WARN, sustain 1):
+the ratio, each side an `increase` over `SuccessWindow` 1 h, stays below
+`SuccessRatioFloor` 0.5 at every 5-minute step of `SuccessSustain` 2 h. A step
+is judged only with at least `MinSends` 20 sends in its window and every
+desired slot current; the alert localizes by target host, failure and decline
+reasons, dropped reports and expiries. No sends is not health:
+`move-outcomes-dormant` names why the ratio has nothing to judge
+(`not_deployed`, `mover_off`, `dry_run`, `no_sends` or `below_minimum_sends`).
+A step with a slot gap is `move-outcomes-telemetry-incomplete`, because a
+process that stops publishing removes its sends or arrivals from the sums.
+
 False-positive qualifiers: a move the budget refused was never sent, so it is
 in neither count; an unrelated reconnect that lands on the target consumes the
-intent and counts as an arrival, which is the placement wanted (MOVE.md §6).
+intent and counts as an arrival, which is the placement wanted (MOVE.md §6),
+so a ratio above 1 is no error.
 False-negative qualifier: dry run sends nothing; its would-send counter
-(`urnetwork_connect_moves_would_send_total`) has no arrivals to compare.
+(`urnetwork_connect_moves_would_send_total`) has no arrivals to compare, and
+the state is `move-outcomes-dormant` with `dry_run`.
 
 ### 24.3 Compulsory closes per drain
 
@@ -43001,6 +43016,7 @@ pause share is judged over acting ticks, which ticks within the band do not
 dilute.
 
 ### 24.6 Move results, expiries and the target breaker
+Probe: `move-outcomes`
 
 ```promql
 sum by (reason) (increase(urnetwork_connect_moves_declined_total{env="main"}[1h]))
@@ -43033,11 +43049,35 @@ the client forwards as before.
   arrival that consumed the intent first; a steady `foreign_move` or
   `invalid_move_id` is a client reporting a move it was not sent.
 
-False-positive qualifier: a client counts only failures of the carrier its old
-transport used, so a network that blocks one carrier is not blamed on the
-target. False-negative qualifiers: a report is best effort and sent once, so a
-client that loses its control path reports nothing; drain moves never feed the
-breaker.
+`move-outcomes` implements both tickets per target host (target
+`<env>/connect-moves/<host>`, a desired connect host):
+
+- `move-target-failures` (WARN, sustain 1): the host's replacement failures
+  over the mover's sends to it, each an `increase` over `SuccessWindow` 1 h,
+  stay above `TargetFailureShare` 0.25 at every 5-minute step of
+  `TargetFailureSustain` 1 h, each step with at least `MinSends` 20 sends to
+  the host and every desired slot current.
+- `move-target-breakers-open` (WARN, sustain 1): at least
+  `BreakerMinOpenAddresses` 2 addresses of the host read open at every
+  1-minute step (`BreakerStep`) of `BreakerHold` 10 min, the maximum over every
+  process that read them. It is judged whether or not the mover sends: a host
+  whose every address is held open receives no sends at all.
+
+False-positive qualifiers: a client counts only failures of the carrier its
+old transport used, so a network that blocks one carrier is not blamed on the
+target. A drain's moves point at the draining host's own addresses, and their
+failure reports count against that host's `target_host` with no kind label
+(`controller/resident_move_result.go`), so a deploy whose new container comes
+up late can push a host's share over a quarter: the probe takes every capable
+drain move of the host in the window
+(`urnetwork_connect_drain_moves_sent_total{capable="true"}`, the most failures
+those moves can report) off the host's failures first. False-negative
+qualifiers: a report is best effort and sent once, so a client that loses its
+control path reports nothing; drain moves never feed the breaker; taking a
+large drain's moves off can hide a mover failure in the same window; a target
+the mover stops sending to, for example because its addresses' breakers
+opened, is no longer judged and its failure alert clears, so read the breaker
+ticket beside it.
 
 As built at the move integration (2026-10-22, feat/resident-move-integrate
 9f797790e), the breaker gauge's own `host` label, the target's inventory host,
@@ -43049,7 +43089,11 @@ reach Mimir. A local reproduction with the module's push client accepted the
 first push and refused the next with `already contains grouping label host`.
 Until the running artifact carries a fix that moves the target host to its
 own label, a source process goes stale right after the mover leaves off,
-which the mover probe reports as unknown slots, never as health.
+which the §24 probes report as unknown slots, never as health. The probe reads
+the target host from `target_host`, the label the move counters use, and
+reports a breaker series without `target_host`, `interface` and a family of 4
+or 6 as `move-outcomes-telemetry-incomplete`, never grouping it by the
+pusher's host.
 
 ### 24.7 Drain gates and drain moves
 

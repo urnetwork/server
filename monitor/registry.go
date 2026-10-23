@@ -184,6 +184,7 @@ func NewSignals() []Signal {
 		NewSubnetArtifactsSignal(),
 		NewConnectH1PlusSignal(),
 		NewProxyH1PlusSignal(),
+		NewMoveOutcomesSignal(),
 		NewMoverSignal(),
 	}
 }
