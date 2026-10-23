@@ -333,7 +333,6 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
-| 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -43053,6 +43052,7 @@ before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
 
 ### 23.3 Connect H1 session closes by carrier, and provider cohorts by app version
+Probe: `connect-close-cohorts`
 
 `urnetwork_connect_h1_sessions_closed_total{carrier,reason}` counts
 authenticated H1 transports by their first observed terminal event, for
@@ -43095,6 +43095,42 @@ bucket can hide several cohorts. A burst spread across carriers and cohorts is
 not this pattern: check the LB, network and Connect path (§2.7, §8.6). No
 server action is indicated for the client pattern; do not restart Connect for
 it.
+
+Implementation (one-minute cadence). Bursts are one-minute events, so every
+run reads the per-minute history of the last 15 minutes as one bounded loopback
+Mimir range query (`query_range`, one-minute steps ending two minutes behind
+now on a minute boundary); a watcher with a 15-minute probe floor still sees
+every minute, and a burst stays in view for one lookback. Each step returns
+`sum by (carrier, reason) (increase(urnetwork_connect_h1_sessions_closed_total{job="connect"}[1m]))`,
+`sum by (app_version) (urnetwork_connect_provider_connections{job="connect"})`,
+and per desired Connect slot the freshest process-start, close and cohort
+source timestamps plus its newest process start. A carrier and reason is a
+burst in a step when it has at least 1,000 closes and at least three times its
+lookback median (the median needs 10 of the 16 points and is robust to a few
+burst minutes; the 10-13 baseline was about 350). A cohort is struck when it
+lost at least 20% and at least 100 of its connections over the same step. A
+burst is the client pattern only when it is on websocket, h1plus is not also
+bursting, no desired slot's newest process started within two minutes of it,
+at least one cohort is struck, the struck cohorts carry at least 70% of the
+fleet's drop and held at most half the fleet before it, and the rest of the
+fleet lost under 5%.
+
+Classes: `connect-close-burst-cohort` (WARN, sustain 1, frame the struck
+release label with the largest drop) names the client pattern: no server
+action, do not restart Connect. `connect-close-burst-spread` (WARN, sustain 1)
+names a burst with `carriers_spread`, `connect_restarted`, `no_struck_cohort` or
+`drop_spread_across_cohorts`: check the LB, network and Connect path (§2.7,
+§8.6) and the rollout state (§8.2). Each reports its largest burst minute with
+closes and medians by carrier and reason, struck cohorts with drop and size,
+and the lookback's burst-minute counts. `connect-close-telemetry-unobservable`
+(visibility, sustain 2) reports a failed, annotated or off-step range read, a
+desired slot whose families are missing, stale (older than three minutes),
+duplicated or on an excluded or disabled host, no close or cohort series, a
+carrier and reason over the burst floor without enough lookback points, cohort
+points missing in a burst minute, and labels outside the server's bounded
+vocabulary (carrier `websocket` or `h1plus`; release `year.month.day`,
+`year.month`, `unknown` or `other`), which are dropped and never rendered.
+Provider supply itself remains §1.1a.
 
 ## Shared provider-egress dashboard refresh
 
