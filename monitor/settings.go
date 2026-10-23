@@ -411,6 +411,10 @@ type SignalSettings struct {
 
 	// Independently enrolled historical payout objects; missing inputs stay unknown.
 	SubnetArtifacts *SubnetArtifactSettings
+	// Subnet family read budgets and optional enrollment (SIGNALS.md §22.6-§22.9).
+	SubnetReplay *SubnetReplaySettings
+	// Reviewed public deployment identity from Config sn.yml; never rendered.
+	SubnetDeployment *SubnetReplayPin
 
 	// ContractDegradationConfig is strict desired degraded.yml authority,
 	// separate from deployed consumer configuration and its cached decisions.
@@ -505,6 +509,8 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 func (s SignalSettings) withDefaults() SignalSettings {
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
 	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
+	s.SubnetReplay = cloneSubnetReplaySettings(s.SubnetReplay)
+	s.SubnetDeployment = cloneSubnetReplayPin(s.SubnetDeployment)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
@@ -730,6 +736,8 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		stConfigStatus:            settings.STConfigStatus.normalized(),
 		stDeploymentKey:           settings.STDeploymentKey,
 		subnetArtifacts:           cloneSubnetArtifactSettings(settings.SubnetArtifacts),
+		subnetReplay:              effectiveSubnetReplaySettings(settings.SubnetReplay),
+		subnetReplayPin:           cloneSubnetReplayPin(settings.SubnetDeployment),
 		contractDegradationConfig: settings.ContractDegradationConfig.normalized(),
 		sshUser:                   settings.SSHUser,
 		sshDevUser:                settings.SSHDevUser,
@@ -765,6 +773,8 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	if settings.SettingsGenerationCheck != nil {
 		startup := settings
 		startup.SubnetArtifacts = cloneSubnetArtifactSettings(settings.SubnetArtifacts)
+		startup.SubnetReplay = cloneSubnetReplaySettings(settings.SubnetReplay)
+		startup.SubnetDeployment = cloneSubnetReplayPin(settings.SubnetDeployment)
 		startup.Routers = cloneRouterSettings(settings.Routers)
 		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)
 		cfg.routerGenerationCheck = func(ctx context.Context) (bool, error) {
@@ -928,6 +938,9 @@ func (r *sourceRunner) shell(ctx context.Context, h *host, command string) (stri
 
 func (r *sourceRunner) sshTimeout(ctx context.Context, h *host, command string, stdin string, timeout time.Duration) (string, error) {
 	if stdin != "" {
+		if withStdin, ok := r.source.(HostStdinSignalSource); ok {
+			return withStdin.HostStdin(ctx, hostSettingsFromHost(h), command, stdin, timeout)
+		}
 		return "", fmt.Errorf("monitor: synthetic SignalSource cannot provide host stdin")
 	}
 	if timed, ok := r.source.(TimedSignalSource); ok {

@@ -169,6 +169,8 @@ type monitorConfig struct {
 	stConfigStatus            STConfigurationStatus
 	stDeploymentKey           string
 	subnetArtifacts           *SubnetArtifactSettings
+	subnetReplay              *SubnetReplaySettings
+	subnetReplayPin           *SubnetReplayPin
 	contractDegradationConfig ContractDegradationConfigStatus
 
 	sshUser     string // deployed login user

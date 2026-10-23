@@ -138,34 +138,48 @@ func TestSubnetCorrectnessDocumentationRetainsEvidenceAndRecoveryRules(t *testin
 }
 
 // The registered sentinel must expose the missing family observers without
-// advertising them as implemented automated probes.
+// advertising unregistered ones as implemented automated probes. Every §22
+// declaration must name a registered signal numbered inside §22, at most once.
 func TestSubnetCorrectnessDocumentationLabelsUnimplementedCoverage(t *testing.T) {
 	t.Parallel()
 	section := subnetCorrectnessDocumentation(t)
-	partialDeclarationsOnly := func(text string) bool {
-		matches := catalogProbePattern.FindAllStringSubmatch(text, -1)
-		return len(matches) == 2 && matches[0][1] == "subnet-coverage" && matches[1][1] == "subnet-artifacts"
+	registered := map[string]string{}
+	for _, signal := range NewSignals() {
+		registered[signal.Key()] = signal.Number()
 	}
-	if !partialDeclarationsOnly(section) {
-		t.Fatalf("subnet catalog probes = %v, want only the coverage sentinel and partial artifact reader", catalogProbePattern.FindAllStringSubmatch(section, -1))
+	declarationsValid := func(text string) bool {
+		seen := map[string]bool{}
+		matches := catalogProbePattern.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			number, ok := registered[match[1]]
+			if !ok || seen[match[1]] || !strings.HasPrefix(number, "22.") {
+				return false
+			}
+			seen[match[1]] = true
+		}
+		return seen["subnet-coverage"] && seen["subnet-artifacts"]
+	}
+	if !declarationsValid(section) {
+		t.Fatalf("subnet catalog probes = %v, want only registered §22 signals including the sentinel and partial reader", catalogProbePattern.FindAllStringSubmatch(section, -1))
 	}
 	for _, unsupported := range []string{
 		section + "\nProbe: `subnet-unrecognized-test`\n",
 		strings.Replace(section, "Probe: `subnet-artifacts`", "Probe: `subnet-unrecognized-test`", 1),
 		section + "\nProbe: `subnet-coverage`\n",
+		section + "\nProbe: `contract-rate`\n",
 	} {
-		if partialDeclarationsOnly(unsupported) {
-			t.Error("a third, unrecognized or duplicate subnet declaration passed the partial-coverage contract")
+		if declarationsValid(unsupported) {
+			t.Error("an unrecognized, duplicate or foreign subnet declaration passed the coverage contract")
 		}
 	}
 	compact := strings.Join(strings.Fields(section), " ")
 	for _, required := range []string{
 		"the registered `subnet-coverage` sentinel makes missing coverage visible",
-		"nine subnet correctness families are not implemented or qualified",
+		"retires a family once its reader is registered",
 		"explicit alert, never a green result from an absent metric",
 		"deliberately cannot certify any economic invariant",
 		"proposed helper or authored test is not a deployed signal",
-		"This documentation has coverage regression tests, **not** an implemented or qualified subnet probe battery",
+		"Registered readers are not yet qualified",
 	} {
 		if !strings.Contains(compact, required) {
 			t.Errorf("subnet implementation status is missing %q", required)

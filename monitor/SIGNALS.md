@@ -331,7 +331,6 @@ active missing capability and must not be read as green.
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
 | 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
-| 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
@@ -42447,18 +42446,20 @@ continues until the boot journal changes.
 
 ## 22. Subnet continuous correctness — SUBNET1
 
-Status (2026-09-13): **required monitoring specification; the registered
-`subnet-coverage` sentinel makes missing coverage visible, but the nine subnet
-correctness families are not implemented or qualified**. Existing §17
+Status (2026-10-22): **required monitoring specification; the registered
+`subnet-coverage` sentinel makes missing coverage visible and retires a family
+once its reader is registered**. Registered readers are not yet qualified
+against testnet evidence or peer review (§22.10): their findings are production
+observations, but a page from an unqualified reader is checked against on-chain
+evidence before it drives an incident. Existing §17
 `subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
 or settlement correctness. The fixed-object availability slice in §22.8a is registered separately and
-does not satisfy a full family. Other `subnet-*` correctness identifiers below,
-except the sentinel's `subnet-monitor-coverage` and this slice's
-`subnet-history-availability`, remain reserved alert classes rather than metric
-names. Implement each family with its source adapter, deterministic
-tests and registry entry before claiming automated coverage. Until then, a
-deployed subnet requiring that family has an explicit alert, never a green
-result from an absent metric.
+does not satisfy a full family. The `subnet-*` classes of a registered family
+are emitted alert classes; those of an unregistered family remain reserved
+alert classes rather than metric names. Implement each family with its source
+adapter, deterministic tests and registry entry before claiming automated
+coverage. Until then, a deployed subnet requiring that family has an explicit
+alert, never a green result from an absent metric.
 
 Sources of requirements: sibling `sn/WHITEPAPER.md` version 1.0, `sn/VALIDATOR.md`,
 `sn/protocol`, `sn/validator`, `sn/evm/src`, and the real server `/verify` and
@@ -42474,9 +42475,12 @@ classification. When the subnet is explicitly disabled, the economic battery
 is correctly **not deployed**. For enabled, invalid, unavailable, or ambiguous
 state, it emits `subnet-monitor-coverage` with the nine missing reader families
 and their source prerequisites. It deliberately cannot certify any economic
-invariant. Retire this warning only as the real typed family readers below are
-registered and independently qualified; §17 node health and log silence are
-not substitutes.
+invariant. The warning retires family by family: a family leaves it once a
+signal with that section number is registered, and that reader then reports its
+own unavailable sources as unknown. A lettered partial reader such as §22.8a is
+never counted as its family. Independent qualification (§22.10) is a separate
+release gate, not a sentinel state; §17 node health and log silence are not
+substitutes.
 
 Observe the complete configured operator and validator census, all live native
 UIDs and eligible head candidates, every due operator/epoch, and every finalized
@@ -42536,6 +42540,34 @@ Proposed collection/SLO defaults, to be verified in testnet before deployment:
 - Expensive complete replay runs incrementally with a retained completeness
   frontier; each completed epoch must be fully reconciled. Sampling is an early
   warning only and cannot certify all payouts, all proofs or all 200 head slots.
+
+Family readers for §22.6 through §22.9 share `subnet_replay_*.go`. Discovery
+starts from the reviewed public Config resource `sn.yml` (chain, genesis,
+netuid, deployment, coordinator, settlement vault and policy), never from the
+producer's st.yml or mirrored rows; its values are compared in memory and never
+rendered. A reviewed pin is always observed, because custody, claims and
+history outlive a disabled producer; without one, only an explicit disable is
+not deployed and every other state is unknown. Chain reads go to the first
+inventory `subtensor` host whose expected genesis matches the pin and whose
+node is a full archive, through one fixed loopback `curl` relay over the
+existing SSH runner: the json rpc batch travels on stdin, never argv, and the
+shared per-host command limit and host exclusions apply unchanged. Each run
+pins one finalized checkpoint, reads every view with eip-1898
+`{blockHash, requireCanonical: true}`, refuses an abi answer that does not
+re-encode byte for byte, and rechecks the checkpoint before any verdict or
+retained cursor advance. `SubnetReplaySettings` owns every bound (5-minute
+cadence, 3-minute run budget, 25-second relayed exchange, 8 MiB response,
+64-member batches, 24 exchanges per run, 1,000-block log windows). The optional
+monitor.yml `subnet_replay` block (schema `urnetwork-monitor-subnet-replay-v1`)
+enrolls only `api_origins` (exactly two bare https origins), `replay_from_block`,
+`evidence_from_block`, `validators` (ss58 hotkeys), `maximum_weight_limit_u16`,
+`anchor_deadline_blocks`, `writer_minimum_actions` and
+`writer_action_liability_wei`. Missing enrollment keeps the dependent classes
+unknown, a malformed block is itself a coverage gap, and enrollment never
+attests health. A family's missing source emits `subnet-monitor-coverage` with
+the classes it leaves undecided; an undecided invariant emits its own class with
+an unknown state. Proved custody, authorization, finalized-proof and accounting
+counterexamples are retained for the watcher's lifetime (§22.10).
 
 All probes are **read-only**. Share the existing four-probe admission and
 two-SSH-commands-per-destination bounds; add one shared endpoint RPC budget,
@@ -42668,6 +42700,7 @@ weight** also does not erase already-earned/still-pending emission from an older
 valid cycle. Preserve that chronology in any apparent unexpected-payment alert.
 
 ### 22.7 Pool emission capture, roots, claims, carry, and conservation
+Probe: `subnet-settlement`
 
 Sources: finalized coordinator/vault logs, block-pinned entitlements and
 accounting getters, exact stake positions, signed payout artifacts, authenticated
@@ -42702,6 +42735,56 @@ rounding tolerances. A balance increase alone can be a transfer/donation or
 dividend; it does not prove miner emission. Retain pending funding, finalized
 unclaimed entitlement, claim credit, paid transfer, expiry and carry as distinct
 states so obligations are neither double-counted nor silently dropped.
+
+`signal_subnet_settlement.go` implements this family for the v1 vault. Its
+**state census** reads, at one finalized evm checkpoint, the coordinator and
+vault links (any difference from the pin is §22.1's drift and leaves this
+family unknown), the vault's five counters, `liveEscrowStake` and
+`conservationHolds`, the coordinator's own operator census, and every epoch's
+`policyAt`/`epochEndBlock` plus each operator's `entitlement`,
+`rootCommitments`, `operatorAt` and `carry`. Beyond the three getter identities
+it reconstructs, from a complete census: `totalCaptured = Σ funded`;
+`pendingFunding = Σ funded` of funded epochs; `outstandingLiability = Σ funded`
+of finalized, root-missed and carried epochs `− totalPaid`; per operator
+`carry = Σ root-missed funding + Σ carried (total − claimed) − Σ finalized and
+carried (total − funded)`; and `Σ claimed − totalPaid >= 0`. A census beyond
+its operator or entry bound is explicitly partial: whole-history sums are
+unknown while per-epoch shape, clock and root rules still run. The clock rules
+use each epoch's own policy in evm blocks: close inside `[end, end +
+closeGrace]`, root inside `[end, end + rootCommitWindow]` by that epoch's root
+signer, finalization no earlier than `end + finalizeOffset`, expiry no earlier
+than `epochStartBlock(epoch + claimTtl + claimGrace + 1) − 1`.
+
+Its **event journal** is an incremental retained frontier from the enrolled
+`replay_from_block`, proven to precede the vault (no vault code at the block
+before it); every log block is checked against the canonical block at its
+height, and windows commit only after the closing checkpoint recheck. The
+journal reconstructs capture, deferral and dust pairing, finalization carry,
+exact claim shares, claimant credit and whole-credit payments, and compares them
+with the getters and a bounded set of `claimCredit` views. While the frontier is
+behind, `subnet-capture-delta`, `subnet-claim-correctness`,
+`subnet-claim-credit-payment` and the event half of `subnet-carry-isolation`
+stay unknown. **Root reproduction** fetches each committed root's artifact once
+per content hash from the enrolled `api_origins` through `/sn/artifact` and
+verifies it with `payoutartifact.DecodeWithContext`; a verified artifact whose
+root, deployment, contracts, policy, coordinates or 10,000-bps allocation
+differs from the chain is a counterexample. Unavailable or unverifiable bytes
+leave that root unknown; serving integrity across origins is §22.8's check.
+
+Bands: a proved identity, carry, claim, payment, root or clock contradiction is
+PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
+finalization due, persistent dust deferral and an unavailable artifact are WARN
+with Sustain 2; finalization still missing `FinalizeOverdueBlocks` after its
+offset pages on the same `epoch-N/finalization` identity. Targets are
+`subnet-settlement/vault` and `subnet-settlement/no-N` with bounded
+`epoch-N/condition` frames; source and enrollment gaps use target
+`subnet-settlement/coverage`. Aggregate contract counters are public chain
+state and are rendered as exact integers; claimant identities, hashes and
+addresses are never rendered. Missing today: the `subnet_replay` enrollment
+(`replay_from_block`, `api_origins`) is not provisioned in vault/main
+monitor.yml, so the journal and root reproduction stay unknown until it is; a
+declared settlement v2 deployment is not read and reports a coverage gap; no
+claimant or keeper SLO is configured.
 
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
 
