@@ -85,12 +85,26 @@ func subnetUnknown(family subnetFamily, class, target, reason string, sustain in
 // a run advances, such as a log frontier or a cursor, is committed only when
 // the run publishes its own findings, so withheld findings are read again.
 type subnetRun struct {
-	settings *SubnetCorrectnessSettings
-	limits   subnetLimits
-	session  *subnetRpcSession
-	started  time.Time
-	closer   func()
-	commits  []func()
+	settings    *SubnetCorrectnessSettings
+	limits      subnetLimits
+	session     *subnetRpcSession
+	environment string
+	started     time.Time
+	closer      func()
+	commits     []func()
+	// The agreed finalized height once the checkpoint is established.
+	checkpointNumber uint64
+}
+
+// The §22.10 frame of one decided check at the agreed checkpoint, in the
+// shared subnetReplayScope keys.
+func (self *subnetRun) scope(completeness, source string) subnetReplayScope {
+	return self.scopeAt(self.checkpointNumber, completeness, source)
+}
+
+// The frame at a finalized height before agreement, such as a contested one.
+func (self *subnetRun) scopeAt(number uint64, completeness, source string) subnetReplayScope {
+	return subnetReplayScope{environment: self.environment, checkpointKind: "native", checkpointNumber: number, completeness: completeness, source: source}
 }
 
 // Defers one observation-state advance to a published run.
@@ -139,7 +153,7 @@ func openSubnetRun(ctx context.Context, env *probeEnv, family subnetFamily) (sub
 		client, transport = newSubnetRpcHttpClient(limits.requestTimeout)
 		closer = transport.CloseIdleConnections
 	}
-	return subnetGate{run: &subnetRun{settings: settings, limits: limits, session: newSubnetRpcSession(client, limits), started: started, closer: closer}}, nil
+	return subnetGate{run: &subnetRun{settings: settings, limits: limits, session: newSubnetRpcSession(client, limits), environment: env.cfg.env, started: started, closer: closer}}, nil
 }
 
 // The effective settings generation must still be the one this run read.
@@ -163,27 +177,99 @@ func subnetSettingsCurrent(ctx context.Context, env *probeEnv) (string, error) {
 }
 
 // Closes a run. Findings computed against a stale generation are replaced by
-// one gate finding; a canceled parent withholds everything.
-func (self *subnetRun) close(ctx context.Context, env *probeEnv, family subnetFamily, findings []finding) ([]finding, error) {
+// one gate finding and nothing is committed; a canceled parent withholds
+// everything. Published reports whether the run's own findings stand.
+func (self *subnetRun) close(ctx context.Context, env *probeEnv, family subnetFamily, findings []finding) (closed []finding, published bool, err error) {
 	self.closer()
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	default:
 	}
 	if env.now().Before(self.started) {
-		return []finding{subnetCoverageGap(family, "configuration", "clock-regressed", subnetConfigurationSustain)}, nil
+		return []finding{subnetCoverageGap(family, "configuration", "clock-regressed", subnetConfigurationSustain)}, false, nil
 	}
 	if reason, err := subnetSettingsCurrent(ctx, env); err != nil || reason != "" {
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return []finding{subnetCoverageGap(family, "configuration", reason, subnetConfigurationSustain)}, nil
+		return []finding{subnetCoverageGap(family, "configuration", reason, subnetConfigurationSustain)}, false, nil
 	}
 	for _, commit := range self.commits {
 		commit()
 	}
-	return findings, nil
+	return findings, true, nil
+}
+
+// One family execution: the gate, the family's observation at one agreed
+// checkpoint, the §22.10 frame and counterexample retention, then the close
+// that publishes or withholds. An explicitly disabled deployment reports
+// nothing; every other output also carries the retained counterexamples.
+func runSubnetFamily(ctx context.Context, env *probeEnv, family subnetFamily, latch *subnetReplayLatch, observe func(context.Context, *subnetRun) ([]finding, error)) ([]finding, error) {
+	gate, err := openSubnetRun(ctx, env, family)
+	if err != nil || gate.notDeployed {
+		return nil, err
+	}
+	if gate.run == nil {
+		output, _ := latch.stage(env.now(), subnetFrame(env.cfg.env, 0, gate.findings))
+		return output, nil
+	}
+	run := gate.run
+	findings, err := observe(ctx, run)
+	if err != nil {
+		run.closer()
+		return nil, err
+	}
+	output, commit := latch.stage(env.now(), subnetFrame(run.environment, run.checkpointNumber, findings))
+	run.afterPublish(commit)
+	closed, published, err := run.close(ctx, env, family, output)
+	if err != nil || published {
+		return closed, err
+	}
+	withheld, _ := latch.stage(env.now(), subnetFrame(run.environment, run.checkpointNumber, closed))
+	return withheld, nil
+}
+
+// Every family alert carries the §22.10 frame. Findings built without one,
+// unknown states and coverage gaps, get the run's frame with an incomplete
+// comparison; the agreed checkpoint is named once it is established.
+func subnetFrame(environment string, checkpointNumber uint64, findings []finding) []finding {
+	scope := subnetReplayScope{environment: environment, checkpointKind: "native", checkpointNumber: checkpointNumber, completeness: "incomplete"}
+	framed := make([]finding, 0, len(findings))
+	for _, value := range findings {
+		if !value.healthy && value.context == "" {
+			value.context = scope.context()
+		}
+		framed = append(framed, value)
+	}
+	return framed
+}
+
+// The §22.1--§22.5 additions to the shared issue: the band state of a
+// warning (a proved counterexample is violated), the family's own evidence
+// and fixed key=value details rendered after the frame.
+type subnetDecision struct {
+	state    string
+	issue    subnetReplayIssue
+	evidence string
+	details  string
+}
+
+// One decided invariant in the shared §22.10 frame: the run's environment,
+// finalized checkpoint, completeness and comparison source, then the
+// invariant with its expected and observed values.
+func subnetDecided(family subnetFamily, class, target, frame string, scope subnetReplayScope, decision subnetDecision) finding {
+	decided := subnetReplayFinding(family.probeId, class, target, frame, scope, "SIGNALS.md §"+family.number, decision.issue)
+	if decision.state != "violated" {
+		decided.observed = "state=" + decision.state + strings.TrimPrefix(decided.observed, "state=violated")
+	}
+	if decision.details != "" {
+		decided.observed += " " + decision.details
+	}
+	if decision.evidence != "" {
+		decided.evidence = decision.evidence
+	}
+	return decided
 }
 
 // The two enrolled endpoints of each kind with public ordinals.

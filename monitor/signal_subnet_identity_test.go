@@ -2,6 +2,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -395,5 +396,31 @@ func TestSubnetIdentityRegistrationMetadata(t *testing.T) {
 	signal := NewSubnetIdentitySignal()
 	if signal.Number() != "22.2" || signal.Key() != "subnet-identity" || signal.ID() != "subnet/identity" || signal.Cadence() <= 0 {
 		t.Fatalf("unexpected metadata %s %s %s", signal.Number(), signal.Key(), signal.ID())
+	}
+}
+
+// §22.10 acceptance: a pool hotkey owned by a foreign coldkey is a proved
+// custody counterexample; restoring the vault owner is the healthy read.
+func init() {
+	subnetFamilyAcceptanceCases["22.2"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			return NewSubnetIdentitySignal(), newSubnetWorld(t).signalSettings()
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			world := newSubnetWorld(t)
+			pool := subnetWorldKey("operator-1-pool")
+			original := types.AccountID(subnetMirroredColdkey(world.vault))
+			world.setStorage("SubtensorModule", "Owner", types.AccountID(subnetWorldKey("foreign")), pool[:])
+			return NewSubnetIdentitySignal(), world.signalSettings(), func() {
+				world.setStorage("SubtensorModule", "Owner", original, pool[:])
+			}
+		},
+		violatedClass: subnetPoolCustodyIdentityClass,
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			return subnetWorldAcceptanceUnknown(t, NewSubnetIdentitySignal(), "eth_getTransactionByHash")
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			return subnetWorldAcceptanceCanceled(t, NewSubnetIdentitySignal(), "eth_getTransactionByHash")
+		},
 	}
 }

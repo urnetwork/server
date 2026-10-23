@@ -54,10 +54,11 @@ func NewSubnetIdentitySignal() Signal {
 type subnetIdentityProbe struct {
 	runtimes    *subnetRuntimeCache
 	bindingLogs *subnetLogFrontier
+	latch       *subnetReplayLatch
 }
 
 func newSubnetIdentityProbe() *subnetIdentityProbe {
-	return &subnetIdentityProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier()}
+	return &subnetIdentityProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch()}
 }
 
 func (*subnetIdentityProbe) id() string               { return "subnet/identity" }
@@ -66,17 +67,7 @@ func (*subnetIdentityProbe) cadence() time.Duration   { return 5 * time.Minute }
 func (*subnetIdentityProbe) runBudget() time.Duration { return subnetIdentityRunBudget }
 
 func (self *subnetIdentityProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	gate, err := openSubnetRun(ctx, env, subnetIdentityFamily)
-	if err != nil || gate.run == nil {
-		return gate.findings, err
-	}
-	run := gate.run
-	findings, err := self.observe(ctx, run)
-	if err != nil {
-		run.closer()
-		return nil, err
-	}
-	return run.close(ctx, env, subnetIdentityFamily, findings)
+	return runSubnetFamily(ctx, env, subnetIdentityFamily, self.latch, self.observe)
 }
 
 func (self *subnetIdentityProbe) observe(ctx context.Context, run *subnetRun) ([]finding, error) {
@@ -132,18 +123,19 @@ func observeSubnetPoolCustody(ctx context.Context, run *subnetRun, checkpoint *s
 	}
 	if len(censusReasons) != 0 {
 		sort.Strings(censusReasons)
-		findings = append(findings, finding{
-			probeId: subnetIdentityFamily.probeId, tier: tierWarn, class: subnetPoolCustodyIdentityClass,
-			target: "subnet-identity/census", frame: "census", sustain: subnetConfigurationSustain,
-			symptom:   "The on-chain operator census differs from the reviewed census",
-			mechanism: "The coordinator's own operatorCount/operatorIdAt census at the checkpoint and the reviewed operator census disagree. An unreviewed operator has no reviewed artifact signer, so its deposit audit cannot be replayed; a reviewed operator missing on chain is not registered.",
-			baseline:  "The coordinator registers exactly the reviewed operators.",
-			observed:  "state=census-mismatch reasons=" + strings.Join(censusReasons, ","),
-			evidence:  fmt.Sprintf("Checkpoint height %d; %d on-chain operators; %d reviewed operators.", checkpoint.number, len(state.operatorIds), len(reviewed)),
-			action:    "Reconcile the reviewed census with the registration history through governance; do not infer an operator's signer from its own artifacts.",
-			verify:    "The on-chain census equals the reviewed census on a fresh run.",
-			playbook:  "SIGNALS.md §22.2",
-		})
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetPoolCustodyIdentityClass, "subnet-identity/census", "census", run.scope("complete", "reviewed-operator-census"), subnetDecision{
+			state: "census-mismatch",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "reviewed-operator-census", expected: "exactly-the-reviewed-operators", observed: strings.Join(censusReasons, ","),
+				symptom:   "The on-chain operator census differs from the reviewed census",
+				mechanism: "The coordinator's own operatorCount/operatorIdAt census at the checkpoint and the reviewed operator census disagree. An unreviewed operator has no reviewed artifact signer, so its deposit audit cannot be replayed; a reviewed operator missing on chain is not registered.",
+				baseline:  "The coordinator registers exactly the reviewed operators.",
+				action:    "Reconcile the reviewed census with the registration history through governance; do not infer an operator's signer from its own artifacts.",
+				verify:    "The on-chain census equals the reviewed census on a fresh run.",
+			},
+			evidence: fmt.Sprintf("Checkpoint height %d; %d on-chain operators; %d reviewed operators.", checkpoint.number, len(state.operatorIds), len(reviewed)),
+		}))
 	}
 	type poolCheck struct {
 		operator *subnetOperatorState
@@ -231,24 +223,25 @@ func observeSubnetPoolCustody(ctx context.Context, run *subnetRun, checkpoint *s
 		if !pool.Active {
 			// The vault's own flag stops capture for this pool; ownership is
 			// unchanged, so it is not a custody identity breach.
-			findings = append(findings, finding{
-				probeId: subnetIdentityFamily.probeId, tier: tierWarn, class: subnetPoolCustodyIdentityClass,
-				target: target, frame: "pool-inactive", sustain: subnetConfigurationSustain,
-				symptom:   "An active operator's vault pool is inactive",
-				mechanism: "The coordinator lists the operator as active but the settlement vault marks its pool inactive, so the pool's emission is not captured. Ownership is unchanged; an upgraded coordinator or a pool migration can set this flag.",
-				baseline:  "Every active operator's vault pool is active.",
-				observed:  "state=pool-inactive",
-				evidence:  fmt.Sprintf("Checkpoint height %d; operator %d.", checkpoint.number, operator.noId),
-				action:    "Confirm whether the pool is migrating; otherwise restore capture through governance.",
-				verify:    "The vault pool is active, or the operator is deactivated, on a fresh run.",
-				playbook:  "SIGNALS.md §22.2",
-			})
+			findings = append(findings, subnetDecided(subnetIdentityFamily, subnetPoolCustodyIdentityClass, target, "pool-inactive", run.scope("complete", "coordinator-and-settlement-vault"), subnetDecision{
+				state: "pool-inactive",
+				issue: subnetReplayIssue{
+					tier: tierWarn, sustain: subnetConfigurationSustain,
+					invariant: "active-operator-pool-active", expected: "active", observed: "inactive",
+					symptom:   "An active operator's vault pool is inactive",
+					mechanism: "The coordinator lists the operator as active but the settlement vault marks its pool inactive, so the pool's emission is not captured. Ownership is unchanged; an upgraded coordinator or a pool migration can set this flag.",
+					baseline:  "Every active operator's vault pool is active.",
+					action:    "Confirm whether the pool is migrating; otherwise restore capture through governance.",
+					verify:    "The vault pool is active, or the operator is deactivated, on a fresh run.",
+				},
+				evidence: fmt.Sprintf("Checkpoint height %d; operator %d.", checkpoint.number, operator.noId),
+			}))
 		}
 		if len(reasons) == 0 {
 			findings = append(findings, subnetHealthy(subnetIdentityFamily, subnetPoolCustodyIdentityClass, target))
 			continue
 		}
-		findings = append(findings, subnetCustodyViolation(target, reasons, fmt.Sprintf("Checkpoint height %d; operator %d; vault UID %d.", checkpoint.number, operator.noId, pool.Uid)))
+		findings = append(findings, subnetCustodyViolation(run.scope("complete", "coordinator-vault-and-native-registry"), target, reasons, fmt.Sprintf("Checkpoint height %d; operator %d; vault UID %d.", checkpoint.number, operator.noId, pool.Uid)))
 	}
 	escrowReasons := []string{}
 	for _, read := range escrowReads {
@@ -279,24 +272,25 @@ func observeSubnetPoolCustody(ctx context.Context, run *subnetRun, checkpoint *s
 	if len(escrowReasons) == 0 {
 		findings = append(findings, subnetHealthy(subnetIdentityFamily, subnetPoolCustodyIdentityClass, "subnet-identity/escrow"))
 	} else {
-		findings = append(findings, subnetCustodyViolation("subnet-identity/escrow", escrowReasons, fmt.Sprintf("Checkpoint height %d; escrow registered=%t.", checkpoint.number, state.escrowRegistered)))
+		findings = append(findings, subnetCustodyViolation(run.scope("complete", "coordinator-vault-and-native-registry"), "subnet-identity/escrow", escrowReasons, fmt.Sprintf("Checkpoint height %d; escrow registered=%t.", checkpoint.number, state.escrowRegistered)))
 	}
 	return findings, nil
 }
 
-func subnetCustodyViolation(target string, reasons []string, evidence string) finding {
-	return finding{
-		probeId: subnetIdentityFamily.probeId, tier: tierPage, class: subnetPoolCustodyIdentityClass,
-		target: target, sustain: subnetProvedSustain,
-		symptom:   "A subnet pool or escrow custody identity is not the registered one",
-		mechanism: "At a finalized block the vault pool, the coordinator's operator version and the native UID mapping disagree, the hotkey is owned by a coldkey other than the immutable vault, or a pool, deposit, escrow, reserve or participant role is shared. Emission captured from such a pool can be credited to the wrong operator or leave custody.",
-		baseline:  "Each active operator's vault pool equals its registered pool hotkey, holds its vault UID in both Keys and Uids, is owned by the vault coldkey, and every custody role is distinct; the escrow is registered under the vault coldkey.",
-		observed:  "state=violated mismatched=" + strings.Join(subnetSortedUnique(reasons), ","),
-		evidence:  evidence + " Hotkeys and coldkeys are compared in memory and not rendered.",
-		action:    "Reconstruct the registration and rotation boundary from finalized events before any repair; never credit a reused UID to its former operator.",
-		verify:    "A fresh checkpoint shows the registered pool identity in both directions under the vault coldkey.",
-		playbook:  "SIGNALS.md §22.2",
-	}
+func subnetCustodyViolation(scope subnetReplayScope, target string, reasons []string, evidence string) finding {
+	return subnetDecided(subnetIdentityFamily, subnetPoolCustodyIdentityClass, target, "", scope, subnetDecision{
+		state: "violated",
+		issue: subnetReplayIssue{
+			tier: tierPage, sustain: subnetProvedSustain,
+			invariant: "pool-custody-identity", expected: "registered-pool-hotkey-uid-both-ways-vault-coldkey-owner-distinct-roles", observed: strings.Join(subnetSortedUnique(reasons), ","),
+			symptom:   "A subnet pool or escrow custody identity is not the registered one",
+			mechanism: "At a finalized block the vault pool, the coordinator's operator version and the native UID mapping disagree, the hotkey is owned by a coldkey other than the immutable vault, or a pool, deposit, escrow, reserve or participant role is shared. Emission captured from such a pool can be credited to the wrong operator or leave custody.",
+			baseline:  "Each active operator's vault pool equals its registered pool hotkey, holds its vault UID in both Keys and Uids, is owned by the vault coldkey, and every custody role is distinct; the escrow is registered under the vault coldkey.",
+			action:    "Reconstruct the registration and rotation boundary from finalized events before any repair; never credit a reused UID to its former operator.",
+			verify:    "A fresh checkpoint shows the registered pool identity in both directions under the vault coldkey.",
+		},
+		evidence: evidence + " Hotkeys and coldkeys are compared in memory and not rendered.",
+	})
 }
 
 func subnetDuplicateKeys(keys [][32]byte) bool {
@@ -403,18 +397,19 @@ func observeSubnetValidatorEligibility(ctx context.Context, run *subnetRun, chec
 			findings = append(findings, subnetHealthy(subnetIdentityFamily, subnetValidatorEligibilityClass, target))
 			continue
 		}
-		findings = append(findings, finding{
-			probeId: subnetIdentityFamily.probeId, tier: tierWarn, class: subnetValidatorEligibilityClass,
-			target: target, sustain: subnetConfigurationSustain,
-			symptom:   "A reviewed subnet validator is not eligible at the checkpoint",
-			mechanism: "The validator's hotkey no longer holds a UID with a validator permit, its owner is not the reviewed coldkey, or its stake is below the native threshold. Its weights would not count, and evidence signed under a changed identity cannot be attributed to the reviewed validator.",
-			baseline:  "Each reviewed validator's hotkey holds its UID in both directions, is owned by its reviewed coldkey, has a permit and meets the stake threshold.",
-			observed:  "state=ineligible reasons=" + strings.Join(reasons, ","),
-			evidence:  fmt.Sprintf("Checkpoint height %d; validator ordinal %d. Accepting evidence from an ineligible identity is a validator-evidence anchor finding in §22.8.", checkpoint.number, i+1),
-			action:    "Check the validator's registration, permit ranking and stake; restore the reviewed identity or update the reviewed census only through review.",
-			verify:    "The validator is registered with a permit and sufficient stake under its reviewed coldkey on a fresh run.",
-			playbook:  "SIGNALS.md §22.2",
-		})
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetValidatorEligibilityClass, target, "", run.scope("complete", "reviewed-validator-census"), subnetDecision{
+			state: "ineligible",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "reviewed-validator-eligible", expected: "registered-permitted-reviewed-owner-and-threshold-stake", observed: strings.Join(reasons, ","),
+				symptom:   "A reviewed subnet validator is not eligible at the checkpoint",
+				mechanism: "The validator's hotkey no longer holds a UID with a validator permit, its owner is not the reviewed coldkey, or its stake is below the native threshold. Its weights would not count, and evidence signed under a changed identity cannot be attributed to the reviewed validator.",
+				baseline:  "Each reviewed validator's hotkey holds its UID in both directions, is owned by its reviewed coldkey, has a permit and meets the stake threshold.",
+				action:    "Check the validator's registration, permit ranking and stake; restore the reviewed identity or update the reviewed census only through review.",
+				verify:    "The validator is registered with a permit and sufficient stake under its reviewed coldkey on a fresh run.",
+			},
+			evidence: fmt.Sprintf("Checkpoint height %d; validator ordinal %d. Accepting evidence from an ineligible identity is a validator-evidence anchor finding in §22.8.", checkpoint.number, i+1),
+		}))
 	}
 	return findings, nil
 }
@@ -552,32 +547,34 @@ func observeSubnetCommitmentMirrors(ctx context.Context, run *subnetRun, checkpo
 	evidence := fmt.Sprintf("Checkpoint height %d; %d native fleet commitments; %d other commitments; policy commitment age bound %d blocks.", checkpoint.number, len(fleet), legacy, maxAge)
 	findings := []finding{}
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetIdentityFamily.probeId, tier: tierPage, class: subnetCommitmentMirrorLagClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "A coordinator commitment mirror contradicts native finalized state",
-			mechanism: "A mirrored commitment names a newer block, a different hash or a non-canonical block hash than the native commitment, or a valid commitment expired before it was mirrored. A false mirror can admit a binding no fleet authorized; an expired one drops valid membership.",
-			baseline:  "Every native fleet commitment is mirrored with its exact hash, block and canonical block hash before the policy's commitment age expires.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(pageReasons), ","),
-			evidence:  evidence,
-			action:    "Preserve the native inclusion and the EVM mirror receipt; investigate the commitment oracle before any binding relies on the mirror.",
-			verify:    "Every fleet commitment's mirror matches native finalized state on a fresh run.",
-			playbook:  "SIGNALS.md §22.2",
-		})
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetCommitmentMirrorLagClass, target, "", run.scope("complete", "native-commitments-and-coordinator-mirror"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "commitment-mirror-consistent", expected: "mirror-equals-native-commitment-before-expiry", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
+				symptom:   "A coordinator commitment mirror contradicts native finalized state",
+				mechanism: "A mirrored commitment names a newer block, a different hash or a non-canonical block hash than the native commitment, or a valid commitment expired before it was mirrored. A false mirror can admit a binding no fleet authorized; an expired one drops valid membership.",
+				baseline:  "Every native fleet commitment is mirrored with its exact hash, block and canonical block hash before the policy's commitment age expires.",
+				action:    "Preserve the native inclusion and the EVM mirror receipt; investigate the commitment oracle before any binding relies on the mirror.",
+				verify:    "Every fleet commitment's mirror matches native finalized state on a fresh run.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(warnReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetIdentityFamily.probeId, tier: tierWarn, class: subnetCommitmentMirrorLagClass,
-			target: target, frame: "lag", sustain: subnetTransientSustain,
-			symptom:   "A native fleet commitment is not yet mirrored by the coordinator",
-			mechanism: "A finalized fleet commitment has waited beyond the reviewed lag without a coordinator mirror. Its fleet cannot bind until the commitment oracle mirrors it.",
-			baseline:  "The commitment oracle mirrors each finalized fleet commitment within the reviewed lag.",
-			observed:  "state=lagging reasons=" + strings.Join(subnetSortedUnique(warnReasons), ","),
-			evidence:  evidence,
-			action:    "Check the commitment oracle's progress and funding; do not mirror manually from the monitor.",
-			verify:    "The commitment is mirrored on a later run.",
-			playbook:  "SIGNALS.md §22.2",
-		})
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetCommitmentMirrorLagClass, target, "lag", run.scope("complete", "native-commitments-and-coordinator-mirror"), subnetDecision{
+			state: "lagging",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetTransientSustain,
+				invariant: "commitment-mirrored-within-lag", expected: fmt.Sprintf("mirrored-within-%d-blocks", run.limits.maxFinalityLagBlocks*16), observed: strings.Join(subnetSortedUnique(warnReasons), ","),
+				symptom:   "A native fleet commitment is not yet mirrored by the coordinator",
+				mechanism: "A finalized fleet commitment has waited beyond the reviewed lag without a coordinator mirror. Its fleet cannot bind until the commitment oracle mirrors it.",
+				baseline:  "The commitment oracle mirrors each finalized fleet commitment within the reviewed lag.",
+				action:    "Check the commitment oracle's progress and funding; do not mirror manually from the monitor.",
+				verify:    "The commitment is mirrored on a later run.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(findings) == 0 {
 		findings = append(findings, subnetHealthy(subnetIdentityFamily, subnetCommitmentMirrorLagClass, target))
@@ -641,18 +638,19 @@ func (self *subnetIdentityProbe) observeFleetBindings(ctx context.Context, run *
 	findings := []finding{}
 	evidence := fmt.Sprintf("Checkpoint height %d; frontier read %d accepted bindings; %d sent through a contract wallet whose calldata is not the direct call.", checkpoint.number, len(logs), indirect)
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetIdentityFamily.probeId, tier: tierPage, class: subnetFleetBindingInvalidClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "The coordinator accepted an invalid fleet binding",
-			mechanism: "An accepted FleetBound binding fails its client Ed25519 consent, its hotkey sr25519 authorization, its chain/netuid/coordinator domain, its generation or validity span, or its future effective epoch when re-verified from the original calldata. Such a binding can credit a fleet that never authorized it.",
-			baseline:  "Every accepted binding verifies under both signatures and the deployment domain, takes effect only in a future epoch and stays within the policy's validity span.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(pageReasons), ","),
-			evidence:  evidence + " Rejected hostile requests emit no event and are not counted here.",
-			action:    "Preserve the transaction and its event, quarantine the binding's credit, and investigate the coordinator's verification before relying on fleet membership.",
-			verify:    "Every accepted binding re-verifies on a fresh run and the incident attributes the accepted one.",
-			playbook:  "SIGNALS.md §22.2",
-		})
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetFleetBindingInvalidClass, target, "", run.scope("bounded-frontier", "original-binding-transactions"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "accepted-binding-verifies", expected: "client-consent-hotkey-authorization-domain-and-epochs-verify", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
+				symptom:   "The coordinator accepted an invalid fleet binding",
+				mechanism: "An accepted FleetBound binding fails its client Ed25519 consent, its hotkey sr25519 authorization, its chain/netuid/coordinator domain, its generation or validity span, or its future effective epoch when re-verified from the original calldata. Such a binding can credit a fleet that never authorized it.",
+				baseline:  "Every accepted binding verifies under both signatures and the deployment domain, takes effect only in a future epoch and stays within the policy's validity span.",
+				action:    "Preserve the transaction and its event, quarantine the binding's credit, and investigate the coordinator's verification before relying on fleet membership.",
+				verify:    "Every accepted binding re-verifies on a fresh run and the incident attributes the accepted one.",
+			},
+			evidence: evidence + " Rejected hostile requests emit no event and are not counted here.",
+		}))
 	}
 	if indirect != 0 {
 		findings = append(findings, subnetUnknown(subnetIdentityFamily, subnetFleetBindingInvalidClass, target, "binding-calldata-indirect", subnetTransientSustain, "decodable direct bindFleetMember calldata for every accepted binding"))

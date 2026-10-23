@@ -2,6 +2,7 @@
 package monitor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,11 +211,12 @@ func TestSubnetHeadTierIsolation(t *testing.T) {
 	world.commitArtifactWith(1, world.currentEpoch-1, excluded)
 	world.activeBindings[headClient] = stabi.STCoordinatorBindingRecord{Uid: 30, Generation: 1, Hotkey: subnetWorldKey("fleet-2-hotkey")}
 	requireOnlySubnetHeadStandingUnknowns(t, runSubnetWorld(t, NewSubnetHeadSignal(), world.signalSettings()))
-	// A head exclusion with no boundary binding pays neither tier.
+	// A head exclusion with no boundary binding pays neither tier; it warns
+	// under its own frame so it never stands in for a double pay.
 	world = newSubnetWorld(t)
 	world.commitArtifactWith(1, world.currentEpoch-1, excluded)
 	alerts = runSubnetWorld(t, NewSubnetHeadSignal(), world.signalSettings())
-	alert = requireSubnetAlert(t, alerts, subnetTierDoublePayClass, "subnet-head/no-1", "", SeverityWarn)
+	alert = requireSubnetAlert(t, alerts, subnetTierDoublePayClass, "subnet-head/no-1", "unpaid", SeverityWarn)
 	if !strings.Contains(alert.Observed, "head-excluded-unbound") {
 		t.Fatal(alert.Observed)
 	}
@@ -254,5 +256,34 @@ func TestSubnetHeadRegistrationMetadata(t *testing.T) {
 	signal := NewSubnetHeadSignal()
 	if signal.Number() != "22.5" || signal.Key() != "subnet-head" || signal.ID() != "subnet/head" || signal.Cadence() <= 0 {
 		t.Fatalf("unexpected metadata %s %s %s", signal.Number(), signal.Key(), signal.ID())
+	}
+}
+
+// §22.10 acceptance: a validator row weighting itself is a proved accounting
+// counterexample; restoring the world's row is the healthy read. Head
+// selection replay and realized pay remain standing gaps of a healthy run.
+func init() {
+	subnetFamilyAcceptanceCases["22.5"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			return NewSubnetHeadSignal(), newSubnetWorld(t).signalSettings()
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			world := newSubnetWorld(t)
+			world.setWeights(1, []subnetWeightPair{{Uid: 11, Weight: 20000}, {Uid: 30, Weight: 20000}, {Uid: 1, Weight: 10000}}, world.finalized-100)
+			return NewSubnetHeadSignal(), world.signalSettings(), func() {
+				world.setWeights(1, []subnetWeightPair{{Uid: 11, Weight: 20000}, {Uid: 12, Weight: 20000}, {Uid: 30, Weight: 25535}}, world.finalized-100)
+			}
+		},
+		violatedClass: subnetHeadWeightBypassClass,
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			return subnetWorldAcceptanceUnknown(t, NewSubnetHeadSignal(), "state_getStorage")
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			return subnetWorldAcceptanceCanceled(t, NewSubnetHeadSignal(), "state_getStorage")
+		},
+		fixedGaps: []subnetFamilyAcceptanceGap{
+			{class: subnetPromotionEconomicsClass, frame: "unobserved"},
+			{class: subnetHeadSelectionClass, frame: "unobserved"},
+		},
 	}
 }

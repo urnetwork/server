@@ -2,6 +2,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
@@ -47,10 +48,31 @@ func TestSubnetValidationHealthyDeploymentVerifiesEveryProof(t *testing.T) {
 	if len(world.requests) == 0 {
 		t.Fatal("no verify route was read")
 	}
-	for _, request := range world.requests {
-		if strings.HasPrefix(request, "POST") {
-			t.Fatal("the validation reader contacted a chain endpoint")
+	// Chain endpoints serve only the agreed checkpoint that dates the
+	// published evidence; no contract, log or storage census is read.
+	for call := range world.calls {
+		switch method := call[strings.LastIndex(call, " ")+1:]; method {
+		case "eth_call", "eth_getLogs", "eth_getStorageAt", "eth_getCode", "eth_getTransactionByHash", "state_getKeysPaged":
+			t.Fatalf("the validation reader read %s from a chain endpoint", method)
 		}
+	}
+}
+
+// The published evidence is decided without the chain; only its frame then
+// says the checkpoint is unavailable.
+func TestSubnetValidationDecidesWithoutTheCheckpoint(t *testing.T) {
+	world := newSubnetWorld(t)
+	world.proofs.Rows[0].FinalSig[0] ^= 1
+	world.override = func(endpoint, method string, params []json.RawMessage) (any, error, bool) {
+		if method == "chain_getFinalizedHead" {
+			return nil, errSubnetWorldSourceLoss, true
+		}
+		return nil, nil, false
+	}
+	alerts := runSubnetWorld(t, NewSubnetValidationSignal(), world.signalSettings())
+	alert := requireSubnetAlert(t, alerts, subnetPathProofInvalidClass, "subnet-validation/proofs", "", SeverityPage)
+	if !strings.Contains(alert.Context, "checkpoint=unavailable") || !strings.Contains(alert.Observed, "final-signature") {
+		t.Fatalf("an unavailable checkpoint hid or misdated the proof failure: %s | %s", alert.Context, alert.Observed)
 	}
 }
 
@@ -300,5 +322,49 @@ func TestSubnetValidationRegistrationMetadata(t *testing.T) {
 	signal := NewSubnetValidationSignal()
 	if signal.Number() != "22.4" || signal.Key() != "subnet-validation" || signal.ID() != "subnet/validation" || signal.Cadence() <= 0 {
 		t.Fatalf("unexpected metadata %s %s %s", signal.Number(), signal.Key(), signal.ID())
+	}
+}
+
+// §22.10 acceptance: a published Final with a broken server signature is a
+// proved finalized-proof counterexample; restoring it is the healthy read.
+// The validators' private measurement, cuts, attribution and canary remain
+// standing gaps of a healthy run.
+func init() {
+	subnetFamilyAcceptanceCases["22.4"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			return NewSubnetValidationSignal(), newSubnetWorld(t).signalSettings()
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			world := newSubnetWorld(t)
+			world.proofs.Rows[0].FinalSig[0] ^= 1
+			return NewSubnetValidationSignal(), world.signalSettings(), func() {
+				world.proofs.Rows[0].FinalSig[0] ^= 1
+			}
+		},
+		violatedClass: subnetPathProofInvalidClass,
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			world := newSubnetWorld(t)
+			world.routes["/verify/proofs"] = func(request *http.Request) *http.Response {
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{}, Body: http.NoBody, Request: request}
+			}
+			return NewSubnetValidationSignal(), world.signalSettings()
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			world := newSubnetWorld(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			proofs := world.routes["/verify/proofs"]
+			world.routes["/verify/proofs"] = func(request *http.Request) *http.Response {
+				cancel()
+				return proofs(request)
+			}
+			return NewSubnetValidationSignal(), world.signalSettings(), ctx
+		},
+		fixedGaps: []subnetFamilyAcceptanceGap{
+			{class: subnetVerifyPoisoningClass, frame: "unobserved"},
+			{class: subnetPoolQualityMismatchClass, frame: "unobserved"},
+			{class: subnetAttemptHistoryGapClass, frame: "unobserved"},
+			{class: subnetEgressAttributionClass, frame: "unobserved"},
+		},
 	}
 }

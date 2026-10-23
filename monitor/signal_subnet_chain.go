@@ -57,10 +57,11 @@ type subnetChainProbe struct {
 	runtimes       *subnetRuntimeCache
 	cursor         *subnetFinalizedCursor
 	governanceLogs *subnetLogFrontier
+	latch          *subnetReplayLatch
 }
 
 func newSubnetChainProbe() *subnetChainProbe {
-	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier()}
+	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch()}
 }
 
 func (*subnetChainProbe) id() string               { return "subnet/chain" }
@@ -92,17 +93,7 @@ func (self *subnetFinalizedCursor) advance(number uint64, hash types.Hash) {
 }
 
 func (self *subnetChainProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	gate, err := openSubnetRun(ctx, env, subnetChainFamily)
-	if err != nil || gate.run == nil {
-		return gate.findings, err
-	}
-	run := gate.run
-	findings, err := self.observe(ctx, run)
-	if err != nil {
-		run.closer()
-		return nil, err
-	}
-	return run.close(ctx, env, subnetChainFamily, findings)
+	return runSubnetFamily(ctx, env, subnetChainFamily, self.latch, self.observe)
 }
 
 func (self *subnetChainProbe) observe(ctx context.Context, run *subnetRun) ([]finding, error) {
@@ -168,21 +159,24 @@ func (self *subnetChainProbe) observeCursor(ctx context.Context, run *subnetRun,
 			return []finding{subnetUnknown(subnetChainFamily, subnetFinalityDivergenceClass, "subnet-chain/cursor", reason, subnetTransientSustain, "the canonical hash of the last accepted finalized block")}, nil
 		}
 		if canonical != hash {
-			return []finding{subnetFinalityContradiction("subnet-chain/cursor", "", "accepted-finalized-block-replaced", fmt.Sprintf("Accepted finalized height %d is no longer canonical at the agreed checkpoint height %d.", number, checkpoint.number))}, nil
+			return []finding{subnetFinalityContradiction(run.scope("contradicted", "accepted-finalized-cursor"), "subnet-chain/cursor", "", "accepted-finalized-block-replaced", fmt.Sprintf("Accepted finalized height %d is no longer canonical at the agreed checkpoint height %d.", number, checkpoint.number))}, nil
 		}
 	}
 	if checkpoint.number < number {
-		return []finding{{
-			probeId: subnetChainFamily.probeId, tier: tierWarn, class: subnetFinalityDivergenceClass,
-			target: "subnet-chain/cursor", frame: "regressed", sustain: subnetTransientSustain,
-			symptom:   "The agreed finalized checkpoint regressed below the monitor's accepted cursor",
-			mechanism: "Both endpoints now agree on a lower finalized height than this process already accepted. The accepted block is still canonical, so this is a lagging or replaced endpoint, not new history; the cursor does not move backwards.",
-			baseline:  "The agreed finalized height never decreases across observations.",
-			observed:  fmt.Sprintf("state=regressed accepted_height=%d agreed_height=%d", number, checkpoint.number),
-			action:    "Check both endpoints' sync and finality progress; restore a synced operational endpoint.",
-			verify:    "The agreed height reaches the accepted cursor again on consecutive runs.",
-			playbook:  "SIGNALS.md §22.1",
-		}}, nil
+		return []finding{subnetDecided(subnetChainFamily, subnetFinalityDivergenceClass, "subnet-chain/cursor", "regressed", run.scope("complete", "accepted-finalized-cursor"), subnetDecision{
+			state: "regressed",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetTransientSustain,
+				invariant: "agreed-height-never-decreases", expected: fmt.Sprintf("at-least-%d", number), observed: fmt.Sprintf("%d", checkpoint.number),
+				delta:     fmt.Sprintf("-%d", number-checkpoint.number),
+				symptom:   "The agreed finalized checkpoint regressed below the monitor's accepted cursor",
+				mechanism: "Both endpoints now agree on a lower finalized height than this process already accepted. The accepted block is still canonical, so this is a lagging or replaced endpoint, not new history; the cursor does not move backwards.",
+				baseline:  "The agreed finalized height never decreases across observations.",
+				action:    "Check both endpoints' sync and finality progress; restore a synced operational endpoint.",
+				verify:    "The agreed height reaches the accepted cursor again on consecutive runs.",
+			},
+			details: fmt.Sprintf("accepted_height=%d agreed_height=%d", number, checkpoint.number),
+		})}, nil
 	}
 	run.afterPublish(func() { self.cursor.advance(checkpoint.number, checkpoint.nativeHash) })
 	return []finding{subnetHealthy(subnetChainFamily, subnetFinalityDivergenceClass, "subnet-chain/cursor")}, nil
@@ -299,32 +293,34 @@ func (self *subnetChainProbe) observeGovernance(ctx context.Context, run *subnet
 	findings := eventFindings
 	evidence := fmt.Sprintf("Checkpoint height %d; coordinator paused=%t; current epoch %d. Contract addresses, code hashes and roles are compared in memory with the reviewed enrollment and are not rendered.", checkpoint.number, state.paused, state.currentEpoch)
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierPage, class: subnetDeploymentGovernanceClass,
-			target: "subnet-chain/deployment", sustain: subnetProvedSustain,
-			symptom:   "The live subnet contract deployment differs from the approved deployment",
-			mechanism: "The coordinator proxy slot, a contract's deployed bytecode, a one-time link, a mirrored contract coldkey, an active governance role or a governance event at a finalized block contradicts the reviewed deployment. A replaced custody contract, unauthorized upgrade or role overlap can redirect custody or policy.",
-			baseline:  "The coordinator is a UUPS proxy to the reviewed implementation; vault and sink bytecode are the reviewed immutable code; vault, sink and coordinator name each other; the three coldkeys are each contract's own mirrored account; owner, guardian and oracle are the reviewed distinct roles, with the approved multisig owner on mainnet.",
-			observed:  "state=violated mismatched=" + strings.Join(subnetSortedUnique(pageReasons), ","),
-			evidence:  evidence,
-			action:    "Capture the exact code, slot and role evidence privately and request governance incident response. Do not repair by updating the reviewed enrollment from the observed values.",
-			verify:    "A fresh agreed checkpoint matches every reviewed governance input, and the incident record attributes the drift.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetDeploymentGovernanceClass, "subnet-chain/deployment", "", run.scope("complete", "reviewed-governance-enrollment"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "reviewed-governance", expected: "reviewed-implementation-code-links-coldkeys-roles-and-owner-authority", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
+				symptom:   "The live subnet contract deployment differs from the approved deployment",
+				mechanism: "The coordinator proxy slot, a contract's deployed bytecode, a one-time link, a mirrored contract coldkey, an active governance role or a governance event at a finalized block contradicts the reviewed deployment. A replaced custody contract, unauthorized upgrade or role overlap can redirect custody or policy.",
+				baseline:  "The coordinator is a UUPS proxy to the reviewed implementation; vault and sink bytecode are the reviewed immutable code; vault, sink and coordinator name each other; the three coldkeys are each contract's own mirrored account; owner, guardian and oracle are the reviewed distinct roles, with the approved multisig owner on mainnet.",
+				action:    "Capture the exact code, slot and role evidence privately and request governance incident response. Do not repair by updating the reviewed enrollment from the observed values.",
+				verify:    "A fresh agreed checkpoint matches every reviewed governance input, and the incident record attributes the drift.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(warnReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierWarn, class: subnetDeploymentGovernanceClass,
-			target: "subnet-chain/deployment", frame: "pending", sustain: subnetConfigurationSustain,
-			symptom:   "A scheduled subnet governance change is not in the reviewed deployment",
-			mechanism: "A future-effective role rotation or a reinitialization is scheduled at a finalized block but does not match the reviewed enrollment. It is not yet active, so custody is unchanged, but the review must precede its effective epoch.",
-			baseline:  "Every scheduled governance change matches a reviewed expectation before it takes effect.",
-			observed:  "state=pending reasons=" + strings.Join(subnetSortedUnique(warnReasons), ","),
-			evidence:  evidence,
-			action:    "Review the scheduled change through governance; update the reviewed enrollment only from that review.",
-			verify:    "The scheduled change is reviewed or withdrawn before its effective epoch.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetDeploymentGovernanceClass, "subnet-chain/deployment", "pending", run.scope("complete", "reviewed-governance-enrollment"), subnetDecision{
+			state: "pending",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "reviewed-scheduled-governance", expected: "every-scheduled-change-reviewed", observed: strings.Join(subnetSortedUnique(warnReasons), ","),
+				symptom:   "A scheduled subnet governance change is not in the reviewed deployment",
+				mechanism: "A future-effective role rotation or a reinitialization is scheduled at a finalized block but does not match the reviewed enrollment. It is not yet active, so custody is unchanged, but the review must precede its effective epoch.",
+				baseline:  "Every scheduled governance change matches a reviewed expectation before it takes effect.",
+				action:    "Review the scheduled change through governance; update the reviewed enrollment only from that review.",
+				verify:    "The scheduled change is reviewed or withdrawn before its effective epoch.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(pageReasons) == 0 && len(warnReasons) == 0 {
 		findings = append(findings, subnetHealthy(subnetChainFamily, subnetDeploymentGovernanceClass, "subnet-chain/deployment"))
@@ -514,32 +510,34 @@ func observeSubnetPolicy(ctx context.Context, run *subnetRun, checkpoint *subnet
 	findings = append(findings, profileFindings...)
 	evidence := fmt.Sprintf("Checkpoint height %d; current epoch %d; %d policy versions; deposit price %s. Policy hashes are compared in memory with sn.yml and the reviewed schedule.", checkpoint.number, state.currentEpoch, len(state.policies), price)
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierPage, class: subnetPolicyScheduleClass,
-			target: "subnet-chain/policy", sustain: subnetProvedSustain,
-			symptom:   "The live subnet policy schedule is not the reviewed one",
-			mechanism: "The current effective policy hash, a policy version's own validity or boundary arithmetic, or the reviewed document's windows and caps disagree with the coordinator at a finalized block. A wrong, retroactive or testnet-duration policy changes every deadline and cap that writers and readers derive in blocks.",
-			baseline:  "The current policy hash equals sn.yml's; every version passes the coordinator's validation; each version starts exactly at its predecessor's epoch boundary; the reviewed document reproduces the current snapshot.",
-			observed:  "state=violated mismatched=" + strings.Join(subnetSortedUnique(pageReasons), ","),
-			evidence:  evidence,
-			action:    "Preserve the effective epoch and every affected reader and writer version, and route to governance review. Never inherit a testnet duration on mainnet or relabel a policy hash to match.",
-			verify:    "A fresh agreed checkpoint shows the reviewed current policy and a continuous, valid version schedule.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/policy", "", run.scope("complete", "pinned-policy-document"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "reviewed-policy-schedule", expected: "coordinator-rules-and-the-pinned-policy-document", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
+				symptom:   "The live subnet policy schedule is not the reviewed one",
+				mechanism: "The current effective policy hash, a policy version's own validity or boundary arithmetic, or the reviewed document's windows and caps disagree with the coordinator at a finalized block. A wrong, retroactive or testnet-duration policy changes every deadline and cap that writers and readers derive in blocks.",
+				baseline:  "The current policy hash equals sn.yml's; every version passes the coordinator's validation; each version starts exactly at its predecessor's epoch boundary; the reviewed document reproduces the current snapshot.",
+				action:    "Preserve the effective epoch and every affected reader and writer version, and route to governance review. Never inherit a testnet duration on mainnet or relabel a policy hash to match.",
+				verify:    "A fresh agreed checkpoint shows the reviewed current policy and a continuous, valid version schedule.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(warnReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierWarn, class: subnetPolicyScheduleClass,
-			target: "subnet-chain/policy", frame: "scheduled", sustain: subnetConfigurationSustain,
-			symptom:   "A scheduled subnet policy version is not in the reviewed schedule",
-			mechanism: "A future-effective policy version or a reviewed document field is not yet adopted by the reviewed schedule. It is not live, so current deadlines are unchanged.",
-			baseline:  "Every future policy hash is listed in the reviewed schedule before its effective epoch.",
-			observed:  "state=pending reasons=" + strings.Join(subnetSortedUnique(warnReasons), ","),
-			evidence:  evidence,
-			action:    "Review the scheduled policy and add its hash to the reviewed schedule only from that review.",
-			verify:    "Every future version's hash is reviewed before it takes effect.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/policy", "scheduled", run.scope("complete", "pinned-policy-document"), subnetDecision{
+			state: "pending",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "reviewed-scheduled-policy", expected: "every-scheduled-policy-reviewed", observed: strings.Join(subnetSortedUnique(warnReasons), ","),
+				symptom:   "A scheduled subnet policy version is not in the reviewed schedule",
+				mechanism: "A future-effective policy version or a reviewed document field is not yet adopted by the reviewed schedule. It is not live, so current deadlines are unchanged.",
+				baseline:  "Every future policy hash is listed in the reviewed schedule before its effective epoch.",
+				action:    "Review the scheduled policy and add its hash to the reviewed schedule only from that review.",
+				verify:    "Every future version's hash is reviewed before it takes effect.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(pageReasons) == 0 && len(warnReasons) == 0 {
 		findings = append(findings, subnetHealthy(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/policy"))
@@ -678,32 +676,34 @@ func observeSubnetNativeProfile(ctx context.Context, run *subnetRun, checkpoint 
 	evidence := fmt.Sprintf("Checkpoint height %d. The runtime's native weight cap storage is deliberately not compared: the signed policy cap is authoritative.", checkpoint.number)
 	findings := []finding{}
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierPage, class: subnetPolicyScheduleClass,
-			target: "subnet-chain/native-profile", sustain: subnetProvedSustain,
-			symptom:   "A required native subnet defense differs from the reviewed profile",
-			mechanism: "Commit-reveal, the single-mechanism UID budget, the liquid-alpha setting or the subnet's existence differs at a finalized block. Disabling commit-reveal exposes fresh weights to copying; another mechanism splits the UID budget the policy assumes.",
-			baseline:  "The live subnet exists and its commit-reveal, mechanism count and liquid-alpha settings equal the reviewed profile.",
-			observed:  "state=violated mismatched=" + strings.Join(pageReasons, ","),
-			evidence:  evidence,
-			action:    "Route to the subnet owner's hyperparameter review; preserve the block and the reviewed profile. The monitor never sends an owner call.",
-			verify:    "A fresh checkpoint shows every required defense at its reviewed value.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/native-profile", "", run.scope("complete", "reviewed-native-profile"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "reviewed-native-profile", expected: "reviewed-hyperparameters", observed: strings.Join(pageReasons, ","),
+				symptom:   "A required native subnet defense differs from the reviewed profile",
+				mechanism: "Commit-reveal, the single-mechanism UID budget, the liquid-alpha setting or the subnet's existence differs at a finalized block. Disabling commit-reveal exposes fresh weights to copying; another mechanism splits the UID budget the policy assumes.",
+				baseline:  "The live subnet exists and its commit-reveal, mechanism count and liquid-alpha settings equal the reviewed profile.",
+				action:    "Route to the subnet owner's hyperparameter review; preserve the block and the reviewed profile. The monitor never sends an owner call.",
+				verify:    "A fresh checkpoint shows every required defense at its reviewed value.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(warnReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetChainFamily.probeId, tier: tierWarn, class: subnetPolicyScheduleClass,
-			target: "subnet-chain/native-profile", frame: "drift", sustain: subnetConfigurationSustain,
-			symptom:   "Live native subnet hyperparameters differ from the reviewed profile",
-			mechanism: "A UID capacity, validator permit count, immunity period, tempo or weights version key differs from the reviewed profile. It may be an authorized change not yet adopted by the review.",
-			baseline:  "Every reviewed native hyperparameter equals its live value.",
-			observed:  "state=drift mismatched=" + strings.Join(warnReasons, ","),
-			evidence:  evidence,
-			action:    "Confirm the change with the subnet owner and update the reviewed profile only from that review.",
-			verify:    "The live values equal the reviewed profile on a fresh run.",
-			playbook:  "SIGNALS.md §22.1",
-		})
+		findings = append(findings, subnetDecided(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/native-profile", "drift", run.scope("complete", "reviewed-native-profile"), subnetDecision{
+			state: "drift",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "reviewed-native-profile", expected: "reviewed-hyperparameters", observed: strings.Join(warnReasons, ","),
+				symptom:   "Live native subnet hyperparameters differ from the reviewed profile",
+				mechanism: "A UID capacity, validator permit count, immunity period, tempo or weights version key differs from the reviewed profile. It may be an authorized change not yet adopted by the review.",
+				baseline:  "Every reviewed native hyperparameter equals its live value.",
+				action:    "Confirm the change with the subnet owner and update the reviewed profile only from that review.",
+				verify:    "The live values equal the reviewed profile on a fresh run.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(findings) == 0 {
 		findings = append(findings, subnetHealthy(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/native-profile"))

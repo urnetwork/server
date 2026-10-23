@@ -66,10 +66,11 @@ type subnetHeadProbe struct {
 	runtimes    *subnetRuntimeCache
 	bindingLogs *subnetLogFrontier
 	ledger      *subnetBindingLedger
+	latch       *subnetReplayLatch
 }
 
 func newSubnetHeadProbe() *subnetHeadProbe {
-	return &subnetHeadProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier(), ledger: &subnetBindingLedger{census: newSubnetBindingCensus()}}
+	return &subnetHeadProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier(), ledger: &subnetBindingLedger{census: newSubnetBindingCensus()}, latch: newSubnetReplayLatch()}
 }
 
 func (*subnetHeadProbe) id() string               { return "subnet/head" }
@@ -205,17 +206,7 @@ func (self *subnetBindingCensus) observeHeadOwners(owners map[uint16][32]byte) u
 }
 
 func (self *subnetHeadProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	gate, err := openSubnetRun(ctx, env, subnetHeadFamily)
-	if err != nil || gate.run == nil {
-		return gate.findings, err
-	}
-	run := gate.run
-	findings, err := self.observe(ctx, run)
-	if err != nil {
-		run.closer()
-		return nil, err
-	}
-	return run.close(ctx, env, subnetHeadFamily, findings)
+	return runSubnetFamily(ctx, env, subnetHeadFamily, self.latch, self.observe)
 }
 
 func (self *subnetHeadProbe) observe(ctx context.Context, run *subnetRun) ([]finding, error) {
@@ -471,33 +462,35 @@ func observeSubnetHeadRows(ctx context.Context, run *subnetRun, checkpoint *subn
 		}
 		sort.Strings(targets)
 		for _, target := range targets {
-			findings = append(findings, finding{
-				probeId: subnetHeadFamily.probeId, tier: tierPage, class: subnetHeadWeightBypassClass,
-				target: target, sustain: subnetProvedSustain,
-				symptom:   "A validator's applied row pays head weight outside the bound fleets",
-				mechanism: "An applied native weight row gives positive weight to a UID that is no operator pool, no fleet bound in the current or previous epoch, no reviewed treasury recipient and not the subnet owner, or to the validator itself. Registration alone never establishes eligibility.",
-				baseline:  "Every positive weight goes to a pool, a bound head fleet, a reviewed treasury recipient or the subnet owner, and no validator weights itself.",
-				observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(bypassReasons[target]), ","),
-				evidence:  evidence + " An earlier valid cycle's still-pending emission is not new weight; only the applied row is judged.",
-				action:    "Identify the row's CRv4 commit and its validator's head decision before attribution; distinguish a not-yet-live winning challenger from an unbound claimant.",
-				verify:    "The validator's next applied row weights only eligible UIDs.",
-				playbook:  "SIGNALS.md §22.5",
-			})
+			findings = append(findings, subnetDecided(subnetHeadFamily, subnetHeadWeightBypassClass, target, "", run.scope("complete", "applied-native-weights-and-binding-census"), subnetDecision{
+				state: "violated",
+				issue: subnetReplayIssue{
+					tier: tierPage, sustain: subnetProvedSustain,
+					invariant: "head-weight-only-to-eligible-uids", expected: "bound-fleet-pool-treasury-or-owner-never-self", observed: strings.Join(subnetSortedUnique(bypassReasons[target]), ","),
+					symptom:   "A validator's applied row pays head weight outside the bound fleets",
+					mechanism: "An applied native weight row gives positive weight to a UID that is no operator pool, no fleet bound in the current or previous epoch, no reviewed treasury recipient and not the subnet owner, or to the validator itself. Registration alone never establishes eligibility.",
+					baseline:  "Every positive weight goes to a pool, a bound head fleet, a reviewed treasury recipient or the subnet owner, and no validator weights itself.",
+					action:    "Identify the row's CRv4 commit and its validator's head decision before attribution; distinguish a not-yet-live winning challenger from an unbound claimant.",
+					verify:    "The validator's next applied row weights only eligible UIDs.",
+				},
+				evidence: evidence + " An earlier valid cycle's still-pending emission is not new weight; only the applied row is judged.",
+			}))
 		}
 	}
 	if len(selectionReasons) != 0 && complete {
-		findings = append(findings, finding{
-			probeId: subnetHeadFamily.probeId, tier: tierPage, class: subnetHeadSelectionClass,
-			target: "subnet-head/selection", sustain: subnetProvedSustain,
-			symptom:   "A validator weights more head fleets than the policy allows",
-			mechanism: "An applied row gives positive weight to more bound head fleets than the reviewed policy's head limit. Selection must choose at most that many fleets by split-adjusted breadth.",
-			baseline:  "Every applied row weights at most the policy's head limit of bound fleets.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(selectionReasons), ","),
-			evidence:  evidence,
-			action:    "Replay the validator's selection from its retained measurement before attribution.",
-			verify:    "The validator's next applied row is within the head limit.",
-			playbook:  "SIGNALS.md §22.5",
-		})
+		findings = append(findings, subnetDecided(subnetHeadFamily, subnetHeadSelectionClass, "subnet-head/selection", "", run.scope("complete", "applied-native-weights-and-binding-census"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "head-limit", expected: "at-most-the-policy-head-limit-of-bound-fleets", observed: strings.Join(subnetSortedUnique(selectionReasons), ","),
+				symptom:   "A validator weights more head fleets than the policy allows",
+				mechanism: "An applied row gives positive weight to more bound head fleets than the reviewed policy's head limit. Selection must choose at most that many fleets by split-adjusted breadth.",
+				baseline:  "Every applied row weights at most the policy's head limit of bound fleets.",
+				action:    "Replay the validator's selection from its retained measurement before attribution.",
+				verify:    "The validator's next applied row is within the head limit.",
+			},
+			evidence: evidence,
+		}))
 	} else {
 		findings = append(findings, subnetUnknown(subnetHeadFamily, subnetHeadSelectionClass, "subnet-head/selection", "validator-decision-unpublished", subnetConfigurationSustain, "each validator's signed release measurement, which carries its full candidate census, split-adjusted breadth, EMA and tie break"))
 	}
@@ -566,35 +559,38 @@ func observeSubnetHeadPayout(ctx context.Context, run *subnetRun, checkpoint *su
 	findings := []finding{}
 	evidence := fmt.Sprintf("Checkpoint height %d; %d bound head UIDs. Keys and coldkeys are compared in memory and not rendered.", checkpoint.number, len(heads))
 	if len(payoutReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetHeadFamily.probeId, tier: tierPage, class: subnetHeadNativePayoutClass,
-			target: payoutTarget, sustain: subnetProvedSustain,
-			symptom:   "Head incentive accrues to the wrong recipient",
-			mechanism: "A bound head UID with positive native incentive is now held by a hotkey its binding does not name, or by an operator, escrow, reserve or pool hotkey, or by a hotkey owned by a custody or operator coldkey. Head emission is native and belongs to the selected fleet's own keys.",
-			baseline:  "Every paid head UID is held by its bound fleet hotkey under a coldkey that is no custody or operator key.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(payoutReasons), ","),
-			evidence:  evidence + " Registration funding, user transfers, delegation, dividends and share rounding are separate from incentive.",
-			action:    "Preserve the UID's registration and binding history; reconstruct the reassignment boundary before any attribution.",
-			verify:    "Every paid head UID is held by its bound fleet's own keys on a fresh run.",
-			playbook:  "SIGNALS.md §22.5",
-		})
+		findings = append(findings, subnetDecided(subnetHeadFamily, subnetHeadNativePayoutClass, payoutTarget, "", run.scope("complete", "native-incentive-keys-and-owners"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "head-incentive-to-fleet-keys", expected: "the-bound-fleet-hotkey", observed: strings.Join(subnetSortedUnique(payoutReasons), ","),
+				symptom:   "Head incentive accrues to the wrong recipient",
+				mechanism: "A bound head UID with positive native incentive is now held by a hotkey its binding does not name, or by an operator, escrow, reserve or pool hotkey, or by a hotkey owned by a custody or operator coldkey. Head emission is native and belongs to the selected fleet's own keys.",
+				baseline:  "Every paid head UID is held by its bound fleet hotkey under a coldkey that is no custody or operator key.",
+				action:    "Preserve the UID's registration and binding history; reconstruct the reassignment boundary before any attribution.",
+				verify:    "Every paid head UID is held by its bound fleet's own keys on a fresh run.",
+			},
+			evidence: evidence + " Registration funding, user transfers, delegation, dividends and share rounding are separate from incentive.",
+		}))
 	} else {
 		findings = append(findings, subnetHealthy(subnetHeadFamily, subnetHeadNativePayoutClass, payoutTarget))
 	}
 	changed := census.observeHeadOwners(headOwners)
 	if changed > run.limits.maxHeadChurnPerRun {
-		findings = append(findings, finding{
-			probeId: subnetHeadFamily.probeId, tier: tierWarn, class: subnetPromotionChurnClass,
-			target: churnTarget, sustain: subnetTransientSustain,
-			symptom:   "Head UIDs are changing hands faster than the reviewed bound",
-			mechanism: "Between consecutive observations more bound head UIDs changed hotkey than the reviewed churn bound. Unproductive promotion and demotion churn burns registration cost and dips coverage-driven scores.",
-			baseline:  "Head UID ownership changes no faster than the reviewed bound between observations.",
-			observed:  fmt.Sprintf("state=churning changed_head_uids=%d bound=%d", changed, run.limits.maxHeadChurnPerRun),
-			evidence:  evidence + " Authorized burn ceilings and the promotion SLO need the fleets' authorization records, which are not monitor-readable.",
-			action:    "Review immunity, the emission floor and registration timing with the head selection owners; governance decides any change.",
-			verify:    "Churn returns within the bound over later observations.",
-			playbook:  "SIGNALS.md §22.5",
-		})
+		findings = append(findings, subnetDecided(subnetHeadFamily, subnetPromotionChurnClass, churnTarget, "", run.scope("complete", "native-head-ownership-across-runs"), subnetDecision{
+			state: "churning",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetTransientSustain,
+				invariant: "head-churn-bounded", expected: fmt.Sprintf("at-most-%d", run.limits.maxHeadChurnPerRun), observed: fmt.Sprintf("%d", changed),
+				symptom:   "Head UIDs are changing hands faster than the reviewed bound",
+				mechanism: "Between consecutive observations more bound head UIDs changed hotkey than the reviewed churn bound. Unproductive promotion and demotion churn burns registration cost and dips coverage-driven scores.",
+				baseline:  "Head UID ownership changes no faster than the reviewed bound between observations.",
+				action:    "Review immunity, the emission floor and registration timing with the head selection owners; governance decides any change.",
+				verify:    "Churn returns within the bound over later observations.",
+			},
+			evidence: evidence + " Authorized burn ceilings and the promotion SLO need the fleets' authorization records, which are not monitor-readable.",
+			details:  fmt.Sprintf("changed_head_uids=%d bound=%d", changed, run.limits.maxHeadChurnPerRun),
+		}))
 	} else {
 		findings = append(findings, subnetHealthy(subnetHeadFamily, subnetPromotionChurnClass, churnTarget))
 	}
@@ -654,24 +650,28 @@ func observeSubnetTierIsolation(ctx context.Context, run *subnetRun, checkpoint 
 		case len(reasons) == 0:
 			findings = append(findings, subnetHealthy(subnetHeadFamily, subnetTierDoublePayClass, target))
 		default:
-			tier := tierWarn
+			// Double pay pages; a client paid by neither tier warns under its
+			// own frame, so it never stands in for a retained double pay.
+			tier, frame := tierWarn, "unpaid"
 			for _, reason := range reasons {
 				if reason == "head-client-in-tail" {
-					tier = tierPage
+					tier, frame = tierPage, ""
 				}
 			}
-			findings = append(findings, finding{
-				probeId: subnetHeadFamily.probeId, tier: tier, class: subnetTierDoublePayClass,
-				target: target, sustain: subnetProvedSustain,
-				symptom:   "A client is assigned to the wrong payout tier",
-				mechanism: "The coordinator's bindingAt at the artifact's own boundary blocks shows a tail provider bound to an active head fleet, so it is paid as both a head miner and a pool provider, or shows a head-excluded provider bound at neither boundary, so it is paid by neither tier.",
-				baseline:  "Every provider active in a head fleet at either boundary is head-excluded from every tail artifact, and every head-excluded provider is bound at a boundary.",
-				observed:  fmt.Sprintf("state=violated reasons=%s epoch=%d", strings.Join(subnetSortedUnique(reasons), ","), source),
-				evidence:  fmt.Sprintf("Checkpoint height %d; artifact boundaries %d to %d. Client identities stay private.", checkpoint.number, read.artifact.Start.Number, read.artifact.End.Number),
-				action:    "Compare the binding history, the client-level payout inputs and native ownership before any repayment; do not compare aggregated coldkey totals only.",
-				verify:    "The next committed artifact excludes exactly the boundary-active head clients.",
-				playbook:  "SIGNALS.md §22.5",
-			})
+			findings = append(findings, subnetDecided(subnetHeadFamily, subnetTierDoublePayClass, target, frame, run.scope("complete", "coordinator-binding-at-artifact-boundaries"), subnetDecision{
+				state: "violated",
+				issue: subnetReplayIssue{
+					tier: tier, sustain: subnetProvedSustain,
+					invariant: "one-payout-tier-per-client", expected: "boundary-active-head-clients-excluded-and-excluded-clients-bound", observed: strings.Join(subnetSortedUnique(reasons), ","),
+					symptom:   "A client is assigned to the wrong payout tier",
+					mechanism: "The coordinator's bindingAt at the artifact's own boundary blocks shows a tail provider bound to an active head fleet, so it is paid as both a head miner and a pool provider, or shows a head-excluded provider bound at neither boundary, so it is paid by neither tier.",
+					baseline:  "Every provider active in a head fleet at either boundary is head-excluded from every tail artifact, and every head-excluded provider is bound at a boundary.",
+					action:    "Compare the binding history, the client-level payout inputs and native ownership before any repayment; do not compare aggregated coldkey totals only.",
+					verify:    "The next committed artifact excludes exactly the boundary-active head clients.",
+				},
+				evidence: fmt.Sprintf("Checkpoint height %d; artifact boundaries %d to %d. Client identities stay private.", checkpoint.number, read.artifact.Start.Number, read.artifact.End.Number),
+				details:  fmt.Sprintf("source_epoch=%d", source),
+			}))
 		}
 	}
 	return findings, nil

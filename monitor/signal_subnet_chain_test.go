@@ -646,3 +646,28 @@ func TestSubnetChainRegistrationMetadata(t *testing.T) {
 		t.Fatal("subnet-chain is not registered")
 	}
 }
+
+// §22.10 acceptance: an unreviewed coordinator owner is a proved
+// authorization counterexample; restoring the owner is the healthy read.
+func init() {
+	subnetFamilyAcceptanceCases["22.1"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			return NewSubnetChainSignal(), newSubnetWorld(t).signalSettings()
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			world := newSubnetWorld(t)
+			original := world.contracts[world.coordinator].views["owner"]
+			world.contracts[world.coordinator].views["owner"] = subnetWorldConstant(subnetWorldAddress("attacker"))
+			return NewSubnetChainSignal(), world.signalSettings(), func() {
+				world.contracts[world.coordinator].views["owner"] = original
+			}
+		},
+		violatedClass: subnetDeploymentGovernanceClass,
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			return subnetWorldAcceptanceUnknown(t, NewSubnetChainSignal(), "eth_getStorageAt")
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			return subnetWorldAcceptanceCanceled(t, NewSubnetChainSignal(), "eth_getStorageAt")
+		},
+	}
+}

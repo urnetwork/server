@@ -473,3 +473,28 @@ func TestSubnetDepositsRegistrationMetadata(t *testing.T) {
 	_, _ = abi.JSON(strings.NewReader(subnetStakingAbiJson))
 	_ = common.Address{}
 }
+
+// §22.10 acceptance: live reserve stake below principal is a proved
+// accounting counterexample; restoring the stake is the healthy read.
+func init() {
+	subnetFamilyAcceptanceCases["22.3"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			return NewSubnetDepositsSignal(), newSubnetWorld(t).signalSettings()
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			world := newSubnetWorld(t)
+			original := world.contracts[world.sink].views["liveStake"]
+			world.contracts[world.sink].views["liveStake"] = subnetWorldConstant(big.NewInt(1499))
+			return NewSubnetDepositsSignal(), world.signalSettings(), func() {
+				world.contracts[world.sink].views["liveStake"] = original
+			}
+		},
+		violatedClass: subnetReservePrincipalClass,
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			return subnetWorldAcceptanceUnknown(t, NewSubnetDepositsSignal(), "eth_getLogs")
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			return subnetWorldAcceptanceCanceled(t, NewSubnetDepositsSignal(), "eth_getLogs")
+		},
+	}
+}

@@ -42865,11 +42865,13 @@ an HTTP 200 or a server-reported count does not establish correctness.
 | `subnet-egress-attribution` | Exact source-IP attribution is unique, forwarded headers are trusted only at the authorized ingress, allocation/release churn is reflected, and IPv4/IPv6 keyed scoring prefixes match policy. | Page if an ambiguous/spoofed/stale address is credited or raw IP/key material leaks in public evidence. Warn on growth of excluded mappings; investigate source attribution before blaming providers. |
 | `subnet-measurement-bias` | Independent-validator coverage and outcome distributions are visible by provider/NO/time cohort; adversarial abandonment, too-perfect single-validator clusters and selective `/verify` service are investigated. | Warn on statistically supported outliers with sample sizes and controls. Do not label collusion/slashing proved from correlation or promise proof-of-routing: the stronger `VALIDATOR.md` §10 defenses remain outside v1. |
 
-Implementation (2026-10-23, `signal_subnet_validation.go`). This reader needs no
-chain: it reads the public `/verify/keys`, `/verify/proofs` with
-`originals=true` and `/verify/stats` at both enrolled origins through the
-server's own response types, under the §22.1 enrollment and the reviewed
-policy document.
+Implementation (2026-10-23, `signal_subnet_validation.go`). This reader decides
+from the public `/verify/keys`, `/verify/proofs` with `originals=true` and
+`/verify/stats` at both enrolled origins through the server's own response
+types, under the §22.1 enrollment and the reviewed policy document. It also
+reads the agreed finalized checkpoint, but only to date the published evidence
+in its §22.10 frame: the evidence is off chain, so an unavailable checkpoint
+leaves `checkpoint=unavailable` in the frame and decides everything else.
 
 - `subnet-path-proof-invalid`: PAGE, Sustain 1, when the origins publish
   different server keys or a key id observed by a published run maps to another
@@ -42960,8 +42962,9 @@ checkpoint; until then every census check is unknown.
   providers ever bound once the census is complete, every tail and head-excluded
   provider otherwise, at most `max_artifact_providers`) are checked with the
   coordinator's own `bindingAt` at the artifact's Start and End boundary block
-  hashes. PAGE when a tail provider is active at either boundary; WARN when a
-  head-excluded provider is active at neither; unknown when that historical
+  hashes. PAGE when a tail provider is active at either boundary; WARN, frame
+  `unpaid`, when a head-excluded provider is active at neither, so it never
+  stands in for a retained double pay; unknown when that historical
   state or the artifact is unreadable.
 - `subnet-promotion-economics` is a standing unknown: it needs an aligned,
   mature per-epoch ledger of realized head and tail pay.
@@ -43382,10 +43385,14 @@ changing detail in the target), retention of that counterexample after a
 healthy read, an unknown source that never turns green and names a fixed
 reason, the not-deployed state, cancellation that withholds every finding, and
 a cadence whose two complete runs span the five-minute recovery window. The
-§22.6 through §22.9 readers share one counterexample latch: proved custody,
+§22.1 through §22.9 readers share one counterexample latch: proved custody,
 authorization, finalized-proof, accounting and state-durability
 counterexamples stay open for the watcher's lifetime with their first and last
-proof clocks, and are dispositioned in the run ledger. Item 3 and peer review
+proof clocks, and are dispositioned in the run ledger. The §22.1 through §22.5
+readers render the same frame on every alert, unknown states included, and
+retain every proved page of theirs; a healthy read never counts as a
+reproduction, and a run's counterexamples are recorded only when the run
+publishes (`subnet_retention.go`). Item 3 and peer review
 remain open: production paging additionally requires feeding real testnet
 bad-deposit and recovery cycles, more than 200 head candidates, real pool
 Merkle and path proofs, unpaid credit, carry and expiry, pause and upgrade,

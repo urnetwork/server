@@ -70,12 +70,14 @@ func NewSubnetValidationSignal() Signal {
 // Probe-owned observation state: the published server key history and the
 // end of the last published proof window.
 type subnetValidationProbe struct {
-	keys   *subnetServerKeyHistory
-	window *subnetProofWindow
+	keys     *subnetServerKeyHistory
+	window   *subnetProofWindow
+	runtimes *subnetRuntimeCache
+	latch    *subnetReplayLatch
 }
 
 func newSubnetValidationProbe() *subnetValidationProbe {
-	return &subnetValidationProbe{keys: &subnetServerKeyHistory{keys: map[byte]string{}}, window: &subnetProofWindow{}}
+	return &subnetValidationProbe{keys: &subnetServerKeyHistory{keys: map[byte]string{}}, window: &subnetProofWindow{}, runtimes: newSubnetRuntimeCache(), latch: newSubnetReplayLatch()}
 }
 
 func (*subnetValidationProbe) id() string               { return "subnet/validation" }
@@ -136,17 +138,9 @@ func (self *subnetProofWindow) advance(end time.Time) {
 }
 
 func (self *subnetValidationProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	gate, err := openSubnetRun(ctx, env, subnetValidationFamily)
-	if err != nil || gate.run == nil {
-		return gate.findings, err
-	}
-	run := gate.run
-	findings, err := self.observe(ctx, env, run)
-	if err != nil {
-		run.closer()
-		return nil, err
-	}
-	return run.close(ctx, env, subnetValidationFamily, findings)
+	return runSubnetFamily(ctx, env, subnetValidationFamily, self.latch, func(ctx context.Context, run *subnetRun) ([]finding, error) {
+		return self.observe(ctx, env, run)
+	})
 }
 
 // Decodes one Json object with no trailing data.
@@ -162,6 +156,12 @@ func subnetDecodeJson(raw []byte, target any) error {
 }
 
 func (self *subnetValidationProbe) observe(ctx context.Context, env *probeEnv, run *subnetRun) ([]finding, error) {
+	// The agreed finalized checkpoint dates the published evidence in the
+	// §22.10 frame. The evidence is off chain, so it is still decided when
+	// the checkpoint is unavailable; the frame then says so.
+	if _, err := readSubnetCheckpoint(ctx, run, self.runtimes); err != nil {
+		return nil, err
+	}
 	findings := []finding{
 		subnetUnknown(subnetValidationFamily, subnetVerifyPoisoningClass, "subnet-validation/poisoning", "authorized-canary-not-deployed", subnetConfigurationSustain, "a separately authorized bounded /verify canary; passive public reads cannot distinguish poisoned from valid seeds"),
 		subnetUnknown(subnetValidationFamily, subnetPoolQualityMismatchClass, "subnet-validation/pool-quality", "validator-decision-unpublished", subnetConfigurationSustain, "each validator's signed release measurement and steering intent, which stay in the validator's private state directory"),
@@ -228,18 +228,19 @@ func (self *subnetValidationProbe) observeKeys(ctx context.Context, run *subnetR
 	}
 	reasons = append(reasons, self.keys.compare(sets[0])...)
 	if len(reasons) != 0 {
-		return sets[0], []finding{{
-			probeId: subnetValidationFamily.probeId, tier: tierPage, class: subnetPathProofInvalidClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "The published verify server key history is inconsistent",
-			mechanism: "The two enrolled origins publish different server keys, or a key id this process already observed now maps to another key or has disappeared. A rewritten or dropped historical key makes old proofs unverifiable or lets a forged key verify them.",
-			baseline:  "Both origins publish identical keys, and every historical key id keeps its original public key forever.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(reasons), ","),
-			evidence:  fmt.Sprintf("%d published key ids. Public keys are compared in memory and not rendered.", len(sets[0])),
-			action:    "Preserve both origins' key responses; investigate the verify key configuration before accepting new proofs.",
-			verify:    "Both origins publish the same complete historical key set on a fresh run.",
-			playbook:  "SIGNALS.md §22.4",
-		}}, nil
+		return sets[0], []finding{subnetDecided(subnetValidationFamily, subnetPathProofInvalidClass, target, "", run.scope("complete", "two-api-origins"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "server-key-history-consistent", expected: "identical-keys-at-both-origins-and-stable-key-ids", observed: strings.Join(subnetSortedUnique(reasons), ","),
+				symptom:   "The published verify server key history is inconsistent",
+				mechanism: "The two enrolled origins publish different server keys, or a key id this process already observed now maps to another key or has disappeared. A rewritten or dropped historical key makes old proofs unverifiable or lets a forged key verify them.",
+				baseline:  "Both origins publish identical keys, and every historical key id keeps its original public key forever.",
+				action:    "Preserve both origins' key responses; investigate the verify key configuration before accepting new proofs.",
+				verify:    "Both origins publish the same complete historical key set on a fresh run.",
+			},
+			evidence: fmt.Sprintf("%d published key ids. Public keys are compared in memory and not rendered.", len(sets[0])),
+		})}, nil
 	}
 	run.afterPublish(func() { self.keys.remember(sets[0]) })
 	return sets[0], []finding{subnetHealthy(subnetValidationFamily, subnetPathProofInvalidClass, target)}, nil
@@ -393,32 +394,34 @@ func (self *subnetValidationProbe) observeProofs(ctx context.Context, run *subne
 	findings := []finding{}
 	evidence := fmt.Sprintf("Window %d minutes; %d proof rows; %d trails with original transitions; %d rows from validators outside the reviewed census (validators are permissionless).", int(now.Sub(from).Minutes()), census.rows, len(transitions), foreign)
 	if len(pageReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetValidationFamily.probeId, tier: tierPage, class: subnetPathProofInvalidClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "Published subnet validation evidence does not verify",
-			mechanism: "A published completed proof fails its server FINAL or validator EXTEND signature, its depth or hop structure, or forks under one trail id, or an original transition fails the SEED/EXTEND/ASSIGN/FINAL receipt validation or names another deployment. Invalid evidence in the public record can enter scoring or a committed artifact.",
-			baseline:  "Every completed proof verifies under its historical server key and its validator's key with the policy depth and unique ordered hops, and every original transition validates under its server key within this deployment's scope.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(pageReasons), ","),
-			evidence:  evidence + " Correctly refused attacks never reach the public index and are not counted here.",
-			action:    "Preserve the minimal signed counterexample bytes privately and investigate the verify server and key custody before more proofs are scored.",
-			verify:    "A fresh window's proofs and transitions all verify.",
-			playbook:  "SIGNALS.md §22.4",
-		})
+		findings = append(findings, subnetDecided(subnetValidationFamily, subnetPathProofInvalidClass, target, "", run.scope("proof-window", "two-api-origins-and-historical-server-keys"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "published-proofs-verify", expected: "every-row-and-original-transition-verifies", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
+				symptom:   "Published subnet validation evidence does not verify",
+				mechanism: "A published completed proof fails its server FINAL or validator EXTEND signature, its depth or hop structure, or forks under one trail id, or an original transition fails the SEED/EXTEND/ASSIGN/FINAL receipt validation or names another deployment. Invalid evidence in the public record can enter scoring or a committed artifact.",
+				baseline:  "Every completed proof verifies under its historical server key and its validator's key with the policy depth and unique ordered hops, and every original transition validates under its server key within this deployment's scope.",
+				action:    "Preserve the minimal signed counterexample bytes privately and investigate the verify server and key custody before more proofs are scored.",
+				verify:    "A fresh window's proofs and transitions all verify.",
+			},
+			evidence: evidence + " Correctly refused attacks never reach the public index and are not counted here.",
+		}))
 	}
 	if len(warnReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetValidationFamily.probeId, tier: tierWarn, class: subnetPathProofInvalidClass,
-			target: target, frame: "publication", sustain: subnetTransientSustain,
-			symptom:   "The two verify origins or the verify policy disagree",
-			mechanism: "The enrolled origins return different proof windows, or the verify server reports a policy other than the deployment's reviewed policy. Two names can share one store, so agreement would not prove independence; disagreement shows one is stale or misconfigured.",
-			baseline:  "Both origins return the same window under the reviewed policy hash.",
-			observed:  "state=inconsistent reasons=" + strings.Join(subnetSortedUnique(warnReasons), ","),
-			evidence:  evidence,
-			action:    "Compare both origins' verify configuration and replication privately.",
-			verify:    "Both origins agree under the reviewed policy on a fresh run.",
-			playbook:  "SIGNALS.md §22.4",
-		})
+		findings = append(findings, subnetDecided(subnetValidationFamily, subnetPathProofInvalidClass, target, "publication", run.scope("proof-window", "two-api-origins"), subnetDecision{
+			state: "inconsistent",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetTransientSustain,
+				invariant: "origins-publish-one-window", expected: "identical-windows-and-the-sn-yml-policy", observed: strings.Join(subnetSortedUnique(warnReasons), ","),
+				symptom:   "The two verify origins or the verify policy disagree",
+				mechanism: "The enrolled origins return different proof windows, or the verify server reports a policy other than the deployment's reviewed policy. Two names can share one store, so agreement would not prove independence; disagreement shows one is stale or misconfigured.",
+				baseline:  "Both origins return the same window under the reviewed policy hash.",
+				action:    "Compare both origins' verify configuration and replication privately.",
+				verify:    "Both origins agree under the reviewed policy on a fresh run.",
+			},
+			evidence: evidence,
+		}))
 	}
 	if len(pageReasons) == 0 && len(warnReasons) == 0 {
 		findings = append(findings, subnetHealthy(subnetValidationFamily, subnetPathProofInvalidClass, target))
@@ -426,18 +429,19 @@ func (self *subnetValidationProbe) observeProofs(ctx context.Context, run *subne
 	attemptTarget := "subnet-validation/attempts"
 	switch {
 	case len(attemptReasons) != 0:
-		findings = append(findings, finding{
-			probeId: subnetValidationFamily.probeId, tier: tierPage, class: subnetAttemptHistoryGapClass,
-			target: attemptTarget, sustain: subnetProvedSustain,
-			symptom:   "A published attempt history forks",
-			mechanism: "Two valid original transitions claim different outcomes at the same depth of one trail. An attempt has one ordered durable sequence; a fork double-applies or fabricates history.",
-			baseline:  "Each trail's transitions form one ordered sequence with one outcome per depth.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(attemptReasons), ","),
-			evidence:  evidence,
-			action:    "Recover the trail's retained journal evidence; never reset statistics to zero to clear it.",
-			verify:    "A fresh window has one transition per trail depth.",
-			playbook:  "SIGNALS.md §22.4",
-		})
+		findings = append(findings, subnetDecided(subnetValidationFamily, subnetAttemptHistoryGapClass, attemptTarget, "", run.scope("proof-window", "two-api-origins-and-historical-server-keys"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "one-receipt-per-trail-depth", expected: "one-valid-receipt", observed: strings.Join(subnetSortedUnique(attemptReasons), ","),
+				symptom:   "A published attempt history forks",
+				mechanism: "Two valid original transitions claim different outcomes at the same depth of one trail. An attempt has one ordered durable sequence; a fork double-applies or fabricates history.",
+				baseline:  "Each trail's transitions form one ordered sequence with one outcome per depth.",
+				action:    "Recover the trail's retained journal evidence; never reset statistics to zero to clear it.",
+				verify:    "A fresh window has one transition per trail depth.",
+			},
+			evidence: evidence,
+		}))
 	case census.truncated:
 		findings = append(findings, subnetUnknown(subnetValidationFamily, subnetAttemptHistoryGapClass, attemptTarget, "transition-census-truncated", subnetTransientSustain, "a complete original transition census for the window"))
 	default:
@@ -445,18 +449,19 @@ func (self *subnetValidationProbe) observeProofs(ctx context.Context, run *subne
 	}
 	egressTarget := "subnet-validation/egress"
 	if len(egressReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetValidationFamily.probeId, tier: tierPage, class: subnetEgressAttributionClass,
-			target: egressTarget, sustain: subnetProvedSustain,
-			symptom:   "Public validation evidence leaks or omits egress attribution",
-			mechanism: "A public proof carries a raw address or an unexpected hop field, or a completed hop has no keyed egress hash. Raw egress addresses must never be public; a missing hash cannot feed head breadth.",
-			baseline:  "Every completed public hop has exactly its client id, server time and a nonzero keyed egress hash, and no public string is a raw address.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(egressReasons), ","),
-			evidence:  evidence + " The leaked value itself is never copied into this alert.",
-			action:    "Restrict the affected evidence and remove the leaking field from publication; investigate source attribution before blaming providers.",
-			verify:    "A fresh window's public evidence has only keyed egress hashes.",
-			playbook:  "SIGNALS.md §22.4",
-		})
+		findings = append(findings, subnetDecided(subnetValidationFamily, subnetEgressAttributionClass, egressTarget, "", run.scope("proof-window", "two-api-origins"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "no-raw-egress-in-public-evidence", expected: "keyed-egress-hashes-only", observed: strings.Join(subnetSortedUnique(egressReasons), ","),
+				symptom:   "Public validation evidence leaks or omits egress attribution",
+				mechanism: "A public proof carries a raw address or an unexpected hop field, or a completed hop has no keyed egress hash. Raw egress addresses must never be public; a missing hash cannot feed head breadth.",
+				baseline:  "Every completed public hop has exactly its client id, server time and a nonzero keyed egress hash, and no public string is a raw address.",
+				action:    "Restrict the affected evidence and remove the leaking field from publication; investigate source attribution before blaming providers.",
+				verify:    "A fresh window's public evidence has only keyed egress hashes.",
+			},
+			evidence: evidence + " The leaked value itself is never copied into this alert.",
+		}))
 	} else {
 		findings = append(findings, subnetUnknown(subnetValidationFamily, subnetEgressAttributionClass, egressTarget, "source-attribution-private", subnetConfigurationSustain, "the operator's private source-IP to provider mapping, which decides whether a credited address was ambiguous, spoofed or stale"))
 	}
@@ -630,18 +635,19 @@ func observeSubnetVerifyStats(ctx context.Context, run *subnetRun, policy *proto
 	}
 	findings := []finding{}
 	if len(reasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetValidationFamily.probeId, tier: tierWarn, class: subnetMeasurementCoverageClass,
-			target: coverageTarget, sustain: subnetTransientSustain,
-			symptom:   "Subnet measurement coverage is below the reviewed policy",
-			mechanism: "The public verify statistics are stale, do not reproduce the exact Wilson reliability rule, report another policy or egress key, show too few providers at a_min, or a reviewed validator published no trail in the window. Required scoring may not finish by its deadline.",
-			baseline:  "Fresh statistics reproduce the Wilson rule under the reviewed policy, most active providers reach a_min, and every reviewed validator publishes trails.",
-			observed:  "state=degraded reasons=" + strings.Join(subnetSortedUnique(reasons), ","),
-			evidence:  fmt.Sprintf("%d statistics rows; latest period %d of %d active providers at a_min. Separate provider failure from validator abandonment, shared-region outage or operator transport failure before attribution.", len(stats.Rows), eligible, active),
-			action:    "Check the verify statistics job, the operator's transport and each absent validator's trail loop.",
-			verify:    "Fresh statistics and every reviewed validator's trails appear on later runs.",
-			playbook:  "SIGNALS.md §22.4",
-		})
+		findings = append(findings, subnetDecided(subnetValidationFamily, subnetMeasurementCoverageClass, coverageTarget, "", run.scope("complete", "two-api-origins-and-the-wilson-rule"), subnetDecision{
+			state: "degraded",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetTransientSustain,
+				invariant: "measurement-coverage", expected: "fresh-exact-statistics-and-every-reviewed-validator-present", observed: strings.Join(subnetSortedUnique(reasons), ","),
+				symptom:   "Subnet measurement coverage is below the reviewed policy",
+				mechanism: "The public verify statistics are stale, do not reproduce the exact Wilson reliability rule, report another policy or egress key, show too few providers at a_min, or a reviewed validator published no trail in the window. Required scoring may not finish by its deadline.",
+				baseline:  "Fresh statistics reproduce the Wilson rule under the reviewed policy, most active providers reach a_min, and every reviewed validator publishes trails.",
+				action:    "Check the verify statistics job, the operator's transport and each absent validator's trail loop.",
+				verify:    "Fresh statistics and every reviewed validator's trails appear on later runs.",
+			},
+			evidence: fmt.Sprintf("%d statistics rows; latest period %d of %d active providers at a_min. Separate provider failure from validator abandonment, shared-region outage or operator transport failure before attribution.", len(stats.Rows), eligible, active),
+		}))
 	} else {
 		findings = append(findings, subnetHealthy(subnetValidationFamily, subnetMeasurementCoverageClass, coverageTarget))
 	}
@@ -700,16 +706,18 @@ func subnetCompletionBias(run *subnetRun, proofs *subnetProofCensus) []finding {
 	if outliers == 0 {
 		return []finding{subnetHealthy(subnetValidationFamily, subnetMeasurementBiasClass, target)}
 	}
-	return []finding{{
-		probeId: subnetValidationFamily.probeId, tier: tierWarn, class: subnetMeasurementBiasClass,
-		target: target, sustain: subnetTransientSustain,
-		symptom:   "A validator's trail completion is a statistical outlier",
-		mechanism: "A validator with enough trails completes them at a rate the others do not, beyond the reviewed z threshold. Adversarial abandonment, too-perfect single-validator clusters and selective /verify service produce this shape; so can honest regional differences.",
-		baseline:  "Every sufficiently sampled validator's completion rate is within the reviewed z threshold of the others'.",
-		observed:  fmt.Sprintf("state=outlier outliers=%d sampled_validators=%d trails=%d", outliers, sampled, total),
-		evidence:  "Validator keys stay private; the counts are the only published values. Correlation does not prove collusion or slashing, and proof-of-routing is outside v1.",
-		action:    "Investigate the outlier's cohorts with controls before any attribution; do not label it collusion from this correlation.",
-		verify:    "The validator's completion rate returns within the threshold, or an investigation records the honest cause.",
-		playbook:  "SIGNALS.md §22.4",
-	}}
+	return []finding{subnetDecided(subnetValidationFamily, subnetMeasurementBiasClass, target, "", run.scope("proof-window", "published-trails"), subnetDecision{
+		state: "outlier",
+		issue: subnetReplayIssue{
+			tier: tierWarn, sustain: subnetTransientSustain,
+			invariant: "validator-completion-within-threshold", expected: "no-outlier", observed: fmt.Sprintf("%d-outliers", outliers),
+			symptom:   "A validator's trail completion is a statistical outlier",
+			mechanism: "A validator with enough trails completes them at a rate the others do not, beyond the reviewed z threshold. Adversarial abandonment, too-perfect single-validator clusters and selective /verify service produce this shape; so can honest regional differences.",
+			baseline:  "Every sufficiently sampled validator's completion rate is within the reviewed z threshold of the others'.",
+			action:    "Investigate the outlier's cohorts with controls before any attribution; do not label it collusion from this correlation.",
+			verify:    "The validator's completion rate returns within the threshold, or an investigation records the honest cause.",
+		},
+		evidence: "Validator keys stay private; the counts are the only published values. Correlation does not prove collusion or slashing, and proof-of-routing is outside v1.",
+		details:  fmt.Sprintf("outliers=%d sampled_validators=%d trails=%d", outliers, sampled, total),
+	})}
 }

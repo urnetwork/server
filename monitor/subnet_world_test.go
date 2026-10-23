@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -1289,7 +1290,29 @@ func runSubnetWorld(t *testing.T, signal Signal, settings SignalSettings) Alerts
 	if err != nil {
 		t.Fatalf("signal run failed: %v", err)
 	}
+	requireSubnetEvidenceFrame(t, alerts)
 	return alerts
+}
+
+// Every §22.1--§22.5 alert carries the SIGNALS.md §22.10 frame, and every
+// decided one names its invariant with expected and observed values.
+func requireSubnetEvidenceFrame(t *testing.T, alerts Alerts) {
+	t.Helper()
+	for _, alert := range alerts {
+		for _, key := range []string{"environment=", "scope=", "checkpoint=", "completeness=", "comparison_source="} {
+			if !strings.Contains(alert.Context, key) {
+				t.Errorf("%s %s %s lacks %s in its context: %q", alert.Class, alert.Target, alert.Frame, key, alert.Context)
+			}
+		}
+		if strings.HasPrefix(alert.Observed, "state=unknown ") {
+			continue
+		}
+		for _, key := range []string{"invariant=", "expected=", "observed="} {
+			if !strings.Contains(alert.Observed, key) {
+				t.Errorf("%s %s %s lacks %s: %q", alert.Class, alert.Target, alert.Frame, key, alert.Observed)
+			}
+		}
+	}
 }
 
 // Alerts of one class, optionally narrowed to a target.
@@ -1346,3 +1369,31 @@ func requireSubnetAlert(t *testing.T, alerts Alerts, class, target, frame string
 	t.Fatalf("missing alert %s %s %s", class, target, frame)
 	return Alert{}
 }
+
+// SIGNALS.md §22.10 acceptance helpers: a world whose run is canceled when
+// it first calls the method, and a world whose method source fails.
+func subnetWorldAcceptanceCanceled(t *testing.T, signal Signal, trigger string) (Signal, SignalSettings, context.Context) {
+	world := newSubnetWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	world.override = func(endpoint, method string, params []json.RawMessage) (any, error, bool) {
+		if method == trigger {
+			cancel()
+		}
+		return nil, nil, false
+	}
+	return signal, world.signalSettings(), ctx
+}
+
+func subnetWorldAcceptanceUnknown(t *testing.T, signal Signal, failing string) (Signal, SignalSettings) {
+	world := newSubnetWorld(t)
+	world.override = func(endpoint, method string, params []json.RawMessage) (any, error, bool) {
+		if method == failing {
+			return nil, errSubnetWorldSourceLoss, true
+		}
+		return nil, nil, false
+	}
+	return signal, world.signalSettings()
+}
+
+var errSubnetWorldSourceLoss = errors.New("synthetic source loss")

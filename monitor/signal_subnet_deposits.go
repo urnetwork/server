@@ -64,10 +64,11 @@ type subnetDepositsProbe struct {
 	runtimes    *subnetRuntimeCache
 	depositLogs *subnetLogFrontier
 	ledger      *subnetDepositLedger
+	latch       *subnetReplayLatch
 }
 
 func newSubnetDepositsProbe() *subnetDepositsProbe {
-	return &subnetDepositsProbe{runtimes: newSubnetRuntimeCache(), depositLogs: newSubnetLogFrontier(), ledger: &subnetDepositLedger{census: newSubnetDepositCensus()}}
+	return &subnetDepositsProbe{runtimes: newSubnetRuntimeCache(), depositLogs: newSubnetLogFrontier(), ledger: &subnetDepositLedger{census: newSubnetDepositCensus()}, latch: newSubnetReplayLatch()}
 }
 
 func (*subnetDepositsProbe) id() string               { return "subnet/deposits" }
@@ -246,17 +247,7 @@ func (self *subnetDepositCensus) prune(currentEpoch uint64) {
 }
 
 func (self *subnetDepositsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	gate, err := openSubnetRun(ctx, env, subnetDepositsFamily)
-	if err != nil || gate.run == nil {
-		return gate.findings, err
-	}
-	run := gate.run
-	findings, err := self.observe(ctx, run)
-	if err != nil {
-		run.closer()
-		return nil, err
-	}
-	return run.close(ctx, env, subnetDepositsFamily, findings)
+	return runSubnetFamily(ctx, env, subnetDepositsFamily, self.latch, self.observe)
 }
 
 // Deposit views of one operator at the checkpoint.
@@ -363,18 +354,19 @@ func observeSubnetReserve(ctx context.Context, run *subnetRun, checkpoint *subne
 		if len(reasons) == 0 {
 			findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetReservePrincipalClass, "subnet-deposits/reserve"))
 		} else {
-			findings = append(findings, finding{
-				probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetReservePrincipalClass,
-				target: "subnet-deposits/reserve", sustain: subnetProvedSustain,
-				symptom:   "The subnet reserve no longer covers or reconciles its recorded principal",
-				mechanism: "At a finalized block the reserve sink's live stake is below its principal, the staking precompile and the sink disagree about the reserve position, operator principal and cumulative conviction do not reconcile, or the reserve lost stake, principal or its hotkey since the last observation. The sink has no withdrawal path, so any of these is a custody incident.",
-				baseline:  "liveStake >= principal; the precompile reads the same live stake; the operator principals sum to principal and each equals that operator's cumulative conviction; live stake, principal and the reserve hotkey never regress.",
-				observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(reasons), ","),
-				evidence:  fmt.Sprintf("Checkpoint height %d; %d operators. Stake and principal amounts are compared exactly in memory and not rendered.", checkpoint.number, len(state.operatorIds)),
-				action:    "Preserve both stake read paths and every ReservePrincipalAdded receipt; check the runtime share accounting before attribution. Never fund an escrow discrepancy from the reserve.",
-				verify:    "A fresh checkpoint reconciles exactly and the incident identifies the first divergent receipt.",
-				playbook:  "SIGNALS.md §22.3",
-			})
+			findings = append(findings, subnetDecided(subnetDepositsFamily, subnetReservePrincipalClass, "subnet-deposits/reserve", "", run.scope("complete", "reserve-sink-coordinator-and-staking-precompile"), subnetDecision{
+				state: "violated",
+				issue: subnetReplayIssue{
+					tier: tierPage, sustain: subnetProvedSustain,
+					invariant: "reserve-principal-conserved", expected: "live-stake-at-least-principal-and-every-ledger-agrees", observed: strings.Join(subnetSortedUnique(reasons), ","),
+					symptom:   "The subnet reserve no longer covers or reconciles its recorded principal",
+					mechanism: "At a finalized block the reserve sink's live stake is below its principal, the staking precompile and the sink disagree about the reserve position, operator principal and cumulative conviction do not reconcile, or the reserve lost stake, principal or its hotkey since the last observation. The sink has no withdrawal path, so any of these is a custody incident.",
+					baseline:  "liveStake >= principal; the precompile reads the same live stake; the operator principals sum to principal and each equals that operator's cumulative conviction; live stake, principal and the reserve hotkey never regress.",
+					action:    "Preserve both stake read paths and every ReservePrincipalAdded receipt; check the runtime share accounting before attribution. Never fund an escrow discrepancy from the reserve.",
+					verify:    "A fresh checkpoint reconciles exactly and the incident identifies the first divergent receipt.",
+				},
+				evidence: fmt.Sprintf("Checkpoint height %d; %d operators. Stake and principal amounts are compared exactly in memory and not rendered.", checkpoint.number, len(state.operatorIds)),
+			}))
 		}
 	}
 	netuid := subnetNetuidArg(run.settings.Deployment.Netuid)
@@ -402,18 +394,19 @@ func observeSubnetReserve(ctx context.Context, run *subnetRun, checkpoint *subne
 	if len(reasons) == 0 {
 		return append(findings, subnetHealthy(subnetDepositsFamily, subnetReserveYieldClass, "subnet-deposits/reserve")), nil
 	}
-	return append(findings, finding{
-		probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetReserveYieldClass,
-		target: "subnet-deposits/reserve", sustain: subnetProvedSustain,
-		symptom:   "The subnet reserve's yield is not compounding under its own coldkey",
-		mechanism: "The reserve hotkey has a nonzero delegate or childkey take, or the sink's coldkey is not its own mirrored account. A take diverts the reserve's dividends; a changed coldkey changes who owns the compounding stake.",
-		baseline:  "The reserve hotkey's delegate and childkey takes are zero and the sink coldkey is the sink's own mirrored account.",
-		observed:  "state=violated reasons=" + strings.Join(reasons, ","),
-		evidence:  fmt.Sprintf("Checkpoint height %d. Deposits, voluntary conviction, rounding donations and yield are separate quantities; a low demand ratio is an economic signal, not this invariant.", checkpoint.number),
-		action:    "Route to custody incident response with the native take storage and the block; do not restake or adjust the reserve from the monitor.",
-		verify:    "A fresh checkpoint shows zero takes under the sink's own coldkey.",
-		playbook:  "SIGNALS.md §22.3",
-	}), nil
+	return append(findings, subnetDecided(subnetDepositsFamily, subnetReserveYieldClass, "subnet-deposits/reserve", "", run.scope("complete", "native-delegate-and-childkey-takes"), subnetDecision{
+		state: "violated",
+		issue: subnetReplayIssue{
+			tier: tierPage, sustain: subnetProvedSustain,
+			invariant: "reserve-yields-nothing", expected: "zero-takes-and-self-mirrored-sink-coldkey", observed: strings.Join(reasons, ","),
+			symptom:   "The subnet reserve's yield is not compounding under its own coldkey",
+			mechanism: "The reserve hotkey has a nonzero delegate or childkey take, or the sink's coldkey is not its own mirrored account. A take diverts the reserve's dividends; a changed coldkey changes who owns the compounding stake.",
+			baseline:  "The reserve hotkey's delegate and childkey takes are zero and the sink coldkey is the sink's own mirrored account.",
+			action:    "Route to custody incident response with the native take storage and the block; do not restake or adjust the reserve from the monitor.",
+			verify:    "A fresh checkpoint shows zero takes under the sink's own coldkey.",
+		},
+		evidence: fmt.Sprintf("Checkpoint height %d. Deposits, voluntary conviction, rounding donations and yield are separate quantities; a low demand ratio is an economic signal, not this invariant.", checkpoint.number),
+	})), nil
 }
 
 // Coordinator deposit counters for the current epoch and the source epoch's
@@ -633,34 +626,36 @@ func (self *subnetDepositsProbe) observeDepositEvents(ctx context.Context, run *
 	findings := []finding{}
 	evidence := fmt.Sprintf("Checkpoint height %d; frontier read %d deposit events and %d reserve receipts. Amounts and funders are compared in memory and not rendered.", checkpoint.number, len(events), len(sinkLogs))
 	if len(attributionReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetDepositAttributionClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "An accepted subnet deposit is misattributed or inconsistent with its counters",
-			mechanism: "A finalized Deposit or ConvictionAdded event has no matching ReservePrincipalAdded receipt in its transaction, a receipt has no deposit, an event names the wrong epoch, policy or operator, an operator's shared nonce sequence repeats or skips, or the epoch counters disagree with the complete event census.",
-			baseline:  "Each deposit or conviction event pairs one-to-one with its same-transaction reserve receipt, names the effective policy of its epoch, advances its operator's nonce by exactly one, and the complete epoch census reproduces the counters within the caps.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(attributionReasons), ","),
-			evidence:  evidence,
-			action:    "Preserve the call bytes, log indices, nonces and before/after stake of the affected transactions, including failed attempts; do not count voluntary conviction as epoch demand.",
-			verify:    "A fresh frontier pairs every event and the counters reconcile.",
-			playbook:  "SIGNALS.md §22.3",
-		})
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetDepositAttributionClass, target, "", run.scope("bounded-frontier", "reserve-receipt-events"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "deposit-receipt-attribution", expected: "one-same-transaction-receipt-per-deposit-and-sequential-nonces", observed: strings.Join(subnetSortedUnique(attributionReasons), ","),
+				symptom:   "An accepted subnet deposit is misattributed or inconsistent with its counters",
+				mechanism: "A finalized Deposit or ConvictionAdded event has no matching ReservePrincipalAdded receipt in its transaction, a receipt has no deposit, an event names the wrong epoch, policy or operator, an operator's shared nonce sequence repeats or skips, or the epoch counters disagree with the complete event census.",
+				baseline:  "Each deposit or conviction event pairs one-to-one with its same-transaction reserve receipt, names the effective policy of its epoch, advances its operator's nonce by exactly one, and the complete epoch census reproduces the counters within the caps.",
+				action:    "Preserve the call bytes, log indices, nonces and before/after stake of the affected transactions, including failed attempts; do not count voluntary conviction as epoch demand.",
+				verify:    "A fresh frontier pairs every event and the counters reconcile.",
+			},
+			evidence: evidence,
+		}))
 	} else {
 		findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetDepositAttributionClass, target))
 	}
 	if len(creditReasons) != 0 {
-		findings = append(findings, finding{
-			probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetReserveCreditDeltaClass,
-			target: "subnet-deposits/reserve-receipts", sustain: subnetProvedSustain,
-			symptom:   "A reserve receipt does not cover its full principal",
-			mechanism: "Consecutive ReservePrincipalAdded receipts do not add exactly their amounts to the total or operator principal, or a receipt's live stake does not cover the total principal, or the stake-over-principal surplus fell between receipts. The contract allows only a pinned zero-to-two rao surplus per move; principal must never be reduced to hide a rounding loss.",
-			baseline:  "Every receipt adds exactly its amount to the total and operator principal, its live stake covers the total principal, and the surplus never decreases beyond runtime share rounding.",
-			observed:  "state=violated reasons=" + strings.Join(subnetSortedUnique(creditReasons), ","),
-			evidence:  evidence,
-			action:    "Retain both destination share-pool transitions of the affected receipts and investigate the runtime share accounting before any repair.",
-			verify:    "A fresh frontier's receipts chain exactly to the sink principal.",
-			playbook:  "SIGNALS.md §22.3",
-		})
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetReserveCreditDeltaClass, "subnet-deposits/reserve-receipts", "", run.scope("bounded-frontier", "reserve-receipt-events"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "receipt-credits-exact", expected: "receipts-add-exactly-their-amounts", observed: strings.Join(subnetSortedUnique(creditReasons), ","),
+				symptom:   "A reserve receipt does not cover its full principal",
+				mechanism: "Consecutive ReservePrincipalAdded receipts do not add exactly their amounts to the total or operator principal, or a receipt's live stake does not cover the total principal, or the stake-over-principal surplus fell between receipts. The contract allows only a pinned zero-to-two rao surplus per move; principal must never be reduced to hide a rounding loss.",
+				baseline:  "Every receipt adds exactly its amount to the total and operator principal, its live stake covers the total principal, and the surplus never decreases beyond runtime share rounding.",
+				action:    "Retain both destination share-pool transitions of the affected receipts and investigate the runtime share accounting before any repair.",
+				verify:    "A fresh frontier's receipts chain exactly to the sink principal.",
+			},
+			evidence: evidence,
+		}))
 	} else {
 		findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetReserveCreditDeltaClass, "subnet-deposits/reserve-receipts"))
 	}
@@ -822,32 +817,36 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 			continue
 		}
 		mismatched++
-		findings = append(findings, finding{
-			probeId: subnetDepositsFamily.probeId, tier: tierWarn, class: subnetOperatorDepositMismatchClass,
-			target: target, sustain: subnetConfigurationSustain,
-			symptom:   "An operator's demand deposit does not match its signed usage claim",
-			mechanism: "The exact deposit audit validators run, replayed against the committed, signed prior-epoch payout artifact, found the observed deposit unequal to the required one, or found the artifact invalid, equivocating or unavailable after its root window. Both underdeposit and overdeposit are mismatches; validators give such a pool zero weight.",
-			baseline:  "Each operator's epoch deposit equals the required deposit for its signed prior-epoch usage, or its artifact is still pending before the root window closes, or the reviewed policy is zero-price.",
-			observed:  fmt.Sprintf("state=%s disposition=%s epoch=%d source_epoch=%d", audit.Status, audit.Disposition, audit.Epoch, audit.SourceEpoch),
-			evidence:  fmt.Sprintf("Checkpoint EVM height %d; artifact deadline %d. This proves consistency with the signed claim, not a trustless usage oracle; required and observed amounts stay private.", checkpoint.evm.number, deadline),
-			action:    "Notify the responsible operator with the private audit record. Do not treat a pre-deadline pending artifact or an authorized bootstrap rule as dishonesty.",
-			verify:    "The operator's next epoch audit is compliant, or its artifact becomes available and verifies.",
-			playbook:  "SIGNALS.md §22.3",
-		})
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target, "", run.scope("complete", "committed-payout-artifact-replay"), subnetDecision{
+			state: fmt.Sprint(audit.Status),
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "operator-deposit-matches-signed-claim", expected: "compliant", observed: fmt.Sprint(audit.Disposition),
+				symptom:   "An operator's demand deposit does not match its signed usage claim",
+				mechanism: "The exact deposit audit validators run, replayed against the committed, signed prior-epoch payout artifact, found the observed deposit unequal to the required one, or found the artifact invalid, equivocating or unavailable after its root window. Both underdeposit and overdeposit are mismatches; validators give such a pool zero weight.",
+				baseline:  "Each operator's epoch deposit equals the required deposit for its signed prior-epoch usage, or its artifact is still pending before the root window closes, or the reviewed policy is zero-price.",
+				action:    "Notify the responsible operator with the private audit record. Do not treat a pre-deadline pending artifact or an authorized bootstrap rule as dishonesty.",
+				verify:    "The operator's next epoch audit is compliant, or its artifact becomes available and verifies.",
+			},
+			evidence: fmt.Sprintf("Checkpoint EVM height %d; artifact deadline %d. This proves consistency with the signed claim, not a trustless usage oracle; required and observed amounts stay private.", checkpoint.evm.number, deadline),
+			details:  fmt.Sprintf("disposition=%s epoch=%d source_epoch=%d", audit.Disposition, audit.Epoch, audit.SourceEpoch),
+		}))
 	}
 	if mismatched != 0 && mismatched == len(state.operatorIds) && checkpoint.evm.number > deadline {
-		findings = append(findings, finding{
-			probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetOperatorDepositMismatchClass,
-			target: "subnet-deposits/operators", sustain: subnetProvedSustain,
-			symptom:   "Every subnet operator failed its deposit audit after the root window",
-			mechanism: "No operator has a compliant deposit audit after the root commit deadline, so every pool's tail weight is zeroed for the epoch.",
-			baseline:  "At least one operator passes its deposit audit by the root commit deadline.",
-			observed:  fmt.Sprintf("state=violated failing_operators=%d", mismatched),
-			evidence:  fmt.Sprintf("Checkpoint EVM height %d; artifact deadline %d.", checkpoint.evm.number, deadline),
-			action:    "Page the operators' settlement owners; check artifact publication and the deposit path before the next epoch.",
-			verify:    "At least one operator's audit is compliant on the next epoch.",
-			playbook:  "SIGNALS.md §22.3",
-		})
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetOperatorDepositMismatchClass, "subnet-deposits/operators", "", run.scope("complete", "committed-payout-artifact-replay"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "some-operator-deposit-compliant", expected: "at-least-one-compliant-operator", observed: fmt.Sprintf("%d-of-%d-failing", mismatched, len(state.operatorIds)),
+				symptom:   "Every subnet operator failed its deposit audit after the root window",
+				mechanism: "No operator has a compliant deposit audit after the root commit deadline, so every pool's tail weight is zeroed for the epoch.",
+				baseline:  "At least one operator passes its deposit audit by the root commit deadline.",
+				action:    "Page the operators' settlement owners; check artifact publication and the deposit path before the next epoch.",
+				verify:    "At least one operator's audit is compliant on the next epoch.",
+			},
+			evidence: fmt.Sprintf("Checkpoint EVM height %d; artifact deadline %d.", checkpoint.evm.number, deadline),
+			details:  fmt.Sprintf("failing_operators=%d", mismatched),
+		}))
 	}
 	return results, findings, nil
 }
@@ -938,18 +937,20 @@ func observeSubnetDepositPenalties(ctx context.Context, run *subnetRun, checkpoi
 			findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetDepositPenaltyBypassClass, target))
 			continue
 		}
-		findings = append(findings, finding{
-			probeId: subnetDepositsFamily.probeId, tier: tierPage, class: subnetDepositPenaltyBypassClass,
-			target: target, sustain: subnetProvedSustain,
-			symptom:   "A noncompliant operator's pool still receives applied validator weight",
-			mechanism: "After the deposit audit's native cycle, an applied validator row still gives positive weight to the pool of an operator whose replayed audit failed. Validators must zero a noncompliant pool; bad demand weighted into Yuma becomes miner emission.",
-			baseline:  "Every validator row applied after the audit's commit-reveal cycle gives a noncompliant pool zero or no weight.",
-			observed:  fmt.Sprintf("state=violated status=%s rows_weighting_pool=%d rows_judged=%d", result.audit.Status, weighted, judged),
-			evidence:  fmt.Sprintf("Checkpoint height %d; rows applied at or after block %d are judged; earlier rows are old applied weights, not a bypass.", checkpoint.number, cycle),
-			action:    "Identify the validator rows and their CRv4 commits; check the validators' deposit audits before attributing intent.",
-			verify:    "Every row applied after the next eligible cycle gives the pool zero weight, or the operator's audit becomes compliant.",
-			playbook:  "SIGNALS.md §22.3",
-		})
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetDepositPenaltyBypassClass, target, "", run.scope("complete", "applied-native-weights"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "noncompliant-pool-zero-weight", expected: "no-applied-row-weights-the-pool", observed: fmt.Sprintf("%d-rows-weight-the-pool", weighted),
+				symptom:   "A noncompliant operator's pool still receives applied validator weight",
+				mechanism: "After the deposit audit's native cycle, an applied validator row still gives positive weight to the pool of an operator whose replayed audit failed. Validators must zero a noncompliant pool; bad demand weighted into Yuma becomes miner emission.",
+				baseline:  "Every validator row applied after the audit's commit-reveal cycle gives a noncompliant pool zero or no weight.",
+				action:    "Identify the validator rows and their CRv4 commits; check the validators' deposit audits before attributing intent.",
+				verify:    "Every row applied after the next eligible cycle gives the pool zero weight, or the operator's audit becomes compliant.",
+			},
+			evidence: fmt.Sprintf("Checkpoint height %d; rows applied at or after block %d are judged; earlier rows are old applied weights, not a bypass.", checkpoint.number, cycle),
+			details:  fmt.Sprintf("status=%s rows_weighting_pool=%d rows_judged=%d", result.audit.Status, weighted, judged),
+		}))
 	}
 	return findings, nil
 }
