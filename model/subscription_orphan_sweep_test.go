@@ -196,7 +196,7 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 							t.Fatal("orphan sweep plan count changed")
 						}
 						childWork, totalWork := float64(0), float64(0)
-						targetPoint, cursorRange, parentPoint, tidDelete := false, page.first, false, false
+						targetPoint, cursorRange, parentPoint, keyDelete := false, page.first, false, false
 						var inspect func(orphanSweepTestPlanNode)
 						inspect = func(node orphanSweepTestPlanNode) {
 							condition := node.IndexCondition + " " + node.Recheck
@@ -212,11 +212,12 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 									for _, key := range keys {
 										completeKey = completeKey && strings.Contains(condition, key)
 									}
+									pointKey := completeKey && strings.Contains(condition, "=") &&
+										!strings.Contains(condition, ">") && !strings.Contains(condition, "<")
 									if node.Alias == "sweep_target" {
-										targetPoint = targetPoint || (completeKey && strings.Contains(condition, "=") &&
-											!strings.Contains(condition, ">") && !strings.Contains(condition, "<"))
+										targetPoint = targetPoint || pointKey
 									} else if node.Alias == "sweep_delete" {
-										tidDelete = tidDelete || node.NodeType == "Tid Scan"
+										keyDelete = keyDelete || pointKey
 									} else if completeKey && strings.Contains(condition, ">") {
 										cursorRange = true
 									}
@@ -238,11 +239,11 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 							}
 						}
 						inspect(plans[0].Plan)
-						// Materialize the actual selected addresses in this transaction,
-						// then inspect the separately prepared deletion's fresh snapshot.
+						// Materialize the actual selected keys in this transaction, then
+						// inspect the separately prepared deletion's fresh snapshot.
 						var examined int64
-						var locked []string
-						targets := []any{&examined, &locked}
+						lockedKeyTargets := newSweepLockedKeyTargets(step.newCursorTargets())
+						targets := append([]any{&examined}, lockedKeyTargets...)
 						targets = append(targets, step.newCursorTargets()...)
 						// This manual prepared name is rebound to different table key
 						// shapes. Its EXECUTE text cannot share a cached description.
@@ -250,16 +251,27 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 						if err != nil && err != pgx.ErrNoRows {
 							server.Raise(err)
 						}
-						if len(locked) > limit || int64(len(locked)) > examined {
-							t.Fatal("locked tuple count exceeded the selected page")
+						lockedKeys := derefCursor(lockedKeyTargets)
+						lockedCount := reflect.ValueOf(lockedKeys[0]).Len()
+						if lockedCount > limit || int64(lockedCount) > examined {
+							t.Fatal("locked key count exceeded the selected page")
 						}
-						if len(locked) == 0 {
-							tidDelete = true // production skips this statement
+						if lockedCount == 0 {
+							keyDelete = true // production skips this statement
 						} else {
-							server.RaisePgResult(tx.Exec(ctx, `PREPARE orphan_delete_plan(text[]) AS `+step.deleteSql))
-							literal := "ARRAY['" + strings.Join(locked, "','") + "']::text[]"
+							// One array literal per key column; the prepared casts type them.
+							keyArrays := make([]string, len(lockedKeys))
+							for i, column := range lockedKeys {
+								values := reflect.ValueOf(column)
+								elements := make([]any, values.Len())
+								for j := range elements {
+									elements[j] = values.Index(j).Interface()
+								}
+								keyArrays[i] = `'{"` + strings.Join(encodeSweepCursorKey(elements), `","`) + `"}'`
+							}
+							server.RaisePgResult(tx.Exec(ctx, `PREPARE orphan_delete_plan AS `+step.deleteSql))
 							server.Raise(tx.QueryRow(ctx, `EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON)
-								EXECUTE orphan_delete_plan(`+literal+`)`).Scan(&raw))
+								EXECUTE orphan_delete_plan(`+strings.Join(keyArrays, ",")+`)`).Scan(&raw))
 							plans = nil
 							server.Raise(json.Unmarshal(raw, &plans))
 							if len(plans) != 1 {
@@ -267,9 +279,9 @@ func TestSweepOrphanContractPlansStayInsideSelectedPage(t *testing.T) {
 							}
 							inspect(plans[0].Plan)
 						}
-						if childWork > 4*limit+16 || totalWork > 6*limit+32 || !targetPoint || !cursorRange || !parentPoint || !tidDelete {
-							t.Fatalf("%s/%s/%s exceeded the selected page: child=%.0f total=%.0f target_point=%t cursor_range=%t parent_point=%t tid_delete=%t",
-								step.table, mode, page.name, childWork, totalWork, targetPoint, cursorRange, parentPoint, tidDelete)
+						if childWork > 4*limit+16 || totalWork > 6*limit+32 || !targetPoint || !cursorRange || !parentPoint || !keyDelete {
+							t.Fatalf("%s/%s/%s exceeded the selected page: child=%.0f total=%.0f target_point=%t cursor_range=%t parent_point=%t key_delete=%t",
+								step.table, mode, page.name, childWork, totalWork, targetPoint, cursorRange, parentPoint, keyDelete)
 						}
 						t.Logf("table=%s mode=%s page=%s child_work=%.0f total_work=%.0f shared_hits=%.0f shared_reads=%.0f",
 							step.table, mode, page.name, childWork, totalWork, plans[0].Plan.Hits, plans[0].Plan.Reads)
@@ -514,12 +526,22 @@ func TestSweepOrphanContractRechecksParentAfterLock(t *testing.T) {
 				server.Raise(err)
 				defer tx.Rollback(context.WithoutCancel(ctx))
 				var count int64
-				var locked []string
 				cursorTargets := step.newCursorTargets()
-				targets := append([]any{&count, &locked}, cursorTargets...)
+				lockedKeyTargets := newSweepLockedKeyTargets(cursorTargets)
+				targets := append([]any{&count}, lockedKeyTargets...)
+				targets = append(targets, cursorTargets...)
 				args := append(orphanSweepTestKey(i, 4, false), 1)
 				server.Raise(tx.QueryRow(ctx, step.sql, args...).Scan(targets...))
-				if count != 1 || len(locked) != 1 || !reflect.DeepEqual(derefCursor(cursorTargets), orphanSweepTestKey(i, 5, false)) {
+				lockedKeys := derefCursor(lockedKeyTargets)
+				lockedKey := make([]any, len(lockedKeys))
+				for j, column := range lockedKeys {
+					if reflect.ValueOf(column).Len() != 1 {
+						t.Fatalf("step %d did not lock exactly the selected orphan", i)
+					}
+					lockedKey[j] = reflect.ValueOf(column).Index(0).Interface()
+				}
+				if count != 1 || !reflect.DeepEqual(lockedKey, orphanSweepTestKey(i, 5, false)) ||
+					!reflect.DeepEqual(derefCursor(cursorTargets), orphanSweepTestKey(i, 5, false)) {
 					t.Fatalf("step %d did not lock the selected orphan", i)
 				}
 				server.Tx(ctx, func(parentTx server.PgTx) {
@@ -529,7 +551,7 @@ func TestSweepOrphanContractRechecksParentAfterLock(t *testing.T) {
 						SELECT $1,source_network_id,source_id,destination_network_id,destination_id,
 						 payer_network_id,0,$1 FROM transfer_contract WHERE contract_id=$2`, orphanSweepTestId(5), orphanSweepTestId(1)))
 				}, server.TxReadCommitted, server.OptNoRetry())
-				tag, err := tx.Exec(ctx, step.deleteSql, locked)
+				tag, err := tx.Exec(ctx, step.deleteSql, lockedKeys...)
 				server.Raise(err)
 				if tag.RowsAffected() != 0 {
 					t.Fatalf("step %d deleted a child of the newly visible parent", i)
@@ -544,6 +566,133 @@ func TestSweepOrphanContractRechecksParentAfterLock(t *testing.T) {
 				}
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id=$1`, orphanSweepTestId(5)))
 			}, server.TxReadCommitted, server.OptNoRetry())
+		}
+	})
+}
+
+// A tuple address names a row only within one partition. Each contract child
+// is swapped for a copy partitioned by contract_id, as the cutover will leave
+// it, and the first page's orphans share their tuple addresses with orphans in
+// the other partition. Every page must delete exactly its own orphans, keep
+// its retained rows, and leave each row past its boundary to that row's page.
+func TestSweepOrphanContractPagesDeleteByKeyAcrossPartitions(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		// The high ids repeat the low ids' tails, so the eight keys sort as
+		// low[0..3] < high[0..3] and fill each partition in the same order.
+		lowIds, highIds := make([]server.Id, 4), make([]server.Id, 4)
+		for i := range 4 {
+			lowIds[i], highIds[i] = orphanSweepTestId(i+1), orphanSweepTestId(i+1)
+			highIds[i][0] = 0x80
+		}
+		// The second id on each side has a parent; the rest are orphans.
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, id := range []server.Id{lowIds[1], highIds[1]} {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+					(contract_id,source_network_id,source_id,destination_network_id,destination_id,
+					 payer_network_id,transfer_byte_count,stream_id)
+					VALUES($1,$2,$3,$4,$5,$2,0,$1)`, id, clients.payerNetworkId, clients.payerId,
+					clients.providerNetworkId, clients.providerId))
+			}
+		}, server.TxReadCommitted, server.OptNoRetry())
+		tail := orphanSweepTestId(1)
+		insertSqls := map[string]string{
+			"contract_close": `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count)
+				VALUES($1,'source',0)`,
+			"transfer_escrow": `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count)
+				VALUES($1,$2,0)`,
+			"transfer_escrow_sweep": `INSERT INTO transfer_escrow_sweep
+				(contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents)
+				VALUES($1,$2,$2,0,0)`,
+			"contract_extender": `INSERT INTO contract_extender(contract_id,extender_id,party,client_id,network_id)
+				VALUES($1,$2,'source',$3,$4)`,
+		}
+		insertArgs := map[string][]any{
+			"contract_close":        {},
+			"transfer_escrow":       {tail},
+			"transfer_escrow_sweep": {tail},
+			"contract_extender":     {tail, clients.providerId, clients.providerNetworkId},
+		}
+		partitioned := 0
+		for _, step := range sweepOrphanContractSteps() {
+			insertSql, found := insertSqls[step.table]
+			if !found {
+				continue
+			}
+			partitioned++
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, strings.ReplaceAll(`
+					CREATE TABLE {{table}}_partitioned (LIKE {{table}} INCLUDING ALL) PARTITION BY RANGE (contract_id);
+					CREATE TABLE {{table}}_low PARTITION OF {{table}}_partitioned
+						FOR VALUES FROM (MINVALUE) TO ('80000000-0000-0000-0000-000000000000');
+					CREATE TABLE {{table}}_high PARTITION OF {{table}}_partitioned
+						FOR VALUES FROM ('80000000-0000-0000-0000-000000000000') TO (MAXVALUE);
+					DROP TABLE {{table}};
+					ALTER TABLE {{table}}_partitioned RENAME TO {{table}};
+				`, "{{table}}", step.table)))
+				for _, id := range append(append([]server.Id{}, lowIds...), highIds...) {
+					server.RaisePgResult(tx.Exec(ctx, insertSql, append([]any{id}, insertArgs[step.table]...)...))
+				}
+			}, server.TxReadCommitted, server.OptNoRetry())
+			remaining := func() []server.Id {
+				var ids []server.Id
+				server.Db(ctx, func(conn server.PgConn) {
+					rows, err := conn.Query(ctx, `SELECT contract_id FROM `+step.table+` ORDER BY contract_id`)
+					server.WithPgResult(rows, err, func() {
+						for rows.Next() {
+							var id server.Id
+							server.Raise(rows.Scan(&id))
+							ids = append(ids, id)
+						}
+					})
+				})
+				return ids
+			}
+			// The fixture's premise: the first page's two orphans have the same
+			// tuple addresses as two orphans of the other partition.
+			server.Db(ctx, func(conn server.PgConn) {
+				for _, i := range []int{0, 2} {
+					var lowTid, highTid string
+					server.Raise(conn.QueryRow(ctx, `SELECT
+						(SELECT ctid::text FROM `+step.table+`_low WHERE contract_id=$1),
+						(SELECT ctid::text FROM `+step.table+`_high WHERE contract_id=$2)`,
+						lowIds[i], highIds[i]).Scan(&lowTid, &highTid))
+					if lowTid != highTid {
+						t.Fatalf("%s fixture rows do not share tuple addresses: %s %s", step.table, lowTid, highTid)
+					}
+				}
+			})
+			pages := []struct {
+				removed  int64
+				examined int
+				done     bool
+				want     []server.Id
+			}{
+				// low[0..2]: the boundary falls before low[3]
+				{removed: 2, examined: 3, want: []server.Id{lowIds[1], lowIds[3], highIds[0], highIds[1], highIds[2], highIds[3]}},
+				// low[3], high[0..1]: the page crosses the partition bound
+				{removed: 2, examined: 3, want: []server.Id{lowIds[1], highIds[1], highIds[2], highIds[3]}},
+				// high[2..3]: a short page ends the step
+				{removed: 2, examined: 2, done: true, want: []server.Id{lowIds[1], highIds[1]}},
+			}
+			var key []any
+			for index, page := range pages {
+				removed, examined, endKey, done := sweepOrphanCursor(ctx, step, key, 3, 3)
+				if removed != page.removed || examined != page.examined || done != page.done || (done && endKey != nil) {
+					t.Fatalf("%s page %d: removed=%d examined=%d done=%t", step.table, index, removed, examined, done)
+				}
+				if got := remaining(); !reflect.DeepEqual(got, page.want) {
+					t.Fatalf("%s page %d left %v, want %v", step.table, index, got, page.want)
+				}
+				key = endKey
+			}
+		}
+		if partitioned != 4 {
+			t.Fatal("the contract child steps changed", partitioned)
 		}
 	})
 }

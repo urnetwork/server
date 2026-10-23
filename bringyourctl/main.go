@@ -612,9 +612,10 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows. The provider payout stats that needed it now read
-// provider_payouts, and migration 816 dropped the column's covering index, so
-// each batch scans the sweep table. It is idempotent and safe to re-run.
+// on existing rows. A db migration adds the column; this command changes no
+// schema. The provider payout stats that needed it now read provider_payouts,
+// and migration 816 dropped the column's covering index, so each batch scans
+// the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -622,9 +623,6 @@ func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	if n, err := opts.Int("--batch"); err == nil && 0 < n {
 		batch = n
 	}
-
-	fmt.Println("Ensuring transfer_escrow_sweep.destination_id exists ...")
-	model.AddSweepDestinationIdColumn(ctx)
 
 	fmt.Printf("Backfilling destination_id in batches of %d ...\n", batch)
 	backfilled := model.BackfillSweepDestinationIds(ctx, batch)

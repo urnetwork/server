@@ -526,7 +526,9 @@ func TestContractCloseReportReapedBeforeSettlementKeepsReportResult(t *testing.T
 		ctx := context.WithValue(f.ctx, contractSettlementTxTestKey{}, func(contractId server.Id) {
 			reaped++
 			server.Tx(f.ctx, func(tx server.PgTx) {
-				for _, table := range []string{"contract_close", "transfer_escrow", "transfer_escrow_sweep", "contract_extender", "transfer_contract"} {
+				// The reaper's own tables, in its order. Close reports go first
+				// because the partition cutover drops their cascade.
+				for _, table := range []string{"contract_close_report", "contract_close", "transfer_escrow", "transfer_escrow_sweep", "contract_extender", "transfer_contract"} {
 					server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM `+table+` WHERE contract_id=$1`, contractId))
 				}
 			})

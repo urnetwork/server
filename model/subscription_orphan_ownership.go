@@ -9,10 +9,11 @@ import (
 )
 
 // Selects one primary-key page, admits its balance owners, then locks the
-// page's orphan rows. Any key the schema allows, including the all-zero key,
-// must page: one key that cannot be admitted would stop every later step.
+// page's orphan rows and returns their keys as aligned contract and balance id
+// arrays. Any key the schema allows, including the all-zero key, must page: one
+// key that cannot be admitted would stop every later step.
 func ownedTransferEscrowOrphanPageInTx(ctx context.Context, tx server.PgTx, first bool,
-	cursor []any, limit int) (count int64, locked []string, targets []any, found, admitted bool) {
+	cursor []any, limit int) (count int64, lockedKeys []any, targets []any, found, admitted bool) {
 	query := `SELECT contract_id,balance_id FROM transfer_escrow ORDER BY contract_id,balance_id LIMIT $1`
 	args := []any{limit}
 	if !first {
@@ -40,21 +41,23 @@ func ownedTransferEscrowOrphanPageInTx(ctx context.Context, tx server.PgTx, firs
 	if !admitted {
 		return 0, nil, nil, false, false
 	}
-	rows, err = tx.Query(ctx, `SELECT matched.ctid::text
+	var lockedContractIds, lockedBalanceIds []server.Id
+	rows, err = tx.Query(ctx, `SELECT matched.contract_id,matched.balance_id
  FROM unnest($1::uuid[],$2::uuid[]) AS requested(contract_id,balance_id)
  CROSS JOIN LATERAL (
- SELECT escrow.ctid FROM transfer_escrow AS escrow
+ SELECT escrow.contract_id,escrow.balance_id FROM transfer_escrow AS escrow
  WHERE escrow.contract_id=requested.contract_id AND escrow.balance_id=requested.balance_id
  AND NOT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=escrow.contract_id LIMIT 1 OFFSET 0)
  LIMIT 1 OFFSET 0 FOR UPDATE OF escrow
  ) AS matched`, contractIds, balanceIds)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
-			var tuple string
-			server.Raise(rows.Scan(&tuple))
-			locked = append(locked, tuple)
+			var contractId, balanceId server.Id
+			server.Raise(rows.Scan(&contractId, &balanceId))
+			lockedContractIds = append(lockedContractIds, contractId)
+			lockedBalanceIds = append(lockedBalanceIds, balanceId)
 		}
 	})
 	lastContract, lastBalance := contractIds[len(contractIds)-1], balanceIds[len(balanceIds)-1]
-	return count, locked, []any{&lastContract, &lastBalance}, true, true
+	return count, []any{lockedContractIds, lockedBalanceIds}, []any{&lastContract, &lastBalance}, true, true
 }
