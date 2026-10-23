@@ -10709,17 +10709,12 @@ var migrations = []any{
 	// Prospectively bind automatic closing reviews and source to the elected winner.
 	newSqlMigration(competitionWinnerReviewMigration()),
 
-	// The smallest contract id of a millisecond (CONTRACT-PARTITION.md).
-	// Contract ids lead with their 48-bit creation millisecond
-	// (connect.NewId), so an id range is a time range: the partition bounds,
-	// the legacy partition's bound check and the bounded reads all derive from
-	// this one function. It is IMMUTABLE, which a CHECK constraint requires: an
-	// epoch does not depend on the session time zone.
-	newSqlMigration(`
-		CREATE OR REPLACE FUNCTION contract_id_floor(t timestamptz) RETURNS uuid
-		LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-		AS $$
-			SELECT (lpad(to_hex(floor(extract(epoch FROM t) * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid
-		$$
-	`),
+	// The smallest contract id of a millisecond (CONTRACT-PARTITION.md;
+	// see contractIdFloorSql).
+	newSqlMigration(contractIdFloorSql),
+
+	// Close evidence retention (CONTRACT-PARTITION.md): the evidence guard
+	// admits deleting a row older than the 13-week contract horizon from a
+	// transaction that opts in. Update, truncate and newer rows stay refused.
+	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
 }
