@@ -252,7 +252,6 @@ active missing capability and must not be read as green.
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
-| 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
@@ -268,7 +267,7 @@ active missing capability and must not be read as green.
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
-| 5.14 | Runbook | `storage-runway`, `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution, guarded partition drops and the payout-frontier check are direct operator steps |
+| 5.14 | Runbook | `storage-runway`, `retention-liveness`, `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution and guarded partition drops are direct operator steps |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
 | 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
@@ -7859,7 +7858,7 @@ changes are owner decisions. VERIFY: two consecutive complete observations
 outside both bands.
 
 ### 2.4g Retention liveness — tables whose retention stopped reclaiming
-Probe: `retention-liveness` (catalog entry; not implemented as of 2026-10-22)
+Probe: `retention-liveness`
 
 Retention that silently stops looks like growth, and a runway alert (§2.4f)
 only says how long is left, not why. Facts on 10-22:
@@ -7890,9 +7889,59 @@ Checks, all cheap and read-only:
 4. Per relation over 100 GB: report net growth over 7 days with no deletes
    (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
 
+Implementation (2026-10-22). Hourly, two bounded read-only queries run on
+the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
+30-second statement-clock guard. A catalog read returns the newest
+`subsidy_payment.end_time`, the `client_reliability` parent's kind and every
+attached partition's name and heap size (at most 4,096), the statistics reset
+and postmaster start, and the public relations of at least 100 GB with their
+insert and delete counters, in fixed ten-cell frames bound by an end row. A
+second read counts `transfer_contract TABLESAMPLE SYSTEM (0.0002)` rows, rows
+older than 14 days, and those with `reap_time`. A failure in one read leaves
+only its own checks unknown. Targets are the primary's name plus a fixed
+check name; only counts, ages and fixed names leave SQL.
+
+- `retention-frontier-pinned` (target `<primary>/subsidy-frontier`, sustain
+  1): the frontier is more than 10 days old. `holding_reliability_retention`
+  says whether the frontier minus one day already holds the 21-day
+  reliability retention back, and `days_until_hold` when it will. No
+  subsidy payment at all holds nothing and is healthy.
+- `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
+  because the page sample is random per run): fewer than 5% of at least 20
+  sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
+  unknown; fewer than 20 old rows is a young table and healthy.
+- `partition-retention-stuck` (target
+  `<primary>/client-reliability-partitions`, sustain 1): the oldest
+  `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
+  upper bound more than 2 days before the cutoff the drop pass computes: 21
+  days, held back to the frontier minus one day, never past 30 days (the
+  model's `ClientReliabilityRetention`, `clientReliabilityRetentionCutoffBlock`
+  and `ClientExpiration`). Empty partitions and names the drop pass did not
+  create are not counted; a frontier-held cutoff is the frontier finding,
+  not a stuck drop. A parent that is missing or not partitioned, or an
+  over-cap census, is unknown.
+- Check 4's list rides in the evidence of every retention finding as
+  `append_only_relations`: relations of at least 100 GB with inserts and no
+  deletes over a statistics window (since the last reset, else since the
+  postmaster start) of at least 7 days, at most 16, names rendered only when
+  plain lowercase identifiers. A shorter window is
+  `unqualified-stats-window`; old deletes outside the window can hide a
+  relation, so the list is a lower bound.
+- `retention-liveness-unobservable` (per check target, sustain 2): no or
+  several primaries, a failed read, a wrong host or role, a skewed clock, an
+  incomplete or malformed frame.
+
+Every tunable, including the mirrored reliability horizon, is a field of
+`RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
+(frontier 17.5 days old and 2.5 days from holding, 0.75% stamped, the
+`st_client_key_history` append-only list), every partition cutoff branch,
+reap share edges and sample sufficiency, malformed frames and failed reads,
+the list's window and name rules, inventory authority and cancellation.
+
 ACTION: retention horizons are owner decisions. Never drop data inside a
 payout frontier without the owner: the code's own comment notes that a missing
-reliability block silently cuts provider credit.
+reliability block silently cuts provider credit. VERIFY: a complete
+observation inside each line on the next runs (two for the sampled check).
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`

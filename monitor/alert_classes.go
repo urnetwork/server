@@ -28,6 +28,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"pg-disk-space-unobservable":                       visibilityAlertClass,
 	"pg-disk-runway-unobservable":                      visibilityAlertClass,
 	"storage-runway-unobservable":                      visibilityAlertClass,
+	"retention-liveness-unobservable":                  visibilityAlertClass,
 	"pg-huge-pages-unobservable":                       visibilityAlertClass,
 	"pg-freeze-age-unobservable":                       visibilityAlertClass,
 	"jwt-rejections-unobservable":                      visibilityAlertClass,
@@ -172,6 +173,9 @@ var alertClassKinds = map[string]alertClassKind{
 	// measured states
 	"pg-disk-space-low":                                   incidentAlertClass,
 	"storage-runway":                                      incidentAlertClass,
+	"retention-frontier-pinned":                           incidentAlertClass,
+	"contract-reap-stalled":                               incidentAlertClass,
+	"partition-retention-stuck":                           incidentAlertClass,
 	"pg-huge-pages-disabled":                              incidentAlertClass,
 	"pg-freeze-age-risk":                                  incidentAlertClass,
 	"jwt-signature-rejection-rate":                        incidentAlertClass,
