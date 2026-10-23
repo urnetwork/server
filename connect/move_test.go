@@ -491,6 +491,36 @@ func TestMoverSendsOnlyItsShare(t *testing.T) {
 	}
 }
 
+// Residents already leaving by a move still count in the published load, so
+// they cover that much of the share: a process whose outstanding moves cover
+// its share sends nothing more until the load table catches up.
+func TestMoverCountsOutstandingMovesAgainstTheShare(t *testing.T) {
+	// a share of 4.5, as in TestMoverSendsOnlyItsShare
+	fixture := newMoveTestFixture(t, 560, 450)
+	fixture.addIdleCandidates(20)
+	for _, candidate := range fixture.addIdleCandidates(3) {
+		candidate.MoveOutstanding = true
+	}
+	if outcome := fixture.mover.tick(); outcome != moverTickMoved {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	if count := len(fixture.executor.sentRequests()); count != 1 && count != 2 {
+		t.Fatalf("sent %d moves for a share of 4.5 with 3 outstanding", count)
+	}
+
+	covered := newMoveTestFixture(t, 560, 450)
+	covered.addIdleCandidates(20)
+	for _, candidate := range covered.addIdleCandidates(5) {
+		candidate.MoveOutstanding = true
+	}
+	if outcome := covered.mover.tick(); outcome != moverTickInBand {
+		t.Fatalf("covered outcome = %s", outcome)
+	}
+	if len(covered.executor.sentRequests()) != 0 || len(covered.store.reservations) != 0 {
+		t.Fatal("a process whose outstanding moves cover its share moved more clients")
+	}
+}
+
 // Dry run does everything but the cooldown and the send: it reserves the
 // budget and counts the moves it would send by source and target.
 func TestMoverDryRunCountsWithoutSending(t *testing.T) {

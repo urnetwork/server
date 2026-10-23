@@ -212,20 +212,28 @@ func (self *moveFleetLoad) hostExcess(host string, tolerance float64) float64 {
 }
 
 // This process's part of its host's excess (MOVE.md §5.5 step 3): the excess
-// times the process's share of the host's residents, rounded up or down at
-// random in proportion to the fraction so the host's processes together shed
-// the excess on average, and capped by maxPerTick.
+// times the process's share of the host's residents, less the process's moves
+// already outstanding, rounded up or down at random in proportion to the
+// fraction so the host's processes together shed the excess on average, and
+// capped by maxPerTick. A resident leaving by a move still counts in the
+// published load until it goes, so it covers that much of the share; without
+// that, every tick until the load table catches up would shed the same excess
+// again.
 func moveProcessShare(
 	hostExcess float64,
 	processResidents int,
 	hostResidents int,
+	outstandingCount int,
 	maxPerTick int,
 	random moveRandom,
 ) int {
 	if maxPerTick <= 0 || !(0 < hostExcess) || processResidents <= 0 || hostResidents <= 0 {
 		return 0
 	}
-	share := hostExcess * float64(min(processResidents, hostResidents)) / float64(hostResidents)
+	share := hostExcess*float64(min(processResidents, hostResidents))/float64(hostResidents) - float64(max(0, outstandingCount))
+	if !(0 < share) {
+		return 0
+	}
 	if float64(maxPerTick) <= share {
 		return maxPerTick
 	}

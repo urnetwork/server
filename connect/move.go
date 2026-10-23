@@ -591,10 +591,17 @@ func (self *Mover) plan(
 		}
 
 	case balanceSource:
+		outstandingCount := 0
+		for _, candidate := range candidates {
+			if candidate.MoveOutstanding {
+				outstandingCount += 1
+			}
+		}
 		share := moveProcessShare(
 			fleet.hostExcess(ownHost, control.Tolerance),
 			processResidents,
 			ownHostLoad.residents,
+			outstandingCount,
 			maxPerTick,
 			self.random,
 		)

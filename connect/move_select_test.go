@@ -201,6 +201,7 @@ func TestMoveProcessShareSplitsTheHostExcess(t *testing.T) {
 		excess           float64
 		processResidents int
 		hostResidents    int
+		outstandingCount int
 		maxPerTick       int
 		share            int
 	}{
@@ -212,9 +213,15 @@ func TestMoveProcessShareSplitsTheHostExcess(t *testing.T) {
 		{excess: 32, processResidents: 1000, hostResidents: 0, maxPerTick: 10, share: 0},
 		{excess: 32, processResidents: 1000, hostResidents: 4000, maxPerTick: 0, share: 0},
 		{excess: math.NaN(), processResidents: 1000, hostResidents: 4000, maxPerTick: 10, share: 0},
+		// moves already outstanding cover that much of the share, before the
+		// cap: a large excess still sends the cap
+		{excess: 32, processResidents: 1000, hostResidents: 4000, outstandingCount: 3, maxPerTick: 10, share: 5},
+		{excess: 400, processResidents: 1000, hostResidents: 4000, outstandingCount: 3, maxPerTick: 10, share: 10},
+		{excess: 32, processResidents: 1000, hostResidents: 4000, outstandingCount: 8, maxPerTick: 10, share: 0},
+		{excess: 32, processResidents: 1000, hostResidents: 4000, outstandingCount: 20, maxPerTick: 10, share: 0},
 	}
 	for _, c := range cases {
-		if share := moveProcessShare(c.excess, c.processResidents, c.hostResidents, c.maxPerTick, random); share != c.share {
+		if share := moveProcessShare(c.excess, c.processResidents, c.hostResidents, c.outstandingCount, c.maxPerTick, random); share != c.share {
 			t.Errorf("%+v: share %d", c, share)
 		}
 	}
@@ -226,7 +233,7 @@ func TestMoveProcessShareSplitsTheHostExcess(t *testing.T) {
 	const tickCount = 20000
 	for tick := 0; tick < tickCount; tick += 1 {
 		for i, residents := range processResidents {
-			totals[i] += moveProcessShare(9, residents, 6000, 10, random)
+			totals[i] += moveProcessShare(9, residents, 6000, 0, 10, random)
 		}
 	}
 	for i, expected := range []float64{1.5, 3, 4.5} {
