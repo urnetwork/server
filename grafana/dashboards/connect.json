@@ -2895,8 +2895,8 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "max by (host, interface, family) (urnetwork_connect_move_target_breaker_open{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
-                    "legendFormat": "{{host}} {{interface}} {{family}}"
+                    "expr": "max by (target_host, interface, family) (urnetwork_connect_move_target_breaker_open{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{target_host}} {{interface}} {{family}}"
                 }
             ]
         },

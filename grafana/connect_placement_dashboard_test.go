@@ -125,7 +125,7 @@ func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 		{
 			id: 74, unit: "short",
 			targets: []testTarget{
-				{Expr: "max by (host, interface, family) (urnetwork_connect_move_target_breaker_open" + selector + ")", LegendFormat: "{{host}} {{interface}} {{family}}"},
+				{Expr: "max by (target_host, interface, family) (urnetwork_connect_move_target_breaker_open" + selector + ")", LegendFormat: "{{target_host}} {{interface}} {{family}}"},
 			},
 			descriptionParts: []string{"MoveTargetBreakerRatio", "MoveTargetBreakerMinSends", "MoveTargetBreakerWindow", "MoveTargetBreakerTimeout", "per address", "no series"},
 		},
