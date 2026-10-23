@@ -325,7 +325,6 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.1 | Coverage gap | `subnet-coverage` reports missing finalized chain, deployment, policy, and governance readers |
 | 22.2 | Coverage gap | `subnet-coverage` reports missing pool, validator, fleet, and commitment readers |
 | 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
@@ -42552,6 +42551,7 @@ registers, changes weights/policy, restarts services or injects public-chain
 attacks. A separately authorized testnet canary is not a passive probe.
 
 ### 22.1 Chain, deployment, policy, and governance
+Probe: `subnet-chain`
 
 Measure with native finalized RPC, EVM `eth_getCode` / `eth_getStorageAt` /
 block-pinned `eth_call`, decoded governance events, and the independent release
@@ -42572,6 +42572,91 @@ in the immutable vault. The runtime-454 native weight getter reports 65535
 despite retained cap storage; enforce and observe the **signed policy cap**,
 not a misleading storage value. Query current values; do not make this catalog
 an independent mutable runtime allowlist.
+
+Implementation (2026-10-23, `signal_subnet_chain.go`). The five §22.1--§22.5
+readers share one reviewed `subnet_correctness` mapping in `monitor.yml`
+(schema `urnetwork-monitor-subnet-correctness-v1`; canonical UTC
+`review_from`/`review_until`; exactly two `native_rpc`, two `evm_rpc` and two
+bare HTTPS `api_origins`; `deploy_block`; reviewed successor runtimes beyond
+the code-owned sn catalog; governance; native profile; the exact reviewed
+policy document as base64; reviewed scheduled policy hashes; the operator
+census with each operator's artifact signer; the validator census with hotkey,
+coldkey and measurement key; treasury recipients; and `limits`, where every
+bound is a setting with a code-owned default and range). Deployment identity is
+never in that mapping: it is config `sn.yml`, read through the strict
+payout-transition parser, and a `blocked` activation pins nothing. When st.yml
+is enabled its deployment key must equal sn.yml's. Missing, malformed or expired
+enrollment, an unavailable or stale settings generation, and an ambiguous
+deployment raise one `subnet-monitor-coverage` gap per family before any
+contact; an explicitly disabled subnet is not deployed. Production
+`vault/main/monitor.yml` has no `subnet_correctness` mapping, so every reader
+reports that gap until the release owner enrolls it.
+
+Every read goes through one run-owned session: a fixed read-only JSON-RPC
+method allowlist, one process-wide admission per endpoint shared by every
+reader (`endpoint_concurrency`), a per-run request budget, a byte cap before
+decoding, strict envelopes (unique keys, matching ids, no trailing data),
+bounded batches, no redirect, proxy, retry, cookie or decompression, and the
+existing host-scope guard. Endpoints and origins are never rendered; findings
+name ordinals such as `native-rpc-1`. EVM calls name their block by EIP-1898
+hash with `requireCanonical`.
+
+The agreed checkpoint is the height P = the lowest of both native and both EVM
+finalized heads. Both native endpoints must report one hash at P, both EVM
+endpoints one EVM hash, both the same runtime version and `:code` hash; genesis
+and the EVM chain id must equal sn.yml; the runtime tuple must exactly equal a
+code-owned reviewed artifact or a reviewed successor, and its metadata must hash
+to the approved BLAKE2b-256 once per runtime (cached by the complete identity);
+and the runtime's own `Ethereum.BlockHash(P)` at the native block must name the
+agreed EVM hash. Storage keys and absent-value defaults come only from that
+verified metadata. Every family reads at this one checkpoint.
+
+- `subnet-finality-divergence`: PAGE, Sustain 1, for contradictory finalized
+  history (two hashes at P, an endpoint's own head not canonical, different
+  runtime state at one hash, a mapping that names another EVM hash, or the
+  accepted finalized block replaced under the monitor's cursor); WARN, Sustain
+  2, frame `lag`, when heads are farther apart than `max_finality_lag_blocks`;
+  WARN frame `regressed` when the agreed height falls below the accepted cursor
+  while that block stays canonical; unknown (frame `unobserved`) when an
+  endpoint is unreadable.
+- `subnet-runtime-identity`: WARN, Sustain 1, for an unreviewed tuple, a known
+  version with other code, a metadata conflict, a foreign genesis or EVM chain
+  id; every family then reports its checkpoint gap. This passive reader cannot
+  attribute a live writer's runtime: that PAGE needs §22.6/§22.9 writer receipts.
+- `subnet-deployment-governance`: PAGE, Sustain 1, for the ERC-1967
+  implementation slot, a nonzero admin or beacon slot, any of the four reviewed
+  code hashes, the vault/coordinator and sink/recorder links, the contracts'
+  netuid, the three contract coldkeys not each contract's own mirrored account
+  or not distinct, the owner, active guardian or active commitment oracle, a
+  role overlap, a multisig owner whose Safe threshold or signer census differs,
+  a single-key owner on mainnet, and finalized `Upgraded`,
+  `OwnershipTransferred` or `GuardianSet` events to unreviewed values or a
+  retroactive `PolicyScheduled` over the bounded governance-event frontier;
+  WARN frame `pending` for an unreviewed scheduled guardian or oracle or a
+  reinitialization. Paused state is evidence, not a violation.
+- `subnet-policy-schedule`: PAGE for a version failing the coordinator's own
+  replayed `_validatePolicy`, a version not starting at its predecessor's epoch
+  boundary, a wrong current-version selection, a current hash other than
+  sn.yml's, a 360-block epoch on mainnet, and a reviewed document whose windows
+  (settlement, or production cadence from its first epoch), claim expiry,
+  binding validity or caps differ from any version under its hash; WARN frame
+  `scheduled` for an unreviewed future hash or an invalid or unpinned document;
+  unknown when no document is enrolled. The live native profile pages on a
+  missing subnet or a changed commit-reveal, mechanism count or liquid-alpha
+  setting, and warns (frame `drift`) on UID capacity, validator count, immunity,
+  tempo or weights version key. The native weight-cap storage is deliberately
+  not compared.
+
+- **False-positive qualifier:** the reviewed mainnet launch policy is
+  zero-price with `equal_demand`; that is reported as evidence, never a policy
+  violation. A lagging endpoint is lag, not divergence, while its answers at P
+  agree. An absent native value decodes the runtime's own default, so the
+  reviewed default tempo is healthy and a default immunity period is drift.
+- **False-negative qualifier:** two endpoint names on one node agree trivially.
+  State at the agreed hash is read from the first endpoint; the second confirms
+  the checkpoint, runtime and mapping only. The cursor and caches are
+  process-local. Governance events before the first frontier window are not
+  replayed; the checkpoint state remains the authority.
 
 ### 22.2 Pool registration, validator identity, and fleet ownership
 

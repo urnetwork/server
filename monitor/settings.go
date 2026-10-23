@@ -409,6 +409,8 @@ type SignalSettings struct {
 	// from a deployment that legitimately finalized epoch zero.
 	STDeploymentKey string
 
+	// Reviewed §22.1--§22.5 read scope with the sn.yml deployment identity.
+	SubnetCorrectness *SubnetCorrectnessSettings
 	// Independently enrolled historical payout objects; missing inputs stay unknown.
 	SubnetArtifacts *SubnetArtifactSettings
 
@@ -504,6 +506,7 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 
 func (s SignalSettings) withDefaults() SignalSettings {
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
+	s.SubnetCorrectness = cloneSubnetCorrectnessSettings(s.SubnetCorrectness)
 	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
@@ -729,6 +732,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		verificationEnabled:       settings.VerificationEnabled,
 		stConfigStatus:            settings.STConfigStatus.normalized(),
 		stDeploymentKey:           settings.STDeploymentKey,
+		subnetCorrectness:         cloneSubnetCorrectnessSettings(settings.SubnetCorrectness),
 		subnetArtifacts:           cloneSubnetArtifactSettings(settings.SubnetArtifacts),
 		contractDegradationConfig: settings.ContractDegradationConfig.normalized(),
 		sshUser:                   settings.SSHUser,
@@ -764,6 +768,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	}
 	if settings.SettingsGenerationCheck != nil {
 		startup := settings
+		startup.SubnetCorrectness = cloneSubnetCorrectnessSettings(settings.SubnetCorrectness)
 		startup.SubnetArtifacts = cloneSubnetArtifactSettings(settings.SubnetArtifacts)
 		startup.Routers = cloneRouterSettings(settings.Routers)
 		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)

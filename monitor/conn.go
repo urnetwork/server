@@ -168,6 +168,7 @@ type monitorConfig struct {
 	verificationEnabled       bool
 	stConfigStatus            STConfigurationStatus
 	stDeploymentKey           string
+	subnetCorrectness         *SubnetCorrectnessSettings
 	subnetArtifacts           *SubnetArtifactSettings
 	contractDegradationConfig ContractDegradationConfigStatus
 
