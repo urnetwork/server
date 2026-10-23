@@ -996,22 +996,10 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	return findings, nil
 }
 
-// pgStatsLandmineProbe is the daily §7 stats-landmine check. The three isolated
-// predicate/index families are the durable boundary for current readers; once
-// they exist, a bounded statistics target keeps ANALYZE itself from becoming
-// the next availability event.
-type pgStatsLandmineProbe struct{}
-
-func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
-func (self pgStatsLandmineProbe) tier() string           { return tierWarn }
-func (self pgStatsLandmineProbe) cadence() time.Duration { return 24 * time.Hour }
-
-func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	target := "pg"
-	if h := env.cfg.hostByRole("pg-primary"); h != nil {
-		target = h.name
-	}
-	rows, err := env.runner.pg(ctx, `
+// The stats-landmine read: transfer_contract's open statistics, its structural
+// index families and the open-column statistics target, aggregated across the
+// partitions once the table is partitioned.
+const pgStatsLandmineSQL = `
 		WITH transfer_contract_indexes AS (
 		 SELECT i.relname AS index_name,
 		        i.reltuples,
@@ -1086,7 +1074,24 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		   ORDER BY transfer_contract_leaves.leaf_name
 		   LIMIT 1
 		 ),'');
-	`)
+`
+
+// pgStatsLandmineProbe is the daily §7 stats-landmine check. The three isolated
+// predicate/index families are the durable boundary for current readers; once
+// they exist, a bounded statistics target keeps ANALYZE itself from becoming
+// the next availability event.
+type pgStatsLandmineProbe struct{}
+
+func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
+func (self pgStatsLandmineProbe) tier() string           { return tierWarn }
+func (self pgStatsLandmineProbe) cadence() time.Duration { return 24 * time.Hour }
+
+func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	target := "pg"
+	if h := env.cfg.hostByRole("pg-primary"); h != nil {
+		target = h.name
+	}
+	rows, err := env.runner.pg(ctx, pgStatsLandmineSQL)
 	if err != nil {
 		return nil, err
 	}
