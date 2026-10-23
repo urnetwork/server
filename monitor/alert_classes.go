@@ -25,6 +25,8 @@ const (
 
 var alertClassKinds = map[string]alertClassKind{
 	// unknown states
+	"drain-moves-not-deployed":                         visibilityAlertClass,
+	"drain-moves-telemetry-incomplete":                 visibilityAlertClass,
 	"move-host-filling":                                visibilityAlertClass,
 	"move-host-load-incomplete":                        visibilityAlertClass,
 	"move-outcomes-dormant":                            visibilityAlertClass,
@@ -178,6 +180,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"worker-scheduler-unobservable":                    visibilityAlertClass,
 
 	// measured states
+	"drain-closes-excess":                                 incidentAlertClass,
+	"drain-refusals-outside-drain":                        incidentAlertClass,
 	"move-host-imbalance":                                 incidentAlertClass,
 	"move-send-errors-fleetwide":                          incidentAlertClass,
 	"move-success-low":                                    incidentAlertClass,

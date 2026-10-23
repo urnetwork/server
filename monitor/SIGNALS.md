@@ -336,8 +336,6 @@ active missing capability and must not be read as green.
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
-| 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
-| 24.7 | Coverage gap | `rollout-guard` sees drains, not their admission refusals or drain moves; the refusals-outside-a-drain rule is missing. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -42763,17 +42761,17 @@ baselines. Every gauge is per process, rides the stats pusher's {env,
 service, block, host} labels, and has no series while its process cannot
 compute it. Missing series are unknown, never zero.
 
-Two probes own five of the seven entries: `mover` (§24.1, §24.4, §24.5) and
-`move-outcomes` (§24.2, §24.6), in `signal_mover.go` and
-`signal_move_outcomes.go`, with the shared reader `connect_move_metrics.go`.
-Each runs one bounded instant query every 5 minutes through one services host's
-loopback Mimir, evaluated two minutes behind now, and `mover` also reads the
-control once. Every threshold
+Three probes own the seven entries: `mover` (§24.1, §24.4, §24.5),
+`move-outcomes` (§24.2, §24.6) and `drain-moves` (§24.3, §24.7), in
+`signal_mover.go`, `signal_move_outcomes.go` and `signal_drain_moves.go`, with
+the shared reader `connect_move_metrics.go`. Each runs one bounded instant query
+every 5 minutes through one services host's loopback Mimir, evaluated two
+minutes behind now, and `mover` also reads the control once. Every threshold
 and window below is a field of `ConnectMoveSettings`, with the default the
 entry names. A desired connect host/block slot (the services.yml placement)
 without a fresh current process, its newest start pushed within 90 s, leaves
 its probe's rules unknown (`mover-telemetry-incomplete`,
-`move-outcomes-telemetry-incomplete`): a
+`move-outcomes-telemetry-incomplete`, `drain-moves-telemetry-incomplete`): a
 draining sibling never stands in for it, and a host the monitor may not
 contact keeps its slots, unknown. Answers are parsed strictly: an annotation,
 an unknown tag, a label or label value outside the code's closed sets, a
@@ -42784,7 +42782,7 @@ instance nonces, control values and response bodies do not.
 A fleet without the move code, or a rule with nothing to judge because the
 mover is off, in dry run or not sending, is a standing state of its own:
 `mover-not-deployed`, `mover-off`, `mover-dry-run`, `mover-warming`,
-`move-host-filling` and `move-outcomes-dormant`.
+`move-host-filling`, `move-outcomes-dormant` and `drain-moves-not-deployed`.
 Each is reported every run as a configured-off WARN: never posted to Slack,
 never healthy, and, as an unknown state, it keeps its signal's other incidents
 from clearing while it lasts. Healthy is reported only for a rule judged on
@@ -42895,6 +42893,7 @@ False-negative qualifier: dry run sends nothing; its would-send counter
 the state is `move-outcomes-dormant` with `dry_run`.
 
 ### 24.3 Compulsory closes per drain
+Probe: `drain-moves`
 
 ```promql
 sum(increase(urnetwork_connect_moves_compulsory_closed_total{env="main",service="connect"}[1d]))
@@ -42916,12 +42915,30 @@ drained process.
   residents at drain start, which means capable clients are failing their
   replacement too.
 
+`drain-moves` judges each drained process on its own, the series of one
+instance nonce: a process whose drain gauge rose above zero, or that sent
+drain moves, within `DrainWindow` 24 h, including the drained processes that
+have since exited. Its closes and its drain moves by `capable` are exact
+counts, the maximum less the minimum within the window, never an extrapolated
+increase. Its legacy residents at drain start are its
+`urnetwork_connect_drain_moves_sent_total{capable="false"}`, one per legacy
+resident of the drain. `drain-closes-excess` (WARN, sustain 1) lists the
+drained processes whose closes, less every compulsory move the mover sent from
+that process, exceed their legacy residents by at least `MinExcessCloses` 1. A
+drain without drain moves (the control's `drainMoves false`, `EnableDrainMoves`
+off, or every intent write failing) has no deadline closes and is counted, not
+judged; a build from before drain moves has neither drain-move series and is
+not counted.
+
 False-positive qualifier: evacuation and emergency compulsory moves close
 clients too; separate them by time, or by
 `urnetwork_connect_moves_sent_total{kind="compulsory"}` by trigger in the
-same window. False-negative qualifiers: a process killed before its deadlines
-counts no close; the drain gauge is per process and is overwritten within one
-push by the replacement container (§10.2), so read it as a range.
+same window. The probe takes the lifetime maximum of the drained process's
+`moves_sent_total{kind="compulsory"}`, an upper bound of the window's mover
+compulsory moves, off its closes first. False-negative qualifiers: a process
+killed before its deadlines counts no close, and a drained process whose final
+push did not land is missing, so the count can only be low; the drain gauge is
+per process, so read it as a range, per instance.
 
 ### 24.4 Mover mode
 Probe: `mover`
@@ -43096,6 +43113,7 @@ or 6 as `move-outcomes-telemetry-incomplete`, never grouping it by the
 pusher's host.
 
 ### 24.7 Drain gates and drain moves
+Probe: `drain-moves`
 
 ```promql
 sum by (carrier) (increase(urnetwork_connect_drain_refusals_total{env="main",service="connect"}[1h]))
@@ -43118,10 +43136,24 @@ the next drain to the legacy migrate without a deploy.
   `urnetwork_connect_drain_residents_remaining` at zero), which means a process
   is stuck draining while it still takes traffic from the lb.
 
-False-positive qualifier: a client that redials into the draining process
-before the lb drops it is refused by design. False-negative qualifier: a
-drain that cannot write intents falls back to the legacy migrate and counts
-`capable="false"` for capable clients too.
+`drain-moves` implements the ticket per slot (target
+`<env>/connect-drains/<host>/<block>`) as `drain-refusals-outside-drain`
+(WARN, sustain 2): a current process refused within `RefusalWindow` 1 h while
+its drain gauge stayed at zero throughout that window. A current process
+without `urnetwork_connect_drain_refusals_total` runs a build from before the
+drain gates; while no current process has it, the state is
+`drain-moves-not-deployed`. Drain moves run whatever the mover's mode is, so
+these rules apply as soon as the build runs.
+
+False-positive qualifiers: a client that redials into the draining process
+before the lb drops it is refused by design. A process whose drain found no
+residents never sets the gauge above zero, but it exits within the drain's
+bound, so the alert needs two consecutive runs of a current process that
+still publishes. False-negative qualifier: a drain that cannot write a
+resident's intent sends the legacy migrate without one and counts no drain
+move for that client (`sendDrainResidentMove`; an earlier reading here, that
+it counts `capable="false"`, does not match the code). The straggler sweep,
+not the deadline, closes such a client, so neither count of §24.3 sees it.
 
 ## Shared provider-egress dashboard refresh
 

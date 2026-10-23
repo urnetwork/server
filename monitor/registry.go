@@ -186,6 +186,7 @@ func NewSignals() []Signal {
 		NewProxyH1PlusSignal(),
 		NewMoveOutcomesSignal(),
 		NewMoverSignal(),
+		NewDrainMovesSignal(),
 	}
 }
 
