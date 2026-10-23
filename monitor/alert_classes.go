@@ -27,6 +27,7 @@ var alertClassKinds = map[string]alertClassKind{
 	// unknown states
 	"pg-disk-space-unobservable":                       visibilityAlertClass,
 	"pg-disk-runway-unobservable":                      visibilityAlertClass,
+	"storage-runway-unobservable":                      visibilityAlertClass,
 	"pg-huge-pages-unobservable":                       visibilityAlertClass,
 	"pg-freeze-age-unobservable":                       visibilityAlertClass,
 	"jwt-rejections-unobservable":                      visibilityAlertClass,
@@ -169,6 +170,7 @@ var alertClassKinds = map[string]alertClassKind{
 
 	// measured states
 	"pg-disk-space-low":                                   incidentAlertClass,
+	"storage-runway":                                      incidentAlertClass,
 	"pg-huge-pages-disabled":                              incidentAlertClass,
 	"pg-freeze-age-risk":                                  incidentAlertClass,
 	"jwt-signature-rejection-rate":                        incidentAlertClass,

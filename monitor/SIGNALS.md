@@ -252,7 +252,6 @@ active missing capability and must not be read as green.
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.4a | Coverage gap | `pg-freeze-age` (§2.4d) reads bounded current-database age risk and positive same-pass advancement; `pg-autovacuum-cancel` (§2.4e) observes qualified JSON cancellation records only, with unavailable JSON unknown. Relation/pass correlation, harmful late/big cancellation, maintenance intent and lost-work attribution remain missing; `vacuum-health` retains separate debt/progress/MVCC coverage. |
-| 2.4f | Coverage gap | `pg-disk-space` (absolute 100 GB floor) and `pg-disk-runway` (visibility-only unknown) are the registered boundaries; the max-of-windows runway estimator for edge-2 and every other stateful volume is missing. |
 | 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
@@ -269,7 +268,7 @@ active missing capability and must not be read as green.
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
-| 5.14 | Runbook | `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution, guarded partition drops and the payout-frontier check are direct operator steps |
+| 5.14 | Runbook | `storage-runway`, `pg-disk-space`, `pg-disk-runway`, `pgbouncer-pool-starvation`; relation-size attribution, guarded partition drops and the payout-frontier check are direct operator steps |
 | 8.1 | Runbook | `provenance`, `rollout-guard` |
 | 8.1a | Shared contract | `proxy-path`, `provenance` |
 | 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
@@ -7532,6 +7531,11 @@ filesystem fell from about 700 GB to 145 GB, and it never became a forecast.
 replace this visibility-only observation with it. A perfect net-growth model is
 not a precondition for warning: the raw max-of-windows decline would have
 warned from 10-20 and paged at about 15:00Z on 10-21.
+`storage-runway` (§2.4f) now measures that raw max-of-windows runway for the
+database root against the same 100,000,000,000-byte line. This
+visibility-only observation still reports the qualified net-growth forecast of
+this section (temp, WAL and vacuum netted out) as unknown; retiring it in favor
+of §2.4f is an owner decision.
 
 ### 2.4d Configured freeze-age risk
 Probe: `pg-freeze-age`
@@ -7718,7 +7722,7 @@ can clear this event finding through the existing notifier; neither quiet logs
 nor a replacement pass alone proves recovery of an unobserved historical cause.
 
 ### 2.4f Storage runway — one estimator for every stateful volume
-Probe: `storage-runway` (catalog entry; not implemented as of 2026-10-22)
+Probe: `storage-runway`
 
 Why: edge-2's root filesystem ran to within hours of full on 10-12/13 and
 again on 10-21. Both times the only implemented check was the §2.4b absolute
@@ -7732,6 +7736,10 @@ Volumes (from inventory roles): edge-2 `/` (PostgreSQL data, WAL and temp),
 edge-5 `/mnt/blob1`..`/mnt/blob4` (one MinIO erasure set: judge the drive with
 the least free space, since one full drive fails every write), the Redis data
 volumes (`/mnt/data` on edge-5 and edge-6), and every host's `/`.
+
+The MinIO drives use this estimator with §11.6b's longer thresholds
+(`minio-runway`), because adding drives takes days; `storage-runway` does not
+report them a second time.
 
 Estimator:
 - `free = avail - floor` for the volume's floor: 100 GB on edge-2 `/` (the
@@ -7793,7 +7801,63 @@ absent node-exporter series, which is unknown, never healthy (§7, 2026-10-22
 rules). A planned large write (a base backup, §11.6b) can arrive faster than
 the 15-minute cadence.
 
-ACTION: §5.14.
+Implementation (2026-10-22). Every fifteen minutes, one bounded loopback
+Mimir `query_range` through the first reachable `services` gateway reads
+`node_filesystem_avail_bytes{env,job="node"}` for every configured volume over
+the last eight days (seven days of pace history plus one pace window) at a
+15-minute step, ending two minutes behind now. The volumes come from
+`StorageRunwaySettings.Volumes`: every enabled inventory host's `/` with floor
+0 (time to full), the `pg-primary` host's `/` with the §2.4b
+100,000,000,000-byte floor, and each `redis-cluster` host's `/mnt/data` with
+floor 0; the largest floor wins when rules overlap. Inventory-disabled and
+`-exclude-host` hosts are never read; an excluded host's volumes stay unknown
+through the shared `monitor-host-scope-partial` finding.
+
+- Source authority: one series per volume with exactly the `env`, `job`,
+  `host`, `device`, `fstype`, `mountpoint` and optional `instance` labels,
+  whole-byte values on the query grid in strictly increasing order, and the
+  newest grid point present (Mimir fills it only from a raw sample inside its
+  lookback). Each window endpoint is the sample nearest it within 15 minutes
+  and the decline divides by the actual elapsed time.
+- `storage-runway` (target `<host>/root` or `<host><mountpoint>`, sustain 2):
+  PAGE `band=page` at runway <= 24 h, PAGE `band=pace-floor` when free above
+  the floor is under twice the largest 24-hour decline of the last seven days,
+  WARN `band=warn` at runway <= 72 h. No positive decline means no runway
+  band, so a flat volume pages only through its pace floor. With some windows
+  missing, the measured rate is a lower bound and a band it already reaches
+  still holds; only a complete estimate is healthy.
+- `storage-runway-unobservable` (same target, sustain 2): no gateway, a failed
+  or invalid answer (status, warnings, matrix shape, byte bound), and a
+  missing, stale, ambiguous, unowned, off-grid or non-whole-byte series, or a
+  missing decline window. Following the 2026-10-22 emission rule 1, it pages
+  when the volume declined more than 5 GB/h over the last six hours, measured
+  from the history that is still present or remembered by this signal
+  instance from a run inside those six hours; otherwise it warns. The memory
+  is process-local and starts empty at every watcher start.
+- Public data: bytes, decimal GB per hour, hours, fixed reasons and error
+  classes. Device names, label values, raw answers and source errors stay
+  private.
+- Every tunable (windows, step, lag, tolerance, thresholds, pace multiple,
+  unknown page line, volume rules, response bounds, cadence and the 40-second
+  run budget) is a field of `StorageRunwaySettings`.
+- False-positive qualifiers in addition to those above: the pace floor pages
+  on a steady decline once free space is under two days of it (runway under
+  48 h), by design; a one-off large write inside the last seven days keeps the
+  pace floor up until it leaves the history. False-negative qualifiers: a
+  volume that filled more than seven days ago and stays flat at its floor has
+  neither runway nor pace; §2.4b covers the database root's absolute floor.
+  The 15-minute step can miss a spike that recovers between grid points.
+
+Synthetic controls replay the edge-2 backtest above, an acceleration only the
+1 h window sees, a cleanup inside the newest hour, a flat volume paging on its
+pace floor, band edges, missing, stale, ambiguous and malformed series, the
+measured and remembered unknown-severity rule, failed and invalid answers,
+inventory exclusion and cancellation.
+
+ACTION: §5.14 for the database root; for other volumes find what is growing
+and remove avoidable growth at its source. Storage additions and retention
+changes are owner decisions. VERIFY: two consecutive complete observations
+outside both bands.
 
 ### 2.4g Retention liveness — tables whose retention stopped reclaiming
 Probe: `retention-liveness` (catalog entry; not implemented as of 2026-10-22)
