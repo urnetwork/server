@@ -175,3 +175,21 @@ func TestProviderProbesOwnIndependentDohCaches(t *testing.T) {
 		t.Fatal("closing one probe changed another probe's DoH ownership")
 	}
 }
+
+// Probes never follow the platform's connection moves (connect/MOVE.md D15):
+// every window's transport settings leave moves off, so no probe transport
+// declares the move capability.
+func TestProbeTransportsNeverDeclareTheMoveCapability(t *testing.T) {
+	configs := []Config{probeTransportBudgetTestConfig(), probeTransportBudgetTestConfig()}
+	for index, settings := range captureProbeTransportSettings(t, configs) {
+		if settings == nil || settings.PlatformTransportSettingsGenerator == nil {
+			t.Errorf("Open %d bypassed the probe's platform settings generator", index)
+			continue
+		}
+		for range 2 {
+			if settings.PlatformTransportSettingsGenerator().EnableMove {
+				t.Errorf("Open %d gave a probe window the move capability", index)
+			}
+		}
+	}
+}
