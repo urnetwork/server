@@ -178,6 +178,9 @@ func TestContractPartitionMaintenance(t *testing.T) {
 func TestContractPartitionAbandonsUnfinalizedCutover(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		if IsContractPartitioned(ctx) {
+			t.Skip("the cutover starts from plain contract tables")
+		}
 		cutoverWeek := ContractPartitionWeekStart(NowUtc()).Add(2 * contractPartitionWeek)
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: testContractPartitionLogf(t)}), nil)
 

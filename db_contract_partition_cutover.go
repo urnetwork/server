@@ -1147,6 +1147,9 @@ func testContractPartitions() bool {
 // tables from the current week: earlier ids go to the legacy partitions and
 // current ones to the weekly partitions, as in production after the cutover.
 func Testing_PartitionContracts(ctx context.Context) {
+	if IsContractPartitioned(ctx) {
+		return
+	}
 	cutoverWeek := ContractPartitionWeekStart(NowUtc())
 	Raise(prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, false, func(string, ...any) {}))
 	Raise(finalizeContractPartitionCutoverWithDeadline(ctx, false, false, func(string, ...any) {}))

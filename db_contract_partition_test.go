@@ -117,6 +117,9 @@ func testContractPartitionLogf(t testing.TB) func(string, ...any) {
 func TestContractPartitionCutover(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		if IsContractPartitioned(ctx) {
+			t.Skip("the cutover starts from plain contract tables")
+		}
 		logf := testContractPartitionLogf(t)
 		now := NowUtc()
 		cutoverWeek := ContractPartitionWeekStart(now).Add(2 * contractPartitionWeek)
