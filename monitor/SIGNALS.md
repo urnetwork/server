@@ -437,6 +437,10 @@ after two complete ticks in which nothing observed it. Healthy control: one
 dip of a Sustain 2 alert posts nothing after its raise. Failure control: two
 complete ticks without the alert post one clear.
 
+A silent class clear hold identifies an exact probe/class/target whose
+evaluation was intentionally deferred. It creates no incident and supplies
+no absence credit for that identity alone.
+
 An unknown state is unobservable whatever signal reports it.
 `alert_classes.go` classifies every alert class as visibility, an unknown
 state reported in place of an incident, or incident, and
@@ -27027,7 +27031,17 @@ proof of a retention-rotation defect.
 host and the current journald activation have been live for 70 minutes, when a
 bounded current-boot query finds no retained entry at or before the 50-minute
 cutoff. The service-age gate allows an intentional configuration restart to
-refill its buffer. Its activation age uses `CLOCK_MONOTONIC`, matching systemd's
+refill its buffer. Unchecked refill stays silent on first observation, but
+supplies no coverage witness. Once a mature `journal-buffer-short` has opened,
+neither a journald restart nor a host reboot ends that incident cohort:
+unchecked executions reset that host/class absence streak without raising a
+new alert. Checked current-boot coverage must supply the ordinary two complete
+absence observations; an unchecked tick between witnesses breaks the sequence.
+Other hosts and journal classes keep their own findings and recovery decisions.
+This local notifier transition does not automate the independent fresh Loki
+verification required for closure.
+
+Its activation age uses `CLOCK_MONOTONIC`, matching systemd's
 `ActiveEnterTimestampMonotonic`; suspend-inclusive `/proc/uptime` must not be
 subtracted from that timestamp. A prior suspend otherwise makes a newly
 restarted journal appear old enough to fail its refill check. Missing, malformed

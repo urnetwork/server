@@ -632,7 +632,14 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 		}
 	}
 
-	if sample.coverageChecked && !sample.coveragePresent {
+	if !sample.coverageChecked {
+		// Refill grace is quiet, but a restart or reboot is no measured
+		// recovery for an already-open short-buffer incident.
+		findings = append(findings, finding{
+			probeId: "host/journal-buffer", tier: tierWarn,
+			class: "journal-buffer-short", target: target, clearHold: true,
+		})
+	} else if !sample.coveragePresent {
 		findings = append(findings, finding{
 			probeId: "host/journal-buffer", tier: tierWarn,
 			class: "journal-buffer-short", target: target, sustain: 2,

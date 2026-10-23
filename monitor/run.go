@@ -113,6 +113,9 @@ type SignalExecution struct {
 	// alerts this execution observed that the gate still holds below their
 	// Sustain. They are present, not absent.
 	HeldAlerts Alerts
+	// Intentionally deferred exact classes. These create no incident and
+	// reset only an existing owned identity's consecutive absence streak.
+	ClearHolds []SignalClassClearHold
 	// the signal returned an error. Its visibility alert is in Alerts or
 	// HeldAlerts, and whatever else the signal observes is unknown.
 	Failed bool
@@ -321,13 +324,15 @@ func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOption
 			for {
 				var alerts Alerts
 				var err error
+				observation := &signalClearHoldObservation{}
+				runCtx := context.WithValue(ctx, signalClearHoldContextKey{}, observation)
 				if standingLogSignal {
 					// This check only drains mutex-protected in-memory counters.
 					// Giving it a remote-command slot lets slow unrelated probes
 					// distort the very rate window it is meant to measure.
-					alerts, err = signal.Run(ctx, self.settings)
+					alerts, err = signal.Run(runCtx, self.settings)
 				} else {
-					alerts, err = runSignalInSlot(ctx, runSlots, signal, self.settings)
+					alerts, err = runSignalInSlot(runCtx, runSlots, signal, self.settings)
 				}
 				if startupSample {
 					close(startupSampleDone)
@@ -342,11 +347,13 @@ func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOption
 				if err != nil {
 					alerts = append(alerts, visibilityAlert(self.settings, signal, err))
 				}
+				clearHolds := observation.snapshot(err != nil)
 				handleLock.Lock()
 				ready, held := alertGate.split(signal, alerts)
 				handleErr := handle(ctx, signal, SignalExecution{
 					Alerts:     ready,
 					HeldAlerts: held,
+					ClearHolds: clearHolds,
 					Failed:     err != nil,
 				})
 				handleLock.Unlock()

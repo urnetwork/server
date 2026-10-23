@@ -91,6 +91,9 @@ type finding struct {
 	// the configuration turned the observation off: a standing state of this
 	// watcher, not an incident
 	configuredOff bool
+	// An intentionally deferred class supplies no absence credit for an
+	// already-open identity. It remains silent and creates no incident.
+	clearHold bool
 }
 
 // An unobservable finding reports an unknown state in place of an incident:

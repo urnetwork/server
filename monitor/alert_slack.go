@@ -484,6 +484,16 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 		}
 		heldKeys[slackIncidentKey(alert)] = true
 	}
+	// A silent availability hold cannot create an incident or enroll a new
+	// reporting signal; it only breaks its own existing absence streak.
+	for _, hold := range execution.ClearHolds {
+		key := slackIncidentKey(Alert{SignalID: hold.SignalId, Class: hold.Class, Target: hold.Target})
+		if incident, ok := self.keyIncidents[key]; ok {
+			if _, owned := incident.signalKeyAbsentRuns[signalKey]; owned {
+				heldKeys[key] = true
+			}
+		}
+	}
 	present := make(Alerts, 0, len(keyAlerts))
 	for _, alert := range keyAlerts {
 		present = append(present, alert)

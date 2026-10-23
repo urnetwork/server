@@ -442,7 +442,11 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 		// literals elsewhere name these: the finding's own class, the
 		// probeSchemaContract classes, the MinIO error patterns, and the log
 		// class and burst names
-		"signal.go alertFromFinding":                         nil,
+		"signal.go alertFromFinding": nil,
+		// Silent availability and notifier lookup copy existing finding
+		// identities; their literal producers above still define every class.
+		"signal.go Run":                                      nil,
+		"alert_slack.go observeWithLock":                     nil,
 		"schema_readiness.go probeSchemaUnavailableFinding":  nil,
 		"signal_derived_locations.go check":                  nil,
 		"signal_egress_site_pool.go check":                   nil,

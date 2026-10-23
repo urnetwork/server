@@ -116,7 +116,14 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alert
 		return nil, err
 	}
 	alerts = make(Alerts, 0, len(findings))
+	clearHolds := []SignalClassClearHold{}
 	for _, finding := range findings {
+		if finding.clearHold {
+			if s.accept == nil || s.accept(finding) {
+				clearHolds = append(clearHolds, SignalClassClearHold{SignalId: finding.probeId, Class: finding.class, Target: finding.target})
+			}
+			continue
+		}
 		// An accept filter selects this signal's detections. A shared probe's
 		// unobservable finding still says this signal's own evidence may be
 		// missing, so it passes: without it the execution would look complete.
@@ -156,6 +163,9 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alert
 		if err := settings.ProviderSelectionObserver(*observation); err != nil {
 			return alerts, fmt.Errorf("monitor: selection observation output failed")
 		}
+	}
+	if ctx.Err() == nil {
+		recordSignalClearHolds(ctx, clearHolds)
 	}
 	return alerts, nil
 }
