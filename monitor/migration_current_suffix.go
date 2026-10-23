@@ -378,8 +378,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
 		providerWorkSessionCustodyPredicates(
 			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+	// 857 replaces the evidence guard body and republishes the rest.
 	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
-		contractCloseEvidenceChainWithoutContractIndexArtifactQuery),
+		contractCloseEvidenceChainWithoutContractIndexArtifactQuery).removedAt(857),
 	migrationCurrentSuffix(826, "unread completed waiting probe index removed",
 		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting")),
 	migrationCurrentSuffix(827, "unread slot completed waiting probe index removed",
@@ -582,8 +583,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
  AND i.indisvalid AND i.indisready
  AND pg_get_indexdef(i.indexrelid)='CREATE UNIQUE INDEX network_user_auth_wallet_pkey ON public.network_user_auth_wallet USING btree (user_id, blockchain)'
  AND i.indexprs IS NULL AND i.indpred IS NULL)`),
-	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery),
-	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery),
+	// 855 replaces the source authorization and round insert bodies and
+	// republishes both custodies.
+	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery).removedAt(855),
+	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery).removedAt(855),
 	migrationCurrentSuffix(852, "device last-connected app version columns",
 		snMainnetMigrationColumns("device",
 			snMainnetMigrationColumn{name: "client_version", kind: "character varying(64)"},
@@ -689,6 +692,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(854, "optional client-key history registration copy",
 		snMainnetMigrationColumns("st_client_key_history",
 			snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
+	migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery),
+	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
+	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
+		contractCloseEvidenceRetentionArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
