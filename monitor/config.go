@@ -100,6 +100,8 @@ type monitorYaml struct {
 	SubnetCorrectness yaml.Node `yaml:"subnet_correctness"`
 	// Present malformed artifact expectations remain an explicit coverage gap.
 	SubnetArtifacts yaml.Node `yaml:"subnet_artifacts"`
+	// Optional subnet family enrollment; a malformed block stays unknown.
+	SubnetReplay yaml.Node `yaml:"subnet_replay"`
 	// Outbound notification. An empty webhook disables the Slack notifier.
 	// bringyourctl reads the same key for Grafana's default contact point
 	// (grafana.AlertRoutingSettingsFromMonitorVault).
@@ -304,6 +306,8 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		STDeploymentKey:           stConfiguration.deploymentKey,
 		SubnetCorrectness:         subnetCorrectnessSettingsFromNode(y.SubnetCorrectness, loadSubnetDeploymentIdentity),
 		SubnetArtifacts:           subnetArtifactSettingsFromNode(y.SubnetArtifacts),
+		SubnetReplay:              subnetReplaySettingsFromNode(y.SubnetReplay),
+		SubnetDeployment:          loadSubnetReplayPin(),
 		ContractDegradationConfig: loadContractDegradationConfig(),
 		SSHUser:                   y.Ssh.User,
 		SSHDevUser:                y.Ssh.DevUser,

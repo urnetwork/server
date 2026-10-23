@@ -325,11 +325,7 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
-| 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
-| 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
-| 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
-| 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
-| 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+| 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 24.1 | Coverage gap | `provider-connections` sees provider counts by host, not capacity-normalized placement; the max over min host-imbalance rule over the mover's normalized load gauge is missing. |
 | 24.2 | Coverage gap | `connection-rate` sees connection churn, not moves; the arrived over sent move success-ratio rule is missing. |
@@ -42562,6 +42558,35 @@ Proposed collection/SLO defaults, to be verified in testnet before deployment:
   frontier; each completed epoch must be fully reconciled. Sampling is an early
   warning only and cannot certify all payouts, all proofs or all 200 head slots.
 
+Family readers for §22.6 through §22.9 share `subnet_replay_*.go`. Discovery
+starts from the reviewed public Config resource `sn.yml` (chain, genesis,
+netuid, deployment, coordinator, settlement vault and policy), never from the
+producer's st.yml or mirrored rows; its values are compared in memory and never
+rendered. A reviewed pin is always observed, because custody, claims and
+history outlive a disabled producer; without one, only an explicit disable is
+not deployed and every other state is unknown. Chain reads go to the first
+inventory `subtensor` host whose expected genesis matches the pin and whose
+node is a full archive, through one fixed loopback `curl` relay over the
+existing SSH runner: the json rpc batch travels on stdin, never argv, and the
+shared per-host command limit and host exclusions apply unchanged. Each run
+pins one finalized checkpoint, reads every view with eip-1898
+`{blockHash, requireCanonical: true}`, refuses an abi answer that does not
+re-encode byte for byte, and rechecks the checkpoint before any verdict or
+retained cursor advance. `SubnetReplaySettings` owns every bound (5-minute
+cadence, 3-minute run budget, 25-second relayed exchange, 8 MiB response,
+64-member batches, 24 exchanges per run, 1,000-block log windows). The optional
+monitor.yml `subnet_replay` block (schema `urnetwork-monitor-subnet-replay-v1`)
+enrolls only `api_origins` (exactly two bare https origins), `replay_from_block`,
+`evidence_from_block`, `validators` (ss58 hotkeys), `maximum_weight_limit_u16`,
+`anchor_deadline_blocks`, `writer_minimum_actions` and
+`writer_action_liability_wei`. Missing enrollment keeps the dependent classes
+unknown, a malformed block is itself a coverage gap, and enrollment never
+attests health. A family's missing source emits `subnet-monitor-coverage` with
+the classes it leaves undecided; an undecided invariant emits its own class with
+an unknown state. Proved custody, authorization, finalized-proof, accounting
+and state-durability counterexamples are retained for the watcher's lifetime
+(§22.10).
+
 All probes are **read-only**. Share the existing four-probe admission and
 two-SSH-commands-per-destination bounds; add one shared endpoint RPC budget,
 bounded concurrency, deadlines, pagination, response bytes and retry backoff.
@@ -42949,6 +42974,7 @@ checkpoint; until then every census check is unknown.
   historical credit is not judged; historical `bindingAt` needs archive state.
 
 ### 22.6 Native weight lifecycle, consensus, and validator dividends
+Probe: `subnet-weights`
 
 Trace each durable decision through its signed CRv4 payload/commit extrinsic,
 canonical finalized success, drand reveal, runtime application and subsequent
@@ -42970,7 +42996,48 @@ report intended versus realized split separately. Non-selected zero **new
 weight** also does not erase already-earned/still-pending emission from an older
 valid cycle. Preserve that chronology in any apparent unexpected-payment alert.
 
+`signal_subnet_weights.go` implements the chain half of this family at one
+finalized native block (`chain_getFinalizedHead`, with genesis checked against
+the pin and the block rechecked canonical at its height before any verdict). It
+derives every storage key from that block's own runtime metadata
+(`state_getMetadata`, decoded once per spec version) and first verifies each
+item's key and value shape against the runtime's type registry, so a runtime
+that changes `Weights`, `Keys`, `Uids`, `LastUpdate`, `ValidatorPermit`,
+`Dividends`, `ValidatorTrust`, `SubnetworkN`, `Tempo`, `RevealPeriodEpochs`,
+`TimelockedWeightCommits` or `Drand.LastStoredRound` is unknown rather than
+misdecoded; values must decode with every byte consumed, and an absent value
+takes the runtime-declared default. Every recorded mainnet runtime from 455
+through 483 passes. The census is the chain's own permitted validator set
+(hotkey and applied row per permitted UID), the enrolled `validators` (their
+UIDs), the main mechanism's pending timelocked commits enumerated by prefix, and
+the vault escrow's UID from a hash-pinned evm `escrowHotkey` view.
+
+Rules: an enrolled validator's applied row pages on a repeated recipient, an
+unregistered recipient, a positive self weight, a positive weight on the claims
+escrow UID, or, with the enrolled signed `maximum_weight_limit_u16`, a largest
+share above the cap (`max × 65535 > sum × cap`; the runtime's reported cap is
+not the authority). It pages on a missed required cycle (no applied row within
+`WeightStaleTempos` tempos and no pending commit), on two pending commits in one
+tempo window, and when a commit past its reveal epoch plus
+`RevealOverdueEpochs` is still pending although the chain stores its drand
+round; a census validator's unapplied reveal only warns, and a reveal waiting
+for an unstored drand round is a dependency WARN. An active enrolled validator
+whose trust falls below `ValidatorTrustCollapse` warns
+(`subnet-consensus-divergence`), and an eligible one seen with zero dividends
+across a full tempo of this watcher's observations warns
+(`subnet-validator-native-payout`). Census validators' rows are not judged by
+the enrolled policy.
+
+Missing today and therefore explicit coverage gaps: the validators' signed
+decisions are not published (the steering intent is private until its reveal,
+and the progress file carries only a vector hash), so an applied row cannot be
+replayed against its demand, quality, head and theta inputs (`decision-replay`);
+the Yuma bond, clipping and stake-weighted adoption replay is not implemented
+(`yuma-replay`). The `subnet_replay` enrollment (`validators`,
+`maximum_weight_limit_u16`) is not provisioned.
+
 ### 22.7 Pool emission capture, roots, claims, carry, and conservation
+Probe: `subnet-settlement`
 
 Sources: finalized coordinator/vault logs, block-pinned entitlements and
 accounting getters, exact stake positions, signed payout artifacts, authenticated
@@ -43006,7 +43073,58 @@ dividend; it does not prove miner emission. Retain pending funding, finalized
 unclaimed entitlement, claim credit, paid transfer, expiry and carry as distinct
 states so obligations are neither double-counted nor silently dropped.
 
+`signal_subnet_settlement.go` implements this family for the v1 vault. Its
+**state census** reads, at one finalized evm checkpoint, the coordinator and
+vault links (any difference from the pin is §22.1's drift and leaves this
+family unknown), the vault's five counters, `liveEscrowStake` and
+`conservationHolds`, the coordinator's own operator census, and every epoch's
+`policyAt`/`epochEndBlock` plus each operator's `entitlement`,
+`rootCommitments`, `operatorAt` and `carry`. Beyond the three getter identities
+it reconstructs, from a complete census: `totalCaptured = Σ funded`;
+`pendingFunding = Σ funded` of funded epochs; `outstandingLiability = Σ funded`
+of finalized, root-missed and carried epochs `− totalPaid`; per operator
+`carry = Σ root-missed funding + Σ carried (total − claimed) − Σ finalized and
+carried (total − funded)`; and `Σ claimed − totalPaid >= 0`. A census beyond
+its operator or entry bound is explicitly partial: whole-history sums are
+unknown while per-epoch shape, clock and root rules still run. The clock rules
+use each epoch's own policy in evm blocks: close inside `[end, end +
+closeGrace]`, root inside `[end, end + rootCommitWindow]` by that epoch's root
+signer, finalization no earlier than `end + finalizeOffset`, expiry no earlier
+than `epochStartBlock(epoch + claimTtl + claimGrace + 1) − 1`.
+
+Its **event journal** is an incremental retained frontier from the enrolled
+`replay_from_block`, proven to precede the vault (no vault code at the block
+before it); every log block is checked against the canonical block at its
+height, and windows commit only after the closing checkpoint recheck. The
+journal reconstructs capture, deferral and dust pairing, finalization carry,
+exact claim shares, claimant credit and whole-credit payments, and compares them
+with the getters and a bounded set of `claimCredit` views. While the frontier is
+behind, `subnet-capture-delta`, `subnet-claim-correctness`,
+`subnet-claim-credit-payment` and the event half of `subnet-carry-isolation`
+stay unknown. **Root reproduction** fetches each committed root's artifact once
+per content hash from the enrolled `api_origins` through `/sn/artifact` and
+verifies it with `payoutartifact.DecodeWithContext`; a verified artifact whose
+root, deployment, contracts, policy, coordinates or 10,000-bps allocation
+differs from the chain is a counterexample. Unavailable or unverifiable bytes
+leave that root unknown; serving integrity across origins is §22.8's check.
+
+Bands: a proved identity, carry, claim, payment, root or clock contradiction is
+PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
+finalization due, persistent dust deferral and an unavailable artifact are WARN
+with Sustain 2; finalization still missing `FinalizeOverdueBlocks` after its
+offset pages on the same `epoch-N/finalization` identity. Targets are
+`subnet-settlement/vault` and `subnet-settlement/no-N` with bounded
+`epoch-N/condition` frames; source and enrollment gaps use target
+`subnet-settlement/coverage`. Aggregate contract counters are public chain
+state and are rendered as exact integers; claimant identities, hashes and
+addresses are never rendered. Missing today: the `subnet_replay` enrollment
+(`replay_from_block`, `api_origins`) is not provisioned in vault/main
+monitor.yml, so the journal and root reproduction stay unknown until it is; a
+declared settlement v2 deployment is not read and reports a coverage gap; no
+claimant or keeper SLO is configured.
+
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
+Probe: `subnet-evidence`
 
 Existing read surfaces are `/sn/epoch`, `/sn/head`, `/sn/artifact`,
 `/sn/attempt-artifact`, `/sn/artifacts`, `/sn/evidence`,
@@ -43034,6 +43152,52 @@ Activation attribution is not the parked validator effort bounty.
 `FINAL.md` and its independently replayed on-chain evidence are the acceptance
 baseline, not perpetual health certificates. Continue checking new epochs and
 the availability of that historical evidence after the simulator stops.
+
+`signal_subnet_evidence.go` implements this family and extends the §22.8a
+fixed-object reader with complete history; it never re-reads enrolled objects.
+At one finalized evm checkpoint it reuses the §22.7 state census for every
+committed root and epoch clock. **History:** it pages the complete
+`/sn/artifacts` index for the pinned deployment at both enrolled origins and
+checks each page independently of the server's own validation: one shared
+prefix under `st/v1/history/<deployment>/<netuid>/`, numeric epoch and operator
+segments, a content-hash filename equal to its `content_hash`, strict ordering,
+exact page cardinality and cursor continuity. A served page that breaks this is
+accepted index tampering (`subnet-artifact-integrity`, PAGE); a page bound or
+read failure leaves that origin's history unknown. Two complete indexes that
+differ warn. Every chain-committed artifact must be listed and readable at both
+origins; its bytes are verified once per origin by the full canonical rebuild,
+and two different verified encodings of one content hash, or bytes that do not
+reproduce the hash, page. A second verified artifact for one epoch and operator
+is equivocation. **Anchors:** `coordinator.validatorEvidence()` must name a
+journal (an unfixed journal is a WARN, the approved profile being delayed) whose
+immutables are the pinned domain (`deploymentIdHash = sha256(deployment_id)`).
+The journal's `ActivationPublished`/`EvidenceCommitted` events are replayed from
+the enrolled `evidence_from_block` with the same proven start, canonical-block
+and commit-after-recheck rules as §22.7. Each new anchor is read back through
+`commitment(slot)` once (write-once): its stored header must equal the event and
+the pinned domain, name a published activation, carry that epoch's policy and,
+for a closed census, the terminal boundary `epochEnd − 1`. Every activation must
+anchor the closed census of each closed epoch of its active operator; the slot is
+derived with `protocol.ValidatorEvidenceHeader.SlotKey`, so absence is decided
+without trusting any listing. A missing anchor warns inside
+`AnchorAtRiskBlocks` of the enrolled `anchor_deadline_blocks` and pages after
+it; an enrolled validator without an activation warns. Anchored payloads are
+read as `GET /sn/attempt-artifact?kind=metadata&hash=0x…` at both origins and
+must be exactly the anchored length and sha256.
+
+A 404 at every enrolled origin is definitive loss: PAGE for a finalized
+entitlement's artifact or any anchored payload, WARN for an artifact no claim
+depends on yet. One origin's gap is a WARN; two origins may share one storage
+failure domain. Past `AuditReplaySloBlocks`, a completed epoch whose committed
+artifact, required census anchor or anchored payload is definitively absent is a
+`subnet-audit-replay-gap` WARN naming the missing requirements; unread objects
+stay pending, never green. The family always reports one coverage gap
+(`semantic-replay`): payload contents are hash-verified, but the secretless
+semantic traversal of attempt prefixes, quality/head decisions and native
+application is not implemented. Missing today: the `subnet_replay` enrollment
+(`api_origins`, `evidence_from_block`, `anchor_deadline_blocks`) is not
+provisioned, and `/sn/evidence/history` is not enumerated because its public
+contract requires a known kind and run id.
 
 ### 22.8a Enrolled payout artifact availability — partial reader
 Probe: `subnet-artifacts`
@@ -43093,6 +43257,7 @@ copies lost, accepted artifact fraud, chain commitment or a protocol deadline
 requires the remaining §22.8 and §22.10 readers and their retained evidence.
 
 ### 22.9 Process correctness, resources, and adversarial noise
+Probe: `subnet-process`
 
 Correlate real operator/API/connect, miner and validator generations with
 structured lifecycle/intent records, bounded queues and existing PG/Redis/MinIO,
@@ -43112,6 +43277,39 @@ diagnosed as permission to restart shared infrastructure.
 | `subnet-writer-funding` | Each scoped signer has enough available native TAO/EVM gas and intended alpha staging to complete its due work within the approved per-action/campaign ceilings; reserved, pending and confirmed spend reconcile. | Warn on insufficient funded runway, price/burn movement or an unresolved nonce/intent; page on cap overspend or a missed required transaction deadline. Never auto-fund, trade, restake or resend an ambiguous transaction. |
 | `subnet-adversarial-resilience` | Rejected attacks are counted by known vector while interleaved honest controls continue to complete with bounded latency, resource use and correct money/weight outcomes. | Page on an accepted exploit, honest-control starvation or escaped resource bound; warn on growing attack pressure. Expected testnet fault windows stay annotated and still require their negative/positive outcomes and recovery, never blanket alert suppression. |
 | `subnet-monitor-coverage` | Every required role, operator, validator, candidate group, epoch, artifact kind and capability has fresh observations; exporter/scrape/log absence is distinct from zero failures. | Warn immediately for unimplemented required probes or configuration gaps; sustain transient visibility loss for two cadences, page at a threatened/missed correctness deadline. Show the missing census/frontier and dependency cause, not a green empty dashboard. |
+
+`signal_subnet_process.go` implements the operator-service half of this
+family. With bounded constant SQL (no identity is interpolated; rows are
+filtered in memory) it reads the producer's finalized event mirror checkpoint
+(`st_chain_sync`: next block and the stored canonical hash of the block before
+it), its nonterminal `st_transaction_intent` rows for the pinned deployment,
+and its `pending_task` subnet tasks. At one finalized evm checkpoint it then
+compares the mirror boundary with the canonical hash at that height (PAGE
+`subnet-state-durability` when they differ; a boundary above the checkpoint is
+not compared), warns when the mirror lags by more than `MirrorLagWarnBlocks` or
+has not advanced within `MirrorStaleAge`, when `StSyncChain` is absent or
+overdue, and when subnet tasks reach `TaskRescheduleWarnCount` reschedule
+errors (`subnet-runtime-liveness`). It reads every scoped writer's finalized
+balance and nonce, hash pinned: each active operator's current root and deposit
+signer from `operatorAt`, and each producer intent sender. A zero balance warns;
+with the enrolled `writer_action_liability_wei` and `writer_minimum_actions` a
+runway below the minimum warns; uncertain intents, intents unresolved past
+`IntentUnresolvedAge`, and unresolved intents whose nonce the chain already
+consumed warn (`subnet-writer-funding`). An explicitly disabled producer is not
+judged, though its operators' chain signers still are. A missed required
+transaction deadline is decided by §22.7's epoch-progress rules.
+
+Missing today and therefore an explicit `subnet-monitor-coverage` gap on every
+run: validator and miner process, progress and resource exporters do not exist
+in the observability stack the monitor reads (the validator's progress file and
+`sn/mainnet` textfile metrics are not deployed to Mimir), so
+`subnet-capacity-margin`, `subnet-rpc-read-ownership`,
+`subnet-evidence-stream-capacity`, `subnet-adversarial-resilience` and the
+validator and miner roles of `subnet-runtime-liveness` stay unknown.
+`subnet-observation-quota` needs a bounded reader of the attempt-upload Redis
+counters against vault `st.yml` `attempt_upload` budgets and the configured
+client population; none exists. Writer cap overspend needs per-action spend
+receipts and stays unknown.
 
 Keep the live testnet adversarial catalogue mapped to these alert families:
 weight copying/Yuma gaming, ownership/UID churn, unauthorized or cross-domain
@@ -43172,8 +43370,27 @@ Implementation acceptance for each proposed family is mandatory:
    simulator authority; the monitor remains passive.
 4. Register complete collection with bounded shared RPC/SSH budgets; retain
    code/fixture pins and actual test results. Peer-review alerts against on-chain
-   evidence before enabling production paging. This documentation has coverage
-   regression tests, **not** an implemented or qualified subnet probe battery.
+   evidence before enabling production paging.
+
+`subnet_family_acceptance_test.go` makes items 1, 2 and 4 executable for every
+registered family: a registered §22.1 through §22.9 family without acceptance
+fixtures fails, and each family's own fixtures must pass a healthy control, a
+proved counterexample that pages with the evidence frame above (environment,
+scope, finalized checkpoint, completeness, comparison source, invariant,
+expected and observed, action and recovery proof, no rendered hex identity, no
+changing detail in the target), retention of that counterexample after a
+healthy read, an unknown source that never turns green and names a fixed
+reason, the not-deployed state, cancellation that withholds every finding, and
+a cadence whose two complete runs span the five-minute recovery window. The
+§22.6 through §22.9 readers share one counterexample latch: proved custody,
+authorization, finalized-proof, accounting and state-durability
+counterexamples stay open for the watcher's lifetime with their first and last
+proof clocks, and are dispositioned in the run ledger. Item 3 and peer review
+remain open: production paging additionally requires feeding real testnet
+bad-deposit and recovery cycles, more than 200 head candidates, real pool
+Merkle and path proofs, unpaid credit, carry and expiry, pause and upgrade,
+and concurrent adverse traffic to each reader, then peer-reviewing its alerts
+against on-chain evidence.
 
 ## 23. H1+ authenticated HTTP/1.1 carriers — Main
 
