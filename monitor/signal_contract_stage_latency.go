@@ -228,8 +228,10 @@ func (self contractStageLatencyProbe) check(ctx context.Context, env *probeEnv) 
 	inventory := newFleetSlotInventory(env, settings.Services, settings.OptionalServices)
 	out, gateway, err := readFleetMimir(ctx, env, contractStageLatencyQuery(env.cfg.env, settings, inventory), at, settings.FleetReadSettings)
 	if err != nil {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		default:
 		}
 		return []finding{contractStageLatencyUnknown(target, "source_unavailable "+observationFailureDetails(err, classifyObservationError(err)))}, nil
 	}

@@ -239,8 +239,10 @@ func (self connectCloseCohortsProbe) check(ctx context.Context, env *probeEnv) (
 	inventory := newFleetSlotInventory(env, []string{settings.Service}, nil)
 	out, gateway, err := readFleetMimirRange(ctx, env, connectCloseCohortsQuery(env.cfg.env, settings, inventory), start, end, settings.Step, settings.FleetReadSettings)
 	if err != nil {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		default:
 		}
 		return []finding{connectCloseUnknown(target, "visibility_reason=source_unavailable "+observationFailureDetails(err, classifyObservationError(err)))}, nil
 	}

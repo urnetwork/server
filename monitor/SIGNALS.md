@@ -38189,8 +38189,8 @@ least 84 of 168 hourly points and a positive median), `retire_ratio` (over 0.8
 while mints exceed 150/s), `mint_refusals` (over 100/s), `discovery_unresolved`
 (exhausted plus unavailable over 30% of primary outcomes once outcomes reach
 1/s) and `short_lived` (at least 3,000 sampled identities, under 50% alive after
-ten minutes and at least 50% retired without connecting). Every band is
-exclusive. `identity-churn-loop` (PAGE, sustain 2) is any criterion together
+ten minutes and at least 50% retired without connecting). Bands are exclusive
+except where written as at least. `identity-churn-loop` (PAGE, sustain 2) is any criterion together
 with queued PgBouncer clients over 500 or the §2.30 mean over 1 s, including an
 unbounded mean when calls return without replies; either side engages it on its
 own evidence. `identity-churn-unobservable` (visibility) reports a failed or

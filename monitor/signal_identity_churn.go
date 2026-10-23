@@ -318,8 +318,10 @@ func (self identityChurnProbe) check(ctx context.Context, env *probeEnv) ([]find
 	sourceReason := ""
 	out, gateway, err := readFleetMimir(ctx, env, identityChurnQuery(env.cfg.env, settings, inventory), at, settings.FleetReadSettings)
 	if err != nil {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		default:
 		}
 		sourceReason = "metrics_unavailable " + observationFailureDetails(err, classifyObservationError(err))
 	} else {
@@ -334,8 +336,12 @@ func (self identityChurnProbe) check(ctx context.Context, env *probeEnv) ([]find
 	}
 	// the lifetime sample is independent: a failed read leaves only it unknown
 	lifetime, lifetimeErr := readIdentityLifetime(ctx, env, settings)
-	if lifetimeErr != nil && ctx.Err() != nil {
-		return nil, ctx.Err()
+	if lifetimeErr != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 	}
 	return evaluateIdentityChurn(settings, target, gatewayName, sourceReason, observation, coverage, lifetime, lifetimeErr), nil
 }

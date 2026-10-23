@@ -35,6 +35,7 @@ type egressCountryFixture struct {
 	desired     urlProbeCoverageDesired
 	desiredErr  error
 	sources     map[string]float64
+	extraSource map[string]string
 	fresh       map[string]time.Time
 	mimirErr    error
 	commands    []string
@@ -79,6 +80,9 @@ func (self *egressCountryFixture) run(t *testing.T, mutate func(*SignalSettings)
 			fixture := newFleetFixture(at)
 			for source, value := range self.sources {
 				fixture.labeled("sources", map[string]string{"source": source}, value)
+			}
+			if self.extraSource != nil {
+				fixture.labeled("sources", self.extraSource, 1)
 			}
 			for hostName, sourceTime := range self.fresh {
 				fixture.fresh("sources", fleetSlot{service: "taskworker", host: hostName, block: "g1"}, sourceTime)
@@ -142,7 +146,7 @@ func TestEgressCountrySitesMissingAndUnderfilledLists(t *testing.T) {
 	fixture.sources["general_country_unavailable"] = 250
 	alerts := fixture.run(t, nil)
 	missing := requireAlertClass(t, alerts, "egress-country-list-missing")
-	for _, want := range []string{"denominator_countries=4", "missing=2", "missing_countries=jp,zy", "lists_outside_denominator=1", "outside_countries=xk", "country_unavailable_draws=250", "normal_country_fallback_share=20.0%"} {
+	for _, want := range []string{"denominator_countries=4", "missing=2", "missing_countries=jp,zy", "lists_outside_denominator=1", "outside_countries=xk", "country_unavailable_draws=250", "normal_country_fallback_share=20.0%", "metrics_gateway=metrics-1"} {
 		if !strings.Contains(missing.Observed, want) {
 			t.Fatalf("missing-list alert lacks %q: %s", want, missing.Observed)
 		}
@@ -230,6 +234,9 @@ func TestEgressCountrySitesUnknownControls(t *testing.T) {
 		{name: "receipt slot", mutate: func(f *egressCountryFixture) { delete(f.fresh, "worker-b.example") }, reason: "receipt_slot_coverage_incomplete"},
 		{name: "receipt slot excluded", settings: func(s *SignalSettings) { s.ExcludedHosts = []string{"worker-a.example"} }, reason: "receipt_slot_coverage_incomplete"},
 		{name: "source label", mutate: func(f *egressCountryFixture) { f.sources["hostile"] = 1 }, reason: "unrecognized_draw_source"},
+		{name: "source extra label", mutate: func(f *egressCountryFixture) {
+			f.extraSource = map[string]string{"source": "country", "hostile": "label"}
+		}, reason: "unrecognized_draw_source"},
 		{name: "source missing", mutate: func(f *egressCountryFixture) { delete(f.sources, "country") }, reason: "draw_sources_incomplete", absent: "egress-country-draw-split"},
 		{name: "workflow", mutate: func(f *egressCountryFixture) { f.desiredErr = errors.New("synthetic configuration refused") }, reason: "url_workflow_unknown"},
 	} {

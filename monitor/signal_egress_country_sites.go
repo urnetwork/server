@@ -198,8 +198,10 @@ func (self egressCountrySitesProbe) check(ctx context.Context, env *probeEnv) ([
 	}
 	denominator, err := readEgressCountryDenominator(ctx, env, settings)
 	if err != nil {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		default:
 		}
 		denominator = nil
 		reasons = append(reasons, "denominator_unavailable")
@@ -216,8 +218,10 @@ func (self egressCountrySitesProbe) check(ctx context.Context, env *probeEnv) ([
 		inventory := newFleetSlotInventory(env, []string{settings.Service}, nil)
 		out, gateway, err := readFleetMimir(ctx, env, egressCountryReceiptQuery(env.cfg.env, settings, inventory), at, settings.FleetReadSettings)
 		if err != nil {
-			if ctx.Err() != nil {
+			select {
+			case <-ctx.Done():
 				return nil, ctx.Err()
+			default:
 			}
 			reasons = append(reasons, "receipts_unavailable "+observationFailureDetails(err, classifyObservationError(err)))
 			break
@@ -237,6 +241,10 @@ func (self egressCountrySitesProbe) check(ctx context.Context, env *probeEnv) ([
 			switch source {
 			case "general", "country", "general_country_unavailable", "security_recheck":
 			default:
+				reasons = append(reasons, "unrecognized_draw_source")
+				continue
+			}
+			if len(sample.labels) != 1 {
 				reasons = append(reasons, "unrecognized_draw_source")
 				continue
 			}
@@ -286,8 +294,8 @@ func evaluateEgressCountrySites(
 		if 0 < normal {
 			fallback = strconv.FormatFloat(100*unavailable/normal, 'f', 1, 64) + "%"
 		}
-		receiptText = fmt.Sprintf("receipt_window=%s general_draws=%.0f country_draws=%.0f country_unavailable_draws=%.0f security_recheck_draws=%.0f normal_country_fallback_share=%s",
-			settings.ReceiptWindow, general, country, unavailable, security, fallback)
+		receiptText = fmt.Sprintf("receipt_window=%s general_draws=%.0f country_draws=%.0f country_unavailable_draws=%.0f security_recheck_draws=%.0f normal_country_fallback_share=%s metrics_gateway=%s",
+			settings.ReceiptWindow, general, country, unavailable, security, fallback, receipts.gateway)
 	}
 	findings := []finding{}
 	countryFinding := func(class string, symptom string, observed string) finding {
