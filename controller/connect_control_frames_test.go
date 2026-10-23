@@ -39,6 +39,7 @@ func TestControlFrameFailureLabelsAreBounded(t *testing.T) {
 		{&protocol.ClientKey{}, "client_key"},
 		{&protocol.ControlPing{}, "control_ping"},
 		{&protocol.ProvidePing{}, "provide_ping"},
+		{&protocol.ResidentMoveResult{}, "resident_move_result"},
 		// an undecodable frame reports no message
 		{nil, "other"},
 		// any message outside the dispatch collapses to one bucket
