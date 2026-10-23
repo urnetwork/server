@@ -83,6 +83,7 @@ func NewSignals() []Signal {
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
 		NewPgBouncerPoolStarvationSignal(),
+		NewContractStageLatencySignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewWorkerCapSignal(),

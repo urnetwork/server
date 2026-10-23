@@ -256,7 +256,6 @@ active missing capability and must not be read as green.
 | 2.4g | Coverage gap | `pg-disk-space` sees the space, not the cause; subsidy-frontier age, contract reap stamping and partition-drop liveness checks are missing. |
 | 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
-| 2.30 | Coverage gap | `contract-rate` and `pgbouncer-pool-starvation` see throughput and starved pools; the per-stage contract-creation latency rule is missing. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -21851,8 +21850,7 @@ Rules added:
   14:00Z.
 
 ### 2.30 Contract-creation stage latency — the database reaching the data plane
-Probe: `contract-stage-latency` (catalog entry; a Grafana rule candidate, not
-implemented as of 2026-10-22)
+Probe: `contract-stage-latency`
 
 A client cannot carry traffic until its contract exists. When the database
 queues, every stage of contract creation slows together. That is the
@@ -21862,7 +21860,12 @@ user-visible cost of pool saturation, and it feeds the identity-churn loop
 Source: `urnetwork_contract_creation_completed_stage_seconds_total{stage}` over
 `urnetwork_contract_creation_completed_total{outcome="contract_reply"}`. The
 mean time per completed contract for each stage is the rate of the first over
-the rate of the second.
+the rate of the second. Both are summed over every producing process and
+ingress (api and the proxies' in-process `/connect/control` are `http`; the
+Connect resident controller and the Taskworker prober are `internal`). Stage
+seconds include canceled, failed, rejected and panicking calls, so a call that
+returns without a reply raises the mean, and returned calls with no reply at
+all are an unbounded mean.
 
 | Stage (mean ms per contract) | 10-15 (baseline) | 10-22 06:30Z |
 |---|---|---|
@@ -21884,10 +21887,46 @@ it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
 (`urnetwork_http_request_duration_seconds{job="api",route="POST ^/connect/control$"}`):
 2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22.
 
+Measurement (one-minute cadence): one bounded loopback Mimir instant query
+through a services gateway, evaluated two minutes behind now so the newest
+partial scrapes are not read as a loss. It returns the five-minute per-stage
+and per-outcome increases, the minimum of the five-minute per-reply mean over
+the last 10 minutes at one-minute steps (`min_over_time(...[10m:1m])`) with its
+point count against `count_over_time(vector(1)[10m:1m])`, the `/connect/control`
+mean and fresh queued PgBouncer clients as context, and each desired slot's
+`urnetwork_contract_creation_stage_timing_enabled` gauge. "For 10 minutes" is
+therefore Mimir history, not a process-local streak: a monitor restart cannot
+learn an active incident as healthy, and the alert carries sustain 1. The hold
+minimum is the verdict; the five-minute stages are attribution.
+
+`contract-stage-latency` (WARN over 250 ms, PAGE over 1 s, both exclusive) names
+the per-reply mean of each stage with its share of the total. A stage holding at
+least 70% of the total is reported as `concentrated_stage` and the alert says
+query or plan problem instead of pool queueing. `contract-stage-latency-unobservable`
+(visibility, sustain 2) reports a failed or annotated read, a hold with missing
+points, an idle hold (no calls, NaN), fewer than 100 returned calls in five
+minutes, an unrecognized stage or outcome label, and any desired api, connect,
+proxy, taskworker or alt slot whose capability gauge is missing, older than
+three minutes, not 1 (an artifact without the collector), duplicated or on an
+excluded or disabled host. Alt is optional: an Alt service without placement
+creates no requirement. Desired slots come from active `services.yml`
+placement, never from surviving series. A proven slow hold over the observed
+processes still alerts beside the coverage warning; a healthy mean on partial
+coverage is never certified. Only stage and outcome labels, counts and
+inventory slot names leave Mimir; no client, contract or query text does.
+
 False-positive qualifier: one stage rising alone (for example
 `companion_origin`) is a query or plan problem, not pool saturation; read the
 spread across stages. False-negative qualifier: means hide tails, and the code
 exports no per-stage histogram.
+
+ACTION: read §2.11a pool starvation, §2.2 wait events and §5.6 first. A
+concentrated stage is a query and plan investigation (§2.3, §5.8). A spread
+across stages is pool queueing: follow §5.12 and break the §14.8 churn loop on
+the database or client side. Do not restart Connect, API or the proxies
+fleet-wide: every restart recreates windows and contracts. Verify with a full
+10-minute hold at or under 250 ms on complete slot coverage, PgBouncer queued
+clients at 0 and the `/connect/control` mean back in single-digit milliseconds.
 
 ---
 
@@ -25913,14 +25952,14 @@ zombie dial-io-timeout tickets accumulated across one outage.
    PgBouncer waiting over 500, prober health halved) escalates it before
    continuing work on the monitor's own sampling and attribution.
 
-Catalog rows from this incident, none implemented as of 2026-10-22:
+Catalog rows from this incident, none implemented when it closed on 2026-10-22; a row naming its probe is implemented now:
 
 | id | source | check | threshold |
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
 | retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
-| contract-stage-latency | Mimir | §2.30 total mean | WARN over 250 ms, PAGE over 1 s, 10 min |
+| contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop | Mimir proxy metrics + pg | §14.8 | WARN on per-device mints, retire/mint ratio or refusals; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
 | modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |
 
