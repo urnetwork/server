@@ -1,0 +1,1541 @@
+{
+  "uid": "urnetwork-capability-probes",
+  "title": "urnetwork / capability probes",
+  "description": "The provider fleet's capabilities as the capability probe (server/capprobe) last read them: end-to-end post-quantum encryption and resizable transfer windows, what the modern provider gate holds quality and speed to. The census gauges are a database snapshot each taskworker's stats collector publishes every five minutes; every census panel reads the one latest snapshot, so no panel needs a host or block variable. The probe's own operational series are summarized here and charted in full on the egress probes dashboard.",
+  "tags": [
+    "urnetwork",
+    "providers",
+    "capability-probe"
+  ],
+  "timezone": "utc",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "providers",
+      "url": "/d/urnetwork-providers",
+      "type": "link",
+      "keepTime": true,
+      "includeVars": true
+    },
+    {
+      "title": "egress probes",
+      "url": "/d/urnetwork-egress-probes",
+      "type": "link",
+      "keepTime": true,
+      "includeVars": true
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_stats_provider_capabilities_observed_at_seconds, env)",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "fleet now",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "providers",
+      "description": "Connected providers in the capability census. The population is the capability probe's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "modern share",
+      "description": "Of the census, the providers whose fresh capability evidence reads a post-quantum end-to-end session and resizable windows: what the modern provider gate admits to quality and speed. The denominator is every connected provider, those without evidence included. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=\"post_quantum\",window=\"resizable\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "post-quantum share",
+      "description": "Of the census, the providers whose fresh capability evidence reads a post-quantum end-to-end session, sealed or not, whatever their window. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=\"post_quantum\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "resizable window share",
+      "description": "Of the census, the providers whose fresh capability evidence reads acknowledgements that advertise a receive window, whatever their end-to-end reading. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",window=\"resizable\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "evidence coverage",
+      "description": "Of the census, the providers with capability evidence newer than the seven-day staleness window. The rest have none or stale evidence and are due for the capability probe's next sweep. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=~\"post_quantum|classical|no_responder\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "census age",
+      "description": "Seconds since the database snapshot of the capability census the dashboard reads. Over 15 minutes the census panels go empty: no taskworker's stats collector is publishing it.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"})",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "capabilities now",
+      "description": "Connected providers by the capability probe's last reading: end-to-end (post_quantum, classical, no_responder) with window (resizable, fixed), or no_evidence / stale_evidence (seven days or older), which have no window reading. Modern is post_quantum / resizable. The population is the capability probe's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "Metric",
+        "showValue": "always",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "legendFormat": "{{e2e}} / {{window}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "evidence age now",
+      "description": "Connected providers by the age of their capability evidence: under 1d, 1d-3d, 3d-7d, stale (seven days or older) or none. The probe measures again once evidence is three days old by default (capability_probe.yml), so most fresh evidence sits under 3d while the probe keeps up. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "Metric",
+        "showValue": "always",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (age) (urnetwork_stats_provider_capability_evidence_age{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "legendFormat": "{{age}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "key exchange groups now",
+      "description": "Connected providers with a fresh negotiated end-to-end session by the TLS key exchange group the provider chose from the capability probe's offer (crypto/tls names; X25519MLKEM768 is the post-quantum hybrid). The eight largest groups plus other. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "Metric",
+        "showValue": "always",
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (key_exchange) (urnetwork_stats_provider_capability_key_exchanges{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "legendFormat": "{{key_exchange}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "instant": true,
+          "range": false,
+          "format": "time_series"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "row",
+      "title": "fleet trends",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "panels": [],
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "providers by end-to-end reading",
+      "description": "The capability census over time, stacked by end-to-end reading. A rising no_evidence or stale_evidence band is the probe falling behind the fleet; a shrinking no_responder band is providers updating to apps with the end-to-end responder. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (e2e) (max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "{{e2e}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "providers by window reading",
+      "description": "The capability census over time, stacked by window reading; unknown is the providers without fresh evidence. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window) (max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "{{window}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 13,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "capability shares",
+      "description": "The capability census's shares over time, each over every connected provider: modern (post-quantum and resizable), post-quantum, resizable windows, and evidence coverage (fresh evidence of any reading). Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=\"post_quantum\",window=\"resizable\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "modern",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=\"post_quantum\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "post-quantum",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",window=\"resizable\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "resizable windows",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\",e2e=~\"post_quantum|classical|no_responder\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))) / sum(max by (e2e, window) (urnetwork_stats_provider_capabilities{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "evidence coverage",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 14,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "modern share of the gated buckets",
+      "description": "Of the providers the other egress rules admit to quality and to speed, the share the capability evidence shows modern: what the modern provider gate keeps once it is on (urnetwork_stats_provider_modern_gate_shadow; the providers dashboard has the full shadow). Not a share of the whole fleet; the capability shares beside it are.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\",outcome=\"modern\"}) / sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"quality\"}))",
+          "legendFormat": "quality",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"speed\",outcome=\"modern\"}) / sum(max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"speed\"}))",
+          "legendFormat": "speed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "max(urnetwork_stats_provider_modern_gate_on{env=\"$env\"})",
+          "legendFormat": "gate on",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "evidence age",
+      "description": "The capability census over time, stacked by evidence age. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (age) (max by (age) (urnetwork_stats_provider_capability_evidence_age{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "{{age}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 16,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "key exchange groups",
+      "description": "Connected providers with a fresh negotiated end-to-end session over time, stacked by key exchange group (the eight largest plus other). Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (key_exchange) (max by (key_exchange) (urnetwork_stats_provider_capability_key_exchanges{env=\"$env\",service=\"taskworker\"} and on (env, service, host, block, instance) topk(1, (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, host, block, instance) (urnetwork_stats_provider_capabilities_observed_at_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30))))",
+          "legendFormat": "{{key_exchange}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 17,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "row",
+      "title": "probe activity",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": [],
+      "id": 18,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "last capability pass",
+      "description": "Seconds since any taskworker last finished a capability probe pass that measured or waited. A waiting probe passes every ten minutes, so past half an hour the probe has stopped (monitor signal capability-probe). The egress probes dashboard charts every capability probe series.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1200
+              },
+              {
+                "color": "red",
+                "value": 1800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 19,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "last capability sweep",
+      "description": "How long the last completed capability probe sweep over the connected providers took, the longest any taskworker reports.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_capability_probe_last_sweep_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 20,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "capability sweeps / 7d",
+      "description": "Capability probe sweeps completed over the last seven days, across the taskworkers.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_capability_probe_sweeps_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[7d]))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 21,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "capability breaker trips / 24h",
+      "description": "Capability probe passes over the last day that negotiated an end-to-end session with no provider and so recorded none of their negative readings: a fault on the probe's own side.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_capability_probe_breaker_trips_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[24h]))",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 22,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "capability measurements by outcome",
+      "description": "Finished capability measurements per hour by outcome: recorded with the gate's outcome (modern, not_post_quantum, no_resizable_windows), or why nothing was recorded.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(urnetwork_capability_probe_providers_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "capability readings",
+      "description": "Final readings of opened capability measurements per hour, by capability (e2e, window) and reading. Unlike the census these keep sealed and unsealed sessions apart; not_tested and pending are not evidence.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (capability, reading) (increase(urnetwork_capability_probe_readings_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{capability}} {{reading}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "id": 24,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      }
+    }
+  ]
+}

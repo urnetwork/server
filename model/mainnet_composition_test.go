@@ -4,6 +4,7 @@ package model
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -150,9 +151,10 @@ func TestMainnetCompositionRegistrationRetainsPolicyHistoryAfterDeletion(t *test
 			for index, input := range inputs {
 				domainHash, err := input.Domain.Digest()
 				server.Raise(err)
-				var evidence, registration []byte
-				server.Raise(conn.QueryRow(ctx, `SELECT evidence,registration FROM st_client_key_history WHERE client_id=$1 AND domain_hash=$2 AND generation=1`, input.ClientID, domainHash[:]).Scan(&evidence, &registration))
-				if !bytes.Equal(evidence, records[index].EvidenceBytes) || !bytes.Equal(registration, records[index].RegistrationBytes) {
+				var evidence, registrationHash []byte
+				server.Raise(conn.QueryRow(ctx, `SELECT evidence,registration_hash FROM st_client_key_history WHERE client_id=$1 AND domain_hash=$2 AND generation=1`, input.ClientID, domainHash[:]).Scan(&evidence, &registrationHash))
+				wantRegistrationHash := sha256.Sum256(records[index].RegistrationBytes)
+				if !bytes.Equal(evidence, records[index].EvidenceBytes) || !bytes.Equal(registrationHash, wantRegistrationHash[:]) {
 					t.Fatalf("deletion rewrote policy %d historical approval", index)
 				}
 			}

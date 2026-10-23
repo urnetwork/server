@@ -12,8 +12,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// PublishAndVerifyReplicas performs both immutable route checks and both
-// independent direct readbacks at every ordered store. The finite caller
+// PublishAndVerifyReplicas performs every immutable route check and every
+// independent direct readback at every ordered store. The finite caller
 // census shares one synced staging file, without retaining a file or verdict
 // between envelopes. Each invocation has separate file ownership.
 func (self *PreparedEvidence) PublishAndVerifyReplicas(ctx context.Context, stores []server.BlobStore) (resultErr error) {
@@ -67,7 +67,7 @@ func (self *PreparedEvidence) PublishAndVerifyReplicas(ctx context.Context, stor
 	}
 	for index, store := range stores {
 		published := publications[index]
-		for _, key := range []string{published.ContentKey, published.HistoryKey} {
+		for _, key := range published.storedKeys() {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

@@ -137,8 +137,8 @@ func TestProviderCountAnnotationsDoNotAdvanceIncidentRecovery(t *testing.T) {
 	key := slackIncidentKey(Alert{SignalID: signal.ID(), Class: "provider-count-effective-empty", Target: "api-fleet", Frame: "any/location/us/quality"})
 	postSignalRunsThroughTheGate(t, signal, settings, len(payloads), func(next int) {
 		if next > 0 {
-			wantPresent, wantAbsent := next < 6, 0
-			if next == 4 || next == 5 {
+			wantPresent, wantAbsent := true, 0
+			if next == 4 || next == 6 {
 				wantAbsent = 1
 			}
 			notifier.stateLock.Lock()

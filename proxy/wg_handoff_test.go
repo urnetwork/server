@@ -28,6 +28,8 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWgHandoffFastReconnect\n")
+		restoreHandoffKey := pushProxyTestHandoffKey()
+		defer restoreHandoffKey()
 		h := setupProxyTargetTest(t)
 		defer h.close(t)
 
@@ -105,11 +107,45 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		wg2.handoffGeneration = generation
 		wg2.handoffPrepareOnce.Do(func() {})
 		applied := make(chan (<-chan int), 1)
+		applyDone := make(chan struct{})
+		var applyRaised any
 		go func() {
-			applied <- wg2.ApplyWgHandoff(h.ctx)
+			defer close(applyDone)
+			applyRaised = server.HandleError(func() {
+				applied <- wg2.ApplyWgHandoff(wg2Ctx)
+			})
+		}()
+		var reestablished <-chan int
+		initiationJoined := false
+		defer func() {
+			wg2Cancel()
+			joinCtx, joinCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer joinCancel()
+			select {
+			case <-applyDone:
+			case <-joinCtx.Done():
+				t.Errorf("handoff apply worker did not join: %v", joinCtx.Err())
+				return
+			}
+			if applyRaised != nil && !server.IsDoneError(applyRaised) {
+				t.Errorf("handoff apply worker failed: %v", applyRaised)
+			}
+			if reestablished == nil {
+				select {
+				case reestablished = <-applied:
+				default:
+				}
+			}
+			if reestablished != nil && !initiationJoined {
+				select {
+				case <-reestablished:
+				case <-joinCtx.Done():
+					t.Errorf("handoff initiation worker did not join: %v", joinCtx.Err())
+				}
+			}
 		}()
 		select {
-		case <-applied:
+		case reestablished = <-applied:
 			t.Fatalf("handoff apply returned early before export")
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -126,7 +162,6 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		// The delayed export is consumed and the apply returns (ungating the
 		// caller's pre-warm) while the initiation phase runs in the
 		// background...
-		var reestablished <-chan int
 		select {
 		case reestablished = <-applied:
 		case <-time.After(10 * time.Second):
@@ -137,6 +172,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		var reestablishedCount int
 		select {
 		case reestablishedCount = <-reestablished:
+			initiationJoined = true
 		case <-time.After(10 * time.Second):
 			t.Fatal("initiation phase did not complete")
 		}

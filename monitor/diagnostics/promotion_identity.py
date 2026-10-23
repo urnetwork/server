@@ -12,12 +12,13 @@ import time
 import process_identity
 
 
-def current(expected_sha256):
-    """Capture only the generation owned by the fixed monitor unit, then verify."""
+def current(expected_sha256, *, unit_authority=process_identity.LEGACY_UNIT_AUTHORITY):
+    """Capture only the explicitly bound unit generation, then verify without service mutation."""
+    process_identity.validate_unit_authority(unit_authority)
     if not isinstance(expected_sha256,str) or not re.fullmatch(r'[a-f0-9]{64}',expected_sha256):
         raise process_identity.AuditError('invalid_authority')
     code,out,stderr_bytes=process_identity._run_bounded([
-        '/usr/bin/systemctl','--user','show',process_identity.UNIT,
+        '/usr/bin/systemctl','--user','show',unit_authority.unit,
         '--property=ActiveState,SubState,MainPID,NRestarts'],time.monotonic()+1)
     if code!=0 or stderr_bytes: raise process_identity.AuditError('command_failed')
     try:
@@ -33,16 +34,21 @@ def current(expected_sha256):
         ticks=int(fields[19]); boot=process_identity._read(process_identity.BOOT_PATH,64).decode('ascii').strip()
     except (ValueError,UnicodeError,IndexError):
         raise process_identity.AuditError('unit_invalid') from None
-    authority={'unit':process_identity.UNIT,'pid':pid,'start_ticks':ticks,'boot_id':boot,'sha256':expected_sha256,'n_restarts':0}
+    authority={'unit':unit_authority.unit,'pid':pid,'start_ticks':ticks,'boot_id':boot,'sha256':expected_sha256,'n_restarts':0}
     # Capture is not authority. The reviewed helper binds this exact generation
     # on both sides of its bounded, noninteractive privileged proc-exe hash.
-    return authority,process_identity.verify(authority)
+    if unit_authority is process_identity.LEGACY_UNIT_AUTHORITY:
+        return authority,process_identity.verify(authority)
+    return authority,process_identity.verify(authority,unit_authority=unit_authority)
 
 
-def replacement(old,expected_sha256):
+def replacement(old,expected_sha256, *, unit_authority=process_identity.LEGACY_UNIT_AUTHORITY):
     """Verify one replacement and predecessor absence without guessing a PID."""
-    process_identity.validate_authority(old)
-    authority,audit=current(expected_sha256)
+    process_identity.validate_authority(old,unit_authority=unit_authority)
+    if unit_authority is process_identity.LEGACY_UNIT_AUTHORITY:
+        authority,audit=current(expected_sha256)
+    else:
+        authority,audit=current(expected_sha256,unit_authority=unit_authority)
     if authority['pid']==old['pid'] or authority['boot_id']!=old['boot_id']:
         raise process_identity.AuditError('generation_mismatch')
     try: pathlib.Path(f"/proc/{old['pid']}").stat()
@@ -52,9 +58,9 @@ def replacement(old,expected_sha256):
     return {'authority':authority,'audit':audit,'old_pid_retired':True}
 
 
-def begin_once(directory,old,new_sha256):
+def begin_once(directory,old,new_sha256, *, unit_authority=process_identity.LEGACY_UNIT_AUTHORITY):
     """Persist intent before replacement/restart; a spent marker cannot reopen."""
-    process_identity.validate_authority(old)
+    process_identity.validate_authority(old,unit_authority=unit_authority)
     if not isinstance(new_sha256,str) or not re.fullmatch(r'[a-f0-9]{64}',new_sha256):
         raise process_identity.AuditError('invalid_authority')
     directory=pathlib.Path(directory)

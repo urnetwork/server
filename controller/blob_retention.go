@@ -10,10 +10,11 @@ import (
 	"github.com/urnetwork/server/stats"
 )
 
-// ApplyBlobRetention joins stats and feedback rules before any lifecycle write.
-// Concurrent workers with the same configuration therefore write the same full
-// desired set, even if their bucket reads overlap. Retention remains best-effort
-// and local reapers retain the caller's lifetime context.
+// ApplyBlobRetention joins stats, client-key evidence history and feedback rules
+// before any lifecycle write. Concurrent workers with the same configuration
+// therefore write the same full desired set, even if their bucket reads overlap.
+// Retention remains best-effort and local reapers retain the caller's lifetime
+// context.
 func ApplyBlobRetention(ctx context.Context) {
 	streamStore, _ := server.LoadBlobStore()
 	feedbackStore, _ := LoadFeedbackLogStore()
@@ -27,6 +28,8 @@ func applyBlobRetention(ctx context.Context, streamStore, feedbackStore server.B
 	if streamStore != nil {
 		env, _ := server.Env()
 		streamRules = stats.StreamLifecycleRules(streamStore, env)
+		// st evidence is published to the same store (server.LoadBlobStore)
+		streamRules = append(streamRules, stClientKeyEvidenceHistoryLifecycleRules(streamStore)...)
 	}
 	if feedbackStore != nil {
 		feedbackRules = feedbackLogLifecycleRules(feedbackStore)

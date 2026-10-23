@@ -301,6 +301,10 @@ func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "kind and run_id are required.", http.StatusBadRequest)
 		return
 	}
+	if !startifact.EvidenceHistoryIndexed(kind) {
+		http.Error(w, "This evidence kind has no history index; read it by content hash from /sn/evidence?hash=.", http.StatusBadRequest)
+		return
+	}
 	prefix, err := startifact.EvidenceHistoryRunPrefix(store, deployment, uint16(netuidValue), kind, runID)
 	if err != nil {
 		http.Error(w, "Bad evidence history identity.", http.StatusBadRequest)

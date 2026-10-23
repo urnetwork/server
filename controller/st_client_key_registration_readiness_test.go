@@ -8,11 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,27 +34,28 @@ type stClientKeyRegistrationProcessedReply struct {
 }
 
 // Two controlled real failures differ only in the external boundary: one
-// refuses actual authority, the other fails the history path after Sql/content.
-func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
+// refuses actual authority, the other fails the content publication after Sql.
+// Client-key evidence has no history copy, so content is its only route.
+func testStClientKeyRegistrationReadinessRetry(t testing.TB, failPublication bool) {
 	t.Helper()
 	fixture, credential, cfg, _ := newStClientKeyRegistrationFixture(t, 1, 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
-	var blockedHistory string
-	if failHistory {
+	var blockedContent string
+	if failPublication {
 		store, ok := server.LoadBlobStore()
 		blobRoot := fixture.snapshot().blobRoot
 		if !ok || store.Authority() != "local:"+blobRoot {
 			t.Fatal("actual private local store was not configured")
 		}
-		prefix, err := startifact.EvidenceHistoryPrefix(store, cfg.DeploymentId, fixture.snapshot().domain.Netuid, startifact.ClientKeyRegistrationEvidenceKind)
+		anyContentKey, err := startifact.EvidenceContentKey(store, "sha256:"+strings.Repeat("00", sha256.Size))
 		if err != nil {
 			t.Fatal(err)
 		}
-		blockedHistory = filepath.Join(blobRoot, filepath.FromSlash(prefix))
-		if err := os.MkdirAll(filepath.Dir(blockedHistory), 0o700); err != nil {
+		blockedContent = filepath.Join(blobRoot, filepath.FromSlash(path.Dir(anyContentKey)))
+		if err := os.MkdirAll(filepath.Dir(blockedContent), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(blockedHistory, []byte("synthetic failed history directory"), 0o600); err != nil {
+		if err := os.WriteFile(blockedContent, []byte("synthetic failed content directory"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -139,10 +141,10 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 		t.Fatal("real failed registration was acknowledged", first.err, first.result.Error)
 	}
 	var original model.StClientKeyHistoryRecord
-	if failHistory {
+	if failPublication {
 		history, err := model.LoadStClientKeyHistory(ctx, fixture.snapshot().domain, *credential.ClientId, model.MaxStClientKeyHistoryRegistrations, model.MaxStClientKeyHistoryBytes)
 		if err != nil || len(history) != 1 {
-			t.Fatal("failed history write lost original Sql registration", len(history), err)
+			t.Fatal("failed content write lost original Sql registration", len(history), err)
 		}
 		original = history[0]
 		store, ok := server.LoadBlobStore()
@@ -153,18 +155,13 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reader, err := store.Get(ctx, key)
-		if err != nil {
-			t.Fatal("original content was not published before failed history", err)
-		}
-		raw, err := io.ReadAll(io.LimitReader(reader, startifact.MaxClientKeyEvidenceBytes+1))
-		err = errors.Join(err, reader.Close())
-		if err != nil || !bytes.Equal(raw, original.EvidenceBytes) {
-			t.Fatal("original content bytes differ", err)
+		if reader, err := store.Get(ctx, key); err == nil {
+			reader.Close()
+			t.Fatal("a failed content write left a published object")
 		}
 		// Only the explicitly created test obstruction is removed. The signed
-		// Sql row and content object remain untouched for the exact retry.
-		if err := os.Remove(blockedHistory); err != nil {
+		// Sql row remains untouched for the exact retry.
+		if err := os.Remove(blockedContent); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -179,7 +176,7 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 		t.Fatal("retry completed before actual response or remained failed", second.err, second.result.Error)
 	}
 	retained := stClientKeyRegistrationAssertStored(t, fixture, cfg, credential, manager.PublicKey(), fixture.snapshot().boundary)
-	if failHistory && (!bytes.Equal(retained.EvidenceBytes, original.EvidenceBytes) || !bytes.Equal(retained.RegistrationBytes, original.RegistrationBytes)) {
+	if failPublication && (!bytes.Equal(retained.EvidenceBytes, original.EvidenceBytes) || !bytes.Equal(retained.RegistrationBytes, original.RegistrationBytes)) {
 		t.Fatal("retry re-signed or replaced the original partial publication")
 	}
 	second.respond <- struct{}{}
@@ -194,8 +191,8 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 		t.Fatal("actual publication store disappeared")
 	}
 	objects, err := store.List(ctx, store.Prefix())
-	if err != nil || len(objects) != 2 {
-		t.Fatal("registration retry changed original content/history object census", len(objects), err)
+	if err != nil || len(objects) != startifact.ClientKeyEvidenceStoredObjects {
+		t.Fatal("registration retry changed the original content-only object census", len(objects), err)
 	}
 	if requests, methods := fixture.counts(); requests != 9 || methods != 41 {
 		t.Fatal("retry reused stale completed authority or bypassed original reads", requests, methods)

@@ -332,9 +332,9 @@ func TestContractDegradationExcludedRedisAndMissingInventory(t *testing.T) {
 	}
 }
 
-// Unknown publications preserve an absent incident's existing recovery credit.
-// Only complete observations advance it; a held visibility warning still resets
-// that warning's own credit without granting recovery to the active incident.
+// Unknown publications preserve incidents but reset their owner's recovery credit.
+// Both the active incident and visibility warning need two uninterrupted complete
+// observations after the final gap; held visibility cannot supply recovery.
 func TestContractDegradationNotifierRetainsUnknown(t *testing.T) {
 	var run, reads atomic.Int32
 	now := syntheticSettings(nil).Now()
@@ -386,9 +386,9 @@ func TestContractDegradationNotifierRetainsUnknown(t *testing.T) {
 		{pagePresent: true}, // missing run 1 is held below WARN sustain
 		{pagePresent: true, unknownPresent: true},                                  // stale run 2 raises WARN
 		{pagePresent: true, pageCredit: 1, unknownPresent: true, unknownCredit: 1}, // healthy run 3
-		{pagePresent: true, pageCredit: 1, unknownPresent: true},                   // missing run 4 preserves PAGE credit
-		{unknownPresent: true, unknownCredit: 1},                                   // healthy run 5 is the second complete PAGE absence
-		{},                                                                         // healthy run 6 clears the independently observed WARN
+		{pagePresent: true, unknownPresent: true},                                  // missing run 4 resets both recovery streaks
+		{pagePresent: true, pageCredit: 1, unknownPresent: true, unknownCredit: 1}, // healthy run 5 is the first complete absence after the gap
+		{}, // healthy run 6 clears PAGE and WARN after consecutive complete absences
 	}
 	assertRun := func(completedRuns int) {
 		t.Helper()

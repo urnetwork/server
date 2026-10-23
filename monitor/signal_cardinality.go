@@ -128,6 +128,7 @@ func observeRedisHostLatencyTracking(ctx context.Context, env *probeEnv, host *h
 set -eu
 command -v timeout >/dev/null
 command -v redis-cli >/dev/null
+command -v awk >/dev/null
 expected=0
 enabled=0
 disabled=0
@@ -135,20 +136,36 @@ invalid=0
 unreachable=0
 for port in ` + strings.Join(portFields, " ") + `; do
   expected=$((expected + 1))
-  if ! response=$(timeout 4 redis-cli --raw -h 127.0.0.1 -p "$port" CONFIG GET latency-tracking 2>/dev/null); then
-    unreachable=$((unreachable + 1))
-    continue
-  fi
-  key=$(printf '%s\n' "$response" | sed -n '1p')
-  value=$(printf '%s\n' "$response" | sed -n '2p')
-  extra=$(printf '%s\n' "$response" | sed -n '3p')
-  if [ "$key" != latency-tracking ] || [ -n "$extra" ]; then
-    invalid=$((invalid + 1))
-    continue
+  # Validate the stream before shell substitution can discard reply bytes.
+  if ! value=$({
+    result=0
+    timeout 4 redis-cli --raw -h 127.0.0.1 -p "$port" CONFIG GET latency-tracking 2>/dev/null || result=$?
+    printf '\nredis-latency-config-exit %s\n' "$result"
+  } | LC_ALL=C awk '
+    {
+      last = $0
+      if (NR == 1 && $0 != "latency-tracking") invalid = 1
+      if (NR == 2) {
+        value = $0
+        if (value != "yes" && value != "no") invalid = 1
+      }
+      if (NR == 3 && $0 != "") invalid = 1
+      if (NR > 4) invalid = 1
+    }
+    END {
+      if (last !~ /^redis-latency-config-exit [0-9]+$/) exit 1
+      if (last != "redis-latency-config-exit 0") { print "unreachable"; exit }
+      if (invalid || NR != 4) { print "invalid"; exit }
+      print value
+    }
+  '); then
+    printf 'Redis latency-tracking reply reduction failed\n' >&2
+    exit 1
   fi
   case "$value" in
     yes) enabled=$((enabled + 1)) ;;
     no) disabled=$((disabled + 1)) ;;
+    unreachable) unreachable=$((unreachable + 1)) ;;
     *) invalid=$((invalid + 1)) ;;
   esac
 done

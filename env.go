@@ -78,7 +78,7 @@ var DefaultWarpHome = "/srv/warp"
 func init() {
 	initGlog()
 	settingsObj := GetSettings()
-	glog.Infof("[env]settings = %s\n", settingsObj)
+	glog.Infof("[env]settings loaded\n")
 	if envObj, ok := settingsObj["env_vars"]; ok {
 		switch v := envObj.(type) {
 		case map[string]any:
@@ -87,7 +87,7 @@ func init() {
 				case string:
 					os.Setenv(key, w)
 				default:
-					glog.Infof("[env]unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
+					glog.Infof("[env]ignored non-string environment value\n")
 				}
 			}
 		}

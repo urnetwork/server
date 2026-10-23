@@ -39,7 +39,9 @@ func PrepareEvidence(envelope *EvidenceEnvelope) (*PreparedEvidence, error) {
 	return &PreparedEvidence{identity: snapshot, encoded: encoded}, nil
 }
 
-// Derive both immutable routes from the sealed signed identity for this store.
+// Derive the immutable routes from the sealed signed identity for this store.
+// A kind outside the history index (EvidenceHistoryIndexed) has only its
+// content route, and its receipt names no history key.
 func (self *PreparedEvidence) publication(store server.BlobStore) (*Published, error) {
 	if self == nil || len(self.encoded) == 0 {
 		return nil, errors.New("prepared evidence is missing")
@@ -51,20 +53,32 @@ func (self *PreparedEvidence) publication(store server.BlobStore) (*Published, e
 	if err != nil {
 		return nil, err
 	}
+	published := &Published{ContentHash: self.identity.ContentHash, ContentKey: contentKey, Bucket: store.Bucket()}
+	if !EvidenceHistoryIndexed(self.identity.Kind) {
+		return published, nil
+	}
 	runId := self.identity.RunID
 	if runId == "" {
 		runId = EvidenceDeploymentHistoryRunID
 	}
-	historyKey, err := EvidenceHistoryKey(store, self.identity.DeploymentID, self.identity.Netuid, self.identity.Kind, runId, self.identity.ContentHash)
+	published.HistoryKey, err = EvidenceHistoryKey(store, self.identity.DeploymentID, self.identity.Netuid, self.identity.Kind, runId, self.identity.ContentHash)
 	if err != nil {
 		return nil, err
 	}
-	return &Published{ContentHash: self.identity.ContentHash, ContentKey: contentKey, HistoryKey: historyKey, Bucket: store.Bucket()}, nil
+	return published, nil
 }
 
-// Both routes execute their immutable create and exact winner readback using
+// The keys an evidence publication writes and verifies, content route first.
+func (self *Published) storedKeys() []string {
+	if self.HistoryKey == "" {
+		return []string{self.ContentKey}
+	}
+	return []string{self.ContentKey, self.HistoryKey}
+}
+
+// Every route executes its immutable create and exact winner readback using
 // one private synced carrier. Staging the same bytes again for the history
-// route adds a redundant synchronous disk flush to every registration.
+// route adds a redundant synchronous disk flush to every publication.
 func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (result *Published, resultErr error) {
 	if ctx == nil {
 		return nil, errors.New("evidence publication context is missing")
@@ -107,7 +121,7 @@ func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStor
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	for _, key := range []string{published.ContentKey, published.HistoryKey} {
+	for _, key := range published.storedKeys() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -118,7 +132,7 @@ func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStor
 	return published, ctx.Err()
 }
 
-// Verify receipt identity and independently read both complete stored routes.
+// Verify receipt identity and independently read every complete stored route.
 // Equality is against the already verified immutable wire, not mutable input
 // fields or a digest-only substitute; exact length and Close remain required.
 func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.BlobStore, published *Published) error {
@@ -138,7 +152,7 @@ func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.
 	if published.ContentKey != want.ContentKey || published.HistoryKey != want.HistoryKey {
 		return errors.New("direct evidence receipt keys do not match the rendered store")
 	}
-	for _, key := range []string{published.ContentKey, published.HistoryKey} {
+	for _, key := range want.storedKeys() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

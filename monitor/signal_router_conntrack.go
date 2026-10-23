@@ -184,9 +184,16 @@ func routerConntrackFinding(h *host, class, observed string) finding {
 }
 
 func (self *routerConntrackProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	parentDone := ctx.Done()
 	return routerTargets(ctx, env, "conntrack", func(h *host, observed routerObservation, err error) []finding {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		// Accept this frame only while its parent is live at this checkpoint.
+		select {
+		case <-parentDone:
+			return nil
+		default:
+		}
 		previous := self.previous[h.name]
 		delete(self.previous, h.name)
 		if err != nil {

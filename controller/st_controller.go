@@ -571,7 +571,9 @@ func StEnabled() bool {
 // Upload is permissionless at the HTTP layer because possession of the
 // configured per-operator artifact key is the authorization. Chain,
 // deployment, policy namespace and signer are all checked before MinIO sees
-// any bytes.
+// any bytes. Kinds without a history index are published only by their own
+// operator paths (client-key registration and observation), so an upload's
+// receipt always names both of its routes.
 func StPublishEvidence(ctx context.Context, encoded []byte) (*startifact.Published, error) {
 	cfg := stConfig()
 	if cfg == nil || !cfg.Enabled || cfg.ArtifactKey == nil {
@@ -580,6 +582,9 @@ func StPublishEvidence(ctx context.Context, encoded []byte) (*startifact.Publish
 	var envelope startifact.EvidenceEnvelope
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		return nil, fmt.Errorf("invalid evidence JSON: %w", err)
+	}
+	if !startifact.EvidenceHistoryIndexed(envelope.Kind) {
+		return nil, fmt.Errorf("evidence kind %q is published only by its operator path", envelope.Kind)
 	}
 	if err := startifact.VerifyEvidence(&envelope); err != nil {
 		return nil, err

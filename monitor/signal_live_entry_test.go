@@ -202,22 +202,28 @@ func (self *liveEntryBudgetProbe) check(ctx context.Context, env *probeEnv) ([]f
 }
 
 // Capture actual execution-loop/cadence-gate outputs under deterministic
-// virtual deadlines. Public notifier delivery happens after the bubble joins.
-func liveEntryExecutionTrace(t *testing.T, expire bool) (Signal, []SignalExecution) {
+// virtual deadlines. Callback faults return to the test owner after loop join.
+func liveEntryExecutionTrace(t *testing.T, expire bool, handlerErr error) (Signal, []SignalExecution, error) {
 	t.Helper()
 	var signal Signal
 	var trace []SignalExecution
+	var resultErr error
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		calls := 0
+		fixtureErrors := make(chan error, 1)
 		probe := &liveEntryBudgetProbe{checkFn: func(probeCtx context.Context, env *probeEnv) ([]finding, error) {
 			calls++
 			if probeCtx.Err() != nil {
-				t.Fatal("budget fixture did not enter live")
+				err := errors.New("budget fixture did not enter live")
+				fixtureErrors <- err
+				return nil, err
 			}
 			if _, scoped := env.runner.(*hostScopeRunner); scoped {
-				t.Fatal("budget fixture enabled host scope")
+				err := errors.New("budget fixture enabled host scope")
+				fixtureErrors <- err
+				return nil, err
 			}
 			if calls <= 2 {
 				return []finding{{probeId: "synthetic/live-entry", tier: tierWarn, class: "synthetic-live-entry", target: "synthetic-source", symptom: "Synthetic previously raised incident", sustain: 1}}, nil
@@ -233,8 +239,16 @@ func liveEntryExecutionTrace(t *testing.T, expire bool) (Signal, []SignalExecuti
 		done := make(chan error, 1)
 		go func() {
 			done <- NewWithSignals(syntheticSettings(&syntheticSource{}), signal).runExecutionLoop(ctx, RunLoopOptions{}, func(parent context.Context, _ Signal, execution SignalExecution) error {
+				select {
+				case err := <-fixtureErrors:
+					return err
+				default:
+				}
 				if parent.Err() != nil {
-					t.Fatal("budget fixture ended outer monitor")
+					return errors.New("budget fixture ended outer monitor")
+				}
+				if handlerErr != nil {
+					return handlerErr
 				}
 				handled <- execution
 				return nil
@@ -242,19 +256,26 @@ func liveEntryExecutionTrace(t *testing.T, expire bool) (Signal, []SignalExecuti
 		}()
 		for i := 0; i < 4; i++ {
 			if i > 0 {
-				ticks <- time.Now()
+				select {
+				case ticks <- time.Now():
+				case resultErr = <-done:
+					return
+				}
 			}
-			trace = append(trace, <-handled)
+			select {
+			case execution := <-handled:
+				trace = append(trace, execution)
+			case resultErr = <-done:
+				return
+			}
 		}
 		if ctx.Err() != nil || calls != 4 {
 			t.Fatal("public budget trace lost live outer owner or exact call count")
 		}
 		cancel()
-		if err := <-done; err != nil {
-			t.Fatal("execution loop did not join on deliberate retirement")
-		}
+		resultErr = <-done
 	})
-	return signal, trace
+	return signal, trace, resultErr
 }
 
 // Actual public loop outputs pass directly into the real notifier. No
@@ -275,7 +296,10 @@ func liveEntryNotifierTexts(t *testing.T, signal Signal, trace []SignalExecution
 // baseline unscoped acceptance clears the raised incident after two expired
 // child turns, despite the outer monitor still being live.
 func TestSignalLiveEntryOwnedBudgetCannotClearNotifier(t *testing.T) {
-	signal, trace := liveEntryExecutionTrace(t, true)
+	signal, trace, err := liveEntryExecutionTrace(t, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	texts := liveEntryNotifierTexts(t, signal, trace)
 	cleared := false
 	for _, text := range texts {
@@ -288,7 +312,10 @@ func TestSignalLiveEntryOwnedBudgetCannotClearNotifier(t *testing.T) {
 
 // The same public path still clears after two genuinely healthy live turns.
 func TestSignalLiveEntryHealthyOwnerAllowsNotifierClear(t *testing.T) {
-	signal, trace := liveEntryExecutionTrace(t, false)
+	signal, trace, err := liveEntryExecutionTrace(t, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	texts := liveEntryNotifierTexts(t, signal, trace)
 	cleared := false
 	for _, text := range texts {
@@ -296,6 +323,16 @@ func TestSignalLiveEntryHealthyOwnerAllowsNotifierClear(t *testing.T) {
 	}
 	if len(trace) != 4 || trace[2].Failed || trace[3].Failed || !cleared {
 		t.Fatal("healthy live owner lost public notifier recovery")
+	}
+}
+
+// A callback error must reach the test owner without a handled execution;
+// the same virtual-time helper joins the actual loop before returning it.
+func TestSignalLiveEntryHandlerFailureReachesTestOwner(t *testing.T) {
+	failure := errors.New("synthetic execution handler failure")
+	signal, trace, err := liveEntryExecutionTrace(t, false, failure)
+	if signal == nil || err != failure || len(trace) != 0 {
+		t.Fatal("execution handler failure did not reach the test owner after loop join")
 	}
 }
 
@@ -314,5 +351,68 @@ func TestSignalLiveEntryEndedMonitorStillSuppressesHandler(t *testing.T) {
 	err := NewWithSignals(syntheticSettings(&syntheticSource{}), adapter).RunExecutionLoop(ctx, RunLoopOptions{}, func(context.Context, Signal, SignalExecution) error { handled++; return nil })
 	if err != nil || calls != 1 || handled != 0 {
 		t.Fatal("existing monitor-parent retirement fence changed")
+	}
+}
+
+// An owning probe's direct parent wrapper remains exact when it already carries
+// this parent. A different child verdict is still wrapped, and a live parent's
+// source error remains untouched. No arbitrary errors.Is match bypasses policy.
+func TestSignalLiveEntryPreservesReturnedParentWrapper(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		for _, test := range []struct {
+			returnedParent error
+			endOwner       bool
+			nestedSource   bool
+		}{
+			{returnedParent: context.Canceled, endOwner: true},
+			{returnedParent: context.DeadlineExceeded, endOwner: true},
+			{returnedParent: context.DeadlineExceeded, endOwner: false},
+			{returnedParent: context.Canceled, endOwner: true, nestedSource: true},
+		} {
+			ctx, cancel := context.WithCancel(context.Background())
+			privateCause := errors.New("synthetic-private-direct-parent-wrapper")
+			admission := &sshAdmissionUnavailableError{err: privateCause, phase: sshAdmissionFailureRelease}
+			sourceErr := &signalContextError{contextErr: test.returnedParent, sourceErr: admission}
+			var returnedSource error = sourceErr
+			if test.nestedSource {
+				returnedSource = errors.Join(sourceErr, errors.New("synthetic-private-nested-wrapper"))
+			}
+			calls := 0
+			adapter := &signalAdapter{number: "1.7", key: "synthetic-live-entry", name: "Synthetic live entry", probe: hostScopeSyntheticProbe{checkFn: func(probeCtx context.Context, _ *probeEnv) ([]finding, error) {
+				calls++
+				if probeCtx.Err() != nil {
+					t.Fatal("direct parent-wrapper source did not enter live")
+				}
+				if test.endOwner {
+					cancel()
+				}
+				return nil, returnedSource
+			}}}
+			settings := syntheticSettings(&syntheticSource{})
+			if scoped {
+				settings.disabledHosts = []HostSettings{{Name: "excluded.example.test"}}
+			}
+			alerts, err := adapter.Run(ctx, settings)
+			if calls != 1 || len(alerts) != 0 || !errors.Is(err, returnedSource) || !errors.Is(err, sourceErr) || !errors.Is(err, admission) || !errors.Is(err, privateCause) || !errors.Is(err, test.returnedParent) {
+				t.Fatal("direct parent wrapper lost original source identity or repeated work")
+			}
+			var returned *signalContextError
+			if !errors.As(err, &returned) {
+				t.Fatal("direct parent wrapper lost typed error authority")
+			}
+			if !test.endOwner || (test.returnedParent == context.Canceled && !test.nestedSource) {
+				if err != sourceErr || returned != sourceErr || returned.sourceErr != admission {
+					t.Fatal("same-parent or live-parent source wrapper was unnecessarily replaced")
+				}
+			} else if returned == sourceErr || returned.contextErr != context.Canceled || returned.sourceErr != returnedSource || err.Error() != context.Canceled.Error() {
+				t.Fatal("different child verdict bypassed canonical parent authority")
+			}
+			var returnedAdmission *sshAdmissionUnavailableError
+			if !errors.As(err, &returnedAdmission) || returnedAdmission != admission {
+				t.Fatal("direct parent wrapper lost its exact typed source leaf")
+			}
+			requireAlertOmits(t, visibilityAlert(settings, adapter, err), "synthetic-private-direct-parent-wrapper", "synthetic-private-nested-wrapper")
+			cancel()
+		}
 	}
 }

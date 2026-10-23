@@ -224,10 +224,12 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		contentHash := sha256.Sum256(registrationBytes)
 		evidenceBytes, evidenceHash, err = startifact.SealClientKeyRegistrationEvidence(input.DeploymentID, registration, artifactKey, input.CreatedAt)
 		server.Raise(err)
+		// The registration is the evidence's exact payload and readers derive
+		// it from there, so the row keeps only its hash, not a second copy.
 		server.RaisePgResult(tx.Exec(ctx, `
-			INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, registration, evidence_hash, evidence)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		`, input.ClientID, generation+1, domainHash[:], contentHash[:], registrationBytes, evidenceHash, evidenceBytes))
+			INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, input.ClientID, generation+1, domainHash[:], contentHash[:], evidenceHash, evidenceBytes))
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_client_key_head (client_id, domain_hash, network_id, generation, retired)
 			VALUES ($1, $2, $3, $4, false)

@@ -541,6 +541,7 @@ func TestProviderScoreReadErrorsInventoryAndExclusions(t *testing.T) {
 	}
 }
 
+// Unknown reader evidence restarts recovery without dropping the retained incident.
 func TestProviderScoreReadErrorsNotifierRetainsUnknown(t *testing.T) {
 	base := syntheticSettings(nil).Now()
 	f := newScoreReadFixture()
@@ -563,14 +564,14 @@ func TestProviderScoreReadErrorsNotifierRetainsUnknown(t *testing.T) {
 		}
 	}
 	postSignalRunsThroughTheGate(t, signal, settings, 8, func(i int) {
-		// Before each run, unknown observations preserve prior complete credit
-		// without adding any: healthy run 6 supplies the second credit after 3.
+		// Before each run, unknown observations reset this owner's credit.
+		// Healthy runs 6 and 7 supply the uninterrupted recovery after the gap.
 		switch i {
-		case 0, 1, 7:
+		case 0, 1:
 			assertIncident(false, 0)
-		case 2, 3:
+		case 2, 3, 5, 6:
 			assertIncident(true, 0)
-		case 4, 5, 6:
+		case 4, 7:
 			assertIncident(true, 1)
 		}
 		f.now = base.Add(time.Duration(i) * 15 * time.Minute)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -103,6 +104,21 @@ func ExtenderProbeConnectSettings() *connect.ConnectSettings {
 // production.
 var extenderForwardProbeTlsConfig = func() *tls.Config {
 	return nil
+}
+
+// Testing_SetExtenderForwardProbeRootCAs verifies the forward probe's inner
+// tls against rootCAs rather than the platform roots, for a test whose api is
+// in process under its own certificate, as this package's own tests do. It
+// names roots to verify against and never turns verification off. Call it
+// from the test goroutine only, and call the restore when the test ends.
+func Testing_SetExtenderForwardProbeRootCAs(rootCAs *x509.CertPool) (restore func()) {
+	previousTlsConfig := extenderForwardProbeTlsConfig
+	extenderForwardProbeTlsConfig = func() *tls.Config {
+		return &tls.Config{RootCAs: rootCAs}
+	}
+	return func() {
+		extenderForwardProbeTlsConfig = previousTlsConfig
+	}
 }
 
 type ExtenderActivateArgs struct {
