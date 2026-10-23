@@ -2761,6 +2761,190 @@
                     "legendFormat": "load publish {{outcome}}"
                 }
             ]
+        },
+        {
+            "id": 72,
+            "type": "timeseries",
+            "title": "move results / min: declined and failed",
+            "description": "Accepted client reports (connect/MOVE.md 5.1): a client declines an advisory move by its D11 rules, or reports a replacement that failed, with the typed reason. Reports arrive wherever the client's control path runs: the connect resident, the api's /connect/control and the proxy's in-process authority, so these series are not filtered by service, block or host. A failure counts against the target address's breaker unless the move was a drain's. No-data: no reports.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 266
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (reason) (rate(urnetwork_connect_moves_declined_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "declined {{reason}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (reason, target_host) (rate(urnetwork_connect_moves_failed_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "failed {{reason}} {{target_host}}"
+                }
+            ]
+        },
+        {
+            "id": 73,
+            "type": "timeseries",
+            "title": "move expiries, compulsory closes and dropped reports / min",
+            "description": "Expired: moves whose arrival window (MoveArrivalTimeout past the migrate time) ended with the resident still at the source; the client keeps forwarding. Compulsory closed: clients closed with the moved close (4006) at a compulsory move's deadline because their resident was still here. Dropped: reports the platform did not accept, by cause: no_intent (the intent expired or an arrival consumed it first), foreign_move or invalid_move_id (a move the client was not sent), invalid_result; these are counted wherever the control path runs. No-data: none.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 266
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (kind) (rate(urnetwork_connect_moves_expired_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "expired {{kind}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(rate(urnetwork_connect_moves_compulsory_closed_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "compulsory closed"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (cause) (rate(urnetwork_connect_move_results_dropped_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "dropped {{cause}}"
+                }
+            ]
+        },
+        {
+            "id": 74,
+            "type": "timeseries",
+            "title": "target breakers open",
+            "description": "1 while moves to an inventory address are held off (connect/MOVE.md 5.5): its failure reports over sends exceeded MoveTargetBreakerRatio with at least MoveTargetBreakerMinSends sends in MoveTargetBreakerWindow, for MoveTargetBreakerTimeout. Counted per address, so one bad interface or path does not idle the whole host. Set by the processes that ask about the address; an address no process asked about has no series.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 274
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max by (host, interface, family) (urnetwork_connect_move_target_breaker_open{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{host}} {{interface}} {{family}}"
+                }
+            ]
+        },
+        {
+            "id": 75,
+            "type": "timeseries",
+            "title": "drain refusals and drain moves / min",
+            "description": "A draining process refuses new client transports (h1, quic) and inbound exchange handshakes for a resident it does not have (exchange), so a redialing client lands on a sibling at once (connect/MOVE.md 2.3). Drain moves: every resident gets a compulsory move to this host's own addresses (capable=true) or the legacy migrate (capable=false), each with a drain intent. Refusals outside a drain mean a process is stuck draining while it still takes traffic. No-data: no drain.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 274
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (carrier) (rate(urnetwork_connect_drain_refusals_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "refused {{carrier}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (capable) (rate(urnetwork_connect_drain_moves_sent_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "drain moves capable={{capable}}"
+                }
+            ]
         }
     ]
 }

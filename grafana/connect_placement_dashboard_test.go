@@ -9,15 +9,22 @@ import (
 )
 
 // The placement panel by host: providers, residents, CPU and moves in and out,
-// with the load model, the mode, dry run, the budget, adoption and the ticks.
+// with the load model, the mode, dry run, the budget, adoption and the ticks,
+// and the move primitives' results, expiries, breakers and drain gates.
 // Gauges stay gauges, counters are per-process rates per minute, and every
 // panel says what no-data means.
 func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 	const selector = `{env="$env",service="connect",block=~"$block",host=~"$host",instance!=""}`
 	// the mover's kinds: same-host drain arrivals are not placement
 	const arrivalSelector = `{env="$env",service="connect",block=~"$block",host=~"$host",instance!="",kind=~"advisory|compulsory"}`
+	// reports arrive wherever the client's control path runs: connect, the
+	// api and the proxy
+	const reportSelector = `{env="$env",instance!=""}`
 	perMinute := func(by string, metric string) string {
 		return "sum by (" + by + ") (rate(" + metric + selector + "[$__rate_interval])) * 60"
+	}
+	reportsPerMinute := func(by string, metric string) string {
+		return "sum by (" + by + ") (rate(" + metric + reportSelector + "[$__rate_interval])) * 60"
 	}
 	assertDiagnosticDashboardPanels(t, "connect.json", []diagnosticDashboardPanel{
 		{
@@ -98,6 +105,38 @@ func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 			},
 			descriptionParts: []string{"store_error", "failed closed", "db_paused", "MoveDbWaitPauseThreshold", "budget_refused", "neither a source nor a target"},
 		},
+		{
+			id: 72, unit: "opm",
+			targets: []testTarget{
+				{Expr: reportsPerMinute("reason", "urnetwork_connect_moves_declined_total"), LegendFormat: "declined {{reason}}"},
+				{Expr: reportsPerMinute("reason, target_host", "urnetwork_connect_moves_failed_total"), LegendFormat: "failed {{reason}} {{target_host}}"},
+			},
+			descriptionParts: []string{"D11", "control path runs", "/connect/control", "not filtered by service", "breaker", "No-data"},
+		},
+		{
+			id: 73, unit: "opm",
+			targets: []testTarget{
+				{Expr: perMinute("kind", "urnetwork_connect_moves_expired_total"), LegendFormat: "expired {{kind}}"},
+				{Expr: "sum(rate(urnetwork_connect_moves_compulsory_closed_total" + selector + "[$__rate_interval])) * 60", LegendFormat: "compulsory closed"},
+				{Expr: reportsPerMinute("cause", "urnetwork_connect_move_results_dropped_total"), LegendFormat: "dropped {{cause}}"},
+			},
+			descriptionParts: []string{"MoveArrivalTimeout past the migrate time", "4006", "no_intent", "foreign_move", "No-data"},
+		},
+		{
+			id: 74, unit: "short",
+			targets: []testTarget{
+				{Expr: "max by (host, interface, family) (urnetwork_connect_move_target_breaker_open" + selector + ")", LegendFormat: "{{host}} {{interface}} {{family}}"},
+			},
+			descriptionParts: []string{"MoveTargetBreakerRatio", "MoveTargetBreakerMinSends", "MoveTargetBreakerWindow", "MoveTargetBreakerTimeout", "per address", "no series"},
+		},
+		{
+			id: 75, unit: "opm",
+			targets: []testTarget{
+				{Expr: perMinute("carrier", "urnetwork_connect_drain_refusals_total"), LegendFormat: "refused {{carrier}}"},
+				{Expr: perMinute("capable", "urnetwork_connect_drain_moves_sent_total"), LegendFormat: "drain moves capable={{capable}}"},
+			},
+			descriptionParts: []string{"h1, quic", "exchange", "sibling", "capable=true", "legacy migrate", "stuck draining", "No-data"},
+		},
 	})
 
 	dashboard := readTestDashboard(t, "connect.json")
@@ -107,7 +146,7 @@ func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 	}
 	var placement strings.Builder
 	for _, panel := range dashboard.Panels {
-		if panel.Id < 62 || 71 < panel.Id {
+		if panel.Id < 62 || 75 < panel.Id {
 			continue
 		}
 		if panel.GridPos.Y <= row.GridPos.Y {
@@ -133,6 +172,16 @@ func TestConnectPlacementDashboardShowsTheMover(t *testing.T) {
 		"urnetwork_connect_move_host_excess",
 		"urnetwork_connect_move_host_cpu_busy",
 		"urnetwork_connect_move_load_publishes_total",
+		// the move primitives'
+		"urnetwork_connect_moves_arrived_total",
+		"urnetwork_connect_moves_expired_total",
+		"urnetwork_connect_moves_compulsory_closed_total",
+		"urnetwork_connect_moves_declined_total",
+		"urnetwork_connect_moves_failed_total",
+		"urnetwork_connect_move_results_dropped_total",
+		"urnetwork_connect_move_target_breaker_open",
+		"urnetwork_connect_drain_refusals_total",
+		"urnetwork_connect_drain_moves_sent_total",
 	}
 	registered := registeredApplicationMetrics(t)
 	for _, metric := range moverMetrics {

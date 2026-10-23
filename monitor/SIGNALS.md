@@ -341,6 +341,8 @@ active missing capability and must not be read as green.
 | 24.3 | Coverage gap | `rollout-guard` sees deploys and drains; the compulsory-closes-per-drain rule is missing. |
 | 24.4 | Coverage gap | `rollout-guard` and `provenance` see builds, not the mover's mode; the mover-mode rule over the mode gauge and the control hash is missing. |
 | 24.5 | Coverage gap | `redis-cluster` and `pgbouncer-pool-starvation` see the Redis and database pressure the mover pauses for; the mover tick-outcome rule is missing. |
+| 24.6 | Coverage gap | `log-errors` sees no move results; the per-target failure-ratio and breaker rules over the move result counters are missing. |
+| 24.7 | Coverage gap | `rollout-guard` sees drains, not their admission refusals or drain moves; the refusals-outside-a-drain rule is missing. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
@@ -42907,6 +42909,73 @@ sum by (kind, trigger) (rate(urnetwork_connect_move_send_errors_total{env="main"
 
 False-positive qualifier: every tick of a process at mode off or in the band
 counts `off` or `in_band`, so the outcome mix is per tick, not per move.
+
+### 24.6 Move results, expiries and the target breaker
+
+```promql
+sum by (reason) (increase(urnetwork_connect_moves_declined_total{env="main"}[1h]))
+sum by (reason, target_host) (increase(urnetwork_connect_moves_failed_total{env="main"}[1h]))
+sum by (cause) (increase(urnetwork_connect_move_results_dropped_total{env="main"}[1h]))
+sum by (kind) (increase(urnetwork_connect_moves_expired_total{env="main",service="connect"}[1h]))
+max by (host, interface, family) (urnetwork_connect_move_target_breaker_open{env="main",service="connect"})
+```
+
+A client reports a move it declined or whose replacement failed with one
+`ResidentMoveResult` to its control, and the platform accepts the report only
+when its move id matches the client's intent in Redis (MOVE.md §5.1). Reports
+arrive wherever the client's control path runs: the connect resident, the api's
+`/connect/control` and the proxy's in-process authority, so these three
+counters carry no service filter. A failure counts against the failed target
+address's breaker unless the move was a drain's. `moves_expired_total`
+counts moves whose arrival window (`MoveArrivalTimeout` past the migrate time)
+ended with the resident still at the source; the source keeps the resident and
+the client forwards as before.
+
+- EXPECTED: declines by `memory_budget`, `recent_move`, `move_in_progress` and
+  `mobile_background_or_metered` are the client's rules working (D11), and
+  most advisory moves that neither arrive nor fail expire.
+- PROPOSED ticket: failures for one `target_host` above a quarter of its sends
+  (§24.2's denominator by target) for 1 h, or a breaker held open on more than
+  one address of a host. Read `reason`: `connect_timeout` and `dial_error`
+  point at the path to the target, `tls_error` at its certificates, and
+  `auth_error` at the platform.
+- `move_results_dropped_total` by `cause`: `no_intent` follows an expiry or an
+  arrival that consumed the intent first; a steady `foreign_move` or
+  `invalid_move_id` is a client reporting a move it was not sent.
+
+False-positive qualifier: a client counts only failures of the carrier its old
+transport used, so a network that blocks one carrier is not blamed on the
+target. False-negative qualifiers: a report is best effort and sent once, so a
+client that loses its control path reports nothing; drain moves never feed the
+breaker.
+
+### 24.7 Drain gates and drain moves
+
+```promql
+sum by (carrier) (increase(urnetwork_connect_drain_refusals_total{env="main",service="connect"}[1h]))
+sum by (capable) (increase(urnetwork_connect_drain_moves_sent_total{env="main",service="connect"}[1h]))
+```
+
+A draining process refuses new client transports on every carrier (`h1`,
+`quic`) and inbound exchange handshakes for a resident it does not have
+(`exchange`), so a redialing client lands on a sibling at once (MOVE.md §2.3,
+phase 0). With drain moves on, every resident gets a compulsory move to this
+host's own addresses (`capable="true"`) or the legacy migrate
+(`capable="false"`), each with a drain intent, so the client takes over at the
+sibling as soon as it arrives. The Redis control's `drainMoves false` returns
+the next drain to the legacy migrate without a deploy.
+
+- EXPECTED: refusals only while a process drains, and drain moves sent once
+  per resident per drain; `capable="true"` grows as clients adopt the move
+  version (`urnetwork_connect_move_capable_residents`).
+- PROPOSED ticket: refusals outside any drain window (§10.2's
+  `urnetwork_connect_drain_residents_remaining` at zero), which means a process
+  is stuck draining while it still takes traffic from the lb.
+
+False-positive qualifier: a client that redials into the draining process
+before the lb drops it is refused by design. False-negative qualifier: a
+drain that cannot write intents falls back to the legacy migrate and counts
+`capable="false"` for capable clients too.
 
 ## Shared provider-egress dashboard refresh
 
