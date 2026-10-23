@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,5 +193,60 @@ func TestContractPartitionAbandonsUnfinalizedCutover(t *testing.T) {
 		connect.AssertEqual(t, prepared, false)
 		// a contract of the cutover week is admitted again
 		testInsertContractRows(t, ctx, testContractIdAt(cutoverWeek.Add(time.Hour)), false)
+	})
+}
+
+// The relations a statement's plan reads.
+func testContractPlanRelations(t testing.TB, ctx context.Context, sql string, args ...any) (relations []string) {
+	var plan string
+	MaintenanceTx(ctx, func(tx PgTx) {
+		Raise(tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+sql, args...).Scan(&plan))
+	})
+	var walk func(node any)
+	walk = func(node any) {
+		switch value := node.(type) {
+		case map[string]any:
+			if name, ok := value["Relation Name"].(string); ok {
+				relations = append(relations, name)
+			}
+			for _, child := range value {
+				walk(child)
+			}
+		case []any:
+			for _, child := range value {
+				walk(child)
+			}
+		}
+	}
+	var decoded any
+	Raise(json.Unmarshal([]byte(plan), &decoded))
+	walk(decoded)
+	return
+}
+
+// A week's archive batch reads and deletes only that week's partition.
+func TestContractArchiveBatchPrunesToItsWeek(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		Testing_PartitionContracts(ctx)
+		weekStart := ContractPartitionWeekStart(NowUtc()).Add(contractPartitionWeek)
+		relations := testContractPlanRelations(
+			t,
+			ctx,
+			contractArchiveBatchSql,
+			ContractIdFloor(weekStart),
+			ContractIdFloor(weekStart.Add(contractPartitionWeek)),
+			contractArchiveBatchSize,
+		)
+		// the delete names the parent; every partition it reads is the week's
+		leaf := ContractPartitionName("transfer_contract", weekStart)
+		leaves := 0
+		for _, relation := range relations {
+			if strings.HasPrefix(relation, "transfer_contract_") {
+				connect.AssertEqual(t, relation, leaf)
+				leaves += 1
+			}
+		}
+		connect.AssertEqual(t, 0 < leaves, true)
 	})
 }

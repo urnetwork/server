@@ -309,21 +309,25 @@ func expiredContractWeeks(ctx context.Context, now time.Time) (weeks []contractW
 
 // Deletes the next batch of the week's credit-bearing contracts through the
 // parent: the archive capture trigger copies each one's usage proof in the same
-// transaction, exactly as the reaper does.
+// transaction, exactly as the reaper does. The delete repeats the week's range
+// so it prunes to the week's partition.
+const contractArchiveBatchSql = `
+	WITH batch AS (
+		SELECT contract_id FROM transfer_contract
+		WHERE $1 <= contract_id AND contract_id < $2 AND outcome IN ` + contractCreditOutcomesSql + `
+		ORDER BY contract_id
+		LIMIT $3
+	)
+	DELETE FROM transfer_contract
+	WHERE $1 <= contract_id AND contract_id < $2 AND contract_id IN (SELECT contract_id FROM batch)
+	RETURNING contract_id
+`
+
 func archiveContractBatch(ctx context.Context, from Id, upper Id) (count int64, last Id, err error) {
 	err = contractPartitionTx(ctx, func(tx PgTx) {
 		result, queryErr := tx.Query(
 			ctx,
-			`
-			WITH batch AS (
-				SELECT contract_id FROM transfer_contract
-				WHERE $1 <= contract_id AND contract_id < $2 AND outcome IN `+contractCreditOutcomesSql+`
-				ORDER BY contract_id
-				LIMIT $3
-			)
-			DELETE FROM transfer_contract WHERE contract_id IN (SELECT contract_id FROM batch)
-			RETURNING contract_id
-			`,
+			contractArchiveBatchSql,
 			from,
 			upper,
 			contractArchiveBatchSize,
