@@ -32,6 +32,37 @@ const (
 	openContractOutcomeNullIndex     = "transfer_contract_outcome_null"
 )
 
+// The runtime value of a statement argument in model source: string literals
+// joined by + with the rendered contract id bound (contract_id_bound.go). Any
+// other expression is not a statement this guard can bind to.
+func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
+	switch value := expression.(type) {
+	case *ast.BasicLit:
+		if value.Kind != token.STRING {
+			return "", false
+		}
+		unquoted, err := strconv.Unquote(value.Value)
+		return unquoted, err == nil
+	case *ast.ParenExpr:
+		return modelSqlExpressionValue(value.X)
+	case *ast.BinaryExpr:
+		if value.Op != token.ADD {
+			return "", false
+		}
+		x, ok := modelSqlExpressionValue(value.X)
+		if !ok {
+			return "", false
+		}
+		y, ok := modelSqlExpressionValue(value.Y)
+		return x + y, ok
+	case *ast.Ident:
+		if value.Name == "unexpiredContractIdFloorSql" {
+			return unexpiredContractIdFloorSql, true
+		}
+	}
+	return "", false
+}
+
 // Resolve the real query owner only through the public wrapper's returned
 // call. A dead helper or an unused callback cannot satisfy the SQL guard.
 func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
@@ -139,13 +170,9 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 			return true
 		}
 		receiver, ok := selector.X.(*ast.Ident)
-		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "conn" || !literalOk || literal.Kind != token.STRING {
+		sql, sqlOk := modelSqlExpressionValue(call.Args[1])
+		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
-		}
-		sql, err := strconv.Unquote(literal.Value)
-		if err != nil {
-			t.Fatal(err)
 		}
 		for marker := range queries {
 			if strings.Contains(sql, marker) {

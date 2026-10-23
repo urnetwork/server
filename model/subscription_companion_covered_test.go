@@ -11,7 +11,6 @@ import (
 	"go/parser"
 	"go/token"
 	"math"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -401,13 +400,9 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 			return true
 		}
 		receiver, ok := method.X.(*ast.Ident)
-		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "conn" || !literalOk || literal.Kind != token.STRING {
+		sql, sqlOk := modelSqlExpressionValue(call.Args[1])
+		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
-		}
-		sql, err := strconv.Unquote(literal.Value)
-		if err != nil {
-			t.Fatal(err)
 		}
 		for _, branch := range []string{"earliest_origin", "earliest_companion_origin"} {
 			if !strings.Contains(sql, "AS "+branch) {

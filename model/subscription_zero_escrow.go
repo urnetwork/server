@@ -89,7 +89,7 @@ func init() {
 // CompanionOriginCloseLinger). $1 and $2 are the origin's source and
 // destination, the companion's reverse; $3 is the earliest close time of a
 // lingering origin.
-const zeroEscrowPlainOriginSql = `
+var zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
 		(
@@ -117,7 +117,7 @@ const zeroEscrowPlainOriginSql = `
 				WHERE
 					open = false AND
 					$3 <= close_time AND
-					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 					source_id = $1 AND
 					destination_id = $2 AND
@@ -138,7 +138,7 @@ const zeroEscrowPlainOriginSql = `
 // are the companion's source and destination networks. A probe shard's reply
 // carrier inherits its anchor's private payer, the shard, as there; a zero
 // escrow anchor has no payer, and its would-be payer is its destination.
-const zeroEscrowChainedOriginSql = `
+var zeroEscrowChainedOriginSql = `
 	SELECT
 		contract_id,
 		CASE WHEN (payer_network_id IS NULL OR payer_network_id = $4) AND
@@ -172,7 +172,7 @@ const zeroEscrowChainedOriginSql = `
 				WHERE
 					open = false AND
 					$3 <= close_time AND
-					contract_id >= (lpad(to_hex((extract(epoch FROM statement_timestamp() - interval '75 minutes') * 1000)::bigint), 12, '0') || '00000000000000000000')::uuid AND
+					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
 					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 					source_id = $1 AND
 					destination_id = $2 AND

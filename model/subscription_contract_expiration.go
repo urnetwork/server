@@ -19,13 +19,10 @@ const DefaultContractExpiration = 60 * time.Minute
 // deadline, which never exceeds creation plus the lifetime above, and a close
 // follows creation: this close-time bound admits every unexpired closed origin.
 //
-// The closed origin reads also bound contract_id below, which keeps them an
-// index range on transfer_contract_open_source_id (open, source_id,
-// destination_id, contract_id) instead of the pair's whole closed history.
-// Contract ids are generated at admission and lead with their 48-bit creation
-// millisecond (connect.NewId), so an unexpired contract's id is at least the
-// smallest id of 75 minutes ago: the lifetime plus 15 minutes for the id
-// preceding the database creation clock (admission waits, server clock skew).
+// The closed origin reads also bound contract_id below (unexpiredContractIdAge),
+// which keeps them an index range on transfer_contract_open_source_id (open,
+// source_id, destination_id, contract_id) instead of the pair's whole closed
+// history.
 const CompanionOriginCloseLinger = DefaultContractExpiration
 
 // Reads the actual committed deadline for the signed contract response. Legacy
