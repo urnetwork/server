@@ -30755,6 +30755,9 @@ decline windows and a fresh size. Classes, targets `<host>/<layer>`:
 - `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
   used bytes over the drives minus twice the logical bucket bytes (2+2
   erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+  MinIO's logical bytes are cluster-wide, so the per-host comparison holds
+  for a single-node store like main's; a multi-node store needs each node's
+  share before this layer can judge it.
 - `minio-put-surge` (target `<host>/puts`, sustain 2): the 1-hour PutObject
   rate above three times its median over the preceding seven days (the newest
   hour excluded) and at least 10 per second warns; the median needs at least
