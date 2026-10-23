@@ -21,6 +21,7 @@ func TestCompetitionAutomationDashboardHasNoCandidateDisclosure(t *testing.T) {
 		"automation_supervisor_heartbeat_age_seconds",
 		"automation_supervisor_expected",
 		"automation_hold_active", "automation_integrity_incidents",
+		"automation_progression_blocked",
 	} {
 		if !strings.Contains(queries, "urnetwork_competition_"+metric) {
 			t.Errorf("missing automation metric %s", metric)

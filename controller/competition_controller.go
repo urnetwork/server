@@ -731,6 +731,9 @@ func (self *Settings) Validate() error {
 	}
 	p := self.EvaluationPolicy
 	season := self.SeasonPolicy
+	if self.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy && season.PreparationWindowSeconds != 0 {
+		return errors.New("elected-winner closing waits for actual qualification rather than a fixed preparation delay")
+	}
 	if self.AutomationPolicy.Enabled && self.AutomationPolicy.Staging {
 		if season.EpochCount != 6 || season.SubmissionWindowSeconds != self.AutomationPolicy.StagingRoundWindowSeconds || season.PreparationWindowSeconds != self.AutomationPolicy.StagingPreparationSeconds || season.SubmissionFeeUsd != 0 || p.TakeoverMargin != 0 || p.Replicates != 9 {
 			return errors.New("staging automation must freeze six fee-free zero-margin nine-replicate epochs and its exact staging timing")
@@ -900,7 +903,7 @@ func validatePinnedCommand(path, digest, label string) error {
 }
 
 func (self *Settings) PublicInfo() InfoResult {
-	return InfoResult{
+	result := InfoResult{
 		CompetitionId:        self.CompetitionId,
 		Enabled:              self.Enabled,
 		ScoreSchema:          ScoreSchema,
@@ -911,6 +914,11 @@ func (self *Settings) PublicInfo() InfoResult {
 		EvaluationPolicy:     self.EvaluationPolicy,
 		SeasonPolicy:         self.SeasonPolicy,
 	}
+	if self.AutomationPolicy.Enabled {
+		policy := self.AutomationPolicy
+		result.AutomationPolicy = &policy
+	}
+	return result
 }
 
 func (self *Settings) TokenNames() []string {
@@ -3500,6 +3508,11 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 	result.PatchPolicy = policy.PatchPolicy
 	result.EvaluationPolicy = policy.EvaluationPolicy
 	result.SeasonPolicy = policy.SeasonPolicy
+	result.AutomationPolicy = nil
+	if policy.AutomationPolicy != nil && policy.AutomationPolicy.Enabled {
+		copied := *policy.AutomationPolicy
+		result.AutomationPolicy = &copied
+	}
 	applyCompetitionDecisionDiscovery(result, round)
 	return nil
 }
@@ -4316,7 +4329,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 			if settings.AutomationPolicy.Enabled {
 				intent, loadErr := currentSourceActivationInTx(ctx, tx, settings)
 				server.Raise(loadErr)
-				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(16*time.Hour)) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
+				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
 					stateErr = ErrConflict
 					return
 				}

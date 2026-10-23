@@ -38,12 +38,116 @@ This legacy staging path is not the v2 staging supervisor described below.
 
 ## V2 durable supervision — disabled until qualified
 
+### Adopted automatic closing policy (2026-10-23)
+
+New seasons should freeze `winner_review_policy: elected_winner_sol61max_v1`.
+This is a prospective opt-in, not a reinterpretation of an already-open round.
+The empty policy retains the historical independent source-choice flow described
+below. Do not change an existing season's policy approval or running worker pins
+to activate this flow in place.
+
+For the adopted policy the durable supervisor performs:
+
+1. Close admission and finish every accepted evaluation.
+2. Seal and publish the provisional reward election after the reveal boundary.
+3. Automatically dispatch the current elected candidate to the qualified
+   Sol 6.1 max honesty/safety broker, with exact source/patch/score evidence.
+4. Record a substantiated rejection through the scoped review API, publish its
+   reasons and replacement decision, and review the next elected candidate.
+   An unavailable model, timeout or uncertainty is not a rejection.
+5. Once approved, independently build/test that exact winner, publish its source,
+   qualify the exact runtime, activate it, and open the next full-window epoch.
+   No unrelated ready candidate can replace the elected winner.
+6. If the eligible ranking is exhausted (including an initial no-winner result),
+   carry the incumbent commits and margin forward. Review the sixth epoch too,
+   then stop without opening epoch seven.
+
+The review deadline is persisted before invoking the broker and survives restart.
+Missing/expired review pauses progression and alerts support; it never extends
+itself or manufactures approval. Build/readiness failures likewise pause and
+alert rather than silently carry forward. Source build/readiness retries have
+a ten-minute cooldown. An expired review window requires explicitly reviewed
+operator recovery; restarting the supervisor does not reset its deadline.
+Ordinary append-only appeals remain separate: restoration can re-elect a
+recipient, but a still-closing round requires a fresh review of that elected
+decision before source promotion. Already-open source pins never change.
+
+Prospectively approve these values together with the rest of the season policy:
+
+```yaml
+automation_policy:
+  winner_review_policy: elected_winner_sol61max_v1
+  winner_review_timeout_seconds: 1800
+  source_choice_delay_seconds: 0
+  staging_preparation_seconds: 0
+season_policy:
+  preparation_window_seconds: 0
+```
+
+The timeout may be 60..86400 seconds; 1800 is the example review budget, not an
+execution timeout for candidates. Actual isolated build/testing and host
+qualification still must succeed; zero removes the old fixed 16-hour wait, not
+these gates. The normal per-submission scoring budget and statistical rules are
+unchanged. Freeze a fresh approved scope/baseline before bootstrap.
+
+Deploy the API/worker/manager code and the additive winner-review DB migration
+before activating the policy. As usual, commit, pull/merge and push before a main
+DB migration; never run a main migration from an unpublished local tree.
+Historical review reports and existing sealed/open rounds remain unchanged.
+
+In addition to the worker/preparation pins below, configure:
+
+```sh
+export SIM_LATENCY_REVIEW_COMMAND=/secure/automation/isolated-sol-review
+export SIM_LATENCY_REVIEW_SHA256=REPLACE_WITH_QUALIFIED_BROKER_SHA256
+export SIM_LATENCY_REVIEWER_TOKEN_FILE=/secure/automation/reviewer.token
+export SIM_LATENCY_BUILD_COMMAND=/secure/automation/isolated-source-build
+export SIM_LATENCY_BUILD_SHA256=REPLACE_WITH_QUALIFIED_BUILD_BROKER_SHA256
+```
+
+The review broker is a deployment-qualified agent integration, not a fake
+template responder or an arbitrary candidate command. It must actually run
+`gpt-6.1-sol` with `max` reasoning in its own isolated context. The
+manager invokes its pinned executable without a shell and with an allowlisted
+environment containing no main/database/vault/reviewer/Git-push credentials.
+The broker must have no ambient access to those credentials either: do not
+run an unconstrained agent with filesystem access to the control host.
+Only its independently provisioned model access and bounded source/evidence
+input belong in its model-execution boundary. No candidate code may execute.
+
+The strict stdin protocol is `review_elected_winner`: frozen request, exact
+authenticated candidate packet/template, and full pinned base files for touched
+paths. Candidate comments, patches and diagnostics are untrusted data, never
+instructions. A valid stdout response has schema 1, model/reasoning pins,
+`no_main_credentials: true`, `no_candidate_execution: true`, a complete
+structured `review`, and real bounded `private_evidence`. These identity
+claims are trusted broker provenance, not independent model attestation.
+All six criteria and exact revision/digests must validate. Uncertainty blocks;
+it must not be fabricated as either approval or misconduct. The manager caches
+accepted response bytes for identical idempotent retries, retains the report in
+versioned COMPLIANCE MinIO storage, and alone posts to the scoped reviewer API.
+The reviewer token is never sent to the model broker. Private attempt records
+and retention receipts remain in the mode-0700 state directory.
+
+Source construction reuses `stage-reviewed-source` automatically with the
+qualified isolated build broker. Tests retain independent Sol 6.1 low ownership.
+No model implementation, real provider access, build broker, or genuine
+qualification is established by a test receipt or by this runbook alone:
+provision and qualify those integrations before enabling the new season.
+
+The `automation_progression_blocked` metric/dashboard and
+`CompetitionAutomaticClosingBlocked` alert use the existing
+`service=sim-latency` routing to support@ur.xyz. Deploy the accompanying
+warp Grafana rule; blocked state contains no candidate labels or private reasons.
+
+### Historical independent-source v2 policy
+
 V2 separates the immutable evaluation seal, provisional reward decisions, and
 reviewed source. Neither payment nor reward approval authorizes source changes.
 The supervisor uses a renewable fenced database lease and append-only checkpoints.
 Existing v1 rounds and schema-1 ledger entries are not converted in place.
 
-After close and full authoritative drain, the v2 worker seals/elects. At the
+For frozen policies without the adopted opt-in, after close and full authoritative drain, the v2 worker seals/elects. At the
 frozen source-choice deadline (zero extra review wait by default), a ready,
 separately authorized exact-source intent may be selected. Otherwise the
 supervisor stages `reviewed_source_carry_forward`, including when a provisional
@@ -75,7 +179,7 @@ sim-latency bootstrap-source --enable-automation \
 Bootstrap registers generation 1/source generation 0 for epoch 1 and persists
 recovery material. It does not activate a pointer, create a round, or invent a
 review. Repeating the same command resumes the exact commit. The supervisor below
-performs the same runtime acknowledgments and full 16-hour preparation gate for
+performs the same runtime acknowledgments and historical full 16-hour preparation gate for
 this baseline as for later transitions. Use the same state directory and owner.
 These examples do not authorize enabling an existing live season:
 
@@ -106,8 +210,9 @@ legacy `run-main.sh staging` command does not select v2 staging. The policy also
 requires `settlement_mode: shadow`, `staging_round_window_seconds` in
 60..604800, and `staging_preparation_seconds` in 0..57600. Staging evaluation and
 source margins are exactly zero, with no actual admission fee or live payout.
-Production remains a positive-margin seven-day round with its full 16-hour
-preparation gate and no staging timing fields. Stage timing and mode are bound
+Production remains a positive-margin seven-day round with no staging timing fields.
+Its historical flow has a fixed 16-hour preparation gate; the adopted closing
+policy instead waits for actual qualification, as above. Stage timing and mode are bound
 into the activation and runtime envelope; changing them cannot resume old state.
 
 Prepare a NEW ten-repository schema-2 staging baseline at
@@ -319,7 +424,7 @@ image, qualification, containment proof, independent test-evidence digest, and
 Sol 6.1 low test ownership. Missing or failed isolation evidence does not produce
 a selectable proposal. The trusted completion time cannot be backdated.
 
-At the deadline the supervisor selects a still-approved, unchanged-base,
+For historical policies only, at the deadline the supervisor selects a still-approved, unchanged-base,
 build-ready proposal (raw score, original admission time, then job id); late/obsolete/unready proposals
 leave safe carry-forward. Build readiness is distinct from the later full
 16-hour preparation interval. Completed runtime preparation is checkpointed so

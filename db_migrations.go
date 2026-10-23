@@ -10705,4 +10705,7 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE st_client_key_history ALTER COLUMN registration DROP NOT NULL;
 	`),
+
+	// Prospectively bind automatic closing reviews and source to the elected winner.
+	newSqlMigration(competitionWinnerReviewMigration()),
 }

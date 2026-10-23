@@ -111,6 +111,18 @@ The public round-result/history endpoints return `409 round_not_published` until
 that boundary, then return a `no-store` projection. A provisional reward can be
 published without a completed honesty review.
 
+Newly approved seasons can adopt `elected_winner_sol61max_v1` closing:
+publish the provisional winner, automatically review it with qualified Sol 6.1
+max, revoke/re-elect on substantiated rejection, then independently build,
+qualify and promote that approved winner before opening the next epoch.
+Only an exhausted eligible ranking carries the incumbent forward. Missing or
+expired review and failed source qualification block and alert support; they
+never silently approve, promote another candidate, or fall back. The sixth
+epoch is reviewed before the supervisor exits. This prospective policy leaves
+existing round rules unchanged. See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
+for activation, the private model-broker protocol, scoped authority, and
+independent build/readiness requirements.
+
 V2 rounds do not populate `GET /competition/leaderboard`, including when
 `include_staging=true`. That endpoint retains legacy finalized v1 winners and
 their `honesty_review` projection. For v2, use the versioned round result/history

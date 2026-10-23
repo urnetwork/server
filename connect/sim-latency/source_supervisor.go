@@ -28,16 +28,25 @@ import (
 // Keeps trusted deployment programs outside candidate workspaces. Their hashes
 // are prospectively configured, never read from a submission or review bundle.
 type sourceSupervisorRuntime struct {
-	settings         *controller.Settings
-	store            controller.PostgresStore
-	stateDirectory   string
-	repositoriesRoot string
-	sourceConfig     string
-	workerCommand    string
-	workerSha256     string
-	prepareCommand   string
-	prepareSha256    string
+	settings          *controller.Settings
+	store             controller.PostgresStore
+	stateDirectory    string
+	repositoriesRoot  string
+	sourceConfig      string
+	workerCommand     string
+	workerSha256      string
+	prepareCommand    string
+	prepareSha256     string
+	reviewCommand     string
+	reviewSha256      string
+	reviewerTokenFile string
+	reviewApiUrl      string
+	buildCommand      string
+	buildSha256       string
 }
+
+// Current trusted control binaries exceed 64 MiB. Hash streams stay bounded.
+const maximumAutomationExecutableBytes int64 = 256 * 1024 * 1024
 
 // Runs a bounded, cancellation-aware trusted integration without a shell.
 func runSourceSupervisorCommand(ctx context.Context, path, expectedDigest string, request any) error {
@@ -72,7 +81,7 @@ func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string
 		return nil, errors.New("pinned automation integration is not configured")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o111 == 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o111 == 0 || info.Size() > maximumAutomationExecutableBytes {
 		return nil, errors.New("automation integration must be a non-writable regular executable")
 	}
 	file, err := os.Open(path)
@@ -80,9 +89,9 @@ func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string
 		return nil, err
 	}
 	hash := sha256.New()
-	_, hashErr := io.Copy(hash, io.LimitReader(file, 64*1024*1024+1))
+	_, hashErr := io.Copy(hash, io.LimitReader(file, maximumAutomationExecutableBytes+1))
 	closeErr := file.Close()
-	if hashErr != nil || closeErr != nil || info.Size() > 64*1024*1024 || hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
+	if hashErr != nil || closeErr != nil || hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
 		return nil, errors.New("automation integration executable digest does not match")
 	}
 	requestBytes, err := json.Marshal(request)
@@ -124,8 +133,8 @@ func (self *sourceSupervisorOutput) Write(content []byte) (int, error) {
 	return len(content), nil
 }
 
-// Loads only the already reviewed pointer and stages an explicit source-only
-// carry-forward at the deadline. No review completion is needed or fabricated.
+// Historical policy may carry at its source deadline. Elected-winner policy
+// instead builds only its actual approved winner; missing readiness blocks.
 func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease model.CompetitionSupervisorLease, snapshot *controller.CompetitionSupervisorSnapshot, transition model.CompetitionSupervisorTransition) (*model.CompetitionSourceActivation, error) {
 	current := snapshot.CurrentSource
 	if current == nil {
@@ -181,6 +190,24 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	var electedProposal *reviewedSourceProposal
+	if snapshot.WinnerReview != nil && snapshot.WinnerReview.CurrentDecision.SelectedJobId != nil {
+		state := snapshot.WinnerReview
+		if state.ApprovedReviewId == nil || state.ApprovedReview == nil || transition.WinnerReview == nil ||
+			state.ApprovedReview.Request.JobId != *state.CurrentDecision.SelectedJobId {
+			return nil, errors.New("elected winner must have genuine affirmative source approval")
+		}
+		if err := self.ensureWinnerProposal(ctx, state.ApprovedReviewId.String()); err != nil {
+			return nil, err
+		}
+		electedProposal, err = self.readySourceProposalForWinner(ctx, current, time.Now().UTC(), state.ApprovedReviewId.String(), state.CurrentDecision.SelectedJobId.String())
+		if err != nil {
+			return nil, err
+		}
+		if electedProposal == nil {
+			return nil, errors.New("approved elected winner has no authenticated isolated build proposal")
+		}
+	}
 	// Unpublished incomplete attempts remain private audit material. Only a
 	// complete, fsynced directory is atomically installed at the recovery path.
 	root, origins, err := newSourceStage(ctx, self.stateDirectory, ".source-"+strconv.FormatInt(generation, 10)+"-", self.repositoriesRoot, self.sourceConfig, current.Staging)
@@ -217,6 +244,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		}
 		decision := result.Decisions[len(result.Decisions)-1]
 		rewardDigest = decision.DecisionSha256
+		if snapshot.WinnerReview != nil && rewardDigest != snapshot.WinnerReview.CurrentDecision.DecisionSha256 {
+			return nil, errors.New("winner changed while staging source")
+		}
 		if decision.SelectedJobId == nil {
 			reason = "no_reward_winner"
 		}
@@ -232,8 +262,14 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		EvaluatorImageDigest: current.EvaluatorImageDigest, HostQualificationSha256: current.HostQualificationSha256, PreparedAt: preparedAt,
 		GitRefs: map[string]model.CompetitionSourceGitRef{},
 	}
+	if snapshot.WinnerReview != nil {
+		intent.WinnerReviewPolicy = snapshot.WinnerReview.Policy.WinnerReviewPolicy
+		intent.WinnerReview = transition.WinnerReview
+	}
 	var proposal *reviewedSourceProposal
-	if transition.Reason == "safe_carry_forward_after_unpublished_promotion" {
+	if snapshot.WinnerReview != nil {
+		proposal = electedProposal
+	} else if transition.Reason == "safe_carry_forward_after_unpublished_promotion" {
 		intent.Reason = "readiness_fallback"
 	} else {
 		proposal, err = self.readySourceProposal(ctx, current, transition.SourceChoiceAt)
@@ -535,8 +571,20 @@ func runSourceSupervisor(opts docopt.Opts) {
 		settings: settings, store: store, stateDirectory: stateDirectory, repositoriesRoot: repositoriesRoot, sourceConfig: sourceConfig,
 		workerCommand: optString(opts, "--worker-command", ""), workerSha256: optString(opts, "--worker-sha256", ""),
 		prepareCommand: optString(opts, "--prepare-command", ""), prepareSha256: optString(opts, "--prepare-sha256", ""),
+		reviewCommand: optString(opts, "--review-command", ""), reviewSha256: optString(opts, "--review-sha256", ""),
+		reviewerTokenFile: optString(opts, "--reviewer-token-file", ""), reviewApiUrl: optString(opts, "--review-api-url", "https://api.bringyour.com"),
+		buildCommand: optString(opts, "--build-command", ""), buildSha256: optString(opts, "--build-sha256", ""),
+	}
+	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+		if runtime.reviewCommand == "" || !validSha256(runtime.reviewSha256) || runtime.buildCommand == "" || !validSha256(runtime.buildSha256) {
+			fatalf("elected-winner supervision requires qualified pinned review and build brokers")
+		}
+		if _, err := readPrivateToken(runtime.reviewerTokenFile); err != nil {
+			fatalf("elected-winner reviewer credential: %s", err)
+		}
 	}
 	driver := &controller.PostgresCompetitionSupervisorDriver{Settings: settings, Store: store, Hooks: controller.CompetitionSupervisorHooks{
+		ReviewWinner: runtime.reviewWinner,
 		ChooseSource: runtime.chooseSource, PublishSource: runtime.publishSource, PrepareSource: runtime.prepareSource, FallbackSource: runtime.fallbackSource,
 		RunWorker: func(ctx context.Context, lease model.CompetitionSupervisorLease, round model.CompetitionRoundResult) error {
 			return runSourceSupervisorWorkerCommand(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease})

@@ -75,19 +75,20 @@ type CompetitionSeasonPolicy struct {
 }
 
 type CompetitionInfoResult struct {
-	CompetitionId         string                      `json:"competition_id"`
-	Enabled               bool                        `json:"enabled"`
-	ScoreSchema           int                         `json:"score_schema"`
-	ScorerVersion         string                      `json:"scorer_version"`
-	BaseSha               string                      `json:"base_sha"`
-	EvaluatorImageDigest  string                      `json:"evaluator_image_digest"`
-	PatchPolicy           CompetitionPatchPolicy      `json:"patch_policy"`
-	EvaluationPolicy      CompetitionEvaluationPolicy `json:"evaluation_policy"`
-	SeasonPolicy          CompetitionSeasonPolicy     `json:"season_policy"`
-	ActiveRound           *CompetitionRoundResult     `json:"active_round,omitempty"`
-	StagingRound          *CompetitionRoundResult     `json:"staging_round,omitempty"`
-	DecisionMode          string                      `json:"decision_mode,omitempty"`
-	RequiredApiCapability string                      `json:"required_api_capability,omitempty"`
+	CompetitionId         string                       `json:"competition_id"`
+	Enabled               bool                         `json:"enabled"`
+	ScoreSchema           int                          `json:"score_schema"`
+	ScorerVersion         string                       `json:"scorer_version"`
+	BaseSha               string                       `json:"base_sha"`
+	EvaluatorImageDigest  string                       `json:"evaluator_image_digest"`
+	PatchPolicy           CompetitionPatchPolicy       `json:"patch_policy"`
+	EvaluationPolicy      CompetitionEvaluationPolicy  `json:"evaluation_policy"`
+	SeasonPolicy          CompetitionSeasonPolicy      `json:"season_policy"`
+	ActiveRound           *CompetitionRoundResult      `json:"active_round,omitempty"`
+	StagingRound          *CompetitionRoundResult      `json:"staging_round,omitempty"`
+	DecisionMode          string                       `json:"decision_mode,omitempty"`
+	RequiredApiCapability string                       `json:"required_api_capability,omitempty"`
+	AutomationPolicy      *CompetitionAutomationPolicy `json:"automation_policy,omitempty"`
 }
 
 type CompetitionGenerateRoundArgs struct {

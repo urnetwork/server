@@ -399,6 +399,9 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			if current.RewardRevision != request.ExpectedRevision {
 				panic(ErrConflict)
 			}
+			if policy.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, self.nowUtc()))
+			}
 			var entry *model.CompetitionSealedEntry
 			for i := range current.Seal.Entries {
 				if current.Seal.Entries[i].JobId == request.JobId {

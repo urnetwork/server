@@ -157,12 +157,21 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 // Ignores unavailable proposals rather than putting discretionary review on
 // the critical path. Every selected proposal is reauthenticated from the store.
 func (self *sourceSupervisorRuntime) readySourceProposal(ctx context.Context, current *model.CompetitionSourceActivation, deadline time.Time) (*reviewedSourceProposal, error) {
+	return self.readySourceProposalForWinner(ctx, current, deadline, "", "")
+}
+
+// New closing policy admits exactly the approved elected winner. Passing
+// empty identities retains historical independently ranked source selection.
+func (self *sourceSupervisorRuntime) readySourceProposalForWinner(ctx context.Context, current *model.CompetitionSourceActivation, deadline time.Time, reviewId, jobId string) (*reviewedSourceProposal, error) {
 	entries, err := os.ReadDir(self.stateDirectory)
 	if err != nil {
 		return nil, err
 	}
 	proposals := []reviewedSourceProposal{}
 	for _, entry := range entries {
+		if reviewId != "" && entry.Name() != "reviewed-source-"+reviewId+".json" {
+			continue
+		}
 		if !strings.HasPrefix(entry.Name(), "reviewed-source-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -176,6 +185,9 @@ func (self *sourceSupervisorRuntime) readySourceProposal(ctx context.Context, cu
 		}
 		var proposal reviewedSourceProposal
 		if decodeStrictJSONBytes(content, &proposal, "reviewed source proposal") != nil {
+			continue
+		}
+		if reviewId != "" && (proposal.ReviewId.String() != reviewId || proposal.JobId.String() != jobId) {
 			continue
 		}
 		approved, err := self.store.ReviewedSource(ctx, self.settings, proposal.ReviewId)
