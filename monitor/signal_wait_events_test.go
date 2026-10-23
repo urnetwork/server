@@ -351,6 +351,40 @@ func TestWaitEventsSignalAttributesTransferEscrowReindexExtension(t *testing.T) 
 	}
 }
 
+// Only a whole-table rebuild of transfer_escrow, or after the contract
+// partition cutover of its legacy partition, is the transfer_escrow rebuild;
+// a REINDEX INDEX of a priority index or of one partition's leaf of it, and
+// other relations that share the prefix, keep the generic attribution.
+func TestWaitEventsSignalAttributesOnlyWholeTransferEscrowRebuilds(t *testing.T) {
+	for _, test := range []struct {
+		sample string
+		whole  bool
+	}{
+		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow"`, whole: true},
+		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_legacy"`, whole: true},
+		{sample: `REINDEX TABLE CONCURRENTLY transfer_escrow;`, whole: true},
+		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_w20261026"`},
+		{sample: `REINDEX TABLE CONCURRENTLY "public"."transfer_escrow_sweep"`},
+		{sample: `REINDEX INDEX CONCURRENTLY "public"."transfer_escrow_unsettled_balance_contract"`},
+		{sample: `REINDEX INDEX CONCURRENTLY "public"."transfer_escrow_unsettled_balance_contract_l"`},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return []Row{{"IO", "DataFileExtend", "1", "190", test.sample, "3597393", "unknown", "taskworker", "192.0.2.10"}}, nil
+		}}
+		alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "wait-event-cluster")
+		if whole := strings.Contains(alert.Mechanism, "selected the very large, high-churn transfer_escrow table"); whole != test.whole {
+			t.Fatalf("%s: transfer_escrow attribution %t, want %t", test.sample, whole, test.whole)
+		}
+		if !test.whole && !strings.Contains(alert.Mechanism, "REINDEX CONCURRENTLY is waiting while PostgreSQL extends the replacement relation") {
+			t.Fatalf("%s: lost the generic rebuild attribution: %s", test.sample, alert.Mechanism)
+		}
+	}
+}
+
 func TestWaitEventsSignalClientReadRequiresOldWaiter(t *testing.T) {
 	tests := []struct {
 		name      string

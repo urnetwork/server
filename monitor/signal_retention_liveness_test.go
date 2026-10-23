@@ -421,3 +421,46 @@ func TestRetentionLivenessCancellationKeepsOriginalCause(t *testing.T) {
 		}
 	}
 }
+
+// Once the contract tables are partitioned, a contract table arrives summed
+// over its partitions and is listed as reclaimed by partition drops, whose
+// deletes leave with the dropped partition's statistics; the reap finding
+// says the sample covers every partition. Plain tables read as before.
+func TestRetentionLivenessContractPartitions(t *testing.T) {
+	for _, partitioned := range []bool{false, true} {
+		source := retentionTestHealthy()
+		source.growth = []retentionTestRelation{{name: "transfer_contract", oid: 16400, total: 1895 * storageRunwayTestGigabyte, inserted: 2000000000}}
+		source.sampled, source.old, source.stamped = 5000, 1000, 0
+		if partitioned {
+			source.mutateCatalog = func(rows []Row) []Row {
+				rows[0][8] = "p"
+				for _, row := range rows {
+					if row[0] == "growth" {
+						row[6] = "1"
+					}
+				}
+				return rows
+			}
+		}
+		alert := requireAlertClass(t, retentionTestRun(t, NewRetentionLivenessSignal(), source), "contract-reap-stalled")
+		listed := strings.Contains(alert.Evidence, "append_only_relations=[transfer_contract total_gb=1895.0 inserted_rows=2000000000 partitioned=true reclaimed_by=partition-drops]")
+		noted := strings.Contains(alert.Context, "transfer_contract is partitioned: the sample reads pages of every partition")
+		if listed != partitioned || noted != partitioned {
+			t.Fatalf("partitioned=%t: listed=%t noted=%t: %s / %s", partitioned, listed, noted, alert.Evidence, alert.Context)
+		}
+		if !partitioned && !strings.Contains(alert.Evidence, "append_only_relations=[transfer_contract total_gb=1895.0 inserted_rows=2000000000]") {
+			t.Fatalf("the plain list changed: %s", alert.Evidence)
+		}
+	}
+	query := retentionLivenessProbe{settings: DefaultRetentionLivenessSettings()}.catalogQuery()
+	for _, want := range []string{
+		"contract_root.oid = pg_partition_root(c.oid)",
+		"contract_root.relname IN ('transfer_contract','transfer_escrow','contract_close','transfer_escrow_sweep','contract_close_report','contract_extender')",
+		"HAVING sum(total_bytes) >= 100000000000",
+		"to_regclass('public.transfer_contract')",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("retention catalog read lost %q", want)
+		}
+	}
+}

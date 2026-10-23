@@ -6425,6 +6425,24 @@ was stuck. This is another clean deployed result and another 22-minute
 all-lookback rollback unit. Retain the four-hour optional-anchor cadence,
 maintenance deferral, and per-lookback commits.
 
+Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
+After the cutover, maintenance rebuilds a priority index one leaf at a time
+(`REINDEX INDEX CONCURRENTLY` of `<published>_l` on `<table>_legacy`, or of
+PostgreSQL's auto-named leaf on `<table>_wYYYYMMDD`), and never rebuilds a
+contract partition or a partitioned contract parent as a whole. The
+`DataFileExtend` attribution to the whole-table `transfer_escrow` rebuild
+therefore requires a `REINDEX TABLE CONCURRENTLY` of `transfer_escrow` or of
+its legacy partition; a `REINDEX INDEX`, a weekly partition or another table
+sharing the prefix (`transfer_escrow_sweep`) keeps the generic reindex
+attribution. The DbMaintenance task-overdue evidence (§5.7) adds the
+published index: in its build and validate phases the progress row names the
+leaf's `_ccnew` copy, which no partitioned index owns yet, so the read maps the
+copy to the leaf it copies on the same relation by an identical definition and
+the leaf to its partitioned index through `pg_inherits`. A priority leaf is the
+bounded rebuild; only a whole-table rebuild of `transfer_escrow` or
+`transfer_escrow_legacy` keeps the whole-table diagnosis, and the evidence
+appends `table=` and `published_index=` for a contract partition.
+
 ### 2.2a Incomplete concurrent-index debris — retry residue vs a live build
 Probe: `reindex-debris`
 
@@ -6659,6 +6677,12 @@ CPU consumption, or the exact worker revision. Direct progress/catalog
 observations qualify the active relation and phase; native process CPU needs
 its own bounded interval measurement. Missing or failed observation remains
 unknown.
+After the contract partition cutover the class also matches the contract
+partitions, `<table>_legacy` and `<table>_wYYYYMMDD` of the six contract
+tables: the partition-aware rotation never rebuilds one as a whole, so a start
+line naming one comes from a worker without it (the legacy partition holds the
+table's whole history). A plain `contract_extender` or `contract_close_report`
+stays in the rotation and does not match.
 
 On 2026-10-05 at 04:26:37Z, a direct native capture identified a concurrent
 whole-table rebuild of `network_client`, with
@@ -7117,6 +7141,18 @@ each = 96 cores pegged.
   creates the false-zero catalog state and requires every pair/payer plan to
   stay on its matching family while the global poll retains its generic index.
 
+Partitioned `transfer_contract` (2026-10-23, `server/CONTRACT-PARTITION.md`).
+The three structural indexes are partitioned indexes on the parent; one is
+valid only once every partition's leaf of it is valid, so the valid/ready count
+needs no change. The parent's `pg_stats` row is its inherited statistics,
+sampled across every partition, and the planner estimates each partition by its
+own statistics, so the check also requires the parent's open-column target on
+every leaf partition (`partitions`, `partition_target_mismatches` and the first
+mismatch in the observed values) and counts a partitioned partial index as
+zero-row only when its leaves' estimates sum to zero. The plain table's row and
+alert are unchanged. The §5.8 plan-wall battery's idx_scan delta sums each
+leaf's scans under its published index.
+
 ### 2.4 Vacuum health
 Probe: `vacuum-health`
 
@@ -7389,6 +7425,15 @@ retention writer was active, and a full close cohort was still running. The
 remaining close backlog and fresh writer churn therefore did not retroactively
 make the completed vacuum stuck. Keep the bounded writer/close fixes and use
 the new vacuum's consecutive progress samples as the next cleanup check.
+
+Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
+Each partition is vacuumed on its own with its own copied thresholds, so the
+line stays per relation, but a contract partition reports under its contract
+table: one finding per table (frame the table, so the identity survives the
+weekly partitions), for its worst partition over that partition's own line,
+with the table's dead tuples summed across all its partitions and how many are
+over their line. The pure-cascade guidance follows the table. Other partitioned
+tables (`client_reliability`) and plain tables report per relation as before.
 
 ### 2.4a Canceled autovacuum and anti-wraparound progress
 Probe: `pg-autovacuum-discard`
@@ -8050,6 +8095,17 @@ ACTION: retention horizons are owner decisions. Never drop data inside a
 payout frontier without the owner: the code's own comment notes that a missing
 reliability block silently cuts provider credit. VERIFY: a complete
 observation inside each line on the next runs (two for the sampled check).
+
+Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
+`TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
+share of every partition's pages, so `contract-reap-stalled` keeps its meaning;
+its context then notes that weeks past the 13-week horizon leave by partition
+drops (§2.4i). Check 4 counts a contract partition toward its contract table
+(sizes, inserts and deletes summed, the 100 GB line on the sum) and marks it
+`partitioned=true reclaimed_by=partition-drops`: a dropped week's deletes leave
+with its partition's statistics, so a partitioned table reads as append-only
+by construction. The catalog frame's ninth cell carries `transfer_contract`'s
+kind. A native PostgreSQL 18 test runs both reads before and after a cutover.
 
 ### 2.4h Contract partition runway — inserts past the last partition fail
 Probe: `contract-partition-runway`

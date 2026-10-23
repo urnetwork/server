@@ -91,3 +91,54 @@ func TestPlannerFlipsSignalSyntheticRejectsUnboundedAnalyzeTarget(t *testing.T) 
 		}
 	}
 }
+
+// Partitioned, the parent's indexes and target are read as before and every
+// partition must keep the parent's open-column target; a plain table has no
+// partitions to compare.
+func TestPlannerFlipsSignalSyntheticPartitionTargets(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		for _, want := range []string{
+			"pg_partition_tree(i.oid)",
+			"bool_and(leaf_index.reltuples >= 0)",
+			"pg_partition_tree(to_regclass(quote_ident(current_schema()) || '.transfer_contract'))",
+			"transfer_contract_leaves.leaf_target <> parent_target.target",
+		} {
+			if !strings.Contains(query, want) {
+				t.Fatalf("stats-landmine query lost the partition aggregation %q", want)
+			}
+		}
+		return []Row{{"2", "0", "3", "300", "7", "0", ""}}, nil
+	}}
+	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("partitions keeping the parent's target alerted:\n%s", alerts.Markdown())
+	}
+
+	source = &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"2", "0", "3", "300", "7", "1", "transfer_contract_w20261102=missing"}}, nil
+	}}
+	alerts, err = NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "stats-landmine")
+	for _, want := range []string{
+		"partitions with another target=1/7",
+		"partitions=7 partition_target_mismatches=1 first_partition_target_mismatch=transfer_contract_w20261102=missing",
+		"ALTER COLUMN open SET STATISTICS 300",
+		"transfer_contract is partitioned",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("partition target alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+
+	// the plain table's healthy row has no partition columns to compare
+	source = &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "3", "300", "0", "0", ""}}, nil }}
+	if alerts, err = NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatal("a plain table without partitions alerted")
+	}
+}
