@@ -144,12 +144,14 @@ func (p *mimirContinuityProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if err != nil {
 		return nil, fmt.Errorf("mimir continuity: response from %s: %w", metricHost.name, err)
 	}
+	assessments, accepted := p.observeGapsWhileActive(end, gaps, ctx.Done())
+	if !accepted {
+		return nil, ctx.Err()
+	}
 	if len(gaps) == 0 {
-		p.observeGaps(end, nil)
 		return mimirContinuityHealthyFindings(nil), nil
 	}
 
-	assessments := p.observeGaps(end, gaps)
 	grouped := map[mimirContinuityClassification][]mimirContinuityAssessment{}
 	for _, assessment := range assessments {
 		grouped[assessment.classification] = append(grouped[assessment.classification], assessment)
@@ -197,12 +199,15 @@ func mimirContinuityHealthyFindings(
 // Preserve classification/history transitions while retaining the latest
 // comparable step before replacing its previous query boundary.
 func (self *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuityGap) []mimirContinuityAssessment {
+	assessments, _ := self.observeGapsWhileActive(now, gaps, nil)
+	return assessments
+}
+
+// Stage comparisons under the history lock, then accept them only while the
+// invocation remains active. The caller captures Done outside this lock.
+func (self *mimirContinuityProbe) observeGapsWhileActive(now time.Time, gaps []mimirContinuityGap, done <-chan struct{}) ([]mimirContinuityAssessment, bool) {
 	self.historyLock.Lock()
 	defer self.historyLock.Unlock()
-
-	if self.history == nil {
-		self.history = map[int64]mimirContinuityGapHistory{}
-	}
 	next := make(map[int64]mimirContinuityGapHistory, len(gaps))
 	assessments := make([]mimirContinuityAssessment, 0, len(gaps))
 	for _, gap := range gaps {
@@ -276,8 +281,13 @@ func (self *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinu
 			recoveryElapsed:     history.recoveryElapsed,
 		})
 	}
+	select {
+	case <-done:
+		return nil, false
+	default:
+	}
 	self.history = next
-	return assessments
+	return assessments, true
 }
 
 // Aggregate every gap's latest comparator without presenting last-positive
