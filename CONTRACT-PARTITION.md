@@ -1,7 +1,23 @@
 # Contract table partitioning plan
 
-Status: PLAN, written 2026-10-22. Nothing here is implemented. Items that need
-an owner decision are marked **Decision**.
+Status: IN PROGRESS. Planned 2026-10-22; the owner settled every **Decision**
+on 2026-10-23 (below).
+
+## Decisions (settled 2026-10-23)
+
+- **Retention horizon R: 13 weeks (90 days).** A weekly partition is dropped
+  once its upper bound is older than R and it passes the preconditions in
+  "Retention".
+- **Granularity: weekly**, Monday 00:00 UTC bounds, the same on every table.
+- **`contract_close_report_evidence`: the same horizon, by age.** A migration
+  lets only the retention task delete rows older than R, in batches; the
+  table stays plain and otherwise immutable.
+- **The cascade foreign key `contract_close_report -> transfer_contract` is
+  dropped at cutover.** Reports leave with their contracts' partitions.
+- Defaults taken: no MinIO export before a drop for now (MinIO is days from
+  full; revisit with large objects only); the index diet is a separate,
+  measured step after partitioning; the production cutover waits for edge-2's
+  storage expansion and the owner's go-ahead.
 
 Pattern to follow: the `client_reliability` partitioning
 (`xops/db/client_reliability_partition_plan.md`, code in
