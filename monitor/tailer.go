@@ -652,8 +652,13 @@ var logClasses = []logClass{
 		verify:    "Every Connect-bearing artifact contains server commit 64366fb5; a deterministic invalid-loader test starts no listener; each valid running allocation reports listener readiness and completes a real QUIC handshake on every enabled carrier; and connect-tls-disabled remains zero through two rollout cadences.",
 		redactIDs: true},
 	{name: "port-exhaustion", re: regexp.MustCompile(`connect: cannot assign requested address`),
-		rateThreshold: 100, tier: tierWarn, playbook: "SIGNALS.md 3.5",
-		meaning: "client-side ephemeral-port exhaustion (redial storm to one destination); self-drains ~60s after the target is fixed"},
+		rateThreshold: 100, tier: tierWarn, playbook: "SIGNALS.md §1.5, §3.5, and §4",
+		meaning:   "the selected log stream reported connect: cannot assign requested address at rate",
+		mechanism: "The classifier counts matching diagnostic lines, not unique connection attempts or allocated ports. It does not observe a native allocation failure, numeric error code, socket tuple, or resource namespace. Ephemeral-port exhaustion is a candidate cause, not a measured diagnosis.",
+		context:   "The stable target identifies the configured log selector, not a proven emitter process or network namespace. Any frame is the first retained exemplar's textual address hint, not a destination bucket or native target. Relayed, retried and mixed-destination diagnostics can share this count. Missing emitter, original-attempt and resource evidence remains unknown; this signature supplies no fixed self-drain interval.",
+		action:    "Bind a retained original event to its emitting artifact/process, original attempt and source network namespace using current enabled inventory. Compare bounded same-window native local-address availability and socket allocation limits/usage to distinguish a source-address problem from measured ephemeral-port or tuple pressure. Do not infer a target-node fault, restart a client fleet, raise limits or change routes from this signature.",
+		verify:    "Require a source-qualified explanation and corroborating native controls for the original attempted address/resource boundary, plus a complete comparable log window below threshold. Falling or missing log counts alone do not prove allocation recovery, and no fixed self-drain deadline is established.",
+	},
 	{name: "pool-timeout", re: regexp.MustCompile(`redis: connection pool timeout`),
 		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "local pool exhausted — backpressure, not the root; find what is slow consuming the pool"},
@@ -2532,6 +2537,9 @@ func (self *logTailer) drainWindow() []finding {
 			baseline := "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)"
 			if c.name == "doh-dial-timeout" {
 				baseline = "healthy ~0/min; sampled outbound dial-leg lines are neither resolver-call failures nor user-request failures; fanout, hedging, and replacement ownership can add legs"
+			}
+			if c.name == "port-exhaustion" {
+				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, native allocation pressure or recovery"
 			}
 			observed := fmt.Sprintf("rate=%d/min class=%s", count, c.name)
 			if c.pageRateThreshold > 0 {

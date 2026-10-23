@@ -46,7 +46,7 @@ func requireProviderCredentialLookupVisibility(t *testing.T, root, reason string
 	}
 
 	alerts, err := NewWithSignals(settings,
-		NewPlayCrashesSignal(), NewAppleCrashesSignal(), NewSubnetCoverageSignal(),
+		NewPlayCrashesSignal(), NewAppleCrashesSignal(), subnetCoverageSignalWith(),
 	).Run(context.Background())
 	if err == nil {
 		t.Error("unavailable credentials did not retain a nonzero monitor result")

@@ -464,6 +464,9 @@ type SignalSettings struct {
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
 	SettingsGenerationCheck SettingsGenerationCheck
+	// Private process-only witness; only the scheduled freshness callback uses
+	// it. It is excluded from complete desired-settings equality.
+	settingsGenerationWitness *settingsGenerationWitness
 	// Optional per-execution coverage sink, including healthy and unavailable
 	// observations. The callback must return promptly; errors remain visible.
 	UrlProbeCoverageObserver func(UrlProbeCoverageObservation) error
