@@ -330,7 +330,7 @@ active missing capability and must not be read as green.
 | 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
 | 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
 | 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
-| 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+| 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 23.3 | Coverage gap | Close-reason and app-version cohort alerting is missing: `connect-h1plus` reads H1+ negotiation counters and `connection-rate` reads PostgreSQL inserts, neither close reasons nor cohorts. |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
@@ -43071,8 +43071,27 @@ Implementation acceptance for each proposed family is mandatory:
    simulator authority; the monitor remains passive.
 4. Register complete collection with bounded shared RPC/SSH budgets; retain
    code/fixture pins and actual test results. Peer-review alerts against on-chain
-   evidence before enabling production paging. This documentation has coverage
-   regression tests, **not** an implemented or qualified subnet probe battery.
+   evidence before enabling production paging.
+
+`subnet_family_acceptance_test.go` makes items 1, 2 and 4 executable for every
+registered family: a registered §22.1 through §22.9 family without acceptance
+fixtures fails, and each family's own fixtures must pass a healthy control, a
+proved counterexample that pages with the evidence frame above (environment,
+scope, finalized checkpoint, completeness, comparison source, invariant,
+expected and observed, action and recovery proof, no rendered hex identity, no
+changing detail in the target), retention of that counterexample after a
+healthy read, an unknown source that never turns green and names a fixed
+reason, the not-deployed state, cancellation that withholds every finding, and
+a cadence whose two complete runs span the five-minute recovery window. The
+§22.6 through §22.9 readers share one counterexample latch: proved custody,
+authorization, finalized-proof, accounting and state-durability
+counterexamples stay open for the watcher's lifetime with their first and last
+proof clocks, and are dispositioned in the run ledger. Item 3 and peer review
+remain open: production paging additionally requires feeding real testnet
+bad-deposit and recovery cycles, more than 200 head candidates, real pool
+Merkle and path proofs, unpaid credit, carry and expiry, pause and upgrade,
+and concurrent adverse traffic to each reader, then peer-reviewing its alerts
+against on-chain evidence.
 
 ## 23. H1+ authenticated HTTP/1.1 carriers — Main
 

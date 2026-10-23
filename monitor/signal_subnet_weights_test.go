@@ -269,3 +269,39 @@ func TestSubnetWeightsUnsupportedRuntimeShapeIsUnknown(t *testing.T) {
 	alerts := runSubnetWeights(t, NewSubnetWeightsSignal(), settings)
 	requireSubnetWeightsSourceReason(t, alerts, "storage-shape-unsupported")
 }
+
+// §22.10 acceptance fixtures for this family.
+func init() {
+	subnetFamilyAcceptanceCases["22.6"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, settings := newSubnetWeightsFixture(t)
+			return NewSubnetWeightsSignal(), settings
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			chain, _, settings := newSubnetWeightsFixture(t)
+			netuid, uid := subnetWeightLittleEndian16(25), subnetWeightLittleEndian16(0)
+			chain.set("Weights", []subnetWeightPair{{Uid: 0, Value: 100}, {Uid: 3, Value: 65535}}, netuid, uid)
+			return NewSubnetWeightsSignal(), settings, func() {
+				chain.set("Weights", []subnetWeightPair{{Uid: 2, Value: 30000}, {Uid: 3, Value: 65535}}, netuid, uid)
+			}
+		},
+		violatedClass: "subnet-weight-vector",
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			chain, _, settings := newSubnetWeightsFixture(t)
+			chain.set("Dividends", []types.U16{100, 200}, subnetWeightLittleEndian16(25))
+			return NewSubnetWeightsSignal(), settings
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			_, node, settings := newSubnetWeightsFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			node.beforeExchange = func(exchange int) {
+				if exchange == 4 {
+					cancel()
+				}
+			}
+			return NewSubnetWeightsSignal(), settings, ctx
+		},
+		fixedGaps: []string{"decision-replay", "yuma-replay"},
+	}
+}

@@ -144,6 +144,7 @@ var subnetReplayRetainedClasses = map[string]bool{
 	"subnet-weight-vector":        true,
 	"subnet-artifact-integrity":   true,
 	"subnet-evidence-anchor":      true,
+	"subnet-state-durability":     true,
 }
 
 // A retained counterexample and its occurrence clocks.

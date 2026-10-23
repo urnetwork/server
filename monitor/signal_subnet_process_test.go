@@ -260,3 +260,38 @@ func TestSubnetProcessRegistrationMetadata(t *testing.T) {
 		t.Fatalf("unexpected metadata: %s %s %s", signal.Number(), signal.Key(), signal.ID())
 	}
 }
+
+// §22.10 acceptance fixtures for this family.
+func init() {
+	subnetFamilyAcceptanceCases["22.9"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, _, settings := newSubnetProcessFixture(t)
+			return NewSubnetProcessSignal(), settings
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			_, _, database, settings := newSubnetProcessFixture(t)
+			healthy := database.mirror
+			database.mirror = []Row{{subnetProcessTestDeploymentKey(), "1441", subnetReplayTestBlockHash(1440, 3).Hex(), "30"}}
+			return NewSubnetProcessSignal(), settings, func() { database.mirror = healthy }
+		},
+		violatedClass: "subnet-state-durability",
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, database, settings := newSubnetProcessFixture(t)
+			database.failure = errors.New("synthetic database unavailable")
+			return NewSubnetProcessSignal(), settings
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			_, node, database, settings := newSubnetProcessFixture(t)
+			database.mirror = nil
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			node.beforeExchange = func(exchange int) {
+				if exchange == 3 {
+					cancel()
+				}
+			}
+			return NewSubnetProcessSignal(), settings, ctx
+		},
+		fixedGaps: []string{"process-telemetry", "role-liveness"},
+	}
+}

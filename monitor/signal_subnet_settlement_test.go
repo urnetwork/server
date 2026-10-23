@@ -493,3 +493,36 @@ func TestSubnetSettlementRegistrationMetadata(t *testing.T) {
 		t.Fatalf("unexpected metadata: %s %s %s %s", signal.Number(), signal.Key(), signal.ID(), signal.Cadence())
 	}
 }
+
+// §22.10 acceptance fixtures for this family.
+func init() {
+	subnetFamilyAcceptanceCases["22.7"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, settings, _ := newSubnetSettlementFixture(t)
+			return NewSubnetSettlementSignal(), settings
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			chain, _, settings, _ := newSubnetSettlementFixture(t)
+			chain.escrowStake.Sub(chain.escrowStake, big.NewInt(7))
+			return NewSubnetSettlementSignal(), settings, func() { chain.escrowStake.Add(chain.escrowStake, big.NewInt(7)) }
+		},
+		violatedClass: "subnet-vault-conservation",
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			_, node, settings, _ := newSubnetSettlementFixture(t)
+			node.chainId = 945
+			return NewSubnetSettlementSignal(), settings
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			chain, node, settings, _ := newSubnetSettlementFixture(t)
+			chain.escrowStake.Sub(chain.escrowStake, big.NewInt(1))
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			node.beforeExchange = func(exchange int) {
+				if exchange == 3 {
+					cancel()
+				}
+			}
+			return NewSubnetSettlementSignal(), settings, ctx
+		},
+	}
+}

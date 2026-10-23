@@ -333,3 +333,38 @@ func TestSubnetEvidenceRegistrationMetadata(t *testing.T) {
 		t.Fatalf("unexpected metadata: %s %s %s", signal.Number(), signal.Key(), signal.ID())
 	}
 }
+
+// §22.10 acceptance fixtures for this family.
+func init() {
+	subnetFamilyAcceptanceCases["22.8"] = subnetFamilyAcceptanceCase{
+		healthy: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, _, settings, _ := newSubnetEvidenceFixture(t)
+			return NewSubnetEvidenceSignal(), settings
+		},
+		violated: func(t *testing.T) (Signal, SignalSettings, func()) {
+			chain, journal, _, settings, _ := newSubnetEvidenceFixture(t)
+			hash := chain.roots[subnetSettlementKey{epoch: 2, noId: 2}].ArtifactHash
+			journal.tamperedArtifacts[1][hash] = true
+			return NewSubnetEvidenceSignal(), settings, func() { journal.tamperedArtifacts[1][hash] = false }
+		},
+		violatedClass: "subnet-artifact-integrity",
+		unknown: func(t *testing.T) (Signal, SignalSettings) {
+			_, _, node, settings, _ := newSubnetEvidenceFixture(t)
+			node.failMethods["eth_call"] = true
+			return NewSubnetEvidenceSignal(), settings
+		},
+		canceled: func(t *testing.T) (Signal, SignalSettings, context.Context) {
+			_, journal, node, settings, _ := newSubnetEvidenceFixture(t)
+			journal.disorderIndex[0] = true
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			node.beforeExchange = func(exchange int) {
+				if exchange == 4 {
+					cancel()
+				}
+			}
+			return NewSubnetEvidenceSignal(), settings, ctx
+		},
+		fixedGaps: []string{"semantic-replay"},
+	}
+}
