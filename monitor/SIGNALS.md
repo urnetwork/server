@@ -5218,6 +5218,18 @@ call and no second gateway. Their earlier unscoped PAGE/source-only assertions
 are deliberately superseded by this live-entry policy, rather than reclassified
 as pre-canceled compatibility or borrowed as notifier-incident evidence.
 
+A directly returned, nonnil signalContextError whose own context verdict is
+exactly the current ended parent is already canonical: preserve that wrapper
+and its immediate source cause instead of adding another context wrapper.
+A nested errors.Is match or a different child context is not this authority.
+Both public live-entry paths use the parent lifecycle taxonomy and safe error
+text while every original source identity remains reachable. Direct collectors
+and probes retain their owning contracts. Even an independently established
+migration fault retained by a probe is withheld at the public adapter after
+its owner ends; live faults/unknowns and pre-canceled no-policy compatibility
+remain separately tested. No ended result is authority to publish an observer
+write or to clear an incident; previously begun writes cannot be rolled back.
+
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
@@ -13613,7 +13625,13 @@ when all three members are rejected, that returned runtime remains incomplete;
 a complete sibling must not make global visibility healthy. Keep independently
 complete siblings' capacity findings. Invalid values and rejected runtime
 identities stay out of the aggregate visibility alert; malformed scalar shape
-or parsing remains a whole-probe source error.
+or parsing remains a whole-probe source error. Rejection also makes that exact
+runtime's tuple unusable for the observation: one rejected member beside a
+complete valid tuple is still unknown in either response order. Appending only
+that rejected metric row is the control; duplicating the full tuple would hide
+this boundary behind other accepted duplicates. Complete quiet and pressured
+siblings retain their own verdicts. This is a source-level correctness boundary,
+not evidence that Main returned such duplicates.
 
 The denominator is returned safe runtime identities, not an authoritative census
 of active Taskworkers. The query can filter stale raw exports before returning
@@ -19775,6 +19793,23 @@ Signals:
   chain again within ten minutes, and its sweep starts over. Find the
   taskworkers whose disabled total is above zero, confirm their hosts
   publish the current config (`WARP_CONFIG_VERSION`) and restart them.
+  The disabled-result current counter is initialized when a taskworker
+  registers its metrics, even before a pass. With the desired probe enabled,
+  an absent current aggregate is unknown (`cannot-observe`), never a measured
+  zero, unless either disabled arm independently proves a positive finding.
+  A positive current total or retained 30-minute increase remains WARN when
+  the counterpart is absent; its observed value says `unknown`, not zero.
+  Current zero with absent range increase remains a narrow healthy control:
+  `increase` can lack two samples after startup. It does not prove that no
+  exited process ran a disabled pass, nor that every fleet exporter was
+  scraped. Recent last-pass history cannot substitute for the initialized
+  current counter. Missing current evidence cannot grant notifier recovery;
+  corrected measured zero must satisfy the normal complete-run clear policy.
+  Invalid, repeated, nonfinite, negative or stale-evaluation samples retain
+  their existing refusal; unsupported payload clocks leave stall age unknown
+  while an independent positive disabled count remains visible. Desired-off
+  still skips the query. Aggregate absence identifies no host or process,
+  and this qualifier asserts no production omission or incident.
 - `capability-probe-no-evidence` — WARN when measurements finish for an hour
   and none records (`providers_total` rising with every `recorded_*` flat).
   The outcome says where: `tunnel_failed` is the probe's own setup (shard
@@ -25816,7 +25851,14 @@ the five-minute healthy-band check where specified, and record recovery
 confirmation in the run ledger (6.8). The continuous CLI's Slack notifier
 (MONITOR.md §3.6) is a transition sink, not a ticket lifecycle: it keys an
 incident on (probe, class, target) per the identity discipline below, and its
-`[CLEARED]` means only that two complete runs no longer reported the incident.
+`[CLEARED]` means only that two uninterrupted complete executions of each
+reporting signal no longer reported the incident. An incomplete execution
+preserves incidents and resets only that signal's absence streak; it supplies
+no recovery credit and does not change another signal's streak. For example,
+a complete absence followed by an unknown execution and another complete
+absence leaves the incident active with one recovery run; one further complete
+absence permits a clear. Reported or held affirmative findings also reset their
+incident's streak. This transition policy does not establish source recovery.
 Its `[ACTIVE AT START]` digest lists what a new watcher's first runs found,
 which can repeat earlier announcements; it does not date the incidents. A
 state the configuration chose, such as the PG query sample without its flag,
@@ -30266,8 +30308,10 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
 - `minio-drive-offline`. One erasure set at EC:2 over four drives needs three
   drives to write and two to read. Any drive with health 0, or a node offline
   count above zero, pages after two observations (a restart brings drives back
-  within about a minute); a negative erasure-set write tolerance means writes
-  are already failing and pages immediately. A healing drive warns after two.
+  within about a minute). A qualified fresh negative erasure-set write tolerance
+  pages immediately, independently of offline or healing drive counts. It reports
+  failed cached write health, not proof of a current application write failure.
+  A healing drive without that negative evidence warns after two.
 - `minio-bucket-quota`. MinIO rejects every PUT once the scanner's usage figure
   plus the object reaches the hard quota, with 400
   `XMinioAdminBucketQuotaExceeded`, which raises no 5xx. Usage at or over the
@@ -30372,6 +30416,26 @@ lost write quorum, quota bands including a quota raised within the window,
 request-error bands, missing/stale/incomplete drive and usage layers,
 malformed Mimir responses, foreign-host series, a dark inventory, and the
 query's freshness bounds.
+
+The configured MinIO source at `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a`
+computes write tolerance as healthy plus healing drives minus write quorum;
+a negative result also sets write health false. Erasure health and local drive
+metrics use independent caches. Fresh scraped timestamps do not attest one
+underlying cache generation or deployed producer identity. Complete online local
+drives cannot veto a qualified erasure-health negative; it also survives a
+missing drive layer beside the original visibility finding. Integer tolerance
+is reduced over distinct observed pool/set pairs. Fractional, nonfinite,
+unlabelled or duplicate-set input cannot qualify a negative or recovery.
+Missing/stale tolerance and zero spare write reserve cannot clear an otherwise
+healthy-looking store; they retain scoped `write-tolerance` visibility while
+independent capacity, bucket and request positives remain. Existing offline
+and healing positives retain their normal bands. Observed sets do not prove a
+complete erasure-set census. Recovery needs fresh unambiguous tolerance at least
+one plus the complete healthy drive layer. False-positive qualifier: cached
+negative health does not prove current failed writes or a physical Main outage.
+False-negative qualifier: missing sets or stale/ambiguous caches can hide loss;
+quiet request counters and alert absence cannot supply missing health authority.
+
 
 ### 11.6b MinIO drive runway, accounting divergence and foreign data on its drives
 Probe: `minio-runway` (catalog entry; not implemented as of 2026-10-22)

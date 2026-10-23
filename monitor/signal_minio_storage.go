@@ -108,26 +108,29 @@ type minioStorageBucket struct {
 // minioStorageHost is one MinIO host's reduced observation. Request
 // partitions hold five-minute increases summed over the partition's APIs.
 type minioStorageHost struct {
-	drives            map[string]*minioStorageDrive
-	driveCount        float64
-	hasDriveCount     bool
-	offlineCount      float64
-	hasOfflineCount   bool
-	writeTolerance    float64
-	hasWriteTolerance bool
-	buckets           map[string]*minioStorageBucket
-	usageAge          float64
-	hasUsageAge       bool
-	requests          map[string]float64
-	driveInvalid      string
-	bucketInvalid     string
+	drives                map[string]*minioStorageDrive
+	driveCount            float64
+	hasDriveCount         bool
+	offlineCount          float64
+	hasOfflineCount       bool
+	writeTolerance        float64
+	hasWriteTolerance     bool
+	writeToleranceInvalid bool
+	writeToleranceSets    map[[2]string]bool
+	buckets               map[string]*minioStorageBucket
+	usageAge              float64
+	hasUsageAge           bool
+	requests              map[string]float64
+	driveInvalid          string
+	bucketInvalid         string
 }
 
 func newMinioStorageHost() *minioStorageHost {
 	return &minioStorageHost{
-		drives:   map[string]*minioStorageDrive{},
-		buckets:  map[string]*minioStorageBucket{},
-		requests: map[string]float64{},
+		drives:             map[string]*minioStorageDrive{},
+		buckets:            map[string]*minioStorageBucket{},
+		requests:           map[string]float64{},
+		writeToleranceSets: map[[2]string]bool{},
 	}
 }
 
@@ -293,7 +296,9 @@ func parseMinioStorage(output string, now time.Time, hosts []string) (map[string
 		// Erasure-set write tolerance is negative once write quorum is lost;
 		// every other partition is a byte size, count, health or increase.
 		if math.IsNaN(value) || math.IsInf(value, 0) || (value < 0 && check != "set_write_tolerance") {
-			if strings.HasPrefix(check, "bucket_") || check == "usage_age" {
+			if check == "set_write_tolerance" {
+				observation.writeToleranceInvalid = true
+			} else if strings.HasPrefix(check, "bucket_") || check == "usage_age" {
 				observation.bucketInvalid = "invalid-" + check
 			} else {
 				observation.driveInvalid = "invalid-" + check
@@ -342,6 +347,12 @@ func parseMinioStorage(output string, now time.Time, hosts []string) (map[string
 			}
 			observation.offlineCount, observation.hasOfflineCount = value, true
 		case "set_write_tolerance":
+			set := [2]string{series.Metric["pool_id"], series.Metric["set_id"]}
+			if math.Trunc(value) != value || set[0] == "" || set[1] == "" || observation.writeToleranceSets[set] {
+				observation.writeToleranceInvalid = true
+				continue
+			}
+			observation.writeToleranceSets[set] = true
 			// one series per erasure set; the weakest set bounds the store
 			if !observation.hasWriteTolerance || value < observation.writeTolerance {
 				observation.writeTolerance = value
@@ -403,7 +414,11 @@ func evaluateMinioStorageHost(target string, observation *minioStorageHost, gate
 	if gap := observation.driveLayerGap(); gap != "" {
 		// Without a complete drive layer the MinIO source itself is in
 		// doubt; partial bucket or request figures cannot clear the host.
-		return []finding{minioStorageUnobservable(target, "drives", gap, gateway)}
+		findings := []finding{minioStorageUnobservable(target, "drives", gap, gateway)}
+		if observation.hasWriteTolerance && !observation.writeToleranceInvalid && observation.writeTolerance < 0 {
+			findings = append(findings, evaluateMinioDriveOffline(target, observation, gateway))
+		}
+		return findings
 	}
 	findings := []finding{
 		evaluateMinioDriveCapacity(target, observation, gateway),
@@ -421,6 +436,14 @@ func minioStorageUnobservable(target, frame, reason, gateway string) finding {
 		observed: fmt.Sprintf("layer=%s reason=%s freshness_limit_s=%d", frame, reason, int(minioStorageFreshness/time.Second)),
 		evidence: "Bounded loopback Mimir query through gateway " + gateway + "; only series labelled with this inventory host were joined.",
 		playbook: "SIGNALS.md §11.6a and §11.14",
+	}
+	if frame == "write-tolerance" {
+		f.symptom = "MinIO erasure-set write tolerance is unavailable or cannot qualify healthy recovery"
+		f.mechanism = "The erasure-set health cache is independent of local drive metrics. Online drive gauges cannot replace missing, stale, malformed or ambiguous write-tolerance evidence."
+		f.baseline = "Fresh unambiguous integer write tolerance of at least one accompanies complete healthy local drive metrics."
+		f.action = "Restore the existing erasure-set metric observation; preserve independently measured drive, capacity, quota and request failures. Do not infer a current write outage or restart MinIO from this visibility gap."
+		f.verify = "Complete fresh drive metrics and unambiguous erasure-set tolerance qualify recovery together."
+		return f
 	}
 	if frame == "drives" {
 		f.pageSustain = 3
@@ -501,6 +524,9 @@ func evaluateMinioDriveCapacity(target string, observation *minioStorageHost, ga
 func evaluateMinioDriveOffline(target string, observation *minioStorageHost, gateway string) finding {
 	offline, healing := []string{}, []string{}
 	for _, drive := range observation.sortedDrives() {
+		if drive.mask&minioDriveHealth == 0 {
+			continue
+		}
 		switch drive.health {
 		case 0:
 			offline = append(offline, drive.path)
@@ -512,7 +538,11 @@ func evaluateMinioDriveOffline(target string, observation *minioStorageHost, gat
 	if observation.hasOfflineCount && observation.offlineCount > offlineCount {
 		offlineCount = observation.offlineCount
 	}
-	if offlineCount == 0 && len(healing) == 0 {
+	negative := observation.hasWriteTolerance && !observation.writeToleranceInvalid && observation.writeTolerance < 0
+	if offlineCount == 0 && len(healing) == 0 && !negative {
+		if !observation.hasWriteTolerance || observation.writeToleranceInvalid || observation.writeTolerance < 1 {
+			return minioStorageUnobservable(target, "write-tolerance", "no-qualified-write-reserve", gateway)
+		}
 		return healthyFinding(minioStorageProbeID, tierPage, "minio-drive-offline", target)
 	}
 
@@ -539,12 +569,14 @@ func evaluateMinioDriveOffline(target string, observation *minioStorageHost, gat
 		playbook: "SIGNALS.md §11.6a",
 	}
 	switch {
+	case negative:
+		f.symptom = "MinIO erasure-set cache reports failed write health on " + target
+		f.sustain = 1
+		f.mechanism = "The configured MinIO producer computes write tolerance from healthy plus healing drives minus write quorum and reports failed write health when it is negative. Local drive gauges use a separate cache and cannot veto this independent negative observation."
+		f.context = "This is fresh scraped cached write-health evidence, not a same-generation drive census or proof that a current application write failed. Offline/healing fields summarize observed rows, not a complete census. Deployed producer identity, underlying cache age and request outcomes remain separate evidence."
+		f.action = "Verify the emitting producer and current erasure-set health, correlate independent drive and application write outcomes, and identify the failing boundary before repair. Do not replace or reformat a drive, restart MinIO, or lower parity based solely on this cached negative."
 	case offlineCount > 0:
 		f.symptom = fmt.Sprintf("%.0f of %.0f MinIO drives on %s are offline", offlineCount, observation.driveCount, target)
-		if observation.hasWriteTolerance && observation.writeTolerance < 0 {
-			f.symptom += " and the erasure set has lost write quorum"
-			f.sustain = 1
-		}
 	default:
 		f.tier = tierWarn
 		f.symptom = fmt.Sprintf("%d MinIO drive(s) on %s are healing", len(healing), target)
