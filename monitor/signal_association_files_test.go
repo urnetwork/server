@@ -113,6 +113,7 @@ func TestAssociationFilesSignalSyntheticMissingAndInvalid(t *testing.T) {
 	}
 }
 
+// Transport-only samples withhold metadata authority without a static-file product incident.
 func TestAssociationFilesSignalLeavesTransportFailureToEdgeIPv6(t *testing.T) {
 	address := "2001:db8:19::28"
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
@@ -129,8 +130,8 @@ func TestAssociationFilesSignalLeavesTransportFailureToEdgeIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("transport-only failure duplicated the edge-ipv6 alert: %+v", alerts)
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !isVisibilityAlert(alerts[0]) {
+		t.Fatalf("transport-only metadata completeness = %+v, want one visibility finding without a product incident", alerts)
 	}
 }
 

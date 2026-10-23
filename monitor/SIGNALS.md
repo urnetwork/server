@@ -41378,6 +41378,23 @@ SHA-256 signing fingerprint; the Apple document must authorize
 application failures into one `web-association-files` alert. Curl exit 7/28 on
 an exact edge remains owned by §18.1 so one transport incident does not open a
 second static-file ticket.
+Transport exclusions do not establish metadata completeness. If any enabled
+edge/path is unobserved because curl returned 7/28, this signal also reports one
+metadata-scoped `cannot-observe` finding with expected/checked/unobserved counts.
+It does not open a new `web-association-files` product incident or diagnose the
+transport, responder, or bundle. Its ready or held visibility marker makes the
+execution incomplete: prior metadata incidents do not receive healthy absence
+credit merely because their required documents were not observed. Independently
+observed HTTP/status or content failures remain present beside that marker.
+Only complete semantic observations on all enabled exact edge/path checks supply
+ordinary absence credit under the shared notifier policy. An unconfigured website
+or empty enabled target set remains a separate applicability case. Unknown error,
+body and endpoint bytes are not copied into the metadata availability finding;
+the existing bounded evidence policy for an observed product failure is unchanged.
+A valid sibling does not prove the skipped contract, and this local completeness
+repair does not establish canonical CDN recovery, responder identity, deployed
+artifact adoption or the separate ten-minute ENOENT verification below.
+
 
 2026-08-31 root cause: the authoritative files were tracked under
 `mmm/ur.io/astro/public/.well-known` and present in `astro/dist/.well-known`.
@@ -41466,6 +41483,23 @@ Scope the diagnosis to the actual responses. One exact-edge 404 does not prove
 every edge lacks the image; retain successful peers as controls. Exact-edge
 transport checks omitted under §18.1 leave image contents unknown and prevent
 an all-edges-healthy conclusion, even when the remaining checked edges pass.
+
+Excluded exact-edge transport must remain explicit metadata incompleteness, not
+healthy absence. If any required exact-edge image check has curl exit 7/28, this
+signal retains one metadata-scoped `cannot-observe` finding with fixed
+expected/checked/unobserved counts, without opening a new image-product or edge
+transport incident. Ready or held visibility withholds recovery credit from prior
+image incidents; healthy public or exact-edge siblings do not prove an omitted
+required check. Independently observed HTTP/content failures remain present.
+The existing public-path `web-email-assets-transport` identity is itself a
+visibility class, including while held below its two-cadence sustain; its working
+recovery protection and classification remain unchanged. Only complete measured
+public and enabled exact-edge contracts supply ordinary shared-notifier absence
+credit. No configured website remains inapplicable; a configured website without
+exact edges still checks its public image URLs. Skipped error, response and
+endpoint bytes are not copied into the availability finding. This completeness
+rule does not establish recipient impact, responder identity, deployment adoption,
+cache ownership or the separate ten-minute operational verification below.
 
 Retired contract history: before 2026-09-01 the templates referenced six
 `https://bringyour.com/res/emails/...` assets through a CloudFront

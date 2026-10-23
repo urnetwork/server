@@ -209,6 +209,7 @@ func TestEmailAssetsSignalRejectsHTMLAndEmptyImages(t *testing.T) {
 	}
 }
 
+// Exact-edge transport remains unknown without a duplicate image-product incident.
 func TestEmailAssetsSignalLeavesExactTransportFailureToEdgeIPv6(t *testing.T) {
 	address := "2001:db8:19::28"
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
@@ -228,8 +229,8 @@ func TestEmailAssetsSignalLeavesExactTransportFailureToEdgeIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("exact transport-only failure duplicated edge-ipv6: %+v", alerts)
+	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !isVisibilityAlert(alerts[0]) {
+		t.Fatalf("exact transport-only metadata authority = %+v, want only own visibility", alerts)
 	}
 }
 
