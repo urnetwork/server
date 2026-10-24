@@ -9,11 +9,25 @@ import (
 )
 
 func sourceBuildInfoFixture() *debug.BuildInfo {
-	return &debug.BuildInfo{Path: "github.com/urnetwork/server/connect/sim-latency", Main: debug.Module{Path: "github.com/urnetwork/server"},
+	return &debug.BuildInfo{GoVersion: "go1.27.3", Path: "github.com/urnetwork/server/connect/sim-latency", Main: debug.Module{Path: "github.com/urnetwork/server"},
 		Settings: []debug.BuildSetting{
 			{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: strings.Repeat("a", 40)}, {Key: "vcs.modified", Value: "false"},
 			{Key: "GOOS", Value: "linux"}, {Key: "GOARCH", Value: "amd64"}, {Key: "CGO_ENABLED", Value: "0"}, {Key: "-buildmode", Value: "exe"},
 		}}
+}
+
+// Source identity does not authorize a different compiler or an auto-upgrade.
+func TestSourceBuildInfoRequiresExactCompetitionGoVersion(t *testing.T) {
+	for _, version := range []string{"", "go1.26.6", "go1.27.2", "go1.27.4", "go1.28.0", "devel go1.27.3-synthetic", "go1.27.3-synthetic"} {
+		info := sourceBuildInfoFixture()
+		info.GoVersion = version
+		if err := verifySourceBuildInfo(info, strings.Repeat("a", 40)); err == nil {
+			t.Errorf("accepted noncompetition compiler %q", version)
+		}
+	}
+	if err := verifySourceBuildInfo(sourceBuildInfoFixture(), strings.Repeat("a", 40)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSourceBuildInfoRequiresExactCleanHostExecutable(t *testing.T) {

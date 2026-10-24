@@ -144,6 +144,11 @@ func newStagingHarnessFixture(t *testing.T, epoch int, winnerJobId string) *stag
 		"source.yml":     string(fixture.sourceBytes),
 		"stubs/go": `#!/bin/bash
 set -euo pipefail
+if [[ $# == 2 && $1 == env && $2 == GOVERSION ]]; then
+    [[ ${GOTOOLCHAIN:-} == local ]]
+    printf 'go1.27.3\n'
+    exit 0
+fi
 [[ $# == 6 && $1 == build && $2 == -trimpath && $3 == -buildvcs=true &&
    $4 == -o && $5 == "$RUN_MAIN_FIXTURE_WORKER" && $6 == */cli/competitionworker ]]
 `,

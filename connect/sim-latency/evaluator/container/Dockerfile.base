@@ -16,6 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/go/bin:/opt/urnetwork/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     GOEXPERIMENT=greenteagc \
     CGO_ENABLED=0 \
+    GOTOOLCHAIN=local \
     GOPATH=/opt/urnetwork/go \
     GOMODCACHE=/opt/urnetwork/go/pkg/mod \
     GOCACHE=/opt/urnetwork/go/build-cache \
@@ -41,6 +42,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
+RUN test "$(go env GOVERSION)" = go1.27.3
 ARG BASE_SHA
 ARG SOURCE_EPOCH
 ARG SOURCE_CONFIG_SHA256

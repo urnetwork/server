@@ -33,6 +33,9 @@ func verifySourceBuildInfo(info *debug.BuildInfo, expectedCommit string) error {
 	if info == nil || !sourceGitShaPattern.MatchString(expectedCommit) || info.Main.Path != "github.com/urnetwork/server" || info.Path != "github.com/urnetwork/server/connect/sim-latency" {
 		return errors.New("source compiler did not return the expected Go program")
 	}
+	if info.GoVersion != "go1.27.3" {
+		return errors.New("competition source binary requires Go 1.27.3")
+	}
 	settings := make(map[string]string, len(info.Settings))
 	for _, setting := range info.Settings {
 		if _, exists := settings[setting.Key]; exists {

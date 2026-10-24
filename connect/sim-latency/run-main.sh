@@ -367,8 +367,9 @@ present_candidate_or_promote_no_winner() {
 
 build_worker() {
     local worker=$state_dir/bin/competitionworker
+    [[ "$(GOTOOLCHAIN=local go env GOVERSION)" == go1.27.3 ]] || fail "competition worker build requires Go 1.27.3 on PATH"
     mkdir -p "$state_dir/bin"
-    go build -trimpath -buildvcs=true -o "$worker" "$server_root/cli/competitionworker"
+    GOTOOLCHAIN=local go build -trimpath -buildvcs=true -o "$worker" "$server_root/cli/competitionworker"
     chmod 0500 "$worker"
     printf '%s\n' "$worker"
 }

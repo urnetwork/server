@@ -14,6 +14,11 @@ Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
 
+Go 1.27.3 is mandatory for competition builds and tests. Select the actual
+installed 1.27.3 toolchain before invoking launchers and set `GOTOOLCHAIN=local`;
+do not rely on a newer toolchain being downloaded or automatically selected.
+Evaluator images and promoted binary metadata must bind exactly Go 1.27.3.
+
 Use Sol 6.1 (`gpt-6.1-sol`) with low reasoning for all test execution,
 including preflight, submission validation, post-promotion smoke tests, and
 reruns. A test failure or suspected flake must be handed to Sol 6.1 (`gpt-6.1-sol`)
