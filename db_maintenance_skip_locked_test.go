@@ -20,6 +20,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,46 +30,58 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Every VACUUM and ANALYZE the rotation issues must skip a locked table rather
-// than queue for it. VACUUM (FULL, ...) is VacuumFullAllTables, an operator run
-// that takes ACCESS EXCLUSIVE with the system offline and is left as it is.
+// Every VACUUM and ANALYZE the rotation and the churn tables' vacuum issue must
+// skip a locked table rather than queue for it. VACUUM (FULL, ...) is
+// VacuumFullAllTables, an operator run that takes ACCESS EXCLUSIVE with the
+// system offline and is left as it is. The rotation's daily pending_task
+// vacuum moved to VacuumHotTables on 2026-10-24, so the rotation issues no
+// VACUUM of its own.
 func TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "db_maintenance.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statements := []string{}
-	ast.Inspect(file, func(node ast.Node) bool {
-		literal, ok := node.(*ast.BasicLit)
-		if !ok || literal.Kind != token.STRING {
-			return true
-		}
-		text, err := strconv.Unquote(literal.Value)
+	// the command as a word, so "vacuumed" or "Vacuums of ..." is not one
+	command := regexp.MustCompile(`^(VACUUM|ANALYZE)\b`)
+	for _, c := range []struct {
+		fileName string
+		// the statements the file must issue
+		want []string
+	}{
+		{fileName: "db_maintenance.go", want: []string{"ANALYZE"}},
+		{fileName: "db_maintenance_hot_vacuum.go", want: []string{"VACUUM", "VACUUM"}},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), c.fileName, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		upper := strings.ToUpper(strings.TrimSpace(text))
-		if strings.HasPrefix(upper, "VACUUM") || strings.HasPrefix(upper, "ANALYZE") {
-			statements = append(statements, text)
-		}
-		return true
-	})
+		statements := []string{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			text, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if command.MatchString(strings.ToUpper(strings.TrimSpace(text))) {
+				statements = append(statements, text)
+			}
+			return true
+		})
 
-	checked := 0
-	for _, statement := range statements {
-		upper := strings.ToUpper(strings.TrimSpace(statement))
-		// the operator VACUUM FULL statement and its log lines
-		if strings.HasPrefix(upper, "VACUUM (FULL") || strings.HasPrefix(upper, "VACUUM FULL") {
-			continue
+		checked := []string{}
+		for _, statement := range statements {
+			upper := strings.ToUpper(strings.TrimSpace(statement))
+			// the operator VACUUM FULL statement and its log lines
+			if strings.HasPrefix(upper, "VACUUM (FULL") || strings.HasPrefix(upper, "VACUUM FULL") {
+				continue
+			}
+			checked = append(checked, command.FindString(upper))
+			if !strings.Contains(upper, "SKIP_LOCKED") {
+				t.Errorf("%s: %q queues for a table an autovacuum holds, which cancels the autovacuum", c.fileName, statement)
+			}
 		}
-		checked += 1
-		if !strings.Contains(upper, "SKIP_LOCKED") {
-			t.Errorf("%q queues for a table an autovacuum holds, which cancels the autovacuum", statement)
+		if !slices.Equal(checked, c.want) {
+			t.Errorf("%s issues %v in %q, want %v", c.fileName, checked, statements, c.want)
 		}
-	}
-	// the pending_task vacuum and the final analyze
-	if checked < 2 {
-		t.Fatalf("found %d rotation vacuum or analyze statement(s) in %v, want at least 2", checked, statements)
 	}
 }
 
@@ -288,9 +301,10 @@ func testDbMaintenanceAnalyzed(ctx context.Context, tableName string) bool {
 	return analyzed
 }
 
-// The daily pending_task vacuum and the final analyze skip a table another
-// session holds, leave that session's transaction alone, and still analyze
-// every free table.
+// The final analyze skips a table another session holds, leaves that
+// session's transaction alone, and still analyzes every free table. A locked
+// pending_task stays in the fixture: the rotation's daily vacuum of it, now
+// VacuumHotTables', was the other statement that queued on 2026-10-13.
 func TestDbMaintenanceAnalyzeSkipsATableLockedByAnotherSession(t *testing.T) {
 	env := DefaultTestEnv()
 	env.ApplyDbMigrations = false

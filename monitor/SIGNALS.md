@@ -7629,9 +7629,12 @@ postmaster restart, malformed frames, failed reads, inventory and
 cancellation.
 
 ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
-`pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
-work behind autovacuum. Source presence does not attest the deployed
-Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
+database analyze, and avoids queueing rebuild/drop work behind autovacuum.
+Since 2026-10-24 the `pending_task` vacuum it ran daily belongs to
+`VacuumHotTables` (`db_maintenance_hot_vacuum.go`), which vacuums the churn
+tables every five minutes with `SKIP_LOCKED` and rebuilds their bloated
+indexes hourly behind the same lock wait. Source presence does not attest the
+deployed Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
 Let independently progressing anti-wraparound work finish (§2.4); do not
 start conflicting maintenance or cancel a pass from this catalog history.
 

@@ -111,6 +111,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
+		work.ScheduleVacuumHotTables(clientSession, tx)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
@@ -403,6 +404,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.DbMaintenance,
 			work.DbMaintenancePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.VacuumHotTables,
+			work.VacuumHotTablesPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.WarmNetworkGetProviderLocations,
