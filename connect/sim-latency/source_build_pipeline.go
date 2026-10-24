@@ -13,9 +13,9 @@ import (
 // Artifacts are not an approval or passed qualification receipt. Keep the
 // private context and logs until authenticated retention has completed.
 type sourceBuildArtifacts struct {
-	Directory       string
-	ImageId         string
-	SimulatorSha256 string
+	Directory       string `json:"directory"`
+	ImageId         string `json:"image_id"`
+	SimulatorSha256 string `json:"simulator_sha256"`
 }
 
 // The caller already authenticated the review against main. Every candidate

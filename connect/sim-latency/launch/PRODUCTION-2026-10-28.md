@@ -30,7 +30,106 @@ are listed explicitly instead of inventing a branch or silently retaining an old
 staging pin. `operator-proxy` is not in the evaluation graph. The tracked SCTP
 module is part of the connect commit, not a separate repository.
 
+## Live capacity sweep — October 24, 12:50 UTC
+
+The isolated four-exchange-host frontier is running serially on sille, with
+200 clients, 80 arrivals/minute and impairment on/off at each provider scale.
+The staging supervisor is inactive and no build/test load is scheduled during
+measurement. The initial 1,800-provider on/off and 7,200-provider on attempts
+failed before simulation because the private harness omitted `EVALUATION_JOB_ID`
+from the container environment. Their disposable stacks cleaned up; these are
+harness failures, not capacity results or baseline samples. The environment
+handoff is corrected for subsequent attempts. Repeat those missing points
+separately after this batch, retaining the failed logs rather than overwriting
+them. Sweep evidence is currently private under
+`temp/production-frontier-20261024.63AtMXS5`; archive completed results before
+selecting scale. This sweep does not replace nine-run calibration.
+
+The first measured point (7,200 providers, impairment off) warmed all 200
+clients and completed measurement, but exited nonzero after 691 seconds:
+`unclean_teardown`, fleet shard 0 required KILL after TERM. Its sidecar marks
+the run incomplete. Retain its CSV/metadata/logs for shutdown diagnosis; do not
+count its latency metrics as a usable baseline or infer a capacity limit until
+the lifecycle failure is understood. The serial sweep has advanced to the
+15,000-provider impairment-on point. That point also warmed all 200 clients but
+failed during measurement with `matchmaking_probe_failed`; its fleet then
+drained cleanly without a diagnostic signal. Both points, including exact CSVs,
+sidecars, compressed inputs/logs and pre-measurement harness failures, are now
+preserved under `baseline/prelaunch-frontier-2026-10-24/` and remain explicitly
+ineligible for baseline use. The original batch and waiting recovery controller
+were stopped after the point's terminal exit and verified container cleanup.
+Resume the missing lower-scale points after the current test window; do not
+start larger points or declare capacity from either incomplete attempt.
+
+The lower-scale recovery finished: 1,800 providers passed impairment on and off
+in 461 and 435 seconds with clean teardown. The 7,200-provider on simulation
+also completed and drained cleanly, but its host wrapper returned 127 after a
+live controller-script edit displaced Bash's unread tail. Its measured sidecar
+and failing controller outcome are both preserved, not relabeled as a clean
+whole-pipeline pass. All five measured attempts are now versioned in the frontier
+archive; only the two 1,800-provider trials are usable capacity points, and none
+is an official baseline sample.
+
+The next public-seed nine-run set uses fresh disposable PostgreSQL/Redis per
+replicate and the same 1,800-provider/four-exchange-instance workload. It stops
+on any failed replicate instead of silently resampling. The root-owned,
+read-only `r9-controller-v1` bundle fixes the mutable-controller failure and
+checks script/input digests before and after execution. The source-case script
+digest is `35f5d0148e25d85a0075a6067400619ef7b4fc2114aa9f2e1b255582642ebc49`;
+measurement script digest is
+`1cade50cd96f2c7529c89b3afb8a60a47567a564bdd7f3aa84dadf54d464a3cd`.
+This remains exploratory calibration, not final scale selection, hidden-seed
+commitment, an official scoring baseline or a finalized margin.
+
+Deterministic FIFO-barrier Go regressions reproduce the live-shell unread-tail
+failure and verify the immutable snapshot control. A composed real-Git-tree
+regression also confirms that schema-2 preflight already selects a source
+generation without inventing a future-round mapping; no production fix was
+needed for that suspected issue. These and archive metadata checks passed
+three race repetitions (19.080 seconds). All earlier raw `v1` evidence remains
+unchanged. No main control-plane writes occurred during the maintenance hold.
+
+The public API still returns `503 source_not_ready`, and sille's configured
+MinIO endpoint `172.28.208.177:23900` refuses TCP connections. No main database
+write or production activation has been attempted while maintenance confirmation
+is pending.
+
 ## Execution checklist
+
+### Restart/review-build validation — October 24, 13:38 UTC
+
+The build broker now durably binds one review to one image/owner and original
+deadline, reuses authenticated completed artifacts, refuses unfinished pipeline
+reservations, and prevents concurrent controllers with a process-owned lock.
+Reviewed Git commits use the authenticated review timestamp and fixed identities
+so re-materialization does not change the source lock. Independent test handling
+retains the original plan, raw provider streams before validation, execution
+observations and final evidence. Unfinished transports pause for reconciliation;
+they do not silently sample another judgment. These are control changes, not
+changes to the frozen evaluated checkpoint.
+
+Focused race regressions passed three repetitions (19.144 seconds; log SHA-256
+`38136da7dbf56dd6382a4955d398100f86295c1eecd2e9160916f5a309b8cfd0`).
+The full real-container offline probe passed all 33 prescribed correctness tests
+and journal replay with no additional candidate test execution. Its log digest is
+`539a4e971e2da03ef986ca7d4e31ee6e2dfd8aafed79b055c7b5c6bb9425b553`;
+test-log digest is
+`927bc47d32f914dbe5aab028c114dc13cc076907945b38e8cb26231af00a0908`.
+Provider streams in that probe were **mocked**, not genuine model provenance.
+The temporary image and containers were removed.
+
+Three consecutive full `tests.sh` passes, each including the six-epoch lifecycle
+and race suite, completed in 115.213, 110.268 and 109.991 seconds. Retained logs:
+
+- `bdce61da90f2aa3449259fd80b41d2b86d1bd3f5acd285160e56e5ea6e77c878`
+- `69b877be9233699929a9df3f28fc84aa6c5cd54d0ca7fdae2737c5bacb42eb17`
+- `8c8821df6753399b7eda70e9ea6be8702b63077fd0b4579efdc33eb461fe4917`
+
+The separately owned disposable database/Redis fixtures were cleaned up. Archive
+verification passed all 2,763 files; historical `v1` bytes and their checksums
+remain unchanged. Real model access, installed qualifier integration, host and
+artifact readiness, supported-scale calibration and production activation are
+still outstanding; these test passes do not close those launch gates.
 
 - [x] Fetch development heads and inspect operator worktrees without modifying them.
 - [x] Compile the candidate graph and pass the simulator harness against its pinned dependencies.

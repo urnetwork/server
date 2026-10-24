@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,9 +130,25 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 			t.Error("temporary synthetic probe image cleanup failed", err)
 		}
 	}()
-	correctness, err := executeJournaledSourceCorrectness(ctx, request, *artifacts, owner, settings, defaultSourceTestJournalSettings(), docker)
+	providerResponses := 0
+	syntheticClient := &http.Client{Transport: winnerReviewTransport(func(*http.Request) (*http.Response, error) {
+		providerResponses++
+		stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
+		if providerResponses == 2 {
+			stream = winnerModelFixtureStream(t, `{"passed":true,"summary":"Synthetic provider observed the prescribed offline test result."}`)
+		} else if providerResponses != 1 {
+			t.Fatal("completed provider stream was requested again during actual-suite replay")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
+	})}
+	modelEvidence, modelDigest, err := executeSourceBuildIndependentTests(ctx, syntheticClient, "synthetic-model-key", request, *artifacts, owner, settings,
+		defaultSourceTestModelSettings(), defaultSourceTestJournalSettings(), docker)
 	if err != nil {
 		t.Fatalf("offline correctness probe failed; private evidence retained at %s: %v", artifacts.Directory, err)
+	}
+	correctness := &modelEvidence.Execution
+	if !modelEvidence.Passed || !validSha256(modelDigest) || providerResponses != 2 {
+		t.Fatal("synthetic provider lost actual correctness execution or retained evidence")
 	}
 	correctnessBytes, err := json.Marshal(correctness)
 	if err != nil {
@@ -144,6 +162,13 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(correctness, replay) || dockerCalls != beforeReplay {
 		t.Fatal("completed actual correctness replay changed facts or invoked Docker again", err)
 	}
+	beforeReplay = dockerCalls
+	modelReplay, replayDigest, err := executeSourceBuildIndependentTests(ctx, syntheticClient, "synthetic-rotated-model-key", request, *artifacts, owner, settings,
+		defaultSourceTestModelSettings(), defaultSourceTestJournalSettings(), docker)
+	if err != nil || !reflect.DeepEqual(modelEvidence, modelReplay) || modelDigest != replayDigest || providerResponses != 2 || dockerCalls != beforeReplay+1 {
+		t.Fatal("model replay changed evidence or reran candidate work instead of only authenticating its image", err)
+	}
+	t.Logf("synthetic provider journal replay retained both streams and exact test evidence=%s; mock responses are not independent model provenance", modelDigest)
 	t.Logf("observed offline correctness tests=%d logs_sha256=%s; direct Go execution, not model provenance", correctness.TestCount, correctness.TestLogsSha256)
 	data, err := json.Marshal(artifacts)
 	if err != nil {

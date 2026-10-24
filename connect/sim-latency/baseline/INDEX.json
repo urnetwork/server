@@ -32,6 +32,12 @@
       "official": false,
       "index_path": "prelaunch-2026-10-24/INDEX.json",
       "index_sha256": "3f62dd3ea030590f151af902131765b2358084402e4dd0f2929d2dcced0545e7"
+    },
+    {
+      "id": "prelaunch-frontier-2026-10-24",
+      "official": false,
+      "index_path": "prelaunch-frontier-2026-10-24/INDEX.json",
+      "index_sha256": "e7e00fdf36a11c9dc1658c25c57f8e8faccd87690b8b848521cfbed552fdabc2"
     }
   ],
   "datasets": [

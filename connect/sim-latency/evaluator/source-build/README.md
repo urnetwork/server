@@ -59,6 +59,26 @@ review/patch/source identities, actual image ID and `sandbox_id == owner`.
 It cannot manufacture model provenance from a Go exit status or a hash string.
 Only a complete passing receipt is persisted and returned on stdout.
 
+The broker now reserves one attempt per approved review under
+`<state_directory>/.attempts/<review-id-digest>/`. Its immutable reservation
+binds the normalized reviewed request, installed settings, random build owner
+and original deadline. Ephemeral checkout paths do not create another attempt.
+A process-owned exclusive lock prevents simultaneous controllers. A completed
+pipeline is reused only after the retained binary and exact Docker image/owner
+are authenticated; a completed receipt is replayed, not requalified. A failed
+or interrupted pipeline pauses for reconciliation rather than rebuilding.
+Changing settings or authority under the same review cannot reset that attempt.
+The qualification request's artifact fields are `directory`, `image_id` and
+`simulator_sha256`. Focused race regressions passed three repetitions; this is
+not yet an installed/qualified production release.
+
+Reviewed patch commits also use the authenticated review timestamp and fixed
+author/committer identity, not the process clock or ambient Git author variables.
+Recreating an identical approved tree after restart must reproduce the same
+commit and source lock. This adjacent correction has a two-checkout regression
+test with deliberately conflicting ambient timestamps; its race repetitions
+passed in the same focused suite.
+
 No API/MinIO/main credentials or config/vault trees are mounted during the
 offline build phases. Later runtime qualification may use only direct
 `config/local` and `vault/local` read-only leaves, never their parents or `all`.
@@ -83,11 +103,17 @@ for execution. Short provider deadlines do not shorten the separate test
 budget or extend an earlier parent deadline.
 
 This client has mocked transport/authority regression coverage, not live model
-qualification. The installed qualifier must still integrate the real fixed-suite
-executor, durable plan/response/execution journal, host/containment evidence and
-artifact retention. Do not retry a completed failed/uncertain test or model
-outcome until operator investigation; only an incomplete transport may resume
-the same original plan without rerunning completed tests.
+qualification. `executeSourceBuildIndependentTests` binds its actual fixed-suite
+callback to both durable execution and provider-response journals and atomically
+retains the model evidence before returning its digest. The installed qualifier
+must use this composed entry point, not the non-durable client interface. It
+still needs real credentials/access, host/containment evidence and deployment
+qualification. Completed malformed, failed or uncertain responses replay rather
+than reroll. An interrupted/failed transport or unfinished dispatch pauses for
+explicit reconciliation; automatic transport retries are deliberately disabled.
+The original plan deadline and installed policy survive process replacement.
+Raw bounded streams are retained before parsing, including opaque encrypted
+reasoning items; model headers/credentials are never journaled.
 
 The implementation follows the official [function-calling contract](https://developers.openai.com/api/docs/guides/function-calling)
 and [stateless reasoning-item replay](https://developers.openai.com/api/docs/guides/reasoning).
@@ -113,5 +139,9 @@ failures remain failures; a changed plan, corrupt record, missing evidence, or
 unfinished reservation cannot start another execution. A pending reservation
 means active **or** interrupted, not proof its process stopped. Reconcile the
 actual owner rather than deleting the journal to force another test draw.
-The real qualifier still needs provider-response journaling and full deployment
-integration; this execution journal alone is not a model or host receipt.
+The real-container composed probe passed all 33 tests and replayed both mocked
+provider streams and the exact execution without another candidate test run.
+Each replay still authenticates the immutable image. Mocked response identities
+are explicitly synthetic: this is integration proof, not live independent-model
+provenance. Real credentials/access, physical host qualification and installed
+qualifier deployment remain required; neither journal alone is a host receipt.

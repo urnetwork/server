@@ -294,10 +294,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", patchPath); err != nil {
 				fatalf("source patch apply: %s", err)
 			}
-			if _, err := sourceGitText(ctx, stagedRoot, "-c", "core.fsync=all", "-c", "user.name=URnetwork Competition", "-c", "user.email=competition@invalid", "commit", "--quiet", "--no-gpg-sign", "-m", "competition: separately reviewed source "+reviewId.String()); err != nil {
-				fatalf("source commit: %s", err)
-			}
-			proposal.Commits[repository], err = sourceGitText(ctx, stagedRoot, "rev-parse", "HEAD")
+			proposal.Commits[repository], err = commitReviewedSource(ctx, stagedRoot, reviewId, approved.Review.CreatedAt)
 			if err != nil {
 				fatalf("source commit identity: %s", err)
 			}
