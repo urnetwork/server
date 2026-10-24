@@ -148,6 +148,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		}},
 		{target: task.NewTaskTarget(work.CloseExpiredNetworkClientHandlers), schedule: work.ScheduleCloseExpiredNetworkClientHandlers},
 		{target: task.NewTaskTarget(work.RemoveDisconnectedNetworkClients), schedule: work.ScheduleRemoveDisconnectedNetworkClients},
+		{target: task.NewTaskTarget(work.RemoveRetiredHostedNetworkClients), schedule: work.ScheduleRemoveRetiredHostedNetworkClients},
+		{target: task.NewTaskTarget(work.RemoveGoneStClientKeyHistory), schedule: work.ScheduleRemoveGoneStClientKeyHistory},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},

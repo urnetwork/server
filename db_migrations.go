@@ -10720,4 +10720,24 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Retired child clients are hard deleted a day after their deactivation
+	// (PARTITION-MAINTENANCE-PLAN.md Part D; db_identity_retention.go). The
+	// reap reads them by deactivation time through this partial index, which
+	// holds only the children waiting for it. Building it reads the 455 GB
+	// heap twice and waits for older snapshots, without blocking writes; an
+	// interrupted build's leftover is dropped and rebuilt.
+	newRestartableOnlineSqlMigration(
+		retiredChildNetworkClientIndexRecoverySql,
+		retiredChildNetworkClientIndexSql,
+		retiredChildNetworkClientIndexAuditSql,
+	),
+
+	// Key history retention for clients that are gone (Part D;
+	// db_identity_retention.go): a table of when each client with key history
+	// went, written by the network_client delete trigger, and a history guard
+	// that admits the retention task's deletes of clients gone more than 91
+	// days. Update and truncate stay refused. The truncate trigger is the only
+	// table lock, held briefly on st_client_key_history.
+	newSqlMigration(clientKeyHistoryRetentionSchemaSql),
 }

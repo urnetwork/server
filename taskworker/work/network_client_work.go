@@ -3,6 +3,8 @@ package work
 import (
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
@@ -102,6 +104,97 @@ func RemoveDisconnectedNetworkClientsPost(
 	tx server.PgTx,
 ) error {
 	ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
+	return nil
+}
+
+// Retired hosted identities are hard deleted a day after their deactivation
+// (model.RemoveRetiredHostedNetworkClients). A chain without a cursor starts
+// at the horizon: identities retired before it age out through the 30-day
+// reap of RemoveDisconnectedNetworkClients, so a deploy or a lost chain never
+// deletes a backlog at once.
+
+// bounds a stranded claim; the reap's run budget is well under it
+const removeRetiredHostedNetworkClientsMaxTime = 15 * time.Minute
+
+type RemoveRetiredHostedNetworkClientsArgs struct {
+	// where the previous run stopped; nil starts at the horizon
+	Cursor *model.RetiredHostedNetworkClientCursor `json:"cursor,omitempty"`
+}
+
+type RemoveRetiredHostedNetworkClientsResult struct {
+	RemovedCount int64                                  `json:"removed_count"`
+	Cursor       model.RetiredHostedNetworkClientCursor `json:"cursor"`
+	// the run budget ended the run with retired children left to examine
+	More bool `json:"more"`
+}
+
+func ScheduleRemoveRetiredHostedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleRemoveRetiredHostedNetworkClients(
+		clientSession,
+		tx,
+		&RemoveRetiredHostedNetworkClientsArgs{},
+		server.NowUtc().Add(1*time.Minute),
+	)
+}
+
+func scheduleRemoveRetiredHostedNetworkClients(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	args *RemoveRetiredHostedNetworkClientsArgs,
+	runAt time.Time,
+) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveRetiredHostedNetworkClients,
+		args,
+		clientSession,
+		task.RunOnce("remove_retired_hosted_network_clients"),
+		task.RunAt(runAt),
+		task.MaxTime(removeRetiredHostedNetworkClientsMaxTime),
+	)
+}
+
+func RemoveRetiredHostedNetworkClients(
+	removeRetiredHostedNetworkClients *RemoveRetiredHostedNetworkClientsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveRetiredHostedNetworkClientsResult, error) {
+	settings := model.DefaultRetiredHostedNetworkClientReapSettings()
+	now := server.NowUtc()
+	cursor := model.RetiredHostedNetworkClientCursor{
+		DeactivateTime: now.Add(-settings.ReapAfterDeactivate),
+	}
+	if removeRetiredHostedNetworkClients.Cursor != nil {
+		cursor = *removeRetiredHostedNetworkClients.Cursor
+	}
+	removedCount, next, more := model.RemoveRetiredHostedNetworkClients(clientSession.Ctx, now, cursor, settings)
+	if 0 < removedCount {
+		glog.Infof("[ncm]removed %d retired hosted clients\n", removedCount)
+	}
+	return &RemoveRetiredHostedNetworkClientsResult{
+		RemovedCount: removedCount,
+		Cursor:       next,
+		More:         more,
+	}, nil
+}
+
+// A run that left work behind continues a minute later.
+func RemoveRetiredHostedNetworkClientsPost(
+	removeRetiredHostedNetworkClients *RemoveRetiredHostedNetworkClientsArgs,
+	removeRetiredHostedNetworkClientsResult *RemoveRetiredHostedNetworkClientsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	runAt := server.NowUtc().Add(5 * time.Minute)
+	if removeRetiredHostedNetworkClientsResult.More {
+		runAt = server.NowUtc().Add(1 * time.Minute)
+	}
+	cursor := removeRetiredHostedNetworkClientsResult.Cursor
+	scheduleRemoveRetiredHostedNetworkClients(
+		clientSession,
+		tx,
+		&RemoveRetiredHostedNetworkClientsArgs{Cursor: &cursor},
+		runAt,
+	)
 	return nil
 }
 
