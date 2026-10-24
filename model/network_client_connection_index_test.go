@@ -20,12 +20,23 @@ const (
 )
 
 // Seeds a connection table shaped like Main's: 4,000 closed rows waiting for
-// the reaper and 200 open ones, one open row per client, and analyzes it so
+// the reaper and 200 open ones, one open row per client, with the clients,
+// their locations and the handlers the readers join, and analyzes them so
 // each reader is planned against that distribution. Returns an open client
 // and its address hash.
 func testingSeedConnectionDistribution(t testing.TB, ctx context.Context) (clientId server.Id, clientAddressHash []byte) {
 	t.Helper()
 	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network_client (client_id, network_id, description, create_time, auth_time)
+			SELECT md5('index-client-'||k)::uuid, md5('index-network')::uuid, 'index client', $1, $1
+			FROM generate_series(0, 199) AS k
+		`, server.NowUtc()))
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network_client_handler (handler_id, heartbeat_time, handler_host)
+			SELECT md5('index-handler-'||h)::uuid, $1, 'handler.example'
+			FROM generate_series(0, 3) AS h
+		`, server.NowUtc()))
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO network_client_connection (
 				client_id, connection_id, connected, connect_time, disconnect_time,
@@ -42,9 +53,14 @@ func testingSeedConnectionDistribution(t testing.TB, ctx context.Context) (clien
 				md5('index-handler-'||(n % 4))::uuid
 			FROM generate_series(1, 4200) AS n
 		`, server.NowUtc()))
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network_client_location (connection_id, client_id, city_location_id, region_location_id, country_location_id)
+			SELECT connection_id, client_id, md5('index-city')::uuid, md5('index-region')::uuid, md5('index-country')::uuid
+			FROM network_client_connection
+		`))
 	})
 	server.Db(ctx, func(conn server.PgConn) {
-		server.RaisePgResult(conn.Exec(ctx, `ANALYZE network_client_connection`))
+		server.RaisePgResult(conn.Exec(ctx, `ANALYZE network_client, network_client_handler, network_client_connection, network_client_location`))
 		server.Raise(conn.QueryRow(
 			ctx,
 			`SELECT client_id, client_address_hash FROM network_client_connection WHERE connected ORDER BY connection_id LIMIT 1`,
@@ -123,10 +139,11 @@ func TestNetworkClientConnectionReadersUsePartialIndexes(t *testing.T) {
 				allowed:  openIndexes,
 			},
 			{
-				name:    "location pass open connections",
-				query:   clientLocationReliabilityConnectedSql,
-				args:    []any{now, false, []server.Id{}},
-				allowed: append([]string{testingConnectionPrimaryKey}, openIndexes...),
+				name:     "location pass open connections",
+				query:    clientLocationReliabilityConnectedSql,
+				args:     []any{now.Add(-time.Minute), false, []server.Id{}},
+				required: openIndexes,
+				allowed:  append([]string{testingConnectionPrimaryKey}, openIndexes...),
 			},
 			{
 				name:     "location pass recently closed connections",
