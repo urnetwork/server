@@ -1297,7 +1297,16 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       report in another retained week, and the census never publishes a
       partial component. The receipts prune to exactly the weeks (or DEFAULT,
       or legacy) holding the reports. An archived contract, whose receipts
-      left with it, reads every partition.
+      left with it, reads every partition. The bound applies only once the
+      evidence is partitioned; on the plain table it would prune nothing, and
+      the census reads every report as before.
+    - **Checks:** the staged parent copies the table's checks with `LIKE ...
+      INCLUDING CONSTRAINTS` rather than re-adding them from their printed
+      definitions. On PostgreSQL 18 the `party` and `original_key_issue`
+      checks re-parse into a different tree (the varchar array's cast moves
+      into its elements), and the attach refuses a check that differs. A
+      `NOT VALID` check on the table blocks the prepare. The contract tables'
+      checks print stably, so their cutover keeps re-adding them.
     - **Locks:** creating a week takes ACCESS EXCLUSIVE on the parent, then
       DEFAULT, for milliseconds. Locking DEFAULT alone would let an insert
       route its row to DEFAULT and then fail the partition check once the
