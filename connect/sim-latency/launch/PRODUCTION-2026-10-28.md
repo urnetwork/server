@@ -310,5 +310,12 @@ could compile tests but could not launch their binaries. The private `/work`
 tmpfs now explicitly permits execution; source and metadata host mounts remain
 read-only, `/tmp` and binary-export tmpfs remain non-executable, and core dumps
 are disabled. Fixed-argument regression coverage and actual Docker mount
-inspection guard this distinction. Full real-container verification is still
-in progress; this is not yet a successful build or qualification receipt.
+inspection guard this distinction. The corrected trusted-base real-container
+probe passed: check 22.55 seconds, compile 24.28 seconds, clean exact source
+revision, and no residual owned containers. Its 126,549,552-byte binary has
+SHA-256 `dd682292eba9d38f0fecd7b48ecdd1a96f942fe44fdbc44927bff472226d89ab`,
+identical to the frozen evaluator simulator. Probe log SHA-256:
+`f331c72ede942e52819bbdff8ee987bf61abbad536865d991900920ed6307c16`.
+Fixed-boundary regressions passed three consecutive race-enabled runs. These
+prove the trusted-base component path, not adversarial winner qualification,
+independent model-owned test execution, or complete live broker integration.
