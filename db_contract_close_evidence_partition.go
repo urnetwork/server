@@ -529,6 +529,32 @@ func closeEvidenceRemovalTargets(ctx context.Context, now time.Time) (targets []
 	return closeEvidenceRemovalOrder(leaves, blockers), nil
 }
 
+// Where an unfinished close evidence pass resumes: the leaf it was deleting
+// from (the table itself while it is plain) and the next contract id there.
+type CloseEvidenceRemovalCursor struct {
+	Leaf       string
+	ContractId *Id
+}
+
+// The index of the target the pass resumes at, and the contract id it resumes
+// from there. A cursor without a leaf comes from before the leaf was recorded,
+// so it belongs to the plain table. A leaf that is no longer a target (dropped,
+// or no longer kept by a straggler) starts the pass over.
+func (self CloseEvidenceRemovalCursor) resumeIn(targets []string) (start int, from Id) {
+	leaf := self.Leaf
+	if leaf == "" && self.ContractId != nil {
+		leaf = closeEvidenceTable
+	}
+	start = slices.Index(targets, leaf)
+	if start < 0 {
+		return 0, Id{}
+	}
+	if self.ContractId != nil {
+		from = *self.ContractId
+	}
+	return
+}
+
 // The removal targets of leaves, given the blockers of the expired weeks (see
 // closeEvidenceRemovalTargets).
 func closeEvidenceRemovalOrder(leaves []PartitionLeaf, blockers map[string]string) (targets []string) {

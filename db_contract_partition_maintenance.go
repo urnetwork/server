@@ -490,32 +490,6 @@ func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor Close
 	return removed, CloseEvidenceRemovalCursor{}, false
 }
 
-// Where an unfinished close evidence pass resumes: the leaf it was deleting
-// from (the table itself while it is plain) and the next contract id there.
-type CloseEvidenceRemovalCursor struct {
-	Leaf       string
-	ContractId *Id
-}
-
-// The index of the target the pass resumes at, and the contract id it resumes
-// from there. A cursor without a leaf comes from before the leaf was recorded,
-// so it belongs to the plain table. A leaf that is no longer a target (dropped,
-// or no longer kept by a straggler) starts the pass over.
-func (self CloseEvidenceRemovalCursor) resumeIn(targets []string) (start int, from Id) {
-	leaf := self.Leaf
-	if leaf == "" && self.ContractId != nil {
-		leaf = closeEvidenceTable
-	}
-	start = slices.Index(targets, leaf)
-	if start < 0 {
-		return 0, Id{}
-	}
-	if self.ContractId != nil {
-		from = *self.ContractId
-	}
-	return
-}
-
 // Deletes the expired evidence of one leaf (or of the plain table) from the
 // contract id from, until deadline. complete says a batch came up short, and
 // ok is false when a batch failed; otherwise last is where the leaf resumes.
