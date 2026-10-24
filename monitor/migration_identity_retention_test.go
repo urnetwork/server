@@ -68,10 +68,14 @@ func TestMigrationCurrentSuffixContractsEmitInVersionOrder(t *testing.T) {
 	if merged[0].artifact.requiredVersion != 902 {
 		t.Fatal("ordering rewrote the merged list")
 	}
+	// a gap would shift every later row column as surely as a swap
 	artifacts := migrationCurrentSuffixArtifacts()
+	if len(artifacts) == 0 || artifacts[0].requiredVersion != 794 || artifacts[len(artifacts)-1].requiredVersion != server.MigrationCount() {
+		t.Fatalf("suffix artifacts do not run from 794 to the head %d", server.MigrationCount())
+	}
 	for index := 1; index < len(artifacts); index++ {
-		if artifacts[index].requiredVersion <= artifacts[index-1].requiredVersion {
-			t.Fatalf("suffix artifacts out of version order at %d: %d after %d", index, artifacts[index].requiredVersion, artifacts[index-1].requiredVersion)
+		if artifacts[index].requiredVersion != artifacts[index-1].requiredVersion+1 {
+			t.Fatalf("suffix artifacts are not contiguous at %d: %d after %d", index, artifacts[index].requiredVersion, artifacts[index-1].requiredVersion)
 		}
 	}
 }

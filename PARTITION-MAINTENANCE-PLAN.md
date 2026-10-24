@@ -825,6 +825,9 @@ Changes:
       (deactivate_time, client_id) WHERE NOT active AND source_client_id IS
       NOT NULL`, with a cursor, so each retired child is examined once. A
       window that is still connected is passed.
+    - The index migration is enrolled in completion recovery, so the index
+      can be built out of band beforehand with the same `CREATE INDEX
+      CONCURRENTLY`, and the deploy then only checks it.
     - Dependents go after each page commits. The shared cascade now also
       deletes roles and the whole provide mirror.
     - A chain starts at the horizon. Windows retired before its first run

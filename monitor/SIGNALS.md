@@ -8101,7 +8101,9 @@ only says how long is left, not why. Facts on 10-22:
   rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
   `remove_gone_st_client_key_history` deletes a client's history 91 days after
   the client went (`st_client_key_gone`), so it stays on this append-only list
-  until the first deletes, about 91 days after that migration.
+  until the first deletes. Those can come about 61 days after that migration:
+  a child the 30-day reap deletes then went at its deactivation, up to 30 days
+  before the migration.
 
 Checks, all cheap and read-only:
 1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
