@@ -19,8 +19,8 @@
 // dashboard counts publish them as urnetwork_stats_provider_modern_gate_shadow
 // and every score export logs them.
 //
-// The gate turns on by itself at its start, 2026-10-21 00:00 UTC by default
-// (owner decision 2026-10-15; EgressIndexSettings.RequiresModernProvider),
+// The gate turns on by itself at its start, 2026-11-04 00:00 UTC by default
+// (owner decision 2026-10-24; EgressIndexSettings.RequiresModernProvider),
 // and from then takes every provider whose outcome is not modern out of
 // Quality and Speed under the not_modern reason. Each pass decides at its
 // own instant, so a pass decides every provider alike.
