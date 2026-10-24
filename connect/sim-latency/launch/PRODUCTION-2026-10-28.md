@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 24, 22:32 UTC
+## Current preparation pointer — October 24, 23:02 UTC
 
 Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
 retains the chronological preparation journal below; its earlier checkpoint
@@ -21,8 +21,12 @@ qualification attempts are in
 Its synthetic-local end-to-end smoke and malicious build-isolation checks have
 passed independently. A separate host CPU/72 GiB memory-bomb test passed, with
 575 ms management-core cleanup; that result is not image-bound host qualification.
-A fresh 15,000-provider impairment-on public-seed frontier point is running
-under `temp/provide-frontier-20261024.B0P1kUpz`, with fresh services and source.
+A fresh 15,000-provider impairment-on public-seed frontier point failed at
+matchmaking probe 6; it is not a baseline or accepted scale. The resulting
+transaction-snapshot and shard-construction corrections have passing focused
+regressions and still require full validation, a coherent replacement source
+ledger/image and fresh measurements. See
+[STARTUP-AND-SNAPSHOT-2026-10-24.md](STARTUP-AND-SNAPSHOT-2026-10-24.md).
 No previous checkpoint's measurements are being reused as the new baseline.
 Current source publication is
 explicitly `prepared_not_activated`; final scale/margin, fresh calibration,

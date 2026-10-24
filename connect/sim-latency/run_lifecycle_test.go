@@ -55,6 +55,31 @@ func TestFleetAccountingProtocolStartsDynamicsAndReturnsSnapshots(t *testing.T) 
 	}
 }
 
+// The child serves this pipe only after constructing its fleet. A readiness
+// acknowledgement must not draw dynamics or reset accounting before prewarm.
+func TestFleetAccountingProtocolAcknowledgesConstructionBeforeDynamics(t *testing.T) {
+	var responses bytes.Buffer
+	started, snapshots := 0, 0
+	err := serveFleetAccounting(
+		strings.NewReader("ready\nsnapshot\nstart-dynamics\nsnapshot\n"),
+		&responses,
+		func() int64 {
+			snapshots++
+			return 17
+		},
+		func() error {
+			started++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal("fleet construction readiness cannot be authenticated before prewarm:", err)
+	}
+	if responses.String() != "0\n17\n0\n17\n" || snapshots != 2 || started != 1 {
+		t.Fatalf("readiness altered dynamics/accounting: replies=%q starts=%d snapshots=%d", responses.String(), started, snapshots)
+	}
+}
+
 func TestFleetAccountingProtocolRejectsUnknownCommand(t *testing.T) {
 	err := serveFleetAccounting(
 		strings.NewReader("reset\n"),
