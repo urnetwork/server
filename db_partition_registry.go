@@ -19,6 +19,9 @@
 //		Retention:   7 * 24 * time.Hour,
 //	})
 //
+// A hook that refers back to the family's own var makes an initialization
+// cycle; register such a family from an init function instead.
+//
 // The declaration says:
 //   - the tables, all partitioned on the same ranges of KeyColumn (created in
 //     Tables order, dropped children first, in reverse);
@@ -41,7 +44,9 @@
 //   - optionally an archive step before a drop (Archive), resumable through a
 //     cursor the registry keeps.
 //
-// Each hook is optional; a nil hook is the registry's default.
+// Each hook is optional; a nil hook is the registry's default. A hook may
+// raise (server.Raise) instead of returning an error; the registry reports
+// either as that hook's failure.
 //
 // # What the registry gives every family
 //

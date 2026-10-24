@@ -2,8 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -28,6 +29,39 @@ import (
 //
 // Before the cutover it only guards a prepared cutover from outliving its
 // week, and removes evidence.
+
+// The contract tables' family in the partition registry
+// (PARTITION-MAINTENANCE-PLAN.md A7, db_partition_registry.go). This task keeps
+// its own pass: it analyzes and retires through the family, and keeps the
+// archive step, the evidence deletes and the cutover guard. The registry's
+// runway task creates its weeks ahead too, apart from the archive work.
+// Registered from init, since its create refers back to the family.
+var contractPartitionFamily *PartitionFamily
+
+func init() {
+	contractPartitionFamily = RegisterPartitionFamily(&PartitionFamily{
+		Name:                  "contract",
+		Description:           "the six contract tables, weekly by contract_id; maintain_contract_partitions analyzes and retires them",
+		Tables:                append([]string{}, ContractPartitionTables...),
+		KeyColumn:             "contract_id",
+		KeyKind:               PartitionKeyId,
+		Granularity:           PartitionGranularityWeekly,
+		AheadRanges:           ContractPartitionAheadWeeks,
+		Retention:             ContractRetention,
+		LeafAnalyzeDelay:      contractPartitionAnalyzeDelay,
+		AnalyzeByOwnTask:      true,
+		RetireByOwnTask:       true,
+		ReindexExempt:         true,
+		MonitorRunwayRanges:   2,
+		MonitorRetentionGrace: 2 * contractPartitionWeek,
+		RunwaySignal:          "2.4h",
+		RetentionSignal:       "2.4i",
+		CreateLeaf:            createContractWeekLeaf,
+		DropPrecondition: func(ctx context.Context, conn PgQuerier, r PartitionRange) string {
+			return contractWeekBlocker(ctx, conn, contractWeekOfRange(r))
+		},
+	})
+}
 
 // Where an unfinished pass resumes.
 type ContractRetentionCursor struct {
@@ -107,131 +141,59 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 	return
 }
 
-// Creates the missing partitions of the current week and the weeks ahead, and
-// counts the weeks after the current one that have one in every table. Until
-// the cutover week starts, the legacy partition covers the weeks before it.
+// Creates the missing partitions of the current week and the weeks ahead
+// through the registry (EnsureRunway), and counts the weeks after the current
+// one that have one in every table. Until the cutover week starts, the legacy
+// partition covers the weeks before it.
 func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created []string, futureWeeks int, err error) {
-	currentWeek := ContractPartitionWeekStart(now)
-	futureWeeks = -1
-	for _, table := range ContractPartitionTables {
-		partitions, listErr := listContractPartitions(ctx, table)
-		if listErr != nil {
-			return created, 0, listErr
-		}
-		existing := map[string]bool{}
-		var legacyUpper time.Time
-		// new partitions take the newest partition's storage settings, so a
-		// setting changed there carries forward
-		template := ContractLegacyPartitionName(table)
-		var newest time.Time
-		for _, partition := range partitions {
-			existing[partition.name] = true
-			if partition.legacy {
-				legacyUpper = partition.upper
-			} else if newest.Before(partition.weekStart) {
-				newest = partition.weekStart
-				template = partition.name
-			}
-		}
-		covered := func(weekStart time.Time) bool {
-			return existing[ContractPartitionName(table, weekStart)] || !legacyUpper.Before(weekStart.Add(contractPartitionWeek))
-		}
-		var parentShape *contractTableShape
-		var templateShape *contractTableShape
-		for week := 0; week <= ContractPartitionAheadWeeks; week += 1 {
-			weekStart := currentWeek.Add(time.Duration(week) * contractPartitionWeek)
-			name := ContractPartitionName(table, weekStart)
-			if covered(weekStart) {
-				continue
-			}
-			if parentShape == nil {
-				MaintenanceDb(ctx, func(conn PgConn) {
-					parentShape = readContractTableShape(ctx, conn, table)
-					templateShape = readContractTableShape(ctx, conn, template)
-				})
-				if parentShape == nil || templateShape == nil {
-					return created, 0, fmt.Errorf("%s or %s is missing", table, template)
-				}
-			}
-			statements, sqlErr := contractWeekPartitionSql(table, parentShape, table, weekStart, templateShape.reloptions, parentShape, table)
-			if sqlErr != nil {
-				return created, 0, sqlErr
-			}
-			if execErr := contractPartitionExec(ctx, append([]string{`SET LOCAL lock_timeout = '5s'`}, statements...)); execErr != nil {
-				// retried on the next run
-				err = fmt.Errorf("create %s: %w", name, execErr)
-				continue
-			}
-			existing[name] = true
-			created = append(created, name)
-		}
-		tableFutureWeeks := 0
-		for week := 1; covered(currentWeek.Add(time.Duration(week) * contractPartitionWeek)); week += 1 {
-			tableFutureWeeks += 1
-		}
-		if futureWeeks < 0 || tableFutureWeeks < futureWeeks {
-			futureWeeks = tableFutureWeeks
+	runway := contractPartitionFamily.EnsureRunway(ctx, now)
+	if 0 < len(runway.Errors) {
+		// retried on the next run
+		err = errors.New(strings.Join(runway.Errors, "; "))
+	}
+	return runway.Created, runway.FutureRanges, err
+}
+
+// Creates table's partition for the week r (the family's CreateLeaf): an empty
+// table with the parent's columns and checks, the storage settings of the
+// newest partition (so a setting changed there carries forward) and the
+// TRUNCATE guards, attached so the parent sees only SHARE UPDATE EXCLUSIVE.
+func createContractWeekLeaf(ctx context.Context, table string, r PartitionRange) error {
+	partitions, err := listContractPartitions(ctx, table)
+	if err != nil {
+		return err
+	}
+	template := ContractLegacyPartitionName(table)
+	var newest time.Time
+	for _, partition := range partitions {
+		if !partition.legacy && newest.Before(partition.weekStart) {
+			newest = partition.weekStart
+			template = partition.name
 		}
 	}
-	return
+	var parentShape *contractTableShape
+	var templateShape *contractTableShape
+	MaintenanceDb(ctx, func(conn PgConn) {
+		parentShape = readContractTableShape(ctx, conn, table)
+		templateShape = readContractTableShape(ctx, conn, template)
+	})
+	if parentShape == nil || templateShape == nil {
+		return fmt.Errorf("%s or %s is missing", table, template)
+	}
+	statements, err := contractWeekPartitionSql(table, parentShape, table, r.Lower, templateShape.reloptions, parentShape, table)
+	if err != nil {
+		return err
+	}
+	lockTimeout := contractPartitionFamily.settings().CreateLockTimeout
+	return contractPartitionExec(ctx, append([]string{fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeout.Milliseconds())}, statements...))
 }
 
 // Analyzes each weekly partition once its week has settled, and the parents
-// once a week.
+// once a week, through the registry.
 func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedWeek string, deadline time.Time) (analyzed []string, nextAnalyzedWeek string) {
-	nextAnalyzedWeek = analyzedWeek
-	analyze := func(statement string) bool {
-		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
-			glog.Errorf("[cp]%s: %s\n", statement, err)
-			return false
-		}
-		return true
-	}
-	for _, table := range ContractPartitionTables {
-		partitions, err := listContractPartitions(ctx, table)
-		if err != nil {
-			glog.Errorf("[cp]%s\n", err)
-			continue
-		}
-		for _, partition := range partitions {
-			settled := partition.upper.Add(contractPartitionAnalyzeDelay)
-			if partition.legacy || now.Before(settled) || !time.Now().Before(deadline) {
-				continue
-			}
-			var lastAnalyze *time.Time
-			MaintenanceDb(ctx, func(conn PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`SELECT GREATEST(last_analyze, last_autoanalyze) FROM pg_stat_user_tables WHERE relid = to_regclass($1)`,
-					"public."+partition.name,
-				)
-				WithPgResult(result, err, func() {
-					if result.Next() {
-						Raise(result.Scan(&lastAnalyze))
-					}
-				})
-			})
-			if lastAnalyze != nil && !lastAnalyze.Before(settled) {
-				continue
-			}
-			if analyze(fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(partition.name))) {
-				analyzed = append(analyzed, partition.name)
-			}
-		}
-	}
-	if week := ContractPartitionWeekStart(now).Format(time.DateOnly); week != analyzedWeek && time.Now().Before(deadline) {
-		parents := true
-		for _, table := range ContractPartitionTables {
-			if analyze(fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table))) {
-				analyzed = append(analyzed, table)
-			} else {
-				parents = false
-			}
-		}
-		if parents {
-			nextAnalyzedWeek = week
-		}
-	}
+	analyzed = contractPartitionFamily.AnalyzeClosedLeaves(ctx, now, deadline)
+	parents, nextAnalyzedWeek := contractPartitionFamily.AnalyzeParents(ctx, now, analyzedWeek, deadline)
+	analyzed = append(analyzed, parents...)
 	return
 }
 
@@ -247,6 +209,35 @@ func (self contractWeek) leaf(table string) string {
 		return ContractLegacyPartitionName(table)
 	}
 	return ContractPartitionName(table, self.partition.weekStart)
+}
+
+// The week as the registry's range.
+func (self contractWeek) partitionRange() PartitionRange {
+	if self.partition.legacy {
+		return PartitionRange{Upper: self.partition.upper, Legacy: true}
+	}
+	return PartitionRange{Lower: self.partition.weekStart, Upper: self.partition.upper}
+}
+
+// The week of a registry range of the contract tables.
+func contractWeekOfRange(r PartitionRange) contractWeek {
+	name := ContractLegacyPartitionName("transfer_contract")
+	if !r.Legacy {
+		name = ContractPartitionName("transfer_contract", r.Lower)
+	}
+	week := contractWeek{
+		partition: contractPartition{
+			name:      name,
+			legacy:    r.Legacy,
+			weekStart: r.Lower,
+			upper:     r.Upper,
+		},
+		upper: ContractIdFloor(r.Upper),
+	}
+	if !r.Legacy {
+		week.lower = ContractIdFloor(r.Lower)
+	}
+	return week
 }
 
 // Why an expired week cannot be dropped yet, or "" if it can. Each check
@@ -286,24 +277,16 @@ func contractWeekBlocker(ctx context.Context, conn contractCatalogQuerier, week 
 	return ""
 }
 
+// The weeks whose upper bound is ContractRetention past, oldest first: the
+// registry's expired ranges of the contract tables.
 func expiredContractWeeks(ctx context.Context, now time.Time) (weeks []contractWeek, err error) {
-	partitions, err := listContractPartitions(ctx, "transfer_contract")
+	ranges, err := contractPartitionFamily.ExpiredRanges(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-	for _, partition := range partitions {
-		if now.Before(partition.upper.Add(ContractRetention)) {
-			continue
-		}
-		week := contractWeek{partition: partition, upper: ContractIdFloor(partition.upper)}
-		if !partition.legacy {
-			week.lower = ContractIdFloor(partition.weekStart)
-		}
-		weeks = append(weeks, week)
+	for _, r := range ranges {
+		weeks = append(weeks, contractWeekOfRange(r))
 	}
-	slices.SortFunc(weeks, func(a contractWeek, b contractWeek) int {
-		return a.partition.upper.Compare(b.partition.upper)
-	})
 	return
 }
 
@@ -404,42 +387,18 @@ func retireExpiredContractWeeks(ctx context.Context, now time.Time, cursor Contr
 }
 
 // Detaches and drops the week's six partitions in one transaction, children
-// first. The detach takes a brief ACCESS EXCLUSIVE lock on each parent, so the
-// lock wait is short and a busy run retries next time. Once detached, no
-// statement can reach the partitions, so the blockers are checked again there
-// before the drop.
+// first, through the registry's guarded drop (PartitionFamily.DropRange): the
+// blockers are checked again on the detached partitions, which no statement
+// can reach. A detach takes a brief ACCESS EXCLUSIVE lock on each parent, so
+// the drop first waits out no long transaction that holds a contract table
+// lock, the lock wait is short, and a busy run retries next time.
 func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string, err error) {
-	tables := slices.Clone(ContractPartitionTables)
-	slices.Reverse(tables)
 	if busy, busyErr := contractTablesBusy(ctx, DefaultContractPartitionLockSettings().MaxTransactionAge); busyErr != nil {
 		return nil, busyErr
 	} else if 0 < busy {
 		return nil, fmt.Errorf("%d long transaction(s) hold contract table locks; retried next run", busy)
 	}
-	err = contractPartitionTx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
-		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = '60s'`))
-		for _, table := range tables {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-				"ALTER TABLE public.%s DETACH PARTITION public.%s",
-				quoteIdentifier(table),
-				quoteIdentifier(week.leaf(table)),
-			)))
-		}
-		if blocker := contractWeekBlocker(ctx, tx, week); blocker != "" {
-			panic(fmt.Errorf("%s after detach", blocker))
-		}
-		for _, table := range tables {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(week.leaf(table)))))
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-	for _, table := range tables {
-		dropped = append(dropped, week.leaf(table))
-	}
-	return
+	return contractPartitionFamily.DropRange(ctx, week.partitionRange())
 }
 
 // Deletes close evidence accepted more than ContractRetention ago whose
