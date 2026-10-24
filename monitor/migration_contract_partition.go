@@ -17,14 +17,17 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// ('transfer_contract', ..., 'contract_extender')
-var migrationContractTablesSql = func() string {
-	quoted := make([]string, 0, len(server.ContractPartitionTables))
-	for _, table := range server.ContractPartitionTables {
+// A SQL list of quoted table names: ('transfer_contract', ...).
+func migrationQuotedTablesSql(tables []string) string {
+	quoted := make([]string, 0, len(tables))
+	for _, table := range tables {
 		quoted = append(quoted, "'"+table+"'")
 	}
 	return "(" + strings.Join(quoted, ", ") + ")"
-}()
+}
+
+// ('transfer_contract', ..., 'contract_extender')
+var migrationContractTablesSql = migrationQuotedTablesSql(server.ContractPartitionTables)
 
 // The cutover swaps all six tables in one transaction, so transfer_contract's
 // kind is the layout of every contract table.
@@ -34,12 +37,18 @@ func isMigrationContractTable(table string) bool {
 	return slices.Contains(server.ContractPartitionTables, table)
 }
 
+// The tables published as plain tables that an operator cutover may make
+// partitioned parents: the contract tables, and provider_egress_health_history
+// (PARTITION-MAINTENANCE-PLAN.md C2).
+var migrationPartitionableTablesSql = migrationQuotedTablesSql(append(append([]string{}, server.ContractPartitionTables...), migrationEgressHealthHistoryTable))
+
 // pg_get_indexdef with its whitespace collapsed, for the index whose pg_class
 // row is indexRelation on the table named by the SQL expression tableName. A
-// partitioned index of a contract table drops the ONLY of its table clause, so
-// it compares equal to the published definition; its validity still requires
-// an attached valid index on every partition. Other partitioned tables keep
-// ONLY, which their own contracts pin.
+// partitioned index of a table a cutover partitions (a contract table, the
+// egress health history) drops the ONLY of its table clause, so it compares
+// equal to the published definition; its validity still requires an attached
+// valid index on every partition. Other partitioned tables keep ONLY, which
+// their own contracts pin.
 func migrationIndexDefinitionSql(indexRelation string, tableName string) string {
 	definition := fmt.Sprintf(`regexp_replace(pg_get_indexdef(%s.oid), '[[:space:]]+', ' ', 'g')`, indexRelation)
 	return fmt.Sprintf(
@@ -48,7 +57,7 @@ func migrationIndexDefinitionSql(indexRelation string, tableName string) string 
 		       ELSE %[4]s END`,
 		indexRelation,
 		tableName,
-		migrationContractTablesSql,
+		migrationPartitionableTablesSql,
 		definition,
 	)
 }
