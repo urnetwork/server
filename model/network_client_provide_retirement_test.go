@@ -11,6 +11,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"sync"
@@ -564,5 +565,84 @@ func TestReapedClientRemovesMirrorAndRoles(t *testing.T) {
 				t.Fatalf("the reaped client kept %d roles", roleCount)
 			}
 		})
+	})
+}
+
+// The abandoned top-level mark can rerun after its update and key delete were
+// sent and its commit failed. A rerun that finds the client connected again
+// marks nothing: the client stays active with its keys and mirror, since the
+// failed attempt's delete rolled back and its post was discarded.
+func TestAbandonedTopLevelMarkRetryKeepsKeysOfReconnectedClient(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "test", "test")
+		secretKeys := map[ProvideMode][]byte{
+			ProvideModePublic: provideRetirementTestKey(0xb1),
+		}
+		SetProvide(ctx, clientId, secretKeys)
+		now := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET auth_time = $2 WHERE client_id = $1`,
+				clientId,
+				now.Add(-TopLevelClientIdleExpiration-time.Hour),
+			))
+		})
+
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		// The sequence is not rolled back, so the commit failure happens once.
+		server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(`
+			CREATE SEQUENCE client_mark_retry_seq;
+			CREATE FUNCTION client_mark_retry_once() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				IF NEW.client_id::text = TG_ARGV[0] AND NOT NEW.active THEN
+					IF nextval('client_mark_retry_seq') = 1 THEN
+						RAISE EXCEPTION 'synthetic mark retry' USING ERRCODE = '40001';
+					END IF;
+				END IF;
+				RETURN NEW;
+			END $$;
+			CREATE CONSTRAINT TRIGGER client_mark_retry
+			AFTER UPDATE ON network_client DEFERRABLE INITIALLY DEFERRED
+			FOR EACH ROW EXECUTE FUNCTION client_mark_retry_once('%s')`, clientId.String())))
+		defer func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if _, err := conn.Exec(cleanup, `DROP TRIGGER client_mark_retry ON network_client;
+				DROP FUNCTION client_mark_retry_once(); DROP SEQUENCE client_mark_retry_seq`); err != nil {
+				t.Errorf("mark retry fixture cleanup failed: %v", err)
+			}
+		}()
+		reruns := 0
+		workerCtx := server.Testing_WithTxRerunHook(ctx, func() {
+			reruns++
+			if reruns != 1 {
+				panic("the mark retried more than once")
+			}
+			// the client connects between the attempts
+			if _, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.21:20000", server.NewId()); err != nil {
+				panic(err)
+			}
+		})
+
+		RemoveDisconnectedNetworkClients(workerCtx, now.Add(-8*time.Hour), now.Add(-NetworkClientReapAfterDeactivate), now.Add(-TopLevelClientIdleExpiration))
+
+		var faults int
+		server.Raise(conn.QueryRow(ctx, `SELECT last_value FROM client_mark_retry_seq`).Scan(&faults))
+		if reruns != 1 || faults != 1 {
+			t.Fatalf("the mark did not rerun once after its commit fault: reruns=%d faults=%d", reruns, faults)
+		}
+		var active bool
+		server.Raise(conn.QueryRow(ctx, `SELECT active FROM network_client WHERE client_id = $1`, clientId).Scan(&active))
+		if !active {
+			t.Fatal("the rerun marked a reconnected client inactive")
+		}
+		assertProvideSecretKeys(t, ctx, clientId, secretKeys)
 	})
 }

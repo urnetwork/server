@@ -3733,6 +3733,8 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// an attempt that does not commit marked nothing
+			batchCount = 0
 			clientIds := []server.Id{}
 			result, err := tx.Query(
 				ctx,
