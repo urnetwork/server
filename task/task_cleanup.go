@@ -240,7 +240,8 @@ func taskCleanupNow(ctx context.Context) func() time.Time {
 
 // One budgeted run from the position in its arguments. Retention is measured
 // from the run's start. On a partitioned table the run removes nothing and
-// completes its sweep.
+// completes its sweep; it only makes sure today and tomorrow have a day, so a
+// stalled partition runway never leaves a completion without one.
 func TaskCleanup(
 	taskCleanup *TaskCleanupArgs,
 	clientSession *session.ClientSession,
@@ -248,8 +249,14 @@ func TaskCleanup(
 	now := taskCleanupNow(clientSession.Ctx)
 	startTime := now()
 	if finishedTaskPartitioned(clientSession.Ctx) {
-		if glog.V(1) {
-			glog.Infof("[task]cleanup: finished_task is partitioned; its retention is the partition drop\n")
+		// the registry's runway keeps these days long ahead, so this creates
+		// one only when that task has stalled
+		for _, day := range []time.Time{startTime, startTime.AddDate(0, 0, 1)} {
+			if created, err := finishedTaskPartitionFamily.EnsureRangeFor(clientSession.Ctx, day); err != nil {
+				glog.Errorf("[task]cleanup could not create the finished_task day of %s: %s\n", day.Format(time.DateOnly), err)
+			} else if 0 < len(created) {
+				glog.Errorf("[task]cleanup created the missing finished_task days %v: the partition runway is behind\n", created)
+			}
 		}
 		return &TaskCleanupResult{}, nil
 	}

@@ -582,7 +582,6 @@ func prepareFinishedTaskCutover(ctx context.Context, cutoverDay time.Time, opera
 		}
 	}
 	if !boundValidated {
-		statement := fmt.Sprintf("ALTER TABLE public.finished_task VALIDATE CONSTRAINT %s", quoteIdentifier(finishedTaskLegacyBoundName))
 		if dryRun {
 			logf("would validate %s (scans finished_task under SHARE UPDATE EXCLUSIVE)", finishedTaskLegacyBoundName)
 		} else {
@@ -591,11 +590,7 @@ func prepareFinishedTaskCutover(ctx context.Context, cutoverDay time.Time, opera
 			// SHARE UPDATE EXCLUSIVE never blocks completions, so the step
 			// does not wait for a quiet table
 			err := finishedTaskCutoverRetry(ctx, settings, settings.CutoverAttempts, false, func() error {
-				return finishedTaskLongTx(ctx, func(tx PgTx) {
-					RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.ValidateLockTimeout.Milliseconds())))
-					RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
-					RaisePgResult(tx.Exec(ctx, statement))
-				})
+				return validateFinishedTaskLegacyBound(ctx, settings)
 			}, logf)
 			if err != nil {
 				return fmt.Errorf("validate %s: %w", finishedTaskLegacyBoundName, err)
@@ -609,6 +604,23 @@ func prepareFinishedTaskCutover(ctx context.Context, cutoverDay time.Time, opera
 		logf("prepared; run --finalize before %s", cutoverDay.Add(-settings.CutoverAbandonMargin).Format(time.RFC3339))
 	}
 	return nil
+}
+
+// Validates the legacy bound: one scan of the table under SHARE UPDATE
+// EXCLUSIVE, which may run past transaction_timeout, so its session runs
+// without it.
+func validateFinishedTaskLegacyBound(ctx context.Context, settings *FinishedTaskPartitionSettings) error {
+	return partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			WithoutTransactionTimeout(ctx, conn, func() {
+				TxInConn(ctx, conn, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.ValidateLockTimeout.Milliseconds())))
+					RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+					RaisePgResult(tx.Exec(ctx, fmt.Sprintf("ALTER TABLE public.finished_task VALIDATE CONSTRAINT %s", quoteIdentifier(finishedTaskLegacyBoundName))))
+				}, TxReadCommitted, OptNoRetry())
+			})
+		}, OptNoRetry())
+	})
 }
 
 // The swap's ATTACH must adopt a valid legacy index for every parent index; a
@@ -821,9 +833,20 @@ func finalizeFinishedTaskCutover(ctx context.Context, deadline bool, dryRun bool
 }
 
 // The parent starts without statistics, and autovacuum never analyzes a
-// partitioned parent.
+// partitioned parent. The sample reads every partition, so the session runs
+// without transaction_timeout.
 func analyzeFinishedTaskParent(ctx context.Context, logf func(string, ...any)) error {
-	if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, `ANALYZE ONLY public.finished_task`}); err != nil {
+	err := partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			WithoutTransactionTimeout(ctx, conn, func() {
+				TxInConn(ctx, conn, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+					RaisePgResult(tx.Exec(ctx, `ANALYZE ONLY public.finished_task`))
+				}, TxReadCommitted, OptNoRetry())
+			})
+		}, OptNoRetry())
+	})
+	if err != nil {
 		return fmt.Errorf("analyze finished_task: %w", err)
 	}
 	logf("analyzed the parent")
@@ -890,8 +913,8 @@ func finishedTaskRollbackPlanInConn(ctx context.Context, conn PgQuerier, setting
 // which the parent alone holds, is also in the legacy table. Each probe reads
 // the legacy primary key, which leads with the task id.
 const finishedTaskRollbackIdentitySql = `SELECT EXISTS (
-	SELECT 1 FROM public.finished_task day
-	WHERE EXISTS (SELECT 1 FROM ONLY public.finished_task_legacy legacy WHERE legacy.task_id = day.task_id)
+	SELECT 1 FROM public.finished_task daily
+	WHERE EXISTS (SELECT 1 FROM ONLY public.finished_task_legacy legacy_row WHERE legacy_row.task_id = daily.task_id)
 )`
 
 // With the legacy table detached, the parent holds only the daily partitions.
