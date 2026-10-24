@@ -83,9 +83,9 @@
 // analyzes and retires them. A family with its own task (the contract tables,
 // client_reliability, network_ping) sets AnalyzeByOwnTask or RetireByOwnTask,
 // and that task calls the family's methods or keeps its own code. Nothing runs
-// for a family whose first table is not partitioned yet (Partitioned), so a
-// family cut over by an operator command is safe to register before its
-// cutover.
+// for a family whose first table is not partitioned yet (Partitioned) except
+// its BeforeCutover hook on the runway pass, so a family cut over by an
+// operator command is safe to register before its cutover.
 package server
 
 import (
@@ -359,6 +359,11 @@ type PartitionFamily struct {
 	// Whether the family is partitioned yet. nil: the first table is a
 	// partitioned table (relkind p).
 	Partitioned func(ctx context.Context) bool
+	// Runs on each runway pass while the family is not partitioned yet, for a
+	// family an operator command cuts over: for example to abandon a prepared
+	// cutover that could no longer be finalized before its cutover week. Its
+	// failure is the runway report's, retried on the next pass. nil: nothing.
+	BeforeCutover func(ctx context.Context, now time.Time) error
 	// The earliest time whose range must exist, for late writes into old
 	// ranges. nil: now.
 	CreateFrom func(ctx context.Context, now time.Time) time.Time
@@ -903,6 +908,13 @@ func (self *PartitionFamily) EnsureRunway(ctx context.Context, now time.Time) *P
 	report := &PartitionRunwayReport{Family: self.Name, CurrentCovered: true, FutureRanges: -1}
 	if !self.IsPartitioned(ctx) {
 		report.FutureRanges = 0
+		if self.BeforeCutover != nil {
+			if err := partitionRegistryRun(func() {
+				Raise(self.BeforeCutover(ctx, now))
+			}); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("before cutover: %s", err))
+			}
+		}
 		return report
 	}
 	report.Partitioned = true
