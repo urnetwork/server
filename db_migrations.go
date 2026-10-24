@@ -208,13 +208,7 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
-			MaintenanceDb(ctx, func(conn PgConn) {
-				// an online build of a large table outlives the role's
-				// transaction_timeout
-				WithoutTransactionTimeout(ctx, conn, func() {
-					Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
-				})
-			}, OptReadWrite(), OptNoRetry())
+			runOnlineSqlMigration(ctx, v)
 		case *CodeMigration:
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]code = %v\n", i+1, len(migrations), v.callback)
@@ -10989,4 +10983,11 @@ var migrations = []any{
 	// client's rows keep network_client_connection_client_id_connect_time,
 	// and handler reads network_client_connection_connected_handler_id.
 	connectionDisconnectTimeIndexDropMigration,
+
+	// Bound the cleanup horizon (PARTITION-MAINTENANCE-PLAN.md A6): every
+	// transaction of the application's sessions ends at 15 minutes, as a
+	// default of each pool's own role in this database. New sessions pick it
+	// up as the pools recycle; a maintenance operation that runs longer lifts
+	// it for its own session (WithoutTransactionTimeout).
+	newCodeMigration(ApplicationTransactionTimeoutMigrationId, migrationSetApplicationTransactionTimeout),
 }

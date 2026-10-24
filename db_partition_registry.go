@@ -1182,10 +1182,12 @@ func (self *PartitionFamily) Retire(ctx context.Context, now time.Time, state Pa
 	return
 }
 
-// One ANALYZE in its own maintenance transaction, without a statement bound.
+// One ANALYZE in its own maintenance transaction, without a statement or
+// transaction bound: a large leaf's ANALYZE can outlast the role's 15 minutes.
 func partitionRegistryAnalyze(ctx context.Context, statement string) bool {
 	err := partitionRegistryTx(ctx, func(tx PgTx) {
 		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		RaisePgResult(tx.Exec(ctx, liftTransactionTimeoutInTxSql))
 		RaisePgResult(tx.Exec(ctx, statement))
 	})
 	if err != nil {

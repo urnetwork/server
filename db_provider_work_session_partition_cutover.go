@@ -906,7 +906,7 @@ func (self *providerWorkSessionCutover) finalize(ctx context.Context, deadline b
 // The parent starts without statistics; autovacuum never analyzes it.
 func (self *providerWorkSessionCutover) analyzeParent(ctx context.Context) error {
 	statement := fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(providerWorkSessionEventTable))
-	if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
+	if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}); err != nil {
 		return fmt.Errorf("analyze %s: %w", providerWorkSessionEventTable, err)
 	}
 	self.logf("analyzed the parent")

@@ -29,6 +29,18 @@ func (self *OnlineSqlMigration) withIndexCompletion(version int32, table, index,
 	return self
 }
 
+// Runs one online migration on a maintenance session. Each phase of a
+// concurrent build on a large table can outlast the application role's
+// transaction bound (PARTITION-MAINTENANCE-PLAN.md A6), so the session lifts
+// it for the migration and restores it after.
+func runOnlineSqlMigration(ctx context.Context, migration *OnlineSqlMigration) {
+	MaintenanceDb(ctx, func(conn PgConn) {
+		WithoutTransactionTimeout(ctx, conn, func() {
+			Raise(executeOnlineSqlMigrationOnConn(ctx, conn, migration))
+		})
+	}, OptReadWrite(), OptNoRetry())
+}
+
 // One direct maintenance connection owns admission, catalog inspection and
 // concurrent DDL. A canceled owner never turns an uncertain probe into success.
 // Older/out-of-band builders are also detected before any recovery statement.

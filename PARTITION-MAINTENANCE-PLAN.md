@@ -465,6 +465,104 @@ A1 per-table settings go into a task beside it. Both sit behind their own tag,
 so nothing changes until the owner runs that tag, as a trial after the storage
 expansion with the §2.4 signals watched.
 
+Implemented (2026-10-24), coded and not applied: xops branch
+`feat/pm-autovacuum`. One `playbook-dbs.yml` block, tagged `never` and
+`autovacuum_tuning`, does both parts. It reloads PostgreSQL and never restarts
+it.
+
+- **Global settings:** in `autovacuum-tuning.conf`, which `postgresql.conf`
+  now includes last (`include_if_exists`). Its `conf.d` comes before the
+  file's own settings, so a drop-in there could not replace them.
+  - `autovacuum_vacuum_cost_delay = 2ms`.
+  - `autovacuum_vacuum_cost_limit = 320`: 160,000 cost units a second,
+    shared by the workers on tables without cost settings.
+    - That covers one vacuum at the fastest read pace seen (network_client on
+      2026-10-13: 38,700 blocks a second, 77,400 units at 2 a block read).
+    - It also covers, at the same time, what all of autovacuum dirtied on
+      2026-10-19 (34 MB/s: 4,150 blocks a second, 83,000 units at 20 a block
+      dirtied).
+    - Left unset, the limit would be `vacuum_cost_limit`'s 200.
+  - `autovacuum_max_workers = 10`. That is within the 16 slots, so a reload
+    applies it, and it is the most workers whose 256 MB vacuum rings stay
+    within 1% of shared_buffers.
+  - `autovacuum_work_mem = 1GB`: ten workers hold at most 10 GB, less than
+    six held at 2 GB.
+- **Per-table options:**
+  - The block applies them with psql on the database host: one `ALTER TABLE
+    ... RESET (...), SET (...)` for each table whose options differ.
+  - It sets `lock_timeout = 500ms`, which is under `deadlock_timeout`, so
+    the ALTER never cancels an autovacuum. It retries on lock timeouts only.
+  - Every A1 table gets `autovacuum_vacuum_cost_delay = 0` and both scale
+    factors 0.
+  - The thresholds use the low end of each table's churn estimate.
+
+  | Table | Dead rows / inserts an hour | Vacuum / insert threshold |
+  |---|---|---|
+  | `finished_task` | 129k / 129k | 130,000 / 130,000 |
+  | `network_client_connection` | 0.3-0.8M / 150-400k | 300,000 / 150,000 |
+  | `network_client_location` | 0.15-0.4M / 150-400k | 150,000 / 150,000 |
+  | `transfer_balance` | ~50k / ~1M a day, in one burst | 50,000 / 40,000 |
+  | `provider_url_probe_run` | 0.26-0.53M / 86-177k | 260,000 / 85,000 |
+  | `device` | ~40k / ~40k | 40,000 / 40,000 |
+  | `search_provider_stats` | 1.7-2.4M / 30-40k | 1,700,000 / 30,000 |
+  | `pending_task` | 0.28-0.35M / 129k | 50 (measured, kept) / 1,000 |
+  | `network_client_handler` | 12-16k / ~0, 25 live rows | 50 / 1,000 |
+  | `transfer_debit_journal` | 1.4-2.5M / 0.7-1.3M, 582 live rows | 50 / 1,000 |
+  | `client_connection_reliability_score` | 0.45-0.6M / 15-60k (a guess), ~0.3M rows | 60,000 / 60,000 |
+  | `provider_egress_probe_cycle` | 0.34-0.7M / ~0, 132k rows | 25,000 / 25,000 |
+
+- **Ordinary deploys:** they never install or remove the file. While the
+  file is present, the ordinary verification expects
+  `autovacuum_max_workers` from it.
+- **Verification, under the tag:** the four settings and
+  `autovacuum_worker_slots` as new bringyour sessions see them, and each
+  table's options after the change.
+- **Revert:** `-e autovacuum_tuning_revert=true` removes the file and gives
+  each table back the options the server's migrations gave it, then verifies
+  the `postgresql.conf` values and those options.
+- **To run:**
+  1. Deploy `postgresql.conf` with its include line (`run-dbs.sh
+     --postgresql-config-only`). That is a reload that changes no setting and
+     logs "skipping missing configuration file". The trial refuses to start
+     until the live file includes its own.
+  2. Dry run: `run-dbs.sh --tags autovacuum_tuning --check --diff`. It
+     reports each table option it would change.
+  3. Apply: the same command without `--check`.
+- **Deviations:**
+  - Five A1 tables keep a trigger at or before the one the defaults give them
+    now, fixed, rather than an hour of churn. For each, an hour of churn is
+    more than its live rows, so an hourly trigger would let it grow to
+    several times its size whenever A1's 5-minute vacuum lapses. Vacuuming
+    them takes about a second. `pending_task` keeps its measured 50.
+  - `network_client`, `provide_key` and `network_client_location_reliability`
+    set `autovacuum_vacuum_cost_delay = 0` themselves: the 2026-07-14
+    re-add migrations did it, so the "set nothing today" above does not hold
+    for the first two. The global 2 ms would not pace them, so the trial
+    removes their own delay.
+  - The four contract tables get a per-table `autovacuum_vacuum_cost_limit =
+    200`, the pace they have run at since July. Without it, their own 2 ms
+    delay would run at the raised global limit, 1.6 times faster.
+- **Assumptions:**
+  - A1's `vacuum_hot_tables` runs on main before the trial. The hourly
+    thresholds then back it up rather than replace it.
+  - The contract tables are not cut over to partitions yet. A partitioned
+    parent takes no autovacuum options, so the per-table step would fail at
+    it, and the play would stop before verifying.
+- **Once the trial is accepted:**
+  - The per-table options become a `db_migrations.go` migration, appended as
+    the July ones were.
+  - The global settings move into `postgresql.conf`.
+  - The trial file, its include line and the block go.
+- **Tests:** `main/ansible/tests/test_postgresql_autovacuum_tuning.py` pins:
+  - the `never` gating, through `ansible-playbook --list-tasks`;
+  - the values and their derivations;
+  - reload-only;
+  - the rendered SQL, the lock-timeout retry and check mode;
+  - both verifications and the ordinary deploy's verification.
+
+  The rendered statements were also run on PostgreSQL 18.4: apply, verify,
+  revert and verify, keeping options the trial does not manage.
+
 ### A6. Bound the transaction horizon
 
 - **Timeout:** set `transaction_timeout` for the application role, for example
@@ -498,6 +596,147 @@ expansion with the §2.4 signals watched.
   - Name the holder, ranked as §2.4 already ranks horizon candidates.
 - **Decided (2026-10-24): 15 minutes,** set once the inventory confirms that
   every request and task path fits.
+
+Implemented (2026-10-24): the bound, the exemptions the inventory below
+calls for, and the horizon signal.
+
+- **The setting.** A code migration
+  (`20261024_set_application_transaction_timeout`,
+  `migrationSetApplicationTransactionTimeout` in `db_transaction_timeout.go`)
+  runs `ALTER ROLE CURRENT_USER IN DATABASE <db> SET transaction_timeout =
+  '15min'` once through each pool, so it bounds the role the main pool's
+  PgBouncer servers run as and the maintenance pool's role. Each pool names
+  only the role it connects as, so no role name is written in code or logged;
+  an ordinary role may set its own default without CREATEROLE.
+  - A role default in this database, not `ALTER DATABASE`: a database
+    default would also bound the operator's `postgres` sessions. A superuser
+    role is skipped, with a log line, for the same reason.
+  - Unaffected unless they set it themselves: `postgres` and every other
+    role, other databases, physical replication (a walsender returns from
+    `InitPostgres` before it reads role settings), autovacuum (it forces 0),
+    and pg_dump (17 and 18 run `SET transaction_timeout = 0` against a 17+
+    server, and pg_restore emits it). The logical backup runs as `postgres`
+    anyway.
+  - The monitor's migration contract checks that an ordinary role carries
+    the default in the database, so a lost default is drift, as the
+    2026-08-13 database-level idle timeout went missing on main. The contract
+    names the migration by its id (`server.CodeMigrationVersion`), never a
+    number.
+- **PostgreSQL 18, checked on 18.4:**
+  - The timer is armed when a transaction starts, with the value then in
+    effect, and ends the session with FATAL 25P04; one autocommit statement
+    is covered too.
+  - Inside a transaction a positive value leaves a running timer alone, zero
+    disarms it, and a positive value set after that arms a new timer counted
+    from then.
+  - REINDEX and CREATE INDEX CONCURRENTLY and VACUUM get a fresh timer for
+    each internal transaction.
+- **A transaction the bound ends** fails at once with its cause. 25P04 is
+  never rerun, at a statement or at commit, is not taken for a retryable
+  connection error, and the pool destroys the dead session. Wire tests pin all
+  three; database tests repeat the statement and autocommit cases on both
+  pools.
+- **Exemptions, per operation:**
+  - `WithoutTransactionTimeout(ctx, conn, callback)` lifts the bound for one
+    maintenance session and restores the default when the callback returns or
+    panics, on a context detached from ctx.
+    - It refuses a main pool session (a session SET through the transaction
+      pooler would reach other clients). Maintenance pool sessions are marked
+      direct when they connect.
+    - Inside an explicit transaction it refuses as well: a RESET there could
+      not restore that transaction's deadline, and a rollback would undo it.
+      A whole transaction is exempted from inside instead (next point).
+    - A session it cannot restore (closed, busy, left in a transaction, or a
+      failed RESET) is closed, so the pool destroys it. A nested call keeps
+      the outer exemption.
+  - `SetTransactionTimeoutInTx(ctx, tx, bound)` replaces the bound for the
+    rest of one transaction, also on the main pool: zero lifts it, and a
+    positive bound disarms the running timer and arms a new one.
+  - A source test enforces that a statement list lifting statement_timeout
+    lifts the transaction bound too, and that each exemption in the table
+    below stays wired; operations of the A1-A4 and A7 branches are checked
+    once their files are present.
+
+The long-reader inventory (2026-10-24). "Fits" means no single transaction or
+statement approaches 15 minutes; an exempted operation keeps its own bound
+(its task's MaxTime, whose cancel reaches a direct session, or a statement
+bound) and §2.4l warns while it holds the horizon.
+
+| Path | What it does | Typical / maximum | Disposition |
+|---|---|---|---|
+| `/stats/providers*`, provider and overview stats routes | Main pool statements over contracts, payouts and intervals, no statement_timeout | seconds; unmeasured, cancelled by the 2-minute fill or nginx's 30 s upstream timeout | fits; the bound is now their server-side backstop (alt has no balancer); replica later |
+| Location directory load | One statement over the valid, connected location reliabilities (about 53M rows) | seconds to minutes; unmeasured | fits; replica later |
+| Search sync, leaderboards, transfer stats, verify, prober and provider-work routes | Paged or bounded reads | seconds | fits |
+| Subnet epoch census (`st_epoch_close`, `st_ledger_v2_step`, `st commit`, `st payout-dry-run`) | One statement reads the epoch's live and archived work in one snapshot | 195-419 s for the 24-hour epoch 0; 30-55 min projected for a 7-day epoch | exempted per session: a direct maintenance session (it ran on the main pool); replica later |
+| Payment plan (`Payout`, `payouts plan`) | One transaction per 4-day slice | 1,121 s (2026-08-31) to over 3 h (2026-09-27) before the October rewrites; unmeasured since | exempted per transaction; measure, then smaller slices |
+| `UpdateClientLocationReliabilities`, `UpdateClientReliabilityScores`, `UpdateNetworkReliabilityWindow` | One transaction each over every client; the network window widens after a rollup stall | whole runs 701-1,356 s with every lookback in one transaction before the checkpoints; unmeasured per transaction since | exempted per transaction at the checkpoints' 2-hour ceiling; page the window later (cap it per run) |
+| Reliability running-window checkpoints | Plan, 30-block reads, apply | reads about 10 s | paged; keep the role's bound |
+| `IndexSearchLocations` | One transaction re-indexes changed location search values | short; a full re-index after a search-format change, unmeasured | exempted per transaction |
+| `db_maintenance` rebuilds (rotation, priority, A2 hot indexes) | REINDEX CONCURRENTLY on a discarded session, 2-hour statement bound | rotation phases 0.5-2 min, waits up to 10 min; priority passes read 421-588 GB of heap, 20-65 min each | exempted per session |
+| `db_maintenance` debris drops, final ANALYZE; A1 hot vacuum | 10 s lock waits; one transaction per table (468.7 s for the whole database); 2-minute VACUUM statements | seconds to minutes | fits |
+| A4 bloat scan (`dbBloatScanRelation`) | pgstattuple_approx under its own statement bound | minutes | exempted per session |
+| Partition maintenance: create, drop, archive and evidence batches; contract, `client_reliability` and `network_ping` families | 5 s locks, 60 s statements, 10k- and 5k-row batches | seconds | fits / paged |
+| Partition ANALYZE of closed leaves and parents | ANALYZE with statement_timeout 0 | 1-5 min each; a legacy leaf longer | exempted per transaction (on main, `partitionRegistryAnalyze` still needs the lift) |
+| `CloseExpiredContracts` | Keyset pages of 256, one short transaction per contract, cursor checkpoint | seconds per page | paged (the model) |
+| `RemoveCompletedContracts`, orphan sweeps, close-evidence retention, net-escrow reconcile, flush and settlement chains, client reap, rollups, `TaskCleanup`, audit retention | 1k-50k-row batches, each committed | seconds per batch | paged |
+| `RemoveOldClientLocationReliabilities` | One unbatched DELETE on the 132 GB table, MaxTime 2 min | under its MaxTime | fits (Part B batches it) |
+| `RefreshFreeTransferBalances`, `SweepProviderAuditEvents`, `DeriveLocations` ingest cursors, `RebuildPointsLeaderboard`, `ExportStats` | One transaction or statement each | 60-80 s (`ExportStats`); the others unmeasured, estimated minutes | fits; §2.4l shows any that do not |
+| Tasks with MaxTime of 15 minutes or less; claims, heartbeats, startup scheduling | Bounded by deadline-derived statement timeouts | seconds | fits |
+| stmonitor | Its own observer role, 60 s budgets | under 60 s | fits; not an application role |
+| `db migrate` | One transaction per SQL migration; online migrations' concurrent builds; code migrations | seconds; a concurrent build on a large table takes hours | online migrations exempted per session; a long SQL migration starts with `SET LOCAL transaction_timeout = 0` |
+| `db vacuum` (`VacuumFullAllTables`) | VACUUM FULL table by table | hours on large tables | exempted per session (its own discarded session; its settings no longer return to the pool) |
+| `db audit --fix`, `db backfill-sweep-destination-id` | A plain index build or validating constraint per transaction; 50k-row batches that full-scan the 101 GB sweep heap | minutes to hours; 4-11 min a late batch | exempted per transaction |
+| `model migrate contract-partition` (prepare, finalize, rollback) | VALIDATE of the legacy bounds, ANALYZE ONLY of the parents, foreign key validations | hours for the four large tables | exempted per transaction; the printed manual VALIDATE runs as `postgres` |
+| `model migrate client-reliability-partition`, `model upgrade-client-reliability-index` | Copies, a one-shot index build, the swap; per-partition concurrent builds | hours (dormant: already partitioned); 3-15 min a partition | exempted per transaction / per session |
+| `model migrate provider-egress-health-partition` (C2) | Chunked copy, counts and missing rows; a swap with 60 s statements | minutes | exempted per session (the copy, the swap's unlocked pre-check, missing rows); the locked swap fits |
+| `stats backfill`, `stats migrate-202608` | One main pool transaction each over the retained windows | hours | exempted per transaction |
+| `db backfill-contract-reap-time`, `db sweep-orphans`, `db scrub-client-addresses`, `payouts sn-reconcile`, `model migrate provide-mode`, `refresh-transfer-balances` | Batched or per-item statements | seconds to minutes; late OFFSET blocks and sn-reconcile on payments with millions of sweeps unmeasured | fits |
+| Logical backup (pg_dump, Sunday and Thursday) | One snapshot for 14+ hours, as `postgres` | 14+ h | unaffected by the bound; §2.4l pages on it after an hour; replica later (or physical base backups only) |
+
+Rollout, after `db migrate` applies the migration:
+
+1. Recycle the pools. Restart the services, or wait for the pools' connection
+   lifetime (8 hours plus up to 15 minutes by default). The main pool's
+   sessions are PgBouncer's servers, which keep the old default until they
+   reconnect: run `RECONNECT bringyour` on each PgBouncer instance, or wait
+   for `server_lifetime` (3600 s).
+2. Verify through both pools: `SHOW transaction_timeout` as the application
+   role through PgBouncer (6432) and directly (5432) reads `15min`. As
+   `postgres`, no session of the application roles predates the migration:
+   `SELECT count(*) FROM pg_stat_activity WHERE usename = <role> AND
+   backend_start < <time the migration ran>` reads 0. `bringyourctl db
+   migrate` logs which pools' roles it set, without their names.
+3. Watch §2.4l (`transaction-horizon`) and the task canaries for 25P04
+   failures in the first days. A path the inventory missed fails fast with
+   `terminating connection due to transaction timeout` and its task's own
+   retry policy; it is fixed by paging it or by one of the two exemptions.
+4. To roll back, `ALTER ROLE <role> IN DATABASE bringyour RESET
+   transaction_timeout` for each role, then recycle as in step 1. The
+   monitor's contract then reports drift until a migration retires it.
+
+Monitor: §2.4l (`transaction-horizon`, `monitor/signal_transaction_horizon.go`)
+warns once the oldest horizon is 15 minutes old and pages at an hour,
+counting sessions, replication slots and prepared transactions (the last two
+even when there are none) and naming the holder as §2.4 ranks horizon
+candidates, without statement text, application names, client addresses, role
+names or prepared-transaction identifiers. On main slots and prepared
+transactions are unused: `max_prepared_transactions` is 0, `wal_level` is
+replica, and the base backup's slot holds WAL, not an xmin; the census
+catches a future one.
+
+Deviations:
+
+- The signal is §2.4l: §2.4k is A4's bloat signal.
+- No per-pool metric of the effective value: the only per-connection hook
+  is the pools' startup path, whose failure cleanup is deliberately bounded,
+  and a query added there could fail connection construction. The rollout's
+  `SHOW` and `pg_stat_activity` checks cover it.
+- The census moved from the main pool to a maintenance session, and
+  `VacuumFullAllTables` to a discarded session of its own.
+- The payment plan, the reliability transactions and the census are
+  exempted, not paged: their runs since the October rewrites are unmeasured,
+  and the bound ending them would end payouts and reliability scoring. §2.4l
+  will measure them; page each once it does.
 
 ### A7. One partition maintenance registry
 

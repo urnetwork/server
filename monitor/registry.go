@@ -64,6 +64,7 @@ func NewSignals() []Signal {
 		NewPgFreezeSignal(),
 		NewPlannerFlipsSignal(),
 		NewVacuumHealthSignal(),
+		NewTransactionHorizonSignal(),
 		NewPgDiskSpaceSignal(),
 		NewPgDiskRunwaySignal(),
 		NewPgFreezeAgeSignal(),

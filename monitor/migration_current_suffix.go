@@ -802,6 +802,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "full connection disconnect time index removed",
 			migrationIndexRemoved("network_client_connection", "network_client_connection_connected_disconnect_time")),
 	},
+	[]snMainnetMigrationContract{
+		// unpublished: named by its id, so its version follows the merge order
+		migrationCurrentSuffix(server.CodeMigrationVersion(server.ApplicationTransactionTimeoutMigrationId),
+			"application role transaction bound", transactionTimeoutRoleDefaultArtifactQuery),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
@@ -857,3 +862,16 @@ var paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
  AND t.tgattr=(SELECT a.attnum::text::int2vector FROM pg_attribute a
   WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))
  AND ` + migrationContractLeafTriggers("transfer_escrow_sweep", "payment_plan_sweep_owner_guard")
+
+// The application roles' 15-minute transaction bound (server
+// PARTITION-MAINTENANCE-PLAN.md A6) is a default of each pool's role in this
+// database. The migration skips a superuser role, so an ordinary role carries
+// it; a lost default is drift, as the 2026-08-13 database-level idle timeout
+// went missing on main. Only a boolean leaves the database, never a role name.
+const transactionTimeoutRoleDefaultArtifactQuery = `EXISTS (SELECT 1
+		FROM pg_db_role_setting setting_row
+		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
+		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
+		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND NOT role_row.rolsuper
+		AND setting = 'transaction_timeout=15min')`

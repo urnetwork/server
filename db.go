@@ -302,6 +302,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			configurePgPoolNotices(config)
 		}
 		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
+		configurePgPoolDirectSession(config, self.vaultResourceName == MaintenancePgVaultResourceName)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {

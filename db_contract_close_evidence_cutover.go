@@ -759,7 +759,7 @@ func finalizeCloseEvidenceCutover(ctx context.Context, deadline bool, dryRun boo
 // safely, and the registry's tasks do both later anyway, so a failure here is
 // reported and does not undo a completed swap.
 func completeCloseEvidenceCutover(ctx context.Context, logf func(string, ...any)) error {
-	if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(closeEvidenceTable))}); err != nil {
+	if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(closeEvidenceTable))}); err != nil {
 		logf("could not analyze %s (the retention task analyzes it): %s", closeEvidenceTable, err)
 	} else {
 		logf("analyzed %s", closeEvidenceTable)
