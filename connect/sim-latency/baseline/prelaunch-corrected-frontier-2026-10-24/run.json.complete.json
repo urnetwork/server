@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-fixed794-p1800-off-source-seal-fix",
+  "run_manifest_sha256": "514c03d82f759cd79a3661acfee6171e757a7a382a139dba410b9e2447e55c48",
+  "run_manifest_bytes": 2755,
+  "completed_unix_ms": 1792872284723
+}
