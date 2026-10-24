@@ -737,12 +737,13 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(854, "optional client-key history registration copy",
 			snMainnetMigrationColumns("st_client_key_history",
 				snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
-		migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery),
+		// v858 and v859 replace guard bodies this pins; they republish the set
+		migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery).removedAt(858),
 		migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 		// the move guard replaces the evidence guard body and republishes the rest
 		migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 			contractCloseEvidenceRetentionArtifactQuery).removedAt(contractCloseEvidenceMoveGuardMigrationVersion),
-		migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery),
+		migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery).removedAt(859),
 		migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery),
 		migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
 		migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",

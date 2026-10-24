@@ -58,6 +58,19 @@ func CompetitionWinnerReviewBodiesSql() (sourceAuthorized, roundInsertGuard, win
 		strings.Split(migration, "$winner_checkpoint$")[1]
 }
 
+// Version 858 retires operator-proxy from production's source requirement:
+// it replaces the source graph and source authorization bodies.
+func CompetitionSourceRetirementBodiesSql() (sourceGraphValid, sourceAuthorized string) {
+	migration := competitionSourceRetirementMigration()
+	return strings.Split(migration, "$graph$")[1], strings.Split(migration, "$source$")[1]
+}
+
+// Version 859 binds a scheduled round's opening to its intent: it replaces the
+// round guard body and republishes the winner guards unchanged.
+func CompetitionScheduledOpeningRoundGuardBodySql() string {
+	return strings.Split(competitionScheduledOpeningMigration(), "$guard$")[1]
+}
+
 // Version 856 publishes the contract id floor.
 func ContractIdFloorBodySql() string {
 	return strings.Split(contractIdFloorSql, "$$")[1]
