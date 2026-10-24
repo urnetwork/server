@@ -29,8 +29,12 @@ Private preparation and minimal review-image context:
 The review image has not yet been built from this context. Dedicated model-key
 provisioning, genuine provider-backed review and qualification, prospective host
 qualification, actual API/worker readiness quorum and activation remain required.
-The independent installed-bundle readback/argument-rejection check is pending;
-static shell/JSON checks and installation hash readback passed. No main DB,
+The independent installed-bundle readback/argument-rejection check passed:
+all four native hashes and clean Go 1.27.3 build identities matched; protected
+ownership/permissions and wrapper/settings digests matched; both build and
+qualification wrappers rejected an argument with exit 2 before execution.
+No model-key contents or valid broker operation were accessed. Evidence is
+retained in `temp/provide-bomb-cwd-fixed-20261024.lFMYV1Ji`. No main DB,
 runtime policy, global review settings, service or supervisor was modified.
 
 ## Exact-Go native control release — 21:47 UTC

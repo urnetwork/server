@@ -76,8 +76,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cleanup_job_objects
-CGO_ENABLED=0 go build -trimpath -o "$build_context/resource-bomb" \
-    "$SERVER_ROOT/connect/sim-latency/evaluator/container/testdata/resource-bomb"
+(
+    cd "$SERVER_ROOT"
+    export GOWORK=off GOTOOLCHAIN=local
+    [ "$(go env GOVERSION)" = go1.27.3 ] || die "resource fixture requires Go 1.27.3"
+    CGO_ENABLED=0 go build -trimpath -o "$build_context/resource-bomb" \
+        ./connect/sim-latency/evaluator/container/testdata/resource-bomb
+)
 install -m 0444 "$FIXTURE_ROOT/Dockerfile" "$build_context/Dockerfile"
 taskset -c "$management_cpuset" sudo -n docker build \
     --network none --provenance=false --no-cache --file "$build_context/Dockerfile" \
