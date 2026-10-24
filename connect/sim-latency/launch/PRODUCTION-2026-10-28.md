@@ -5,6 +5,11 @@ qualification start immediately. Current upstream development heads replace the
 previous plan to wait for a Monday source freeze. Do not admit public submissions
 before the opening or reinterpret an existing staging round as production.
 
+The inactive root-owned October 24 host-control installation, exact artifact
+identities, test evidence and remaining activation gates are recorded in
+[HOST-CONTROL-2026-10-24.md](HOST-CONTROL-2026-10-24.md). It does not change the
+frozen evaluated source below or assert live production readiness.
+
 ## Candidate source checkpoint
 
 Fetched October 24 from the development branches below. These are candidate
