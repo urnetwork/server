@@ -133,14 +133,35 @@ All ten remote refs and frozen module coverage were verified against the new
 ledger. This does not activate a production policy or approve its provisional
 16.1% floor as newly calibrated.
 
-The corrected evaluator build is in progress under
+The corrected evaluator build completed under
 `temp/corrected-evaluator-build-20261024.7nUOrNCn`, using a separate frozen
 controller workspace and a sparse config checkout containing only the source
 ledger. The Docker context includes only the ten product repositories, that
 public ledger and trusted evaluator scripts, not the surrounding config checkout.
 An initial argument-parsing failure and an unnecessary config LFS checkout are
-retained separately; neither started an evaluation. No new image digest or
-qualification is claimed before the build and checks complete.
+retained separately; neither started an evaluation. The actual new image ID is
+`sha256:79400f3375c64767f5021e43ef852e9ff9da3ca5a4b79dc03e8e9ed381247eb9`;
+the embedded simulator/scorer SHA-256 is
+`09bfec0e6611c0c8dcca8b55706fda3914fb8ae57a4917ed1d71c56410928402`.
+Its raw pretty-printed source-lock file SHA-256 is
+`239607aeeae792c009e43367e4e88d00b72d6413d684bbbc10df24658c594937`,
+distinct from the canonical model source lock above. The completed image-record
+file SHA-256 is
+`7bff59a3e12813d18d7a2e7ce00f46c04e6e577ead6585b46db23777bb66aaee`.
+
+The image's own source preflight passed offline, readonly and non-root on the
+management CPUs. A separate filesystem census found exactly the ten product
+repository directories, no `/workspace/config` or `/workspace/vault`, and no
+runtime config/vault `main` or `all` directories. Smoke-artifact SHA-256 values:
+
+- `identity.json`: `9aa81584b97d15ff3c0acecef27e47d27fd63b6456a2d26a4e41a3b3904989ff`;
+- `source-check.json`: `c280e11e68b1cef1df7ceab33c27ef77c618795dc403138aa88375239fd086db`;
+- `workspace-census.txt`: `83318b263d836ddf24d904313b6d0dd9fb1841766922053dd982e23548f40f30`.
+
+The same image is locally available under the immutable-ID alias
+`urnetwork/sim-latency-evaluator-base-id:79400f3375c64767f5021e43ef852e9ff9da3ca5a4b79dc03e8e9ed381247eb9`.
+This records local image availability, not registry publication, full resource/
+network/host qualification, provider-backed review or an official baseline.
 
 Fresh native main controls also built from a clean private snapshot under
 `temp/main-control-native-20261024.L1VK9M5A`; they are **not yet installed**:
