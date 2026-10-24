@@ -291,12 +291,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 			selectedMargin = proposal.Significance.RecommendedNextEpochTakeoverMarginPercent
 		}
 		intent.Threshold, intent.ThresholdEvidenceSha256 = selectedMargin/100, proposal.Significance.ScoreSha256
-		manifest.EvaluationSource.Generations = append(manifest.EvaluationSource.Generations, reviewedSourceGeneration{
-			Generation: intent.SourceGeneration, Kind: intent.Kind, SourceLockSha256: intent.SourceLockSha256,
-			SignificantImprovementPercent: selectedMargin, ThresholdEvidenceSha256: intent.ThresholdEvidenceSha256,
-			SourceApprovalId: proposal.ReviewId.String(), SourceApprovalDigest: proposal.ReviewDecisionDigest, EvaluatedBaseSourceLockSha256: current.SourceLockSha256,
-			PatchSha256: proposal.PatchSha256, ScoreSha256: proposal.Significance.ScoreSha256, Significance: proposal.Significance, Repositories: sourceRepositoriesFromCommits(proposal.Commits),
-		})
+		manifest.EvaluationSource.Generations = append(manifest.EvaluationSource.Generations, reviewedGenerationForProposal(current, proposal))
 		if err := copyReviewedSourcePatch(proposal, root); err != nil {
 			return nil, err
 		}

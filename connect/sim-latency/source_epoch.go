@@ -360,16 +360,16 @@ func validateSourceSignificanceForMode(significance *sourceSignificance, staging
 		!finiteNonnegative(significance.BaselineSampleVariance) ||
 		!finiteNonnegative(significance.CandidateSampleVariance) ||
 		!finite(significance.ObservedImprovementPercent) ||
-		significance.ObservedImprovementPercent <= 0 ||
+		(!staging && significance.ObservedImprovementPercent <= 0) ||
 		!validSourceMargin(significance.TakeoverMarginPercent, staging) ||
 		!finiteNonnegative(significance.MinimumSignificantImprovementPercent) ||
 		!finiteNonnegative(significance.RequiredImprovementPercent) ||
 		!finite(significance.OneSidedPValue) || significance.OneSidedPValue < 0 ||
-		significance.Alpha < significance.OneSidedPValue ||
+		1 < significance.OneSidedPValue || (!staging && significance.Alpha < significance.OneSidedPValue) ||
 		!finiteNonnegative(significance.NextEpochMinimumImprovementPercent) ||
 		!finiteNonnegative(significance.RecommendedNextEpochTakeoverMarginPercent) ||
 		(!staging && significance.RecommendedNextEpochTakeoverMarginPercent == 0) ||
-		50 < significance.RecommendedNextEpochTakeoverMarginPercent {
+		(!staging && 50 < significance.RecommendedNextEpochTakeoverMarginPercent) {
 		return errors.New("record is incomplete or not statistically significant")
 	}
 	if significance.RequiredImprovementPercent < significance.TakeoverMarginPercent ||
