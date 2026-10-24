@@ -297,6 +297,7 @@ func TestCloseEvidenceCutoverProblems(t *testing.T) {
 		{"partitioned", func(shape *contractTableShape) { shape.relkind = "p" }, "is not a plain table"},
 		{"nullable key", func(shape *contractTableShape) { shape.columns[1].notNull = false }, "report_id is not a NOT NULL uuid"},
 		{"no inherit check", func(shape *contractTableShape) { shape.checks[0].noInherit = true }, "is NO INHERIT"},
+		{"not valid check", func(shape *contractTableShape) { shape.checks[0].validated = false }, "is NOT VALID"},
 		{"invalid index", func(shape *contractTableShape) { shape.indexes[1].valid = false }, "is invalid"},
 		{"key without report_id", func(shape *contractTableShape) {
 			shape.indexes[0].constraintDefinition = "PRIMARY KEY (client_id)"
@@ -327,19 +328,29 @@ func TestCloseEvidenceCutoverProblems(t *testing.T) {
 	}
 }
 
-// The staged parent is partitioned by report_id and carries both guards,
-// while the contract tables' staged parents keep their contract_id key.
+// The staged parent is partitioned by report_id, copies the table's checks
+// with their stored expression trees rather than re-adding them from their
+// printed definitions, never copies the prepared bound, and carries both
+// guards, while the contract tables' staged parents keep their contract_id key.
 func TestCloseEvidenceStagedParentSql(t *testing.T) {
 	statements, err := closeEvidenceStagedParentSql(testCloseEvidenceShape())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(statements[0], `CREATE TABLE public."contract_close_report_evidence_p" (LIKE public."contract_close_report_evidence" INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES`) ||
-		!strings.HasSuffix(statements[0], "PARTITION BY RANGE (report_id)") {
+	if statements[0] != `CREATE TABLE public."contract_close_report_evidence_p" (LIKE public."contract_close_report_evidence" INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS INCLUDING INDEXES INCLUDING STORAGE INCLUDING COMPRESSION INCLUDING COMMENTS) PARTITION BY RANGE (report_id)` {
 		t.Fatalf("staged parent %s", statements[0])
 	}
-	if !slices.Contains(statements, `ALTER TABLE public."contract_close_report_evidence_p" ADD CONSTRAINT "contract_close_report_evidence_acked_byte_count_check" CHECK ((acked_byte_count >= 0))`) {
-		t.Errorf("staged checks %q", statements)
+	if slices.ContainsFunc(statements, func(statement string) bool { return strings.Contains(statement, "ADD CONSTRAINT") }) {
+		t.Errorf("a check is re-added from its printed definition: %q", statements)
+	}
+	bound := testCloseEvidenceShape()
+	bound.legacyBound = &contractConstraint{name: "contract_close_report_evidence_legacy_bound", definition: "CHECK ((report_id < '0192f0f0-0000-0000-0000-000000000000'::uuid))", validated: true}
+	boundStatements, err := closeEvidenceStagedParentSql(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundStatements[1] != `ALTER TABLE public."contract_close_report_evidence_p" DROP CONSTRAINT "contract_close_report_evidence_legacy_bound"` {
+		t.Errorf("the staged parent keeps the prepared bound: %q", boundStatements)
 	}
 	for _, trigger := range []string{
 		`CREATE TRIGGER contract_close_report_evidence_guard BEFORE DELETE OR UPDATE ON public."contract_close_report_evidence_p" FOR EACH ROW EXECUTE FUNCTION contract_close_report_evidence_guard()`,

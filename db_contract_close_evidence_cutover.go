@@ -134,6 +134,11 @@ func closeEvidenceCutoverProblems(shape *contractTableShape) (problems []string)
 		if check.noInherit {
 			problems = append(problems, fmt.Sprintf("%s check %s is NO INHERIT", shape.table, check.name))
 		}
+		// the staged parent copies each check as valid, and a valid parent
+		// check cannot adopt a NOT VALID one at the swap
+		if !check.validated {
+			problems = append(problems, fmt.Sprintf("%s check %s is NOT VALID; validate it before the cutover", shape.table, check.name))
+		}
 	}
 	primary := 0
 	for _, index := range shape.indexes {
@@ -205,15 +210,42 @@ func closeEvidenceTriggerDefinitions(shape *contractTableShape, table string) (d
 	return
 }
 
-// The staged parent: the table's columns, defaults, storage and every index
-// (LIKE ... INCLUDING INDEXES clones each index's stored expression tree, so
-// the swap's attach adopts the table's own), then its checks with their
-// validity, and the table's guards: a row trigger on the parent clones onto
-// every partition attached to it, and its TRUNCATE guard covers a TRUNCATE of
-// the parent.
+// The staged parent: the table's columns, defaults, storage, checks and every
+// index, then the table's guards. LIKE ... INCLUDING INDEXES clones each
+// index's stored expression tree, so the swap's attach adopts the table's own,
+// and INCLUDING CONSTRAINTS does the same for each check. A check re-added from
+// its printed definition can parse into a different tree: on PostgreSQL 18 a
+// varchar array's cast moves into its elements, as in the party and
+// original_key_issue checks. The attach refuses a partition whose check
+// differs from the parent's. LIKE copies a check as valid, so every check of
+// the table must be valid (closeEvidenceCutoverProblems), and the prepared
+// bound, which bounds only the table, is dropped from the copy. A row trigger
+// on the parent clones onto every partition attached to it, and its TRUNCATE
+// guard covers a TRUNCATE of the parent.
 func closeEvidenceStagedParentSql(shape *contractTableShape) (statements []string, err error) {
 	staged := closeEvidenceStagedParentName()
-	statements = shape.stagedParentSqlBy("report_id")
+	statements = append(statements, fmt.Sprintf(
+		"CREATE TABLE public.%s (LIKE public.%s INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS INCLUDING INDEXES INCLUDING STORAGE INCLUDING COMPRESSION INCLUDING COMMENTS) PARTITION BY RANGE (report_id)",
+		quoteIdentifier(staged),
+		quoteIdentifier(shape.table),
+	))
+	if shape.legacyBound != nil {
+		statements = append(statements, fmt.Sprintf(
+			"ALTER TABLE public.%s DROP CONSTRAINT %s",
+			quoteIdentifier(staged),
+			quoteIdentifier(shape.legacyBound.name),
+		))
+	}
+	for _, column := range shape.columns {
+		if 0 <= column.statisticsTarget {
+			statements = append(statements, fmt.Sprintf(
+				"ALTER TABLE public.%s ALTER COLUMN %s SET STATISTICS %d",
+				quoteIdentifier(staged),
+				quoteIdentifier(column.name),
+				column.statisticsTarget,
+			))
+		}
+	}
 	for _, trigger := range shape.triggers {
 		definition, ok := contractRetargetTrigger(trigger.definition, shape.table, staged)
 		if !ok {
