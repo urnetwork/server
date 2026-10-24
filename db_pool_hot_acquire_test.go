@@ -29,6 +29,7 @@ type pgPoolWireFixture struct {
 	query         func(int, string) bool
 	queryError    func(int, string) *pgproto3.ErrorResponse
 	queryRows     func(int, string) ([]pgproto3.FieldDescription, [][][]byte)
+	queryNotices  func(int, string) []*pgproto3.NoticeResponse
 	beforeStartup func(int)
 	// A late-reply barrier runs after row/command replies have been flushed.
 	beforeReady func(int, string)
@@ -108,6 +109,11 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 				self.stateLock.Unlock()
 				if self.query != nil && !self.query(connectionIndex, message.String) {
 					return
+				}
+				if self.queryNotices != nil {
+					for _, notice := range self.queryNotices(connectionIndex, message.String) {
+						backend.Send(notice)
+					}
 				}
 				// like postgres, an aborted transaction refuses every statement
 				// but its end

@@ -3539,8 +3539,10 @@ var migrations = []any{
 	//     CREATE, measure-first (see STORAGE.md §3).
 	//   - pending_task: already tuned above.
 	// The existing bloat is not fixed by this (autovacuum only reclaims going
-	// forward): each of these tables needs a one-time manual
-	// VACUUM (VERBOSE, ANALYZE), and pg_repack to shrink the files.
+	// forward). A table shrinks only in a maintenance window, with VACUUM FULL,
+	// until PostgreSQL 19 brings online compaction (REPACK CONCURRENTLY,
+	// PARTITION-MAINTENANCE-PLAN.md A4); never pg_repack or another external
+	// tool (owner rule, 2026-10-23).
 	newSqlMigration(`
         ALTER TABLE contract_close SET (
             autovacuum_vacuum_cost_delay = 0,

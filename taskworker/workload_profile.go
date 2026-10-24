@@ -171,6 +171,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			work.ScheduleDbMaintenance(clientSession, tx, 0)
 		}},
+		// the churn tables' vacuum, which DbMaintenance no longer runs
+		{target: task.NewTaskTarget(work.VacuumHotTables), schedule: work.ScheduleVacuumHotTables},
 		{target: task.NewTaskTarget(work.WarmNetworkGetProviderLocations), schedule: work.ScheduleWarmNetworkGetProviderLocations},
 		{target: task.NewTaskTarget(work.RemoveExpiredAuthAttempts), schedule: work.ScheduleRemoveExpiredAuthAttempts},
 		{target: task.NewTaskTarget(work.RemoveExpiredWalletAuthChallenges), schedule: work.ScheduleRemoveExpiredWalletAuthChallenges},
