@@ -28,10 +28,13 @@ func (self *exchangeWritevCleanupReadConn) Read(message []byte) (int, error) {
 }
 
 // Starts only the real ExchangeConnection socket lifecycle and its tcp peer.
-// A callback may hold the dequeued writer owner until its context is canceled.
+// The peer drains at most the offered payload and frame header before observing
+// a real terminal read. Callbacks expose writer ownership and positive reads.
 func newExchangeWritevCleanupSocketFixture(
 	t *testing.T,
+	offeredPayloadByteCount int,
 	afterDequeue func(context.Context),
+	afterPeerRead func(int),
 ) (*exchangeWritevFixtureOwner, context.Context) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -43,6 +46,10 @@ func newExchangeWritevCleanupSocketFixture(
 	owner.listener = listener
 	owner.peerDone = make(chan struct{})
 	peerReadEntered := make(chan struct{})
+	wireByteCount := offeredPayloadByteCount
+	if 0 < wireByteCount {
+		wireByteCount += exchangeIOFrameHeaderByteCount
+	}
 	go func() {
 		defer close(owner.peerDone)
 		owner.peerErr = func() error {
@@ -54,10 +61,31 @@ func newExchangeWritevCleanupSocketFixture(
 				return ctx.Err()
 			}
 			defer peer.Close()
+			deadline, _ := ctx.Deadline()
+			if err := peer.SetReadDeadline(deadline); err != nil {
+				return err
+			}
 			close(peerReadEntered)
-			var message [1]byte
-			_, err = peer.Read(message[:])
-			return err
+			var message [1024]byte
+			readByteCount := 0
+			for {
+				// One extra byte detects an overrun without treating the known
+				// payload bound itself as proof that the socket terminated.
+				n, err := peer.Read(message[:min(len(message), wireByteCount-readByteCount+1)])
+				readByteCount += n
+				if wireByteCount < readByteCount {
+					return fmt.Errorf("cleanup peer read %d bytes beyond offered wire bound %d", readByteCount, wireByteCount)
+				}
+				if 0 < n && afterPeerRead != nil {
+					afterPeerRead(n)
+				}
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					return io.ErrNoProgress
+				}
+			}
 		}()
 	}()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
@@ -102,10 +130,10 @@ func newExchangeWritevCleanupSocketFixture(
 // retained writer witness is reconciled. No writes or return counts are faked.
 func TestExchangeWritevFixtureCleanupJoinsRealSocketOwners(t *testing.T) {
 	writerEntered := make(chan struct{})
-	owner, ctx := newExchangeWritevCleanupSocketFixture(t, func(ctx context.Context) {
+	owner, ctx := newExchangeWritevCleanupSocketFixture(t, 8*1024, func(ctx context.Context) {
 		close(writerEntered)
 		<-ctx.Done()
-	})
+	}, nil)
 	message := clientconnect.MessagePoolGet(8 * 1024)
 	index := owner.keepPending(message)
 	owner.witnesses = append(owner.witnesses, retainResidentPoolWitness(message))
@@ -138,7 +166,7 @@ func TestExchangeWritevFixtureCleanupJoinsRealSocketOwners(t *testing.T) {
 // Refusal consumes the offered reference itself. Only its never-offered
 // sibling belongs to fixture cleanup, followed by the final-owner witness.
 func TestExchangeWritevFixtureCleanupReturnsUnofferedSibling(t *testing.T) {
-	owner, ctx := newExchangeWritevCleanupSocketFixture(t, nil)
+	owner, ctx := newExchangeWritevCleanupSocketFixture(t, 0, nil, nil)
 	owner.connection.sendAdmission.close()
 	message := clientconnect.MessagePoolGet(8 * 1024)
 	messageIndex := owner.keepPending(message)
@@ -242,5 +270,64 @@ func TestExchangeWritevFixtureEarlyFailureRunsCleanup(t *testing.T) {
 		if witness != nil {
 			t.Error("early failure bypassed final-owner reconciliation")
 		}
+	}
+}
+
+// A real positive peer read precedes cleanup. Delivered data is not a terminal
+// read, and draining it must still leave every socket and pooled owner joined.
+func TestExchangeWritevFixtureCleanupDrainsPositiveReadBeforeTerminal(t *testing.T) {
+	writerEntered := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	firstPeerRead := make(chan int, 1)
+	var firstPeerReadOnce sync.Once
+	owner, ctx := newExchangeWritevCleanupSocketFixture(t, 8*1024, func(ctx context.Context) {
+		close(writerEntered)
+		select {
+		case <-releaseWriter:
+		case <-ctx.Done():
+		}
+	}, func(n int) {
+		firstPeerReadOnce.Do(func() { firstPeerRead <- n })
+	})
+	message := clientconnect.MessagePoolGet(8 * 1024)
+	index := owner.keepPending(message)
+	owner.witnesses = append(owner.witnesses, retainResidentPoolWitness(message))
+	if result := owner.connection.sendMessage(ctx.Done(), owner.takePending(index), nil, time.Second); result != pooledMessageSendDelivered {
+		t.Fatalf("writer admission = %v", result)
+	}
+	select {
+	case <-writerEntered:
+	case <-ctx.Done():
+		t.Fatal("write worker did not take the pooled message")
+	}
+	close(releaseWriter)
+	var positiveReadByteCount int
+	select {
+	case positiveReadByteCount = <-firstPeerRead:
+	case <-ctx.Done():
+		t.Fatal("real peer did not read pending bytes before cleanup")
+	}
+	if positiveReadByteCount <= 0 {
+		t.Fatal("positive-read barrier carried no bytes")
+	}
+	if err := owner.close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-owner.connection.done:
+	default:
+		t.Fatal("fixture returned before exchange socket workers joined")
+	}
+	select {
+	case <-owner.peerDone:
+	default:
+		t.Fatal("fixture returned before its tcp peer joined")
+	}
+	if owner.pending[index] != nil || owner.witnesses[0] != nil {
+		t.Fatal("fixture retained its own pooled references after the socket joins")
+	}
+	t.Logf("positive_read_bytes=%d exchange_joined=true peer_joined=true final_pool_owner_returned=true terminal_read=%v", positiveReadByteCount, owner.peerErr)
+	if !errors.Is(owner.peerErr, net.ErrClosed) && !errors.Is(owner.peerErr, io.EOF) {
+		t.Fatalf("WRITEV_CLEANUP_TERMINAL_AFTER_POSITIVE_READ: closed peer read = %v", owner.peerErr)
 	}
 }

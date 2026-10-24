@@ -3182,6 +3182,21 @@ func (self *fixedMultiHopApiGenerator) NextDestinationsContext(
 	return self.NextDestinations(count, excludeDestinations, rankMode)
 }
 
+// Cooperative discovery keeps the wrapper's exact path and request policy.
+// A promoted API method would replace the path with its direct provider tail.
+func (self *fixedMultiHopApiGenerator) NextDestinationsWithIpFamilyContext(
+	ctx context.Context,
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	ipFamily clientconnect.IpFamilyFilter,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return self.NextDestinationsWithIpFamily(count, excludeDestinations, rankMode, ipFamily)
+}
+
 // One explicit path uses the same single quality window as a fixed provider.
 func (self *fixedMultiHopApiGenerator) FixedDestinationSize() (int, bool) {
 	return 1, true

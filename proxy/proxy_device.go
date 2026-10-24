@@ -1123,9 +1123,16 @@ func (self *ProxyDevice) Run() {
 			return
 		}
 		if !self.UpdateActivity() {
+			// ReadBatch handed us every pooled copy; no sender owns them yet.
+			for index, packet := range packets[:n] {
+				connect.MessagePoolReturn(packet)
+				packets[index] = nil
+			}
 			return
 		}
-		self.deviceLocal.SendPacketsNoCopy(packets[:n])
+		self.deviceLocal.SendNativePacketsNoCopy(packets[:n])
+		// The native batch entry consumes every owner, including refusals.
+		clear(packets[:n])
 	}
 }
 

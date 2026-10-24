@@ -78,6 +78,14 @@ func TestFixedMultiHopApiGeneratorPreservesDiscoveryPath(t *testing.T) {
 					)
 				},
 			},
+			{
+				name: "family-context",
+				call: func() (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+					return generator.NextDestinationsWithIpFamilyContext(
+						t.Context(), 4, nil, "quality", clientconnect.IpFamilyFilterV4Capable,
+					)
+				},
+			},
 		}
 		for _, c := range calls {
 			destinations, err := c.call()
@@ -126,13 +134,21 @@ func TestFixedMultiHopApiGeneratorFiltersDiscovery(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		destinations, err := familyGenerator.NextDestinationsWithIpFamily(c.count, c.excludeDestinations, "quality", c.ipFamily)
-		if err != nil || len(destinations) != c.wantCount {
-			t.Errorf("%s discovery=%v err=%v, want %d paths", c.name, destinations, err, c.wantCount)
-		}
-		if c.wantCount == 1 {
-			if _, ok := destinations[generator.destination]; !ok {
-				t.Errorf("%s discovery omitted full path %v", c.name, generator.destination)
+		for _, contextAware := range []bool{false, true} {
+			var destinations map[clientconnect.MultiHopId]clientconnect.DestinationStats
+			var err error
+			if contextAware {
+				destinations, err = generator.NextDestinationsWithIpFamilyContext(t.Context(), c.count, c.excludeDestinations, "quality", c.ipFamily)
+			} else {
+				destinations, err = familyGenerator.NextDestinationsWithIpFamily(c.count, c.excludeDestinations, "quality", c.ipFamily)
+			}
+			if err != nil || len(destinations) != c.wantCount {
+				t.Errorf("%s context=%t discovery=%v err=%v, want %d paths", c.name, contextAware, destinations, err, c.wantCount)
+			}
+			if c.wantCount == 1 {
+				if _, ok := destinations[generator.destination]; !ok {
+					t.Errorf("%s context=%t discovery omitted full path %v", c.name, contextAware, generator.destination)
+				}
 			}
 		}
 	}
@@ -153,5 +169,29 @@ func TestFixedMultiHopApiGeneratorContextDiscovery(t *testing.T) {
 	destinations, err = generator.NextDestinationsContext(ctx, 1, nil, "quality")
 	if !errors.Is(err, context.Canceled) || len(destinations) != 0 {
 		t.Errorf("canceled context discovery=%v err=%v, want no paths and context cancellation", destinations, err)
+	}
+}
+
+// The embedded API has a direct-provider spec. Interface dispatch must still
+// return this wrapper's full topology; this is the isolated pre-fix control.
+func TestFixedMultiHopApiGeneratorFamilyContextKeepsFullPath(t *testing.T) {
+	generator := newFixedMultiHopGeneratorForTest(t, 3)
+	var familyContext interface {
+		NextDestinationsWithIpFamilyContext(context.Context, int, []clientconnect.MultiHopId, string, clientconnect.IpFamilyFilter) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error)
+	} = generator
+	destinations, err := familyContext.NextDestinationsWithIpFamilyContext(t.Context(), 1, nil, "quality", clientconnect.IpFamilyFilterV4Capable)
+	if _, fullPath := destinations[generator.destination]; err != nil || len(destinations) != 1 || !fullPath {
+		t.Fatalf("family-context discovery=%v err=%v, want only full path %v", destinations, err, generator.destination)
+	}
+}
+
+// Cancellation precedes discovery even when a fixed spec could answer locally.
+func TestFixedMultiHopApiGeneratorFamilyContextCancellation(t *testing.T) {
+	generator := newFixedMultiHopGeneratorForTest(t, 3)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	destinations, err := generator.NextDestinationsWithIpFamilyContext(ctx, 1, nil, "quality", clientconnect.IpFamilyFilterV4Capable)
+	if !errors.Is(err, context.Canceled) || len(destinations) != 0 {
+		t.Fatalf("canceled family-context discovery=%v err=%v, want no paths and caller cancellation", destinations, err)
 	}
 }
