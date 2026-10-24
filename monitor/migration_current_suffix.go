@@ -4,6 +4,7 @@ package monitor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -17,9 +18,20 @@ func migrationCurrentSuffix(version int, name string, predicates ...string) snMa
 	return contract
 }
 
+// The contracts in version order. An artifact's row column is its version's
+// position, so the probe emits the queries in that order whatever order
+// separately developed branches merged the list in.
+func migrationCurrentSuffixContractsInVersionOrder(contracts []snMainnetMigrationContract) []snMainnetMigrationContract {
+	ordered := slices.Clone(contracts)
+	slices.SortStableFunc(ordered, func(a snMainnetMigrationContract, b snMainnetMigrationContract) int {
+		return a.artifact.requiredVersion - b.artifact.requiredVersion
+	})
+	return ordered
+}
+
 func migrationCurrentSuffixArtifacts() []migrationArtifact {
 	artifacts := make([]migrationArtifact, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContracts {
+	for _, contract := range migrationCurrentSuffixContractsInVersionOrder(migrationCurrentSuffixContracts) {
 		artifacts = append(artifacts, contract.artifact)
 	}
 	return artifacts
@@ -27,7 +39,7 @@ func migrationCurrentSuffixArtifacts() []migrationArtifact {
 
 func migrationCurrentSuffixArtifactQueries() string {
 	queries := make([]string, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContracts {
+	for _, contract := range migrationCurrentSuffixContractsInVersionOrder(migrationCurrentSuffixContracts) {
 		queries = append(queries, contract.query)
 	}
 	return strings.Join(queries, ",\n")

@@ -50,6 +50,32 @@ func TestIdentityRetentionMigrationContracts(t *testing.T) {
 	}
 }
 
+// Pure: contracts merged out of version order still emit their queries in
+// version order, the order of their row columns, and the merged list itself
+// is left as it was.
+func TestMigrationCurrentSuffixContractsEmitInVersionOrder(t *testing.T) {
+	merged := []snMainnetMigrationContract{
+		migrationCurrentSuffix(902, "later", "(902)"),
+		migrationCurrentSuffix(900, "earlier", "(900)"),
+		migrationCurrentSuffix(901, "middle", "(901)"),
+	}
+	ordered := migrationCurrentSuffixContractsInVersionOrder(merged)
+	for index, want := range []int{900, 901, 902} {
+		if contract := ordered[index]; contract.artifact.requiredVersion != want || contract.artifact.rowColumn != want-589 || contract.query != fmt.Sprintf("(%d)", want) {
+			t.Fatalf("position %d holds %+v, want version %d", index, contract.artifact, want)
+		}
+	}
+	if merged[0].artifact.requiredVersion != 902 {
+		t.Fatal("ordering rewrote the merged list")
+	}
+	artifacts := migrationCurrentSuffixArtifacts()
+	for index := 1; index < len(artifacts); index++ {
+		if artifacts[index].requiredVersion <= artifacts[index-1].requiredVersion {
+			t.Fatalf("suffix artifacts out of version order at %d: %d after %d", index, artifacts[index].requiredVersion, artifacts[index-1].requiredVersion)
+		}
+	}
+}
+
 // DB-backed: under the owner rule this runs only after the branch, with its
 // migrations, is merged to main.
 //
