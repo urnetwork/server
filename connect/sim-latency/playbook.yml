@@ -91,7 +91,6 @@ evaluation_source:
     - goidenticons
     - userwireguard
     - sn
-    - operator-proxy
     - warp
     - gvisor
   canonical_patch_repository: server

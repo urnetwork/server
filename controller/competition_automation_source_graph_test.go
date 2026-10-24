@@ -1,4 +1,4 @@
-// Private database fixtures prove staging retirement cannot weaken the historical production graph.
+// Private database fixtures prove both modes require the complete live graph.
 package controller
 
 import (
@@ -29,30 +29,19 @@ func TestCompetitionAutomationSourceGraphIsModeBoundInStoreAndDatabase(t *testin
 				t.Fatal(err)
 			}
 			intent := competitionAutomationSourceIntent(t, fixture, sealed, 2)
-			wantCount := 11
-			if staging {
-				wantCount = 10
-			}
-			if len(intent.Commits) != wantCount || len(intent.GitRefs) != wantCount+1 || (intent.Commits["operator-proxy"] != "") == staging || intent.Commits["gvisor"] == "" {
+			wantCount := 10
+			if len(intent.Commits) != wantCount || len(intent.GitRefs) != wantCount+1 || intent.Commits["operator-proxy"] != "" || intent.Commits["gvisor"] == "" {
 				t.Fatalf("invalid graph fixture staging=%t: %+v", staging, intent.Commits)
 			}
-			for _, mutation := range []string{"cross-mode", "missing-gvisor", "unknown-repository"} {
+			for _, mutation := range []string{"retired-repository", "missing-gvisor", "unknown-repository", "cross-mode"} {
 				invalid := intent
 				invalid.Commits, invalid.GitRefs = maps.Clone(intent.Commits), maps.Clone(intent.GitRefs)
 				switch mutation {
 				case "cross-mode":
-					if staging {
-						invalid.Commits["operator-proxy"] = fixture.settings.BaseSha
-						invalid.GitRefs["operator-proxy"] = model.CompetitionSourceGitRef{Branch: "sim-latency-staging", Commit: fixture.settings.BaseSha, ExpectedCommit: fixture.settings.BaseSha}
-					} else {
-						delete(invalid.Commits, "operator-proxy")
-						delete(invalid.GitRefs, "operator-proxy")
-					}
-					// A valid canonical hash for the other graph must not authorize this mode.
-					invalid.SourceLockSha256, err = model.CompetitionSourceLockDigest(invalid.Commits)
-					if err != nil {
-						t.Fatal(err)
-					}
+					invalid.Staging = !staging
+				case "retired-repository":
+					invalid.Commits["operator-proxy"] = fixture.settings.BaseSha
+					invalid.GitRefs["operator-proxy"] = model.CompetitionSourceGitRef{Branch: intent.GitRefs["server"].Branch, Commit: fixture.settings.BaseSha, ExpectedCommit: fixture.settings.BaseSha}
 				case "missing-gvisor":
 					delete(invalid.Commits, "gvisor")
 					delete(invalid.GitRefs, "gvisor")
@@ -75,7 +64,11 @@ func TestCompetitionAutomationSourceGraphIsModeBoundInStoreAndDatabase(t *testin
 						server.RaisePgResult(tx.Exec(ctx, `SELECT competition_v2_source_authorized($1::jsonb,$2,$3,$4)`, string(content), intent.Environment, intent.CompetitionId, intent.SeasonId))
 					})
 				})
-				if databaseErr == nil || !strings.Contains(databaseErr.Error(), "repository graph") {
+				expectedError := "repository graph"
+				if mutation == "cross-mode" {
+					expectedError = "source mode"
+				}
+				if databaseErr == nil || !strings.Contains(databaseErr.Error(), expectedError) {
 					t.Fatalf("SQL accepted %s staging=%t: %v", mutation, staging, databaseErr)
 				}
 			}
@@ -102,11 +95,6 @@ func TestCompetitionAutomationRuntimeSourceGraphRejectsRetiredStagingPin(t *test
 	invalid := valid
 	invalid.Commits = maps.Clone(valid.Commits)
 	invalid.Commits["operator-proxy"] = strings.Repeat("c", 40)
-	var err error
-	invalid.SourceLockSha256, err = model.CompetitionSourceLockDigest(invalid.Commits)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := sourceSettingsFromIntent(settings, &invalid); err == nil {
 		t.Fatal("runtime accepted the retired staging repository")
 	}

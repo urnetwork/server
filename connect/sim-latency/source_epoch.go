@@ -45,6 +45,7 @@ type sourceRepositories struct {
 	Goidenticons  sourceRepository `yaml:"goidenticons"`
 	Userwireguard sourceRepository `yaml:"userwireguard"`
 	Sn            sourceRepository `yaml:"sn"`
+	// Recognized only to reject obsolete pins explicitly; never required or serialized when empty.
 	OperatorProxy sourceRepository `yaml:"operator-proxy,omitempty" json:",omitzero"`
 	Warp          sourceRepository `yaml:"warp"`
 	Gvisor        sourceRepository `yaml:"gvisor"`
@@ -56,9 +57,9 @@ func sourceRepositoryNames() []string {
 	return sourceRepositoryNamesForMode(false)
 }
 
-// Retains the historical production graph while new staging excludes the
-// retired operator-proxy repository entirely, including origin discovery.
-func sourceRepositoryNamesForMode(staging bool) []string {
+// Both execution modes use only live repositories. The mode still selects
+// branches and authority, never a different dependency census.
+func sourceRepositoryNamesForMode(_ bool) []string {
 	names := []string{
 		"server",
 		"connect",
@@ -69,9 +70,6 @@ func sourceRepositoryNamesForMode(staging bool) []string {
 		"userwireguard",
 		"sn",
 	}
-	if !staging {
-		names = append(names, "operator-proxy")
-	}
 	return append(names, "warp", "gvisor")
 }
 
@@ -81,22 +79,18 @@ func (self sourceRepositories) commits() map[string]string {
 }
 
 // Builds the exact mode-specific lock map without an empty retired entry.
-func (self sourceRepositories) commitsForMode(staging bool) map[string]string {
+func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 	commits := map[string]string{
-		"server":         self.Server.Commit,
-		"connect":        self.Connect.Commit,
-		"sdk":            self.Sdk.Commit,
-		"proxy":          self.Proxy.Commit,
-		"glog":           self.Glog.Commit,
-		"goidenticons":   self.Goidenticons.Commit,
-		"userwireguard":  self.Userwireguard.Commit,
-		"sn":             self.Sn.Commit,
-		"operator-proxy": self.OperatorProxy.Commit,
-		"warp":           self.Warp.Commit,
-		"gvisor":         self.Gvisor.Commit,
-	}
-	if staging {
-		delete(commits, "operator-proxy")
+		"server":        self.Server.Commit,
+		"connect":       self.Connect.Commit,
+		"sdk":           self.Sdk.Commit,
+		"proxy":         self.Proxy.Commit,
+		"glog":          self.Glog.Commit,
+		"goidenticons":  self.Goidenticons.Commit,
+		"userwireguard": self.Userwireguard.Commit,
+		"sn":            self.Sn.Commit,
+		"warp":          self.Warp.Commit,
+		"gvisor":        self.Gvisor.Commit,
 	}
 	return commits
 }
@@ -215,7 +209,7 @@ func decodeSourceManifest(manifestBytes []byte) (*sourceManifest, error) {
 		}
 		return nil, fmt.Errorf("decode source config trailing data: %w", err)
 	}
-	if manifest.Staging {
+	{
 		// Presence itself is forbidden, including an empty retired pin that a
 		// zero-value typed field would otherwise silently discard.
 		var keys struct {
@@ -223,14 +217,17 @@ func decodeSourceManifest(manifestBytes []byte) (*sourceManifest, error) {
 				Generations []struct {
 					Repositories map[string]yaml.Node `yaml:"repositories"`
 				} `yaml:"generations"`
+				Epochs []struct {
+					Repositories map[string]yaml.Node `yaml:"repositories"`
+				} `yaml:"epochs"`
 			} `yaml:"evaluation_source"`
 		}
 		if err := yaml.Unmarshal(manifestBytes, &keys); err != nil {
-			return nil, fmt.Errorf("decode staging source repository keys: %w", err)
+			return nil, fmt.Errorf("decode source repository keys: %w", err)
 		}
-		for _, generation := range keys.EvaluationSource.Generations {
+		for _, generation := range append(keys.EvaluationSource.Generations, keys.EvaluationSource.Epochs...) {
 			if _, present := generation.Repositories["operator-proxy"]; present {
-				return nil, errors.New("staging source cannot include retired operator-proxy")
+				return nil, errors.New("source cannot include retired operator-proxy")
 			}
 		}
 	}
@@ -261,6 +258,9 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		return errors.New("source config must contain baseline epoch 0 and at most six promoted epochs")
 	}
 	for epochIndex, epoch := range manifest.EvaluationSource.Epochs {
+		if epoch.Repositories.OperatorProxy.Commit != "" {
+			return errors.New("source cannot include retired operator-proxy")
+		}
 		if epoch.Epoch != epochIndex {
 			return fmt.Errorf("source epochs must be contiguous: entry %d has epoch %d", epochIndex, epoch.Epoch)
 		}

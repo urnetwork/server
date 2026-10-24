@@ -74,8 +74,8 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		return errors.New("reviewed source config requires baseline generation 0 and at most six promotions")
 	}
 	for index, generation := range generationRecords {
-		if manifest.Staging && generation.Repositories.OperatorProxy.Commit != "" {
-			return errors.New("staging source cannot include retired operator-proxy")
+		if generation.Repositories.OperatorProxy.Commit != "" {
+			return errors.New("source cannot include retired operator-proxy")
 		}
 		if generation.Generation != index || !validSha256(generation.SourceLockSha256) ||
 			!validSha256(generation.ThresholdEvidenceSha256) ||

@@ -80,7 +80,7 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 // This independent fixture prevents a removed main dependency from silently
 // shrinking every serializer, validator, image copy, and source ledger together.
 func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
 	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
 		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
 	}
@@ -306,8 +306,8 @@ func TestEvaluatorBaseCopiesExactlyLockedRepositories(t *testing.T) {
 	if copies := copyPattern.FindAllString(dockerfile, -1); !slices.Equal(copies, []string{"COPY source/ /workspace/"}) {
 		t.Fatalf("image must copy only the builder's mode-specific source context: %v", copies)
 	}
-	if !strings.Contains(dockerfile, `if [ -d /workspace/operator-proxy ]; then git config --system --add safe.directory /workspace/operator-proxy; fi`) {
-		t.Fatal("retired repository trust is not conditional on production source presence")
+	if strings.Contains(dockerfile, "/workspace/operator-proxy") {
+		t.Fatal("image still trusts a retired repository")
 	}
 }
 
@@ -373,9 +373,6 @@ git() {
 	} {
 		includeWorktree := mode.includeWorktree
 		expectedCommits := maps.Clone(repositoryCommits)
-		if mode.staging {
-			delete(expectedCommits, "operator-proxy")
-		}
 		buildContext := t.TempDir()
 		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", body)
 		command.Env = []string{
@@ -442,12 +439,12 @@ write_evidence() { [[ $1 == staging-source.json ]]; printf '%s\n' "$2"; }
 		change string
 	}{
 		{name: "complete"},
-		{name: "missing-operator-proxy", omit: "operator-proxy"},
+		{name: "missing-userwireguard", omit: "userwireguard"},
 		{name: "missing-warp", omit: "warp"},
 		{name: "missing-gvisor", omit: "gvisor"},
 		{name: "unexpected", extra: "unexpected"},
 		{name: "substituted", omit: "warp", extra: "unexpected"},
-		{name: "malformed-commit", change: "operator-proxy"},
+		{name: "malformed-commit", change: "userwireguard"},
 	} {
 		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
 		delete(repositoryCommits, fixture.omit)
@@ -579,25 +576,22 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 	}{
 		{name: "complete"},
 		{name: "explicit-staging", staging: true, imageStage: true},
+		{name: "production-retired-extra", extra: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "staging-retired-extra", staging: true, imageStage: true, extra: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "staging-rejects-production-image", staging: true, wantErr: "staging source requires an explicitly staging evaluator image"},
 		{name: "production-rejects-staging-image", imageStage: true, wantErr: "production source cannot use a staging evaluator image"},
 		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
-		{name: "missing-operator-proxy", omit: "operator-proxy", wantErr: "source lock is malformed"},
+		{name: "missing-userwireguard", omit: "userwireguard", wantErr: "source lock is malformed"},
 		{name: "missing-warp", omit: "warp", wantErr: "source lock is malformed"},
 		{name: "missing-gvisor", omit: "gvisor", wantErr: "source lock is malformed"},
 		{name: "unexpected", extra: "unexpected", wantErr: "source lock is malformed"},
 		{name: "substituted", omit: "warp", extra: "unexpected", wantErr: "source lock is malformed"},
-		{name: "operator-proxy-mismatch", change: "operator-proxy", wantErr: "repository operator-proxy does not match the source lock"},
+		{name: "userwireguard-mismatch", change: "userwireguard", wantErr: "repository userwireguard does not match the source lock"},
 		{name: "warp-mismatch", change: "warp", wantErr: "repository warp does not match the source lock"},
 		{name: "gvisor-mismatch", change: "gvisor", wantErr: "repository gvisor does not match the source lock"},
 	} {
 		lockedCommits := maps.Clone(repositoryCommits)
 		expectedCommits := maps.Clone(repositoryCommits)
-		if fixture.staging {
-			delete(lockedCommits, "operator-proxy")
-			delete(expectedCommits, "operator-proxy")
-		}
 		if fixture.omit != "" {
 			delete(lockedCommits, fixture.omit)
 		}

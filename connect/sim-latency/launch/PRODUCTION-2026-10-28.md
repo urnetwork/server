@@ -34,7 +34,7 @@ module is part of the connect commit, not a separate repository.
 
 - [x] Fetch development heads and inspect operator worktrees without modifying them.
 - [ ] Compile and test the complete candidate graph in private temporary clones.
-- [ ] Audit transitive repository coverage against that graph.
+- [x] Audit transitive repository coverage against that graph.
 - [ ] Publish the approved production source lock and competition branches without
   overwriting historical epoch records or force-pushing an existing branch.
 - [ ] Build and qualify the exact production evaluator; retain authenticated
@@ -76,12 +76,20 @@ fixed opening, not permission to omit honesty review or invent readiness proof.
   Focused lifecycle/source/review tests passed using the exact candidate graph:
   `go test -p 2 -timeout 10m -run '^Test(RunMainCompleteSixEpochLifecycle|WinnerReview|SourceReview|ReviewedSource|StagingSource|SourceGraph)' -count=1 ./connect/sim-latency`.
   This does not claim a full-suite, race-suite or live-integration pass.
-- The production source protocol still requires eleven repositories, including
-  the retired `operator-proxy`. The ten-repository retirement was implemented
-  only for explicit staging. New production support must cover the Go source
-  protocol, database guards, evaluator scripts and image builder, with tests
-  preserving historical eleven-repository locks. Do not use a fake empty
-  repository or relabel production as staging to bypass the checks.
+- The initial production protocol still required the retired `operator-proxy`.
+  The October 24 retirement update removes it from all active production and
+  staging source requirements, evaluator/build scripts, promotion, remote
+  checks, and runbooks. An additive migration updates both database source
+  guards without changing the existing winner-review requirements. Historical
+  migration bodies and measured evidence remain untouched; obsolete locks do
+  not qualify a new release. No fake placeholder or staging-mode bypass is used.
+  Source/model tests and focused race tests passed; real disposable-database
+  tests accepted both ten-repository modes and rejected obsolete/unknown pins.
+  The updated complete `sim-latency/tests.sh` harness passed, including the race
+  suite (114.045 seconds). Its retained log SHA-256 is
+  `225388e19256b0b20edca94a414e26b82fff4609a2be7688668031b732252aaa`.
+  Repeated disposable-database checks also passed with cross-mode rejection
+  still enforced. Live main migration/deployment remains pending maintenance.
 - Public API HTTPS, the configured main PostgreSQL connection, and the host's
   configured MinIO endpoint refused connections during the initial checks.
   The existing staging supervisor reports `lease_unavailable` from PostgreSQL.

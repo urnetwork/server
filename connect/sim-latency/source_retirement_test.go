@@ -1,5 +1,5 @@
-// Retirement regressions preserve production history while proving that new
-// staging never requires, serializes, builds, or contacts the retired repo.
+// Both production and staging must omit the retired repository from every
+// active source operation. Historical evidence is not rewritten.
 package main
 
 import (
@@ -17,11 +17,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The stage set differs from the historical set by only the retired repository.
-func TestStagingSourceRepositorySetRetiresOnlyOperatorProxy(t *testing.T) {
+// The independently enumerated set prevents accidental reintroduction in either mode.
+func TestSourceRepositorySetRetiresOperatorProxyInBothModes(t *testing.T) {
 	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
-	if !slices.Equal(sourceRepositoryNamesForMode(true), want) || !slices.Contains(sourceRepositoryNames(), "operator-proxy") {
-		t.Fatal("staging retirement changed another required pin or production history")
+	if !slices.Equal(sourceRepositoryNamesForMode(true), want) || !slices.Equal(sourceRepositoryNames(), want) {
+		t.Fatal("retirement changed another required pin or left a retired production requirement")
 	}
 	manifest := stagingSourceTestManifest(t)
 	if err := validateSourceManifest(manifest); err != nil {
@@ -54,6 +54,39 @@ func TestStagingSourceRepositorySetRetiresOnlyOperatorProxy(t *testing.T) {
 	production := reviewedSourceTestManifest(t)
 	if err := validateSourceManifest(production); err != nil {
 		t.Fatalf("retirement broke historical production source: %v", err)
+	}
+}
+
+// An empty obsolete key must not evade strict census validation in either
+// supported production manifest shape, even when the typed value is zero.
+func TestProductionSourceManifestRejectsRetiredPins(t *testing.T) {
+	for _, schema := range []int{1, 2} {
+		manifest := sourceTestManifest(sourceTestCommits(strings.Repeat("a", 40)))
+		section := "epochs"
+		if schema == 2 {
+			manifest = reviewedSourceTestManifest(t)
+			section = "generations"
+		}
+		content, err := yaml.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeSourceManifest(content); err != nil {
+			t.Fatalf("production schema %d rejected ten complete pins: %v", schema, err)
+		}
+		var raw map[string]any
+		if err := yaml.Unmarshal(content, &raw); err != nil {
+			t.Fatal(err)
+		}
+		repositories := raw["evaluation_source"].(map[string]any)[section].([]any)[0].(map[string]any)["repositories"].(map[string]any)
+		repositories["operator-proxy"] = map[string]any{}
+		content, err = yaml.Marshal(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeSourceManifest(content); err == nil || !strings.Contains(err.Error(), "retired operator-proxy") {
+			t.Fatalf("production schema %d accepted a retired pin: %v", schema, err)
+		}
 	}
 }
 
@@ -93,8 +126,8 @@ func TestStagingEvaluatorSourceLockRequiresTenExactPins(t *testing.T) {
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadEvaluatorSourceLock(path); err == nil {
-		t.Fatal("ten-pin staging lock was accepted as historical production")
+	if _, err := loadEvaluatorSourceLock(path); err != nil {
+		t.Fatalf("production rejected the complete live graph: %v", err)
 	}
 }
 
@@ -117,25 +150,40 @@ func TestStagingFrozenGraphRejectsRetiredRequiredModule(t *testing.T) {
 	if err := verifyFrozenSourceGraphForMode(context.Background(), serverRoot, changed, true); err == nil || !strings.Contains(err.Error(), "operator-proxy is absent") {
 		t.Fatalf("staging ignored a genuinely required retired dependency: %v", err)
 	}
-	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, changed); err != nil {
-		t.Fatalf("historical production graph was reinterpreted: %v", err)
+	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, changed); err == nil || !strings.Contains(err.Error(), "operator-proxy is absent") {
+		t.Fatalf("production ignored a genuinely required retired dependency: %v", err)
 	}
 }
 
 // Ten local-only remotes are sufficient. The Git tripwire rejects any attempt
 // to discover or contact operator-proxy, without ever permitting real network.
 func TestStagingRemoteVerificationNeverContactsRetiredRepository(t *testing.T) {
+	verifyRemoteSourceWithoutRetiredRepository(t, true)
+}
+
+// Production must work from the same ten remotes without a retired placeholder.
+func TestProductionRemoteVerificationNeverContactsRetiredRepository(t *testing.T) {
+	verifyRemoteSourceWithoutRetiredRepository(t, false)
+}
+
+// The tripwire runs through actual Git source and remote verification in both modes.
+func verifyRemoteSourceWithoutRetiredRepository(t *testing.T, staging bool) {
+	t.Helper()
 	root := t.TempDir()
 	commits := map[string]string{}
-	for _, repository := range sourceRepositoryNamesForMode(true) {
+	for _, repository := range sourceRepositoryNamesForMode(staging) {
 		commits[repository] = sourceTestRepository(t, root, repository)
 		repositoryRoot := filepath.Join(root, repository)
-		sourceTestGit(t, repositoryRoot, "branch", "-m", stagingEvaluationSourceBranch)
+		sourceTestGit(t, repositoryRoot, "branch", "-m", sourceBranch(staging))
 		sourceTestGit(t, repositoryRoot, "remote", "add", "origin", repositoryRoot)
 	}
-	manifest := stagingSourceTestManifest(t)
+	manifest := reviewedSourceTestManifest(t)
+	manifest.EvaluationSource.Epochs = nil
+	if staging {
+		manifest = stagingSourceTestManifest(t)
+	}
 	manifest.EvaluationSource.Generations[0].Repositories = sourceRepositoriesFromCommits(commits)
-	lockDigest, err := model.CompetitionSourceLockDigestForMode(commits, true)
+	lockDigest, err := model.CompetitionSourceLockDigestForMode(commits, staging)
 	if err != nil {
 		t.Fatal(err)
 	}

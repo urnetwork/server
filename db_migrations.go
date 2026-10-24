@@ -10720,4 +10720,7 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Both production and staging use only the ten live source repositories.
+	newSqlMigration(competitionSourceRetirementMigration()),
 }

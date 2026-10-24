@@ -26,14 +26,16 @@ trusted baseline and scorer continue to execute from the pristine base image.
 
 For every production evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
-`sn`, `operator-proxy`, `warp`, and `gvisor` repositories out of that authenticated base
+`sn`, `warp`, and `gvisor` repositories out of that authenticated base
 image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
 changing any host repository checkout. Explicit v2 staging instead copies exactly
-the ten repositories above other than the retired `operator-proxy`, using only
+the same ten repositories above, using only
 `sim-latency-staging` branches and a staging-authenticated image and source lock.
 The staging builder neither discovers nor contacts the retired remote. Existing
-production images and eleven-pin locks retain their original identity.
+production images and eleven-pin locks retain their original identity as
+historical evidence; no new production or staging release requires the deleted
+`operator-proxy` repository.
 Baseline and candidate have distinct
 trees; the builder applies the canonical patch only to the candidate tree.
 The selected tree is mounted read-only at `/workspace` in each runner and is

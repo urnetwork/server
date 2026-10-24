@@ -374,7 +374,7 @@ func TestCompetitionRuntimeManifestRequiresExactInstalledContent(t *testing.T) {
 	t.Setenv("SIM_LATENCY_RUNTIME_MANIFEST_DIRECTORY", directory)
 	settings := &Settings{CompetitionId: "synthetic-competition", AutomationPolicy: model.CompetitionAutomationPolicy{Enabled: true, Environment: "synthetic", SeasonId: "synthetic-season"}}
 	commits := map[string]string{}
-	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		commits[name] = strings.Repeat("a", 40)
 	}
 	lockDigest, err := model.CompetitionSourceLockDigest(commits)

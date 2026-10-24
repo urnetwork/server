@@ -2693,7 +2693,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`if [ "$staging" = true ]; then`,
 		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`readonly REPOSITORIES`,
@@ -2726,7 +2726,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
 		`for repository in "${REPOSITORIES[@]}"; do`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`if [ "$staging" = true ]; then`,
 		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`readonly REPOSITORIES`,
@@ -2749,7 +2749,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	for _, required := range []string{
 		`for repository in "${REPOSITORIES[@]}"; do`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`if [ "$staging" = true ]; then`,
 		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`readonly REPOSITORIES`,
@@ -2878,7 +2878,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`if [ "$staging" = true ]; then`,
 		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
 		`readonly REPOSITORIES`,
