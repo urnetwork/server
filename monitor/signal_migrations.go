@@ -430,7 +430,7 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "Redis contract admission compatibility and policy", requiredVersion: 755, rowColumn: 166},
 	{name: "provider payment bonus provenance and submission guards", requiredVersion: 756, rowColumn: 167},
 	{name: "provider earning boundary immutable guards", requiredVersion: 757, rowColumn: 168},
-	{name: "asynchronous transfer debit journal and retention guard", requiredVersion: 758, rowColumn: 169},
+	{name: "asynchronous transfer debit journal and retention guard", requiredVersion: 758, removedVersion: 864, rowColumn: 169},
 	{name: "acceptance-test balance drain audit", requiredVersion: 759, rowColumn: 170},
 	{name: "active acceptance-test balance drain lookup", requiredVersion: 760, rowColumn: 171},
 	{name: "Solana payment amount reservations", requiredVersion: 761, rowColumn: 172},

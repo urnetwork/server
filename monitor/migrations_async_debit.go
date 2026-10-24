@@ -70,3 +70,15 @@ var transferDebitArtifactQuery = `(` +
 	financialGuardArtifact("transfer_balance", "transfer_balance_pending_debit_guard", "protect_pending_transfer_debit", server.TransferDebitGuardBodySql(), 11) + `
  AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.transfer_debit_journal') AND contype='f')
  AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.transfer_debit_journal') AND NOT tgisinternal))`
+
+// The age index keyed applied, which made marking a debit applied a non-HOT
+// update; v864 drops it after v863 builds (shard, create_time). The rest of
+// the v758 custody is republished unchanged, with the age index required
+// absent instead.
+var transferDebitJournalHotArtifactQuery = func() string {
+	ageIndex := financialIndexArtifact("transfer_debit_journal", "transfer_debit_journal_age", "shard, applied, create_time")
+	if strings.Count(transferDebitArtifactQuery, ageIndex) != 1 {
+		panic("transfer debit monitor cannot locate its published age index")
+	}
+	return strings.Replace(transferDebitArtifactQuery, ageIndex, migrationIndexRemoved("transfer_debit_journal", "transfer_debit_journal_age"), 1)
+}()

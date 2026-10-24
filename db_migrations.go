@@ -10788,4 +10788,39 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE search_provider_stats SET (fillfactor = 70);
 	`),
+
+	// A transfer debit journal row is inserted, marked applied once its debit
+	// commits, and deleted after its Redis release, seconds later
+	// (model/subscription_transfer_debit.go). transfer_debit_journal_age keyed
+	// applied, so marking a row applied was a non-HOT update. Its readers, the
+	// flush's oldest-age gauge and the monitor's per-shard ages, take the
+	// oldest row of a shard in one state: keyed (shard, create_time) they read
+	// that shard's rows oldest first until one matches. That is a few rows
+	// while the journal holds its usual few seconds of debits; during a
+	// backlog the applied age reads the shard's pending rows. The flush itself
+	// reads by balance (the primary key and transfer_debit_journal_shard).
+	// This builds the new index; the next migration drops the old one.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_debit_journal_shard_create_time`,
+		`CREATE INDEX CONCURRENTLY transfer_debit_journal_shard_create_time
+		 ON transfer_debit_journal (shard, create_time)`,
+		`DROP INDEX IF EXISTS transfer_debit_journal_shard_create_time;
+		 CREATE INDEX transfer_debit_journal_shard_create_time
+		 ON transfer_debit_journal (shard, create_time)`,
+	),
+	// The age index keyed by applied, replaced by the one above, which the
+	// previous migration built before this drop runs. Without it no index of
+	// the journal keys applied, so marking a row applied is HOT.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_debit_journal_age`,
+		`DROP INDEX IF EXISTS transfer_debit_journal_age`,
+	),
+	// Room on each page for the applied version of every row inserted there:
+	// a page holds the debits of a few seconds, and each is rewritten once as
+	// applied before it is deleted. The journal holds few live rows, so the
+	// space costs nothing that matters.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE transfer_debit_journal SET (fillfactor = 70);
+	`),
 }

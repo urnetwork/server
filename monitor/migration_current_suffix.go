@@ -706,6 +706,13 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFillfactor("device", 90)),
 	migrationCurrentSuffix(862, "search provider stats pages keep room for open-hour rollups",
 		migrationFillfactor("search_provider_stats", 70)),
+	migrationCurrentSuffix(863, "transfer debit journal age index keyed without applied",
+		financialIndexArtifact("transfer_debit_journal", "transfer_debit_journal_shard_create_time", "shard, create_time")),
+	// 864 retires the v758 composite, which pinned the dropped age index
+	migrationCurrentSuffix(864, "transfer debit journal custody without the applied age index",
+		transferDebitJournalHotArtifactQuery),
+	migrationCurrentSuffix(865, "transfer debit journal pages keep room for the applied version",
+		migrationFillfactor("transfer_debit_journal", 70)),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

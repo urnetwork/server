@@ -79,6 +79,7 @@ func TestWritePathTableFillfactors(t *testing.T) {
 			{table: "transfer_balance", fillfactor: "85"},
 			{table: "device", fillfactor: "90"},
 			{table: "search_provider_stats", fillfactor: "70"},
+			{table: "transfer_debit_journal", fillfactor: "70"},
 		} {
 			var fillfactor *string
 			MaintenanceDb(ctx, func(conn PgConn) {
@@ -93,5 +94,37 @@ func TestWritePathTableFillfactors(t *testing.T) {
 				t.Errorf("%s fillfactor=%v, want %s", expected.table, fillfactor, expected.fillfactor)
 			}
 		}
+	})
+}
+
+// Marking a debit applied changes only the applied flag. No index keys it once
+// the age index is (shard, create_time), so the update is HOT.
+func TestTransferDebitJournalAppliedUpdateIsHot(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		balanceId := NewId()
+		contractId := NewId()
+		Tx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO transfer_debit_journal (contract_id, balance_id, debit_byte_count, shard) VALUES ($1, $2, 1024, $3)`,
+				contractId,
+				balanceId,
+				int(balanceId[15])%16,
+			))
+		})
+		Tx(ctx, func(tx PgTx) {
+			// the statement of the debit flush (model/subscription_transfer_debit.go)
+			tag := RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE transfer_debit_journal SET applied=true WHERE balance_id=$1 AND contract_id=ANY($2) AND NOT applied`,
+				balanceId,
+				[]Id{contractId},
+			))
+			updated, hot := writePathTestTransactionUpdates(t, ctx, tx, "transfer_debit_journal")
+			if tag.RowsAffected() != 1 || updated != 1 || hot != 1 {
+				t.Fatalf("applied rows=%d updated=%d hot=%d, want one HOT update", tag.RowsAffected(), updated, hot)
+			}
+		})
 	})
 }
