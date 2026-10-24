@@ -825,7 +825,12 @@ func closeEvidenceRollbackSqlInTx(ctx context.Context, tx PgTx, settings *CloseE
 	if parent == nil || parent.relkind != "p" {
 		return nil, 0, fmt.Errorf("%s is not partitioned", table)
 	}
-	if legacy == nil || legacy.legacyBound == nil {
+	// the legacy partition keeps the table's bound under the table's name,
+	// which a shape read by the partition's own name lists with its checks
+	bound := contractLegacyBoundName(table)
+	if legacy == nil || !slices.ContainsFunc(legacy.checks, func(check contractConstraint) bool {
+		return check.name == bound
+	}) {
 		return nil, 0, fmt.Errorf("%s has no legacy partition with its bound", table)
 	}
 	leaves, err := closeEvidencePartitionFamily.ListLeaves(ctx, tx, table)
@@ -857,7 +862,7 @@ func closeEvidenceRollbackSqlInTx(ctx context.Context, tx PgTx, settings *CloseE
 	columns := closeEvidenceColumnList(ctx, tx, table)
 	statements = append(statements,
 		fmt.Sprintf("ALTER TABLE public.%s DETACH PARTITION public.%s", quoteIdentifier(table), quoteIdentifier(legacyName)),
-		fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT %s", quoteIdentifier(legacyName), quoteIdentifier(legacy.legacyBound.name)),
+		fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT %s", quoteIdentifier(legacyName), quoteIdentifier(bound)),
 		fmt.Sprintf("INSERT INTO public.%[1]s (%[3]s) SELECT %[3]s FROM public.%[2]s", quoteIdentifier(legacyName), quoteIdentifier(table), columns),
 		fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(table)),
 		fmt.Sprintf("ALTER TABLE public.%s RENAME TO %s", quoteIdentifier(legacyName), quoteIdentifier(table)),
