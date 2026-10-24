@@ -324,26 +324,46 @@ func verifyRemoteSourceEpochMode(
 			return fmt.Errorf("repository %s origin: %w", repositoryName, err)
 		}
 		cloneRoot := filepath.Join(temporaryRoot, repositoryName+".git")
-		cloneArgs := []string{"clone", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch}
-		// An exact-head check needs only the advertised tip. History remains
-		// mandatory for the non-head mode because it proves older checkpoints
-		// are reachable from the production branch.
-		if requireExactHead {
-			cloneArgs = append(cloneArgs, "--depth=1")
-		}
+		// Most checks pin the advertised tip and need no history or file blobs.
+		// Older checkpoints deepen only their own branch before ancestry proof.
+		cloneArgs := []string{"clone", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch,
+			"--depth=1", "--filter=blob:none"}
 		cloneArgs = append(cloneArgs, origin, cloneRoot)
 		command := exec.Command("git", cloneArgs...)
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("clone repository %s competition branch: %s", repositoryName, strings.TrimSpace(string(output)))
 		}
+		// Git's --branch also accepts tags and leaves HEAD detached for them.
+		// Source policy requires the named branch, not an identically named tag.
+		actualBranch, err := gitOutput(cloneRoot, "symbolic-ref", "--quiet", "HEAD")
+		if err != nil || actualBranch != "refs/heads/"+branch {
+			return fmt.Errorf("repository %s competition source %s is not the required branch", repositoryName, branch)
+		}
 		expectedCommit := epoch.Repositories.commitsForMode(manifest.Staging)[repositoryName]
-		if _, err := gitOutput(cloneRoot, "cat-file", "-e", expectedCommit+"^{commit}"); err != nil {
-			return fmt.Errorf("repository %s competition branch does not contain epoch commit %s", repositoryName, expectedCommit)
+		head, err := gitOutput(cloneRoot, "rev-parse", "HEAD")
+		if err != nil {
+			return fmt.Errorf("repository %s competition branch head: %w", repositoryName, err)
 		}
 		if requireExactHead {
-			head, err := gitOutput(cloneRoot, "rev-parse", "HEAD")
-			if err != nil || head != expectedCommit {
+			if head != expectedCommit {
 				return fmt.Errorf("repository %s competition branch head %s does not match active epoch commit %s", repositoryName, head, expectedCommit)
+			}
+			continue
+		}
+		if head != expectedCommit {
+			shallow, err := gitOutput(cloneRoot, "rev-parse", "--is-shallow-repository")
+			if err != nil || (shallow != "true" && shallow != "false") {
+				return fmt.Errorf("repository %s shallow history state is unavailable", repositoryName)
+			}
+			if shallow == "true" {
+				if _, err := gitOutput(cloneRoot, "fetch", "--quiet", "--unshallow", "--filter=blob:none", "origin", branch); err != nil {
+					return fmt.Errorf("repository %s checkpoint history unavailable: %w", repositoryName, err)
+				}
+			}
+			// Local clones and promisor fetches can contain unrelated objects.
+			// Availability alone is not proof of membership in this branch.
+			if _, err := gitOutput(cloneRoot, "merge-base", "--is-ancestor", expectedCommit, head); err != nil {
+				return fmt.Errorf("repository %s competition branch does not contain epoch commit %s as an ancestor", repositoryName, expectedCommit)
 			}
 		}
 	}

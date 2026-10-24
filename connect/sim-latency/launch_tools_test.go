@@ -7,11 +7,132 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Local bare clones can contain objects from unrelated branches. Object
+// presence alone must never authenticate a competition-branch checkpoint.
+func TestRemoteSourcePreflightRejectsUnreachableCommitObjects(t *testing.T) {
+	root := t.TempDir()
+	commits := map[string]string{}
+	for _, name := range sourceRepositoryNames() {
+		commits[name] = sourceTestRepository(t, root, name)
+		local := filepath.Join(root, name)
+		if name == "server" {
+			sourceTestGit(t, local, "checkout", "--quiet", "--orphan", "synthetic-unrelated")
+			sourceTestGit(t, local, "commit", "--quiet", "--no-gpg-sign", "-m", "unrelated source")
+			commits[name] = sourceTestGit(t, local, "rev-parse", "HEAD")
+			sourceTestGit(t, local, "checkout", "--quiet", "sim-latency")
+		}
+		remote := filepath.Join(t.TempDir(), name+".git")
+		sourceTestGit(t, root, "clone", "--quiet", "--bare", local, remote)
+		sourceTestGit(t, local, "remote", "add", "origin", remote)
+	}
+	if err := verifyRemoteSourceEpoch(sourceTestManifest(commits), 0, root); err == nil {
+		t.Fatal("unreachable commit object authenticated as competition source")
+	}
+}
+
+// Execute the real preflight against Git fixture remotes, but make a full
+// initial-history clone fail deterministically instead of depending on timing.
+func TestRemoteSourcePreflightBoundsInitialHistoryTransfer(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	root := t.TempDir()
+	commits := map[string]string{}
+	for _, name := range sourceRepositoryNames() {
+		commits[name] = sourceTestRepository(t, root, name)
+		local := filepath.Join(root, name)
+		remote := filepath.Join(t.TempDir(), name+".git")
+		sourceTestGit(t, root, "clone", "--quiet", "--bare", local, remote)
+		sourceTestGit(t, local, "remote", "add", "origin", "file://"+remote)
+	}
+	bin := t.TempDir()
+	shim := `#!/bin/sh
+if test "$1" = clone; then
+  depth=no
+  filter=no
+  for argument do
+    test "$argument" != --depth=1 || depth=yes
+    test "$argument" != --filter=blob:none || filter=yes
+  done
+  test "$depth:$filter" = yes:yes || { echo unbounded-initial-history >&2; exit 91; }
+fi
+exec "$SYNTHETIC_REAL_GIT" "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNTHETIC_REAL_GIT", git)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := verifyRemoteSourceEpoch(sourceTestManifest(commits), 0, root); err != nil {
+		t.Fatal("tip verification downloaded unnecessary history:", err)
+	}
+}
+
+// A genuinely older checkpoint still needs its branch ancestry. File remotes
+// force real shallow-clone behavior rather than Git's local-copy shortcut.
+func TestRemoteSourcePreflightDeepensHistoricalCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	commits := map[string]string{}
+	serverHead := ""
+	for _, name := range sourceRepositoryNames() {
+		commits[name] = sourceTestRepository(t, root, name)
+		local := filepath.Join(root, name)
+		if name == "server" {
+			if err := os.WriteFile(filepath.Join(local, "newer.txt"), []byte("newer competition source\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			sourceTestGit(t, local, "add", "newer.txt")
+			sourceTestGit(t, local, "commit", "--quiet", "--no-gpg-sign", "-m", "advance source")
+			serverHead = sourceTestGit(t, local, "rev-parse", "HEAD")
+		}
+		remote := filepath.Join(t.TempDir(), name+".git")
+		sourceTestGit(t, root, "clone", "--quiet", "--bare", local, remote)
+		sourceTestGit(t, local, "remote", "add", "origin", "file://"+remote)
+	}
+	manifest := sourceTestManifest(commits)
+	if err := verifyRemoteSourceEpoch(manifest, 0, root); err != nil {
+		t.Fatal("shallow verification lost a valid historical checkpoint:", err)
+	}
+	if err := verifyRemoteSourceEpochHead(manifest, 0, root); err == nil {
+		t.Fatal("exact-head verification accepted a historical checkpoint")
+	}
+	if got := sourceTestGit(t, filepath.Join(root, "server"), "rev-parse", "HEAD"); got != serverHead {
+		t.Fatal("historical preflight changed the operator checkout")
+	}
+}
+
+// Git's --branch can also select a tag. Matching bytes are insufficient when
+// the required competition branch itself has disappeared.
+func TestRemoteSourcePreflightRejectsTagInsteadOfBranch(t *testing.T) {
+	root := t.TempDir()
+	commits := map[string]string{}
+	for _, name := range sourceRepositoryNames() {
+		commits[name] = sourceTestRepository(t, root, name)
+		local := filepath.Join(root, name)
+		if name == "server" {
+			sourceTestGit(t, local, "tag", "sim-latency")
+			sourceTestGit(t, local, "branch", "-m", "synthetic-product")
+		}
+		remote := filepath.Join(t.TempDir(), name+".git")
+		sourceTestGit(t, root, "clone", "--quiet", "--bare", local, remote)
+		sourceTestGit(t, local, "remote", "add", "origin", remote)
+	}
+	manifest := sourceTestManifest(commits)
+	if err := verifyRemoteSourceEpoch(manifest, 0, root); err == nil {
+		t.Error("tag substituted for the frozen source branch")
+	}
+	if err := verifyRemoteSourceEpochHead(manifest, 0, root); err == nil {
+		t.Error("tag substituted for the active source branch")
+	}
+}
 
 func TestLaunchPreflightVerifiesRemoteEpochWithoutChangingWorkingTrees(t *testing.T) {
 	repositoriesRoot := t.TempDir()
