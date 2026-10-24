@@ -50,7 +50,8 @@
 // urnetwork.provider_work_session_retention, which only the registry's
 // guarded drop sets (DropGuardSetting), and unless the leaf's upper bound is 13
 // weeks past by the database's clock. The legacy partition's upper bound is the
-// cutover week, so it becomes droppable 13 weeks after it.
+// cutover week, so it becomes old enough 13 weeks after it. The registry also
+// retains any leaf whose admissions are still needed by open connections.
 package server
 
 import (
@@ -63,7 +64,7 @@ import (
 
 const providerWorkSessionEventTable = "provider_work_session_event"
 
-// Events are kept 13 weeks after their week ends, as the contracts they
+// Events are kept at least 13 weeks after their week ends, as the contracts they
 // describe are (ContractRetention; decided 2026-10-24).
 const ProviderWorkSessionEventRetention = 13 * 7 * 24 * time.Hour
 
@@ -194,6 +195,7 @@ var providerWorkSessionEventPartitionFamily = RegisterPartitionFamily(&Partition
 	LeafAnalyzeDelay: 24 * time.Hour,
 	ReindexExempt:    true,
 	DropFence:        providerWorkSessionEventDropFence,
+	DropPrecondition: providerWorkSessionEventDropBlocker,
 	BeforeCutover:    abandonStaleProviderWorkSessionCutover,
 })
 
@@ -210,6 +212,32 @@ func providerWorkSessionEventLeaf(r PartitionRange) string {
 // the database refuses a leaf whose upper bound is not 13 weeks past.
 func providerWorkSessionEventDropFence(ctx context.Context, tx PgTx, r PartitionRange) {
 	RaisePgResult(tx.Exec(ctx, `SELECT provider_work_session_event_drop_guard($1)`, providerWorkSessionEventLeaf(r)))
+}
+
+// An open connection still needs its admit's network identity when it retires.
+// Read the named leaf: the registry repeats this check after detaching it under
+// the event parent's write fence. A concurrent retirement either committed its
+// event already or still appears connected here, so neither order loses its
+// admit. This also covers the legacy leaf and clients removed from the directory.
+func providerWorkSessionEventDropBlocker(ctx context.Context, conn PgQuerier, r PartitionRange) string {
+	var needed bool
+	Raise(conn.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS (
+		SELECT 1 FROM network_client_connection connection
+		WHERE connection.connected AND EXISTS (
+			SELECT 1 FROM public.%s event
+			WHERE event.client_id = connection.client_id
+			AND event.connection_id = connection.connection_id AND event.kind = 'admit'
+			AND NOT EXISTS (
+				SELECT 1 FROM provider_work_session_event newer
+				WHERE newer.client_id = event.client_id AND newer.connection_id = event.connection_id
+				AND newer.kind = 'admit' AND newer.sequence > event.sequence
+			)
+		)
+	)`, quoteIdentifier(providerWorkSessionEventLeaf(r)))).Scan(&needed))
+	if needed {
+		return "an open connection still needs its admission event"
+	}
+	return ""
 }
 
 // Abandons a prepared cutover once its cutover week is less than the abandon

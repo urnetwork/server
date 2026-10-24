@@ -302,11 +302,54 @@ func parseDbHotVacuumNotices(notices []*pgconn.Notice) dbHotVacuumNotices {
 	return parsed
 }
 
+// A parent's ANALYZE needs its own completion as well as its leaves' summaries.
+func dbHotVacuumRelationReported(notices []*pgconn.Notice, tableName string, pattern *regexp.Regexp) bool {
+	for _, notice := range notices {
+		firstLine, _, _ := strings.Cut(notice.Message, "\n")
+		match := pattern.FindStringSubmatch(firstLine)
+		if match != nil && strings.HasSuffix(match[1], ".public."+tableName) {
+			return true
+		}
+	}
+	return false
+}
+
 // One VACUUM statement: its notices, and how it ended.
 type dbHotVacuumAttempt struct {
 	notices []*pgconn.Notice
+	// The heap or intended leaves, including leaves SKIP_LOCKED omits silently.
+	relations []string
 	// nil when the statement completed
 	err error
+}
+
+// Inventory the intended heaps before PostgreSQL expands VACUUM's target.
+// Partition expansion can silently omit a locked leaf without a skip notice.
+func dbHotVacuumRelationsSql(tableName string) string {
+	relation := "'" + strings.ReplaceAll(pgx.Identifier{"public", tableName}.Sanitize(), "'", "''") + "'"
+	return fmt.Sprintf(`SELECT current_database() || '.' || n.nspname || '.' || c.relname
+		FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE c.relkind <> 'p' AND (c.oid=to_regclass(%s)
+			OR c.oid IN (SELECT relid FROM pg_partition_tree(to_regclass(%s))))
+		ORDER BY c.oid`, relation, relation)
+}
+
+// A summary from one leaf cannot stand in for another intended heap.
+func dbHotVacuumMissingRelations(notices []*pgconn.Notice, relations []string, pattern *regexp.Regexp) []string {
+	finished := map[string]bool{}
+	for _, notice := range notices {
+		firstLine, _, _ := strings.Cut(notice.Message, "\n")
+		if match := pattern.FindStringSubmatch(firstLine); match != nil {
+			finished[match[1]] = true
+		}
+	}
+	missing := []string{}
+	for _, relation := range relations {
+		if !finished[relation] {
+			missing = append(missing, relation)
+		}
+	}
+	return missing
 }
 
 // Runs one table's VACUUM (VERBOSE) under timeout on a direct session of
@@ -315,6 +358,9 @@ type dbHotVacuumAttempt struct {
 // that cannot be reset, or that the stop closed, is discarded instead.
 func dbHotVacuumTable(ctx context.Context, pool *safePgPool, tableName string, analyze bool, timeout time.Duration) *dbHotVacuumAttempt {
 	attempt := &dbHotVacuumAttempt{}
+	// The inventory and VACUUM share the table's budget.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	conn, err := acquirePgPoolConn(ctx, pool)
 	if err != nil {
 		attempt.err = err
@@ -331,6 +377,24 @@ func dbHotVacuumTable(ctx context.Context, pool *safePgPool, tableName string, a
 
 	if _, err := conn.Exec(ctx, fmt.Sprintf("SET statement_timeout = %d", timeout.Milliseconds())); err != nil {
 		attempt.err = err
+		return attempt
+	}
+	rows, err := conn.Query(ctx, dbHotVacuumRelationsSql(tableName))
+	if err != nil {
+		attempt.err = err
+		return attempt
+	}
+	for rows.Next() {
+		var relation string
+		if err := rows.Scan(&relation); err != nil {
+			rows.Close()
+			attempt.err = err
+			return attempt
+		}
+		attempt.relations = append(attempt.relations, relation)
+	}
+	rows.Close()
+	if attempt.err = rows.Err(); attempt.err != nil {
 		return attempt
 	}
 	statement := dbHotVacuumStatement
@@ -704,9 +768,13 @@ func (self *dbHotVacuumRun) vacuumTable(ctx context.Context, tableName string, r
 	notices := parseDbHotVacuumNotices(attempt.notices)
 	result.removedRows = notices.removedRows
 	result.notRemovableRows = notices.notRemovableRows
-	result.analyzed = result.analyze && notices.analyzed
+	missing := dbHotVacuumMissingRelations(attempt.notices, attempt.relations, dbHotVacuumSummaryPattern())
+	vacuumed := len(attempt.relations) > 0 && len(missing) == 0
+	result.analyzed = result.analyze && vacuumed &&
+		len(dbHotVacuumMissingRelations(attempt.notices, attempt.relations, dbHotVacuumAnalyzePattern())) == 0 &&
+		dbHotVacuumRelationReported(attempt.notices, tableName, dbHotVacuumAnalyzePattern())
 	var pgErr *pgconn.PgError
-	canceled := errors.As(attempt.err, &pgErr) && pgErr.Code == pgerrcode.QueryCanceled
+	canceled := errors.As(attempt.err, &pgErr) && pgErr.Code == pgerrcode.QueryCanceled || errors.Is(attempt.err, context.DeadlineExceeded)
 	done := false
 	select {
 	case <-ctx.Done():
@@ -714,12 +782,11 @@ func (self *dbHotVacuumRun) vacuumTable(ctx context.Context, tableName string, r
 	default:
 	}
 	switch {
-	case notices.vacuumed:
+	case vacuumed:
 		// an analyze that failed after it is retried by the next run
 		result.outcome = dbHotVacuumVacuumed
-	case attempt.err == nil && notices.skipped != "":
+	case attempt.err == nil && (notices.skipped != "" || notices.vacuumed && len(missing) > 0):
 		result.outcome = dbHotVacuumSkipped
-		result.detail = notices.skipped
 	case attempt.err == nil:
 		result.outcome = dbHotVacuumUnreported
 	case done:
@@ -732,6 +799,12 @@ func (self *dbHotVacuumRun) vacuumTable(ctx context.Context, tableName string, r
 		result.outcome = dbHotVacuumFailed
 	}
 	details := []string{}
+	if notices.vacuumed && len(missing) > 0 {
+		details = append(details, "vacuum unfinished: "+strings.Join(missing, ", "))
+	}
+	if notices.skipped != "" {
+		details = append(details, notices.skipped)
+	}
 	if notices.warning != "" {
 		details = append(details, notices.warning)
 	}

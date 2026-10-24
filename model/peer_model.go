@@ -1499,6 +1499,23 @@ func UpdateNetworkPeerProvideModes(
 	updateNetworkPeerProvideModes(ctx, *networkId, clientId, provideModes)
 }
 
+// A delayed provide publishes the current committed keys. Read them after the
+// peer's mutation fence, and repeat the read if a newer publication wins its
+// compare-and-swap. This orders peer updates across the separate Redis slots.
+func refreshNetworkPeerProvideModes(ctx context.Context, clientId server.Id) {
+	networkId := GetNetworkClientNetwork(ctx, clientId)
+	if networkId == nil {
+		return
+	}
+	updateNetworkPeerProvideModesWithLoader(ctx, *networkId, clientId, func() map[ProvideMode]bool {
+		provideModes := map[ProvideMode]bool{}
+		for provideMode := range loadProvideSecretKeys(ctx, clientId) {
+			provideModes[provideMode] = true
+		}
+		return provideModes
+	})
+}
+
 // Compares both values from one optimistic snapshot, then advances the fence
 // before conditionally rewriting a healthy member. False means a concurrent
 // mutation won and the caller must reload both values.
@@ -1660,10 +1677,15 @@ func updateNetworkPeerProvideModes(
 	clientId server.Id,
 	provideModes map[ProvideMode]bool,
 ) bool {
-	provideModesList := sortedProvideModesList(provideModes)
+	return updateNetworkPeerProvideModesWithLoader(ctx, networkId, clientId, func() map[ProvideMode]bool { return provideModes })
+}
+
+// Capture the registry fence before loading canonical modes on every attempt.
+func updateNetworkPeerProvideModesWithLoader(ctx context.Context, networkId server.Id, clientId server.Id, load func() map[ProvideMode]bool) bool {
 	operationId := server.NewId()
 	return retryNetworkPeerMutation(ctx, func() bool {
 		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		provideModesList := sortedProvideModesList(load())
 		if updateNetworkPeerProvideModesAtMutationState(
 			ctx,
 			networkId,

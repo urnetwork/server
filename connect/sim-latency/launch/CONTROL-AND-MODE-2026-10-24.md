@@ -96,3 +96,82 @@ At 18:22 UTC main `/competition/info` still returned 503, the configured sille
 MinIO authority refused connections, and the dedicated model credential was
 absent. Main control-plane writes remain on the maintenance hold. No production
 round was opened or main database migrated by this work.
+
+## Corrected source publication and build preparation
+
+The fixes and corrected evidence were committed and pushed to main; the tested
+runtime changes are present in main merge `822902437d8614b18ed89a850b5c1646a47c55a3`.
+Only the four-file impairment correction was backported onto the original frozen
+server in a fresh temporary checkout. The published `sim-latency` server head is
+now `3d96d16ddb4fc2fb08d3f9003c52e30b9a47241d`. A whole-tree diff excluding
+`connect/sim-latency/` is empty against the original `67c87445...` checkpoint;
+the other nine repository commits are unchanged. The operator checkout remains
+on main, not the competition branch.
+
+The backport built offline with clean VCS metadata and passed its mode tests
+three race repetitions (37.582 seconds). This is a smoke binary, not an evaluator
+image: SHA-256 `db008bd2206647ef4f74f6e9e6cc5b46b57f004787cbe1c443b57a4b8d2f37e0`.
+The test log digest is
+`0815ba51411d5db668cc1c26e0613deef030e43156cfa3ed39fe9bce8de0411d`.
+Logs and the exact temporary checkout are under
+`temp/production-impairment-backport-20261024.Lp0rommJ`.
+
+Config main `c93a289d404ed23cfee11fb9087e8d72689a73ce` publishes the corresponding
+preparation ledger and explicitly unactivated source-choice descriptor:
+
+- canonical ten-repository source lock:
+  `ba3971eeffae3469bab9a07cfeebb95a1986b3222a8420b7c1a6367756a7f35e`;
+- source-manifest file SHA-256:
+  `6fca07712cc22b9bb3f9c30ef974392c8e49eff808cab491a8a2ffca08eeeb81`;
+- source-choice preparation file SHA-256:
+  `ce6e7b23447a180150cc7179518f3ff12150e18d9de05665f7fe0f5dfc16beb5`.
+
+The prior manifest is preserved byte-for-byte in
+`config/history/sim-latency-2026-10-24-074239.yml`, SHA-256
+`db7d7da3158c5525e1eb74b05a986997dd3bfbb5c4236e5ca10903f01c5bd82f`.
+All ten remote refs and frozen module coverage were verified against the new
+ledger. This does not activate a production policy or approve its provisional
+16.1% floor as newly calibrated.
+
+The corrected evaluator build completed under
+`temp/corrected-evaluator-build-20261024.7nUOrNCn`, using a separate frozen
+controller workspace and a sparse config checkout containing only the source
+ledger. The Docker context includes only the ten product repositories, that
+public ledger and trusted evaluator scripts, not the surrounding config checkout.
+An initial argument-parsing failure and an unnecessary config LFS checkout are
+retained separately; neither started an evaluation. The actual new image ID is
+`sha256:79400f3375c64767f5021e43ef852e9ff9da3ca5a4b79dc03e8e9ed381247eb9`;
+the embedded simulator/scorer SHA-256 is
+`09bfec0e6611c0c8dcca8b55706fda3914fb8ae57a4917ed1d71c56410928402`.
+Its raw pretty-printed source-lock file SHA-256 is
+`239607aeeae792c009e43367e4e88d00b72d6413d684bbbc10df24658c594937`,
+distinct from the canonical model source lock above. The completed image-record
+file SHA-256 is
+`7bff59a3e12813d18d7a2e7ce00f46c04e6e577ead6585b46db23777bb66aaee`.
+
+The image's own source preflight passed offline, readonly and non-root on the
+management CPUs. A separate filesystem census found exactly the ten product
+repository directories, no `/workspace/config` or `/workspace/vault`, and no
+runtime config/vault `main` or `all` directories. Smoke-artifact SHA-256 values:
+
+- `identity.json`: `9aa81584b97d15ff3c0acecef27e47d27fd63b6456a2d26a4e41a3b3904989ff`;
+- `source-check.json`: `c280e11e68b1cef1df7ceab33c27ef77c618795dc403138aa88375239fd086db`;
+- `workspace-census.txt`: `83318b263d836ddf24d904313b6d0dd9fb1841766922053dd982e23548f40f30`.
+
+The same image is locally available under the immutable-ID alias
+`urnetwork/sim-latency-evaluator-base-id:79400f3375c64767f5021e43ef852e9ff9da3ca5a4b79dc03e8e9ed381247eb9`.
+This records local image availability, not registry publication, full resource/
+network/host qualification, provider-backed review or an official baseline.
+
+Fresh native main controls also built from a clean private snapshot under
+`temp/main-control-native-20261024.L1VK9M5A`; they are **not yet installed**:
+
+| Program | SHA-256 |
+| --- | --- |
+| `competitionprepare` | `b6d9e2eba649e8d4530e495d09be7504397b156b0285fb44d6497d8eae7c2433` |
+| `competitionqualify` | `c069d27e78ccdbe4765fc13ae0de02c3eabadcf204ed2761e5ab3815de489e96` |
+| `competitionworker` | `1003f4dbb1cc2a68bd5bc8278f7110cc7a9314600b5da20b9f6c7a6d26d1d6e7` |
+| `sim-latency` | `61f7a62206227d03b76f64fa558731df09bf7bef57f241954b3b050a91671143` |
+
+These are main control programs, not the newly evaluated product. Their build
+identity is provenance, not a season-wide restriction on future main fixes.
