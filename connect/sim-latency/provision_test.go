@@ -336,7 +336,7 @@ func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testin
 			t.Fatalf("matureProviderReliabilities: %v", err)
 		}
 		writeMatureReliabilityScores(ctx, server.NowUtc(), 13*time.Hour, reliabilities)
-		callerSession := session.Testing_CreateClientSession(
+		callerSession := simulationTestClientSession(
 			ctx,
 			session.NewByJwt(server.NewId(), server.NewId(), "sim-caller", false, false),
 		)
