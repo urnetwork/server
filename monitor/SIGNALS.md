@@ -8689,7 +8689,9 @@ kick is a pooled transaction that moves the chain's run_at only if its queue
 key is free; a held key means the chain is being claimed, finished or
 rescheduled, which covers the debit. An active partition has no mark: its
 producers pay one Redis round trip and write nothing to the queue, and
-concurrent producers coalesce into one kick. The idle pass sets its mark only after its finishing commit and
+concurrent producers coalesce into one kick. A wake, kick included, waits at
+most one second, the bound of the contract-hole delta that every terminal claim
+already publishes. The idle pass sets its mark only after its finishing commit and
 then reads the journal again, so a debit committed in between still wakes it.
 Without a kick (Redis unavailable, a lost post, a scoped expiry repair, a
 producer from an older build) a debit waits at most the 30 s back-off plus one 15 s page, inside the

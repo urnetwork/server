@@ -53,15 +53,18 @@ type IdleWakeSettings struct {
 	// only the kick; the chain still runs at its idle delay.
 	MarkTtl time.Duration
 	// Bounds one mark, clear or wake, including the kick's queue transaction.
+	// A producer's wake is optional work that its caller waits for after its
+	// commit, so a stalled Redis must cost that caller no more than this.
 	Timeout time.Duration
 }
 
 // Four 30-second idle delays per mark. A wake is a Redis round trip and at
-// most one short queue transaction per kicked chain.
+// most one short queue transaction per kicked chain; one second is the bound
+// a terminal claim's contract-hole delta already spends after its commit.
 func DefaultIdleWakeSettings() *IdleWakeSettings {
 	return &IdleWakeSettings{
 		MarkTtl: 2 * time.Minute,
-		Timeout: 5 * time.Second,
+		Timeout: time.Second,
 	}
 }
 
