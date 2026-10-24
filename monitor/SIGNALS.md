@@ -8342,6 +8342,10 @@ for 90 days, one per measured relation of every public table:
   (`dbMaintenanceEstimateBtreeBytes`), which fills leaf pages to the index's
   fillfactor; other access methods are recorded unmeasured.
 
+A partitioned table has no storage of its own, so each partition leaf is
+measured and reported as its own table (a contract week by its leaf name,
+which leaves with its partition).
+
 Check, hourly: each relation's newest measurement within 35 days, credited
 with any shrink since (reclaimable − (measured size − current size), never
 below zero; growth is not added), against the relation's current size.
