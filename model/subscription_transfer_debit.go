@@ -19,6 +19,24 @@ import (
 const transferDebitBatchSize = 512
 const TransferDebitShardCount = 16
 
+// A balance with a full batch flushes again in the same page, up to this many
+// batches, while the page has at least transferDebitRepeatMargin left. One
+// very large payer's grant then releases its reservations at the rate it
+// admits them instead of one batch per task claim; the cap and the margin keep
+// the page's later balances and its deadline intact.
+const transferDebitBatchesPerBalance = 16
+const transferDebitRepeatMargin = 5 * time.Second
+
+// The page may start another batch: it is live and, when it has a deadline,
+// at least the margin remains.
+func transferDebitPageHasTime(bounded context.Context) bool {
+	if bounded.Err() != nil {
+		return false
+	}
+	deadline, ok := bounded.Deadline()
+	return !ok || transferDebitRepeatMargin <= time.Until(deadline)
+}
+
 var errTransferDebitPageDeadline = errors.New("transfer debit page deadline")
 
 func transferDebitShard(balanceId server.Id) int { return int(balanceId[15]) % TransferDebitShardCount }
@@ -140,11 +158,20 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 				return
 			}
 			applied, released, busy, err := operations.flushBalance(bounded, *next)
+			// Repeat only after a full, released, uncontended batch.
+			last := released
+			for batches := 1; err == nil && !busy && last == transferDebitBatchSize &&
+				batches < transferDebitBatchesPerBalance && transferDebitPageHasTime(bounded); batches++ {
+				var batchApplied int
+				batchApplied, last, busy, err = operations.flushBalance(bounded, *next)
+				applied += batchApplied
+				released += last
+			}
 			if err != nil {
 				result.Failed++
 				transferDebitResults.WithLabelValues("error").Inc()
 			}
-			if released == transferDebitBatchSize {
+			if last == transferDebitBatchSize {
 				result.More = true
 			}
 			result.Balances++

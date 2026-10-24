@@ -364,6 +364,89 @@ func (self *redisSelectionExtendedFaultTx) Query(ctx context.Context, sql string
 	return self.PgTx.Query(ctx, sql, args...)
 }
 
+// One very large network funds every contract from its own grants. With at
+// least two large free grants, each payer client starts at the grant its hash
+// selects, so the network's admissions and releases spread across the grants'
+// Redis slots instead of all landing on the earliest-expiring one.
+func TestRedisGrantMultiGrantPayerSpreadsByClient(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		// each grant can fund every payer, so no hash imbalance spills over
+		ids := redisSelectionTestGrants(t, ctx, clients, 4, 64*1024, true)
+		payers := []server.Id{clients.payerId}
+		extra := map[server.Id]server.Id{}
+		for range 15 {
+			payerId := server.NewId()
+			payers = append(payers, payerId)
+			extra[payerId] = clients.payerNetworkId
+		}
+		insertContractLifecycleTestClients(t, ctx, extra)
+
+		used := map[server.Id]bool{}
+		for index, payerId := range payers {
+			payer := clients
+			payer.payerId = payerId
+			escrow, err := payer.create(ctx, 1024, false)
+			// candidates are newest first, as the prober's are
+			position := int(payerId.Hash() % 4)
+			want := ids[3-position]
+			if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != want || escrow.Balances[0].BalanceByteCount != 1024 {
+				got := -1
+				if escrow != nil && len(escrow.Balances) == 1 {
+					got = slices.Index(ids, escrow.Balances[0].BalanceId)
+				}
+				t.Fatalf("payer %d (position %d) was funded from grant %d, want grant %d: %v", index, position, got, 3-position, err)
+			}
+			used[want] = true
+		}
+		if len(used) < 2 {
+			t.Fatal("sixteen payer clients all funded from one grant", len(used))
+		}
+	})
+}
+
+// Every network now holds one large free grant. A single large grant is not a
+// spread, so the payer keeps the exact earliest-expiry order.
+func TestRedisGrantSingleLargeGrantKeepsEarliestExpiryOrder(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		earliest := redisSelectionTestGrants(t, ctx, clients, 1, 4096, false)
+		large := redisSelectionTestGrants(t, ctx, clients, 1, 4096, true)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET end_time=end_time+INTERVAL '1 hour' WHERE balance_id=$1`, large[0]))
+		})
+		escrow, err := clients.create(ctx, 1024, false)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != earliest[0] {
+			t.Fatal("a single large grant changed the earliest-expiry order", escrow, err)
+		}
+	})
+}
+
+// Paid grants are never spread: their priority and order stay financial.
+func TestRedisGrantPaidLargeGrantsKeepEarliestExpiryOrder(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		ids := redisSelectionTestGrants(t, ctx, clients, 4, 4096, true)
+		server.Tx(ctx, func(tx server.PgTx) {
+			// paid is generated from the grant's revenue
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=1 WHERE balance_id=ANY($1)`, ids))
+		})
+		escrow, err := clients.create(ctx, 1024, false)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != ids[0] {
+			t.Fatal("large paid grants were spread instead of funding in earliest-expiry order", escrow, err)
+		}
+	})
+}
+
 // Native admission records the legacy allocator's internal-prober outcomes:
 // the first and extended preferred windows, the keyset fallback, and a failure
 // after the prober was identified. An ordinary payer records none.
