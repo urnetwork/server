@@ -183,3 +183,16 @@ var migrationFp2ArtifactQueries = []string{
 		migrationFp2Column{name: "arin_lookup_at", kind: "timestamp without time zone"},
 		migrationFp2Column{name: "arin_database_build_epoch", kind: "bigint", notNull: true, defaultExpression: "0"}),
 }
+
+// A write-path migration drops provider_egress_probe_cycle_next_attempt, which
+// v723 pinned: no query reads it since every next-attempt read requires
+// eligible. The rest of the v723 contract is republished with that index
+// required absent.
+var migrationFp2DurableQueueWithoutFullDeadlineIndexQuery = func() string {
+	published := migrationFp2ArtifactQueries[723-722]
+	fullDeadlineIndex := migrationFp2Index("provider_egress_probe_cycle", "provider_egress_probe_cycle_next_attempt", "next_attempt_at, client_id", "", false)
+	if strings.Count(published, fullDeadlineIndex) != 1 {
+		panic("probe queue monitor cannot locate its published full deadline index")
+	}
+	return strings.Replace(published, fullDeadlineIndex, migrationIndexRemoved("provider_egress_probe_cycle", "provider_egress_probe_cycle_next_attempt"), 1)
+}()

@@ -12,8 +12,14 @@ import (
 
 var errTaskClaimOwnership = errors.New("task claim generation ownership missing")
 
+// A finished task's identity is its task id, which readers key on alone.
+// finished_task's primary key also holds the run end time, its partition key,
+// so the move, its only writer, refuses an id that already finished.
+var errFinishedTaskIdentityExists = errors.New("finished task identity already exists")
+
 // One statement moves the exact fenced owner and captures its wake. Deletion
 // holds row/key ownership through the later transactional post and commit.
+// The copy skips an id that already finished, and the move then rolls back.
 const taskCompletionOwnerSql = `WITH removed AS (
  DELETE FROM pending_task WHERE task_id=$1 AND claim_generation=$5 RETURNING *
 ), copied AS (
@@ -24,10 +30,11 @@ const taskCompletionOwnerSql = `WITH removed AS (
  SELECT task_id,function_name,args_json,client_address,client_address_hash,
   client_address_port,client_by_jwt_json,run_at,run_once_key,run_priority,
   run_max_time_seconds,$2,$3,reschedule_error,$4 FROM removed
+ WHERE NOT EXISTS (SELECT 1 FROM finished_task WHERE finished_task.task_id=removed.task_id)
  RETURNING task_id
 )
-SELECT removed.run_once_generation,removed.run_once_wake_at
-FROM removed JOIN copied USING(task_id)`
+SELECT removed.run_once_generation,removed.run_once_wake_at,copied.task_id IS NOT NULL
+FROM removed LEFT JOIN copied USING(task_id)`
 
 // A producer either precedes the exact owner deletion and leaves a generation,
 // or follows its commit and inserts anew. The move rolls back on any refusal.
@@ -35,12 +42,16 @@ func finishTaskOwnerInTx(ctx context.Context, tx server.PgTx, r *taskExecutionRe
 	queued := r.task
 	var generation int64
 	var wakeAt *time.Time
+	var copied bool
 	err := tx.QueryRow(ctx, taskCompletionOwnerSql, queued.TaskId, r.runStartTime,
-		r.runEndTime, r.resultJson, queued.ClaimGeneration).Scan(&generation, &wakeAt)
+		r.runEndTime, r.resultJson, queued.ClaimGeneration).Scan(&generation, &wakeAt, &copied)
 	if errors.Is(err, pgx.ErrNoRows) {
 		server.Raise(errTaskClaimOwnership)
 	}
 	server.Raise(err)
+	if !copied {
+		server.Raise(errFinishedTaskIdentityExists)
+	}
 	server.AddTxCommitCount(tx, &taskFinishedCounter, 1)
 	if queued.RunOnceKey == "" {
 		return nil

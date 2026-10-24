@@ -970,25 +970,49 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				return
 			}
 
-			tag := server.RaisePgResult(tx.Exec(
+			// The device row is locked as the update would lock it, but its
+			// spec is rewritten only when it changed. A client re-auths with
+			// the same spec almost every time, and rewriting it anyway made a
+			// new row version per re-auth.
+			deviceFound := false
+			deviceSpecChanged := false
+			result, err = tx.Query(
 				clientSession.Ctx,
 				`
-					UPDATE device
-					SET
-						device_spec = $2
-					WHERE
-						device_id = $1
+					SELECT device_spec IS DISTINCT FROM $2 FROM device
+					WHERE device_id = $1
+					FOR NO KEY UPDATE
 				`,
 				deviceId,
 				authClient.DeviceSpec,
-			))
-			if tag.RowsAffected() == 0 {
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceSpecChanged))
+					deviceFound = true
+				}
+			})
+			if !deviceFound {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Device does not exist.",
 					},
 				}
 				return
+			}
+			if deviceSpecChanged {
+				server.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`
+						UPDATE device
+						SET
+							device_spec = $2
+						WHERE
+							device_id = $1
+					`,
+					deviceId,
+					authClient.DeviceSpec,
+				))
 			}
 
 			server.RaisePgResult(tx.Exec(
@@ -3191,6 +3215,15 @@ func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
 	})
 }
 
+// Whether an address has an open connection, read through
+// network_client_connection_connected_client_address_hash, which holds open
+// connections only.
+const networkClientAddressConnectedSql = `
+	SELECT true FROM network_client_connection
+	WHERE client_address_hash = $1 AND connected
+	LIMIT 1
+`
+
 func IsIpConnectedToNetwork(
 	ctx context.Context,
 	clientIp string,
@@ -3205,11 +3238,7 @@ func IsIpConnectedToNetwork(
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT true FROM network_client_connection
-				WHERE client_address_hash = $1 AND connected
-				LIMIT 1
-			`,
+			networkClientAddressConnectedSql,
 			addressHash[:],
 		)
 		server.WithPgResult(result, err, func() {
@@ -3674,6 +3703,36 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // (a large one-time pass).
 const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
+// One batch of closed connections older than $1, at most $2, with their
+// location, latency and speed rows. The candidates are read through
+// network_client_connection_closed_disconnect_time, which holds closed
+// connections only.
+const removeDisconnectedConnectionsSql = `
+	WITH candidate AS (
+		SELECT connection_id
+		FROM network_client_connection
+		WHERE
+			connected = false AND
+			disconnect_time < $1
+		LIMIT $2
+	), deleted_location AS (
+		DELETE FROM network_client_location
+		USING candidate
+		WHERE network_client_location.connection_id = candidate.connection_id
+	), deleted_latency AS (
+		DELETE FROM network_client_latency
+		USING candidate
+		WHERE network_client_latency.connection_id = candidate.connection_id
+	), deleted_speed AS (
+		DELETE FROM network_client_speed
+		USING candidate
+		WHERE network_client_speed.connection_id = candidate.connection_id
+	)
+	DELETE FROM network_client_connection
+	USING candidate
+	WHERE network_client_connection.connection_id = candidate.connection_id
+`
+
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
@@ -3689,31 +3748,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
-				`
-				WITH candidate AS (
-					SELECT connection_id
-					FROM network_client_connection
-					WHERE
-						connected = false AND
-						disconnect_time < $1
-					LIMIT $2
-				), deleted_location AS (
-					DELETE FROM network_client_location
-					USING candidate
-					WHERE network_client_location.connection_id = candidate.connection_id
-				), deleted_latency AS (
-					DELETE FROM network_client_latency
-					USING candidate
-					WHERE network_client_latency.connection_id = candidate.connection_id
-				), deleted_speed AS (
-					DELETE FROM network_client_speed
-					USING candidate
-					WHERE network_client_speed.connection_id = candidate.connection_id
-				)
-				DELETE FROM network_client_connection
-				USING candidate
-				WHERE network_client_connection.connection_id = candidate.connection_id
-				`,
+				removeDisconnectedConnectionsSql,
 				minConnectionTime.UTC(),
 				removeConnectionBatchCount,
 			))

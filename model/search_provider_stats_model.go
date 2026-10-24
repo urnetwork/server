@@ -155,7 +155,9 @@ func RollupSearchProviderStats(ctx context.Context, now time.Time) {
 }
 
 // UpsertSearchProviderStats writes rollup rows, overwriting the row for
-// (period_start, client_id) with the latest absolute per-period count.
+// (period_start, client_id) with the latest absolute per-period count. A row
+// whose count is unchanged is not rewritten: the open hour rolls up every
+// minute, and most of its providers were not matched again since the last run.
 func UpsertSearchProviderStats(ctx context.Context, rows []*SearchProviderStatsRow) {
 	if len(rows) == 0 {
 		return
@@ -176,6 +178,9 @@ func UpsertSearchProviderStats(ctx context.Context, rows []*SearchProviderStatsR
 					SET
 						period_end = $2,
 						match_count = $4
+					WHERE
+						(search_provider_stats.period_end, search_provider_stats.match_count) IS DISTINCT FROM
+						(EXCLUDED.period_end, EXCLUDED.match_count)
 					`,
 					row.PeriodStart.UTC(),
 					row.PeriodEnd.UTC(),

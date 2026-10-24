@@ -15,7 +15,12 @@ const (
 	ProviderUrlProbeCompletedWindow        = 4 * time.Hour
 	providerUrlProbeCompletionSkew         = 2 * time.Minute
 	providerUrlProbeCompletionReportMaxAge = 24 * time.Hour
-	providerUrlProbeRunRetention           = 7 * 24 * time.Hour
+	// Uncounted claims older than this are deleted. The readers that need an
+	// old claim look back at most 28 hours: a completion is accepted at most
+	// 24 hours after its claim, and its local failure streak reads the claims
+	// of the 4 hours before that one. Counted claims are kept until expiry
+	// uncounts them, whatever their age.
+	providerUrlProbeRunRetention = 2 * 24 * time.Hour
 )
 
 // One completed turn, including setup failures; retries retain every field.

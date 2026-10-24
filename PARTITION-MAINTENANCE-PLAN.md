@@ -637,6 +637,72 @@ A new fillfactor applies only to pages written after the change. Existing pages
 take it at the next compaction: a VACUUM FULL window, or PostgreSQL 19's online
 compaction.
 
+**Implemented (2026-10-24), the rows from `network_client_connection` to
+`transfer_balance` and `user_auth_attempt`:** each migration is a named value
+(`db_write_path_migrations.go`), and its monitor catalog contract reads its
+version from its position in the list (`WritePathMigrationVersion`).
+
+- `network_client_connection`: the three partial indexes are built
+  concurrently, then the full `(connected, client_id)`,
+  `(client_id, connected, extender_id)`, `(client_address_hash, connected)` and
+  `(connected, disconnect_time)` are dropped. Every reader filters a literal
+  `connected` or `connected = false`, which implies the partial predicates;
+  none passes `connected` as a parameter. Reads of all a client's rows keep
+  `(client_id, connect_time)`.
+- `network_client_location_reliability`:
+  - The upsert rewrites a row only when a value changed, or once its
+    `update_block_number` is a day old; the block never moves back.
+  - The block's only reader is the retention delete. It now keeps a row a day
+    longer for the refresh lag, so a row goes 30 to 31 days after its client
+    was last seen, never sooner than before.
+  - The 15-minute delete runs in 10,000-row transactions for at most 90 s.
+    Fillfactor 85.
+  - The pass publishes `urnetwork_client_location_reliability_pass_clients{identity}`
+    (`hosted_child` or `top_level`) and `..._pass_written_rows`. The hosted-child
+    share of the table's own rows needs a scan; sample it:
+
+    ```sql
+    SELECT count(*) AS sampled_rows,
+           count(*) FILTER (WHERE client.source_client_id IS NOT NULL) AS hosted_child_rows,
+           count(*) FILTER (WHERE client.client_id IS NULL) AS gone_client_rows
+    FROM network_client_location_reliability AS reliability TABLESAMPLE SYSTEM (0.01)
+    LEFT JOIN network_client AS client USING (client_id);
+    ```
+- `search_provider_stats`: change guard on `(period_end, match_count)`;
+  fillfactor 70. The open hour keeps its one-minute rollup.
+- `device`: the re-auth locks the device row and rewrites `device_spec` only
+  when it differs. Fillfactor 90.
+- `client_connection_reliability_score`:
+  - The `(lookback_index, max_block_number)` index is dropped, not narrowed:
+    every reader reads a whole lookback or probes the primary key. Fillfactor 50.
+  - **Deviation:** the upsert skips only a row identical to its recomputation,
+    window included. `max_block_number` is each row's publication marker, read
+    by the stale-row delete and the freshness signal (SIGNALS.md §2.15a), and it
+    moves every pass. So a row whose scores are unchanged is still rewritten,
+    now as a HOT update. Skipping it needs a per-lookback publication marker and
+    a freshness signal change first, left for the owner.
+- `transfer_debit_journal`: `(shard, create_time)` replaces
+  `(shard, applied, create_time)`, so marking a row applied is HOT. Fillfactor
+  70. The age readers read a shard oldest first and filter the state; during a
+  backlog the applied age reads the shard's pending rows.
+- `provider_egress_probe_cycle`: only `provider_egress_probe_cycle_next_attempt`
+  is dropped, since every next-attempt read requires `eligible`. Kept:
+  - the slot and non-slot partial pairs: `shard_count` 1 reads only the
+    non-slot indexes, and larger counts only the slot ones. If production's
+    `shard_count` stays above one, the non-slot trio can go along with
+    `shard_count` 1 (owner decision);
+  - the completed-priority pair, which priority admission reads. Outside
+    priority mode it is nearly empty, and a write adds no entry to it.
+- `provider_url_probe_run`: retention 2 days. Readers of an old claim look
+  back at most 28 hours: 24 hours of completion acceptance, plus the 4-hour
+  failure streak before that claim.
+- `network_client_handler`: the `heartbeat_time` index is dropped, so the
+  heartbeat is HOT.
+- `transfer_balance`: fillfactor 85. Grants are inserted together, so one page
+  holds many balances debited at the same time.
+- `user_auth_attempt`: dropped. `RemoveExpiredAuthAttempts` is deleted and
+  listed in `removedTaskTargets`.
+
 ## Part C: partitioning
 
 A candidate is a table whose retention can drop a whole time range, and whose
@@ -803,6 +869,62 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 
 B1, B2 and A1 alone would keep the table small. The owner chose to partition it
 as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
+
+**Implemented (2026-10-24):** branch `feat/pm-finished`, on the registry (A7).
+
+- **Schema:** three migrations on the plain table. They build a unique
+  `(task_id, run_end_time)` index online, make it the primary key, and add a
+  partial index of failed Posts (`finished_task_post_retry`). The key change
+  lands at deploy, before any cutover.
+- **Identity:** both fenced moves now also refuse a task id that already
+  finished, in any partition (`errFinishedTaskIdentityExists`). Without it,
+  the new key would accept a second end time. A batch that meets such a task
+  falls back to completing its members one by one. A pure test pins that the
+  two moves are the only `INSERT INTO finished_task` outside tests.
+- **Family:** `finished_task` registers daily partitions, 3 days ahead, kept 7
+  days past each upper bound. There is no DEFAULT partition, and the legacy
+  partition retires at C + 7 days.
+- **Fence, as built:**
+  - Only a failed Post (`post_error` set, Post not completed) can have a live
+    finished owner. A day gains no new failed Post after it ends.
+  - The archive step first removes the expired day's failed Posts through
+    TaskCleanup's own owner-admitted group delete. A busy group is left whole.
+  - The drop transaction then:
+    - defers while a transaction older than 5 s holds a `finished_task` lock;
+    - takes ACCESS EXCLUSIVE on the parent and the day;
+    - refuses while the day still holds a failed Post.
+  - After the detach, it checks again that no row ended within the last 7 days.
+  - A held row defers every day's drop, not only its own. Each drop waits at
+    most its 2 s lock bound and retries on the next pass.
+- **Cleanup:** on the partitioned table, TaskCleanup deletes nothing. It
+  creates today's and tomorrow's partitions if they are missing, so a stalled
+  runway cannot leave completions without a partition. On the plain table it
+  keeps today's row retention, and abandons a prepare still unfinalized 2
+  hours before its cutover day.
+- **Cutover:** `bringyourctl model migrate finished-task-partition
+  --cutover-day=<day, at least 12 h ahead> [--dry-run] [--finalize]
+  [--rollback [--max-copy-rows=<n>]] [--abort]`.
+  - It copies nothing. Prepare is resumable, finalize probes the attach in a
+    rolled-back transaction, and the swap is one transaction.
+  - Rollback copies the daily partitions' rows back into the legacy table
+    under its lock. It checks the copy's row count and refuses a task id
+    that is in both. Up to 200,000 rows by default, and nothing before C.
+  - Validate, analyze and the rollback run without `transaction_timeout`.
+  - The registry's runway and retention tasks must be deployed first, and
+    every taskworker must run this build. An older TaskCleanup would keep
+    deleting rows through the partitioned parent by row address. It would
+    only delete eligible rows whose owners it admitted, but it could wait on a
+    held row.
+- **Lookups:** each lookup by task id is one index probe per partition,
+  about 12 with the days ahead, and reads that bound `run_end_time` prune. A
+  DB test pins both.
+- **Monitor:** the three migrations' §8.9 contracts are in
+  `monitor/migration_finished_task_partition.go`, with versions from the
+  server's migration list. They read the catalogs directly, so they hold on
+  the plain table, through a prepared cutover and on the partitioned parent.
+  The unique index's contract ends where the primary key takes the index over.
+- **Future index migrations** on `finished_task` must be partition-aware, like
+  the contract tables'.
 
 ### C4. `provider_work_session_event` (136 GB): weekly partitions, 13 weeks (decided 2026-10-24)
 

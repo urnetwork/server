@@ -61,10 +61,12 @@ func migrationFp2TestQuery(t testing.TB) string {
 		t.Fatal(err)
 	}
 	prefix, _, ok := strings.Cut(query, "SELECT version.value,")
-	if !ok || !strings.Contains(query, strings.Join(migrationFp2ArtifactQueries, ",\n")) {
+	if !ok || !strings.Contains(query, strings.Join(migrationFp2ArtifactQueries, ",\n")) ||
+		!strings.Contains(query, migrationFp2DurableQueueWithoutFullDeadlineIndexQuery) {
 		t.Fatal("the real migration signal did not emit the FP2 contracts")
 	}
-	return prefix + "SELECT ARRAY[" + strings.Join(migrationFp2ArtifactQueries, ",") + "]"
+	return prefix + "SELECT ARRAY[" + strings.Join(migrationFp2ArtifactQueries, ",") + "], " +
+		migrationFp2DurableQueueWithoutFullDeadlineIndexQuery
 }
 
 // Missing objects, look-alike defaults/keys/predicates, wrong generation and
@@ -74,18 +76,27 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 		ctx := t.Context()
 		query := migrationFp2TestQuery(t)
 		server.Tx(ctx, func(tx server.PgTx) {
+			// a write-path migration republishes the v723 contract without the
+			// full deadline index it drops, so at head it owns the v723 faults
+			successor := migrationCurrentSuffixTestContract(t, server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop)).artifact
+			var successorMatches bool
 			read := func() []bool {
 				var matches []bool
-				server.Raise(tx.QueryRow(ctx, query).Scan(&matches))
+				server.Raise(tx.QueryRow(ctx, query).Scan(&matches, &successorMatches))
 				if len(matches) != 9 {
 					t.Fatalf("catalog returned%d contracts", len(matches))
 				}
 				return matches
 			}
 			for index, matches := range read() {
-				if matches != (index != 4) {
-					t.Fatalf("migrated schema v%d match=%t, want%t", index+722, matches, index != 4)
+				// v726 is superseded at v729, v723 by the successor
+				superseded := index == 4 || index == 1
+				if matches != !superseded {
+					t.Fatalf("migrated schema v%d match=%t, want%t", index+722, matches, !superseded)
 				}
+			}
+			if !successorMatches {
+				t.Fatalf("migrated schema fails the v%d durable queue successor", successor.requiredVersion)
 			}
 			for _, fault := range []struct {
 				name, sql string
@@ -131,10 +142,18 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 				if matches[fault.version-722] {
 					t.Fatalf("%s passed its v%d guard", fault.name, fault.version)
 				}
+				owner := fault.version
+				if fault.version == 723 {
+					if successorMatches {
+						t.Fatalf("%s passed its v%d successor guard", fault.name, successor.requiredVersion)
+					}
+					owner = successor.requiredVersion
+				}
 				row := syntheticMigrationArtifactRow(server.MigrationCount())
 				for index, matched := range matches {
 					row[index+133] = fmt.Sprint(matched)
 				}
+				row[successor.rowColumn] = fmt.Sprint(successorMatches)
 				source := &syntheticSource{postgresFn: func(emitted string) ([]Row, error) {
 					if strings.Contains(emitted, "FROM migration_catalog") {
 						return syntheticMigrationCatalogRows(server.MigrationCount()), nil
@@ -147,7 +166,7 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 				}
 				found := false
 				for _, alert := range alerts {
-					if alert.Class == "migration-schema-drift" && alert.Severity == SeverityPage && strings.Contains(alert.Markdown(), fmt.Sprintf("@v%d", fault.version)) {
+					if alert.Class == "migration-schema-drift" && alert.Severity == SeverityPage && strings.Contains(alert.Markdown(), fmt.Sprintf("@v%d", owner)) {
 						found = true
 					}
 				}
@@ -182,11 +201,15 @@ func TestMigrationFp2MissingFutureObjectsAreQueryable(t *testing.T) {
 				ALTER TABLE network_client_location_reliability DROP COLUMN arin_risk,DROP COLUMN arin_non_quality;
 				ALTER TABLE provider_egress_health DROP COLUMN security_measured_at,DROP COLUMN legacy_tls_authentication_failure;`))
 			var matches []bool
-			server.Raise(tx.QueryRow(ctx, query).Scan(&matches))
+			var successorMatches bool
+			server.Raise(tx.QueryRow(ctx, query).Scan(&matches, &successorMatches))
 			for index, matched := range matches {
 				if matched {
 					t.Fatalf("absent future v%d objects appear present", index+722)
 				}
+			}
+			if successorMatches {
+				t.Fatal("absent future successor objects appear present")
 			}
 		})
 	})
