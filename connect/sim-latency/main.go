@@ -57,19 +57,13 @@ import (
 	"github.com/urnetwork/server/controller"
 )
 
-func main() {
-	// the sdk redirects os.Stderr to os.Stdout at package init (the mobile
-	// convention: diagnostics to stdout). This tool is the opposite: stdout
-	// carries only measurement output (CSV/tables/json), logs go to stderr.
-	// Restore the real stderr before anything logs.
-	os.Stderr = os.NewFile(2, "/dev/stderr")
-
-	usage := `sim-latency: local latency/load simulation for the egress provider stack.
+func simulationUsage() string {
+	return `sim-latency: local latency/load simulation for the egress provider stack.
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
   sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
-  sim-latency fleet --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
+  sim-latency fleet --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--no-impair] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --runs=<paths> [--alpha=<a>] [--out=<path>]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
@@ -208,10 +202,16 @@ Options:
   --alpha=<a>            Significance level stored with the baseline [default: 0.05].
   --p=<a>                One-sided significance threshold [default: 0.05].
   --json                 Machine-readable output.`
+}
+
+func main() {
+	// The sdk's mobile initialization redirects diagnostics to stdout. Restore
+	// stderr before logging: stdout belongs exclusively to machine results.
+	os.Stderr = os.NewFile(2, "/dev/stderr")
 
 	setDefaultEnv()
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
+	opts, err := docopt.ParseArgs(simulationUsage(), os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
@@ -334,9 +334,6 @@ func runRun(opts docopt.Opts) {
 	providers, _ := opts.String("--providers")
 	siteHome, _ := opts.String("--site-home")
 	absSiteHome := mustAbs(siteHome)
-	if noImpair, _ := opts.Bool("--no-impair"); noImpair {
-		impairEnabled = false
-	}
 	// the in-process services read the site settings/stats via WARP_SITE_HOME
 	os.Setenv("WARP_SITE_HOME", absSiteHome)
 
@@ -361,6 +358,7 @@ func runRun(opts docopt.Opts) {
 		Duration:            optDuration(opts, "--duration", 30*time.Minute),
 		RequestTimeout:      optDuration(opts, "--request-timeout", 2*time.Minute),
 		FleetShards:         optInt(opts, "--fleet-shards", 0),
+		FleetSettings:       fleetSettingsFromOpts(opts),
 		SiteListen:          optString(opts, "--site-listen", "127.0.0.1:0"),
 		Services:            servicesConfig,
 		MetaPath:            optString(opts, "--meta", "run.json"),
@@ -407,7 +405,7 @@ func runFleet(opts docopt.Opts) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	fleet, err := NewFleet(ctx, config, entries, apiUrl, wsUrls, wsPorts, ramp)
+	fleet, err := NewFleet(ctx, config, entries, apiUrl, wsUrls, wsPorts, ramp, *fleetSettingsFromOpts(opts))
 	if err != nil {
 		fatalf("fleet shard %d/%d: %s", index, count, err)
 	}
@@ -434,6 +432,12 @@ func runFleet(opts docopt.Opts) {
 }
 
 // ---- env + option helpers ----
+
+func fleetSettingsFromOpts(opts docopt.Opts) *FleetSettings {
+	settings := DefaultFleetSettings()
+	settings.ImpairmentEnabled = !optBool(opts, "--no-impair")
+	return &settings
+}
 
 // setDefaultEnv fills the local-env vars a self-contained invocation needs,
 // without clobbering anything the caller set (e.g. via run-local.sh).
