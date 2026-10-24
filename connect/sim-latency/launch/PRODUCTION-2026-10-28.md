@@ -14,7 +14,7 @@ builds and evaluations use fresh temporary checkouts.
 
 | Repository | Development branch | Candidate commit |
 | --- | --- | --- |
-| server | main | afaafaa521b0d1c6a88948628b00ba574c1674f7 |
+| server | main | 67c87445abe6725b25b3df2a13af7eb99cd4f8ed |
 | connect | main | e90d59eb404f973dba6e9d0689ecd94e2718c10e |
 | sdk | main | d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb |
 | proxy | main | af1d364fe34b807c31936642bff7d3fd849ab2a4 |
@@ -33,9 +33,9 @@ module is part of the connect commit, not a separate repository.
 ## Execution checklist
 
 - [x] Fetch development heads and inspect operator worktrees without modifying them.
-- [ ] Compile and test the complete candidate graph in private temporary clones.
+- [x] Compile the candidate graph and pass the simulator harness against its pinned dependencies.
 - [x] Audit transitive repository coverage against that graph.
-- [ ] Publish the approved production source lock and competition branches without
+- [x] Publish the preparation source lock and competition branches without
   overwriting historical epoch records or force-pushing an existing branch.
 - [ ] Build and qualify the exact production evaluator; retain authenticated
   containment, kill/cleanup, artifact, and host-readiness evidence.
@@ -108,3 +108,29 @@ fixed opening, not permission to omit honesty review or invent readiness proof.
   PostgreSQL/Redis services and synthetic resources, not main or shared local
   stores. The ordinary local harness also refused stale launcher ownership;
   that refusal was not bypassed by deleting its lock or resetting shared stores.
+
+## Published preparation checkpoint
+
+Server `67c87445abe6725b25b3df2a13af7eb99cd4f8ed` contains the retirement and
+test-boundary fixes. All ten remote `sim-latency` branches now identify the table
+above, using ordinary fast-forwards (gvisor's branch was newly created).
+Config `c32a2e5dc13724a25fa2fc6121b3b531d4c9140a` publishes the new schema-2
+production manifest at `config/main/sim-latency.yml`; its canonical source lock
+is `f8954162b28894aa96c7bd75b2aadb32e5724fa1852f32b0e6db7eb12f5645f5`.
+The prior manifest was moved byte-for-byte into config's history directory.
+The active staging configuration and all live source pointers remain unchanged.
+
+Three consecutive complete `tests.sh` passes used isolated owned stores and
+synthetic resources: 114.045, 101.615, and 98.768 seconds for the race phase.
+Each included a separate passing six-epoch lifecycle invocation. The final
+race log contains 326 passing top-level tests; its SHA-256 is
+`2edfbd774ef03a82c35d9c856c588e25b6073cbdc9d4559b792d0435b36603ed`.
+The second race log SHA-256 is
+`591c7ab2f3b209d04dbb3f669658ebff4efdbce4d93dded8ab8028fce5cbb0a9`.
+
+The exact production evaluator image build has started. Production qualification,
+fresh calibration, real review/build broker qualification, live deployment,
+settlement acceptance, and scheduled opening remain separate unchecked work.
+The manifest's 16.1% historical floor is explicitly provisional until fresh
+calibration; publishing it is not an assertion of a newly measured baseline or
+permission to bootstrap/open production.
