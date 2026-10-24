@@ -102,4 +102,6 @@ using a fresh metadata seed and read-only source. Complete Go test events must
 prove every mandatory test ran and passed and every package completed. Logs are
 retained before their exact digest is returned. This is a targeted correctness
 suite, not the complete repository/database suite or live smoke/host proof.
-Direct shell-run probes of it do not constitute model-owned execution.
+The full real-container synthetic probe passed all 33 tests with owned-image
+and container cleanup. Direct shell-run probes do not constitute model-owned
+execution or a complete live qualification receipt.
