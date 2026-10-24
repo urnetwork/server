@@ -127,89 +127,97 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	}
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
-	server.Db(ctx, func(conn server.PgConn) {
-		query := stEpochProviderUsageSql
-		if census != nil {
-			query = stEpochProviderOriginalUsageSql
-		}
-		rows, err := conn.Query(ctx, query, queryStart, queryEnd)
-		if err != nil {
-			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var contractId server.Id
-			var data []byte
-			var closedAt *time.Time
-			var duplicate bool
-			var originalReports []byte
-			var windowOnly bool
-			columns := []any{&contractId, &data, &closedAt, &duplicate}
+	// One statement reads the whole epoch in one snapshot, so the read cannot
+	// be paged, and a seven-day epoch outlasts the application role's
+	// 15-minute transaction bound (30-55 minutes projected at epoch 0's read
+	// rates). It runs on a direct maintenance session that lifts the bound for
+	// itself; the epoch close's MaxTime still bounds it, and its cancel reaches
+	// that session. A replica takes this read once one exists.
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		server.WithoutTransactionTimeout(ctx, conn, func() {
+			query := stEpochProviderUsageSql
 			if census != nil {
-				columns = append(columns, &originalReports, &windowOnly)
+				query = stEpochProviderOriginalUsageSql
 			}
-			if err := rows.Scan(columns...); err != nil {
-				returnErr = err
-				return
-			}
-			if windowOnly {
-				if window != nil && len(originalReports) != 0 {
-					if err := json.Unmarshal(originalReports, window); err != nil {
-						returnErr = err
-						return
-					}
-				}
-				continue
-			}
-			if closedAt == nil {
-				returnErr = fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", contractId)
-				return
-			}
-			if duplicate {
-				returnErr = fmt.Errorf("subnet contract %s has both live and archived usage", contractId)
-				return
-			}
-			snapshot, err := decodeContractUsageSnapshot(data)
+			rows, err := conn.Query(ctx, query, queryStart, queryEnd)
 			if err != nil {
-				returnErr = fmt.Errorf("subnet contract %s: %w", contractId, err)
+				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 				return
 			}
-			if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(*closedAt) || legacy.Epoch != epoch) {
-				returnErr = fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", contractId)
-				return
-			}
-			if census != nil {
-				census.Count++
-				if census.Records != nil {
-					if len(originalReports) > payoutartifact.MaxClosedWorkRecordBytes {
-						originalReports = nil // Preserve original usage, never a truncated proof.
-					}
-					if len(census.Records) == payoutartifact.MaxClosedWorkRecords || len(data) > payoutartifact.MaxClosedWorkRecordBytes || len(data)+len(originalReports) > payoutartifact.MaxClosedWorkOriginalBytes-originalBytes {
-						census.Records = nil // No prefix may claim the complete query.
-					} else {
-						originalBytes += len(data) + len(originalReports)
-						census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data), OriginalReports: bytes.Clone(originalReports)})
-					}
+			defer rows.Close()
+			for rows.Next() {
+				var contractId server.Id
+				var data []byte
+				var closedAt *time.Time
+				var duplicate bool
+				var originalReports []byte
+				var windowOnly bool
+				columns := []any{&contractId, &data, &closedAt, &duplicate}
+				if census != nil {
+					columns = append(columns, &originalReports, &windowOnly)
 				}
-			}
-			if closedAt.Before(earningStart) || !closedAt.Before(earningEnd) {
-				continue
-			}
-			for _, provider := range snapshot.Providers {
-				usage := usagesByClientId[provider.ClientId]
-				if usage == nil {
-					usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
-					usagesByClientId[provider.ClientId] = usage
-				}
-				if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
-					returnErr = fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
+				if err := rows.Scan(columns...); err != nil {
+					returnErr = err
 					return
 				}
-				usage.PayoutByteCount += int64(provider.ByteCount)
+				if windowOnly {
+					if window != nil && len(originalReports) != 0 {
+						if err := json.Unmarshal(originalReports, window); err != nil {
+							returnErr = err
+							return
+						}
+					}
+					continue
+				}
+				if closedAt == nil {
+					returnErr = fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", contractId)
+					return
+				}
+				if duplicate {
+					returnErr = fmt.Errorf("subnet contract %s has both live and archived usage", contractId)
+					return
+				}
+				snapshot, err := decodeContractUsageSnapshot(data)
+				if err != nil {
+					returnErr = fmt.Errorf("subnet contract %s: %w", contractId, err)
+					return
+				}
+				if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(*closedAt) || legacy.Epoch != epoch) {
+					returnErr = fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", contractId)
+					return
+				}
+				if census != nil {
+					census.Count++
+					if census.Records != nil {
+						if len(originalReports) > payoutartifact.MaxClosedWorkRecordBytes {
+							originalReports = nil // Preserve original usage, never a truncated proof.
+						}
+						if len(census.Records) == payoutartifact.MaxClosedWorkRecords || len(data) > payoutartifact.MaxClosedWorkRecordBytes || len(data)+len(originalReports) > payoutartifact.MaxClosedWorkOriginalBytes-originalBytes {
+							census.Records = nil // No prefix may claim the complete query.
+						} else {
+							originalBytes += len(data) + len(originalReports)
+							census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data), OriginalReports: bytes.Clone(originalReports)})
+						}
+					}
+				}
+				if closedAt.Before(earningStart) || !closedAt.Before(earningEnd) {
+					continue
+				}
+				for _, provider := range snapshot.Providers {
+					usage := usagesByClientId[provider.ClientId]
+					if usage == nil {
+						usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
+						usagesByClientId[provider.ClientId] = usage
+					}
+					if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
+						returnErr = fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
+						return
+					}
+					usage.PayoutByteCount += int64(provider.ByteCount)
+				}
 			}
-		}
-		returnErr = rows.Err()
+			returnErr = rows.Err()
+		})
 	})
 	if returnErr != nil {
 		return nil, returnErr

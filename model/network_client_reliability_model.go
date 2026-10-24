@@ -1146,6 +1146,19 @@ func configureReliabilityRunningCheckpoint(ctx context.Context, tx reliabilityRu
 	))
 }
 
+// The reliability transactions that read or rewrite every client's rows (the
+// location reliabilities, the client scores, the network window) are
+// unmeasured since the October rewrites (scoring every lookback in one
+// transaction took 1,356 s before them), and the network window widens with
+// every stall of the rollup. The application role's 15-minute transaction
+// bound (PARTITION-MAINTENANCE-PLAN.md A6) could end each run the same way,
+// and every retry would read a wider window. Each carries the checkpoints'
+// two-hour ceiling instead, so the server still ends an orphan; the bounded
+// checkpoints above fit the role's bound and keep it.
+func boundReliabilityTransactionInTx(ctx context.Context, tx server.PgCanExec) {
+	server.SetTransactionTimeoutInTx(ctx, tx, reliabilityRunningCheckpointStatementTimeout)
+}
+
 // reliabilityRunningLookback pairs a lookback_index with its window width.
 type reliabilityRunningLookback struct {
 	lookbackIndex int
@@ -1681,6 +1694,7 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		if complete {
 			maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
 			minTime := maxTime.Add(-maxLookback)
@@ -2290,6 +2304,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete, liveStaleHandlerIds)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -2899,6 +2914,7 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 	// judged before the transaction: the judgement reads Redis
 	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }

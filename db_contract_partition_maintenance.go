@@ -181,7 +181,7 @@ func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created [
 func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedWeek string, deadline time.Time) (analyzed []string, nextAnalyzedWeek string) {
 	nextAnalyzedWeek = analyzedWeek
 	analyze := func(statement string) bool {
-		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
+		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}); err != nil {
 			glog.Errorf("[cp]%s: %s\n", statement, err)
 			return false
 		}

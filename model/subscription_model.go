@@ -6686,6 +6686,9 @@ func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCoun
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// a batch's full scan of a large sweep table can outlast the
+			// application role's 15-minute transaction bound
+			server.SetTransactionTimeoutInTx(ctx, tx, 0)
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`

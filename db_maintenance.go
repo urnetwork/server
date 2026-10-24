@@ -1186,7 +1186,9 @@ func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockT
 // which the wait would cancel, or behind a conflicting lock: it waits for the
 // scope to clear for at most lockTimeout and otherwise returns a
 // *dbMaintenanceLockConflict without starting. lockTimeout still bounds each
-// lock and snapshot wait of the later phases. pid names the server backend for
+// lock and snapshot wait of the later phases. A rebuild can legitimately run
+// past the application role's transaction_timeout (A6), so the statement runs
+// with it off (WithoutTransactionTimeout). pid names the server backend for
 // the cleanup after a failure; it is zero when the statement never started.
 func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement string, lockTimeout time.Duration) (pid int32, err error) {
 	conn, err := AcquireMaintenanceDbConn(ctx)
@@ -1216,7 +1218,23 @@ func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement st
 	pid = backendPid
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, dbMaintenanceReindexTimeout)
 	defer timeoutCancel()
-	_, err = conn.Exec(timeoutCtx, statement)
+	func() {
+		// the setting's own statements raise; the session is discarded either way
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				recoveredErr, ok := recovered.(error)
+				if !ok {
+					panic(recovered)
+				}
+				if err == nil {
+					err = recoveredErr
+				}
+			}
+		}()
+		WithoutTransactionTimeout(timeoutCtx, conn, func() {
+			_, err = conn.Exec(timeoutCtx, statement)
+		})
+	}()
 	return
 }
 
@@ -1756,10 +1774,14 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 // in flight. Tables are processed one at a time, smallest first, so peak
 // transient use is bounded by the largest single table rather than their sum.
 //
-// Runs on the maintenance connection in autocommit (VACUUM cannot run inside a
-// transaction). A table that cannot be locked within lock_timeout, or that
-// errors mid-rewrite (e.g. out of disk — VACUUM FULL rolls back cleanly,
-// leaving the table intact), is logged and skipped; the run continues.
+// Runs on a direct maintenance session of its own in autocommit (VACUUM cannot
+// run inside a transaction), discarded after the run so its settings never
+// return to the pool: no statement bound, a lock bound, and no transaction
+// bound, since a large table's rewrite outlasts the application role's
+// (PARTITION-MAINTENANCE-PLAN.md A6). A table that cannot be locked within
+// lock_timeout, or that errors mid-rewrite (e.g. out of disk — VACUUM FULL
+// rolls back cleanly, leaving the table intact), is logged and skipped; the
+// run continues.
 func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(string, ...any)) {
 	skip := func(t string) bool {
 		for _, e := range excludes {
@@ -1807,11 +1829,15 @@ func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(strin
 	}
 	logf("VACUUM FULL plan: %d tables to vacuum, %d skipped", len(todo), len(all)-len(todo))
 
-	MaintenanceDb(ctx, func(conn PgConn) {
+	func() {
+		conn, err := AcquireMaintenanceDbConn(ctx)
+		Raise(err)
+		defer discardPgConnection(ctx, conn)
 		RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
 		// so a table held by another session (e.g. the client_reliability copy)
 		// is skipped rather than blocking the whole run
 		RaisePgResult(conn.Exec(ctx, `SET lock_timeout = '60s'`))
+		RaisePgResult(conn.Exec(ctx, `SET transaction_timeout = 0`))
 
 		for i, ti := range todo {
 			startTime := time.Now()
@@ -1834,7 +1860,7 @@ func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(strin
 			})
 			logf("[%d/%d] %s done: %s -> %s in %.1fs", i+1, len(todo), ti.name, ti.pretty, after, time.Since(startTime).Seconds())
 		}
-	}, OptReadWrite(), OptNoRetry())
+	}()
 
 	logf("VACUUM FULL complete")
 }

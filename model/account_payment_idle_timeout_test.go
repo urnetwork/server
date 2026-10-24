@@ -18,12 +18,14 @@ func (self *recordingPaymentPlanTransaction) Exec(_ context.Context, sql string,
 
 // Retain the temporary-relation buffer guard without disabling idle protection.
 // Reliability now runs on this owner and cannot leave an outer transaction idle.
+// The plan lifts the role's transaction bound for its own transaction only.
 func TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards(t *testing.T) {
 	ctx := context.Background()
 	recorder := &recordingPaymentPlanTransaction{}
 	configurePaymentPlanTransaction(ctx, recorder)
 	wantStatements := []string{
 		"SET LOCAL effective_io_concurrency = 32",
+		"SET LOCAL transaction_timeout = 0",
 	}
 	if len(recorder.statements) != len(wantStatements) {
 		t.Fatalf("payment-plan transaction configuration = %q, want %q", recorder.statements, wantStatements)
@@ -58,6 +60,7 @@ func TestPaymentPlanTransactionGuardsAreLocal(t *testing.T) {
 
 			baselineIdleTimeout := readSetting(conn, "idle_in_transaction_session_timeout")
 			baselineIOConcurrency := readSetting(conn, "effective_io_concurrency")
+			baselineTransactionTimeout := readSetting(conn, "transaction_timeout")
 			tx, err := conn.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -74,9 +77,15 @@ func TestPaymentPlanTransactionGuardsAreLocal(t *testing.T) {
 			if setting := readSetting(tx, "effective_io_concurrency"); setting != "32" {
 				t.Fatalf("transaction effective_io_concurrency = %q, want 32", setting)
 			}
+			if setting := readSetting(tx, "transaction_timeout"); setting != "0" {
+				t.Fatalf("transaction transaction_timeout = %q, want the bound lifted", setting)
+			}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT 1`))
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatal(err)
+			}
+			if setting := readSetting(conn, "transaction_timeout"); setting != baselineTransactionTimeout {
+				t.Fatalf("post-commit transaction_timeout = %q, want original session value %q", setting, baselineTransactionTimeout)
 			}
 			if setting := readSetting(conn, "idle_in_transaction_session_timeout"); setting != baselineIdleTimeout {
 				t.Fatalf("post-commit idle timeout = %q, want original session value %q", setting, baselineIdleTimeout)

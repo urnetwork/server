@@ -902,6 +902,9 @@ func ApplySchemaFix(ctx context.Context, diff *SchemaDiff, forceDropIndexes bool
 			onStatement(i, len(statements), statement)
 		}
 		MaintenanceTx(ctx, func(tx PgTx) {
+			// a plain index build or a validating constraint on a large table
+			// outlasts the application role's 15-minute transaction bound
+			SetTransactionTimeoutInTx(ctx, tx, 0)
 			RaisePgResult(tx.Exec(ctx, statement))
 		})
 	}

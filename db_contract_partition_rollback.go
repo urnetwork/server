@@ -99,7 +99,7 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 		statement := fmt.Sprintf("ALTER TABLE public.%s VALIDATE CONSTRAINT %s", quoteIdentifier(foreignKey.table), quoteIdentifier(foreignKey.name))
 		if err := contractPartitionExecRetry(ctx, []string{
 			fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.ValidationLockTimeout.Milliseconds()),
-			`SET LOCAL statement_timeout = 0`, statement,
+			`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement,
 		}, settings.ValidationMaxAttempts, settings.ValidationRetryInterval, logf); err != nil {
 			return fmt.Errorf("validate %s: %w", foreignKey.name, err)
 		}
