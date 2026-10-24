@@ -88,10 +88,60 @@ permits cleanup. Nothing here pushes source refs or activates a round.
 
 ## Release status
 
-The broker entry point and interlocks require deployment qualification. A real
-independent qualifier is still required; this repository does not install or
-assert one by supplying an executable pathname. Do not enable production with
-a stub qualifier or use synthetic test receipts as operational evidence.
+The broker and independent qualifier entry points require deployment
+qualification. The qualifier implementation is `source-qualify-build`:
+
+```sh
+exec /path/to/pinned/sim-latency source-qualify-build \
+  --qualification-settings=/path/to/private/qualification-settings.json \
+  --qualification-settings-sha256=<sha256-of-those-exact-settings-bytes>
+```
+
+The broker's `qualification_command` names the immutable wrapper above, and its
+`qualification_sha256` pins that wrapper's exact bytes. The wrapper selects the
+binary and settings; request JSON cannot change them. Example settings shape:
+
+```json
+{
+  "sandbox": {
+    "state_directory": "/var/lib/urnetwork/competition-reviewed-builds"
+  },
+  "host": {
+    "command": "/path/to/pinned/host-self-check.sh",
+    "command_sha256": "<exact-host-checker-sha256>"
+  },
+  "model_key_file": "/path/to/root-private/dedicated-source-test.key"
+}
+```
+
+All paths shown are deployment placeholders, not an installed release. The
+sandbox state path/allocation must match the build broker. Root-owned protected
+ancestry is required for settings, checker, active host document and dedicated
+key; settings/key leaves must also be private. No token is stored in settings.
+The command uses the actual Sol 6.1 low prescribed-test tool and durable journals,
+not a Go exit status relabeled as model provenance.
+
+Before candidate tests start, the qualifier inspects and retains Docker's actual
+created-container configuration. Changed image/command, host networking, elevated
+privileges, writable/redirected mounts and changed resource limits refuse start.
+It retains the terminal state and post-removal census as well. Those observations
+and the real test log identity form a separate containment artifact.
+
+After tests, the pinned root checker reads a separate private prospective host
+configuration; the active host file is not overwritten. The new-image hardware
+fingerprint explicitly has `runtime_qualified: false`. It supplies the expected
+fingerprint for the future source intent, **not** proof that the next round can
+open. The existing fenced preparation still must install the exact intended
+runtime and pass its real host probe, artifact checks and API/worker readiness
+acknowledgments before activation.
+
+The focused regressions passed three race repetitions. The actual-container
+probe passed the offline pipeline and all 33 prescribed correctness tests,
+including observed containment and journal replay. Three consecutive complete
+`tests.sh` passes also passed after calibration ended. Provider responses in the
+container probe were mocked, not genuine model provenance. Genuine provider
+access, root-owned release installation and fenced runtime qualification remain
+required before enabling production. Never use synthetic receipts operationally.
 
 The independent test-model client in `source_test_model.go` uses Sol 6.1 low
 with one forced, argument-free `run_prescribed_tests` tool. Its trusted callback

@@ -94,7 +94,70 @@ MinIO endpoint `172.28.208.177:23900` refuses TCP connections. No main database
 write or production activation has been attempted while maintenance confirmation
 is pending.
 
+### Calibration and preparation checkpoint — October 24, 15:01 UTC
+
+The original nine-run coordinator is still live. Replicates 1–4 each completed
+with exit 0, taking 442, 452, 441 and 436 seconds respectively; replicate 5 is
+running. No Go build or test work overlaps these timed measurements. This is
+still public-seed exploratory calibration, not the official baseline.
+
+Draft host-preparation changes allow a root-only, protected alternate host
+configuration without replacing the active host document. The prospective
+profile explicitly cannot assert runtime qualification or inherit another
+image's readiness evidence. Deterministic tests cover protected-path ancestry,
+marker authentication before evidence reads, root-only argument authorization,
+changed hardware/image/boot identity and preservation of failed runtime facts.
+These drafts have formatting/shell syntax checks only; execute their Go tests
+after timed calibration ends, before committing or installing them.
+
+Read-only live checks still return API `503 source_not_ready` and connection
+refused from sille's MinIO endpoint `172.28.208.177:23900`. No main writes or
+activation have occurred during the maintenance hold.
+
 ## Execution checklist
+
+### Qualifier and four-instance evidence — October 24, 15:42 UTC
+
+All nine fresh-service runs completed cleanly, with no replacements and no
+overlapping builds/tests. Their failure-charged raw p95 median is 17,597.57 ms,
+sample mean 17,967.77 ms, sample SD 1,753.81 ms and CV 9.76%. Twenty of 22,112
+measured requests failed. The historical 16.1% margin would imply an illustrative
+14,764.36 ms practical threshold; neither scale nor margin is frozen here.
+An equal-variance nine-per-side Welch approximation gives an 8.03% mean-difference
+boundary, not an actual candidate significance decision.
+
+The original enclosing coordinator returned 1 only after all nine runs: its
+optional descriptive-analysis command omitted an explicit source-config path.
+That failure remains retained. Separate offline, read-only analysis in the same
+image succeeded with its actual embedded source configuration/lock; no run was
+repeated. The failure-charged report SHA-256 is
+`9d2c8c4a20650cc97cb742b5415c726c4230462a24db10d818da783068074796`;
+the separate success-only descriptive report is
+`34b61461c76249b4cf73cb5379f1d64f748c40164cd364bb81bef1ef451fdffb`.
+
+The independent build qualifier now has a real `source-qualify-build` entry point
+joining the prescribed low-model test client, actual Docker containment
+inspection, terminal/cleanup observations and a root-checked prospective host
+fingerprint. The fingerprint explicitly cannot assert future runtime readiness.
+The exact-image fenced preparation and API/worker acknowledgments remain gates.
+
+Focused regression tests passed three race repetitions (8.597 seconds; log
+`4653507d66623fd813cb3d861483ce618807404856edfe8c8d426cdfab30761d`).
+The real-container offline probe passed all 33 correctness tests and replay;
+its retained log is
+`ecf344957aba22e2a8d5868787054db0d3f7823485a425b2abf74902c8568fb1`.
+Provider responses in that probe were mocked, not genuine model provenance.
+Three full simulator-suite invocations passed consecutively in 143, 123 and
+124 seconds, with owned disposable services cleaned up. Logs:
+
+- `6f323306250d5f291e4067168ead191acbcd5e2e0047ee495154d3a21cc712a3`
+- `4e29df7f228e6214ac59dcce656a5a653e55bae1a62ae3631a9cdc7ac9478b01`
+- `98a2123d15da4d9b35cca28cd7de667fa570e21380fe746dd20ea84e835eca78`
+
+This closes implementation/test work for the qualifier coordinator, not its
+installation, genuine provider access, production host/artifact readiness,
+reference calibration or season activation. No main control-plane writes were
+performed during the maintenance hold.
 
 ### Restart/review-build validation — October 24, 13:38 UTC
 

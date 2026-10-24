@@ -93,6 +93,7 @@ Usage:
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
+  sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
@@ -104,6 +105,8 @@ Usage:
   sim-latency --version
 
 Options:
+  --qualification-settings=<path> Private deployment settings for exact-image independent qualification.
+  --qualification-settings-sha256=<digest> Immutable installed qualification-settings digest.
   --build-settings=<path> Private deployment settings for the isolated source build broker.
   --build-settings-sha256=<digest> Immutable installed build-settings digest.
   --model-key-file=<path> Dedicated OpenAI API key leaf; no main credentials belong in the broker.
@@ -279,6 +282,8 @@ Options:
 		runWinnerReviewBroker(opts)
 	case optBool(opts, "source-build-broker"):
 		runSourceBuildBroker(opts)
+	case optBool(opts, "source-qualify-build"):
+		runSourceBuildQualifier(opts)
 	case optBool(opts, "launch-preflight"):
 		requireMainEnvironment("launch-preflight")
 		runLaunchPreflight(opts)

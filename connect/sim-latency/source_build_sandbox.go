@@ -177,7 +177,7 @@ func executeSourceBuildSandbox(ctx context.Context, input sourceBuildSandboxInpu
 		}
 	}()
 	if err := docker(ctx, args, output, diagnostics); err != nil {
-		return nil, nil, errors.New("source build container creation failed")
+		return nil, nil, fmt.Errorf("source build container creation failed: %w", err)
 	}
 	id = strings.TrimSpace(string(output.content))
 	if !validSha256(id) || output.exceeded {

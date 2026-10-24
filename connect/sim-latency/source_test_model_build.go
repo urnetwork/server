@@ -33,8 +33,15 @@ func executeSourceBuildIndependentTests(ctx context.Context, client *http.Client
 	settings.ResponseJournalDirectory = journal
 	plan := sourceTestPlan{Owner: owner, ImageId: artifacts.ImageId, SourceLockSha256: request.Proposal.SourceLockSha256,
 		PatchSha256: request.Proposal.PatchSha256, SuiteSha256: sourceCorrectnessSuiteDigest()}
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
+		SourceDirectory: filepath.Join(artifacts.Directory, "source"), MetadataDirectory: filepath.Join(artifacts.Directory, "correctness", "metadata"),
+		OutputDirectory: filepath.Join(artifacts.Directory, "correctness", "output")}
+	observedDocker, err := sourceCorrectnessContainmentDocker(input, sandbox, docker)
+	if err != nil {
+		return nil, "", err
+	}
 	evidence, err := executeSourceTestModel(ctx, client, key, plan, settings, func(testCtx context.Context) (sourceTestExecution, error) {
-		result, err := executeJournaledSourceCorrectness(testCtx, request, artifacts, owner, sandbox, journalSettings, docker)
+		result, err := executeJournaledSourceCorrectness(testCtx, request, artifacts, owner, sandbox, journalSettings, observedDocker)
 		if err != nil {
 			return sourceTestExecution{}, err
 		}
@@ -55,6 +62,9 @@ func executeSourceBuildIndependentTests(ctx context.Context, client *http.Client
 			return nil, "", err
 		}
 	} else if err != nil {
+		return nil, "", err
+	}
+	if _, err := retainSourceCorrectnessContainment(input, sandbox, evidence.Execution); err != nil {
 		return nil, "", err
 	}
 	return evidence, expected, nil
