@@ -14,7 +14,11 @@ repository pins unchanged. Config main
 Go **1.27.3** is mandatory. The exact test, archival, compiler and publication
 evidence is in [GO-AND-PROVIDE-2026-10-24.md](GO-AND-PROVIDE-2026-10-24.md).
 
-The new evaluator build is live, not qualified. Current source publication is
+The new evaluator image is built and its independent basic identity checks pass,
+but it is not fully qualified. Its exact evaluator/worker identities and retained
+qualification attempts are in
+[ARTIFACTS-GO1273-2026-10-24.md](ARTIFACTS-GO1273-2026-10-24.md).
+Current source publication is
 explicitly `prepared_not_activated`; final scale/margin, fresh calibration,
 hidden epoch baseline and production runtime activation remain unproven.
 The current source ledger is `config/main/sim-latency.yml`; old ledgers and image
