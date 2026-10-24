@@ -329,5 +329,8 @@ artifact check, reproducing the identical frozen binary; log SHA-256:
 `a13a37271124a174c40bbca929fe36af658b4cdb8dd796c735800a50d089255d`.
 The package `tests.sh` wrapper currently refuses to start because its shared
 local launcher lock has no readable owner. That preflight is not bypassed or
-counted as passing; a direct offline package Go suite is being checked
-separately, without claiming independent model-run test provenance.
+counted as passing. A direct race-enabled package Go suite also failed its six
+database integration preflights because `WARP_ENV` was not set to `local`.
+Neither result is a simulator correctness failure or successful full-suite
+proof; restore the launcher-managed test environment before rerunning the
+supported wrapper. No independent model-run test provenance is claimed.
