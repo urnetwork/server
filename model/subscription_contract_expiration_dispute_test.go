@@ -52,7 +52,7 @@ func requireDisputedExpirationDebitAndDrain(t testing.TB, ctx context.Context, f
 			t.Fatal("disputed deadline lost its exact pending debit")
 		}
 	})
-	requireLegacySettlementTestState(t, ctx, f, id, false, true, 1000, 300)
+	requireLegacySettlementTestState(t, ctx, f, id, true, 1000, 300)
 	for _, want := range []int{1, 0} {
 		applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 		if err != nil || busy || applied != want || released != want {
@@ -111,32 +111,20 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 				})
 			}
 			count, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-			wantCount := int64(1)
-			if scenario.missingDeadline && !scenario.redis {
-				wantCount = 0
-			}
-			if err != nil || count != wantCount {
-				t.Fatalf("%s disputed expiration count=%d want=%d err=%v", scenario.name, count, wantCount, err)
+			if err != nil || count != 1 {
+				t.Fatalf("%s disputed expiration count=%d want=1 err=%v", scenario.name, count, err)
 			}
 			proof := requireExpirationCheckpointReports(t, ctx, id, !scenario.missingDeadline)
 			if scenario.redis && !scenario.missingDeadline {
 				requireDisputedExpirationDebitAndDrain(t, ctx, f, id)
 			}
-			if scenario.missingDeadline {
-				if scenario.redis {
-					flushed, err := FlushTransferDebits(ctx, int(f.balanceId[15])%TransferDebitShardCount, nil, 1)
-					if err != nil || flushed.Failed != 0 {
-						t.Fatal("historical Redis continuation lost its debit", err)
-					}
-				} else {
-					requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 1000)
-					complete, busy, _, err := flushLegacySettlement(ctx, id)
-					if err != nil || !complete || busy {
-						t.Fatal("historical legacy continuation lost its financial owner", complete, busy, err)
-					}
+			if scenario.missingDeadline && scenario.redis {
+				flushed, err := FlushTransferDebits(ctx, int(f.balanceId[15])%TransferDebitShardCount, nil, 1)
+				if err != nil || flushed.Failed != 0 {
+					t.Fatal("historical Redis continuation lost its debit", err)
 				}
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+			requireLegacySettlementTestState(t, ctx, f, id, true, 700, 0)
 			if scenario.missingDeadline {
 				// The old no-deadline continuation can still publish its
 				// independently durable provider projection after the close.
@@ -161,7 +149,7 @@ func TestContractExpirationDisputedCheckpointsKeepFinancialCustody(t *testing.T)
 			if err != nil || count != 0 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, !scenario.missingDeadline)) {
 				t.Fatal("disputed expiry replay changed terminal accounting or original proof", err)
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+			requireLegacySettlementTestState(t, ctx, f, id, true, 700, 0)
 			checkCompleted()
 		}
 	})
@@ -202,7 +190,7 @@ func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t
 		if !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
 			t.Fatal("canceled reconciliation changed its original reports or financial state")
 		}
-		requireLegacySettlementTestState(t, ctx, f, id, false, false, 1000, 1000)
+		requireLegacySettlementTestState(t, ctx, f, id, false, 1000, 1000)
 		server.Db(ctx, func(conn server.PgConn) {
 			var unchanged bool
 			server.Raise(conn.QueryRow(ctx, `SELECT dispute AND outcome IS NULL AND provider_usage IS NULL
@@ -221,7 +209,7 @@ func TestContractExpirationDisputedCheckpointCancellationRollsBackFinalization(t
 		}
 		proof := requireExpirationCheckpointReports(t, ctx, id, true)
 		requireDisputedExpirationDebitAndDrain(t, ctx, f, id)
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 700, 0)
 		requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 300)
 		count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
 		if err != nil || count != 0 || !bytes.Equal(proof, requireExpirationCheckpointReports(t, ctx, id, true)) {

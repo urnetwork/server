@@ -88,7 +88,7 @@ type contractDeadlineEscrow struct {
 // An accounting anomaly must not leave the contract open for another task to fix.
 //
 // The caller's deadline is authoritative, even ahead of the process clock; task
-// admission owns the eligibility check. Contract, intent, debit, earnings, escrow
+// admission owns the eligibility check. Contract, debit, earnings, escrow
 // metadata and outcome commit atomically. A database, ownership or cancellation
 // failure that prevents that commit must return an explicit error for retry,
 // never acknowledge an open contract as closed. Optional caches run after commit.
@@ -103,7 +103,7 @@ func ReconcileContractAtDeadline(ctx context.Context, contractId server.Id, dead
 	var posts []server.PostFunction
 	server.HandleError(func() {
 		// Discover only prospective identities without holding a transaction.
-		// Admission can then wait without retaining the contract or intent.
+		// Admission can then wait without retaining the contract.
 		// The locked callback checks the full current scope before any write.
 		balanceIds := readDeadlineBalanceIds(ctx, contractId)
 		keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
@@ -150,9 +150,9 @@ func deadlineFinancialOwnershipKeys(contractId server.Id, balanceIds []server.Id
 		task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId)))
 }
 
-// Reuse the caller's transaction when an overdue intent already owns its rows.
-// Such callers may not wait for admission while holding those rows. All errors
-// abort that transaction; returned posts require a confirmed commit.
+// Reuse the caller's transaction when it already holds the contract row. Such
+// callers may not wait for admission while holding that row. All errors abort
+// that transaction; returned posts require a confirmed commit.
 func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time) (*ContractDeadlineReconciliation, []server.PostFunction) {
 	return reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, false)
 }
@@ -181,12 +181,6 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		}
 	}
 	result.Outcome = ContractOutcomeSettled
-	// Intent workers acquire intent then try the contract without waiting.
-	// This path holds the contract, so it must never wait for that intent.
-	err = tx.QueryRow(ctx, `SELECT outcome FROM legacy_settlement_intent WHERE contract_id=$1 FOR UPDATE NOWAIT`, contractId).Scan(&result.Outcome)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		server.Raise(err)
-	}
 	result.Requested, _ = deadlineReportAmounts(owner.reports, result.Outcome, &result.Adjustments)
 	participants, originNetworkId, err := contractParticipantsFromOwnerInTx(ctx, tx, contractId, owner.participants, nil)
 	if err != nil {
@@ -245,11 +239,9 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		usageParticipants = nil
 	}
 	usage := deadlineUsageSnapshot(owner, usageParticipants, &result.Adjustments)
-	// Accepted adjudication survives. Retirement clears the dispute only
-	// with its best funded settlement. The intent guard remains intact.
+	// Retirement clears the dispute only with its best funded settlement.
 	// Retirement (dispute, usage_unverified, expiration_time) is written by
 	// the outcome claim itself, so the close writes one contract row version.
-	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId))
 	claimed, err := claimContractOutcomeWithUsageValueInTx(ctx, tx, contractId, result.Outcome, usage, true, &deadline)
 	server.Raise(err)
 	if !claimed {

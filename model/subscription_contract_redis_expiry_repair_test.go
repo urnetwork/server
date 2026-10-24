@@ -189,7 +189,7 @@ func TestRedisContractExpiryRepairAdmissionRefusals(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		for _, test := range []struct{ change, status string }{
-			{"recent", "recent_report"}, {"dispute", "disputed"}, {"intent", "legacy_intent_present"},
+			{"recent", "recent_report"}, {"dispute", "disputed"},
 			{"journal", "debit_present"}, {"legacy", "reservation_mode_changed"},
 			{"settled", "reservation_mode_changed"}, {"absent", "reservation_mode_changed"},
 			{"foreign", "custody_invalid"}, {"stream", "stream_scope_unsupported"},
@@ -208,9 +208,6 @@ func TestRedisContractExpiryRepairAdmissionRefusals(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, id, server.NowUtc()))
 				case "dispute":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, id))
-				case "intent":
-					server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, id))
-					server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, false))
 				case "journal":
 					journalBalanceId := server.NewId()
 					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,1,$3)`, id, journalBalanceId, transferDebitShard(journalBalanceId)))

@@ -28,8 +28,7 @@ const closeFunctionFairnessClaims = 64 + 32
 const closeFunctionFairnessPrefix = 64 + 8
 
 // Public constructors retain actual Redis reservation tokens and payer grants.
-// The accepted intent is the same explicit retained-state seam used by the
-// qualified scheduled-close/publication controls; no balance or escrow is edited.
+// No balance or escrow is edited.
 type closeFunctionFairnessFixture struct {
 	ids          []server.Id
 	paid         []server.Id
@@ -85,12 +84,6 @@ func seedCloseFunctionFairness(t testing.TB, ctx context.Context) closeFunctionF
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL WHERE contract_id=ANY($1)`, f.ids))
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for _, id := range f.ids {
-				batch.Queue(`INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time)
-                    VALUES($1,$2,'settled',$3)`, id, int(id[15])%model.LegacySettlementShardCount, f.bulkAt)
-			}
-		})
 	}, server.TxReadCommitted, server.OptNoRetry())
 	server.Db(ctx, func(conn server.PgConn) {
 		var exact bool
@@ -98,11 +91,8 @@ func seedCloseFunctionFairness(t testing.TB, ctx context.Context) closeFunctionF
             (SELECT count(*)=288 AND bool_and(outcome IS NULL) FROM transfer_contract WHERE contract_id=ANY($1)) AND
             (SELECT count(*)=256 AND bool_and(redis_reserved AND NOT settled AND balance_byte_count=100) FROM transfer_escrow WHERE contract_id=ANY($1)) AND
             NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($2)) AND
-            (SELECT count(*)=288 AND count(*) FILTER(WHERE payer_network_id IS NOT NULL)=256
-                AND count(DISTINCT payer_network_id)=64
-                AND count(DISTINCT source_client_id) FILTER(WHERE payer_network_id IS NULL)=8
-                FROM legacy_settlement_intent WHERE contract_id=ANY($1)) AND
-            NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1))`, f.ids, f.free).Scan(&exact))
+            (SELECT count(*)=256 AND count(DISTINCT payer_network_id)=64 FROM transfer_contract WHERE contract_id=ANY($3)) AND
+            NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1))`, f.ids, f.free, f.paid).Scan(&exact))
 		if !exact {
 			t.Fatal("fixture bypassed public reservation or admitted an already-closed contract")
 		}
@@ -187,7 +177,7 @@ func (self *closeFunctionFairnessTarget) Run(ctx context.Context, queued *task.T
 		return result, original, err
 	}
 	closed, ok := result.(*CloseScheduledContractResult)
-	if !ok || closed.Owner != nil || closed.Reconciliation == nil {
+	if !ok || closed.Reconciliation == nil {
 		return nil, nil, fmt.Errorf("real close returned an unexpected result")
 	}
 	return result, func(tx server.PgTx) ([]server.PostFunction, error) {
@@ -196,8 +186,7 @@ func (self *closeFunctionFairnessTarget) Run(ctx context.Context, queued *task.T
 			return nil, err
 		}
 		var terminal bool
-		if err := tx.QueryRow(self.ctx, `SELECT outcome IS NOT NULL AND NOT EXISTS(
-			SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+		if err := tx.QueryRow(self.ctx, `SELECT outcome IS NOT NULL
 			FROM transfer_contract WHERE contract_id=$1`, closed.Reconciliation.ContractId).Scan(&terminal); err != nil {
 			return nil, err
 		}
@@ -253,7 +242,6 @@ type closeFunctionFairnessState struct {
 	PendingChildren int
 	Paid            int
 	Free            int
-	Intents         int
 	Unsettled       int
 	Journals        int
 	ProviderPending int
@@ -266,20 +254,19 @@ func readCloseFunctionFairness(ctx context.Context, f closeFunctionFairnessFixtu
 	var s closeFunctionFairnessState
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT
-            (SELECT count(DISTINCT args_json::jsonb->>'contract_id') FROM finished_task WHERE function_name=$4 AND post_completed),
-            (SELECT count(*) FROM pending_task WHERE function_name=$4),
+            (SELECT count(DISTINCT args_json::jsonb->>'contract_id') FROM finished_task WHERE function_name=$3 AND post_completed),
+            (SELECT count(*) FROM pending_task WHERE function_name=$3),
             (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled'),
             (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($2) AND outcome='settled'),
-            (SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($3)),
             (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1) AND NOT settled),
             (SELECT count(*) FROM transfer_debit_journal WHERE contract_id=ANY($1)),
-            (SELECT count(*) FROM pending_task WHERE function_name=$5),
-            (SELECT count(*) FROM pending_task WHERE function_name=$7),
-            (SELECT count(DISTINCT function_name) FROM finished_task WHERE function_name=ANY($6) AND post_completed),
+            (SELECT count(*) FROM pending_task WHERE function_name=$4),
+            (SELECT count(*) FROM pending_task WHERE function_name=$6),
+            (SELECT count(DISTINCT function_name) FROM finished_task WHERE function_name=ANY($5) AND post_completed),
             (SELECT count(*) FROM finished_task WHERE COALESCE(reschedule_error,'')<>'' OR COALESCE(post_error,'')<>'')+
-            (SELECT count(*) FROM pending_task WHERE reschedule_error_count<>0)`, f.paid, f.free, f.ids,
+            (SELECT count(*) FROM pending_task WHERE reschedule_error_count<>0)`, f.paid, f.free,
 			NewScheduledContractClosureTaskTarget().TargetFunctionName(), model.NewLegacyProviderTotalsTaskTarget().TargetFunctionName(), canaries, model.NewLegacyNetEscrowMirrorTaskTarget().TargetFunctionName()).Scan(
-			&s.Children, &s.PendingChildren, &s.Paid, &s.Free, &s.Intents, &s.Unsettled, &s.Journals, &s.ProviderPending, &s.MirrorPending, &s.Canaries, &s.Errors))
+			&s.Children, &s.PendingChildren, &s.Paid, &s.Free, &s.Unsettled, &s.Journals, &s.ProviderPending, &s.MirrorPending, &s.Canaries, &s.Errors))
 	})
 	return s
 }
@@ -300,7 +287,6 @@ func requireCloseFunctionFairnessConservation(t testing.TB, ctx context.Context,
             NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=ANY($3)) AND
             NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($3)) AND
             NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1)) AND
-            NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=ANY($1)) AND
             (SELECT count(*)=64 AND bool_and(start_balance_byte_count=10000 AND balance_byte_count=9932) FROM transfer_balance WHERE balance_id=ANY($5)) AND
             (SELECT provided_byte_count=4352 AND provided_net_revenue_nano_cents=0 FROM account_balance WHERE network_id=$4)`,
 			f.ids, f.paid, f.free, f.provider, f.balances).Scan(&exact))
@@ -373,12 +359,10 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
                 (SELECT count(*)=288 AND bool_and(run_at=$2) FROM pending_task WHERE function_name=$1) AND
-                (SELECT count(*)=6 AND bool_and(run_at=$4) FROM pending_task WHERE function_name=ANY($3)) AND
-                NOT EXISTS(SELECT 1 FROM pending_task WHERE function_name=ANY($5))`,
-				NewScheduledContractClosureTaskTarget().TargetFunctionName(), f.bulkAt, names, f.bulkAt.Add(35*time.Second),
-				[]string{model.NewLegacyPayerSettlementTaskTarget().TargetFunctionName(), model.NewLegacySourceSettlementTaskTarget().TargetFunctionName()}).Scan(&exact))
+                (SELECT count(*)=6 AND bool_and(run_at=$4) FROM pending_task WHERE function_name=ANY($3))`,
+				NewScheduledContractClosureTaskTarget().TargetFunctionName(), f.bulkAt, names, f.bulkAt.Add(35*time.Second)).Scan(&exact))
 			if !exact {
-				t.Fatal("fixture prequeued financial owners or lost the exact old-block/later-canary ordering")
+				t.Fatal("fixture lost the exact old-block/later-canary ordering")
 			}
 		})
 		closeTarget := &closeFunctionFairnessTarget{Target: NewScheduledContractClosureTaskTarget(), ctx: ctx, prefix: make(chan struct{}), release: make(chan struct{})}
@@ -388,7 +372,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		settings.FairClaimFunctions = true
 		settings.PollTimeout = 20 * time.Millisecond
 		worker := task.NewTaskWorker(ctx, settings)
-		worker.AddTargets(closeTarget, NewLegacySettlementDispatcherTaskTarget(), model.NewLegacyPayerSettlementTaskTarget(), model.NewLegacySourceSettlementTaskTarget(), NewTransferDebitTaskTarget(), model.NewLegacyProviderTotalsTaskTarget(), model.NewLegacyNetEscrowMirrorTaskTarget())
+		worker.AddTargets(closeTarget, NewTransferDebitTaskTarget(), model.NewLegacyProviderTotalsTaskTarget(), model.NewLegacyNetEscrowMirrorTaskTarget())
 		for _, canary := range canaries {
 			worker.AddTargets(canary)
 		}
@@ -444,7 +428,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 			if closeFunctionFairnessClaims < current.Children {
 				t.Fatal("queued closes outlived the owner batches that closed their contracts", current)
 			}
-			if current.Children == closeFunctionFairnessClaims && current.Paid == 256 && current.Free == 32 && current.PendingChildren+current.Intents+current.Unsettled+current.Journals+current.ProviderPending+current.MirrorPending == 0 {
+			if current.Children == closeFunctionFairnessClaims && current.Paid == 256 && current.Free == 32 && current.PendingChildren+current.Unsettled+current.Journals+current.ProviderPending+current.MirrorPending == 0 {
 				break
 			}
 			select {

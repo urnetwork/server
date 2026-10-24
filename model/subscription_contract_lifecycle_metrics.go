@@ -15,8 +15,7 @@ var contractOpenedCounter server.TxCommitCounter
 var contractClosedCounter server.TxCommitCounter
 
 // Receiver checkpoints completed as finals because a sender final covered by
-// them authorized settlement on the report path. A queued legacy settlement
-// intent counts here when it commits, before its terminal close.
+// them authorized settlement on the report path.
 var contractCoveredCheckpointCounter server.TxCommitCounter
 
 var contractOpenedMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{

@@ -25,7 +25,7 @@ func TestReportReplayThenCanceledClientExpiryConservesGrant(t *testing.T) {
 		})
 		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 1000)
 		server.RunPosts(ctx, posts...)
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, false, 1000, 1000)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, 1000, 1000)
 		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 800}
 		if applied, err := CloseContractWithReport(ctx, source); err != nil || !applied {
 			t.Fatal("source's original final report did not commit")
@@ -69,8 +69,8 @@ func TestReportReplayThenCanceledClientExpiryConservesGrant(t *testing.T) {
 		// The exact persisted quiet boundary is supplied directly. No sleep or
 		// short negative timeout decides whether the owner may retire it.
 		closed, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-		if err != nil || closed != 0 {
-			t.Fatal("expiry did not leave the real legacy financial continuation")
+		if err != nil || closed != 1 {
+			t.Fatal("expiry did not settle the legacy reservation inline", closed, err)
 		}
 		proofBefore, proof := readContractExpiryTestSnapshot(t, ctx, contract.ContractId)
 		if proof.Expiry == nil || len(proof.Expiry.Reports) != 2 || proof.ByteCount != 800 ||
@@ -78,11 +78,7 @@ func TestReportReplayThenCanceledClientExpiryConservesGrant(t *testing.T) {
 			proof.Expiry.Reports[ContractPartySource].ByteCount != 800 || proof.Expiry.Reports[ContractPartyDestination].ByteCount != 800 {
 			t.Fatal("expiry proof collapsed equal work or authenticated synthetic finality")
 		}
-		complete, busy, _, err := flushLegacySettlement(ctx, contract.ContractId)
-		if err != nil || !complete || busy {
-			t.Fatal("identified replay stranded fully funded ordinary usage")
-		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 200, 0)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, 200, 0)
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 800, 800)
 		for _, report := range append(checkpoints, source) {
 			if applied, err := CloseContractWithReport(ctx, report); err != nil || applied {
@@ -107,11 +103,7 @@ func TestReportReplayThenCanceledClientExpiryConservesGrant(t *testing.T) {
 		server.RunPosts(ctx, healthyPosts...)
 		server.Raise(CloseContract(ctx, healthy.ContractId, f.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, healthy.ContractId, f.destinationId, 11, false))
-		complete, busy, _, err = flushLegacySettlement(ctx, healthy.ContractId)
-		if err != nil || !complete || busy {
-			t.Fatal("expired peer prevented healthy neighbor progress")
-		}
-		requireLegacySettlementTestState(t, ctx, f, healthy.ContractId, false, true, 189, 0)
+		requireLegacySettlementTestState(t, ctx, f, healthy.ContractId, true, 189, 0)
 		projectLegacyProviderTotalsForTest(t, ctx)
 		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
@@ -151,22 +143,18 @@ func TestReportlessCanceledClientExpiryReleasesWholeGrant(t *testing.T) {
 			}
 		})
 		closed, _, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-		if err != nil || closed != 0 {
-			t.Fatal("reportless expiry lost its ordinary financial continuation")
+		if err != nil || closed != 1 {
+			t.Fatal("reportless expiry did not settle the legacy reservation inline", closed, err)
 		}
 		proofBefore, proof := readContractExpiryTestSnapshot(t, ctx, contract.ContractId)
 		if proof.Expiry == nil || len(proof.Expiry.Reports) != 0 || proof.ByteCount != 0 || proof.ExcludedReason != "expired_unconfirmed" {
 			t.Fatal("reportless expiry manufactured completed work")
 		}
-		complete, busy, _, err := flushLegacySettlement(ctx, contract.ContractId)
-		if err != nil || !complete || busy {
-			t.Fatal("reportless canceled endpoint permanently reserved its grant")
-		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 1000, 0)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, 1000, 0)
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 0)
-		complete, _, _, err = flushLegacySettlement(ctx, contract.ContractId)
-		if err != nil || complete {
-			t.Fatal("reportless recovery replay reclaimed a terminal owner")
+		closed, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
+		if err != nil || closed != 0 {
+			t.Fatal("reportless recovery replay reclaimed a terminal owner", closed, err)
 		}
 		proofAfter, _ := readContractExpiryTestSnapshot(t, ctx, contract.ContractId)
 		if !bytes.Equal(proofBefore, proofAfter) {
@@ -174,6 +162,6 @@ func TestReportlessCanceledClientExpiryReleasesWholeGrant(t *testing.T) {
 		}
 		healthy, healthyPosts := createNetEscrowOrderingTestContract(ctx, f, 1000)
 		server.RunPosts(ctx, healthyPosts...)
-		requireLegacySettlementTestState(t, ctx, f, healthy.ContractId, false, false, 1000, 1000)
+		requireLegacySettlementTestState(t, ctx, f, healthy.ContractId, false, 1000, 1000)
 	})
 }

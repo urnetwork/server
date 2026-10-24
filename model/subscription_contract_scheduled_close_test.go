@@ -147,7 +147,7 @@ func TestScheduledContractCloseKeepsRedisAndLegacyAccounting(t *testing.T) {
 			if err != nil || applied != wantDebits || released != wantDebits || busy {
 				t.Fatal("deadline did not preserve its original consumption owner", applied, released, busy, err)
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
+			requireLegacySettlementTestState(t, ctx, f, id, true, 983, 0)
 			requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, id, 17)
 			before := readRedisExpiryRepairTestState(ctx, id)
 			if _, err := CloseContractAtDeadline(ctx, id, deadline); err != nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
@@ -157,9 +157,9 @@ func TestScheduledContractCloseKeepsRedisAndLegacyAccounting(t *testing.T) {
 	})
 }
 
-// A capped deadline leaves accepted intent/proof/report bytes untouched. Even
-// a real report committed while C is held cannot delay its ordinary worker.
-func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
+// A capped deadline leaves proof/report bytes untouched. Even a real report
+// committed while C is held cannot delay the deadline close.
+func TestScheduledContractCloseCapsHeldFreshReport(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -172,7 +172,6 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 		server.Raise(CloseContract(ctx, id, f.sourceId, 17, true))
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(3*time.Hour)))
-			server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, false))
 		})
 		// Hold C until the actual task is waiting, then commit a fresh public
 		// report through its InTx owner. Lock observation, not a sleep, proves
@@ -245,7 +244,7 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 		}
 		owner, err := completed.owner, completed.err
 		if err != nil || owner != nil {
-			t.Fatal("scheduled close did not finish accepted intent", err)
+			t.Fatal("scheduled close did not finish the contract", err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var current string
@@ -253,30 +252,27 @@ func TestScheduledContractCloseCapsHeldFreshExistingIntent(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, stateSql, id).Scan(&current))
 			server.Raise(conn.QueryRow(ctx, `SELECT expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&expiration))
 			if current != expectedState || !expiration.Equal(deadline.Truncate(time.Microsecond)) {
-				t.Fatal("due handoff changed accepted proof/reports or failed to cap its later expiration")
+				t.Fatal("deadline close changed proof/reports or failed to cap its later expiration")
 			}
 		})
 		server.Db(ctx, func(conn server.PgConn) {
 			var unchanged bool
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(party='source' AND checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1`, id).Scan(&unchanged))
 			if !unchanged {
-				t.Fatal("intent handoff changed reports before its owner")
+				t.Fatal("deadline close changed reports")
 			}
 		})
-		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 0 || page.Failed != 0 {
-			t.Fatal("due accepted intent was not retired with closure", page, err)
-		}
 		closed, terminal := GetContractClose(ctx, id)
 		if !terminal || closed.Outcome != ContractOutcomeSettled {
-			t.Fatal("scheduled close changed accepted adjudication")
+			t.Fatal("scheduled close did not settle the contract")
 		}
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 983, 0)
 	})
 }
 
-// An underfunded intent consumes available escrow and closes at its deadline.
-func TestScheduledContractCloseReconcilesUnderfundedIntent(t *testing.T) {
+// An underfunded reservation consumes available escrow and closes at its
+// deadline.
+func TestScheduledContractCloseReconcilesUnderfundedReservation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -286,20 +282,15 @@ func TestScheduledContractCloseReconcilesUnderfundedIntent(t *testing.T) {
 		server.RunPosts(ctx, posts...)
 		id := contract.ContractId
 		server.Raise(CloseContract(ctx, id, f.sourceId, 300, true))
-		server.Raise(SettleEscrow(ctx, id, ContractOutcomeSettled))
 		owner, err := CloseContractAtDeadline(ctx, id, server.NowUtc().Add(-time.Minute))
 		if err != nil || owner != nil {
-			t.Fatal("underfunded intent did not finish", err)
+			t.Fatal("underfunded reservation did not finish", err)
 		}
-		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 0 || page.Failed != 0 {
-			t.Fatal("scheduled deadline left repeated accounting failure", page, err)
-		}
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 900, 0)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 900, 0)
 	})
 }
 
-// A canceled task cannot prepare expiry or make the accepted intent disappear.
+// A canceled task cannot prepare expiry or change custody.
 func TestScheduledContractCloseCancellationKeepsCustody(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -315,54 +306,5 @@ func TestScheduledContractCloseCancellationKeepsCustody(t *testing.T) {
 		if _, err := CloseContractAtDeadline(canceled, id, server.NowUtc().Add(-time.Minute)); err == nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
 			t.Fatal("canceled scheduled close changed custody", err)
 		}
-	})
-}
-
-// A due cap cannot replace an accepted dispute outcome or supply its missing
-// unselected report; adjudication stays with the existing payer continuation.
-func TestScheduledContractClosePreservesExistingAdjudication(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		f := newNetEscrowOrderingTestFixture(t, ctx)
-		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
-		server.RunPosts(ctx, posts...)
-		id := contract.ContractId
-		server.Raise(CloseContract(ctx, id, f.sourceId, 17, true))
-		SetContractDispute(ctx, id, true)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(3*time.Hour)))
-			server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeDisputeResolvedToSource, true))
-		})
-		read := func() (raw string) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(
-					(SELECT jsonb_agg(row_to_json(r) ORDER BY party) FROM contract_close r WHERE contract_id=$1))::text
-					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&raw))
-			})
-			return
-		}
-		before := read()
-		owner, err := CloseContractAtDeadline(ctx, id, server.NowUtc().Add(-time.Minute))
-		if err != nil || owner != nil || read() != before {
-			t.Fatal("scheduled cap changed accepted adjudication", err)
-		}
-		page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-		if err != nil || page.Completed != 0 || page.Failed != 0 {
-			t.Fatal("capped adjudication retained unfinished financial work", page, err)
-		}
-		closed, terminal := GetContractClose(ctx, id)
-		if !terminal || closed.Outcome != ContractOutcomeDisputeResolvedToSource {
-			t.Fatal("capped close replaced the accepted outcome")
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var exact bool
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*)=1 AND bool_and(party='source' AND checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1`, id).Scan(&exact))
-			if !exact {
-				t.Fatal("adjudication fabricated an unselected report")
-			}
-		})
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
 	})
 }

@@ -83,11 +83,8 @@ func TestCloseReportRollbackCommitLossAndFinalReplay(t *testing.T) {
 			t.Fatal("source final report was lost")
 		}
 		requireCloseReportState(t, ctx, e.ContractId, 4, 400)
-		complete, busy, _, err := flushLegacySettlement(ctx, e.ContractId)
-		if err != nil || !complete || busy {
-			t.Fatal("idempotent reports did not settle")
-		}
-		requireLegacySettlementTestState(t, ctx, f, e.ContractId, false, true, 800, 0)
+		// The source final settles the legacy reservation inline.
+		requireLegacySettlementTestState(t, ctx, f, e.ContractId, true, 800, 0)
 		requireLegacyProviderDurability(t, ctx, f, e.ContractId, 200)
 		for _, r := range []struct {
 			client     server.Id

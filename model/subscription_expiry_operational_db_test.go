@@ -74,8 +74,7 @@ func requireForceCloseOperationalPreserved(t testing.TB, ctx context.Context, f 
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT
 			(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1) +
-			(SELECT count(*) FROM transfer_escrow_sweep WHERE contract_id=$1) +
-			(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1)`, f.contractId).Scan(&newOwners))
+			(SELECT count(*) FROM transfer_escrow_sweep WHERE contract_id=$1)`, f.contractId).Scan(&newOwners))
 	})
 	if newOwners != 0 || readForceCloseProviderProjection(t, ctx, f) != (forceCloseProviderProjection{}) {
 		t.Fatal("failed checkpoint created a debit, settlement, or payout owner")
@@ -93,11 +92,7 @@ func requireForceCloseOperationalPreserved(t testing.TB, ctx context.Context, f 
 func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *forceCloseDisputeFixture, legacy bool, proof []byte) {
 	t.Helper()
 	count, err := ForceCloseOpenContractIds(ctx, f.cutoff, 10, 1, 0, 0)
-	wantCount := int64(1)
-	if legacy {
-		wantCount = 0 // The durable legacy owner still owns this financial close.
-	}
-	if err != nil || count != wantCount {
+	if err != nil || count != 1 {
 		t.Fatal("healthy recovery failed to reach its ordinary financial owner", count, err)
 	}
 	retained, snapshot := readContractExpiryTestSnapshot(t, ctx, f.contractId)
@@ -105,18 +100,14 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 		t.Fatal("healthy continuation did not retain original bilateral usage")
 	}
 	if proof == nil {
-		// The fault-free control observes proof at the same pre-worker
-		// boundary. Faulted cases supply the proof retained before recovery.
+		// The fault-free control observes proof at the same boundary. Faulted
+		// cases supply the proof retained before recovery.
 		proof = retained
 	} else if !bytes.Equal(proof, retained) {
 		t.Fatal("healthy continuation replaced the failed attempt's original proof")
 	}
-	if legacy {
-		complete, busy, _, err := flushLegacySettlement(ctx, f.contractId)
-		if err != nil || !complete || busy {
-			t.Fatal("legacy recovery failed to apply its exact settlement", complete, busy, err)
-		}
-	} else {
+	// A legacy reservation settles inline in the expiry's own transaction.
+	if !legacy {
 		pending := f.state(t, ctx)
 		// Foreground outcome, immutable consumption, and earnings commit
 		// together. Only the debit worker owns escrow metadata and release;
@@ -175,25 +166,13 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 		if count, err := ForceCloseOpenContractIds(ctx, f.cutoff, 10, 1, 0, 0); err != nil || count != 0 {
 			t.Fatal("terminal expiry replay repeated financial work", count, err)
 		}
-		if legacy {
-			complete, busy, gate, err := flushLegacySettlement(ctx, f.contractId)
-			if err != nil || complete || !busy || gate != legacySettlementBusyIntent {
-				t.Fatal("legacy replay lost its deleted-intent disposition", complete, busy, gate, err)
-			}
-		} else {
+		if !legacy {
 			applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 			if err != nil || applied != 0 || released != 0 || busy {
 				t.Fatal("debit replay repeated accounting", applied, released, busy, err)
 			}
 		}
 		requireForceCloseDebitJournal(t, ctx, f, 0, 0)
-		var intent bool
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, f.contractId).Scan(&intent))
-		})
-		if intent {
-			t.Fatal("terminal replay restored a deleted settlement intent")
-		}
 		afterProof, _ := readContractExpiryTestSnapshot(t, ctx, f.contractId)
 		if f.state(t, ctx) != settled || !bytes.Equal(proof, afterProof) {
 			t.Fatal("recovery or replay changed original proof, financial totals, or terminal state")

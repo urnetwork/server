@@ -2461,23 +2461,15 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		connect.AssertEqual(t, nil, err)
 		err = CloseContract(ctx, contractId, clientIdB, 0, false)
 		connect.AssertEqual(t, nil, err)
-		// A legacy close now queues durable work. The contract must retain
-		// its reservation until the actual bounded worker commits settlement;
-		// an acknowledged close alone cannot justify a final mirror check.
+		// The second final settles the legacy reservation inline.
 		server.Db(ctx, func(conn server.PgConn) {
-			var pending, open, unsettled bool
+			var terminal, unsettled bool
 			server.Raise(conn.QueryRow(ctx, `
-				SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
-				       (SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1),
+				SELECT (SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1),
 				       EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT settled)
-			`, contractId).Scan(&pending, &open, &unsettled))
-			connect.AssertEqual(t, true, pending && open && unsettled)
+			`, contractId).Scan(&terminal, &unsettled))
+			connect.AssertEqual(t, true, terminal && !unsettled)
 		})
-		flushed, err := FlushLegacySettlements(ctx, int(contractId[15])%LegacySettlementShardCount, nil, 1)
-		connect.AssertEqual(t, nil, err)
-		connect.AssertEqual(t, 1, flushed.Visited)
-		connect.AssertEqual(t, 1, flushed.Completed)
-		connect.AssertEqual(t, 0, flushed.Failed)
 		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalanceA+initialBalanceB, GetActiveTransferBalanceByteCount(ctx, networkId))
 		server.Redis(ctx, func(r server.RedisClient) {

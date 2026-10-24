@@ -352,7 +352,6 @@ func readBoundedNetEscrowCensus(ctx context.Context, balanceIds []server.Id, bou
 	if len(balanceIds) == 0 {
 		return
 	}
-	defer enterLegacySettlementTiming(ctx, legacySettlementColdCensus)()
 	server.Tx(ctx, func(tx server.PgTx) {
 		exact, statementBalances = map[server.Id]netEscrowSnapshot{}, 0
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)

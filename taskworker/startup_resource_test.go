@@ -16,7 +16,8 @@ import (
 // TestEnv supplies only isolated credentials. Re-express its exact endpoint
 // through the supported list/template form, then open both real pools and run
 // each production initializer. The old raw-map ownership parser refused after
-// ordinary schedules committed, before either accounting family was seeded.
+// ordinary schedules committed, before the debit family was seeded. The
+// retired legacy settlement chains are no longer seeded at all.
 func TestTaskworkerStartupSchedulesExpiryWithNormalizedMaintenanceResource(t *testing.T) {
 	t.Setenv("WARP_DOMAIN", "startup-resource.example")
 	env := server.DefaultTestEnv()
@@ -64,7 +65,7 @@ func TestTaskworkerStartupSchedulesExpiryWithNormalizedMaintenanceResource(t *te
 					count(*) FILTER(WHERE run_once_key LIKE '["flush_transfer_debits_%'),
 					count(*) FILTER(WHERE run_once_key LIKE '["flush_legacy_settlements_%')
 					FROM pending_task`).Scan(&debits, &legacy))
-				if closes != 1 || runAt.After(server.NowUtc()) || debits != model.TransferDebitShardCount || legacy != model.LegacySettlementShardCount {
+				if closes != 1 || runAt.After(server.NowUtc()) || debits != model.TransferDebitShardCount || legacy != 0 {
 					t.Fatal("startup omitted or duplicated expiry/accounting tasks", profile, closes, debits, legacy)
 				}
 			})

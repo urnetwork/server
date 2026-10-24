@@ -99,29 +99,28 @@ func newCloseDeferredCohort(t testing.TB, ctx context.Context, siblingCount int,
 const forceCloseTestRawPageSize = 256
 
 // Reads the terminal outcome, debit journal count and retained proof of one row.
-func readCloseDeferredContract(t testing.TB, ctx context.Context, id server.Id) (terminal bool, journals int, proof bool, intents int) {
+func readCloseDeferredContract(t testing.TB, ctx context.Context, id server.Id) (terminal bool, journals int, proof bool) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL,
 			(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1),
-			usage_unverified,
-			(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1)
-			FROM transfer_contract WHERE contract_id=$1`, id).Scan(&terminal, &journals, &proof, &intents))
+			usage_unverified
+			FROM transfer_contract WHERE contract_id=$1`, id).Scan(&terminal, &journals, &proof))
 	})
 	return
 }
 
 // A failed row must stay open in its original custody: no outcome, debit
-// journal, settlement intent or settled reservation was fabricated for it.
+// journal or settled reservation was fabricated for it.
 func requireCloseDeferredVictimOpen(t testing.TB, ctx context.Context, id server.Id) {
 	t.Helper()
-	terminal, journals, _, intents := readCloseDeferredContract(t, ctx, id)
+	terminal, journals, _ := readCloseDeferredContract(t, ctx, id)
 	var unsettled int
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE contract_id=$1 AND NOT settled AND redis_reserved`, id).Scan(&unsettled))
 	})
-	if terminal || journals != 0 || intents != 0 || unsettled != 1 {
-		t.Fatal("the failed row gained a close, debit, intent or released reservation", terminal, journals, intents, unsettled)
+	if terminal || journals != 0 || unsettled != 1 {
+		t.Fatal("the failed row gained a close, debit or released reservation", terminal, journals, unsettled)
 	}
 }
 
@@ -169,7 +168,7 @@ func requireCloseDeferredFirstAttempt(t testing.TB, ctx context.Context, cohort 
 		t.Fatal("deferred row hid its explicit failure or lost the same retry owner", finished, retried, posts, err)
 	}
 	for _, siblingId := range cohort.siblingIds {
-		if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, siblingId); !terminal || journals != 1 {
+		if terminal, journals, _ := readCloseDeferredContract(t, ctx, siblingId); !terminal || journals != 1 {
 			t.Fatal("a sibling in the failed row's page did not commit its close", siblingId, terminal, journals)
 		}
 	}
@@ -204,7 +203,7 @@ func requireCloseDeferredRecovery(t testing.TB, ctx context.Context, cohort *clo
 	if err != nil || len(finished) != 1 || finished[0] != id || len(retried)+len(posts) != 0 {
 		t.Fatal("the continued scan failed to reach its next raw page", finished, retried, posts, err)
 	}
-	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.tailId); !terminal || journals != 1 {
+	if terminal, journals, _ := readCloseDeferredContract(t, ctx, cohort.tailId); !terminal || journals != 1 {
 		t.Fatal("the deferred row starved the healthy tail")
 	}
 	requireCloseDeferredVictimOpen(t, ctx, cohort.victimId)
@@ -218,7 +217,7 @@ func requireCloseDeferredRecovery(t testing.TB, ctx context.Context, cohort *clo
 	if err != nil || len(finished) != 1 || finished[0] != nextId || len(retried)+len(posts) != 0 {
 		t.Fatal("the next pass did not revisit the deferred row", finished, retried, posts, err)
 	}
-	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.victimId); !terminal || journals != 1 {
+	if terminal, journals, _ := readCloseDeferredContract(t, ctx, cohort.victimId); !terminal || journals != 1 {
 		t.Fatal("the deferred row was not retired once its operation succeeded")
 	}
 }
@@ -266,12 +265,12 @@ func requireCloseBusyRunWalksPastVictim(t testing.TB, ctx context.Context, cohor
 		t.Fatal("a busy row ended the run as a task failure", finished, retried, posts, err)
 	}
 	for _, siblingId := range cohort.siblingIds {
-		if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, siblingId); !terminal || journals != 1 {
+		if terminal, journals, _ := readCloseDeferredContract(t, ctx, siblingId); !terminal || journals != 1 {
 			t.Fatal("a sibling in the busy row's page did not commit its close", siblingId, terminal, journals)
 		}
 	}
 	requireCloseDeferredVictimOpen(t, ctx, cohort.victimId)
-	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.tailId); !terminal || journals != 1 {
+	if terminal, journals, _ := readCloseDeferredContract(t, ctx, cohort.tailId); !terminal || journals != 1 {
 		t.Fatal("the busy row still ended the walk before the healthy tail")
 	}
 	nextId := readCloseDeferredTaskId(t, ctx)
@@ -285,7 +284,7 @@ func requireCloseBusyRunWalksPastVictim(t testing.TB, ctx context.Context, cohor
 	if err != nil || len(finished) != 1 || finished[0] != nextId || len(retried)+len(posts) != 0 {
 		t.Fatal("the next pass did not revisit the deferred row", finished, retried, posts, err)
 	}
-	if terminal, journals, _, _ := readCloseDeferredContract(t, ctx, cohort.victimId); !terminal || journals != 1 {
+	if terminal, journals, _ := readCloseDeferredContract(t, ctx, cohort.victimId); !terminal || journals != 1 {
 		t.Fatal("the deferred row was not retired once its owner released")
 	}
 }

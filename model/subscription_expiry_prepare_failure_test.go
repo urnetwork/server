@@ -51,16 +51,22 @@ func requireForceClosePreparationFailureAllowsTail(t *testing.T, legacy bool) {
 				EXECUTE FUNCTION synthetic_expiry_proof_failure();`, first.contractId)))
 		})
 		before := []forceCloseDisputeState{first.state(t, ctx), tail.state(t, ctx)}
-		readOwners := func() (prepared, terminal, intents, journals int) {
+		readOwners := func() (prepared, terminal, journals int) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT
 					count(*) FILTER(WHERE usage_unverified),count(*) FILTER(WHERE outcome IS NOT NULL),
-					(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1::uuid[])),
 					(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=ANY($1::uuid[]))
 					FROM transfer_contract WHERE contract_id=ANY($1::uuid[])`, ids).
-					Scan(&prepared, &terminal, &intents, &journals))
+					Scan(&prepared, &terminal, &journals))
 			})
 			return
+		}
+		// A legacy reservation settles inline and writes no debit journal.
+		wantJournals := func(terminal int) int {
+			if legacy {
+				return 0
+			}
+			return terminal
 		}
 		var tailRetained forceCloseDisputeState
 		for attempt := 1; attempt <= 2; attempt++ {
@@ -82,24 +88,23 @@ func requireForceClosePreparationFailureAllowsTail(t *testing.T, legacy bool) {
 				t.Fatalf("failed proof changed financial custody: before=%+v after=%+v", before[0], after)
 			}
 			if attempt == 1 {
-				if prepared, terminal, intents, journals := readOwners(); prepared != 0 || terminal != 0 || intents != 0 || journals != 0 || tail.state(t, ctx) != before[1] {
-					t.Fatal("proof rollback or unvisited tail published a new owner", prepared, terminal, intents, journals)
+				if prepared, terminal, journals := readOwners(); prepared != 0 || terminal != 0 || journals != 0 || tail.state(t, ctx) != before[1] {
+					t.Fatal("proof rollback or unvisited tail published a new owner", prepared, terminal, journals)
 				}
 			}
 			// The fault remains installed. The next raw page must still reach
 			// the healthy tail, then end the pass so the failed head can return.
 			tailCount, next, tailErr := forceCloseOpenContractIdsBudgetedPage(ctx, first.cutoff, 3, 1, 1, 0, cursor, time.Minute, 1)
 			wantTailCount := int64(0)
-			if !legacy && attempt == 1 {
+			if attempt == 1 {
 				wantTailCount = 1
 			}
 			if tailErr != nil || tailCount != wantTailCount || next != nil {
 				t.Fatal("persistent failed head blocked or duplicated the healthy tail", tailCount, next, tailErr)
 			}
-			prepared, terminal, intents, journals := readOwners()
-			if prepared != 1 || legacy && (terminal != 0 || intents != 1 || journals != 0) ||
-				!legacy && (terminal != 1 || intents != 0 || journals != 1) {
-				t.Fatal("healthy tail lost its own mode-specific settlement custody", prepared, terminal, intents, journals)
+			prepared, terminal, journals := readOwners()
+			if prepared != 1 || terminal != 1 || journals != wantJournals(1) {
+				t.Fatal("healthy tail lost its own mode-specific settlement custody", prepared, terminal, journals)
 			}
 			if attempt == 1 {
 				tailRetained = tail.state(t, ctx)
@@ -111,28 +116,12 @@ func requireForceClosePreparationFailureAllowsTail(t *testing.T, legacy bool) {
 			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_expiry_proof_failure ON transfer_contract`))
 		})
 		count, cursor, err := forceCloseOpenContractIdsBudgetedPage(ctx, first.cutoff, 3, 1, 1, 0, nil, time.Minute, 1)
-		wantCount := int64(1)
-		if legacy {
-			wantCount = 0 // Legacy intents own both the old tail and recovered head.
-		}
-		if err != nil || count != wantCount || cursor != nil {
+		if err != nil || count != 1 || cursor != nil {
 			t.Fatal("removing the proof fault did not recover the retained head", count, cursor, err)
 		}
-		prepared, terminal, intents, journals := readOwners()
-		if prepared != 2 || legacy && (terminal != 0 || intents != 2 || journals != 0) ||
-			!legacy && (terminal != 2 || intents != 0 || journals != 2) {
-			t.Fatal("healthy recovery used the wrong reservation-mode owner", prepared, terminal, intents, journals)
-		}
-		if legacy {
-			var matching int
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM legacy_settlement_intent intent
-					JOIN transfer_contract contract USING(contract_id)
-					WHERE intent.contract_id=ANY($1::uuid[]) AND intent.payer_network_id=contract.payer_network_id`, ids).Scan(&matching))
-			})
-			if matching != 2 {
-				t.Fatal("current expiry queued an absent or different intent payer", matching)
-			}
+		prepared, terminal, journals := readOwners()
+		if prepared != 2 || terminal != 2 || journals != wantJournals(2) {
+			t.Fatal("healthy recovery used the wrong reservation-mode owner", prepared, terminal, journals)
 		}
 		recovered := make([]forceCloseDisputeState, len(fixtures))
 		for index, fixture := range fixtures {
@@ -141,15 +130,22 @@ func requireForceClosePreparationFailureAllowsTail(t *testing.T, legacy bool) {
 			if snapshot.Expiry == nil || len(snapshot.Expiry.Reports) != 2 || snapshot.ByteCount != forceCloseOperationalUsage {
 				t.Fatal("recovery lost the original authenticated report proof")
 			}
-			if recovered[index].payerBalanceByteCount != before[index].payerBalanceByteCount ||
-				recovered[index].netEscrowByteCount != before[index].netEscrowByteCount || recovered[index].escrowSettled {
-				t.Fatal("expiry consumed or released the separate financial owner's reservation")
+			if recovered[index].providerEarnedByteCount != forceCloseOperationalUsage {
+				t.Fatal("recovered outcome did not retain its exact earned payout")
 			}
-			if !legacy {
-				requireForceCloseDebitJournal(t, ctx, fixture, 1, forceCloseOperationalUsage)
-				if recovered[index].providerEarnedByteCount != forceCloseOperationalUsage {
-					t.Fatal("Redis outcome did not retain its exact earned payout")
+			if legacy {
+				// The legacy debit, reservation release and escrow metadata
+				// commit with the outcome.
+				if recovered[index].payerBalanceByteCount != before[index].payerBalanceByteCount-forceCloseOperationalUsage ||
+					recovered[index].netEscrowByteCount != 0 || !recovered[index].escrowSettled {
+					t.Fatal("legacy expiry did not settle its reservation inline")
 				}
+			} else {
+				if recovered[index].payerBalanceByteCount != before[index].payerBalanceByteCount ||
+					recovered[index].netEscrowByteCount != before[index].netEscrowByteCount || recovered[index].escrowSettled {
+					t.Fatal("expiry consumed or released the separate financial owner's reservation")
+				}
+				requireForceCloseDebitJournal(t, ctx, fixture, 1, forceCloseOperationalUsage)
 			}
 		}
 		if replayCount, replayCursor, replayErr := forceCloseOpenContractIdsBudgetedPage(ctx, first.cutoff, 3, 1, 1, 0, nil, time.Minute, 1); replayErr != nil || replayCount != 0 || replayCursor != nil {
@@ -163,12 +159,13 @@ func requireForceClosePreparationFailureAllowsTail(t *testing.T, legacy bool) {
 	})
 }
 
-// A visited legacy contract may have neither proof nor intent after preparation fails.
+// A visited legacy contract has no proof after preparation fails; its recovery
+// settles the reservation inline.
 func TestForceCloseLegacyPreparationFailureAllowsTailAndRevisitsHead(t *testing.T) {
 	requireForceClosePreparationFailureAllowsTail(t, true)
 }
 
-// Redis has no legacy intent even after recovery; outcome and debit journal distinguish it.
+// A Redis contract's recovery retains its outcome and debit journal.
 func TestForceCloseRedisPreparationFailureAllowsTailAndRevisitsHead(t *testing.T) {
 	requireForceClosePreparationFailureAllowsTail(t, false)
 }

@@ -96,18 +96,25 @@ func TestContractExpiryPreparedFlagAvoidsDuplicateWrite(t *testing.T) {
 				t.Fatalf("scoped continuation transactions=%d, want report and settlement only", steps)
 			}
 			afterProof := contractExpiryFlagProof(ctx, id)
-			if !bytes.Equal(beforeProof, afterProof) {
+			if beforeProof != nil && !bytes.Equal(beforeProof, afterProof) {
 				t.Fatalf("%s: continuation changed retained proof", scenario.name)
 			}
+			if beforeProof == nil {
+				// An interrupted expiry's nil proof settles as unconfirmed usage.
+				usage, err := retainedContractExpiryUsage(afterProof)
+				if err != nil || usage.ByteCount != 0 || usage.ExcludedReason != "expired_unconfirmed" || len(usage.Providers) != 0 {
+					t.Fatalf("%s: nil proof settled as confirmed usage: %v", scenario.name, err)
+				}
+			}
+			// The settlement continuation settles the legacy reservation inline.
 			server.Db(ctx, func(conn server.PgConn) {
-				var intact bool
-				server.Raise(conn.QueryRow(ctx, `SELECT usage_unverified AND outcome IS NULL
-					AND EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+				var settled bool
+				server.Raise(conn.QueryRow(ctx, `SELECT usage_unverified AND outcome='settled'
 					AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
-					AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
-					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&intact))
-				if !intact {
-					t.Fatalf("%s: continuation changed accounting custody", scenario.name)
+					AND COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$1),0)=0
+					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&settled))
+				if !settled {
+					t.Fatalf("%s: continuation did not settle the reservation without payout", scenario.name)
 				}
 			})
 		}

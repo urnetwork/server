@@ -7,9 +7,9 @@ import (
 )
 
 // A legacy-escrow contract records the receiver's final exactly like a current
-// contract. Its settlement is deferred to a durable legacy intent, not to the
-// deadline closer, and the intent exists as soon as both parties are final.
-func TestTwoPartyFinalCloseQueuesLegacyEscrowSettlement(t *testing.T) {
+// contract. The second final settles it inline, not through the deadline
+// closer.
+func TestTwoPartyFinalCloseSettlesLegacyEscrowInline(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -35,16 +35,13 @@ func TestTwoPartyFinalCloseQueuesLegacyEscrowSettlement(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			var destinationCheckpoint bool
 			var destinationByteCount ByteCount
-			var pending bool
-			server.Raise(conn.QueryRow(ctx, `SELECT checkpoint,used_transfer_byte_count,
-                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
-                FROM contract_close WHERE contract_id=$1 AND party=$2`, contractId, ContractPartyDestination).Scan(&destinationCheckpoint, &destinationByteCount, &pending))
+			server.Raise(conn.QueryRow(ctx, `SELECT checkpoint,used_transfer_byte_count
+                FROM contract_close WHERE contract_id=$1 AND party=$2`, contractId, ContractPartyDestination).Scan(&destinationCheckpoint, &destinationByteCount))
 			if destinationCheckpoint || destinationByteCount != byteCount {
 				t.Fatalf("legacy receiver final recorded checkpoint=%t bytes=%d, want final %d", destinationCheckpoint, destinationByteCount, byteCount)
 			}
-			if !pending {
-				t.Fatal("both finals did not queue the legacy settlement intent")
-			}
 		})
+		requireLegacySettlementTestState(t, ctx, f, contractId, true, 1000-byteCount, 0)
+		requireLegacyProviderDurability(t, ctx, f, contractId, int64(byteCount))
 	})
 }

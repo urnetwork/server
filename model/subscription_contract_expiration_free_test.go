@@ -54,7 +54,6 @@ func requireFreeExpiryOwnerClosedReports(t testing.TB, ctx context.Context, ids 
 		var exact bool
 		server.Raise(conn.QueryRow(ctx, `SELECT
             (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) AND outcome='settled' AND NOT dispute AND NOT open)=$2
-            AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=ANY($1::uuid[]))
             AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($1::uuid[]))
             AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=ANY($1::uuid[]))
             AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1::uuid[]))
@@ -81,14 +80,14 @@ func expireFreeExpiryOwnerContracts(ctx context.Context, ids []server.Id, missin
 	})
 }
 
-// Public dispute creation permits a positive free checkpoint. The existing
-// source-intent owner is the matched control for ordinary no-intent expiry.
+// Public dispute creation permits a positive free checkpoint. Ordinary expiry
+// closes each such dispute through its no-payout owner, with the same proof.
 func TestContractExpirationFreeDisputeUsesPublicSourceOwner(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		batch := &legacySettlementPostBatch{}
 		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
 		server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, clockTransferByteCountRedisKey).Err()) })
 		for index, missingDeadline := range []bool{false, true} {
@@ -118,19 +117,10 @@ func TestContractExpirationFreeDisputeUsesPublicSourceOwner(t *testing.T) {
 				}
 			}
 			expireFreeExpiryOwnerContracts(ctx, ids, missingDeadline)
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, ids[1]))
-				server.Raise(queueLegacySettlementInTx(ctx, tx, ids[1], ContractOutcomeSettled, true))
-			})
-			owned := context.WithValue(ctx, legacySettlementCloseScopeKey{}, ContractCloseOwner{Kind: ContractCloseOwnerSourceClient, Id: f.sourceId})
 			beforeClosed := contractClosedCounter.Snapshot()
-			completed, busy, _, err := flushLegacySettlement(owned, ids[1])
-			if err != nil || !completed || busy || freeExpiryOwnerClockCount(batch) != index*2+1 {
-				t.Fatal("matched source-intent control lost positive free usage", completed, busy, err)
-			}
 			count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-			if err != nil || count != 1 || freeExpiryOwnerClockCount(batch) != index*2+2 {
-				t.Fatal("ordinary free dispute did not use its no-payout owner", missingDeadline, count, err)
+			if err != nil || count != 2 || freeExpiryOwnerClockCount(batch) != index*2+2 {
+				t.Fatal("ordinary free disputes did not use their no-payout owner", missingDeadline, count, err)
 			}
 			if missingDeadline {
 				requireFreeExpiryOwnerClosed(t, ctx, ids)
@@ -138,8 +128,8 @@ func TestContractExpirationFreeDisputeUsesPublicSourceOwner(t *testing.T) {
 				requireFreeExpiryOwnerClosedReports(t, ctx, ids, 1, true)
 			}
 			proof, snapshot := readContractExpiryTestSnapshot(t, ctx, ids[0])
-			controlProof, _ := readContractExpiryTestSnapshot(t, ctx, ids[1])
-			if !bytes.Equal(proof, controlProof) || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0 ||
+			peerProof, _ := readContractExpiryTestSnapshot(t, ctx, ids[1])
+			if !bytes.Equal(proof, peerProof) || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0 ||
 				snapshot.ExcludedReason != "expired_unconfirmed" || snapshot.Expiry == nil || len(snapshot.Expiry.Reports) != 1 ||
 				snapshot.Expiry.Reports[ContractPartySource].ByteCount != 17 || !snapshot.Expiry.Reports[ContractPartySource].Checkpoint {
 				t.Fatal("free dispute invented a peer in its immutable usage proof")
@@ -192,7 +182,6 @@ func interruptFreeExpiryPublicClose(t testing.TB, ctx context.Context, id, desti
 	server.Db(ctx, func(conn server.PgConn) {
 		var interruptedState bool
 		server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL AND NOT dispute AND open AND NOT usage_unverified AND provider_usage IS NULL
-                    AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
                     AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
                     AND (SELECT count(*)=2 AND bool_and(NOT checkpoint AND used_transfer_byte_count=17)
                         FROM contract_close WHERE contract_id=$1)
@@ -211,7 +200,7 @@ func TestContractExpirationFreeFinalReportsResumePublicClose(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		batch := &legacySettlementPostBatch{}
 		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
 		server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, clockTransferByteCountRedisKey).Err()) })
 		for index, missingDeadline := range []bool{false, true} {
@@ -273,7 +262,7 @@ func TestContractExpirationFreeDisputeCancellationKeepsProofAndReports(t *testin
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		batch := &legacySettlementPostBatch{}
 		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
 		server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, clockTransferByteCountRedisKey).Err()) })
 		f := newFreeExpiryOwnerFixture(ctx)
@@ -311,7 +300,6 @@ func TestContractExpirationFreeDisputeCancellationKeepsProofAndReports(t *testin
 			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL AND dispute AND usage_unverified
                 AND (SELECT count(*)=1 AND bool_and(party='source' AND checkpoint AND used_transfer_byte_count=17)
                     FROM contract_close WHERE contract_id=$1)
-                AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
                 AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
                 AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
                 AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
@@ -346,64 +334,6 @@ func TestContractExpirationFreeDisputeCancellationKeepsProofAndReports(t *testin
 	})
 }
 
-// An accepted intent can appear after page preparation commits. Ordinary
-// expiry must hand it to the dispatcher without consuming or changing its
-// selected outcome, including when the original candidate was disputed.
-func TestContractExpirationFreeContinuationDefersNewAcceptedIntent(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
-		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
-		for _, disputed := range []bool{false, true} {
-			f := newFreeExpiryOwnerFixture(ctx)
-			id, err := CreateContractNoEscrow(ctx, f.networkId, f.sourceId, f.networkId, f.destinationId, 100)
-			server.Raise(err)
-			server.Raise(CloseContract(ctx, id, f.sourceId, 17, disputed))
-			if disputed {
-				SetContractDispute(ctx, id, true)
-			} else {
-				interruptFreeExpiryPublicClose(t, ctx, id, f.destinationId)
-			}
-			expireFreeExpiryOwnerContracts(ctx, []server.Id{id}, true)
-			readIntent := func() string {
-				var state string
-				server.Db(ctx, func(conn server.PgConn) {
-					server.Raise(conn.QueryRow(ctx, `SELECT row_to_json(i)::text FROM legacy_settlement_intent i WHERE contract_id=$1`, id).Scan(&state))
-				})
-				return state
-			}
-			var before []byte
-			var beforeIntent string
-			arrivals := 0
-			callCtx := context.WithValue(ctx, forceCloseContinuationContextKey{}, func(parent context.Context, selected server.Id) context.Context {
-				if selected != id {
-					return parent
-				}
-				arrivals++
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, id))
-					server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeDisputeResolvedToSource, true))
-				})
-				before, beforeIntent = readRedisExpiryRepairTestState(ctx, id), readIntent()
-				return parent
-			})
-			beforeClosed := contractClosedCounter.Snapshot()
-			count, _, err := ForceCloseOpenContractIdsPage(callCtx, server.NowUtc().Add(-5*time.Minute), 32, 1, 0, 0, nil)
-			if err != nil || count != 0 || arrivals != 1 || len(before) == 0 || beforeIntent == "" ||
-				!bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) || beforeIntent != readIntent() || freeExpiryOwnerClockCount(batch) != 0 {
-				t.Fatal("free expiry did not defer the new accepted intent unchanged", disputed, count, err)
-			}
-			afterClosed := contractClosedCounter.Snapshot()
-			if !beforeClosed.Stable || !afterClosed.Stable || afterClosed.Confirmed != beforeClosed.Confirmed ||
-				afterClosed.Uncertain != beforeClosed.Uncertain || afterClosed.Untracked != beforeClosed.Untracked {
-				t.Fatal("accepted-intent handoff counted a completed free contract", beforeClosed, afterClosed)
-			}
-		}
-	})
-}
-
 // Public dispute creation between proof and continuation changes the current
 // owner state. The no-edit branch must clear that actual dispute atomically.
 func TestContractExpirationFreeFinalContinuationReloadsPublicDispute(t *testing.T) {
@@ -411,7 +341,7 @@ func TestContractExpirationFreeFinalContinuationReloadsPublicDispute(t *testing.
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		batch := &legacySettlementPostBatch{}
 		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
 		f := newFreeExpiryOwnerFixture(ctx)
 		id, err := CreateContractNoEscrow(ctx, f.networkId, f.sourceId, f.networkId, f.destinationId, 100)
@@ -450,7 +380,7 @@ func TestContractExpirationFreeFinalContinuationRejectsChangedReport(t *testing.
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		batch := &legacySettlementPostBatch{mirrorBalanceIdSet: map[server.Id]bool{}}
+		batch := &legacySettlementPostBatch{}
 		ctx = context.WithValue(ctx, legacySettlementPostBatchKey{}, batch)
 		f := newFreeExpiryOwnerFixture(ctx)
 		id, err := CreateContractNoEscrow(ctx, f.networkId, f.sourceId, f.networkId, f.destinationId, 100)

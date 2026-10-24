@@ -49,18 +49,12 @@ func TestPublicDisputeAndLegacyPeerKeepSeparateReservations(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var pending, terminal bool
-			server.Raise(conn.QueryRow(ctx, `SELECT
-				EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
-				outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1`, peer.ContractId).Scan(&pending, &terminal))
-			if !pending || terminal || fixture.state(t, ctx) != before {
-				t.Fatal("queued legacy peer did not retain both reservation owners")
+			var terminal bool
+			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1`, peer.ContractId).Scan(&terminal))
+			if !terminal {
+				t.Fatal("legacy peer did not settle inline")
 			}
 		})
-		flushed, err := FlushLegacySettlements(ctx, int(peer.ContractId[15])%LegacySettlementShardCount, nil, 1)
-		if err != nil || flushed.Visited != 1 || flushed.Completed != 1 || flushed.Failed != 0 {
-			t.Fatal("legacy peer worker did not complete its durable owner", flushed, err)
-		}
 		after = fixture.state(t, ctx)
 		if after.legacyEscrowByteCount != 0 || after.redisEscrowByteCount != grant || after.requestTokenByteCount != grant ||
 			after.netEscrowByteCount != grant || after.payerBalanceByteCount != before.payerBalanceByteCount ||

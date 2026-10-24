@@ -35,7 +35,7 @@ func TestPrivateRedisContractExpiryRepairKindIsolation(t *testing.T) {
 	if _, err := parsePrivateContractExpiryRepair(strings.NewReader(raw)); err == nil {
 		t.Fatal("the existing expiry parser admitted the Redis kind")
 	}
-	for _, otherKind := range []string{"customer-contract-expiry-repair-v1", privateLegacySettlementDrainInputKind} {
+	for _, otherKind := range []string{"customer-contract-expiry-repair-v1", "customer-contract-legacy-settlement-v1"} {
 		otherRaw := strings.Replace(raw, privateRedisContractExpiryRepairInputKind, otherKind, 1)
 		if _, err := parsePrivateRedisContractExpiryRepair(strings.NewReader(otherRaw)); err == nil {
 			t.Fatal("the Redis parser admitted another command kind")

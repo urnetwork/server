@@ -94,6 +94,39 @@ func legacyMirrorTestFinalize(ctx context.Context, owner *task.Task, post func(s
 	}, server.TxReadCommitted, server.OptNoRetry())
 }
 
+// The sole fixture interception is an updatable view over the unchanged escrow
+// table. Its volatile predicate waits only in the exact census query; every
+// ordinary ownership point read and financial write still reaches the table.
+// No production hook, replacement settlement, sleep, or short timeout is used.
+func installLegacyColdPageCensusBarrier(t testing.TB, ctx context.Context) func() {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+            ALTER TABLE transfer_escrow RENAME TO synthetic_cold_page_escrow;
+            CREATE FUNCTION synthetic_cold_page_census_gate() RETURNS boolean
+            LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+                IF position('SELECT requested_balance.balance_id,' IN current_query()) > 0 THEN
+                    PERFORM pg_advisory_xact_lock(731031);
+                END IF;
+                RETURN true;
+            END $$;
+            CREATE VIEW transfer_escrow AS
+                SELECT * FROM synthetic_cold_page_escrow
+                WHERE synthetic_cold_page_census_gate()`))
+	}, server.TxReadCommitted, server.OptNoRetry())
+	return func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		server.Tx(cleanup, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(cleanup, `
+                DROP VIEW transfer_escrow;
+                ALTER TABLE synthetic_cold_page_escrow RENAME TO transfer_escrow;
+                DROP FUNCTION synthetic_cold_page_census_gate()`))
+		}, server.TxReadCommitted, server.OptNoRetry())
+	}
+}
+
 // A financial producer owns the mirror queue key with an uncommitted newer
 // revision. The finalizer of the older owner waits for that key before it reads
 // the pending row, then requeues a replacement for the committed revision.
@@ -245,29 +278,30 @@ func TestLegacyNetEscrowMirrorDeleteBeforeProducerLeavesFreshOwner(t *testing.T)
 
 func TestLegacyNetEscrowMirrorFinancialRollbackWarmInvalidationAndOldReader(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		// The owner gets a real owned server transaction whose end the test chooses.
 		tx, finish := beginRareGrantTestTx(t, ctx)
 		defer finish(false)
-		_, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
+		_, complete, err := settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
 		server.Raise(err)
-		if !complete || busy {
+		if !complete {
 			t.Fatal("rollback did not reach the actual financial transition")
 		}
 		server.Raise(finish(false))
 		server.Db(ctx, func(conn server.PgConn) {
 			var count int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1`, legacyColdPageMirrorFunction).Scan(&count))
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1`,
+				task.NewTaskTarget(ApplyLegacyNetEscrowMirror).TargetFunctionName()).Scan(&count))
 			if count != 0 {
 				t.Fatal("rolled-back money retained a mirror owner")
 			}
 		})
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
-			posts, complete, busy, _, err = flushLegacySettlementInTx(ctx, tx, id)
+			posts, complete, err = settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
 			server.Raise(err)
 		}, server.TxReadCommitted, server.OptNoRetry())
-		if !complete || busy {
+		if !complete {
 			t.Fatal("committed financial owner did not finish")
 		}
 		owner := legacyMirrorTestOwner(t, ctx, f.balanceId)
@@ -364,7 +398,7 @@ func TestLegacyNetEscrowMirrorLostReplyDeletedBalanceAndScope(t *testing.T) {
 // touches the existing owner, and makes its older snapshot require a successor.
 func TestLegacyNetEscrowMirrorColdOwnerAllowsSameGrantClose(t *testing.T) {
 	legacyMirrorTestEnv(t, func(t testing.TB, ctx context.Context) {
-		f, contractId := legacySettlementTestIntent(t, ctx)
+		f, contractId := legacySettlementTestOpenFinals(t, ctx)
 		_, posts := createNetEscrowOrderingTestContract(ctx, f, 23)
 		server.RunPosts(ctx, posts...)
 		native := createRedisAdmissionTest(ctx, f, 31)
@@ -392,8 +426,7 @@ func TestLegacyNetEscrowMirrorColdOwnerAllowsSameGrantClose(t *testing.T) {
 			done <- completion{result: result, post: post, err: err}
 		}()
 		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
-		completed, busy, _, err := flushLegacySettlement(ctx, contractId)
-		if err != nil || !completed || busy {
+		if err := SettleEscrow(ctx, contractId, ContractOutcomeSettled); err != nil {
 			t.Fatalf("running census retained financial or pending-row ownership: %v", err)
 		}
 		if legacyMirrorTestOwner(t, ctx, f.balanceId).TaskId != owner.TaskId {

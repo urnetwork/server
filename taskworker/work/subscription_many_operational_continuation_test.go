@@ -175,7 +175,6 @@ func TestCloseExpiredManyOperationalVisitsKeepFailureAndReachNextRawPage(t *test
 			server.Raise(conn.QueryRow(ctx, `SELECT last_value FROM synthetic_task_expiry_proof_attempts`).Scan(&attempts))
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract c
 				WHERE c.contract_id=ANY($1::uuid[]) AND c.outcome IS NULL AND NOT c.dispute AND NOT c.usage_unverified
-				AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent i WHERE i.contract_id=c.contract_id)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal j WHERE j.contract_id=c.contract_id)
 				AND NOT EXISTS(SELECT 1 FROM contract_close r WHERE r.contract_id=c.contract_id)`, failedIds).Scan(&retained))
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[])

@@ -69,11 +69,9 @@ func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) er
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		debitName := work.NewTransferDebitTaskTarget().TargetFunctionName()
-		dispatchName := work.NewLegacySettlementDispatcherTaskTarget().TargetFunctionName()
 		for _, definition := range subnetOperatorTasks() {
 			if definition.schedule != nil {
-				name := definition.target.TargetFunctionName()
-				if name == debitName || name == dispatchName {
+				if definition.target.TargetFunctionName() == debitName {
 					continue
 				}
 				definition.schedule(clientSession, tx)
@@ -165,9 +163,6 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveCompletedContracts), schedule: work.ScheduleRemoveCompletedContracts},
 		{target: task.NewTaskTarget(work.ReconcileNetEscrow), schedule: work.ScheduleReconcileNetEscrow},
 		{target: work.NewTransferDebitTaskTarget(), schedule: work.ScheduleFlushTransferDebits},
-		{target: work.NewLegacySettlementDispatcherTaskTarget(), schedule: work.ScheduleFlushLegacySettlements},
-		{target: model.NewLegacyPayerSettlementTaskTarget()},
-		{target: model.NewLegacySourceSettlementTaskTarget()},
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			work.ScheduleDbMaintenance(clientSession, tx, 0)
 		}},
