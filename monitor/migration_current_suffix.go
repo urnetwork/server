@@ -700,6 +700,16 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationTableRemoved("user_auth_attempt")),
 	migrationCurrentSuffix(859, "handler heartbeat index removed",
 		migrationIndexRemoved("network_client_handler", "network_client_handler_heartbeat_time")),
+	migrationCurrentSuffix(860, "transfer balance pages keep room for in-place debits",
+		migrationFillfactor("transfer_balance", 85)),
+}
+
+// Free space a table keeps on every page it writes, so an update of an
+// unindexed column can stay on its page (HOT) instead of writing index entries.
+func migrationFillfactor(table string, fillfactor int) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.%s')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=%d']::text[])`, table, fillfactor)
 }
 
 // A retired table stays dropped: a recreated copy under the published name

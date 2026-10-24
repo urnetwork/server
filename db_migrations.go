@@ -10746,4 +10746,21 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS network_client_handler_heartbeat_time`,
 		`DROP INDEX IF EXISTS network_client_handler_heartbeat_time`,
 	),
+
+	// transfer_balance is updated in place on the debit path: each transfer
+	// debit flush applies a balance's pending debits in one UPDATE of
+	// balance_byte_count (model/subscription_transfer_debit.go), as often as
+	// every 2 s for a busy balance. While a balance stays active that changes
+	// no indexed column, so the update is HOT when its page has room; on a
+	// full page it writes an entry in every index instead. 85 rather than 90:
+	// the daily grants are inserted together, so one page holds many balances
+	// debited at the same time, and their dead versions are pruned only once
+	// older snapshots end. It costs about 18% more pages, on the pages it
+	// applies to: those written from now on, and every page at the next
+	// compaction. Storage parameters take ShareUpdateExclusiveLock, which
+	// blocks no reader or writer.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE transfer_balance SET (fillfactor = 85);
+	`),
 }

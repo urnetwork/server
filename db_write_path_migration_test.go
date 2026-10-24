@@ -66,3 +66,30 @@ func TestNetworkClientHandlerHeartbeatIsHot(t *testing.T) {
 		})
 	})
 }
+
+// The fillfactor of each write-path table, the free space its pages keep so an
+// update of unindexed columns stays on its page (HOT).
+func TestWritePathTableFillfactors(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, expected := range []struct {
+			table      string
+			fillfactor string
+		}{
+			{table: "transfer_balance", fillfactor: "85"},
+		} {
+			var fillfactor *string
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(
+					ctx,
+					`SELECT (SELECT option_value FROM pg_options_to_table(relation.reloptions) WHERE option_name = 'fillfactor')
+					FROM pg_class relation WHERE relation.oid = to_regclass('public.'||$1)`,
+					expected.table,
+				).Scan(&fillfactor))
+			}, OptReadOnly())
+			if fillfactor == nil || *fillfactor != expected.fillfactor {
+				t.Errorf("%s fillfactor=%v, want %s", expected.table, fillfactor, expected.fillfactor)
+			}
+		}
+	})
+}
