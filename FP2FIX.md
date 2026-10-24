@@ -12,7 +12,8 @@ evidence table is migration 836, which Main gets only once the owner approves
 applying it. Owner decision, the same day: the evidence comes from a separate
 capability probe task ([server/capprobe](capprobe/README.md)), not from the
 URL measurement tunnel, whose encryption stays off. Owner decision,
-2026-10-15: **the gate turns on automatically at 2026-10-21 00:00 UTC** while
+2026-10-24: **the automatic cutoff is postponed to 2026-11-04 00:00 UTC**
+while
 `quality_speed_requires_modern_provider` is absent from provider.yml, as it
 is on Main; `false` keeps it off (the kill switch and the way to postpone),
 `true` turns it on at once, and `quality_speed_modern_provider_start` moves
@@ -190,7 +191,7 @@ reclassifying the fleet.
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required; required at `online_url_success_ratio` once set (off by default, 2026-10-15) |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
-| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-10-21 00:00 UTC | Required from 2026-10-21 00:00 UTC | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-11-04 00:00 UTC | Required from 2026-11-04 00:00 UTC | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
@@ -198,8 +199,8 @@ eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
 
 The modern provider row (2026-10-14) is native bucket membership too, and
-only while the gate is on: from 2026-10-21 00:00 UTC (owner decision
-2026-10-15) while `quality_speed_requires_modern_provider` is absent from
+only while the gate is on: from 2026-11-04 00:00 UTC (owner decision
+2026-10-24) while `quality_speed_requires_modern_provider` is absent from
 provider.yml, never with it `false`, and at once with it `true`. Until then
 the dashboard counts and every score export count what it would take out.
 Probe admission, explicit client ids, `force_minimum` and Online never read
@@ -414,7 +415,7 @@ provider cannot resolve the probe client's key.
   outcome but `modern` is what the gate takes out once it is on.
 - **Switch.** Three ways (owner decision 2026-10-15), by
   `quality_speed_requires_modern_provider` in provider.yml. Absent, as on
-  Main, the gate turns on by itself at its start, 2026-10-21 00:00 UTC by
+  Main, the gate turns on by itself at its start, 2026-11-04 00:00 UTC by
   default, that instant included. `false` keeps it off: the kill switch and
   the way to postpone. `true` turns it on at once.
   `quality_speed_modern_provider_start`, an RFC 3339 instant such as
@@ -472,8 +473,8 @@ provider cannot resolve the probe client's key.
   the switch off, both on 2026-10-14. (3) Deploy the API and the taskworkers.
   The capability probe ships switched off and schedules nothing, so the
   deploy measures nothing. There is no API-first constraint any more:
-  nothing new rides the operator submission. With the automatic start (owner
-  decision 2026-10-15) the taskworkers must run it before 2026-10-21
+  nothing new rides the operator submission. With the postponed automatic start (owner
+  decision 2026-10-24) the taskworkers must run it before 2026-11-04
   00:00 UTC, since their score export decides the buckets FindProviders2
   answers from and their stats collector the dashboard counts, and the API
   too, so the provider status it decides per request agrees.
@@ -494,7 +495,7 @@ provider cannot resolve the probe client's key.
   which the gate counts as post-quantum and which should be understood
   first, and `capability-probe-breaker` and `capability-probe-downgrades`
   (SIGNALS.md §2.19g) must be quiet and the monitor's `capability-probe`
-  signal healthy. (5) The gate turns on by itself at 2026-10-21 00:00 UTC
+  signal healthy. (5) The gate turns on by itself at 2026-11-04 00:00 UTC
   while `quality_speed_requires_modern_provider` is absent from provider.yml,
   as on Main, so the probe's sweep and the review must be done by then. The
   monitor's readiness signal (monitor SIGNALS.md §2.29,
