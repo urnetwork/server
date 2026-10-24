@@ -716,6 +716,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	// 866 retires the v723 composite, which pinned the dropped index
 	migrationCurrentSuffix(866, "URL receipt history and durable probe queue without the unread full deadline index",
 		migrationFp2DurableQueueWithoutFullDeadlineIndexQuery),
+	migrationCurrentSuffix(867, "client score lookback window index removed",
+		migrationIndexRemoved("client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block")),
+	migrationCurrentSuffix(868, "client score pages keep room for a full pass rewrite",
+		migrationFillfactor("client_connection_reliability_score", 50)),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

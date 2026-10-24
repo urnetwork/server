@@ -25,6 +25,7 @@ func TestDroppedHotTableIndexesStayOutOfSchemaAndMaintenance(t *testing.T) {
 			"network_client_handler_heartbeat_time",
 			"transfer_debit_journal_age",
 			"provider_egress_probe_cycle_next_attempt",
+			"client_connection_reliability_score_lookback_max_block",
 		}
 		exists := func(name string) bool {
 			var present bool

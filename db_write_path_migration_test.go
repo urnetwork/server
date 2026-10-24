@@ -80,6 +80,7 @@ func TestWritePathTableFillfactors(t *testing.T) {
 			{table: "device", fillfactor: "90"},
 			{table: "search_provider_stats", fillfactor: "70"},
 			{table: "transfer_debit_journal", fillfactor: "70"},
+			{table: "client_connection_reliability_score", fillfactor: "50"},
 		} {
 			var fillfactor *string
 			MaintenanceDb(ctx, func(conn PgConn) {
@@ -124,6 +125,41 @@ func TestTransferDebitJournalAppliedUpdateIsHot(t *testing.T) {
 			updated, hot := writePathTestTransactionUpdates(t, ctx, tx, "transfer_debit_journal")
 			if tag.RowsAffected() != 1 || updated != 1 || hot != 1 {
 				t.Fatalf("applied rows=%d updated=%d hot=%d, want one HOT update", tag.RowsAffected(), updated, hot)
+			}
+		})
+	})
+}
+
+// A reliability pass rewrites each client score with its new window. No index
+// keys the window or the scores any more, so the rewrite is HOT.
+func TestClientReliabilityScoreRewriteIsHot(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientId := NewId()
+		upsert := func(tx PgTx, maxBlockNumber int64) {
+			// the shape of the pass's upsert (UpdateClientReliabilityScores)
+			RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO client_connection_reliability_score (
+					client_id, lookback_index, independent_reliability_score, independent_reliability_weight,
+					reliability_score, reliability_weight, min_block_number, max_block_number
+				) VALUES ($1, 1, 60, 1, 60, 1, $2, $3)
+				ON CONFLICT (client_id, lookback_index) DO UPDATE SET
+					min_block_number = EXCLUDED.min_block_number,
+					max_block_number = EXCLUDED.max_block_number`,
+				clientId,
+				maxBlockNumber-60,
+				maxBlockNumber,
+			))
+		}
+		Tx(ctx, func(tx PgTx) {
+			upsert(tx, 1000)
+		})
+		Tx(ctx, func(tx PgTx) {
+			upsert(tx, 1030)
+			updated, hot := writePathTestTransactionUpdates(t, ctx, tx, "client_connection_reliability_score")
+			if updated != 1 || hot != 1 {
+				t.Fatalf("score rewrite updated=%d hot=%d, want one HOT update", updated, hot)
 			}
 		})
 	})

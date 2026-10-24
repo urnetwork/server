@@ -1725,6 +1725,12 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 			// hold SUM(1.0) (independent_sum) and SUM(1.0/valid_client_count)
 			// (reliability_sum) over the window, so this reads the small running
 			// table instead of re-scanning the full client_reliability window.
+			// A row identical to its recomputation, window included, is not
+			// rewritten. The window moves with every pass, and its
+			// max_block_number is the publication marker the stale-row delete
+			// and the freshness signal (SIGNALS.md §2.15a) read, so a pass over
+			// a new window still rewrites every row; no index keys these
+			// columns, so each rewrite stays on its page (HOT).
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -1771,6 +1777,28 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					city_location_id = EXCLUDED.city_location_id,
 					region_location_id = EXCLUDED.region_location_id,
 					country_location_id = EXCLUDED.country_location_id
+				WHERE
+					(
+						client_connection_reliability_score.independent_reliability_score,
+						client_connection_reliability_score.independent_reliability_weight,
+						client_connection_reliability_score.reliability_score,
+						client_connection_reliability_score.reliability_weight,
+						client_connection_reliability_score.min_block_number,
+						client_connection_reliability_score.max_block_number,
+						client_connection_reliability_score.city_location_id,
+						client_connection_reliability_score.region_location_id,
+						client_connection_reliability_score.country_location_id
+					) IS DISTINCT FROM (
+						EXCLUDED.independent_reliability_score,
+						EXCLUDED.independent_reliability_weight,
+						EXCLUDED.reliability_score,
+						EXCLUDED.reliability_weight,
+						EXCLUDED.min_block_number,
+						EXCLUDED.max_block_number,
+						EXCLUDED.city_location_id,
+						EXCLUDED.region_location_id,
+						EXCLUDED.country_location_id
+					)
 				`,
 				minBlockNumber,
 				maxBlockNumber,

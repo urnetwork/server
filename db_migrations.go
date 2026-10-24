@@ -10841,4 +10841,29 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS provider_egress_probe_cycle_next_attempt`,
 		`DROP INDEX IF EXISTS provider_egress_probe_cycle_next_attempt`,
 	),
+
+	// Each reliability pass upserts every client score of each lookback with
+	// the pass's window (UpdateClientReliabilityScores), so max_block_number
+	// changes on every row every pass, and
+	// client_connection_reliability_score_lookback_max_block keyed it: every
+	// rewrite was non-HOT. Its readers all read whole lookbacks: the pass's
+	// stale-row delete (lookback_index = $1 AND max_block_number <> $2, which
+	// no btree condition serves), the monitor's drift and checks aggregates
+	// over lookback 2, and nothing narrower. A sequential scan of this small
+	// table serves them as well, and a three-valued (lookback_index) index
+	// would not, so the index is dropped rather than narrowed. Every other
+	// reader probes the primary key (client_id, lookback_index) or reads the
+	// whole table, as the provider count filter does.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS client_connection_reliability_score_lookback_max_block`,
+		`DROP INDEX IF EXISTS client_connection_reliability_score_lookback_max_block`,
+	),
+	// A pass rewrites every row in place, so each page needs room for a new
+	// version of every row on it: half the page, once the previous pass's
+	// versions are pruned. Applies to pages written from now on, and to every
+	// page at the next compaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE client_connection_reliability_score SET (fillfactor = 50);
+	`),
 }
