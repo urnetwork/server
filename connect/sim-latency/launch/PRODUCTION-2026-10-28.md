@@ -10,6 +10,14 @@ identities, test evidence and remaining activation gates are recorded in
 [HOST-CONTROL-2026-10-24.md](HOST-CONTROL-2026-10-24.md). It does not change the
 frozen evaluated source below or assert live production readiness.
 
+**Frontier correction (October 24, 18:01 UTC):** the frozen executable's
+`--no-impair` mode was not propagated to fleet subprocesses. All four-shard
+requested-off points below actually had impaired children, so their on/off
+interpretations and capacity eligibility are withdrawn. Raw runs remain retained;
+the frontier index explicitly records the invalid mode. The impairment-on R9
+dataset is unaffected. A fixed, authenticated executable and true off trials are
+required before final scale selection; no old sidecar is rewritten to fake them.
+
 ## Candidate source checkpoint
 
 Fetched October 24 from the development branches below. These are candidate
