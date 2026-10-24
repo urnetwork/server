@@ -333,8 +333,9 @@ type ProviderEgressHealthClassResult struct {
 // One immutable URL outcome, or an older aggregate retained only for audit.
 // Validated URL evidence preserves its measurement time rather than arrival
 // time, so delayed publication cannot refresh rolling eligibility. Timestamps
-// more than one minute in the future are rejected. Legacy evidence without a
-// policy timestamp uses arrival time but cannot satisfy the URL-policy gate.
+// more than one minute in the future, or older than the history's ingest age
+// (a day), are rejected. Legacy evidence without a policy timestamp uses
+// arrival time but cannot satisfy the URL-policy gate.
 type SubmitProviderEgressHealthArgs struct {
 	ClientId         server.Id                      `json:"client_id"`
 	RunId            server.Id                      `json:"run_id"`
@@ -404,6 +405,14 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 	}
 	if args.UrlProbeEvidence != nil && args.UrlProbeEvidence.MeasuredAt.After(server.NowUtc().Add(time.Minute)) {
 		return refuseProviderEgressIngest("URL evidence timestamp is in the future.")
+	}
+	// A delayed result keeps its measured_at, and the history keeps a day
+	// only for its retention (PARTITION-MAINTENANCE-PLAN.md C2): one older
+	// than the ingest takes is refused, so a replay is either refused here or
+	// meets its own row and stores nothing. A report without URL evidence is
+	// timed at arrival.
+	if maxIngestAge := model.DefaultProviderEgressHealthHistorySettings().MaxIngestAge; args.UrlProbeEvidence != nil && args.UrlProbeEvidence.MeasuredAt.Before(server.NowUtc().Add(-maxIngestAge)) {
+		return refuseProviderEgressIngest("URL evidence timestamp is too old.")
 	}
 	if args.UrlProbeEvidence != nil && args.RunId == (server.Id{}) {
 		return refuseProviderEgressIngest("A versioned URL result requires an immutable run id.")

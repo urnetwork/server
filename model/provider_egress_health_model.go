@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
@@ -157,9 +161,47 @@ func splitProviderEgressNames(names string) []string {
 	return out
 }
 
+// The advisory lock a store holds on one run id until its transaction ends.
+// Only the posts of one run wait on each other.
+func providerEgressHealthRunLockKey(runId server.Id) string {
+	return fmt.Sprintf("provider-egress-health-run-v1:%s", runId)
+}
+
+// An insert found no partition of the history for the result's day.
+type providerEgressHealthPartitionMissingError struct {
+	measuredAt time.Time
+}
+
+// Implements error.
+func (self *providerEgressHealthPartitionMissingError) Error() string {
+	return fmt.Sprintf("no %s partition holds %s", providerEgressHealthHistoryTable, self.measuredAt.Format(time.RFC3339))
+}
+
+// Raises a history insert's failure, a missing day partition as its own
+// error so the store can create the day and store once more.
+func raiseProviderEgressHealthInsertErr(err error, measuredAt time.Time) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.CheckViolation &&
+		pgErr.TableName == providerEgressHealthHistoryTable &&
+		pgErr.ConstraintName == "" {
+		panic(&providerEgressHealthPartitionMissingError{measuredAt: measuredAt})
+	}
+	server.Raise(err)
+}
+
 // Records one accepted URL result idempotently, updates matching cycle progress
 // atomically, and retains the newest diagnostic/security snapshot. An old cycle
 // may contribute evidence but cannot advance a different cycle's quota.
+//
+// A run id is stored once across the retained history: a post whose run id is
+// already stored stores and publishes nothing, whatever its measured_at. The
+// history's key is (run_id, measured_at) once partitioned (C2), so the run id
+// is looked up under a lock per run, at read committed: a second post of one
+// run waits for the first to commit and then sees its row. The insert names no
+// conflict target, so it is the same statement on the plain table (unique
+// run_id) and on the partitioned one. An insert that finds no partition for
+// its day creates the day (the registry's EnsureRangeFor) and stores once more.
 func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) {
 	if health.UrlProbeEvidence != nil {
 		// Arrival time must not rejuvenate a delayed measurement. Do not mutate
@@ -187,13 +229,66 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 		evidenceJson = string(encoded)
 	}
 
+	runId := health.RunId
+	if runId == (server.Id{}) {
+		// Legacy local callers have no run token. Preserve idempotency of
+		// their measured timestamp; production submitters carry RunId.
+		identity := sha256.Sum256([]byte(health.ClientId.String() + ":" + health.MeasuredAt.UTC().Format(time.RFC3339Nano)))
+		copy(runId[:], identity[:len(runId)])
+	}
+
+	store := func() {
+		storeProviderEgressHealth(ctx, health, runId, string(classResultsJson), evidenceJson, policyVersion)
+	}
+	var partitionMissingErr *providerEgressHealthPartitionMissingError
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// the one failure handled here: no partition holds the day
+				if err, ok := r.(error); ok && errors.As(err, &partitionMissingErr) {
+					return
+				}
+				panic(r)
+			}
+		}()
+		store()
+	}()
+	if partitionMissingErr == nil {
+		return
+	}
+	// a day older than the ingest takes is a day retention may have dropped
+	// already, and recreating it would let a replay meet no row
+	if maxIngestAge := DefaultProviderEgressHealthHistorySettings().MaxIngestAge; health.MeasuredAt.Before(server.NowUtc().Add(-maxIngestAge)) {
+		panic(fmt.Errorf("%w: the measurement is older than the ingest's %s, so its day is not created", partitionMissingErr, maxIngestAge))
+	}
+	_, err = providerEgressHealthHistoryPartitionFamily.EnsureRangeFor(ctx, health.MeasuredAt)
+	server.Raise(err)
+	store()
+}
+
+// The store's transaction (see SetProviderEgressHealth).
+func storeProviderEgressHealth(
+	ctx context.Context,
+	health *ProviderEgressHealth,
+	runId server.Id,
+	classResultsJson string,
+	evidenceJson any,
+	policyVersion int,
+) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		runId := health.RunId
-		if runId == (server.Id{}) {
-			// Legacy local callers have no run token. Preserve idempotency of
-			// their measured timestamp; production submitters carry RunId.
-			identity := sha256.Sum256([]byte(health.ClientId.String() + ":" + health.MeasuredAt.UTC().Format(time.RFC3339Nano)))
-			copy(runId[:], identity[:len(runId)])
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			providerEgressHealthRunLockKey(runId),
+		))
+		var stored bool
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT EXISTS (SELECT 1 FROM provider_egress_health_history WHERE run_id = $1)`,
+			runId,
+		).Scan(&stored))
+		if stored {
+			return
 		}
 		var cycleStartedAt *time.Time
 		if !health.CycleStartedAt.IsZero() {
@@ -224,10 +319,12 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 			INSERT INTO provider_egress_health_history
 				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version)
 			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11)
-			ON CONFLICT (run_id) DO NOTHING`,
+			ON CONFLICT DO NOTHING`,
 			runId, health.ClientId, health.MeasuredAt.UTC(), health.OKCount, health.Total,
-			string(classResultsJson), health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion)
-		server.Raise(err)
+			classResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion)
+		if err != nil {
+			raiseProviderEgressHealthInsertErr(err, health.MeasuredAt)
+		}
 		if inserted.RowsAffected() == 0 {
 			return
 		}
@@ -349,7 +446,7 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
 				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, health.Total))
 		}
-	})
+	}, server.TxReadCommitted)
 }
 
 // Accepted measured URL outcomes contribute for strictly less than eight hours.
