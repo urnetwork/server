@@ -34,7 +34,7 @@ func testDbBloatFixedColumns() []dbBloatColumn {
 // A scan's free space counts only beyond what a rewrite at the fillfactor
 // keeps free next to the live tuples.
 func TestDbBloatScanReclaimableSubtractsTheFillfactorReserve(t *testing.T) {
-	scan := dbBloatScan{liveTupleBytes: 1000, deadTupleBytes: 300, freeBytes: 2000}
+	scan := dbBloatScan{relationBytes: 4 * testDbBloatBlockSize, liveTupleBytes: 1000, deadTupleBytes: 300, freeBytes: 2000}
 	for _, c := range []struct {
 		fillfactor  int
 		reserved    int64
@@ -59,9 +59,15 @@ func TestDbBloatScanReclaimableSubtractsTheFillfactorReserve(t *testing.T) {
 
 	// a relation denser than its fillfactor, set after its rows were written,
 	// would grow in a rewrite: it reclaims nothing rather than a negative
-	dense := dbBloatScan{liveTupleBytes: 8000, deadTupleBytes: 100, freeBytes: 500}
+	dense := dbBloatScan{relationBytes: 2 * testDbBloatBlockSize, liveTupleBytes: 8000, deadTupleBytes: 100, freeBytes: 500}
 	if reclaimable := dense.reclaimableBytes(50); reclaimable != 0 {
 		t.Fatalf("a relation denser than its fillfactor reclaims %d bytes", reclaimable)
+	}
+
+	// an inconsistent result never reclaims more than the relation
+	overcounted := dbBloatScan{relationBytes: testDbBloatBlockSize, deadTupleBytes: 6000, freeBytes: 6000}
+	if reclaimable := overcounted.reclaimableBytes(100); reclaimable != testDbBloatBlockSize {
+		t.Fatalf("a relation of %d bytes reclaims %d", testDbBloatBlockSize, reclaimable)
 	}
 }
 

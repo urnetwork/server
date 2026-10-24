@@ -339,11 +339,11 @@ func (self *dbBloatScan) reservedBytes(fillfactor int) int64 {
 	return self.liveTupleBytes * int64(100-fillfactor) / int64(fillfactor)
 }
 
-// Dead tuples and the free space beyond the fillfactor's reserve. A relation
-// denser than its fillfactor (set after its rows were written) would grow in a
-// rewrite, so it reclaims nothing.
+// Dead tuples and the free space beyond the fillfactor's reserve, at most the
+// relation. A relation denser than its fillfactor (set after its rows were
+// written) would grow in a rewrite, so it reclaims nothing.
 func (self *dbBloatScan) reclaimableBytes(fillfactor int) int64 {
-	return max(0, self.deadTupleBytes+self.freeBytes-self.reservedBytes(fillfactor))
+	return min(self.relationBytes, max(0, self.deadTupleBytes+self.freeBytes-self.reservedBytes(fillfactor)))
 }
 
 // Estimates the heap bytes of a fresh rewrite of rowCount rows: each page holds,
