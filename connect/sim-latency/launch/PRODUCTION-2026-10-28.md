@@ -242,6 +242,17 @@ The model key is not provisioned, the broker is not enabled in the supervisor,
 and no live provider review or full containment qualification is claimed.
 Follow [`../evaluator/review/README.md`](../evaluator/review/README.md) to
 provision and qualify the actual installed boundary. Independent build-broker
-qualification remains separate. Full harness repetition is in progress during
-an intentional calibration inter-replicate pause, not concurrently with timed
-scoring; resume calibration after those checks finish.
+qualification remains separate. Three consecutive complete `tests.sh` passes
+then completed against fresh, owned PostgreSQL/Redis fixtures, each including
+the six-epoch lifecycle and race suite (102.524, 101.954, and 98.024 seconds for
+the race phases). Logs are retained under
+`/home/by/urnetwork/temp/production-broker-fullsuite.Adq6PfXg` with SHA-256:
+
+- `tests-1.log`: `2ec16516d76fe2f4656e9151060e789de25cc7fbb65dd46756cd599b7befda1b`;
+- `tests-2.log`: `0fd9606e285f0b3566c2b6f13fc5183dfa68b7501051252932f87656f54707c1`;
+- `tests-3.log`: `2e26ec63dcdf9df56c4dc01011e78a912fa509a1f0424d36ef253abd84d85734`.
+
+Owned test services were removed successfully. These builds/tests ran during an
+intentional pause between calibration replicates 3 and 4, not concurrently with
+timed scoring. The current replicate finished normally before tests started;
+calibration orchestration resumed at 09:21 UTC after all three passes.
