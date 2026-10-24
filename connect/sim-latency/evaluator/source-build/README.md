@@ -93,3 +93,15 @@ The implementation follows the official [function-calling contract](https://deve
 and [stateless reasoning-item replay](https://developers.openai.com/api/docs/guides/reasoning).
 Opaque encrypted reasoning items are forwarded for continuation, never decoded
 or exposed as an audit explanation. No main/model credential enters model input.
+
+The fixed offline executor in `source_test_suite.go` now covers 33 mandatory
+named tests across server error classification, the permitted resident-contract
+manager/cache/read/lease/fallback surface, and protected simulator/scoring
+behavior. It runs the prescribed selectors in a separate offline container,
+using a fresh metadata seed and read-only source. Complete Go test events must
+prove every mandatory test ran and passed and every package completed. Logs are
+retained before their exact digest is returned. This is a targeted correctness
+suite, not the complete repository/database suite or live smoke/host proof.
+The full real-container synthetic probe passed all 33 tests with owned-image
+and container cleanup. Direct shell-run probes do not constitute model-owned
+execution or a complete live qualification receipt.
