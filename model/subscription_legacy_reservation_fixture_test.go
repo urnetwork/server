@@ -132,10 +132,32 @@ func projectLegacyProviderTotalsForTest(t testing.TB, ctx context.Context) {
 	}
 }
 
+// The bytes one contract swept to the destination network.
+func requireLegacyProviderSwept(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, bytes int64) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var swept int64
+		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(sum(payout_byte_count),0) FROM transfer_escrow_sweep
+            WHERE contract_id=$1 AND network_id=$2`, id, f.destinationNetworkId).Scan(&swept))
+		if swept != bytes {
+			t.Fatalf("contract swept %d bytes to its provider, want %d", swept, bytes)
+		}
+	})
+}
+
 // This remains assertion-only: lost acknowledgements and omitted posts must
 // leave exact totals durable without executing their projection. One statement
 // observes the account plus unapplied payloads consistently across an apply commit.
+// The account and its unapplied payloads are the destination network's, so id
+// must be the only contract that pays that network.
 func requireLegacyProviderDurability(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, bytes int64, expectedRevenue ...int64) {
+	t.Helper()
+	requireLegacyProviderCohortDurability(t, ctx, f, []server.Id{id}, bytes, expectedRevenue...)
+}
+
+// requireLegacyProviderDurability for several contracts that pay the same
+// destination network: their combined sweep is its whole durable total.
+func requireLegacyProviderCohortDurability(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, ids []server.Id, bytes int64, expectedRevenue ...int64) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		var swept, provided, sweptRevenue, providedRevenue int64
@@ -147,12 +169,12 @@ func requireLegacyProviderDurability(t testing.TB, ctx context.Context, f netEsc
             WHERE function_name=$3 AND (args_json::jsonb->>'applied')::boolean=false
                 AND (allocation->>'network_id')::uuid=$2
         ) SELECT COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep
-            WHERE contract_id=$1 AND network_id=$2),0),COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0),
-            COALESCE((SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=$1 AND network_id=$2),0),
+            WHERE contract_id=ANY($1) AND network_id=$2),0),COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0),
+            COALESCE((SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=ANY($1) AND network_id=$2),0),
             COALESCE((SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$2),0),
             COALESCE((SELECT sum((allocation->>'bytes')::bigint) FROM unapplied),0),
             COALESCE((SELECT sum((allocation->>'revenue')::bigint) FROM unapplied),0)`,
-			id, f.destinationNetworkId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(
+			ids, f.destinationNetworkId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(
 			&swept, &provided, &sweptRevenue, &providedRevenue, &pendingBytes, &pendingRevenue))
 		revenue := int64(0)
 		if len(expectedRevenue) > 0 {
