@@ -206,13 +206,13 @@ func TestOriginWaitIndependentLossRetainsIncidentThroughPartialQuiet(t *testing.
 		if next >= 2 {
 			notifier.stateLock.Lock()
 			incident, present := notifier.keyIncidents[key]
-			if present != (next < 9) {
+			if !present {
 				notifier.stateLock.Unlock()
 				t.Fatal("partial notification authority cleared or re-raised incident")
 			}
 			if present {
 				wantAbsent := 0
-				if next == 7 || next == 8 {
+				if next == 7 || next == 9 {
 					wantAbsent = 1
 				}
 				if incident.signalKeyAbsentRuns[signal.Key()] != wantAbsent {
@@ -227,6 +227,12 @@ func TestOriginWaitIndependentLossRetainsIncidentThroughPartialQuiet(t *testing.
 		}
 		run.Store(int32(next))
 	}, notifier)
+	notifier.stateLock.Lock()
+	_, present := notifier.keyIncidents[key]
+	notifier.stateLock.Unlock()
+	if present {
+		t.Fatal("two complete observations after partial quiet did not clear incident")
+	}
 	closeSlackNotifier(t, notifier)
 	posts := webhook.posted()
 	identity := "origin-notification-loss · synthetic/api-fleet"

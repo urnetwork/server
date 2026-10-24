@@ -156,7 +156,8 @@ func runBootstrapSource(opts docopt.Opts) {
 		digest := sha256.Sum256(manifestBytes)
 		intent = &model.CompetitionSourceActivation{Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
 			Staging: settings.AutomationPolicy.Staging, StagingRoundWindowSeconds: settings.AutomationPolicy.StagingRoundWindowSeconds, StagingPreparationSeconds: settings.AutomationPolicy.StagingPreparationSeconds,
-			Generation: 1, ExpectedGeneration: 0, SourceGeneration: 0, TargetEpoch: 1, Kind: "baseline", Reason: "policy_approved_baseline", SourceDecisionDigest: round.SourceDecisionDigest,
+			WinnerReviewPolicy: settings.AutomationPolicy.WinnerReviewPolicy,
+			Generation:         1, ExpectedGeneration: 0, SourceGeneration: 0, TargetEpoch: 1, Kind: "baseline", Reason: "policy_approved_baseline", SourceDecisionDigest: round.SourceDecisionDigest,
 			TargetRoundId:    server.NewId(),
 			SourceLockSha256: generation.SourceLockSha256, Commits: generation.Repositories.commitsForMode(manifest.Staging), GitRefs: map[string]model.CompetitionSourceGitRef{}, Manifest: manifestBytes,
 			ManifestCommit: manifestCommit, ManifestSha256: hex.EncodeToString(digest[:]), ConfigExpectedCommit: manifestCommit,

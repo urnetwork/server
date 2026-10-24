@@ -225,6 +225,7 @@ const clientKeyPolicyNamespaceArtifactQuery = `(
 
 // Admission pins the complete installed function, its relation and its enabled
 // insert/update trigger; a numeric head cannot hide a disabled custody guard.
+// Partitioned, every partition's clone of the trigger is pinned too.
 func contractUsageGuardBodyArtifactQuery(bodies ...string) string {
 	quoted := make([]string, len(bodies))
 	for index, body := range bodies {
@@ -248,6 +249,7 @@ func contractUsageGuardBodyArtifactQuery(bodies ...string) string {
           AND trigger_record.tgattr = ''::int2vector
           AND NOT trigger_record.tgisinternal
     )
+    AND ` + migrationContractLeafTriggers("transfer_contract", "transfer_contract_usage_guard") + `
 )`
 }
 
@@ -491,7 +493,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) (result []findi
 		), `+competitionStagingApprovalCatalogQuery+`, `+migrationFp2CatalogQuery+`, index_artifact AS (
 			SELECT table_relation.relname::text AS table_name,
 			       index_relation.relname::text AS index_name,
-			       regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g') AS definition,
+			       `+migrationIndexDefinitionSql("index_relation", "table_relation.relname")+` AS definition,
 			       regexp_replace(
 			           pg_get_expr(index_record.indpred, index_record.indrelid),
 			           '[[:space:]]+', ' ', 'g'
@@ -948,7 +950,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) (result []findi
 		             AND predicate_definition = '( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (payer_network_id IS NOT NULL))'
 		             AND indisvalid AND indisready
 		       ),
-		       EXISTS (
+		       (EXISTS (
 		           SELECT 1
 		           FROM pg_attribute attribute_record
 		           JOIN pg_class relation ON relation.oid = attribute_record.attrelid
@@ -961,7 +963,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) (result []findi
 		                 'autovacuum_analyze_scale_factor=0',
 		                 'autovacuum_analyze_threshold=1000000'
 		             ]::text[]
-		       ),
+		       ) OR `+transferContractPartitionedOpenStatisticsArtifactQuery+`),
 		       to_regclass('public.network_onboarding_offer') IS NOT NULL,
 		       to_regclass('public.network_onboarding_apple_offer_code') IS NOT NULL,
 		       EXISTS (

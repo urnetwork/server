@@ -95,8 +95,8 @@ func TestControlFrameMetricsBoundedErrorsAndQuietCells(t *testing.T) {
 			}
 		}
 	}
-	if children != 96 {
-		t.Fatalf("bounded children = %d, want 96", children)
+	if children != 108 {
+		t.Fatalf("bounded children = %d, want 108", children)
 	}
 	if got := testutil.ToFloat64(metrics.completions.WithLabelValues("internal", "other", "error")); got != 1 {
 		t.Fatalf("unknown message error = %v", got)

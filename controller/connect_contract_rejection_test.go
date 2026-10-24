@@ -23,6 +23,8 @@ func TestContractRejectionCauseSchemaAndErrorClasses(t *testing.T) {
 		{err: context.Canceled, want: "canceled"},
 		{err: context.DeadlineExceeded, want: "deadline"},
 		{err: model.ErrActiveClientNotFound, want: "source_inactive"},
+		{err: model.ErrRedisPendingReservationExpired, want: "reservation_window_expired"},
+		{err: errors.Join(model.ErrRedisPendingReservationReleased, errors.New("compensation detail")), want: "reservation_released"},
 		{err: errors.New("private error text must not become a label"), want: "other"},
 	} {
 		if got := contractRejectionFailureClass(test.err); got != test.want {
@@ -37,8 +39,8 @@ func TestContractRejectionCauseSchemaAndErrorClasses(t *testing.T) {
 		if family.GetName() != "urnetwork_connect_contract_rejections_total" {
 			continue
 		}
-		if len(family.Metric) != 40 {
-			t.Fatalf("rejection collector has %d cells, want 40 initialized cells", len(family.Metric))
+		if len(family.Metric) != 48 {
+			t.Fatalf("rejection collector has %d cells, want 48 initialized cells", len(family.Metric))
 		}
 		for _, sample := range family.Metric {
 			if len(sample.Label) != 3 {

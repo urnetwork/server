@@ -5,10 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -309,26 +305,8 @@ func TestProberShardCompanionPayerHandoffRechecksOriginAndCancellation(t *testin
 // retain exact open-pair and closed-endpoint index ranges in both plan modes.
 // The existing closed branch filters the other endpoint and linger window.
 func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sql string
-	ast.Inspect(file, func(node ast.Node) bool {
-		if lit, ok := node.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			value, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(value, "AS earliest_companion_origin") {
-				sql = value
-			}
-		}
-		return true
-	})
-	if sql == "" {
-		t.Fatal("runtime companion query missing")
-	}
+	// the executed statement, whole: its literals and the rendered id bound
+	sql := coveredCompanionRuntimeQueries(t)["earliest_companion_origin"].sql
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -351,7 +329,7 @@ func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
 					var rows, scans int
 					var inspect func(map[string]any)
 					inspect = func(node map[string]any) {
-						if node["Relation Name"] == "transfer_contract" {
+						if planNodeContractTable(node) == "transfer_contract" {
 							condition, _ := node["Index Cond"].(string)
 							filter, _ := node["Filter"].(string)
 							index, _ := node["Index Name"].(string)

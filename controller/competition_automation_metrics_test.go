@@ -16,11 +16,15 @@ func TestCompetitionAutomationMetricsClearAbsentState(t *testing.T) {
 	competitionAutomationMetricSnapshot{
 		unpublishedSeals: 2, pendingEvents: 3, oldestPublicationAt: &past,
 		pendingSources: 4, supervisorHeartbeatAt: &past,
+		progressionBlocked: true,
 		supervisorExpected: true,
 		activeHoldKinds:    []string{"source_activation"}, incidentCount: 1,
 	}.publish(now)
 	if got := testutil.ToFloat64(competitionAutomationOldestEventAge); got != 60 {
 		t.Fatalf("event age = %v, want 60", got)
+	}
+	if testutil.ToFloat64(competitionAutomationProgressionBlocked) != 1 {
+		t.Fatal("blocked closing was not surfaced")
 	}
 	competitionAutomationMetricSnapshot{}.publish(now)
 	for _, gauge := range []struct {
@@ -28,6 +32,7 @@ func TestCompetitionAutomationMetricsClearAbsentState(t *testing.T) {
 		value float64
 	}{
 		{name: "seals", value: testutil.ToFloat64(competitionAutomationUnpublishedSeals)},
+		{name: "progression blocked", value: testutil.ToFloat64(competitionAutomationProgressionBlocked)},
 		{name: "events", value: testutil.ToFloat64(competitionAutomationPendingEvents)},
 		{name: "event age", value: testutil.ToFloat64(competitionAutomationOldestEventAge)},
 		{name: "sources", value: testutil.ToFloat64(competitionAutomationPendingSources)},

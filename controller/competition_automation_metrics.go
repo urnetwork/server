@@ -12,6 +12,10 @@ import (
 )
 
 var (
+	competitionAutomationProgressionBlocked = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "competition", Name: "automation_progression_blocked",
+		Help: "1 when the latest durable closing/review/source checkpoint requires support attention; no candidate details.",
+	})
 	competitionAutomationUnpublishedSeals = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "competition", Name: "automation_unpublished_seals",
 		Help: "Sealed evaluation inventories awaiting their frozen publication time.",
@@ -49,6 +53,7 @@ var (
 // Registers bounded aggregate metrics with the existing main metrics pipeline.
 func init() {
 	prometheus.MustRegister(
+		competitionAutomationProgressionBlocked,
 		competitionAutomationUnpublishedSeals,
 		competitionAutomationPendingEvents,
 		competitionAutomationOldestEventAge,
@@ -71,6 +76,7 @@ type competitionAutomationMetricSnapshot struct {
 	supervisorExpected    bool
 	activeHoldKinds       []string
 	incidentCount         int
+	progressionBlocked    bool
 }
 
 // Allows a back-compatible API binary to start before the additive v2 migration.
@@ -120,12 +126,20 @@ func refreshAutomationOperationalMetrics(ctx context.Context, settings *Settings
 				WHERE competition_id=$1 AND environment=$2 AND season_id=$3
 			`, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&snapshot.supervisorHeartbeatAt))
 			if settings.AutomationPolicy.Enabled {
+				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT state IN ('winner_review_blocked','winner_source_blocked','preparation_blocked','publication_blocked') OR
+				 (state='winner_review_pending' AND (transition_json->'winner_review'->>'deadline')::timestamp<=$4)
+				 FROM competition_supervisor_transition WHERE competition_id=$1 AND environment=$2 AND season_id=$3 ORDER BY target_epoch DESC,revision DESC LIMIT 1),false)`,
+					settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId, now).Scan(&snapshot.progressionBlocked))
 				server.Raise(conn.QueryRow(ctx, `
 					SELECT COALESCE(max(CASE WHEN automation_sealed_at IS NOT NULL THEN epoch_number ELSE epoch_number-1 END),0) < 6
 					FROM competition_round WHERE competition_id=$1 AND staging=false
 					  AND policy_json->'automation_policy'->>'environment'=$2
 					  AND policy_json->'automation_policy'->>'season_id'=$3
 				`, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&snapshot.supervisorExpected))
+				if settings.AutomationPolicy.WinnerReviewPolicy == "elected_winner_sol61max_v1" {
+					server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT state<>'complete' FROM competition_supervisor_transition WHERE competition_id=$1 AND environment=$2 AND season_id=$3 AND target_epoch=7 ORDER BY revision DESC LIMIT 1),true)`,
+						settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&snapshot.supervisorExpected))
+				}
 			}
 			var incidentSchemaInstalled bool
 			server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('competition_automation_hold') IS NOT NULL`).Scan(&incidentSchemaInstalled))
@@ -156,6 +170,10 @@ func refreshAutomationOperationalMetrics(ctx context.Context, settings *Settings
 
 // Clamps clock skew and uses explicit absent sentinels rather than stale ages.
 func (self competitionAutomationMetricSnapshot) publish(now time.Time) {
+	competitionAutomationProgressionBlocked.Set(0)
+	if self.progressionBlocked {
+		competitionAutomationProgressionBlocked.Set(1)
+	}
 	for _, kind := range []string{"admission", "evaluation", "source_activation", "reward_delivery"} {
 		competitionAutomationHoldActive.WithLabelValues(kind).Set(0)
 		for _, activeKind := range self.activeHoldKinds {

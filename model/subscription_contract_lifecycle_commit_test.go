@@ -48,7 +48,13 @@ func TestContractLifecycleCountersCreateCommitRetry(t *testing.T) {
 			for attempt := range 2 {
 				var attemptErr error
 				server.HandleError(func() {
-					server.Tx(request, func(tx server.PgTx) {
+					// A Redis attempt reserves before its transaction, as the
+					// public owner does; the retry takes over the pending token.
+					published, finish, err := reserveRedisTransferEscrowBeforeTx(request, fixture.sourceNetworkId, fixture.sourceId,
+						fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 100)
+					server.Raise(err)
+					defer finish()
+					server.Tx(published, func(tx server.PgTx) {
 						var id server.Id
 						if backend == "no_escrow" {
 							var err error
@@ -56,7 +62,7 @@ func TestContractLifecycleCountersCreateCommitRetry(t *testing.T) {
 								fixture.destinationNetworkId, fixture.destinationId, 100, true)
 							server.Raise(err)
 						} else {
-							contract, _, err := createTransferEscrowInTx(request, tx, fixture.sourceNetworkId, fixture.sourceId,
+							contract, _, err := createTransferEscrowInTx(published, tx, fixture.sourceNetworkId, fixture.sourceId,
 								fixture.destinationNetworkId, fixture.destinationId, fixture.sourceNetworkId, 100, nil)
 							server.Raise(err)
 							id = contract.ContractId

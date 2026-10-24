@@ -316,6 +316,7 @@ var safeDeadlineClient = &safeRedisClient{disableCommandRetry: true, contextTime
 var safeAuthClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true}
 
 func RedisAuth(ctx context.Context, callback func(context.Context, RedisClient) error) (returnErr error) {
+	observeTxIo(TxIoRedis)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	defer func() {
@@ -531,6 +532,7 @@ func OptRedisNoPreflight() RedisPreflightOptions {
 }
 
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
+	observeTxIo(TxIoRedis)
 	retryOptions := OptRetryDefault()
 	preflight := true
 	// debugOptions := OptNoDebug()

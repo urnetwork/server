@@ -34,7 +34,9 @@ type monitorYaml struct {
 	AddressMode string            `yaml:"address_mode"`
 	Routers     []RouterSettings  `yaml:"routers"`
 	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
-	Hosts       []struct {
+	// observer_overlay: the operator's observer route contract (SIGNALS.md §1.7)
+	ObserverOverlay ObserverOverlaySettings `yaml:"observer_overlay"`
+	Hosts           []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -96,8 +98,12 @@ type monitorYaml struct {
 	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
 	// the former to noop and the latter to fail closed as invalid desired state.
 	DNSAliases yaml.Node `yaml:"dns_aliases"`
+	// Present malformed §22.1--§22.5 enrollment remains an explicit gap too.
+	SubnetCorrectness yaml.Node `yaml:"subnet_correctness"`
 	// Present malformed artifact expectations remain an explicit coverage gap.
 	SubnetArtifacts yaml.Node `yaml:"subnet_artifacts"`
+	// Optional subnet family enrollment; a malformed block stays unknown.
+	SubnetReplay yaml.Node `yaml:"subnet_replay"`
 	// Outbound notification. An empty webhook disables the Slack notifier.
 	// bringyourctl reads the same key for Grafana's default contact point
 	// (grafana.AlertRoutingSettingsFromMonitorVault).
@@ -289,6 +295,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	settings := SignalSettings{
 		Routers:                   cloneRouterSettings(y.Routers),
 		PublicUdp:                 clonePublicUdpSettings(y.PublicUdp),
+		ObserverOverlay:           cloneObserverOverlaySettings(y.ObserverOverlay),
 		Environment:               env,
 		PublicDomain:              strings.TrimSpace(services.Domain),
 		WebsiteDomain:             activeWebsiteDomainFromServices(services),
@@ -300,7 +307,10 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		VerificationEnabled:       stConfiguration.configuredEnabled,
 		STConfigStatus:            stConfiguration.status,
 		STDeploymentKey:           stConfiguration.deploymentKey,
+		SubnetCorrectness:         subnetCorrectnessSettingsFromNode(y.SubnetCorrectness, loadSubnetDeploymentIdentity),
 		SubnetArtifacts:           subnetArtifactSettingsFromNode(y.SubnetArtifacts),
+		SubnetReplay:              subnetReplaySettingsFromNode(y.SubnetReplay),
+		SubnetDeployment:          loadSubnetReplayPin(),
 		ContractDegradationConfig: loadContractDegradationConfig(),
 		SSHUser:                   y.Ssh.User,
 		SSHDevUser:                y.Ssh.DevUser,
@@ -1465,41 +1475,38 @@ func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6Int
 	return byHost, nil
 }
 
+// The public edge interfaces by host, under the inventory rules connect's
+// server-directed moves read too (server.ActiveEdgeLbInterfaces).
 func activePublicLBFromServices(services servicesYaml) (map[string][]PublicLBInterfaceSettings, error) {
 	if len(services.Versions) == 0 {
 		return nil, fmt.Errorf("services.yml: no active version")
 	}
-	domain := strings.TrimSpace(services.Domain)
-	if domain == "" {
-		return nil, fmt.Errorf("services.yml: domain is required for public LB inventory")
+	configured := map[string]map[string]server.ServicesLbInterfaceConfig{}
+	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
+		configuredInterfaces := map[string]server.ServicesLbInterfaceConfig{}
+		for interfaceName, interfaceConfig := range interfaces {
+			configuredInterfaces[interfaceName] = server.ServicesLbInterfaceConfig{
+				Ipv4:        interfaceConfig.IPv4,
+				Ipv6:        interfaceConfig.IPv6,
+				Transparent: interfaceConfig.Transparent,
+			}
+		}
+		configured[configuredHost] = configuredInterfaces
+	}
+	edgeInterfaces, err := server.ActiveEdgeLbInterfaces(services.Domain, configured)
+	if err != nil {
+		return nil, err
 	}
 
 	byHost := map[string][]PublicLBInterfaceSettings{}
-	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
-		host := strings.TrimSuffix(configuredHost, "."+domain)
-		if !strings.Contains(host, "-edge-") {
-			continue
-		}
-		for interfaceName, configured := range interfaces {
-			if configured.Transparent {
-				continue
-			}
-			ipv4 := strings.TrimSpace(configured.IPv4)
-			ipv6 := strings.TrimSpace(configured.IPv6)
-			if ipv4 == "" && ipv6 == "" {
-				continue
-			}
+	for host, interfaces := range edgeInterfaces {
+		for _, edgeInterface := range interfaces {
 			byHost[host] = append(byHost[host], PublicLBInterfaceSettings{
-				Interface:   interfaceName,
-				IPv4Address: ipv4,
-				IPv6Address: ipv6,
+				Interface:   edgeInterface.Interface,
+				IPv4Address: edgeInterface.Ipv4,
+				IPv6Address: edgeInterface.Ipv6,
 			})
 		}
-	}
-	for host := range byHost {
-		sort.Slice(byHost[host], func(i, j int) bool {
-			return byHost[host][i].Interface < byHost[host][j].Interface
-		})
 	}
 	return byHost, nil
 }

@@ -146,6 +146,7 @@ type CompetitionSupervisorSnapshot struct {
 	CurrentSource *model.CompetitionSourceActivation
 	Transition    *model.CompetitionSupervisorTransition
 	Intent        *model.CompetitionSourceActivation
+	WinnerReview  *CompetitionWinnerReviewState
 }
 
 // External work is outside database transactions. Every mutating method must
@@ -183,6 +184,7 @@ type CompetitionSupervisorHooks struct {
 	PublishSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	PrepareSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	FallbackSource func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation, string) (bool, error)
+	ReviewWinner   func(context.Context, model.CompetitionSupervisorLease, CompetitionWinnerReviewRequest) error
 }
 
 // A failed promotion may be abandoned only when independently proven to have
@@ -238,12 +240,24 @@ func (self *PostgresCompetitionSupervisorDriver) Snapshot(ctx context.Context, l
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
 		}
+		if snapshot.Seal != nil {
+			policy, decodeErr := decodeRoundPolicySnapshot(round.PolicyJson)
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			if policy.AutomationPolicy != nil && policy.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+				snapshot.WinnerReview, err = self.Store.WinnerReviewState(ctx, self.Settings, round.RoundId)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	snapshot.CurrentSource, err = self.Store.CurrentSourceActivation(ctx, self.Settings)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	if targetEpoch <= 6 {
+	if targetEpoch <= 6 || snapshot.WinnerReview != nil {
 		snapshot.Transition, err = self.Store.SupervisorTransition(ctx, self.Settings, targetEpoch)
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -408,7 +422,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	targetEpoch := 1
 	choiceAt := now
 	if snapshot.Round != nil {
-		if snapshot.Round.Epoch >= 6 {
+		if snapshot.Round.Epoch >= 6 && snapshot.WinnerReview == nil {
 			return "season_complete", nil
 		}
 		targetEpoch = snapshot.Round.Epoch + 1
@@ -416,8 +430,12 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	}
 	transition := snapshot.Transition
 	if transition == nil {
+		initialState := "source_choice_pending"
+		if snapshot.WinnerReview != nil {
+			initialState = "winner_review_pending"
+		}
 		transition, err = self.Driver.SaveTransition(operationCtx, *lease, model.CompetitionSupervisorTransition{
-			TargetEpoch: targetEpoch, ExpectedRevision: 0, State: "source_choice_pending", SourceChoiceAt: choiceAt,
+			TargetEpoch: targetEpoch, ExpectedRevision: 0, State: initialState, SourceChoiceAt: choiceAt,
 		})
 		if err != nil {
 			return "checkpoint_blocked", err
@@ -426,6 +444,13 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	}
 	if transition.TargetEpoch != targetEpoch {
 		return "blocked", errors.New("supervisor checkpoint belongs to another epoch")
+	}
+	if snapshot.WinnerReview != nil {
+		updated, reviewState, reviewErr, stop := self.reconcileWinnerReview(operationCtx, *lease, snapshot, transition, now)
+		if stop {
+			return reviewState, reviewErr
+		}
+		transition = updated
 	}
 	checkpoint := func(nextState, reason string, intent *model.CompetitionSourceActivation, opensAt time.Time) (string, error) {
 		next := *transition
@@ -445,6 +470,9 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		return result.State, nil
 	}
 	fallback := func(reason string) (bool, string, error) {
+		if snapshot.WinnerReview != nil {
+			return false, "", nil
+		}
 		if snapshot.Intent == nil || snapshot.Intent.Kind != "reviewed_source_promotion" {
 			return false, "", nil
 		}
@@ -466,12 +494,24 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		return true, result.State, nil
 	}
 	switch transition.State {
+	case "winner_source_blocked":
+		if snapshot.WinnerReview == nil || now.Before(transition.UpdatedAt.Add(10*time.Minute)) {
+			return "winner_source_blocked", ErrReviewNotReady
+		}
+		fallthrough
 	case "source_choice_pending":
 		if now.Before(transition.SourceChoiceAt) {
 			return "source_choice_pending", nil
 		}
 		intent, choiceErr := self.Driver.ChooseSource(operationCtx, *lease, snapshot, *transition)
 		if choiceErr != nil {
+			if snapshot.WinnerReview != nil {
+				state, saveErr := checkpoint("winner_source_blocked", "approved winner build unavailable; support attention required", nil, time.Time{})
+				if saveErr != nil {
+					return state, saveErr
+				}
+				return state, choiceErr
+			}
 			return "source_choice_blocked", choiceErr
 		}
 		if intent == nil || intent.TargetEpoch != targetEpoch {
@@ -494,6 +534,9 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 		return checkpoint("preparation_pending", "", snapshot.Intent, time.Time{})
 	case "preparation_pending", "preparation_blocked":
+		if snapshot.WinnerReview != nil && transition.State == "preparation_blocked" && now.Before(transition.UpdatedAt.Add(10*time.Minute)) {
+			return "preparation_blocked", ErrReviewNotReady
+		}
 		if snapshot.Intent == nil {
 			return "preparation_blocked", errors.New("durable source intent is missing")
 		}

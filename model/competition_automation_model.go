@@ -21,6 +21,9 @@ const (
 	CompetitionAutomationCapability  = "competition.reward.v2"
 	CompetitionRuntimeBlobCapability = "competition.reward.v2.runtime-blob.v1"
 	CompetitionElectionRule          = "raw_latency_g1_g6_welch_v1"
+	CompetitionWinnerReviewPolicy    = "elected_winner_sol61max_v1"
+	CompetitionWinnerReviewModel     = "gpt-6.1-sol"
+	CompetitionWinnerReviewReasoning = "max"
 )
 
 var competitionAutomationSha256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -47,6 +50,8 @@ type CompetitionAutomationPolicy struct {
 	SourceGeneration           int    `json:"source_generation" yaml:"source_generation"`
 	SourceLockSha256           string `json:"source_lock_sha256" yaml:"source_lock_sha256"`
 	SourceActivationGeneration int64  `json:"source_activation_generation" yaml:"source_activation_generation"`
+	WinnerReviewPolicy         string `json:"winner_review_policy,omitempty" yaml:"winner_review_policy,omitempty"`
+	WinnerReviewTimeoutSeconds int    `json:"winner_review_timeout_seconds,omitempty" yaml:"winner_review_timeout_seconds,omitempty"`
 }
 
 // Validates authority references, not economic rules that must be agreed externally.
@@ -81,6 +86,17 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 	if policy.SourceChoiceDelaySeconds < 0 || policy.SourceChoiceDelaySeconds > 86400 || policy.SourceGeneration < 0 || policy.SourceGeneration > 6 || policy.SourceActivationGeneration < 1 ||
 		!competitionAutomationSha256.MatchString(policy.PolicyApprovalSha256) || !competitionAutomationSha256.MatchString(policy.SourceLockSha256) {
 		return errors.New("automation source or policy approval identity is invalid")
+	}
+	if policy.WinnerReviewPolicy == "" {
+		if policy.WinnerReviewTimeoutSeconds != 0 {
+			return errors.New("winner review timeout requires an explicit frozen policy")
+		}
+	} else if policy.WinnerReviewPolicy != CompetitionWinnerReviewPolicy || policy.WinnerReviewTimeoutSeconds < 60 || policy.WinnerReviewTimeoutSeconds > 86400 {
+		return errors.New("winner review requires the supported policy and a bounded timeout")
+	} else if policy.SourceChoiceDelaySeconds != 0 {
+		return errors.New("elected-winner progression cannot use the legacy independent source-choice delay")
+	} else if policy.StagingPreparationSeconds != 0 {
+		return errors.New("elected-winner progression requires readiness rather than a fixed staging delay")
 	}
 	return nil
 }
@@ -338,6 +354,9 @@ type CompetitionIntegrityReviewRequest struct {
 	SupersedesReviewId          *server.Id                 `json:"supersedes_review_id,omitempty"`
 	AppealId                    string                     `json:"appeal_id,omitempty"`
 	ExpectedReplacementJobId    *server.Id                 `json:"expected_replacement_job_id,omitempty"`
+	ExpectedDecisionSha256      string                     `json:"expected_decision_sha256,omitempty"`
+	ReviewerModel               string                     `json:"reviewer_model,omitempty"`
+	ReviewerReasoning           string                     `json:"reviewer_reasoning,omitempty"`
 }
 
 // Review records remain separate even when approval does not change the reward recipient.
@@ -377,6 +396,17 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 	if request.SourceDisposition == "approved" && request.RewardDisposition != "approved" && request.RewardDisposition != "restored" {
 		return errors.New("source approval requires an affirmative integrity review")
 	}
+	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy {
+		if request.ReviewerModel != CompetitionWinnerReviewModel || request.ReviewerReasoning != CompetitionWinnerReviewReasoning || !competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) {
+			return errors.New("winner review requires the elected decision identity and pinned reviewer policy")
+		}
+		if request.SourceDisposition == "rejected" && request.RewardDisposition != "disqualified" || request.RewardDisposition == "disqualified" && request.SourceDisposition != "rejected" {
+			return errors.New("winner rejection must revoke both reward and source eligibility")
+		}
+		if (request.RewardDisposition == "approved" || request.RewardDisposition == "restored") && request.SourceDisposition != "approved" {
+			return errors.New("affirmative winner review must approve the same source")
+		}
+	}
 	allowedReasonKVs := map[string]bool{}
 	for _, code := range []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"} {
 		allowedReasonKVs[code] = true
@@ -396,7 +426,15 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		}
 	}
 	criteriaKVs := map[string]bool{"measurement_integrity": false, "workload_generalization": false, "containment": false, "patch_scope": false, "reproducibility": false, "source_safety": false}
+	failedFinding := false
+	supportedFailure := false
 	for _, finding := range request.Findings {
+		failedFinding = failedFinding || finding.Disposition == "fail"
+		if finding.Disposition == "fail" {
+			for _, reason := range request.ReasonCodes {
+				supportedFailure = supportedFailure || reason == finding.ReasonCode
+			}
+		}
 		seen, ok := criteriaKVs[finding.Criterion]
 		if !ok || seen || !competitionAutomationSha256.MatchString(finding.EvidenceSha256) || finding.Explanation == "" || len(finding.Explanation) > 4096 || !allowedReasonKVs[finding.ReasonCode] {
 			return errors.New("invalid or duplicate structured finding")
@@ -413,6 +451,9 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		if !seen {
 			return errors.New("review is missing a required criterion")
 		}
+	}
+	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy && request.RewardDisposition == "disqualified" && (!failedFinding || !supportedFailure) {
+		return errors.New("elected-winner disqualification requires a failed honesty or safety finding")
 	}
 	return nil
 }
@@ -517,6 +558,8 @@ type CompetitionSourceActivation struct {
 	AbandonedAt               *time.Time                         `json:"abandoned_at,omitempty"`
 	IntentSha256              string                             `json:"intent_sha256"`
 	State                     string                             `json:"state"`
+	WinnerReviewPolicy        string                             `json:"winner_review_policy,omitempty"`
+	WinnerReview              *CompetitionWinnerReviewCheckpoint `json:"winner_review,omitempty"`
 }
 
 // An unpublished failed promotion is retained forever when safe carry-forward replaces it.
@@ -564,15 +607,27 @@ type CompetitionSupervisorLease struct {
 
 // Append-only reconciliation checkpoints describe external work without doing it in a transaction.
 type CompetitionSupervisorTransition struct {
-	TargetEpoch                int        `json:"target_epoch"`
-	Revision                   int        `json:"revision"`
-	ExpectedRevision           int        `json:"expected_revision"`
-	State                      string     `json:"state"`
-	Reason                     string     `json:"reason"`
-	SourceActivationGeneration int64      `json:"source_activation_generation,omitempty"`
-	RoundId                    *server.Id `json:"round_id,omitempty"`
-	UpdatedAt                  time.Time  `json:"updated_at"`
-	SourceChoiceAt             time.Time  `json:"source_choice_at"`
-	PreparationStartedAt       time.Time  `json:"preparation_started_at"`
-	OpensAt                    time.Time  `json:"opens_at"`
+	TargetEpoch                int                                `json:"target_epoch"`
+	Revision                   int                                `json:"revision"`
+	ExpectedRevision           int                                `json:"expected_revision"`
+	State                      string                             `json:"state"`
+	Reason                     string                             `json:"reason"`
+	SourceActivationGeneration int64                              `json:"source_activation_generation,omitempty"`
+	RoundId                    *server.Id                         `json:"round_id,omitempty"`
+	UpdatedAt                  time.Time                          `json:"updated_at"`
+	SourceChoiceAt             time.Time                          `json:"source_choice_at"`
+	PreparationStartedAt       time.Time                          `json:"preparation_started_at"`
+	OpensAt                    time.Time                          `json:"opens_at"`
+	WinnerReview               *CompetitionWinnerReviewCheckpoint `json:"winner_review,omitempty"`
+}
+
+// The elected identity and its original deadline survive restarts and retries.
+// Re-election creates a different checkpoint; pending review never extends one.
+type CompetitionWinnerReviewCheckpoint struct {
+	RoundId              server.Id `json:"round_id"`
+	JobId                server.Id `json:"job_id"`
+	RewardRevision       int       `json:"reward_revision"`
+	RewardDecisionSha256 string    `json:"reward_decision_sha256"`
+	StartedAt            time.Time `json:"started_at"`
+	Deadline             time.Time `json:"deadline"`
 }

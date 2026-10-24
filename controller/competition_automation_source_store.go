@@ -176,6 +176,9 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 	if err := ensureAutomationRoundValidInTx(ctx, tx, predecessorId); err != nil {
 		return err
 	}
+	if err := validateWinnerSourceInTx(ctx, tx, settings, intent, predecessorId); err != nil {
+		return err
+	}
 	switch intent.Kind {
 	case "reviewed_source_carry_forward":
 		if intent.SourceGeneration != current.SourceGeneration || intent.SourceLockSha256 != current.SourceLockSha256 || intent.Threshold != current.Threshold || intent.ThresholdEvidenceSha256 != current.ThresholdEvidenceSha256 || !reflect.DeepEqual(intent.Commits, current.Commits) || intent.ReviewId != nil {
@@ -367,7 +370,7 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 				if self.nowUtc().Before(sourceChoiceAt) || intent.PreparedAt.Before(sourceChoiceAt) || intent.RewardDecisionDigest != rewardDigest {
 					panic(ErrConflict)
 				}
-				if intent.Kind == "reviewed_source_promotion" {
+				if intent.Kind == "reviewed_source_promotion" && intent.WinnerReviewPolicy != model.CompetitionWinnerReviewPolicy {
 					var reviewedAt time.Time
 					server.Raise(tx.QueryRow(ctx, `SELECT created_at FROM competition_integrity_review WHERE review_id=$1`, intent.ReviewId).Scan(&reviewedAt))
 					if sourceChoiceAt.Before(reviewedAt) || intent.BuildReadyAt.IsZero() || sourceChoiceAt.Before(intent.BuildReadyAt) {
@@ -501,6 +504,8 @@ func (self PostgresStore) CurrentSourceActivation(ctx context.Context, settings 
 // Appends an expected-revision checkpoint while preserving every earlier attempt and blockage.
 func (self PostgresStore) RecordSupervisorTransition(ctx context.Context, settings *Settings, lease model.CompetitionSupervisorLease, transition model.CompetitionSupervisorTransition) (result *model.CompetitionSupervisorTransition, err error) {
 	validStateKVs := map[string]bool{"waiting": true, "evaluating": true, "sealing": true, "source_choice": true, "preparing": true, "preparation_blocked": true, "activating": true, "ready": true, "opening": true, "open": true, "complete": true, "incident_hold": true, "source_choice_pending": true, "source_publication_pending": true, "publication_blocked": true, "preparation_pending": true, "preparation_ready": true, "source_active": true, "round_created": true}
+	validStateKVs["winner_review_pending"], validStateKVs["winner_review_blocked"] = true, true
+	validStateKVs["winner_source_blocked"] = true
 	if !validStateKVs[transition.State] || transition.TargetEpoch < 1 || transition.TargetEpoch > 7 || transition.ExpectedRevision < 0 || len(transition.Reason) > 2048 {
 		return nil, ErrConflict
 	}

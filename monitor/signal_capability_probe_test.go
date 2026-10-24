@@ -428,17 +428,17 @@ func TestCapabilityProbeSignalPayloadClockEqualityAndRecovery(t *testing.T) {
 		name   string
 		values map[string]float64
 	}{
-		{name: "pass exactly now", values: map[string]float64{"last_pass": capabilityProbeTestUnix(0), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}},
-		{name: "start exactly now", values: map[string]float64{"oldest_start": capabilityProbeTestUnix(0)}},
-		{name: "no pass in startup grace", values: map[string]float64{"oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
-		{name: "zero pass in startup grace", values: map[string]float64{"last_pass": 0, "oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
+		{name: "pass exactly now", values: map[string]float64{"disabled_running": 0, "last_pass": capabilityProbeTestUnix(0), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}},
+		{name: "start exactly now", values: map[string]float64{"disabled_running": 0, "oldest_start": capabilityProbeTestUnix(0)}},
+		{name: "no pass in startup grace", values: map[string]float64{"disabled_running": 0, "oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
+		{name: "zero pass in startup grace", values: map[string]float64{"disabled_running": 0, "last_pass": 0, "oldest_start": capabilityProbeTestUnix(10 * time.Minute)}},
 	} {
 		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, c.values), nil)
 		if len(alerts) != 0 {
 			t.Errorf("%s: supported clock or startup grace emitted an alert", c.name)
 		}
 	}
-	values := map[string]float64{"last_pass": capabilityProbeTestUnix(-time.Hour), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}
+	values := map[string]float64{"disabled_running": 0, "last_pass": capabilityProbeTestUnix(-time.Hour), "oldest_start": capabilityProbeTestUnix(3 * time.Hour)}
 	alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, nil, capabilityProbeMimirFixture(t, values), nil)
 	if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {
 		t.Fatal("future pass did not establish unknown before correction")
@@ -475,8 +475,9 @@ func TestCapabilityProbeSignalEvaluationClockBoundRemainsIndependent(t *testing.
 		{shift: 5*time.Minute + time.Second, unknown: true},
 	} {
 		response := capabilityProbeMimirFixture(t, map[string]float64{
-			"last_pass":    capabilityProbeTestUnix(time.Minute),
-			"oldest_start": capabilityProbeTestUnix(3 * time.Hour),
+			"disabled_running": 0,
+			"last_pass":        capabilityProbeTestUnix(time.Minute),
+			"oldest_start":     capabilityProbeTestUnix(3 * time.Hour),
 		})
 		response = strings.ReplaceAll(response,
 			"["+strconv.FormatInt(capabilityProbeTestNow.Unix(), 10)+",",

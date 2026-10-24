@@ -58,13 +58,19 @@ Optional environment:
   SIM_LATENCY_WORKER_SHA256        pinned worker launcher digest
   SIM_LATENCY_PREPARE_COMMAND      absolute trusted runtime propagation adapter
   SIM_LATENCY_PREPARE_SHA256       pinned propagation/qualification adapter digest
+  SIM_LATENCY_REVIEW_COMMAND       qualified isolated Sol 6.1 max review broker
+  SIM_LATENCY_REVIEW_SHA256        pinned review broker digest
+  SIM_LATENCY_REVIEWER_TOKEN_FILE  scoped reviewer token, never sent to the broker
+  SIM_LATENCY_BUILD_COMMAND        qualified isolated source-build/test broker
+  SIM_LATENCY_BUILD_SHA256         pinned source-build/test broker digest
 
-V2 supervise uses a durable database lease and checkpoint, independently of
-review. Missing runtime propagation/readiness leaves preparation_blocked. It
+V2 supervise uses a durable database lease and the frozen closing policy.
+The elected-winner policy invokes qualified review/build brokers automatically.
+Missing runtime propagation/readiness leaves preparation_blocked. It
 never calls legacy promote --no-winner for a provisional reward winner.
 
 Exit 20 means a legacy production candidate is waiting for the mandatory honesty and
-safety review documented in RUN-MAIN.md. Staging automatically names the best
+safety review documented in RUN-MAIN.md. Legacy staging automatically names the best
 placeable winner (or no winner) after close and drain, with no takeover margin
 or statistical-significance requirement. Its named winner needs a separate
 manual staging review for Apex approval; staging never promotes source.
@@ -435,7 +441,7 @@ run_season() {
 }
 
 # The v2 process is built/resolved once and reconciles database state. It never
-# rebuilds binaries or waits for a reviewer between epochs.
+# rebuilds binaries per poll. The adopted flow dispatches its bounded reviewer.
 run_supervisor() {
     [[ ${SIM_LATENCY_AUTOMATION_ENABLED:-false} == true ]] ||
         fail "v2 automation is disabled; prospectively approved policy and explicit enablement are required"
@@ -444,6 +450,14 @@ run_supervisor() {
        -n ${SIM_LATENCY_PREPARE_SHA256:-} ]] ||
         fail "v2 requires a supervisor owner and pinned worker/preparation integrations"
     local arguments=()
+    if [[ -n ${SIM_LATENCY_REVIEW_COMMAND:-} ]]; then
+        [[ -n ${SIM_LATENCY_REVIEW_SHA256:-} && -n $reviewer_token_file &&
+           -n ${SIM_LATENCY_BUILD_COMMAND:-} && -n ${SIM_LATENCY_BUILD_SHA256:-} ]] ||
+            fail "automatic winner review requires pinned review/build brokers and a scoped reviewer token"
+        arguments+=(--review-command="$SIM_LATENCY_REVIEW_COMMAND" --review-sha256="$SIM_LATENCY_REVIEW_SHA256"
+            --reviewer-token-file="$reviewer_token_file" --review-api-url="$api_url"
+            --build-command="$SIM_LATENCY_BUILD_COMMAND" --build-sha256="$SIM_LATENCY_BUILD_SHA256")
+    fi
     if [[ ${1:-} == --once ]]; then
         arguments+=(--once)
         shift

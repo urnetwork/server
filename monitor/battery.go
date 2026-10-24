@@ -76,15 +76,47 @@ func (self *batteryLatch) healthy(key string) {
 	delete(self.tripped, key)
 }
 
+// idx_scan per transfer_contract index. Once transfer_contract is partitioned
+// (server/CONTRACT-PARTITION.md) its scans are counted on the leaf indexes, so
+// each leaf's count is added to the partitioned index it belongs to
+// (pg_inherits) and reported under that published name; a plain table's
+// indexes report as before.
+const planWallIndexSnapshotSql = `
+		SELECT 'idx', coalesce(published.relname, index_stats.indexrelname)::text, sum(index_stats.idx_scan)::text, '0'
+		FROM pg_stat_user_indexes index_stats
+		LEFT JOIN pg_inherits inheritance ON inheritance.inhrelid = index_stats.indexrelid
+		LEFT JOIN pg_class published ON published.oid = inheritance.inhparent
+		WHERE index_stats.relname='transfer_contract'
+		   OR index_stats.relid IN (
+		       SELECT tree.relid FROM pg_partition_tree(to_regclass('public.transfer_contract')) tree WHERE tree.isleaf
+		   )
+		GROUP BY 2`
+
+// One plan-wall snapshot: pg_stat_statements counters for the top active
+// query_ids, then planWallIndexSnapshotSql.
+const planWallSnapshotSql = `
+		SELECT 'stmt', s.queryid::text, s.calls::text, round(s.total_exec_time)::text
+		FROM pg_stat_statements s
+		WHERE s.queryid IN (
+			SELECT query_id FROM pg_stat_activity
+			WHERE backend_type='client backend' AND state='active' AND query_id IS NOT NULL
+			GROUP BY query_id ORDER BY count(*) DESC LIMIT 3
+		)
+		UNION ALL` + planWallIndexSnapshotSql + `;
+	`
+
 // planWallBattery is SIGNALS.md 5.8 steps 2–3, the discriminators for a
 // query-plan cpu wall beyond the query_id grouping (which activeBattery
 // already collects):
 //   - a 15s pg_stat_statements counter delta for the top active query_ids
 //     (current per-call mean far above lifetime mean = the step-change tell);
 //   - a 15s idx_scan snapshot delta on transfer_contract (the intended pair
-//     indexes at 0 while one wrong index takes all scans);
+//     indexes at 0 while one wrong index takes all scans), summed over the
+//     partitions per published index once the table is partitioned;
 //   - the pg_stats landmine check on transfer_contract.open (n_distinct=1 /
-//     mcv {v}@1.0 = the 2.3 rare-value poisoning).
+//     mcv {v}@1.0 = the 2.3 rare-value poisoning). A partitioned parent's
+//     pg_stats row is its inherited statistics, sampled across every
+//     partition.
 //
 // Two snapshots are taken 15s apart and diffed here — temp tables are
 // unavailable to a read-only session, and this keeps no backend occupied in
@@ -93,18 +125,7 @@ func (self *batteryLatch) healthy(key string) {
 func planWallBattery(ctx context.Context, env *probeEnv) string {
 	parts := []string{}
 
-	snapSql := `
-		SELECT 'stmt', s.queryid::text, s.calls::text, round(s.total_exec_time)::text
-		FROM pg_stat_statements s
-		WHERE s.queryid IN (
-			SELECT query_id FROM pg_stat_activity
-			WHERE backend_type='client backend' AND state='active' AND query_id IS NOT NULL
-			GROUP BY query_id ORDER BY count(*) DESC LIMIT 3
-		)
-		UNION ALL
-		SELECT 'idx', indexrelname, idx_scan::text, '0'
-		FROM pg_stat_user_indexes WHERE relname='transfer_contract';
-	`
+	snapSql := planWallSnapshotSql
 	type stmtSnap struct {
 		calls   float64
 		totalMs float64

@@ -996,6 +996,7 @@ func (self *TestEnv) runWithSetup(
 					}
 				}
 			}()
+			defer testTxIoAudit(t.Name())()
 			callback(tb)
 			attemptReturned = true
 		}()
@@ -1266,6 +1267,9 @@ cluster: %t`,
 
 	if self.ApplyDbMigrations {
 		ApplyDbMigrations(ctx)
+		if testContractPartitions() {
+			Testing_PartitionContracts(ctx)
+		}
 	}
 
 	if self.Warmup {

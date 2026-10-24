@@ -32,7 +32,7 @@ func (self pointsRollupWorkPlan) producer(name string) (pointsRollupWorkPlan, fl
 		var visit func(pointsRollupWorkPlan) float64
 		visit = func(node pointsRollupWorkPlan) float64 {
 			var rows float64
-			if node.Relation == "transfer_escrow_sweep" {
+			if planContractTable(node.Relation) == "transfer_escrow_sweep" {
 				rows = (node.Rows + node.Filtered + node.Rechecked) * node.Loops
 			}
 			for _, child := range node.Plans {
@@ -58,6 +58,7 @@ func TestPointsBlockRollupQueryWork(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		batchContracts := DefaultPointsBlockRollupSettings().BatchContracts
 		server.Db(ctx, func(conn server.PgConn) {
 			for _, sql := range []string{
 				`CREATE TABLE account_payment(payment_id uuid PRIMARY KEY,create_time timestamp NOT NULL,payment_plan_id uuid,block_rollup_cursor uuid,block_rollup_complete boolean NOT NULL DEFAULT false)`,
@@ -130,7 +131,7 @@ func TestPointsBlockRollupQueryWork(t *testing.T) {
 					server.RaisePgResult(conn.Exec(ctx, `UPDATE account_payment SET block_rollup_cursor=$1,block_rollup_complete=false`, cursor))
 					server.RaisePgResult(conn.Exec(ctx, `TRUNCATE account_payment_block`))
 					var raw []byte
-					query := fmt.Sprintf("EXPLAIN(ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) EXECUTE points_rollup_work(%d,'%s',%d)", pointsBlockRollupBatchContracts, SubnetBlockGenesis.Format(time.DateTime), int64(SubnetBlockDuration/time.Second))
+					query := fmt.Sprintf("EXPLAIN(ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) EXECUTE points_rollup_work(%d,'%s',%d)", batchContracts, SubnetBlockGenesis.Format(time.DateTime), int64(SubnetBlockDuration/time.Second))
 					server.Raise(conn.QueryRow(ctx, query).Scan(&raw))
 					var plans []struct{ Plan pointsRollupWorkPlan }
 					if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
@@ -141,7 +142,7 @@ func TestPointsBlockRollupQueryWork(t *testing.T) {
 					if !batchFound || !paidFound {
 						t.Fatal("missing rollup producer plans")
 					}
-					selected := min(c.remaining, pointsBlockRollupBatchContracts)
+					selected := min(c.remaining, batchContracts)
 					if c.pending {
 						selected = 0
 					}
@@ -164,7 +165,7 @@ func TestPointsBlockRollupQueryWork(t *testing.T) {
 					if selected > 0 {
 						wantCursor = fmt.Sprintf("%032x", (c.prefix+selected-1)*c.stride)
 					}
-					if wantCursor == nil && gotCursor != nil || wantCursor != nil && (gotCursor == nil || server.RequireParseId(*gotCursor) != server.RequireParseId(wantCursor.(string))) || complete != (!c.pending && selected < pointsBlockRollupBatchContracts) {
+					if wantCursor == nil && gotCursor != nil || wantCursor != nil && (gotCursor == nil || server.RequireParseId(*gotCursor) != server.RequireParseId(wantCursor.(string))) || complete != (!c.pending && selected < batchContracts) {
 						t.Fatalf("cursor/completion changed: case=%s mode=%s cursor=%v complete=%t", c.name, mode, gotCursor, complete)
 					}
 					wantBlocks := []int64{}

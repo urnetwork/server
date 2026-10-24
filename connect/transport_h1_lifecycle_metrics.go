@@ -59,11 +59,14 @@ const (
 	connectH1CloseClientLimit
 	connectH1CloseRequestCanceled
 	connectH1CloseHandlerCanceled
+	// a compulsory move's deadline closed the transport (MOVE.md §5.6)
+	connectH1CloseMoved
 )
 
 var connectH1CloseLabels = [...]string{
 	"unclassified", "peer_close", "read_timeout", "read_error", "write_error",
 	"resident_ended", "client_limit", "request_canceled", "handler_canceled",
+	"moved",
 }
 
 type connectH1LifecycleMetrics struct {

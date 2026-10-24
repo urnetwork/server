@@ -118,6 +118,10 @@ func TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence(t *testing.T) {
 			{asyncMaintenanceCase: newAsyncMaintenanceCase(RemoveOldNetworkReliabilityWindow, RemoveOldNetworkReliabilityWindowPost, &RemoveOldNetworkReliabilityWindowArgs{}),
 				seed:   `INSERT INTO network_connection_reliability_window(network_id,bucket_number) VALUES($1,0),($2,900000000000)`,
 				verify: `SELECT count(*)=1 AND bool_and(network_id=$2) FROM network_connection_reliability_window WHERE network_id IN ($1,$2)`},
+			{asyncMaintenanceCase: newAsyncMaintenanceCase(MaintainContractPartitions, MaintainContractPartitionsPost, &MaintainContractPartitionsArgs{}),
+				seed: `INSERT INTO contract_close_report_evidence(client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at)
+					VALUES($1,$1,contract_id_floor('2000-01-01'),'source',1,0,false,'2000-01-01'),($2,$2,$2,'source',1,0,false,'2099-01-01')`,
+				verify: `SELECT count(*)=1 AND bool_and(client_id=$2) FROM contract_close_report_evidence WHERE client_id IN ($1,$2)`},
 			{asyncMaintenanceCase: newAsyncMaintenanceCase(RemoveOldClientReliabilityStats, RemoveOldClientReliabilityStatsPost, &RemoveOldClientReliabilityStatsArgs{}),
 				seed: `INSERT INTO client_reliability(block_number,client_address_hash,network_id,client_id)
 					VALUES(0,'synthetic-old',$1,$1),(900000000000,'synthetic-live',$2,$2)`,

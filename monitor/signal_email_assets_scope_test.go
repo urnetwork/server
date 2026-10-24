@@ -5,7 +5,9 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -48,18 +50,24 @@ func TestEmailAssetsOmittedEdgesDoNotBecomeHealthy(t *testing.T) {
 			if healthyPeer {
 				addresses = append(addresses, "2001:db8:19::200")
 			}
+			var calls atomic.Int32
 			source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+				calls.Add(1)
 				joined := strings.Join(args, " ")
-				if name != "curl" {
-					return "", errors.New("unexpected local command")
+				path := requestedEmailAsset(joined)
+				if name != "curl" || len(args) == 0 || path == "" || args[len(args)-1] != "https://email.example"+path {
+					return "", errors.New("synthetic image request lost command, domain or path")
 				}
 				if strings.Contains(joined, "--resolve") {
-					if strings.Contains(joined, addresses[0]) {
+					if strings.Contains(joined, "email.example:443:["+addresses[0]+"]") {
 						return emailAssetHTTPFixture("000", "28", "", "0", ""), errors.New("synthetic transport failure")
 					}
-					return emailAssetHTTPFixture("200", "0", "image/png", "1024", addresses[1]), nil
+					if healthyPeer && strings.Contains(joined, "email.example:443:["+addresses[1]+"]") {
+						return emailAssetHTTPFixture("200", "0", "image/png", "1024", addresses[1]), nil
+					}
+					return "", errors.New("synthetic image lost exact-address binding")
 				}
-				if requestedEmailAsset(joined) == emailAssets[0].path {
+				if path == emailAssets[0].path {
 					if publicExit == "35" {
 						return emailAssetHTTPFixture("000", "35", "", "0", ""), errors.New("synthetic public transport failure")
 					}
@@ -67,11 +75,34 @@ func TestEmailAssetsOmittedEdgesDoNotBecomeHealthy(t *testing.T) {
 				}
 				return emailAssetHTTPFixture("200", "0", "image/png", "1024", "203.0.113.19"), nil
 			}}
-			alerts, err := NewEmailAssetsSignal().Run(context.Background(), emailAssetSyntheticSettings(source, addresses...))
-			if err != nil || len(alerts) != 1 {
-				t.Fatalf("public exit %s peer %t: alerts=%v err=%v", publicExit, healthyPeer, alerts, err)
+			settings := emailAssetSyntheticSettings(source, addresses...)
+			settings.WebsiteDomain = "email.example"
+			settings.PublicDomain = "public.example"
+			alerts, err := NewEmailAssetsSignal().Run(context.Background(), settings)
+			if err != nil || len(alerts) != 2 {
+				t.Fatalf("public exit %s peer %t: alerts=%d error=%t, want metadata and public findings", publicExit, healthyPeer, len(alerts), err != nil)
 			}
-			markdown := alerts[0].Markdown()
+			expected := len(emailAssets) * (1 + len(addresses))
+			if calls.Load() != int32(expected) {
+				t.Fatalf("public exit %s peer %t: source calls=%d, want %d", publicExit, healthyPeer, calls.Load(), expected)
+			}
+			unknown := requireAlertClass(t, alerts, "cannot-observe")
+			if !isVisibilityAlert(unknown) || unknown.SignalID != "monitor/visibility" || unknown.Target != "email-assets/email.example" || unknown.Sustain != 2 || unknown.Observed != fmt.Sprintf("expected=%d checked=%d unobserved=2", expected, expected-2) {
+				t.Fatalf("public exit %s peer %t: omitted exact-edge authority or coverage changed", publicExit, healthyPeer)
+			}
+			publicClass := "web-email-assets"
+			publicSustain := 1
+			publicVisibility := false
+			if publicExit == "35" {
+				publicClass = "web-email-assets-transport"
+				publicSustain = 2
+				publicVisibility = true
+			}
+			public := requireAlertClass(t, alerts, publicClass)
+			if public.SignalID != "synthetic/web-email-assets" || public.Target != "email.example" || public.Sustain != publicSustain || isVisibilityAlert(public) != publicVisibility {
+				t.Fatalf("public exit %s peer %t: independent public finding changed identity or policy", publicExit, healthyPeer)
+			}
+			markdown := public.Markdown()
 			for _, unsupported := range []string{"Every checked exact edge is healthy", "Every exact edge completed its semantic image check", "image bytes themselves are present and reachable"} {
 				if strings.Contains(markdown, unsupported) {
 					t.Fatalf("public exit %s peer %t: unavailable edges became healthy: %s", publicExit, healthyPeer, markdown)

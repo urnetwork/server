@@ -79,7 +79,7 @@ func TestNetEscrowCreationColdPostWarmsCurrentHistoryOnce(t *testing.T) {
 			// callback reloads the new committed amount and warms that revision.
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=7
-					WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
+					WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, f.balanceId))
 			})
 			beforeReload = testutil.ToFloat64(netEscrowCreationSnapshots.WithLabelValues("reloaded"))
 			for _, post := range delayedPosts {
@@ -193,12 +193,12 @@ func seedCreationWarmMixedHistory(t testing.TB, ctx context.Context, count int) 
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=$2,balance_byte_count=$2 WHERE balance_id=$1`, f.balanceId, count+8))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
 			(contract_id,source_network_id,source_id,destination_network_id,destination_id,payer_network_id,transfer_byte_count,outcome,close_time)
-			SELECT md5($5::uuid::text||'-cache-contract-'||n)::uuid,$1,$2,$3,$4,$1,1,
+			SELECT overlay(md5($5::uuid::text||'-cache-contract-'||n)::uuid::text placing left($5::uuid::text,13) from 1 for 13)::uuid,$1,$2,$3,$4,$1,1,
 				CASE WHEN n%4=0 THEN 'canceled' ELSE NULL END,
 				CASE WHEN n%4=0 THEN now() AT TIME ZONE 'UTC' ELSE NULL END
 			FROM generate_series(1,$6)n`, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.balanceId, count))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved)
-			SELECT md5($1::uuid::text||'-cache-contract-'||n)::uuid,$1,
+			SELECT overlay(md5($1::uuid::text||'-cache-contract-'||n)::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid,$1,
 				CASE WHEN n%4=1 THEN 0 ELSE 1 END,n%4=2
 			FROM generate_series(1,$2)n`, f.balanceId, count))
 		var terminal, zero, redis, open int
@@ -270,11 +270,11 @@ func TestNetEscrowCreationHotHistoryCurrentAndWarmPlans(t *testing.T) {
 							escrowNodes, contractLoops, visitedRows := 0, float64(0), float64(0)
 							var visit func(censusBoundsPlanNode)
 							visit = func(n censusBoundsPlanNode) {
-								if n.Relation == "transfer_escrow" {
+								if planContractTable(n.Relation) == "transfer_escrow" {
 									escrowNodes++
 									visitedRows += (n.Rows + n.Removed) * n.Loops
 								}
-								if n.Relation == "transfer_contract" {
+								if planContractTable(n.Relation) == "transfer_contract" {
 									contractLoops += n.Loops
 								}
 								for _, child := range n.Plans {

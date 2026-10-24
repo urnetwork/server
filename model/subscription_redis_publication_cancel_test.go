@@ -138,11 +138,14 @@ func testRedisPublicPublicationBoundary(t *testing.T, cancelAfterBatch bool) {
 			var readErr error
 			tokens, readErr = client.HGetAll(ctx, redisContractReservationKeys(fixture.balanceId)[1]).Result()
 			server.Raise(readErr)
-			_, readErr = client.ZScore(ctx, redisContractReservationKeys(fixture.balanceId)[4], owner.contractId.String()).Result()
-			if readErr != nil && !errors.Is(readErr, redis.Nil) {
-				server.Raise(readErr)
+			// either the recovery or the pending marker
+			for _, key := range redisContractReservationKeys(fixture.balanceId)[4:6] {
+				_, readErr = client.ZScore(ctx, key, owner.contractId.String()).Result()
+				if readErr != nil && !errors.Is(readErr, redis.Nil) {
+					server.Raise(readErr)
+				}
+				marked = marked || readErr == nil
 			}
-			marked = readErr == nil
 		})
 		t.Logf("joined public result canceled=%t publication_started=%t SQL contract/escrow/journal=%t/%t/%t own_token=%q marked=%t neighbor_token=%q", caller.Err() != nil, publicationStarted, contract, escrow, journal, tokens[owner.contractId.String()], marked, tokens[neighbor.ContractId.String()])
 		if tokens[neighbor.ContractId.String()] != "17" {

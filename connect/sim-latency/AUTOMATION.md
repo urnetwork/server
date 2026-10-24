@@ -6,6 +6,19 @@ or three-hour submission budget. Existing rounds keep their original protocol;
 never convert an admitted round in place. Keep automation disabled until the
 deployment and integration checks below pass.
 
+New seasons may freeze `winner_review_policy: elected_winner_sol61max_v1`.
+Under that adopted policy, publication still precedes review, but the supervisor
+automatically reviews the elected winner with Sol 6.1 max before source choice.
+Rejection publishes reasons and re-elects from the immutable seal; approval
+gates the exact winner's isolated build and runtime qualification. Only no winner
+permits incumbent carry-forward. Missing/expired review and failed readiness
+pause and alert support, never silently approve or substitute another source.
+Successful qualification opens the next full window without the old fixed
+16-hour preparation delay. Epoch six is reviewed before completion.
+This is prospective: empty-policy historical rounds retain the independent
+source/deadline behavior below. See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
+for policy approval, deployment, scoped broker authority and recovery boundaries.
+
 ## What a winner means
 
 After admission closes and **all** admitted jobs are terminal, UR seals the

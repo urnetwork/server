@@ -11,6 +11,14 @@
   "templating": {"list": [{"name": "env", "label": "env", "type": "query", "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "query": "label_values(urnetwork_competition_configured, env)", "refresh": 2, "sort": 1}]},
   "panels": [
     {
+      "id": 8, "type": "stat", "title": "epoch closing requires support",
+      "description": "A review deadline, unavailable reviewer, or winner build/publication/qualification failure blocks progression. Never approve automatically or substitute another source. Escalate to support@ur.xyz.",
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_progression_blocked{env=\"$env\"})", "instant": true}]
+    },
+    {
       "id": 1, "type": "stat", "title": "sealed, awaiting publication",
       "description": "Frozen reveal time still protects these sealed inventories. This is not an early leaderboard.",
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},

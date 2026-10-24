@@ -1,8 +1,10 @@
 # MOVE — server-directed connection placement
 
-Status: **design for review (2026-10-22). Nothing here is implemented.** §9 lists
-the decisions to settle before implementation, each with a recommendation; §10
-lists the open questions. Work through both before any code lands.
+Status: **design complete; decisions settled 2026-10-22 (§9, §10).
+Implementation in progress:** the protocol is on connect main (09d446ee), and
+the settings live in `connect/move_settings.go`. The one input still pending is
+edge-7/8's core counts and interfaces (Q2), which v27 needs but the design does
+not.
 
 The platform tells a connected client "reconnect to this exact edge IP", and the
 client opens the new transport (same hostname, SNI and certificate) before it
@@ -36,11 +38,11 @@ weight. Their share of providers went **up**:
 | 10-22 19:30Z | 16.1% | 17.5% | 32.7% | 33.6% | 66.4% |
 
 That held even though every connect block was drained twice on 10-22, so every
-provider re-resolved. The likely causes are resolver caching, route53 health
-checks, and clients always trying the same first address (sorted per family,
-connect `net_dial_race.go:103-135`). We cannot verify any of them from here (Q1).
-Whatever the cause, DNS influences only new connections, and providers stay
-connected for days.
+provider re-resolved. Q1 found why. Route53 answers do follow the weights, but
+86% of H1 dial attempts still land on edge-3/4. The three largest networks hold
+73% of connections and sit 66–82% on edge-3/4. Placement follows how a few
+large fleets resolve and dial, not our weights. DNS also influences only new
+connections, and providers stay connected for days.
 
 **Imbalance costs the whole platform, not just one host.** Connect uses about
 1.4–1.9 cores per 1k providers. At the 10-22 peak it used 151 cores, while edge-3
@@ -217,8 +219,9 @@ Non-goals:
 - **Choosing the process within a host.** nginx `least_conn` across blocks does
   that.
 - **Controlling DNS weights automatically.**
-- **Latency or geography-aware placement.** All edges are in one facility today;
-  keep the inventory shape open for it (Q8).
+- **Latency or geography-aware placement.** All edges are in one facility
+  today. If locality matters later, it lives in the server's choice of target
+  IP. The client only ever learns an IP (Q8).
 - **Moving clients that reach the platform through an extender or a
   DNS-carried transport** (§5.2).
 
@@ -253,9 +256,9 @@ today's behavior.
 ```proto
 enum ResidentMoveKind {
     // legacy migrate semantics: same name, server-chosen time (drain)
-    ResidentMoveDrain = 0;
-    ResidentMoveAdvisory = 1;
-    ResidentMoveCompulsory = 2;
+    ResidentMoveKindDrain = 0;
+    ResidentMoveKindAdvisory = 1;
+    ResidentMoveKindCompulsory = 2;
 }
 
 message ResidentMoveTarget {
@@ -298,8 +301,8 @@ already visible as an arrival at the target.
 
 ```proto
 enum ResidentMoveOutcome {
-    ResidentMoveDeclined = 0;
-    ResidentMoveFailed = 1;
+    ResidentMoveOutcomeDeclined = 0;
+    ResidentMoveOutcomeFailed = 1;
 }
 
 enum ResidentMoveReason {
@@ -330,16 +333,24 @@ message ResidentMoveResult {
 ```
 
 **Server handling:**
-- The resident's internal client receives the frame, like other
-  client-to-control messages.
-- It is accepted only when `move_id` matches the move this resident sent to
-  this client (the resident keeps the last few move ids). Anything else is
-  dropped and counted.
-- It increments bounded counters (§5.9). A failure also feeds the target
-  breaker (§5.5) and deletes the intent early.
+- Client-to-control frames are handled in `controller.ConnectControlFrames`,
+  wherever the frame lands:
+  - a connect resident (`connect/resident_controller.go`);
+  - api `POST /connect/control`;
+  - the proxy's in-process control (`localclient`);
+  - taskworker egress control.
+
+  So validation cannot use resident memory.
+- A report is accepted only when its `move_id` matches the client's
+  `move_intent_<clientId>` in Redis (§5.3). The intent outlives the client's 60 s
+  connect timeout. Anything else is dropped and counted.
+- An accepted report increments bounded counters (§5.9), deletes the intent (no
+  arrival is coming), and, for a failure, feeds the target breaker (§5.5).
 - Client-driven, so it is never logged at the default level; detail goes to
   V(1).
-- Old servers never see it: the server ships first (§7).
+- Old servers never see it, because the server ships first (§7). That includes
+  the proxy, whose in-process control path must ship in the same server
+  release.
 
 ### 5.2 Client behavior
 
@@ -360,7 +371,8 @@ server/proxy hosted windows and device clients) and to the sdk's
 - `CanMakeBeforeBreakFrom` refuses;
 - a move completed within `MoveClientMinInterval`;
 - this target failed within `MoveTargetFailHold`;
-- (Q3) the app is backgrounded on a metered network.
+- (mobile, D11) the app is backgrounded, or the active network is metered
+  (`MoveDeclineBackgroundOrMetered`).
 
 **Execute:**
 - At `migrate_time`, build the replacement transport with the same URL,
@@ -421,14 +433,25 @@ dialing a forward:
 **At A:**
 - The replaced resident must retire promptly, not after the 75 s refresh poll.
   Until it does, two residents serve one client.
-- Mechanism (Q7, answered): today a live resident learns of replacement only
-  through the 75 s refresh. The process-wide key-event subscriber
-  (`KeyEventDelivery`, on since 2026-07-18) serves network peers and stream
-  hops. Subscribing it to every `ncr_` key would deliver over 1k events a second
-  to every process, from refresh SETs plus new registrations. So B sends A a
-  direct "resident replaced" message over the exchange as it takes over. B
-  already has A's host and ports from `ncr_`. The 75 s refresh stays as the
-  backstop.
+- Mechanism (Q7): today a live resident learns of replacement only through the
+  75 s refresh. The process-wide key-event subscriber (`KeyEventDelivery`, on
+  since 2026-07-18) serves network peers and stream hops. Subscribing it to every
+  `ncr_` key would deliver over 1k events a second to every process, from
+  refresh SETs plus new registrations.
+- Instead, A watches only the moves it started, since it wrote their intents.
+  While a move is outstanding, A re-reads that client's `ncr_` every
+  `MoveIntentPollInterval` (1 s), and again whenever one of the resident's
+  transports closes. It retires the resident as soon as `ncr_` names another
+  resident.
+- This is bounded: balance moves leave at most about 360 outstanding
+  fleet-wide (120/min × the 3 min intent TTL), so about 360 GETs a second in
+  total. The poll stops when the intent expires.
+- Drains do not poll. The draining process closes everything by the deadline,
+  and a taken-over resident there only idles until then.
+- The 75 s refresh stays as the backstop.
+- A direct "resident replaced" exchange message from B would remove the poll.
+  It is left as a later optimization, because it needs a new internal frame and
+  connection path.
 - After retirement, the client's old transport on A re-reads `ncr_` and forwards
   to B until the client closes it.
 
@@ -560,12 +583,17 @@ about the send window + 60 s + the sweep, instead of 15–30 min.
 
 ### 5.8 Settings
 
-All of these have code defaults; there are no globals. Server settings go in a
-new `ExchangeMoveSettings` embedded in `ExchangeSettings`.
+All of these have code defaults; there are no globals. Server settings live in
+`connect/move_settings.go` and are embedded in `ExchangeSettings`:
+`ExchangeMoveSettings` holds the move primitives, and `ExchangeMoverSettings`
+holds the mover. The code switch is the ceiling. The mover's mode is off until
+an operator sets the Redis control, so a deploy alone changes no placement.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `EnableMove` | false | master switch; the Redis control can only narrow it |
+| `EnableMove` | true | ceiling for every move behavior; the Redis control can only narrow it |
+| `EnableDrainMoves` | true | drains send compulsory same-host moves with intents (D13); the Redis control can turn it off |
+| `MoveDefaultMode` | off | the mover's mode while the Redis control is absent: off, dry_run or on |
 | `MoveLoadPublishInterval` | 15s | load record cadence |
 | `MoveLoadStaleTimeout` | 60s | ignore older records |
 | `MoveTickInterval` | 10s | mover cadence |
@@ -577,15 +605,19 @@ new `ExchangeMoveSettings` embedded in `ExchangeSettings`.
 | `MoveSourceMinCpu` | 0 (off) | optional extra source condition |
 | `MoveTargetMaxCpu` | 0.75 | never move onto a busier host |
 | `MoveEmergencyCpu` | 0.95 | emergency shedding threshold |
+| `MoveEmergencyTicks` | 3 | consecutive ticks at the threshold before shedding |
+| `EnableArrivalMoves` | false | arrival-time moves (D9), enabled after idle moves prove out |
 | `MoveIdleTimeout` | 10m | payload-idle requirement |
 | `MoveMinResidentAge` | 10m | skip fresh residents |
 | `MoveClientCooldown` | 6h | per-client minimum time between balance moves |
 | `MoveArrivalTimeout` | 3m | intent TTL |
+| `MoveIntentPollInterval` | 1s | source re-reads `ncr_` for its outstanding moves |
 | `MoveCompulsoryTimeout` | 60s | deadline after `migrate_time` |
 | `MovePreferDuration` | 6h | stickiness sent to the client |
 | `MoveDbWaitPauseThreshold` | 50ms | pause when pool acquire wait exceeds this |
 | `MoveInventoryRefreshInterval` | 5m | reload `services.yml` |
-| `MoveTargetBreakerRatio` | 0.2 | failures ÷ sends to one target IP that opens its breaker (minimum 20 sends) |
+| `MoveTargetBreakerRatio` | 0.2 | failures ÷ sends to one target IP that opens its breaker |
+| `MoveTargetBreakerMinSends` | 20 | minimum sends in the window before the breaker can open |
 | `MoveTargetBreakerTimeout` | 10m | how long an open breaker skips that IP |
 
 Client settings go in the connect repo, in `PlatformTransportSettings` or
@@ -597,6 +629,7 @@ constants move into settings when touched:
 | `EnableMove` | true | honor targeted moves |
 | `MoveTargetFailHold` | 1h | do not retry a failed target |
 | `MoveClientMinInterval` | 30m | client-side floor between advisory moves |
+| `MoveDeclineBackgroundOrMetered` | true | sdk on mobile: decline advisory moves while backgrounded or metered |
 | `MigrateConnectTimeout` | 60s | existing; reused |
 
 ### 5.9 Observability
@@ -655,7 +688,9 @@ moves in and out.
 
 | Concern | Answer |
 |---|---|
-| Two residents serve one client during handoff | Compare-and-set nomination plus prompt retirement at A (§5.3, Q7). The residentId guard already protects stale cleanups. |
+| Two residents serve one client during handoff | Compare-and-set nomination plus retirement at A within about 1 s (§5.3 poll). The residentId guard already protects stale cleanups. |
+| Make-before-break overlap trips the client limit | The concurrent-client limit counts a client once by client id (as CONNECTDRAIN2 established for migration), so the overlap does not. |
+| Result report arrives at a process other than the source | Validated against the Redis intent, not process memory, so any process that runs `ConnectControlFrames` handles it. |
 | Ping-pong between hosts | Hysteresis band, targets strictly below the mean, per-client cooldown, intent arrivals never re-moved. |
 | Herd onto a new or empty host | Per-target arrival cap and target CPU guard. Arrivals are spread by `migrate_time` jitter. |
 | A move lands during DB saturation | DB guard per process, the Redis kill switch, and a low default budget. Moves also reduce saturation by fixing CPU. |
@@ -700,7 +735,9 @@ feasible.
 - stickiness TTL and failure fallback;
 - target-family handling for pinned transports;
 - dedupe by `move_id`;
-- old-field-only frames behave exactly as today.
+- old-field-only frames behave exactly as today;
+- a result report is sent for each decline and failure reason;
+- the mobile background or metered decline (sdk).
 
 **server:**
 - the mover's selection is pure and table-driven over a fake load table: band,
@@ -713,11 +750,19 @@ feasible.
 - compulsory close at the deadline;
 - drain with intents converging without the long tail;
 - excuse consumption on arrival;
-- kill switch and dry run.
+- kill switch and dry run;
+- the source's `ncr_` poll retires a replaced resident within the interval and
+  stops when the intent expires;
+- result reports through each control path (resident, api `/connect/control`,
+  proxy `localclient`), accepted only with a matching intent;
+- the target breaker opens at the ratio and minimum sample, per IP.
 
 **Load:** a move storm against the arrival cap, and a DB-guard pause.
 
-## 9. Decisions to settle
+## 9. Decisions (settled 2026-10-22)
+
+Each decision below keeps the options and reasoning that led to it. Every one
+went as recommended, with the refinements noted.
 
 | # | Decision | Recommendation | Status |
 |---|---|---|---|
@@ -800,7 +845,7 @@ hop.
   resident age ≥ 10 min, not moved in 6 h, a direct carrier, and capable.
 - Providers with an open contract but no payload count as idle: a handoff costs
   them nothing visible.
-- Open: also skip clients with any open contract?
+- **Decided:** an open contract with no recent payload counts as idle.
 
 **D8. Pace and band.**
 - **Recommend:** 120 moves/min fleet-wide (about 0.6% of the providers on a hot
@@ -820,17 +865,18 @@ hop.
 **D10. Stickiness.** Without it, natural reconnects undo moves through DNS.
 - **Recommend:** prefer the target for `prefer_duration` (6 h, server-supplied),
   in memory only, falling back to DNS on any dial failure.
-- Open: should it survive an app restart?
+- **Decided:** memory only, so a restart re-resolves through DNS.
 
 **D11. Advisory decline rules.** The §5.2 list.
-- Open: should mobile clients decline while backgrounded or on a metered
-  network (Q3)?
+- **Decided:** mobile clients also decline advisory moves while backgrounded or
+  on a metered network. Compulsory moves still apply.
 
 **D12. Compulsory semantics.** The deadline is per client: `close_time =
 migrate_time + MoveCompulsoryTimeout` (60 s). Triggers spread `migrate_time`
 over a window. Enforcement is a close with reason "moved" (4006). Legacy
 clients get the legacy migrate plus the close.
-- Open: should N differ per trigger (drain, evacuation, emergency) (Q9)?
+- **Decided:** one `MoveCompulsoryTimeout` (60 s) for every trigger. Triggers
+  that cover many clients spread their send times instead.
 
 **D13. Drains.** Compulsory moves targeting the same host (the new container),
 or use drains to rebalance?
@@ -848,8 +894,8 @@ or use drains to rebalance?
   server/proxy hosted windows (they use the same library).
 - Exclude server probes (capprobe, qualityprobe, egress probe), whose
   measurements a move would disturb.
-- Open: should hosted windows be included (Q5)? They are short-lived and often
-  active.
+- **Decided:** hosted windows are included. They are short-lived and often
+  active, so most of their moves will come from arrival-time moves (D9).
 
 **D16. Excusal.**
 - **Recommend:** every move writes the CONNECTDRAIN2 markers and skips the peer
@@ -888,13 +934,10 @@ or use drains to rebalance?
      cannot.
    - Worth a separate look: those fleets' dial paths, and the client-cancelled
      to accepted handshake ratios (edge-0 1.03, edge-1 1.10, edge-3 1.50,
-     edge-4 1.95), which show heavy dial racing on the hot hosts. Route53 health checks
-   failing on edge-0/1 interfaces would remove them from answers. Client or
-   resolver caching, or address ordering, could pin clients. Worth checking
-   health-check history independently: moves correct placement, but a flapping
-   health check is its own problem.
-2. **Capacity:** cores (96/72), or explicit per-host weights? What are edge-7/8's
-   core counts and interfaces?
+     edge-4 1.95), which show heavy dial racing on the hot hosts.
+2. **Capacity:** decided by D3 and D17: host cores × an optional per-host
+   `move_weight`. **Still pending from the owner:** edge-7/8's core counts and
+   interfaces, for the v27 inventory entry.
 3. **Mobile:** answered by D11: mobile clients decline advisory moves while
    backgrounded or on a metered network.
 4. **Declines:** decided 2026-10-22: clients report declines and failures with
@@ -905,9 +948,10 @@ or use drains to rebalance?
    models `redis_version:8.10.2`, so HEXPIRE (7.4+) is likely available. Confirm
    with `INFO server` before relying on it. The design doesn't depend on it:
    the mover's cleanup handles stale fields.
-7. **Prompt retirement at A:** answered (§5.3). It is not wired today, so add a
-   direct "resident replaced" exchange message from B to A, with the 75 s refresh
-   as the backstop.
+7. **Prompt retirement at A:** answered (§5.3). It is not wired today. The
+   source polls `ncr_` for its own outstanding moves (1 s, bounded), with the
+   75 s refresh as the backstop. A direct exchange message is a later
+   optimization.
 8. **More facilities later:** decided 2026-10-22: no region or locality field.
    The region comes from the target IP the server picks, and the client only
    needs that IP. If locality matters later, it lives in the server's target
@@ -921,8 +965,12 @@ or use drains to rebalance?
   - `ExchangeSettings` gains `ExchangeMoveSettings`;
   - `Drain()` sends compulsory moves and writes intents;
   - `ResidentTransport` takeover by intent (around 3288-3372);
-  - prompt retirement of a replaced resident;
+  - the source's `ncr_` poll for its outstanding moves, and retirement of a
+    replaced resident;
+  - per-resident capability (`resident_move_version`);
   - draining gates for inbound exchange connections.
+- `controller/connect_controller.go`: a `ConnectControlFrames` case for
+  `ResidentMoveResult`, validated against the Redis intent.
 - `connect/transport.go`:
   - capability parse (H1 header, H3 Auth);
   - draining gate in `connectQuic`;
@@ -930,8 +978,11 @@ or use drains to rebalance?
 - New `connect/move.go` (mover loop, eligibility, target choice) and
   `connect/move_load.go` (load publisher, inventory reload).
 - `model/`: move intent (set, get, `GETDEL`), cooldown, `{connect_load}` table,
-  `{connect_move}` budget script and control hash.
+  `{connect_move}` budget script and control hash, and target breaker
+  counters.
 - `monitor/SIGNALS.md`, grafana placement panel.
+- Release: connect, api, taskworker, the proxy (its in-process control path)
+  and alt (its embedded exchange and API) ship the server side together.
 
 **connect** (client library):
 - `protocol/transfer.proto`: `ResidentMigrate` fields, `ResidentMoveKind`,
@@ -948,7 +999,111 @@ or use drains to rebalance?
 **sdk:**
 - `device_local_provider.go`: same handling for providers; fix the H3→H3
   break-before-make path.
+- The mobile background or metered decline (`MoveDeclineBackgroundOrMetered`),
+  wired to the platform's app-state and network-type signals.
 - Ship in android, apple, windows, linux and wasm builds.
 
 **Other consumers:** rebuild with the new library: server/proxy hosted windows,
 the sn miner and validator, and connectctl.
+
+## 12. Implementation notes (2026-10-23)
+
+What landed differs from the sections above in these places. The sections
+above are the design as decided; these notes record what the code does and
+why.
+
+**Where it lives:**
+- connect `main` 9c9f9f42: the client (`resident_move.go`,
+  `transport_move.go`, the dial overrides in `net.go` and
+  `transport_family.go`, the window generator's `MoveClientTransport`).
+- sdk `main` 99758df1: the provider's moves, the H3 migration fix and the
+  mobile decline.
+- server: the primitives (`connect/resident_move.go`,
+  `connect/transport_moved_close.go`, `connect/edge_inventory.go`,
+  `model/resident_move_*.go`, `controller/resident_move_result.go`), the mover
+  (`connect/move*.go`, `model/connect_move_*.go`), and the wiring
+  (`connect/move_exchange.go`, `connect/run.go`).
+
+**Alt (decided during implementation):**
+- H3 and whodis are canonical on alt (connect `EXTENDER.md` L1, L4), and
+  every deployed space derives an alt url. A move redirects only the platform
+  host's edges: a carrier the alt url sends to alt never dials a move's target
+  or a preference. A strict move's replacement parks those carriers, so it
+  arrives at the target over H1, and they dial alt again once the move
+  concludes.
+- A resident on an edge whose client reaches it only through alt is still a
+  candidate. Moving it moves the resident's CPU, and the client's alt
+  carriers then forward to the new resident.
+- Alt names each listener's carrier to the connect handler (plain QUIC is H3,
+  whodis is H3 under dns), so those residents are direct carriers only when
+  they really are.
+- Only the connect service runs the mover and the load publisher. Alt's
+  embedded exchange runs neither, and its hosts carry no `-edge-` name, so
+  they are never targets.
+
+**Load model and mover:**
+- Evacuation: an evacuating host's residents stay in the fleet mean but its
+  capacity does not. With the §5.4 mean as written, a balanced fleet has no
+  host below the mean, so an evacuation could never find a target.
+- The control's tolerance can only widen the band, since a narrower band moves
+  more clients.
+- Emergency moves go only to capable idle clients. A legacy client re-resolves
+  the same name, which §1 shows lands mostly on the hot hosts again.
+- Arrival-time moves (D9) are noted at nomination and sent at the next tick,
+  first within the tick's share. Arrivals by intent are never moved again; an
+  evacuation still moves them.
+- Dry run reserves budget, so its would-send counts show real pacing, but
+  writes no cooldown, intent or frame.
+- New settings: `MoveLoadCleanupTimeout` (10 min) for stale load records and
+  `MoveTargetBreakerWindow` (10 min) for the breaker's send window.
+- `move_weight` is `versions[0].lb.move_weights.<host>`, beside
+  `lb.interfaces`: warp reads every key under `lb.interfaces.<host>` as an
+  interface.
+- A process keys its load record by its inventory host name
+  (`Exchange.MoveHost`), resolved after the inventory's first load, so the
+  table joins the inventory whether `WARP_HOST` carries the domain or not.
+- `providerResidents` counts residents with a transport that declared provide
+  intent. The edge carries the declaration across exchange connections.
+- Payload idleness (D7) is read from the resident's forwards: any forwarded
+  frame is activity. An idle client has no forwards, so it reads as idle.
+- DB guard: the mean acquire wait of the main pool between ticks. A pool with
+  every connection checked out and no acquire completing reads as having
+  waited the whole interval.
+
+**Primitives:**
+- The intent also stores the targets: a failure report names only an IP
+  family, so the intent is where the failed IP is found.
+- The intent lives `MoveArrivalTimeout` past the move's `migrate_time`, not
+  past its write, so a drain client jittered late in the window still finds
+  it.
+- Drain moves do not feed the target breaker: they point clients at the
+  draining host's own addresses, and counting them would open every host's
+  breakers on each deploy.
+- A drain's deadlines are capped at the drain's own, and a drain move replaces
+  any balance move still outstanding on the resident.
+- The drain's switch is the Redis control's `drainMoves`; a drain that cannot
+  read the control keeps the code switches, since its clients must still
+  leave.
+- Probes (capprobe, qualityprobe, the egress probe) open their tunnels through
+  `qualityprobe/providertunnel`, which turns moves off, so no probe declares
+  the capability (D15). Evacuations and drains still reach them as the legacy
+  migrate.
+
+**Client:**
+- The sdk H3→H3 make-before-break fix is not possible as stated: when the
+  memory budget is blocked, connect forbids holding two full H3 working sets.
+  Instead a migration the platform directs never breaks: the old carrier
+  stays, the replacement closes, and the platform closes the old carrier at
+  its own deadline. An advisory move in that state is declined with
+  `MemoryBudget`.
+- Only a failure in the carrier the old transport used holds the target or
+  fails the move, so a target is not blamed for a carrier blocked on the
+  client's own network.
+- One report per move, sent when the move concludes. A compulsory move refused
+  for the memory budget sends none, so the intent stays for the reconnect.
+- The stickiness fallback to the name happens on the next dial attempt.
+- VLESS is a relay like an extender: strict dials skip it, and a move it
+  carries is declined with `ExtenderCarrier`.
+- The sdk's `SetAppBackgrounded` and `SetNetworkMetered` exist on
+  `DeviceLocal`. Until the android and apple apps call them, no device
+  declines for that reason.

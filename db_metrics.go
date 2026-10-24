@@ -59,6 +59,40 @@ func (self *safePgPool) metricSnapshot() (pgPoolMetricSnapshot, bool) {
 	}, true
 }
 
+// One reading of the main pool's acquire counters.
+type DbPoolAcquireStat struct {
+	// successful acquires, cumulative for the current pool generation
+	AcquireCount int64
+	// the total time those acquires waited
+	AcquireDuration time.Duration
+	// connections checked out at the reading, and the pool's maximum
+	AcquiredConns int32
+	MaxConns      int32
+}
+
+// The main pool's acquire counters, or false until the pool opens. A pacing
+// loop compares two readings for the recent mean wait; a pool reset starts the
+// counts again from zero.
+func DbPoolAcquireStats() (DbPoolAcquireStat, bool) {
+	return safePool.acquireStat()
+}
+
+// The pool's acquire counters, or false until it opens. Never opens the pool.
+func (self *safePgPool) acquireStat() (DbPoolAcquireStat, bool) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.pool == nil {
+		return DbPoolAcquireStat{}, false
+	}
+	stats := self.pool.Stat()
+	return DbPoolAcquireStat{
+		AcquireCount:    stats.AcquireCount(),
+		AcquireDuration: stats.AcquireDuration(),
+		AcquiredConns:   stats.AcquiredConns(),
+		MaxConns:        stats.MaxConns(),
+	}, true
+}
+
 // pgPoolMetricsCollector publishes the two finite pool roles.
 type pgPoolMetricsCollector struct {
 	connectionsDesc     *prometheus.Desc

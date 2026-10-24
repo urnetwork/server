@@ -67,9 +67,7 @@ func TestRedisAmbiguousCompensationKeepsActualReplyOwnership(t *testing.T) {
 				stop()
 				var reservationErr error
 				_ = server.HandleError(func() {
-					server.Tx(owned, func(tx server.PgTx) {
-						_, _, reservationErr = selectRedisTransferBalances(owned, tx, owner, clients.payerNetworkId, clients.payerId, 23)
-					}, server.TxReadCommitted, server.OptNoRetry())
+					_, _, reservationErr = selectRedisTransferBalances(owned, owner, nil, clients.payerNetworkId, clients.payerId, 23)
 				})
 				if !hook.hit.Load() || reservationErr == nil || errors.Is(reservationErr, errRedisReservationInsufficient) {
 					t.Fatal("actual reply-loss boundary was not observed", reservationErr)

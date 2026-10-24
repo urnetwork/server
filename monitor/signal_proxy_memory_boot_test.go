@@ -93,13 +93,13 @@ func TestProxyMemorySignalUdpBootMalformedRemainsUnknown(t *testing.T) {
 
 // The collector must discard partial output even if the failed read emitted a UUID.
 func TestProxyMemoryScriptUdpBootReadFailureDiscardsOutput(t *testing.T) {
-	const hostMarker = "printf 'proxy_host 1\\n'\n"
-	start := strings.Index(proxyMemoryScript, hostMarker)
-	end := strings.Index(proxyMemoryScript, "warpctl_path=")
-	if start < 0 || end <= start {
+	const bootMarker = "if ! boot_id=$(tr -d '\\n' < /proc/sys/kernel/random/boot_id 2>/dev/null); then\n"
+	const endMarker = "\nwarpctl_path="
+	start := strings.Index(proxyMemoryScript, bootMarker)
+	end := strings.Index(proxyMemoryScript, endMarker)
+	if strings.Count(proxyMemoryScript, bootMarker) != 1 || strings.Count(proxyMemoryScript, endMarker) != 1 || start < 0 || end <= start {
 		t.Fatal("boot collector fixture could not locate the actual source stanza")
 	}
-	start += len(hostMarker)
 	directory := t.TempDir()
 	bootPath := filepath.Join(directory, "synthetic-boot-id")
 	shimPath := filepath.Join(directory, "tr")
@@ -260,25 +260,25 @@ func TestProxyMemoryObserveUdpBootInvalidBaselineIsDiscarded(t *testing.T) {
 		sample.bootID = bootId
 		sample.udpInDatagrams = 20_000
 		sample.udpRcvbufErrors = 750
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(time.Minute)); valid {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(time.Minute)); valid {
 			t.Fatal("UDP boot baseline authority: invalid cached identity authorized a counter delta")
 		}
 		if _, retained := probe.udpSamples["proxy-1"]; retained {
 			t.Fatal("UDP boot baseline authority: invalid cached identity remained reusable")
 		}
 		sample.bootID = proxyMemoryBootTestId
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(2*time.Minute)); valid {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(2*time.Minute)); valid {
 			t.Fatal("first known boot sample used an invalid cached baseline")
 		}
 		known := probe.udpSamples["proxy-1"]
 		sample.bootID = bootId
-		if _, valid := probe.observeUDP("proxy-1", sample, now.Add(3*time.Minute)); valid || probe.udpSamples["proxy-1"] != known {
+		if _, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(3*time.Minute)); valid || probe.udpSamples["proxy-1"] != known {
 			t.Fatal("invalid current boot replaced or consumed a valid known baseline")
 		}
 		sample.bootID = proxyMemoryBootTestId
 		sample.udpInDatagrams += 20_000
 		sample.udpRcvbufErrors += 500
-		delta, valid := probe.observeUDP("proxy-1", sample, now.Add(4*time.Minute))
+		delta, valid := probe.observeUDP(context.Background(), "proxy-1", sample, now.Add(4*time.Minute))
 		if !valid || delta.elapsed != 2*time.Minute || delta.inDatagrams != 20_000 || delta.rcvbufErrors != 500 {
 			t.Fatal("matching known boot endpoints lost the full authoritative elapsed interval")
 		}

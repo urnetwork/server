@@ -113,7 +113,7 @@ func stCensusPlanTestCounters(t testing.TB, value any) (work stCensusPlanTestWor
 	loops, _ := node["Actual Loops"].(float64)
 	filtered, _ := node["Rows Removed by Filter"].(float64)
 	rechecked, _ := node["Rows Removed by Index Recheck"].(float64)
-	if node["Relation Name"] == "transfer_contract" {
+	if planNodeContractTable(node) == "transfer_contract" {
 		work.ContractRows += (actual + filtered + rechecked) * loops
 	}
 	if node["CTE Name"] == "window_rows" {

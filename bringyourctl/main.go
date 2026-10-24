@@ -133,6 +133,7 @@ Usage:
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
+    bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -165,6 +166,11 @@ Options:
                    client limit and the concurrent connection limit (the defaults
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
+    --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
+                   go to weekly partitions; prepare only.
+    --rollback     Undo the contract partition swap while no weekly
+                   partition holds a row.
+    --abort        Drop a prepared, unfinalized contract partition cutover.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -465,6 +471,8 @@ func main() {
 				modelMigrateProxyDeviceConfig(opts)
 			} else if clientReliabilityPartition, _ := opts.Bool("client-reliability-partition"); clientReliabilityPartition {
 				modelMigrateClientReliabilityPartition(opts)
+			} else if contractPartition, _ := opts.Bool("contract-partition"); contractPartition {
+				modelMigrateContractPartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -604,9 +612,10 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows. The provider payout stats that needed it now read
-// provider_payouts, and migration 816 dropped the column's covering index, so
-// each batch scans the sweep table. It is idempotent and safe to re-run.
+// on existing rows. A db migration adds the column; this command changes no
+// schema. The provider payout stats that needed it now read provider_payouts,
+// and migration 816 dropped the column's covering index, so each batch scans
+// the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -614,9 +623,6 @@ func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	if n, err := opts.Int("--batch"); err == nil && 0 < n {
 		batch = n
 	}
-
-	fmt.Println("Ensuring transfer_escrow_sweep.destination_id exists ...")
-	model.AddSweepDestinationIdColumn(ctx)
 
 	fmt.Printf("Backfilling destination_id in batches of %d ...\n", batch)
 	backfilled := model.BackfillSweepDestinationIds(ctx, batch)
@@ -2725,6 +2731,36 @@ func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
 	if err := model.MigrateClientReliabilityToPartitions(ctx, parallelism, oneshot, dryRun, logf); err != nil {
 		panic(err)
 	}
+}
+
+// Partitions the contract tables by contract id (CONTRACT-PARTITION.md):
+// prepare (with --cutover-week), then --finalize before that week; --rollback
+// and --abort undo. Each step can be rehearsed with --dry-run.
+func modelMigrateContractPartition(opts docopt.Opts) {
+	options, err := contractPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateContractsToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractPartitionMigrateOptions, err error) {
+	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
+		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	return
 }
 
 // Upgrades the partitioned client_reliability secondary index to the desired

@@ -15,20 +15,25 @@ import (
 )
 
 // Commit a real owned admission without its optional recovery page, modeling
-// a successful SQL commit whose caller loses the reply before marker cleanup.
+// a successful SQL commit whose caller dies with the reply before marker
+// cleanup, long enough ago for any recovery page to take the marker over.
 func redisCurrentJoinRetainedContract(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, amount ByteCount) *TransferEscrow {
 	t.Helper()
 	owned := withRedisContractAdmission(ctx)
+	reserved, finish := reserveRedisAdmissionTestBeforeTx(t, owned, f.sourceNetworkId, f.sourceId,
+		f.destinationNetworkId, f.destinationId, f.sourceNetworkId, amount)
 	var result *TransferEscrow
-	server.Tx(owned, func(tx server.PgTx) {
+	server.Tx(reserved, func(tx server.PgTx) {
 		var err error
-		result, _, err = createTransferEscrowInTx(owned, tx, f.sourceNetworkId, f.sourceId,
+		result, _, err = createTransferEscrowInTx(reserved, tx, f.sourceNetworkId, f.sourceId,
 			f.destinationNetworkId, f.destinationId, f.sourceNetworkId, amount, nil)
 		server.Raise(err)
 	}, server.TxReadCommitted, server.OptNoRetry())
+	finish()
 	if result == nil {
 		t.Fatal("retained request did not publish SQL custody")
 	}
+	redisRecoveryAgePendingMarker(t, ctx, f.balanceId, result.ContractId)
 	redisRecoveryRequireMarker(t, ctx, f.balanceId, result.ContractId, true)
 	return result
 }

@@ -343,10 +343,10 @@ func TestRedisShardSubscriptionsSettingsCancellation(t *testing.T) {
 }
 
 // Real Signal.Run observations cross the actual run loop, cadence gate and
-// public notifier. Unknown cannot consume the second complete absence; the
-// unchanged shared gate clears only when that later complete observation arrives.
+// public notifier. Unknown resets the preceding complete absence; the shared
+// gate clears only after two uninterrupted complete observations after the gap.
 func TestRedisShardSubscriptionsUnknownCannotConsumeNotifierRecovery(t *testing.T) {
-	for _, runs := range []int{4, 5} {
+	for _, runs := range []int{4, 5, 6} {
 		var run atomic.Int32
 		settings, _ := redisShardTestSettings(t, func(request redisShardRequest, _ int, output string) (string, error) {
 			if run.Load() > 0 && request.Phase == "counts" {
@@ -368,7 +368,7 @@ func TestRedisShardSubscriptionsUnknownCannotConsumeNotifierRecovery(t *testing.
 		texts := webhook.posted()
 		identity := "redis/shard-subscriptions · redis-shard-subscriber-missing · proxy-1/proxy/g1"
 		wantCleared := 0
-		if runs == 5 {
+		if runs == 6 {
 			wantCleared = 1
 		}
 		if countSlackPosts(texts, "[WARN] raised", identity) != 1 || countSlackPosts(texts, "[CLEARED]", identity) != wantCleared {

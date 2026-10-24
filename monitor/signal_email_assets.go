@@ -1,3 +1,4 @@
+// Required image coverage remains unknown when exact-edge transport is excluded.
 package monitor
 
 import (
@@ -192,8 +193,18 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 		}
 		failures = append(failures, emailAssetEvidence(result, problem))
 	}
+	findings := []finding{}
+	if edgeUnavailable > 0 {
+		unknown := cannotObserveFinding("email-assets/"+domain, fmt.Errorf("required exact-edge email images were not observed"))
+		unknown.mechanism = "Required email images were not observed on every enabled exact edge/path. Transport ownership remains with the edge IPv6 signal; healthy public responses cannot establish exact-edge contract recovery."
+		unknown.observed = fmt.Sprintf("expected=%d checked=%d unobserved=%d", len(results), checked, edgeUnavailable)
+		unknown.action = "Retain prior email-image incidents and independent response/content findings. Use separately owned transport evidence before choosing a repair; do not infer missing images or invalidate a cache from unobserved responses."
+		unknown.verify = "Every required public and enabled exact-edge image returns a complete response that can be classified and validated."
+		unknown.playbook = "SIGNALS.md §19.2 and §18.1"
+		findings = append(findings, unknown)
+	}
 	if len(failures) == 0 {
-		return nil
+		return findings
 	}
 
 	class := "web-email-assets"
@@ -232,7 +243,7 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 		context += fmt.Sprintf(" %d configured exact-edge checks were unavailable before an HTTP response and remain owned by §18.1; their image contents are unknown.", edgeUnavailable)
 	}
 
-	return []finding{{
+	return append(findings, finding{
 		probeId: "synthetic/web-email-assets", tier: tierWarn,
 		class: class, target: domain, sustain: sustain,
 		symptom:   fmt.Sprintf("%s transactional-email images fail on %d public/edge checks", domain, len(failures)),
@@ -244,7 +255,7 @@ func emailAssetFindings(domain string, results []emailAssetResult) []finding {
 		action:    action,
 		verify:    verify,
 		playbook:  "SIGNALS.md §19.2",
-	}}
+	})
 }
 
 func emailAssetProblem(result exactHTTPSResult) (problem, category string) {

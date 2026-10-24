@@ -13,6 +13,9 @@ import (
 
 // Production timing never derives from staging values, even on a staging-named environment.
 func sourcePreparationInterval(intent *model.CompetitionSourceActivation) time.Duration {
+	if intent.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+		return 0
+	}
 	if intent.Staging {
 		return time.Duration(intent.StagingPreparationSeconds) * time.Second
 	}

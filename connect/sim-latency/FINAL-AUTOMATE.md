@@ -1,5 +1,27 @@
 # Automated reward decisions and safe epoch progression
 
+## Adopted amendment — 2026-10-23
+
+The user adopted elected-winner automatic closing, replacing this document's
+original independent-source recommendation for prospectively approved seasons.
+After close/drain and public provisional election, automatically review the
+elected winner with Sol 6.1 max. A substantiated rejection publishes reasons,
+revokes/re-elects from the sealed ranking, and reviews the replacement. An
+approved elected winner is independently built, qualified and promoted before
+the next epoch opens. Carry forward only when no eligible winner remains.
+Unavailable/expired review or failed build/readiness pauses and alerts support;
+it never grants approval or silently substitutes another source. Review epoch
+six before completion. Publication still precedes review, and neither election
+nor review is proof of payment.
+
+The new frozen policy is `elected_winner_sol61max_v1`. Its durable bounded
+review window replaces the old independent source-choice deadline; actual
+successful readiness replaces the old fixed preparation delay. Existing
+policies and historical artifacts retain their original rules. See
+[RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23) for the
+current protocol and deployment gates. The original design below is retained
+as historical rationale, not the new policy's source-selection instructions.
+
 Design and implementation requirements, 2026-10-16. The implementation remains
 opt-in and disabled by default. This document is not approval of new reward
 policy or authorization to deploy. The repository-state comparisons below

@@ -378,8 +378,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
 		providerWorkSessionCustodyPredicates(
 			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+	// 857 replaces the evidence guard body and republishes the rest.
 	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
-		contractCloseEvidenceChainWithoutContractIndexArtifactQuery),
+		contractCloseEvidenceChainWithoutContractIndexArtifactQuery).removedAt(857),
 	migrationCurrentSuffix(826, "unread completed waiting probe index removed",
 		migrationIndexRemoved("provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting")),
 	migrationCurrentSuffix(827, "unread slot completed waiting probe index removed",
@@ -582,8 +583,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
  AND i.indisvalid AND i.indisready
  AND pg_get_indexdef(i.indexrelid)='CREATE UNIQUE INDEX network_user_auth_wallet_pkey ON public.network_user_auth_wallet USING btree (user_id, blockchain)'
  AND i.indexprs IS NULL AND i.indpred IS NULL)`),
-	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery),
-	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery),
+	// 855 replaces the source authorization and round insert bodies and
+	// republishes both custodies.
+	migrationCurrentSuffix(850, "staging source graph of ten repositories", competitionMigration850ArtifactQuery).removedAt(855),
+	migrationCurrentSuffix(851, "exact competition runtime-blob capability guard", competitionMigration851ArtifactQuery).removedAt(855),
 	migrationCurrentSuffix(852, "device last-connected app version columns",
 		snMainnetMigrationColumns("device",
 			snMainnetMigrationColumn{name: "client_version", kind: "character varying(64)"},
@@ -689,6 +692,10 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(854, "optional client-key history registration copy",
 		snMainnetMigrationColumns("st_client_key_history",
 			snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
+	migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery),
+	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
+	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
+		contractCloseEvidenceRetentionArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
@@ -715,9 +722,11 @@ func migrationIndexRemoved(table, name string) string {
 
 // The 814 guard fires only for payment_id changes, so tgattr names that column
 // rather than being empty like the other row triggers in this suffix.
-const paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
+// Partitioned, every partition's clone of the guard is pinned too.
+var paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
  WHERE t.tgrelid=to_regclass('public.transfer_escrow_sweep') AND t.tgname='payment_plan_sweep_owner_guard'
  AND t.tgfoid=to_regprocedure('public.payment_plan_sweep_owner_guard()') AND NOT t.tgisinternal
  AND t.tgenabled IN ('O','A') AND t.tgtype=19 AND t.tgqual IS NULL AND t.tgnargs=0
  AND t.tgattr=(SELECT a.attnum::text::int2vector FROM pg_attribute a
-  WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))`
+  WHERE a.attrelid=to_regclass('public.transfer_escrow_sweep') AND a.attname='payment_id'))
+ AND ` + migrationContractLeafTriggers("transfer_escrow_sweep", "payment_plan_sweep_owner_guard")

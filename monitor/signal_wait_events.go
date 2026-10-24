@@ -82,7 +82,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism = "REINDEX CONCURRENTLY is waiting while PostgreSQL extends the replacement relation on disk. For a very large, high-churn table this makes the maintenance selection itself the load owner; a simultaneous WALInsert/WALWrite cluster is downstream write pressure, not an independent PgBouncer failure."
 			action = "Identify the relation in pg_stat_progress_create_index and check reindex-debris before changing PostgreSQL or PgBouncer. Let the protected in-progress operation reach its configured outcome; prevent the next recurrence by skipping any table too large for the two-hour full-table policy and by cleaning incomplete indexes immediately around every future rebuild."
 			contextDetail += " A DataFileExtend wait proves active file growth but not stale debris; the independent reindex-debris catalog probe supplies that discriminator."
-			if strings.Contains(strings.ToLower(row.str(4)), "transfer_escrow") {
+			if transferEscrowWholeTableReindexQuery(row.str(4)) {
 				mechanism = "The daily maintenance task selected the very large, high-churn transfer_escrow table for a full REINDEX TABLE CONCURRENTLY and is waiting while PostgreSQL extends its replacement relation. That rebuild drives clustered WAL and storage work into unrelated service queries; PgBouncer only exposes the resulting queueing."
 				action = "Do not interrupt the protected in-progress transfer_escrow rebuild. Deploy the taskworker maintenance revision that excludes transfer_escrow from full-table reindex and cleans incomplete indexes before and after each selected object; after the protected operation ends, handle any reindex-debris alert under an explicitly authorized maintenance window."
 			}
@@ -108,6 +108,22 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		findings = append(findings, healthyFinding("pg/wait-events", tierWarn, "wait-event-cluster", target))
 	}
 	return findings, nil
+}
+
+// Whether the sampled statement rebuilds transfer_escrow as a whole: a REINDEX
+// TABLE of the plain table or, after the contract partition cutover, of its
+// legacy partition. A REINDEX INDEX is the bounded rebuild of one priority
+// index, or of one partition's leaf of it, and a weekly partition is one week
+// of rows.
+func transferEscrowWholeTableReindexQuery(sample string) bool {
+	// the sample may carry a trailing comment after the relation
+	fields := strings.Fields(strings.ToLower(sample))
+	if len(fields) < 4 || fields[0] != "reindex" || fields[1] != "table" || fields[2] != "concurrently" {
+		return false
+	}
+	relation := strings.ReplaceAll(strings.TrimSuffix(fields[3], ";"), `"`, "")
+	relation = strings.TrimPrefix(relation, "public.")
+	return relation == "transfer_escrow" || relation == "transfer_escrow_legacy"
 }
 
 func waitEventMeaning(wait string) string {

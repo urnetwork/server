@@ -409,8 +409,14 @@ type SignalSettings struct {
 	// from a deployment that legitimately finalized epoch zero.
 	STDeploymentKey string
 
+	// Reviewed §22.1--§22.5 read scope with the sn.yml deployment identity.
+	SubnetCorrectness *SubnetCorrectnessSettings
 	// Independently enrolled historical payout objects; missing inputs stay unknown.
 	SubnetArtifacts *SubnetArtifactSettings
+	// Subnet family read budgets and optional enrollment (SIGNALS.md §22.6-§22.9).
+	SubnetReplay *SubnetReplaySettings
+	// Reviewed public deployment identity from Config sn.yml; never rendered.
+	SubnetDeployment *SubnetReplayPin
 
 	// ContractDegradationConfig is strict desired degraded.yml authority,
 	// separate from deployed consumer configuration and its cached decisions.
@@ -423,9 +429,13 @@ type SignalSettings struct {
 
 	Hosts []HostSettings
 	// Routers are explicitly enrolled read-only targets, never Linux hosts.
-	Routers       []RouterSettings
-	PublicUdp     PublicUdpSettings
-	disabledHosts []HostSettings
+	Routers   []RouterSettings
+	PublicUdp PublicUdpSettings
+	// ObserverOverlay is the operator's contract for the monitor host's own
+	// route to inventory overlay addresses (SIGNALS.md §1.7). Empty leaves
+	// overlay route attribution explicitly unknown.
+	ObserverOverlay ObserverOverlaySettings
+	disabledHosts   []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
@@ -454,6 +464,9 @@ type SignalSettings struct {
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
 	SettingsGenerationCheck SettingsGenerationCheck
+	// Private process-only witness; only the scheduled freshness callback uses
+	// it. It is excluded from complete desired-settings equality.
+	settingsGenerationWitness *settingsGenerationWitness
 	// Optional per-execution coverage sink, including healthy and unavailable
 	// observations. The callback must return promptly; errors remain visible.
 	UrlProbeCoverageObserver func(UrlProbeCoverageObservation) error
@@ -504,9 +517,13 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 
 func (s SignalSettings) withDefaults() SignalSettings {
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
+	s.SubnetCorrectness = cloneSubnetCorrectnessSettings(s.SubnetCorrectness)
 	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
+	s.SubnetReplay = cloneSubnetReplaySettings(s.SubnetReplay)
+	s.SubnetDeployment = cloneSubnetReplayPin(s.SubnetDeployment)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
+	s.ObserverOverlay = cloneObserverOverlaySettings(s.ObserverOverlay)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -729,7 +746,10 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		verificationEnabled:       settings.VerificationEnabled,
 		stConfigStatus:            settings.STConfigStatus.normalized(),
 		stDeploymentKey:           settings.STDeploymentKey,
+		subnetCorrectness:         cloneSubnetCorrectnessSettings(settings.SubnetCorrectness),
 		subnetArtifacts:           cloneSubnetArtifactSettings(settings.SubnetArtifacts),
+		subnetReplay:              effectiveSubnetReplaySettings(settings.SubnetReplay),
+		subnetReplayPin:           cloneSubnetReplayPin(settings.SubnetDeployment),
 		contractDegradationConfig: settings.ContractDegradationConfig.normalized(),
 		sshUser:                   settings.SSHUser,
 		sshDevUser:                settings.SSHDevUser,
@@ -754,6 +774,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgQuerySampleUntil:        settings.PGQuerySampleUntil,
 		pgQuerySampleContinuous:   settings.PGQuerySampleContinuous,
 		publicUdp:                 clonePublicUdpSettings(settings.PublicUdp),
+		observerOverlay:           cloneObserverOverlaySettings(settings.ObserverOverlay),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,
@@ -764,9 +785,13 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	}
 	if settings.SettingsGenerationCheck != nil {
 		startup := settings
+		startup.SubnetCorrectness = cloneSubnetCorrectnessSettings(settings.SubnetCorrectness)
 		startup.SubnetArtifacts = cloneSubnetArtifactSettings(settings.SubnetArtifacts)
+		startup.SubnetReplay = cloneSubnetReplaySettings(settings.SubnetReplay)
+		startup.SubnetDeployment = cloneSubnetReplayPin(settings.SubnetDeployment)
 		startup.Routers = cloneRouterSettings(settings.Routers)
 		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)
+		startup.ObserverOverlay = cloneObserverOverlaySettings(settings.ObserverOverlay)
 		cfg.routerGenerationCheck = func(ctx context.Context) (bool, error) {
 			return startup.SettingsGenerationCheck(ctx, startup)
 		}
@@ -928,6 +953,9 @@ func (r *sourceRunner) shell(ctx context.Context, h *host, command string) (stri
 
 func (r *sourceRunner) sshTimeout(ctx context.Context, h *host, command string, stdin string, timeout time.Duration) (string, error) {
 	if stdin != "" {
+		if withStdin, ok := r.source.(HostStdinSignalSource); ok {
+			return withStdin.HostStdin(ctx, hostSettingsFromHost(h), command, stdin, timeout)
+		}
 		return "", fmt.Errorf("monitor: synthetic SignalSource cannot provide host stdin")
 	}
 	if timed, ok := r.source.(TimedSignalSource); ok {

@@ -44,6 +44,10 @@ func TestMigrationsSourceGraphHistoricalAuthorityCustody(t *testing.T) {
 	}
 }
 
+// 855 retires the 850 and 851 custodies and republishes their functions, so
+// at head it owns their faults.
+const competitionWinnerReviewOwner = "elected-winner review and successor source guards@v855"
+
 // Numeric head, matching names, old legitimate bodies and unchanged source
 // functions cannot substitute for the exact published successor graph.
 func TestMigrationsSourceGraphSchemaFaultsReachSignal(t *testing.T) {
@@ -52,11 +56,11 @@ func TestMigrationsSourceGraphSchemaFaultsReachSignal(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{name: "legacy source mode restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_mode(intent jsonb) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceModeBody + `$regression$`, want: "staging source graph of ten repositories@v850"},
-		{name: "legacy source authority restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_authorized(intent jsonb, env text, competition text, season text) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceAuthorizedBody + `$regression$`, want: "staging source graph of ten repositories@v850"},
-		{name: "graph validator always accepts", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: "staging source graph of ten repositories@v850"},
-		{name: "graph security privilege changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) SECURITY DEFINER`, want: "staging source graph of ten repositories@v850"},
-		{name: "graph volatility changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) VOLATILE`, want: "staging source graph of ten repositories@v850"},
+		{name: "legacy source mode restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_mode(intent jsonb) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceModeBody + `$regression$`, want: competitionWinnerReviewOwner},
+		{name: "legacy source authority restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_authorized(intent jsonb, env text, competition text, season text) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceAuthorizedBody + `$regression$`, want: competitionWinnerReviewOwner},
+		{name: "graph validator always accepts", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: competitionWinnerReviewOwner},
+		{name: "graph security privilege changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) SECURITY DEFINER`, want: competitionWinnerReviewOwner},
+		{name: "graph volatility changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) VOLATILE`, want: competitionWinnerReviewOwner},
 		{name: "retained seal guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_seal_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`, want: "isolated automation staging and current lifecycle guards@v847"},
 		{name: "retained staging index removed", sql: `DROP INDEX competition_round_v2_staging_epoch`, want: "isolated automation staging and current lifecycle guards@v847"},
 	}

@@ -360,7 +360,9 @@ consecutive complete runs of every signal that reported it in which nothing
 observed it. An alert the gate holds below its Sustain, as it does for the
 first runs after a one-run dip, is still observed. A run is incomplete, and
 clears nothing, when it failed or carries an unobservable alert, gated or
-held. Every signal's unknown state is unobservable: `alert_classes.go`
+held. It also resets that signal's accumulated absence streak; complete
+observations separated by an incomplete run are not consecutive. Other
+signals' recovery streaks are unchanged. Every signal's unknown state is unobservable: `alert_classes.go`
 classifies every alert class the monitor emits as visibility, an unknown
 state reported in place of an incident (`cannot-observe`, every
 `*-unobservable`, `pg-cpu-unavailable`, `host-metrics-missing`, the

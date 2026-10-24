@@ -142,6 +142,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
+		work.ScheduleMaintainContractPartitions(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientDataUsage(clientSession, tx)
 		// seeded only while degraded.yml enables the contract degradation valve
@@ -497,6 +498,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,
 			work.RemoveOldClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MaintainContractPartitions,
+			work.MaintainContractPartitionsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RollupClientReliabilityStats,

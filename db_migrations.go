@@ -43,6 +43,9 @@ type OnlineSqlMigration struct {
 	sql         string
 	auditSql    string
 	completion  *onlineIndexMigrationCompletion
+	// an index on a contract table, built per partition once the table is
+	// partitioned (newContractIndexMigration)
+	contractIndex *contractIndexMigration
 }
 
 func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
@@ -10705,4 +10708,16 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE st_client_key_history ALTER COLUMN registration DROP NOT NULL;
 	`),
+
+	// Prospectively bind automatic closing reviews and source to the elected winner.
+	newSqlMigration(competitionWinnerReviewMigration()),
+
+	// The smallest contract id of a millisecond (CONTRACT-PARTITION.md;
+	// see contractIdFloorSql).
+	newSqlMigration(contractIdFloorSql),
+
+	// Close evidence retention (CONTRACT-PARTITION.md): the evidence guard
+	// admits deleting a row older than the 13-week contract horizon from a
+	// transaction that opts in. Update, truncate and newer rows stay refused.
+	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
 }

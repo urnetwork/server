@@ -42,7 +42,29 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 		return scopeAlerts, nil
 	}
 
+	started := time.Now()
 	current, err := settings.SettingsGenerationCheck(ctx, settings)
+	completed := time.Now()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if witness := settings.settingsGenerationWitness; witness != nil {
+		if witness.observe(ctx, settings, started, completed, current, err) != nil {
+			scopeAlerts = append(scopeAlerts, Alert{
+				SignalNumber: s.Number(), SignalKey: s.Key(), SignalID: s.ID(), SignalName: s.Name(),
+				Severity: SeverityWarn, Class: "cannot-observe", Target: "monitor-settings/witness",
+				Environment: settings.Environment, ObservedAt: settings.Now(), Sustain: 1, unobservable: true,
+				Symptom:   "The optional local settings-generation witness is unavailable.",
+				Mechanism: "The private writer could not establish its startup association or complete a bounded record. The actual freshness callback result remains independent.",
+				Baseline:  "Each existing freshness invocation retains a complete fixed-schema witness bound to this process and startup settings.",
+				Observed:  "settings_witness_available=false",
+				Evidence:  "Only fixed status is exposed; paths, settings, credentials and writer errors are discarded.",
+				Action:    "Preserve the failed private output and qualify a fresh destination through the controlled watcher workflow. Do not infer equality from missing records or retry this stream in place.",
+				Verify:    "A separately qualified watcher retains a complete same-process callback witness; the original freshness and ingestion incident requirements still apply.",
+				Playbook:  "SIGNALS.md §1.6",
+			})
+		}
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -128,6 +150,7 @@ func NewSettingsGenerationCheck(load SignalSettingsLoader) SettingsGenerationChe
 func comparableSignalSettings(settings SignalSettings) SignalSettings {
 	settings = settings.withDefaults()
 	settings.SettingsGenerationCheck = nil
+	settings.settingsGenerationWitness = nil
 	settings.UrlProbeCoverageObserver = nil
 	settings.ProviderSelectionObserver = nil
 	settings.Source = nil

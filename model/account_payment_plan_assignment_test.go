@@ -6,6 +6,8 @@ package model
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,8 +117,20 @@ func TestPaymentPlanAssignmentResumesFromCommittedBatches(t *testing.T) {
 		if err != nil || !pending {
 			t.Fatal("partially assigned plan is payable", pending, err)
 		}
-		// the weekly points rollup waits for the payment's remaining sweeps
-		if _, err := AdvancePointsBlockRollup(ctx); err != nil {
+		// the plan stored the payment's blocks with its points, from every
+		// sweep it selected, including those the remaining batches assign
+		planBlocks := paymentPlanBlocks(t, ctx, state.paymentIds[0])
+		if !paymentPlanBlockRollupComplete(t, ctx, state.paymentIds[0]) || len(planBlocks) == 0 ||
+			!slices.Equal(planBlocks, paymentPlanPaidSweepBlocks(t, ctx, cohort.destinationNetworkId)) {
+			t.Fatal("plan did not store its payment's blocks", planBlocks)
+		}
+		// a payment an earlier planner left to the history rollup waits for
+		// its plan's remaining sweeps
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM account_payment_block WHERE payment_id=$1`, state.paymentIds[0]))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET block_rollup_complete=false WHERE payment_id=$1`, state.paymentIds[0]))
+		})
+		if _, err := AdvancePointsBlockRollup(ctx, DefaultPointsBlockRollupSettings()); err != nil {
 			t.Fatal(err)
 		}
 		if paymentPlanBlockRollupComplete(t, ctx, state.paymentIds[0]) {
@@ -146,11 +160,15 @@ func TestPaymentPlanAssignmentResumesFromCommittedBatches(t *testing.T) {
 		if err != nil || pending {
 			t.Fatal("completed plan is not payable", pending, err)
 		}
-		if _, err := AdvancePointsBlockRollup(ctx); err != nil {
+		if _, err := AdvancePointsBlockRollup(ctx, DefaultPointsBlockRollupSettings()); err != nil {
 			t.Fatal(err)
 		}
 		if !paymentPlanBlockRollupComplete(t, ctx, state.paymentIds[0]) {
 			t.Fatal("points rollup skipped a payment that owns all of its sweeps")
+		}
+		// the history rollup finds the blocks the plan stored
+		if rolledUp := paymentPlanBlocks(t, ctx, state.paymentIds[0]); !slices.Equal(rolledUp, planBlocks) {
+			t.Fatalf("plan and history rollup disagree: plan=%v rollup=%v", planBlocks, rolledUp)
 		}
 	})
 }
@@ -161,6 +179,42 @@ func paymentPlanBlockRollupComplete(t testing.TB, ctx context.Context, paymentId
 		server.Raise(conn.QueryRow(ctx, `SELECT block_rollup_complete FROM account_payment WHERE payment_id=$1`, paymentId).Scan(&complete))
 	})
 	return
+}
+
+// The payment's stored operator blocks, ascending.
+func paymentPlanBlocks(t testing.TB, ctx context.Context, paymentId server.Id) (blocks []int64) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT block_number FROM account_payment_block WHERE payment_id=$1 ORDER BY block_number`, paymentId)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var block int64
+				server.Raise(result.Scan(&block))
+				blocks = append(blocks, block)
+			}
+		})
+	})
+	return
+}
+
+// The operator blocks of the network's sweeps with payout bytes, ascending,
+// by the Go block clock.
+func paymentPlanPaidSweepBlocks(t testing.TB, ctx context.Context, networkId server.Id) []int64 {
+	t.Helper()
+	blocks := map[int64]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT sweep_time FROM transfer_escrow_sweep WHERE network_id=$1 AND 0 < payout_byte_count`, networkId)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var sweepTime time.Time
+				server.Raise(result.Scan(&sweepTime))
+				if !sweepTime.Before(SubnetBlockGenesis) {
+					blocks[int64(SubnetBlockNumber(sweepTime))] = true
+				}
+			}
+		})
+	})
+	return slices.Sorted(maps.Keys(blocks))
 }
 
 func TestPaymentPlanPendingAssignmentHoldsPaymentsAndSweeps(t *testing.T) {

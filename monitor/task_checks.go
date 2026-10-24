@@ -174,6 +174,71 @@ var reliabilityTaskDiagnosticQuery = `
 	CROSS JOIN classification_guard g;
 `
 
+// The published (partitioned) index of the index a REINDEX CONCURRENTLY
+// reports, or empty for an index of a plain table. On a partitioned contract
+// table maintenance rebuilds one leaf index at a time, and in its build and
+// validate phases the progress row names the leaf's transient _ccnew copy,
+// which no partitioned index owns yet. The copy is mapped to the leaf index it
+// copies on the same relation by an identical definition, as the server's
+// debris cleanup pairs them; a contract leaf carries one index per
+// definition, since the cutover refuses duplicate definitions. The leaf then
+// names its partitioned parent through pg_inherits.
+func dbMaintenancePublishedIndexSql(indexRelid string) string {
+	return `coalesce((
+	           SELECT published.relname::text
+	           FROM pg_index in_progress
+	           JOIN pg_index original ON original.indrelid = in_progress.indrelid
+	             AND (original.indexrelid = in_progress.indexrelid OR (
+	                 original.indkey::text = in_progress.indkey::text
+	                 AND original.indclass::text = in_progress.indclass::text
+	                 AND original.indcollation::text = in_progress.indcollation::text
+	                 AND original.indoption::text = in_progress.indoption::text
+	                 AND original.indisunique = in_progress.indisunique
+	                 AND pg_get_expr(original.indexprs, original.indrelid) IS NOT DISTINCT FROM pg_get_expr(in_progress.indexprs, in_progress.indrelid)
+	                 AND pg_get_expr(original.indpred, original.indrelid) IS NOT DISTINCT FROM pg_get_expr(in_progress.indpred, in_progress.indrelid)))
+	           JOIN pg_inherits inheritance ON inheritance.inhrelid = original.indexrelid
+	           JOIN pg_class published ON published.oid = inheritance.inhparent
+	           WHERE in_progress.indexrelid = ` + indexRelid + `
+	           ORDER BY original.indexrelid = in_progress.indexrelid DESC, published.relname
+	           LIMIT 1
+	       ), '')`
+}
+
+// One REINDEX CONCURRENTLY progress row as the overdue diagnosis reads it.
+type dbMaintenanceRebuild struct {
+	relation string
+	// the contract table of a contract partition, otherwise the relation
+	table string
+	// the contract partition rebuilt, if the relation is one
+	partition string
+	legacy    bool
+	index     string
+	// the partitioned index whose leaf is rebuilt, if any
+	publishedIndex string
+}
+
+func classifyDbMaintenanceRebuild(relation, index, publishedIndex string) dbMaintenanceRebuild {
+	rebuild := dbMaintenanceRebuild{relation: relation, table: relation, index: index, publishedIndex: publishedIndex}
+	if table, _, legacy, ok := server.ParseContractPartitionName(relation); ok {
+		rebuild.table, rebuild.partition, rebuild.legacy = table, relation, legacy
+	}
+	return rebuild
+}
+
+// A rebuild of one priority index, or of a leaf of one, is the bounded
+// bloat-triggered kind.
+func (self dbMaintenanceRebuild) priority() bool {
+	return server.IsDbMaintenancePriorityIndex(self.index) ||
+		self.publishedIndex != "" && server.IsDbMaintenancePriorityIndex(self.publishedIndex)
+}
+
+// Whether the row is a whole-table rebuild of table: of the plain table, or of
+// its legacy partition, which holds the table's history. A weekly partition is
+// one week of rows, not the relation the whole-table guidance is about.
+func (self dbMaintenanceRebuild) wholeTable(table string) bool {
+	return strings.EqualFold(self.table, table) && (self.partition == "" || self.legacy) && !self.priority()
+}
+
 // dbMaintenanceProgressQuery keeps the blocker evidence structural. Backend
 // PIDs and SQL text are volatile, can contain identifiers, and are unnecessary
 // once the shared reliability classifier names the causal phase.
@@ -193,7 +258,8 @@ var dbMaintenanceProgressQuery = `
 	       coalesce(blocker.wait_event,'-'),
 	       coalesce(blocker.holds_snapshot,false)::text,
 	       p.blocks_done,
-	       p.blocks_total
+	       p.blocks_total,
+	       ` + dbMaintenancePublishedIndexSql("p.index_relid") + `
 	FROM pg_stat_progress_create_index p
 	JOIN pg_stat_activity a USING (pid)
 	LEFT JOIN LATERAL (
@@ -889,12 +955,18 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				dbMaintenanceEvidence.str(12), dbMaintenanceEvidence.str(13), dbMaintenanceEvidence.str(14),
 				dbMaintenanceEvidence.str(15),
 			)
+			maintenance := classifyDbMaintenanceRebuild(dbMaintenanceEvidence.str(0), dbMaintenanceEvidence.str(1), dbMaintenanceEvidence.str(16))
+			if maintenance.partition != "" {
+				alert.evidence += fmt.Sprintf(" table=%s published_index=%s", maintenance.table, maintenance.publishedIndex)
+			}
 			// A bloat-triggered rebuild of one transfer_escrow partial index is
 			// routine; only a rebuild of another index is the whole-table one.
-			if strings.EqualFold(dbMaintenanceEvidence.str(0), "transfer_escrow") &&
-				!server.IsDbMaintenancePriorityIndex(dbMaintenanceEvidence.str(1)) {
+			if maintenance.wholeTable("transfer_escrow") {
 				alert.mechanism = "The daily table rotation selected transfer_escrow for REINDEX TABLE CONCURRENTLY even though this is a very large, high-churn relation whose full rebuild cannot reliably fit the two-hour per-object policy. Extending the replacement relation and generating its WAL can saturate PostgreSQL long enough for Connect logins and unrelated tasks to time out; repeated interrupted attempts can leave numbered _ccnew debris."
 				alert.context += " The live progress row identifies the current bounded operation; reindex-debris independently identifies residue from earlier attempts. PgBouncer timeout symptoms are downstream queueing, not evidence that the pooler initiated the load."
+				if maintenance.partition != "" {
+					alert.context += " The rebuild is on " + maintenance.partition + ", the legacy partition that holds every escrow from before the contract partition cutover; the partition-aware rotation never selects a contract partition."
+				}
 				alert.action = "Do not cancel or duplicate the protected in-progress rebuild. Deploy the taskworker maintenance revision that excludes transfer_escrow from full-table reindex and cleans incomplete indexes before and after every selected object. After the protected operation finishes, require explicit maintenance authorization before running the supported cleanup-only cycle."
 				alert.verify = "The current attempt reaches its bounded outcome, transfer_escrow never appears in a later full-table maintenance progress row, reindex-debris reaches zero under an authorized cleanup window, and one complete post-deploy maintenance cycle causes no PostgreSQL or Connect timeout wave."
 			} else if isReliabilityRollingPhase(dbMaintenanceEvidence.str(7)) {

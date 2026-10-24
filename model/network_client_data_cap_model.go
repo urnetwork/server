@@ -688,6 +688,13 @@ func (self *clientDataCapActiveState) stale(snapshot *clientDataCapActiveSnapsho
 		!snapshot.monthStart.Equal(clientDataCapMonthStart(now))
 }
 
+// Whether a payer in the network may be capped: the snapshot lists the
+// network, or it must be refreshed before it can say.
+func (self *clientDataCapActiveState) mayCap(networkId server.Id, now time.Time) bool {
+	snapshot := self.snapshot.Load()
+	return self.stale(snapshot, now) || snapshot.networkIds[networkId]
+}
+
 func (self *clientDataCapActiveState) current(ctx context.Context, query server.PgCanQuery, now time.Time) *clientDataCapActiveSnapshot {
 	snapshot := self.snapshot.Load()
 	if !self.stale(snapshot, now) {

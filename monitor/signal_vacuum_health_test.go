@@ -421,3 +421,61 @@ func TestVacuumHealthSignalDoesNotAssumeCascadeProgressWithoutWork(t *testing.T)
 		t.Fatalf("cascade table without reported vacuum work lost overdue-cleanup action:\n%s", alert.Markdown())
 	}
 }
+
+// A partitioned contract table reports once, under its own name, for its worst
+// partition over that partition's line, with the table's total across its
+// partitions; the pure-cascade guidance follows the table, not the partition
+// name.
+func TestVacuumHealthSignalGroupsContractPartitions(t *testing.T) {
+	normalizedSQL := strings.Join(strings.Fields(pgVacuumHealthSQL), " ")
+	for _, clause := range []string{
+		"contract_root.oid = pg_partition_root(c.oid)",
+		"contract_root.relname IN ('transfer_contract', 'transfer_escrow', 'contract_close', 'transfer_escrow_sweep', 'contract_close_report', 'contract_extender')",
+		"PARTITION BY dead_relation.table_name",
+		"WHERE candidate.table_rank = 1",
+	} {
+		if !strings.Contains(normalizedSQL, clause) {
+			t.Fatalf("vacuum query lost the contract partition grouping %q", clause)
+		}
+	}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"transfer_escrow_legacy", "25713625", "09-12 07:03",
+			"25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+			"42", "62625", "", "1234", "7", "active", "client backend", "", "UPDATE transfer_escrow SET settled = true WHERE contract_id = $1",
+			"transfer_escrow", "26100000", "14", "1",
+		}}, nil
+	}}
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "dead-tuples")
+	if len(alerts) != 1 || alert.Frame != "transfer_escrow" ||
+		!strings.Contains(alert.Symptom, "table transfer_escrow has 25713625 dead tuples in partition transfer_escrow_legacy") ||
+		!strings.Contains(alert.Symptom, "26100000 dead tuples across its 14 partitions, 1 over their line") ||
+		!strings.Contains(alert.Observed, "partition=transfer_escrow_legacy table_n_dead_tup=26100000 partitions=14 partitions_over_line=1") ||
+		!strings.Contains(alert.Mechanism, "intentionally high-threshold pure-cascade table") ||
+		!strings.Contains(alert.Verify, "transfer_escrow_legacy returns below 25M") {
+		t.Fatalf("partitioned dead tuples were not reported under the table:\n%s", alert.Markdown())
+	}
+
+	// a plain table, with or without the grouping columns, reports as before
+	for _, row := range []Row{
+		{"transfer_escrow", "25713625", "09-12 07:03", "25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+			"42", "62625", "", "1234", "7", "active", "client backend", "", "SELECT 1"},
+		{"transfer_escrow", "25713625", "09-12 07:03", "25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+			"42", "62625", "", "1234", "7", "active", "client backend", "", "SELECT 1", "transfer_escrow", "25713625", "1", "1"},
+	} {
+		plain := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{row}, nil }}
+		alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(plain))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "dead-tuples")
+		if alert.Frame != "transfer_escrow" || alert.Symptom != "table transfer_escrow has 25713625 dead tuples (alert threshold > 25000000), last autovacuum 09-12 07:03" ||
+			strings.Contains(alert.Observed, "partition=") {
+			t.Fatalf("a plain table's report changed:\n%s", alert.Markdown())
+		}
+	}
+}

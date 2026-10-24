@@ -80,7 +80,7 @@ func TestNetEscrowSettlementCacheLegacyMutationInvalidatesPrediction(t *testing.
 			legacy := func() {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET balance_byte_count=balance_byte_count+4
-					 WHERE balance_id=$1 AND contract_id=md5($1::uuid::text||'-cache-contract-1')::uuid`, f.balanceId))
+					 WHERE balance_id=$1 AND contract_id=overlay(md5($1::uuid::text||'-cache-contract-1')::uuid::text placing left($1::uuid::text,13) from 1 for 13)::uuid`, f.balanceId))
 				}, server.TxReadCommitted, server.OptNoRetry())
 				mutated = true
 			}

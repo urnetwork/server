@@ -36,6 +36,11 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 				if len(row) <= artifact.rowColumn {
 					t.Fatalf("prefix %d omitted artifact column %d", head, artifact.rowColumn)
 				}
+				if artifact.removedVersion != 0 && artifact.removedVersion <= head {
+					// a later migration supersedes this contract and republishes
+					// what it keeps
+					continue
+				}
 				if present := migrationBool(row[artifact.rowColumn]); present != (artifact.requiredVersion <= head) {
 					t.Fatalf("prefix %d artifact %d=%t", head, artifact.requiredVersion, present)
 				}
@@ -145,9 +150,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
 		{"dropped provider session transaction index rebuilt", 824, `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
 		{"provider session head accepts a zero sequence", 824, snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
-		{"dropped close evidence contract index rebuilt", 825, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
-		{"close evidence accepted time nullable", 825, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
-		{"close evidence census index missing", 825, `DROP INDEX contract_close_original_census`},
+		// 857 republishes the 825 custody, including the dropped index
+		{"dropped close evidence contract index rebuilt", 857, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
+		{"close evidence accepted time nullable", 857, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
+		{"close evidence census index missing", 857, `DROP INDEX contract_close_original_census`},
 		{"dropped completed waiting probe index rebuilt", 826, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
 		{"dropped slot completed waiting probe index rebuilt", 827, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
 		{"connection table truncates on vacuum", 828, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
@@ -211,6 +217,11 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
+		{name: "elected-winner review guard dropped", version: 855, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: 855, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
+		{name: "close evidence guard refuses retention again", version: 857, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
+			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -265,10 +276,16 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
 			} {
+				// read as the signal's index catalog reads it, so a partitioned
+				// contract table's parent index compares without ONLY
 				var definition string
 				var predicate *string
-				server.Raise(conn.QueryRow(ctx, `SELECT pg_get_indexdef(indexrelid), pg_get_expr(indpred,indrelid)
- FROM pg_index WHERE indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
+				server.Raise(conn.QueryRow(ctx, `SELECT `+migrationIndexDefinitionSql("index_relation", "table_relation.relname")+`,
+ pg_get_expr(index_record.indpred,index_record.indrelid)
+ FROM pg_index index_record
+ JOIN pg_class index_relation ON index_relation.oid=index_record.indexrelid
+ JOIN pg_class table_relation ON table_relation.oid=index_record.indrelid
+ WHERE index_record.indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				for _, state := range []struct{ valid, ready, want bool }{
 					{valid: true, ready: true, want: true}, {valid: false, ready: true}, {valid: true, ready: false},
@@ -295,7 +312,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
 				{824, "provider_work_session_event", "provider_work_session_event_transaction"},
-				{825, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				// 857 republishes the 825 custody
+				{857, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
 				{831, "audit_device_event", "audit_device_event_stats_device_id"},

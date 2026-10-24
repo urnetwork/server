@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,22 +16,47 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Count every actual row crossing each grant Query. This composes the existing
-// real-query fixture; no production observer or global hook is added.
-type redisSelectionTestTx struct {
-	*escrowGrantQueryTestTx
-	pageCounts []int
+// Count every actual row crossing each grant read. Discovery reads pooled
+// connections before the contract transaction; the request's read seam wraps
+// each one. No production observer or global hook is added.
+type redisSelectionTestReads struct {
+	stateLock    sync.Mutex
+	grantQueries int
+	grantRows    int
+	pageCounts   []int
 }
 
-func (self *redisSelectionTestTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	before := self.grantQueries
-	rows, err := self.escrowGrantQueryTestTx.Query(ctx, sql, args...)
-	if err != nil || self.grantQueries == before {
+func (self *redisSelectionTestReads) observe(query server.PgCanQuery) server.PgCanQuery {
+	return &redisSelectionTestQuery{query: query, reads: self}
+}
+
+type redisSelectionTestQuery struct {
+	query server.PgCanQuery
+	reads *redisSelectionTestReads
+}
+
+func (self *redisSelectionTestQuery) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if !strings.Contains(strings.Join(strings.Fields(sql), " "), " FROM transfer_balance ") {
+		return self.query.Query(ctx, sql, args...)
+	}
+	reads := self.reads
+	reads.stateLock.Lock()
+	reads.grantQueries++
+	reads.stateLock.Unlock()
+	rows, err := self.query.Query(ctx, sql, args...)
+	if err != nil {
 		return rows, err
 	}
-	index := len(self.pageCounts)
-	self.pageCounts = append(self.pageCounts, 0)
-	return &redisSelectionTestRows{Rows: rows, next: func() { self.pageCounts[index]++ }}, nil
+	reads.stateLock.Lock()
+	defer reads.stateLock.Unlock()
+	index := len(reads.pageCounts)
+	reads.pageCounts = append(reads.pageCounts, 0)
+	return &redisSelectionTestRows{Rows: rows, next: func() {
+		reads.stateLock.Lock()
+		defer reads.stateLock.Unlock()
+		reads.grantRows++
+		reads.pageCounts[index]++
+	}}, nil
 }
 
 type redisSelectionTestRows struct {
@@ -46,19 +72,12 @@ func (self *redisSelectionTestRows) Next() bool {
 	return true
 }
 
-func redisSelectionCreateCounted(t testing.TB, ctx context.Context, clients escrowSelectionTestClients, amount ByteCount) (*TransferEscrow, *redisSelectionTestTx, error) {
+func redisSelectionCreateCounted(t testing.TB, ctx context.Context, clients escrowSelectionTestClients, amount ByteCount) (*TransferEscrow, *redisSelectionTestReads, error) {
 	t.Helper()
-	var observed *redisSelectionTestTx
-	escrow, err := runRedisContractAdmission(ctx, func(owned context.Context) (*TransferEscrow, error) {
-		var escrow *TransferEscrow
-		var failure error
-		server.Tx(owned, func(tx server.PgTx) {
-			observed = &redisSelectionTestTx{escrowGrantQueryTestTx: &escrowGrantQueryTestTx{PgTx: tx}}
-			escrow, _, failure = createTransferEscrowInTx(owned, observed, clients.payerNetworkId, clients.payerId,
-				clients.providerNetworkId, clients.providerId, clients.payerNetworkId, amount, nil)
-		}, server.TxReadCommitted, server.OptNoRetry())
-		return escrow, failure
-	})
+	observed := &redisSelectionTestReads{}
+	counted := context.WithValue(ctx, redisGrantReadContextKey{}, observed.observe)
+	escrow, err := CreateTransferEscrow(counted, clients.payerNetworkId, clients.payerId,
+		clients.providerNetworkId, clients.providerId, amount)
 	return escrow, observed, err
 }
 
@@ -351,17 +370,17 @@ func redisSelectionProberOutcomes(t testing.TB) map[string]float64 {
 
 // Fails only the extended preferred window, after the first window has
 // identified the internal prober.
-type redisSelectionExtendedFaultTx struct {
-	server.PgTx
+type redisSelectionExtendedFaultQuery struct {
+	query server.PgCanQuery
 	fault error
 }
 
-// Refuses the extended window query; every other query reaches the transaction.
-func (self *redisSelectionExtendedFaultTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+// Refuses the extended window query; every other read reaches its connection.
+func (self *redisSelectionExtendedFaultQuery) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if sql == proberGrantExtendedSql {
 		return nil, self.fault
 	}
-	return self.PgTx.Query(ctx, sql, args...)
+	return self.query.Query(ctx, sql, args...)
 }
 
 // Native admission records the legacy allocator's internal-prober outcomes:
@@ -432,16 +451,11 @@ func TestRedisGrantSelectionRecordsProberOutcomes(t *testing.T) {
 		fault := errors.New("synthetic extended window failure")
 		before = redisSelectionProberOutcomes(t)
 		var failure error
+		faulted := context.WithValue(ctx, redisGrantReadContextKey{}, func(query server.PgCanQuery) server.PgCanQuery {
+			return &redisSelectionExtendedFaultQuery{query: query, fault: fault}
+		})
 		if value := server.HandleError(func() {
-			_, failure = runRedisContractAdmission(ctx, func(owned context.Context) (*TransferEscrow, error) {
-				var escrow *TransferEscrow
-				var err error
-				server.Tx(owned, func(tx server.PgTx) {
-					escrow, _, err = createTransferEscrowInTx(owned, &redisSelectionExtendedFaultTx{PgTx: tx, fault: fault},
-						failed.payerNetworkId, failed.payerId, failed.providerNetworkId, failed.providerId, failed.payerNetworkId, 1024, nil)
-				}, server.TxReadCommitted, server.OptNoRetry())
-				return escrow, err
-			})
+			_, failure = failed.create(faulted, 1024, false)
 		}); value != nil {
 			failure, _ = value.(error)
 		}

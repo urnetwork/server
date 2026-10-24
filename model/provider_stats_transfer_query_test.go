@@ -213,10 +213,10 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 							var inspect func(providerTransferTestPlanNode)
 							inspect = func(node providerTransferTestPlanNode) {
 								work := node.Loops * (node.Rows + node.Removed + node.Recheck)
-								if node.Relation == "transfer_contract" {
+								if planContractTable(node.Relation) == "transfer_contract" {
 									contractWork += work
 								}
-								if node.Relation == "contract_close" {
+								if planContractTable(node.Relation) == "contract_close" {
 									reportWork += work
 									reportLoops += node.Loops
 									// PostgreSQL deparses varchar equality as (party)::text.

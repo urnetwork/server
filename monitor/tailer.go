@@ -652,8 +652,13 @@ var logClasses = []logClass{
 		verify:    "Every Connect-bearing artifact contains server commit 64366fb5; a deterministic invalid-loader test starts no listener; each valid running allocation reports listener readiness and completes a real QUIC handshake on every enabled carrier; and connect-tls-disabled remains zero through two rollout cadences.",
 		redactIDs: true},
 	{name: "port-exhaustion", re: regexp.MustCompile(`connect: cannot assign requested address`),
-		rateThreshold: 100, tier: tierWarn, playbook: "SIGNALS.md 3.5",
-		meaning: "client-side ephemeral-port exhaustion (redial storm to one destination); self-drains ~60s after the target is fixed"},
+		rateThreshold: 100, tier: tierWarn, playbook: "SIGNALS.md §1.5, §3.5, and §4",
+		meaning:   "the selected log stream reported connect: cannot assign requested address at rate",
+		mechanism: "The classifier counts matching diagnostic lines, not unique connection attempts or allocated ports. It does not observe a native allocation failure, numeric error code, socket tuple, or resource namespace. Ephemeral-port exhaustion is a candidate cause, not a measured diagnosis.",
+		context:   "The stable target identifies the configured log selector, not a proven emitter process or network namespace. Any frame is the first retained exemplar's textual address hint, not a destination bucket or native target. Relayed, retried and mixed-destination diagnostics can share this count. Missing emitter, original-attempt and resource evidence remains unknown; this signature supplies no fixed self-drain interval.",
+		action:    "Bind a retained original event to its emitting artifact/process, original attempt and source network namespace using current enabled inventory. Compare bounded same-window native local-address availability and socket allocation limits/usage to distinguish a source-address problem from measured ephemeral-port or tuple pressure. Do not infer a target-node fault, restart a client fleet, raise limits or change routes from this signature.",
+		verify:    "Require a source-qualified explanation and corroborating native controls for the original attempted address/resource boundary, plus a complete comparable log window below threshold. Falling or missing log counts alone do not prove allocation recovery, and no fixed self-drain deadline is established.",
+	},
 	{name: "pool-timeout", re: regexp.MustCompile(`redis: connection pool timeout`),
 		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "local pool exhausted — backpressure, not the root; find what is slow consuming the pool"},
@@ -1147,7 +1152,7 @@ var logClasses = []logClass{
 		groupBy:       dbMaintenanceLegacyReindexLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.2a",
 		meaning:   "a Taskworker selected a table excluded from scheduled whole-table concurrent reindexing",
-		mechanism: "Before current-main server commits 908a8b2c and d8392c83, the daily hash rotation could select these large or high-churn tables, and incomplete-index cleanup ran only after the whole rotation. An interrupted rebuild can leave numbered _ccnew/_ccold artifacts; the same durable DbMaintenance epoch can then be lease-recovered and launch another full-table rebuild before reaching cleanup. The current policy excludes these tables, keeps cleanup adjacent to every permitted rebuild, and preserves task ownership when only the pooled timestamp refresh stalls. Stable patch IDs prove these commits are patch-identical to the former 7676014f and abfd976b hashes after main was rewritten. The later network_client exclusion closes a separate omission in the same scheduled policy; both the old reindex[...] and current table[...] reindex start formats are recognized. Log format alone does not identify a worker revision.",
+		mechanism: "Before current-main server commits 908a8b2c and d8392c83, the daily hash rotation could select these large or high-churn tables, and incomplete-index cleanup ran only after the whole rotation. An interrupted rebuild can leave numbered _ccnew/_ccold artifacts; the same durable DbMaintenance epoch can then be lease-recovered and launch another full-table rebuild before reaching cleanup. The current policy excludes these tables, keeps cleanup adjacent to every permitted rebuild, and preserves task ownership when only the pooled timestamp refresh stalls. Stable patch IDs prove these commits are patch-identical to the former 7676014f and abfd976b hashes after main was rewritten. The later network_client exclusion closes a separate omission in the same scheduled policy; both the old reindex[...] and current table[...] reindex start formats are recognized. After the contract partition cutover the partition-aware rotation also excludes every contract partition (<table>_legacy, which holds the table's whole history, and <table>_wYYYYMMDD), so a start line naming one comes from a worker without it. Log format alone does not identify a worker revision.",
 		context:   "The exact start line proves selection and entry into the call path; both formats log before opening the maintenance connection, so it does not by itself prove that PostgreSQL began the statement, that the operation completed or remains active, that it created any particular artifact, or that it consumed CPU. Confirm current relation and phase through direct progress/catalog evidence and measure native process CPU separately. It pages because two same-day contract_close retries independently drove hundreds of ordinary backends active, exhausted PostgreSQL admission, lost the pooled task heartbeat, left another invalid index, and reclaimed the same durable task into a new retry. Correlate the table with pg_stat_progress_create_index, the reindex-debris lower-bound/active-candidate split, direct client-slot capacity, and the exact DbMaintenance task/worker lifecycle. A shift between those two byte buckets is not cleanup.",
 		action:    "Inspect the active database operation before changing Taskworker. Do not let a rollout or manual cancellation implicitly interrupt a protected rebuild. Operations must explicitly choose whether a bounded active operation should finish or be canceled; cancellation is a database mutation and requires authorization. Once pg_stat_progress_create_index is empty, satisfy §8.13 identity observation and deploy Taskworker from an intentional local checkout containing current-main server commits 908a8b2c and d8392c83 and the scheduled network_client exclusion. Clean existing artifacts separately with the supported cleanup-only maintenance command and explicit database-maintenance authorization; never wildcard-drop _ccnew/_ccold indexes.",
 		verify:    "§8.12 proves every active Taskworker's source/digest identity and runtime behavior for both fixes; one complete maintenance epoch emits no excluded-table start line in either format and pg_stat_progress_create_index never names an excluded table; after authorized cleanup the reindex-debris probe reports zero inactive artifacts; and no related DataFileExtend/WAL wait cluster or Connect login-timeout wave recurs.",
@@ -1412,7 +1417,11 @@ var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter 
 var netEscrowClampMarkerRe = regexp.MustCompile(`\bclamped_to=[^\s]+`)
 var lokiTailBackendAddrRe = regexp.MustCompile(`[[:space:]]addr=("[^"]+"|[^[:space:]]+)`)
 var warpLogIdentityRe = regexp.MustCompile(`^\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[cid:([^\]]+)\]`)
-var dbMaintenanceLegacyReindexRe = regexp.MustCompile(`\[db\]maintenance (?:reindex\[[0-9]+/[0-9]+\] |table\[[0-9]+/[0-9]+\] reindex )(client_reliability(?:_p[0-9]{8})?|contract_close|network_client|network_client_location_reliability|network_client_connection|transfer_contract|transfer_escrow|transfer_escrow_sweep)[[:space:]]*$`)
+
+// Contract partitions (server/CONTRACT-PARTITION.md) are excluded too: the
+// partition-aware rotation never rebuilds a legacy or weekly contract
+// partition as a whole, so only an older worker selects one.
+var dbMaintenanceLegacyReindexRe = regexp.MustCompile(`\[db\]maintenance (?:reindex\[[0-9]+/[0-9]+\] |table\[[0-9]+/[0-9]+\] reindex )(client_reliability(?:_p[0-9]{8})?|contract_close|network_client|network_client_location_reliability|network_client_connection|transfer_contract|transfer_escrow|transfer_escrow_sweep|(?:transfer_contract|transfer_escrow|contract_close|transfer_escrow_sweep|contract_close_report|contract_extender)_(?:legacy|w[0-9]{8}))[[:space:]]*$`)
 
 type warpLogIdentity struct {
 	host       string
@@ -2532,6 +2541,9 @@ func (self *logTailer) drainWindow() []finding {
 			baseline := "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)"
 			if c.name == "doh-dial-timeout" {
 				baseline = "healthy ~0/min; sampled outbound dial-leg lines are neither resolver-call failures nor user-request failures; fanout, hedging, and replacement ownership can add legs"
+			}
+			if c.name == "port-exhaustion" {
+				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, native allocation pressure or recovery"
 			}
 			observed := fmt.Sprintf("rate=%d/min class=%s", count, c.name)
 			if c.pageRateThreshold > 0 {

@@ -1,5 +1,8 @@
 // Grant selection retains the payer's financial order and internal-prober
 // spread. Only Redis reserves bytes; discovery never locks shared SQL grants.
+// Selection precedes the contract transaction: each discovery read is one
+// autocommit statement on a pooled connection, released before the Redis
+// reservations it informs.
 package model
 
 import (
@@ -28,6 +31,21 @@ type redisGrantSelectionLimits struct {
 }
 
 type redisGrantSelectionContextKey struct{}
+
+// A test seam may observe discovery reads; production reads pooled connections.
+type redisGrantReadContextKey struct{}
+
+// Runs one discovery read on a pooled connection, outside any transaction.
+func readRedisGrants(ctx context.Context, read func(query server.PgCanQuery)) {
+	observe, _ := ctx.Value(redisGrantReadContextKey{}).(func(server.PgCanQuery) server.PgCanQuery)
+	server.Db(ctx, func(conn server.PgConn) {
+		if observe != nil {
+			read(observe(conn))
+			return
+		}
+		read(conn)
+	})
+}
 
 // Settings are loaded once per process, not on every contract's hot path.
 // Deploy an immutable config revision and restart to change the profile. This
@@ -98,10 +116,12 @@ func redisGrantCounterHeld(err error) bool {
 	return reply.Error() == "invalid reservation counter" || reply.Error() == "invalid reservation key type"
 }
 
-// Discovery closes each bounded SQL result before reserving in Redis. The
-// existing active/network/end/start/id index supports the fallback keyset;
-// request-local counters do not serialize unrelated payers or balances.
-func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission *redisContractAdmission,
+// Discovery releases each bounded SQL result and its connection before
+// reserving in Redis. The existing active/network/end/start/id index supports
+// the fallback keyset; request-local counters do not serialize unrelated
+// payers or balances. Reservations are pending until the request's contract
+// transaction has joined.
+func selectRedisTransferBalances(ctx context.Context, admission *redisContractAdmission, reservation *redisPendingReservation,
 	payerNetworkId, payerClientId server.Id, requested ByteCount) ([]*TransferEscrowBalance, Priority, error) {
 	limits, ok := ctx.Value(redisGrantSelectionContextKey{}).(redisGrantSelectionLimits)
 	if !ok {
@@ -144,9 +164,10 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 			return false, nil
 		}
 		admission.noteBalance(balance.balanceId)
-		operation := "reserve-owned"
+		reservation.noteReservationRequest()
+		operation := "reserve-pending"
 		if whole {
-			operation = "reserve-owned-full"
+			operation = "reserve-pending-full"
 		}
 		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
 		if err != nil {
@@ -200,24 +221,26 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 			return nil, 0, capacity()
 		}
 		raw := 0
-		rows, err := tx.Query(ctx, sql, args...)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				balance := &escrowTransferBalance{}
-				var preferred bool
-				values := []any{&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime}
-				if window == 0 {
-					values = append(values, &internal)
+		readRedisGrants(ctx, func(query server.PgCanQuery) {
+			rows, err := query.Query(ctx, sql, args...)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					balance := &escrowTransferBalance{}
+					var preferred bool
+					values := []any{&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime}
+					if window == 0 {
+						values = append(values, &internal)
+					}
+					values = append(values, &preferred)
+					server.Raise(rows.Scan(values...))
+					rowsRead++
+					raw++
+					last = balance.balanceId
+					if preferred {
+						candidates = append(candidates, balance)
+					}
 				}
-				values = append(values, &preferred)
-				server.Raise(rows.Scan(values...))
-				rowsRead++
-				raw++
-				last = balance.balanceId
-				if preferred {
-					candidates = append(candidates, balance)
-				}
-			}
+			})
 		})
 		warn()
 		if !internal {
@@ -281,14 +304,16 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 			args = append(args, cursor.endTime, cursor.startTime, cursor.balanceId, count)
 		}
 		page := []*escrowTransferBalance{}
-		rows, err := tx.Query(ctx, sql, args...)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				balance := &escrowTransferBalance{}
-				server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
-				page = append(page, balance)
-				rowsRead++
-			}
+		readRedisGrants(ctx, func(query server.PgCanQuery) {
+			rows, err := query.Query(ctx, sql, args...)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					balance := &escrowTransferBalance{}
+					server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
+					page = append(page, balance)
+					rowsRead++
+				}
+			})
 		})
 		warn()
 		for _, balance := range page {
@@ -318,8 +343,9 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 	}
 }
 
-// A blocked endpoint can outlive a grant. Admission rechecks the selected
-// snapshot's time bounds after that wait; expiry never creates new credit.
+// A blocked endpoint, or the wait for the transaction, can outlive a grant.
+// Admission rechecks the selected snapshot's time bounds after the endpoint
+// wait; expiry never creates new credit.
 func redisGrantSelectedCurrent(ctx context.Context, tx server.PgTx, ids []server.Id) error {
 	var current bool
 	server.Raise(tx.QueryRow(ctx, `SELECT count(*)=$2 FROM transfer_balance

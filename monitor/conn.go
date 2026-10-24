@@ -168,7 +168,10 @@ type monitorConfig struct {
 	verificationEnabled       bool
 	stConfigStatus            STConfigurationStatus
 	stDeploymentKey           string
+	subnetCorrectness         *SubnetCorrectnessSettings
 	subnetArtifacts           *SubnetArtifactSettings
+	subnetReplay              *SubnetReplaySettings
+	subnetReplayPin           *SubnetReplayPin
 	contractDegradationConfig ContractDegradationConfigStatus
 
 	sshUser     string // deployed login user
@@ -202,6 +205,8 @@ type monitorConfig struct {
 	pgQuerySampleUntil      time.Time
 	pgQuerySampleContinuous bool
 	publicUdp               PublicUdpSettings
+	// the operator's observer overlay route contract (§1.7)
+	observerOverlay ObserverOverlaySettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

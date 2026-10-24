@@ -9,7 +9,8 @@ import (
 )
 
 // Transition-table names are part of the function contract, so verify them as
-// well as enabled state, timing, relation, and function identity.
+// well as enabled state, timing, relation, and function identity. Partitioned,
+// the escrow TRUNCATE guard must also cover every partition.
 var netEscrowRevisionArtifactQuery = `(
 	(SELECT count(*) = 2 FROM (VALUES ('balance_id','uuid'), ('revision','bigint')) AS expected(column_name,data_type)
 	WHERE EXISTS (SELECT 1 FROM information_schema.columns AS actual
@@ -55,4 +56,5 @@ var netEscrowRevisionArtifactQuery = `(
 			AND actual.tgoldtable IS NOT DISTINCT FROM expected.old_table
 			AND actual.tgnewtable IS NOT DISTINCT FROM expected.new_table
 			AND actual.tgnargs=0 AND actual.tgqual IS NULL AND actual.tgattr=''::int2vector AND NOT actual.tgisinternal))
+	AND ` + migrationContractLeafTriggers("transfer_escrow", "transfer_escrow_revision_truncate_guard") + `
 )`

@@ -88,7 +88,8 @@ var contractFailureCounter = prometheus.NewCounterVec(
 var contractRejectionCauses = []string{
 	"inactive_destination", "provide_mode_unavailable", "provide_secret_unavailable",
 	"insufficient_balance", "missing_companion_origin", "client_not_found",
-	"source_inactive", "canceled", "deadline", "other",
+	"source_inactive", "canceled", "deadline", "reservation_window_expired",
+	"reservation_released", "other",
 }
 
 var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -180,6 +181,8 @@ func controlFrameMessageLabel(message any) string {
 		return "control_ping"
 	case *protocol.ProvidePing:
 		return "provide_ping"
+	case *protocol.ResidentMoveResult:
+		return "resident_move_result"
 	default:
 		return "other"
 	}
@@ -226,6 +229,15 @@ func recordControlFrameFailure(message any, err error) {
 func contractFailureClass(err error) string {
 	if errors.Is(err, errContractDestinationInactive) {
 		return "inactive_destination"
+	}
+	// A pending Redis reservation the creation transaction refused to
+	// publish (model.redisPendingReservation): its window closed before the
+	// request fence, or its own request released it first.
+	if errors.Is(err, model.ErrRedisPendingReservationExpired) {
+		return "reservation_window_expired"
+	}
+	if errors.Is(err, model.ErrRedisPendingReservationReleased) {
+		return "reservation_released"
 	}
 	message := strings.ToLower(err.Error())
 	switch {
@@ -530,6 +542,11 @@ func ConnectControlFrames(
 				// sender waits for, and receipt already refreshes resident
 				// activity. Older clients ping the control destination
 				// constantly, so treating these as unhandled floods the log.
+
+			case *protocol.ResidentMoveResult:
+				// validated against the client's move intent in Redis, since
+				// any control path can carry it (resident_move_result.go)
+				err = ReportResidentMoveResult(ctx, clientId, v)
 
 			default:
 				err = fmt.Errorf("Cannot handle oob control message: %T", message)

@@ -7,13 +7,18 @@ import "github.com/urnetwork/server"
 // v767 published the evidence custody with the contract lookup index; 825
 // drops that index and keeps the rest, so both heads share these predicates.
 func contractCloseEvidenceArtifact(contractIndex string) string {
+	return contractCloseEvidenceArtifactWithGuard(contractIndex, server.ContractCloseEvidenceGuardBodySql())
+}
+
+// 857 keeps the custody and replaces only the guard body.
+func contractCloseEvidenceArtifactWithGuard(contractIndex string, guardBody string) string {
 	return `(` +
 		migrationFp2Table("contract_close_report_evidence") + ` AND ` +
 		financialColumnsArtifact("contract_close_report_evidence", `('client_id','uuid','NO',NULL),('report_id','uuid','NO',NULL),('contract_id','uuid','NO',NULL),('party','character varying','NO',NULL),('acked_byte_count','bigint','NO',NULL),('unacked_byte_count','numeric','NO',NULL),('checkpoint','boolean','NO',NULL),('accepted_at','timestamp without time zone','NO',NULL)`) + ` AND ` +
 		financialConstraintsArtifact("contract_close_report_evidence", `('PRIMARY KEY (client_id, report_id)'),('CHECK (((party)::text = ANY ((ARRAY[''source''::character varying, ''destination''::character varying])::text[])))'),('CHECK ((acked_byte_count >= 0))'),('CHECK (((unacked_byte_count >= (0)::numeric) AND (unacked_byte_count <= ''18446744073709551615''::numeric)))')`) + ` AND ` +
 		contractIndex + ` AND ` +
-		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_guard", server.ContractCloseEvidenceGuardBodySql(), 27) + ` AND ` +
-		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_truncate_guard", "contract_close_report_evidence_guard", server.ContractCloseEvidenceGuardBodySql(), 34) + ` AND
+		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_guard", guardBody, 27) + ` AND ` +
+		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_truncate_guard", "contract_close_report_evidence_guard", guardBody, 34) + ` AND
  EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contract_close_report_evidence' AND column_name='party' AND character_maximum_length=16) AND
  EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contract_close_report_evidence' AND column_name='unacked_byte_count' AND numeric_precision=20 AND numeric_scale=0) AND
  NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.contract_close_report_evidence') AND contype='f') AND
@@ -49,3 +54,10 @@ var contractCloseInventoryArtifactQuery = contractCloseInventoryArtifact(contrac
 var contractCloseEvidenceChainWithoutContractIndexArtifactQuery = contractCloseInventoryArtifact(
 	contractCloseOriginalArtifact(contractCloseEvidenceArtifact(
 		migrationIndexRemoved("contract_close_report_evidence", "contract_close_report_evidence_contract"))))
+
+// 857 admits age-bounded retention deletes in the guard; the 825 custody is
+// otherwise unchanged.
+var contractCloseEvidenceRetentionArtifactQuery = contractCloseInventoryArtifact(
+	contractCloseOriginalArtifact(contractCloseEvidenceArtifactWithGuard(
+		migrationIndexRemoved("contract_close_report_evidence", "contract_close_report_evidence_contract"),
+		server.ContractCloseEvidenceRetentionGuardBodySql())))

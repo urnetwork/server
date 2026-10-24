@@ -32,6 +32,71 @@ const (
 	openContractOutcomeNullIndex     = "transfer_contract_outcome_null"
 )
 
+// The runtime value of a statement argument in model source: string literals
+// joined by + with the rendered contract id bound (contract_id_bound.go). Any
+// other expression is not a statement this guard can bind to.
+func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
+	switch value := expression.(type) {
+	case *ast.BasicLit:
+		if value.Kind != token.STRING {
+			return "", false
+		}
+		unquoted, err := strconv.Unquote(value.Value)
+		return unquoted, err == nil
+	case *ast.ParenExpr:
+		return modelSqlExpressionValue(value.X)
+	case *ast.BinaryExpr:
+		if value.Op != token.ADD {
+			return "", false
+		}
+		x, ok := modelSqlExpressionValue(value.X)
+		if !ok {
+			return "", false
+		}
+		y, ok := modelSqlExpressionValue(value.Y)
+		return x + y, ok
+	case *ast.Ident:
+		if value.Name == "unexpiredContractIdFloorSql" {
+			return unexpiredContractIdFloorSql, true
+		}
+	}
+	return "", false
+}
+
+// The one statement a model function in subscription_model.go queries, as it
+// runs (see modelSqlExpressionValue).
+func modelFunctionStatement(t testing.TB, functionName string) string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != functionName || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			if selector, ok := call.Fun.(*ast.SelectorExpr); !ok || selector.Sel.Name != "Query" {
+				return true
+			}
+			if sql, ok := modelSqlExpressionValue(call.Args[1]); ok {
+				statements = append(statements, sql)
+			}
+			return true
+		})
+	}
+	if len(statements) != 1 {
+		t.Fatalf("%s queries %d statements, want one", functionName, len(statements))
+	}
+	return statements[0]
+}
+
 // Resolve the real query owner only through the public wrapper's returned
 // call. A dead helper or an unused callback cannot satisfy the SQL guard.
 func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
@@ -125,8 +190,9 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// These are the two executed tx.Query literals, not independent fixture
+	// These are the two executed conn.Query literals, not independent fixture
 	// strings or unreachable declarations. Each has both discovery predicates.
+	// The selection reads before the transaction, on a pooled connection.
 	queries := map[string]bool{"AS earliest_origin": false, "AS earliest_companion_origin": false}
 	ast.Inspect(owner.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -138,13 +204,9 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 			return true
 		}
 		receiver, ok := selector.X.(*ast.Ident)
-		literal, literalOk := call.Args[1].(*ast.BasicLit)
-		if !ok || receiver.Name != "tx" || !literalOk || literal.Kind != token.STRING {
+		sql, sqlOk := modelSqlExpressionValue(call.Args[1])
+		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
-		}
-		sql, err := strconv.Unquote(literal.Value)
-		if err != nil {
-			t.Fatal(err)
 		}
 		for marker := range queries {
 			if strings.Contains(sql, marker) {
@@ -159,7 +221,7 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 	})
 	for marker, found := range queries {
 		if !found {
-			t.Errorf("actual companion tx.Query %s not found", marker)
+			t.Errorf("actual companion conn.Query %s not found", marker)
 		}
 	}
 
@@ -222,6 +284,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 	if testing.Short() {
 		t.Skip("open-contract query-plan test seeds 100k rows; skipped in -short")
 	}
+	runtimeQueries := coveredCompanionRuntimeQueries(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		sourceId := server.NewId()
@@ -246,57 +309,33 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			assertPlanUsesAnyIndex(t, pairPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, pairPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
-			originPlan := explainOpenContractPlan(t, ctx, conn, `
-				SELECT contract_id
-				FROM (
-					(
-						SELECT contract_id, create_time
-						FROM transfer_contract
-						WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-						  AND source_id = $1
-						  AND destination_id = $2
-						  AND companion_contract_id IS NULL
-						ORDER BY create_time ASC
-						LIMIT 1
-					)
-					UNION ALL
-					(
-						SELECT contract_id, create_time
-						FROM transfer_contract
-						WHERE open = false
-						  AND $3 <= close_time
-						  AND source_id = $1
-						  AND destination_id = $2
-						  AND companion_contract_id IS NULL
-						ORDER BY create_time ASC
-						LIMIT 1
-					)
-					ORDER BY create_time ASC
-					LIMIT 1
-				) AS earliest_origin
-			`, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
-			assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
-			assertPlanAvoidsIndexes(t, originPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
+			// the executed plain origin reads, with their contract id bounds:
+			// the escrow companion's, which also reads the prober maximum, and
+			// zero escrow's
+			plainOriginArgs := []any{sourceId, destinationId, server.NowUtc().Add(-time.Hour), payerNetworkId}
+			if runtimeQueries["earliest_origin"].binds == 5 {
+				plainOriginArgs = append(plainOriginArgs, ByteCount(1024))
+			}
+			for _, origin := range []struct {
+				sql  string
+				args []any
+			}{
+				{sql: runtimeQueries["earliest_origin"].sql, args: plainOriginArgs},
+				{sql: zeroEscrowPlainOriginSql, args: plainOriginArgs[:3]},
+			} {
+				originPlan := explainOpenContractPlan(t, ctx, conn, origin.sql, origin.args...)
+				assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
+				assertPlanAvoidsIndexes(t, originPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
+			}
 
 			// the actual companion origin existence read, before any transaction
 			existencePlan := explainOpenContractPlan(t, ctx, conn, companionOriginExistsSql, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
 			assertPlanUsesAnyIndex(t, existencePlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, existencePlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
-			escrowPlan := explainOpenContractPlan(t, ctx, conn, `
-				SELECT transfer_contract.contract_id,
-				       transfer_contract.transfer_byte_count,
-				       transfer_contract.priority
-				FROM transfer_contract
-				LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
-				INNER JOIN transfer_escrow ON transfer_escrow.contract_id = transfer_contract.contract_id
-				WHERE (CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END)
-				  AND transfer_contract.source_id = $1
-				  AND transfer_contract.destination_id = $2
-				  AND transfer_contract.transfer_byte_count <= $3
-				  AND contract_close.contract_id IS NULL
-				ORDER BY transfer_contract.priority DESC, transfer_contract.create_time ASC
-			`, sourceId, destinationId, ByteCount(1024))
+			// the executed open escrow read, with its contract id bounds
+			escrowPlan := explainOpenContractPlan(t, ctx, conn,
+				modelFunctionStatement(t, "GetOpenTransferEscrowsOrderedByPriorityCreateTime"), sourceId, destinationId, ByteCount(1024))
 			assertPlanUsesAnyIndex(t, escrowPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, escrowPlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 
@@ -349,6 +388,12 @@ func seedFalseZeroOpenContractStats(
 	payerNetworkId server.Id,
 ) {
 	t.Helper()
+	if server.IsContractPartitioned(ctx) {
+		// the false-zero sample is a plain-table statistics hazard; a
+		// partitioned parent has no storage parameters, and each partition
+		// keeps its own statistics
+		t.Skip("plain contract tables only")
+	}
 	server.Db(ctx, func(writerConn server.PgConn) {
 		server.RaisePgResult(writerConn.Exec(ctx, `ALTER TABLE transfer_contract SET (autovacuum_enabled = false)`))
 		server.RaisePgResult(writerConn.Exec(ctx, `

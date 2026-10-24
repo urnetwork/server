@@ -92,23 +92,20 @@ func pgGroupedCancellationFixture(t *testing.T, signal Signal, component string,
 	return result
 }
 
-// The existing scoped adapter owns the parent/source error join. Unscoped
-// callers keep the original source error, while public evidence stays private.
+// Both live-entry adapter paths retain the canonical parent verdict and the
+// exact returned source privately; direct probe authority is not redefined.
 func pgGroupedRequireCanceledSource(t *testing.T, result pgGroupedCancellationResult, scoped bool, sourceErr, nestedErr error) {
 	t.Helper()
 	if result.parentErr != context.Canceled || result.triggerReads != 1 ||
 		result.returnedErr == nil || len(result.alerts) != 0 {
 		t.Fatal("ended grouped owner returned successful partial observations")
 	}
-	returnedSource := result.returnedErr
-	if scoped {
-		var interrupted *signalContextError
-		if !errors.Is(result.returnedErr, context.Canceled) || !errors.As(result.returnedErr, &interrupted) ||
-			result.returnedErr.Error() != context.Canceled.Error() {
-			t.Fatal("grouped cancellation lost the scoped parent verdict")
-		}
-		returnedSource = interrupted.sourceErr
+	var interrupted *signalContextError
+	if !errors.Is(result.returnedErr, context.Canceled) || !errors.As(result.returnedErr, &interrupted) ||
+		result.returnedErr.Error() != context.Canceled.Error() {
+		t.Fatal("grouped cancellation lost the live-entry parent verdict")
 	}
+	returnedSource := interrupted.sourceErr
 	if returnedSource != sourceErr || !errors.Is(result.returnedErr, sourceErr) || !errors.Is(result.returnedErr, nestedErr) {
 		t.Fatal("grouped cancellation discarded the exact returned source cause")
 	}
@@ -187,14 +184,11 @@ func TestPgGroupedCanceledLifecycleStopsBeforeCompletion(t *testing.T) {
 			if result.parentErr != context.Canceled || result.triggerReads != 1 || result.readsAfterEnd != 0 || len(result.alerts) != 0 {
 				t.Fatal("canceled lifecycle returned a successful observation")
 			}
-			returnedSource := result.returnedErr
-			if scoped {
-				var interrupted *signalContextError
-				if !errors.Is(result.returnedErr, context.Canceled) || !errors.As(result.returnedErr, &interrupted) {
-					t.Fatal("canceled lifecycle lost the returned helper error or parent verdict")
-				}
-				returnedSource = interrupted.sourceErr
+			var interrupted *signalContextError
+			if !errors.Is(result.returnedErr, context.Canceled) || !errors.As(result.returnedErr, &interrupted) || result.returnedErr.Error() != context.Canceled.Error() {
+				t.Fatal("canceled lifecycle lost the returned helper error or parent verdict")
 			}
+			returnedSource := interrupted.sourceErr
 			if returnedSource == nil || !strings.HasPrefix(returnedSource.Error(), "fleet log gateway:") ||
 				!strings.Contains(returnedSource.Error(), "taskworker journal: no services hosts in inventory") ||
 				!errors.Is(result.returnedErr, returnedSource) {
