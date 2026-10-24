@@ -644,6 +644,59 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     857 does for close evidence).
 - **Decided (2026-10-24): 13 weeks,** matching contract retention, so a
   session's events never outlive the contracts they describe.
+- **Implemented (2026-10-24):** branch `feat/pm-events`
+  (`db_provider_work_session_partition.go`, `..._cutover.go`).
+  - **Migration** (`providerWorkSessionPartitionSchemaSql`): functions and a
+    receipt trigger only, so no lock on the event table. The append's retire
+    lookup is bounded by `provider_work_session_admit_floor(connection)`, the
+    id's mint millisecond less a day, and falls back to the unbounded lookup
+    when that finds nothing. Its monitor contract takes the migration's
+    position as its version (`ProviderWorkSessionPartitionMigrationVersion`),
+    reads all three layouts (plain, prepared, partitioned), and supersedes
+    824's contract.
+  - **Sequence identity:** no identity relation. The append is the only
+    writer, and the head guard keeps each client's generator monotonic (the
+    proof is in the file comment).
+  - **Receipt reference: trigger-enforced, not `observed_at` in the receipt.**
+    - A foreign key into the partitioned table runs a referencing-row check of
+      the whole receipt table inside each detach. On PostgreSQL 18 that took
+      1.75 s for a week of a million events against a million receipts, under
+      the parent's ACCESS EXCLUSIVE lock. It would also refuse every week a
+      receipt references.
+    - Receipts are self-contained signed originals, and their readers (chain
+      replay, payout originals) read receipts only, from sequence 1. So
+      receipts outlive the events they sign; dropping them with their events
+      would break those chains.
+    - The trigger checks the reference at insert, the only time a receipt is
+      written: today's weeks first, then every week. The cutover drops the
+      foreign key.
+    - The signer's event lookup is bounded a day below its transaction's
+      start.
+  - **Cutover:** `bringyourctl model migrate provider-work-session-partition
+    [--cutover-week=<Monday>] [--dry-run] [--finalize] [--rollback] [--abort]`.
+    - Prepare builds `(client_id, sequence, observed_at)` concurrently and
+      swaps it in as the primary key, dropping the receipt key and the old key
+      (an estimated 31 GB built and 28 GB returned).
+    - It then stages the parent with `LIKE ... INCLUDING INDEXES` and weeks
+      C..C+4, and adds and validates the bound. The build and the validation
+      run on a session exempt from `transaction_timeout`.
+    - Finalize runs the rolled-back attach probe, then the swap.
+    - Every exclusive step waits for a quiet table, then for at most 3 s per
+      lock, with retries. Every step is resumable; a build that another backend
+      is still running is never dropped.
+    - Rollback keeps every event until the first one at or after C.
+    - The runway pass abandons a cutover not finalized 6 h before C, through
+      the registry's new additive `BeforeCutover` hook.
+  - **Drop:** the family (`AheadRanges` 4, `KeepLegacyPartition` false) sets
+    `urnetwork.provider_work_session_retention` in the drop transaction. Its
+    fence, `provider_work_session_event_drop_guard`, refuses a leaf whose upper
+    bound is not 91 days past by the database's clock. Neither DETACH nor DROP
+    fires a trigger, and event triggers need a superuser, so the database
+    cannot refuse a manual drop.
+  - **Not built:**
+    - an insert-side `EnsureRangeFor` retry; the runway and its monitor cover
+      that case;
+    - receipt retention, which is left for when the signer ships.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
