@@ -1,6 +1,13 @@
 # Sim-latency baseline preservation
 
-The current four-exchange-instance, fresh-service nine-run evidence is in
+Corrected-image capacity results are in
+[`prelaunch-corrected-frontier-2026-10-24/`](prelaunch-corrected-frontier-2026-10-24/README.md).
+The 1,800- and 7,200-provider true impairment-off points both completed, each
+with 200 warmed clients and zero measured failures. These single trials are
+exploratory capacity evidence, not a final scale or an official baseline.
+Earlier requested-off results from the defective image are not true off trials.
+
+The earlier four-exchange-instance, fresh-service nine-run evidence is in
 [`prelaunch-four-exchange-2026-10-24/`](prelaunch-four-exchange-2026-10-24/README.md).
 It includes failure-charged raw-score analysis, all completion markers, full
 compressed logs and the original post-processing failure plus its recovery.
