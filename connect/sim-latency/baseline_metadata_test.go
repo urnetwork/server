@@ -29,6 +29,11 @@ func TestRetainedBaselineMetadataDigests(t *testing.T) {
 		}
 		manifestPathDigests[parts[1]] = parts[0]
 	}
+	// The module boundary is maintained metadata, not historical measurement
+	// evidence. Omitting it must not hide drift from a toolchain update.
+	if _, present := manifestPathDigests["go.mod"]; !present {
+		t.Fatal("baseline module boundary is absent from MANIFEST.sha256")
+	}
 
 	checkDigest := func(path string, expected string, source string) {
 		t.Helper()

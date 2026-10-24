@@ -91,3 +91,12 @@ fixed opening, not permission to omit honesty review or invent readiness proof.
 - The staging supervisor runs the older installed release, not the newly
   published elected-winner review integration. No staging policy, production
   pointer, main database, live credential, or admission window was changed.
+- The initial complete direct-Go run caught archive metadata drift: the earlier
+  Go 1.27.3 toolchain update changed the archive's minimal module boundary but
+  not its manifest checksum. The checksum was repaired and the existing
+  deterministic metadata test passed; no `v1` measurement evidence changed.
+  Integration tests in that direct run correctly refused a missing local-env
+  attestation. The guarded suite is being rerun with separately owned disposable
+  PostgreSQL/Redis services and synthetic resources, not main or shared local
+  stores. The ordinary local harness also refused stale launcher ownership;
+  that refusal was not bypassed by deleting its lock or resetting shared stores.
