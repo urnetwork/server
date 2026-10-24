@@ -1273,6 +1273,9 @@ cluster: %t`,
 		if testProviderWorkSessionPartitions() {
 			Testing_PartitionProviderWorkSessionEvents(ctx)
 		}
+		if testFinishedTaskPartitions() {
+			Testing_PartitionFinishedTasks(ctx, TestingFinishedTaskCutoverDay(NowUtc()))
+		}
 	}
 
 	if self.Warmup {

@@ -47,7 +47,7 @@ func migrationCurrentSuffixArtifactQueries() string {
 	return strings.Join(queries, ",\n")
 }
 
-var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
+var migrationCurrentSuffixContracts = append(append([]snMainnetMigrationContract{
 	migrationCurrentSuffix(794, "tiered extender directory and release custody",
 		snMainnetMigrationColumns("network_extender",
 			snMainnetMigrationColumn{name: "directory_tier", kind: "smallint", notNull: true, defaultExpression: "0"},
@@ -724,7 +724,8 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 	migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
 		pendingTaskFillfactorArtifactQuery),
 	migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
-		providerWorkSessionPartitionCustodyPredicates()...))...)
+		providerWorkSessionPartitionCustodyPredicates()...))...),
+	finishedTaskPartitionContracts()...)
 
 // A fillfactor governs only later writes, so the published setting itself is
 // the artifact. The version is looked up by the migration's SQL and follows it

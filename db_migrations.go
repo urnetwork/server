@@ -10800,4 +10800,24 @@ var migrations = []any{
 	// replaces functions and adds a trigger to the receipt table, so it takes
 	// no lock on the event table (db_provider_work_session_partition.go).
 	newSqlMigration(providerWorkSessionPartitionSchemaSql),
+
+	// finished_task moves to daily partitions by run end time
+	// (PARTITION-MAINTENANCE-PLAN.md C3), and a partitioned table's unique
+	// keys must include its partition key, so the primary key becomes
+	// (task_id, run_end_time). Build its index online first; a retry removes
+	// residue from an interrupted concurrent build.
+	finishedTaskIdentityIndexMigration,
+
+	// The primary key takes over that index, catalog work only. A task id
+	// stays unique without it: the completion move is the only writer and
+	// refuses an id that already finished (task/task_run_once.go). The
+	// lock_timeout keeps this change from queueing completions behind a long
+	// transaction.
+	finishedTaskPrimaryKeyMigration,
+
+	// The failed Posts that a Post retry may still run. Before a day's
+	// partition drops, they leave through their finished owners, and the
+	// drop's fence reads this index (task/finished_task_partition.go). Failed
+	// Posts are rare, so the index stays small; built online.
+	finishedTaskPostRetryIndexMigration,
 }

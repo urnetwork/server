@@ -804,6 +804,62 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 B1, B2 and A1 alone would keep the table small. The owner chose to partition it
 as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
 
+**Implemented (2026-10-24):** branch `feat/pm-finished`, on the registry (A7).
+
+- **Schema:** three migrations on the plain table. They build a unique
+  `(task_id, run_end_time)` index online, make it the primary key, and add a
+  partial index of failed Posts (`finished_task_post_retry`). The key change
+  lands at deploy, before any cutover.
+- **Identity:** both fenced moves now also refuse a task id that already
+  finished, in any partition (`errFinishedTaskIdentityExists`). Without it,
+  the new key would accept a second end time. A batch that meets such a task
+  falls back to completing its members one by one. A pure test pins that the
+  two moves are the only `INSERT INTO finished_task` outside tests.
+- **Family:** `finished_task` registers daily partitions, 3 days ahead, kept 7
+  days past each upper bound. There is no DEFAULT partition, and the legacy
+  partition retires at C + 7 days.
+- **Fence, as built:**
+  - Only a failed Post (`post_error` set, Post not completed) can have a live
+    finished owner. A day gains no new failed Post after it ends.
+  - The archive step first removes the expired day's failed Posts through
+    TaskCleanup's own owner-admitted group delete. A busy group is left whole.
+  - The drop transaction then:
+    - defers while a transaction older than 5 s holds a `finished_task` lock;
+    - takes ACCESS EXCLUSIVE on the parent and the day;
+    - refuses while the day still holds a failed Post.
+  - After the detach, it checks again that no row ended within the last 7 days.
+  - A held row defers every day's drop, not only its own. Each drop waits at
+    most its 2 s lock bound and retries on the next pass.
+- **Cleanup:** on the partitioned table, TaskCleanup deletes nothing. It
+  creates today's and tomorrow's partitions if they are missing, so a stalled
+  runway cannot leave completions without a partition. On the plain table it
+  keeps today's row retention, and abandons a prepare still unfinalized 2
+  hours before its cutover day.
+- **Cutover:** `bringyourctl model migrate finished-task-partition
+  --cutover-day=<day, at least 12 h ahead> [--dry-run] [--finalize]
+  [--rollback [--max-copy-rows=<n>]] [--abort]`.
+  - It copies nothing. Prepare is resumable, finalize probes the attach in a
+    rolled-back transaction, and the swap is one transaction.
+  - Rollback copies the daily partitions' rows back into the legacy table
+    under its lock. It checks the copy's row count and refuses a task id
+    that is in both. Up to 200,000 rows by default, and nothing before C.
+  - Validate, analyze and the rollback run without `transaction_timeout`.
+  - The registry's runway and retention tasks must be deployed first, and
+    every taskworker must run this build. An older TaskCleanup would keep
+    deleting rows through the partitioned parent by row address. It would
+    only delete eligible rows whose owners it admitted, but it could wait on a
+    held row.
+- **Lookups:** each lookup by task id is one index probe per partition,
+  about 12 with the days ahead, and reads that bound `run_end_time` prune. A
+  DB test pins both.
+- **Monitor:** the three migrations' §8.9 contracts are in
+  `monitor/migration_finished_task_partition.go`, with versions from the
+  server's migration list. They read the catalogs directly, so they hold on
+  the plain table, through a prepared cutover and on the partitioned parent.
+  The unique index's contract ends where the primary key takes the index over.
+- **Future index migrations** on `finished_task` must be partition-aware, like
+  the contract tables'.
+
 ### C4. `provider_work_session_event` (136 GB): weekly partitions, 13 weeks (decided 2026-10-24)
 
 - **Writes:** the connection trigger (`provider_work_session_append`) appends
