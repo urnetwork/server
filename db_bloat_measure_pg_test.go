@@ -697,14 +697,14 @@ func TestDbBloatMeasureResumesAnInterruptedScan(t *testing.T) {
 		deadline := time.Now().Add(testDbMaintenanceBarrierTimeout)
 		for {
 			var waiting bool
-			MaintenanceDb(ctx, func(conn PgConn) {
+			Db(ctx, func(conn PgConn) {
 				Raise(conn.QueryRow(ctx, `
 					SELECT EXISTS (
 						SELECT 1 FROM pg_locks
 						WHERE locktype = 'advisory' AND NOT granted AND classid = 0 AND objid = 4242
 					)
 				`).Scan(&waiting))
-			}, OptNoRetry())
+			})
 			if waiting {
 				break
 			}
