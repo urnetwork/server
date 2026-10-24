@@ -1214,61 +1214,6 @@ func countRows(ctx context.Context, query string, args ...any) int {
 	return c
 }
 
-// RemoveExpiredAuthAttempts must drain the whole older-than-window backlog
-// across multiple bounded batches while leaving in-window rows untouched. A
-// small batch size forces the drain loop to iterate.
-func TestRemoveExpiredAuthAttempts(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-
-		orig := removeExpiredAuthAttemptsBatchSize
-		removeExpiredAuthAttemptsBatchSize = 3
-		defer func() { removeExpiredAuthAttemptsBatchSize = orig }()
-
-		now := server.NowUtc()
-		minTime := now.Add(-24 * time.Hour)
-
-		// 10 expired (older than minTime) => must all be removed across batches;
-		// 4 in-window (newer than minTime) => must all survive.
-		expiredCount := 10
-		freshCount := 4
-		server.Tx(ctx, func(tx server.PgTx) {
-			for i := 0; i < expiredCount; i += 1 {
-				server.RaisePgResult(tx.Exec(ctx,
-					`INSERT INTO user_auth_attempt (user_auth_attempt_id, success, attempt_time) VALUES ($1, false, $2)`,
-					server.NewId(), now.Add(-time.Duration(48+i)*time.Hour),
-				))
-			}
-			for i := 0; i < freshCount; i += 1 {
-				server.RaisePgResult(tx.Exec(ctx,
-					`INSERT INTO user_auth_attempt (user_auth_attempt_id, success, attempt_time) VALUES ($1, false, $2)`,
-					server.NewId(), now.Add(-time.Duration(i)*time.Hour),
-				))
-			}
-		})
-
-		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), expiredCount+freshCount)
-
-		removed := RemoveExpiredAuthAttempts(ctx, minTime)
-		connect.AssertEqual(t, removed, int64(expiredCount))
-
-		// only the in-window rows remain, and none older than minTime survived
-		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
-		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt WHERE attempt_time < $1`, minTime.UTC()), 0)
-
-		// idempotent: a second run removes nothing more
-		removed = RemoveExpiredAuthAttempts(ctx, minTime)
-		connect.AssertEqual(t, removed, int64(0))
-		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
-
-		// The limiter no longer writes this table, so as the cutoff advances the
-		// legacy table converges to empty.
-		removed = RemoveExpiredAuthAttempts(ctx, now.Add(time.Hour))
-		connect.AssertEqual(t, removed, int64(freshCount))
-		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), 0)
-	})
-}
-
 // RemoveExpiredAuthCodes drains expired/inactive codes (and their auth_code_role
 // rows) across batches, keeping live codes. A small batch size forces iteration.
 func TestRemoveExpiredAuthCodesBatched(t *testing.T) {

@@ -236,6 +236,32 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
 		{name: "task queue pages filled again", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task RESET (fillfactor)`},
 		{name: "task queue pages filled to 70", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task SET (fillfactor = 70)`},
+		{name: "legacy auth attempt table recreated", version: server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
+		{name: "dropped handler heartbeat index rebuilt", version: server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
+		{name: "transfer balance pages filled", version: server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
+		{name: "device pages filled", version: server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), sql: `ALTER TABLE device SET (fillfactor = 100)`},
+		{name: "search provider stats pages filled", version: server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
+		{name: "missing debit journal age index", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
+		{name: "debit journal age index keys applied", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "dropped debit journal applied age index rebuilt", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "debit journal shard index missing", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `DROP INDEX transfer_debit_journal_shard`},
+		{name: "debit journal pages filled", version: server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "dropped full probe deadline index rebuilt", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
+		{name: "probe queue identity missing", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
+		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
+		{name: "client score pages filled", version: server.WritePathMigrationVersion(server.WritePathClientScoreFillfactor), sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
+		{name: "location reliability pages filled", version: server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
+		{name: "missing open connection client index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id`},
+		{name: "open connection client index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (client_id, extender_id)`},
+		{name: "open connection client index leads with extender", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (extender_id, client_id) WHERE connected`},
+		{name: "missing open connection address index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash`},
+		{name: "open connection address index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash; CREATE INDEX network_client_connection_connected_client_address_hash ON network_client_connection (client_address_hash)`},
+		{name: "missing closed connection index", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time`},
+		{name: "closed connection index includes open rows", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time; CREATE INDEX network_client_connection_closed_disconnect_time ON network_client_connection (disconnect_time)`},
+		{name: "dropped full connected client index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), sql: `CREATE INDEX network_client_connection_connected_client_id ON network_client_connection (connected, client_id)`},
+		{name: "dropped full connection extender index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), sql: `CREATE INDEX network_client_connection_client_id_connected_extender_id ON network_client_connection (client_id, connected, extender_id)`},
+		{name: "dropped full connection address index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), sql: `CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)`},
+		{name: "dropped full connection disconnect time index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), sql: `CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -289,6 +315,9 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{829, "device", "device_network_id"},
 				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), "network_client_connection", "network_client_connection_connected_client_id_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "network_client_connection", "network_client_connection_connected_client_address_hash"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "network_client_connection", "network_client_connection_closed_disconnect_time"},
 			} {
 				// read as the signal's index catalog reads it, so a partitioned
 				// contract table's parent index compares without ONLY
@@ -332,6 +361,12 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
 				{831, "audit_device_event", "audit_device_event_stats_device_id"},
+				{server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), "network_client_handler", "network_client_handler_heartbeat_time"},
+				{server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), "client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), "network_client_connection", "network_client_connection_connected_client_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), "network_client_connection", "network_client_connection_client_id_connected_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), "network_client_connection", "network_client_connection_client_address_hash_connected"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "network_client_connection", "network_client_connection_connected_disconnect_time"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool
