@@ -227,6 +227,33 @@ table can no longer starve these tables. Compact, they are each under 10 GB,
 so a pass over all of them takes seconds. A plain vacuum stops the heap from
 growing, but does not shrink a time-ordered index (A2).
 
+Implemented (2026-10-24): `VacuumHotTables` (`db_maintenance_hot_vacuum.go`),
+run by the run-once chain `vacuum_hot_tables`
+(`taskworker/work/maintenance_work.go`), armed by `InitTasks` and in the
+subnet-operator workload.
+- Each run gives the 12 tables a turn in order with
+  `VACUUM (SKIP_LOCKED, VERBOSE, SKIP_DATABASE_STATS)`, adding ANALYZE once a
+  table's last one is an hour old, on a direct maintenance session.
+  `statement_timeout` is the smaller of 2 minutes and what is left of the
+  4-minute budget, set per statement and reset before the session goes back to
+  the pool; a session that cannot be reset is discarded.
+- The resume table, each table's last finished vacuum and analyze, and the last
+  index pass travel in the task arguments. A timed-out table gives way to the
+  next; a statement the budget cut short keeps its table's turn.
+- The VERBOSE summaries arrive through a per-connection notice dispatcher that
+  only the maintenance pool installs (`db_notice.go`).
+- A table with no finished vacuum for an hour logs a warning and counts
+  `urnetwork_db_hot_vacuum_stale_total`; every turn counts
+  `urnetwork_db_hot_vacuum_attempts_total` by outcome.
+- At 10,000 rows not yet removable in a table, the run logs the oldest holder of
+  each kind (session, slot `xmin`, slot `catalog_xmin`, prepared transaction) by
+  pid, application name, state and ages only.
+- `DbMaintenance` no longer vacuums `pending_task`.
+- Deviations: `SKIP_DATABASE_STATS` is added, since the database-wide frozen-xid
+  update scans `pg_class` and waits for a lock SKIP_LOCKED does not skip, and
+  autovacuum keeps it current. The summaries are matched in English, so a
+  translated `lc_messages` shows as every table going stale.
+
 ### A2. Rebuild a churn table's bloated indexes
 
 The priority rebuild already does the right thing for seven contract indexes:
@@ -250,6 +277,22 @@ Extend it to every index of the A1 tables:
   - defer under load or long transactions (`dbMaintenanceDeferReason`);
   - drop `_ccnew` debris after an interrupted rebuild.
 
+Implemented (2026-10-24): the hot vacuum's hourly pass
+(`dbHotVacuumRun.rebuildBloatedIndexes`).
+- It measures every valid index of the 12 tables, each leaf of a partitioned
+  one on its own (`dbMaintenanceTableIndexSizes`), and rebuilds those at 2× their
+  compact estimate with 64 MiB to reclaim: on by default, most reclaimable first,
+  at most 3 a pass, within what is left of the run budget.
+- Guards: the load guard (a transaction older than a minute defers the pass, and
+  the next run retries it), a skip while the table is vacuumed,
+  `dbMaintenanceAwaitTableUnlocked` through `dbMaintenanceRunReindex`, and debris
+  dropped before and after each rebuild, on a detached context after a failure.
+- An index on a heap over 8 GiB, which a rebuild may not read twice within the
+  budget, is left to the rotation. The seven priority indexes keep their opt-in.
+- Every REINDEX (rotation, priority and hourly) runs under
+  `WithoutTransactionTimeout` (`db_transaction_timeout.go`, whose
+  implementation `feat/pm-horizon` owns).
+
 ### A3. Fix the rotation's size bound and skip list
 
 - **Bound:** measure what a rebuild reads and writes:
@@ -268,6 +311,14 @@ Extend it to every index of the A1 tables:
   still plan "a one-time pg_repack". Replace both with the owner's rule: a
   maintenance-window VACUUM FULL until PostgreSQL 19, then its built-in online
   compaction (A4).
+
+Implemented (2026-10-24):
+- `dbMaintenanceTableBytes` is the heap and toast (`pg_table_size`) plus each
+  index's compact estimate, or its size on disk when it has none (not a btree,
+  or never vacuumed or analyzed).
+- `network_client_connection` left `dbMaintenanceSkipReindexTables`, and the
+  monitor's `db-maintenance-legacy-reindex` pattern no longer pages on it.
+- Both comments now state the owner's rule.
 
 ### A4. Measure bloat now; compact online after PostgreSQL 19
 
