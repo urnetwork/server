@@ -96,6 +96,30 @@ func TestMeasureDbBloatTaskRecordsTheWeekAndRejectsCancellation(t *testing.T) {
 			t.Fatalf("the body recorded %d heap measurements, want 1", measurements)
 		}
 
+		// the finished week's post schedules the next week's slot with its cursor
+		settings := server.DefaultDbBloatMeasureSettings()
+		before := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(MeasureDbBloatPost(&MeasureDbBloatArgs{}, result, owner, tx))
+		})
+		after := server.NowUtc()
+		name := task.NewTaskTarget(MeasureDbBloat).TargetFunctionName()
+		successors := []*task.Task{}
+		for _, pending := range task.GetTasks(ctx, task.ListPendingTasks(ctx)...) {
+			if pending.FunctionName == name {
+				successors = append(successors, pending)
+			}
+		}
+		if len(successors) != 1 ||
+			!(successors[0].RunAt.Equal(settings.NextWeekStart(before)) || successors[0].RunAt.Equal(settings.NextWeekStart(after))) {
+			t.Fatalf("successors = %+v", successors)
+		}
+		var successorArgs MeasureDbBloatArgs
+		if err := json.Unmarshal([]byte(successors[0].ArgsJson), &successorArgs); err != nil ||
+			!successorArgs.Cursor.Week.Equal(result.Cursor.Week) || !successorArgs.Cursor.CatalogDone || !successorArgs.Cursor.ScanDone {
+			t.Fatalf("successor args %s = %+v, %v", successors[0].ArgsJson, successorArgs, err)
+		}
+
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
 		queued := &task.Task{TaskId: server.NewId(), ArgsJson: `{"cursor":{}}`, ClientAddress: ""}
