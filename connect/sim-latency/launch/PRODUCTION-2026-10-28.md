@@ -30,6 +30,26 @@ are listed explicitly instead of inventing a branch or silently retaining an old
 staging pin. `operator-proxy` is not in the evaluation graph. The tracked SCTP
 module is part of the connect commit, not a separate repository.
 
+## Live capacity sweep — October 24, 12:50 UTC
+
+The isolated four-exchange-host frontier is running serially on sille, with
+200 clients, 80 arrivals/minute and impairment on/off at each provider scale.
+The staging supervisor is inactive and no build/test load is scheduled during
+measurement. The initial 1,800-provider on/off and 7,200-provider on attempts
+failed before simulation because the private harness omitted `EVALUATION_JOB_ID`
+from the container environment. Their disposable stacks cleaned up; these are
+harness failures, not capacity results or baseline samples. The environment
+handoff is corrected for subsequent attempts. Repeat those missing points
+separately after this batch, retaining the failed logs rather than overwriting
+them. Sweep evidence is currently private under
+`temp/production-frontier-20261024.63AtMXS5`; archive completed results before
+selecting scale. This sweep does not replace nine-run calibration.
+
+The public API still returns `503 source_not_ready`, and sille's configured
+MinIO endpoint `172.28.208.177:23900` refuses TCP connections. No main database
+write or production activation has been attempted while maintenance confirmation
+is pending.
+
 ## Execution checklist
 
 - [x] Fetch development heads and inspect operator worktrees without modifying them.
