@@ -10728,10 +10728,7 @@ var migrations = []any{
 	// taskworker built before this that still runs the drain fails that run
 	// until it is replaced; nothing else reads the table. The drop holds the
 	// unused table's exclusive lock only.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		DROP TABLE IF EXISTS user_auth_attempt;
-	`),
+	userAuthAttemptDropMigration,
 
 	// network_client_handler holds one row per connect handler process, a few
 	// dozen, and each heartbeats every 5 s. The heartbeat rewrites
@@ -10742,10 +10739,7 @@ var migrations = []any{
 	// the monitor's handler counts), which a sequential scan of a few dozen
 	// rows answers; every other reader probes the primary key. Without the
 	// index the heartbeat is HOT.
-	newOnlineSqlMigration(
-		`DROP INDEX CONCURRENTLY IF EXISTS network_client_handler_heartbeat_time`,
-		`DROP INDEX IF EXISTS network_client_handler_heartbeat_time`,
-	),
+	handlerHeartbeatIndexDropMigration,
 
 	// transfer_balance is updated in place on the debit path: each transfer
 	// debit flush applies a balance's pending debits in one UPDATE of
@@ -10759,10 +10753,7 @@ var migrations = []any{
 	// applies to: those written from now on, and every page at the next
 	// compaction. Storage parameters take ShareUpdateExclusiveLock, which
 	// blocks no reader or writer.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE transfer_balance SET (fillfactor = 85);
-	`),
+	transferBalanceFillfactorMigration,
 
 	// device rows are rewritten in place: a re-auth whose device_spec changed
 	// (authNetworkClientWithParentState, which no longer rewrites an unchanged
@@ -10771,10 +10762,7 @@ var migrations = []any{
 	// HOT update when its page has room. 90 is enough because a device is
 	// rewritten rarely once those writes skip unchanged values. It applies to
 	// pages written from now on, and to every page at the next compaction.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE device SET (fillfactor = 90);
-	`),
+	deviceFillfactorMigration,
 
 	// RollupSearchProviderStats rolls the open hour up every minute, so a row
 	// of a provider matched through the hour is rewritten up to 60 times.
@@ -10784,10 +10772,7 @@ var migrations = []any{
 	// together, one page holds many of them, and each keeps rewriting through
 	// its hour, hence 70. It applies to pages written from now on, and to
 	// every page at the next compaction.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE search_provider_stats SET (fillfactor = 70);
-	`),
+	searchProviderStatsFillfactorMigration,
 
 	// A transfer debit journal row is inserted, marked applied once its debit
 	// commits, and deleted after its Redis release, seconds later
@@ -10800,29 +10785,18 @@ var migrations = []any{
 	// backlog the applied age reads the shard's pending rows. The flush itself
 	// reads by balance (the primary key and transfer_debit_journal_shard).
 	// This builds the new index; the next migration drops the old one.
-	newRestartableOnlineSqlMigration(
-		`DROP INDEX CONCURRENTLY IF EXISTS transfer_debit_journal_shard_create_time`,
-		`CREATE INDEX CONCURRENTLY transfer_debit_journal_shard_create_time
-		 ON transfer_debit_journal (shard, create_time)`,
-		`DROP INDEX IF EXISTS transfer_debit_journal_shard_create_time;
-		 CREATE INDEX transfer_debit_journal_shard_create_time
-		 ON transfer_debit_journal (shard, create_time)`,
-	),
+	transferDebitJournalShardTimeIndexMigration,
+
 	// The age index keyed by applied, replaced by the one above, which the
 	// previous migration built before this drop runs. Without it no index of
 	// the journal keys applied, so marking a row applied is HOT.
-	newOnlineSqlMigration(
-		`DROP INDEX CONCURRENTLY IF EXISTS transfer_debit_journal_age`,
-		`DROP INDEX IF EXISTS transfer_debit_journal_age`,
-	),
+	transferDebitJournalAgeIndexDropMigration,
+
 	// Room on each page for the applied version of every row inserted there:
 	// a page holds the debits of a few seconds, and each is rewritten once as
 	// applied before it is deleted. The journal holds few live rows, so the
 	// space costs nothing that matters.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE transfer_debit_journal SET (fillfactor = 70);
-	`),
+	transferDebitJournalFillfactorMigration,
 
 	// provider_egress_probe_cycle_next_attempt (next_attempt_at, client_id)
 	// predates the eligible flag. Every reader that orders or bounds
@@ -10837,10 +10811,7 @@ var migrations = []any{
 	// pairs both stay, since one shard reads the non-slot indexes and several
 	// shards the slot ones. The completed-priority pair stays too: it is
 	// nearly empty outside priority mode, so it costs almost nothing.
-	newOnlineSqlMigration(
-		`DROP INDEX CONCURRENTLY IF EXISTS provider_egress_probe_cycle_next_attempt`,
-		`DROP INDEX IF EXISTS provider_egress_probe_cycle_next_attempt`,
-	),
+	probeCycleNextAttemptIndexDropMigration,
 
 	// Each reliability pass upserts every client score of each lookback with
 	// the pass's window (UpdateClientReliabilityScores), so max_block_number
@@ -10854,18 +10825,13 @@ var migrations = []any{
 	// would not, so the index is dropped rather than narrowed. Every other
 	// reader probes the primary key (client_id, lookback_index) or reads the
 	// whole table, as the provider count filter does.
-	newOnlineSqlMigration(
-		`DROP INDEX CONCURRENTLY IF EXISTS client_connection_reliability_score_lookback_max_block`,
-		`DROP INDEX IF EXISTS client_connection_reliability_score_lookback_max_block`,
-	),
+	clientScoreWindowIndexDropMigration,
+
 	// A pass rewrites every row in place, so each page needs room for a new
 	// version of every row on it: half the page, once the previous pass's
 	// versions are pruned. Applies to pages written from now on, and to every
 	// page at the next compaction.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE client_connection_reliability_score SET (fillfactor = 50);
-	`),
+	clientScoreFillfactorMigration,
 
 	// network_client_location_reliability holds one row per client seen in
 	// the last 30 days (132 GB before the 2026-10-23 VACUUM FULL). The
@@ -10876,8 +10842,5 @@ var migrations = []any{
 	// are HOT when the page has room. 85 leaves that room on each page for
 	// the rows of its clients that are still connecting. It applies to pages
 	// written from now on, and to every page at the next compaction.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE network_client_location_reliability SET (fillfactor = 85);
-	`),
+	locationReliabilityFillfactorMigration,
 }

@@ -222,21 +222,21 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
 		{name: "close evidence guard refuses retention again", version: 857, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
-		{name: "legacy auth attempt table recreated", version: 858, sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
-		{name: "dropped handler heartbeat index rebuilt", version: 859, sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
-		{name: "transfer balance pages filled", version: 860, sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
-		{name: "device pages filled", version: 861, sql: `ALTER TABLE device SET (fillfactor = 100)`},
-		{name: "search provider stats pages filled", version: 862, sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
-		{name: "missing debit journal age index", version: 863, sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
-		{name: "debit journal age index keys applied", version: 863, sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "dropped debit journal applied age index rebuilt", version: 864, sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "debit journal shard index missing", version: 864, sql: `DROP INDEX transfer_debit_journal_shard`},
-		{name: "debit journal pages filled", version: 865, sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
-		{name: "dropped full probe deadline index rebuilt", version: 866, sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
-		{name: "probe queue identity missing", version: 866, sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
-		{name: "dropped client score window index rebuilt", version: 867, sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
-		{name: "client score pages filled", version: 868, sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
-		{name: "location reliability pages filled", version: 869, sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
+		{name: "legacy auth attempt table recreated", version: server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
+		{name: "dropped handler heartbeat index rebuilt", version: server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
+		{name: "transfer balance pages filled", version: server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
+		{name: "device pages filled", version: server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), sql: `ALTER TABLE device SET (fillfactor = 100)`},
+		{name: "search provider stats pages filled", version: server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
+		{name: "missing debit journal age index", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
+		{name: "debit journal age index keys applied", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "dropped debit journal applied age index rebuilt", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "debit journal shard index missing", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `DROP INDEX transfer_debit_journal_shard`},
+		{name: "debit journal pages filled", version: server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "dropped full probe deadline index rebuilt", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
+		{name: "probe queue identity missing", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
+		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
+		{name: "client score pages filled", version: server.WritePathMigrationVersion(server.WritePathClientScoreFillfactor), sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
+		{name: "location reliability pages filled", version: server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -332,8 +332,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
 				{831, "audit_device_event", "audit_device_event_stats_device_id"},
-				{859, "network_client_handler", "network_client_handler_heartbeat_time"},
-				{867, "client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block"},
+				{server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), "network_client_handler", "network_client_handler_heartbeat_time"},
+				{server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), "client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

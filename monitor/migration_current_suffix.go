@@ -5,6 +5,8 @@ package monitor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -25,10 +27,38 @@ func migrationCurrentSuffixArtifacts() []migrationArtifact {
 	return artifacts
 }
 
+// The first version of the suffix; its row column follows the legacy payer
+// columns (version - 589).
+const migrationCurrentSuffixFirstVersion = 794
+
+// One expression per version from the first through the newest contract, in
+// version order, so a contract's row column is its version however the list
+// is ordered, including versions a merge places by their position in the
+// server's migration list. A version with no contract, a migration the
+// monitor does not pin, holds a true placeholder that no artifact reads.
 func migrationCurrentSuffixArtifactQueries() string {
-	queries := make([]string, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContracts {
-		queries = append(queries, contract.query)
+	return migrationCurrentSuffixVersionQueries(migrationCurrentSuffixContracts)
+}
+
+// The expressions of contracts in version order with placeholders, as above.
+func migrationCurrentSuffixVersionQueries(contracts []snMainnetMigrationContract) string {
+	versionQueries := map[int]string{}
+	lastVersion := migrationCurrentSuffixFirstVersion - 1
+	for _, contract := range contracts {
+		version := contract.artifact.requiredVersion
+		if _, duplicate := versionQueries[version]; duplicate || version < migrationCurrentSuffixFirstVersion {
+			panic(fmt.Errorf("migration suffix contract version %d is duplicated or out of range", version))
+		}
+		versionQueries[version] = contract.query
+		lastVersion = max(lastVersion, version)
+	}
+	queries := make([]string, 0, lastVersion-migrationCurrentSuffixFirstVersion+1)
+	for version := migrationCurrentSuffixFirstVersion; version <= lastVersion; version++ {
+		query, ok := versionQueries[version]
+		if !ok {
+			query = "true"
+		}
+		queries = append(queries, query)
 	}
 	return strings.Join(queries, ",\n")
 }
@@ -696,31 +726,31 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
-	migrationCurrentSuffix(858, "legacy auth attempt table dropped",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), "legacy auth attempt table dropped",
 		migrationTableRemoved("user_auth_attempt")),
-	migrationCurrentSuffix(859, "handler heartbeat index removed",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), "handler heartbeat index removed",
 		migrationIndexRemoved("network_client_handler", "network_client_handler_heartbeat_time")),
-	migrationCurrentSuffix(860, "transfer balance pages keep room for in-place debits",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), "transfer balance pages keep room for in-place debits",
 		migrationFillfactor("transfer_balance", 85)),
-	migrationCurrentSuffix(861, "device pages keep room for in-place updates",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), "device pages keep room for in-place updates",
 		migrationFillfactor("device", 90)),
-	migrationCurrentSuffix(862, "search provider stats pages keep room for open-hour rollups",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), "search provider stats pages keep room for open-hour rollups",
 		migrationFillfactor("search_provider_stats", 70)),
-	migrationCurrentSuffix(863, "transfer debit journal age index keyed without applied",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), "transfer debit journal age index keyed without applied",
 		financialIndexArtifact("transfer_debit_journal", "transfer_debit_journal_shard_create_time", "shard, create_time")),
-	// 864 retires the v758 composite, which pinned the dropped age index
-	migrationCurrentSuffix(864, "transfer debit journal custody without the applied age index",
+	// retires the v758 composite, which pinned the dropped age index
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), "transfer debit journal custody without the applied age index",
 		transferDebitJournalHotArtifactQuery),
-	migrationCurrentSuffix(865, "transfer debit journal pages keep room for the applied version",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), "transfer debit journal pages keep room for the applied version",
 		migrationFillfactor("transfer_debit_journal", 70)),
-	// 866 retires the v723 composite, which pinned the dropped index
-	migrationCurrentSuffix(866, "URL receipt history and durable probe queue without the unread full deadline index",
+	// retires the v723 composite, which pinned the dropped index
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), "URL receipt history and durable probe queue without the unread full deadline index",
 		migrationFp2DurableQueueWithoutFullDeadlineIndexQuery),
-	migrationCurrentSuffix(867, "client score lookback window index removed",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), "client score lookback window index removed",
 		migrationIndexRemoved("client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block")),
-	migrationCurrentSuffix(868, "client score pages keep room for a full pass rewrite",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathClientScoreFillfactor), "client score pages keep room for a full pass rewrite",
 		migrationFillfactor("client_connection_reliability_score", 50)),
-	migrationCurrentSuffix(869, "location reliability pages keep room for changed rows",
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), "location reliability pages keep room for changed rows",
 		migrationFillfactor("network_client_location_reliability", 85)),
 }
 

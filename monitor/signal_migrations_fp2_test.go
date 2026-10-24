@@ -76,9 +76,9 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 		ctx := t.Context()
 		query := migrationFp2TestQuery(t)
 		server.Tx(ctx, func(tx server.PgTx) {
-			// v866 republishes the v723 contract without the full deadline
-			// index it drops, so at head it owns the v723 faults
-			successor := migrationCurrentSuffixTestContract(t, 866).artifact
+			// a write-path migration republishes the v723 contract without the
+			// full deadline index it drops, so at head it owns the v723 faults
+			successor := migrationCurrentSuffixTestContract(t, server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop)).artifact
 			var successorMatches bool
 			read := func() []bool {
 				var matches []bool
@@ -89,14 +89,14 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 				return matches
 			}
 			for index, matches := range read() {
-				// v726 is superseded at v729, v723 at v866
+				// v726 is superseded at v729, v723 by the successor
 				superseded := index == 4 || index == 1
 				if matches != !superseded {
 					t.Fatalf("migrated schema v%d match=%t, want%t", index+722, matches, !superseded)
 				}
 			}
 			if !successorMatches {
-				t.Fatal("migrated schema fails the v866 durable queue successor")
+				t.Fatalf("migrated schema fails the v%d durable queue successor", successor.requiredVersion)
 			}
 			for _, fault := range []struct {
 				name, sql string
@@ -145,7 +145,7 @@ func TestMigrationFp2CatalogGuardsOnMigratedDatabase(t *testing.T) {
 				owner := fault.version
 				if fault.version == 723 {
 					if successorMatches {
-						t.Fatalf("%s passed its v866 successor guard", fault.name)
+						t.Fatalf("%s passed its v%d successor guard", fault.name, successor.requiredVersion)
 					}
 					owner = successor.requiredVersion
 				}
@@ -209,7 +209,7 @@ func TestMigrationFp2MissingFutureObjectsAreQueryable(t *testing.T) {
 				}
 			}
 			if successorMatches {
-				t.Fatal("absent future v866 objects appear present")
+				t.Fatal("absent future successor objects appear present")
 			}
 		})
 	})

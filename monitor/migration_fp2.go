@@ -167,9 +167,10 @@ var migrationFp2ArtifactQueries = []string{
 		migrationFp2Column{name: "arin_database_build_epoch", kind: "bigint", notNull: true, defaultExpression: "0"}),
 }
 
-// v866 drops provider_egress_probe_cycle_next_attempt, which v723 pinned: no
-// query reads it since every next-attempt read requires eligible. The rest of
-// the v723 contract is republished with that index required absent.
+// A write-path migration drops provider_egress_probe_cycle_next_attempt, which
+// v723 pinned: no query reads it since every next-attempt read requires
+// eligible. The rest of the v723 contract is republished with that index
+// required absent.
 var migrationFp2DurableQueueWithoutFullDeadlineIndexQuery = func() string {
 	published := migrationFp2ArtifactQueries[723-722]
 	fullDeadlineIndex := migrationFp2Index("provider_egress_probe_cycle", "provider_egress_probe_cycle_next_attempt", "next_attempt_at, client_id", "", false)

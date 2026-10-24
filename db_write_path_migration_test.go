@@ -165,3 +165,28 @@ func TestClientReliabilityScoreRewriteIsHot(t *testing.T) {
 		})
 	})
 }
+
+// Each write-path migration's version is its position in the migration list,
+// unique, and in the order the write-path migrations were written: a
+// replacement index is built before the migration that drops what it
+// replaces.
+func TestWritePathMigrationVersionsFollowTheirPosition(t *testing.T) {
+	previousVersion := 0
+	for migration := WritePathUserAuthAttemptDrop; ; migration++ {
+		target, ok := writePathMigrations[migration]
+		if !ok {
+			if int(migration) != len(writePathMigrations) {
+				t.Fatalf("write-path migrations are not numbered contiguously: %d of %d", migration, len(writePathMigrations))
+			}
+			break
+		}
+		version := WritePathMigrationVersion(migration)
+		if version < 1 || len(migrations) < version || migrations[version-1] != target {
+			t.Fatalf("write-path migration %d version %d is not its position", migration, version)
+		}
+		if version <= previousVersion {
+			t.Fatalf("write-path migration %d version %d is not after %d", migration, version, previousVersion)
+		}
+		previousVersion = version
+	}
+}
