@@ -83,36 +83,59 @@ func TestClientKeyHistoryRetentionBodiesAreDelimited(t *testing.T) {
 	}
 }
 
+// Pure: the index build is enrolled in completion recovery under its own
+// version, with the definition PostgreSQL renders and the monitor pins.
+func TestRetiredChildNetworkClientIndexCompletionIsEnrolled(t *testing.T) {
+	version := RetiredChildNetworkClientIndexMigrationVersion()
+	completion := migrations[version-1].(*OnlineSqlMigration).completion
+	if completion == nil || completion.version != int32(version) || completion.table != "network_client" ||
+		completion.index != "network_client_retired_child_deactivate_time" ||
+		completion.definition != retiredChildNetworkClientIndexTestDefinition ||
+		completion.predicate != "((NOT active) AND (source_client_id IS NOT NULL))" {
+		t.Fatalf("retired child index completion = %+v", completion)
+	}
+}
+
 // DB-backed: under the owner rule this runs only after the branch, with its
 // migrations, is merged to main.
 //
-// Replays the online index over a same-name leftover, again over its built
-// index, and through the schema audit's transactional path; each leaves the
-// exact usable index the monitor pins.
+// Replays the online index over a same-name leftover without its predicate,
+// again over its built index, and through the schema audit's transactional
+// path. Each leaves the exact usable index the monitor pins, and the replay
+// keeps the completed build instead of rebuilding it.
 func TestRetiredChildNetworkClientIndexMigrationReplay(t *testing.T) {
 	migration := migrations[RetiredChildNetworkClientIndexMigrationVersion()-1].(*OnlineSqlMigration)
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		defer cancel()
-		assertIndex := func(conn PgConn) {
+		assertIndex := func(conn PgConn) uint32 {
 			t.Helper()
+			var oid uint32
 			var definition string
 			var valid, ready, live bool
-			Raise(conn.QueryRow(ctx, `SELECT pg_get_indexdef(indexrelid), indisvalid, indisready, indislive
+			Raise(conn.QueryRow(ctx, `SELECT indexrelid, pg_get_indexdef(indexrelid), indisvalid, indisready, indislive
 				FROM pg_index WHERE indexrelid = to_regclass('public.network_client_retired_child_deactivate_time')
-				AND indrelid = 'public.network_client'::regclass`).Scan(&definition, &valid, &ready, &live))
+				AND indrelid = 'public.network_client'::regclass`).Scan(&oid, &definition, &valid, &ready, &live))
 			if definition != retiredChildNetworkClientIndexTestDefinition || !valid || !ready || !live {
 				t.Fatalf("retired child index=%q valid=%t ready=%t live=%t", definition, valid, ready, live)
 			}
+			return oid
 		}
 		MaintenanceDb(ctx, func(conn PgConn) {
 			RaisePgResult(conn.Exec(ctx, `CREATE TABLE network_client (
 				client_id uuid PRIMARY KEY, source_client_id uuid NULL, active boolean NOT NULL DEFAULT true, deactivate_time timestamp NULL);
 				CREATE INDEX network_client_retired_child_deactivate_time ON network_client (deactivate_time)`))
+			var residue uint32
+			Raise(conn.QueryRow(ctx, `SELECT to_regclass('public.network_client_retired_child_deactivate_time')::oid`).Scan(&residue))
 			Raise(executeOnlineSqlMigrationOnConn(ctx, conn, migration))
-			assertIndex(conn)
+			built := assertIndex(conn)
+			if built == residue {
+				t.Fatal("a same-name leftover without the predicate was taken for the index")
+			}
 			Raise(executeOnlineSqlMigrationOnConn(ctx, conn, migration))
-			assertIndex(conn)
+			if replayed := assertIndex(conn); replayed != built {
+				t.Fatalf("the completed index was rebuilt on replay: oid %d became %d", built, replayed)
+			}
 		}, OptReadWrite(), OptNoRetry())
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, migration.auditSql))

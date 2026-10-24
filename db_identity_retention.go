@@ -31,6 +31,27 @@ const retiredChildNetworkClientIndexAuditSql = `
 	WHERE NOT active AND source_client_id IS NOT NULL
 `
 
+// The index as PostgreSQL renders it, which completion recovery compares.
+const retiredChildNetworkClientIndexDefinition = "CREATE INDEX network_client_retired_child_deactivate_time ON public.network_client USING btree (deactivate_time, client_id) WHERE ((NOT active) AND (source_client_id IS NOT NULL))"
+
+const retiredChildNetworkClientIndexPredicate = "((NOT active) AND (source_client_id IS NOT NULL))"
+
+// Enrolls the index build in completion recovery: a completed build, including
+// one made out of band with the same statement, is kept when the migration
+// reruns, and a builder still running is refused rather than raced. The
+// recovery is keyed by the migration's version, which is its position, known
+// only once the list is built.
+func init() {
+	version := RetiredChildNetworkClientIndexMigrationVersion()
+	migrations[version-1].(*OnlineSqlMigration).withIndexCompletion(
+		int32(version),
+		"network_client",
+		"network_client_retired_child_deactivate_time",
+		retiredChildNetworkClientIndexDefinition,
+		retiredChildNetworkClientIndexPredicate,
+	)
+}
+
 // st_client_key_gone records when each client with key history went: written
 // by the network_client delete trigger, which loses the client's row, and by
 // the retention task for clients deleted before this migration. A child goes

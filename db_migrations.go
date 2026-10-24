@@ -10730,8 +10730,10 @@ var migrations = []any{
 	// db_identity_retention.go). The reap pages the retired children by
 	// deactivation time through this partial index, which holds only retired
 	// children. Building it reads the 455 GB heap twice and waits for older
-	// snapshots, without blocking writes; an interrupted build's leftover is
-	// dropped and rebuilt.
+	// snapshots, without blocking writes. It is enrolled in completion
+	// recovery (db_identity_retention.go): a completed build is kept, so it may
+	// be pre-created out of band with the same statement, and an interrupted
+	// build's leftover is dropped and rebuilt.
 	newRestartableOnlineSqlMigration(
 		retiredChildNetworkClientIndexRecoverySql,
 		retiredChildNetworkClientIndexSql,
