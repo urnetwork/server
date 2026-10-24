@@ -612,6 +612,27 @@ Each one is small, and each needs a test.
 | `legacy_settlement_intent` | A drained queue: Redis admission now marks escrows `redis_reserved`. The 33.6 GB was a past backlog plus non-HOT retries. | Once all 16 shards are empty, drop the table, its outcome trigger on `transfer_contract`, and its FK, along with the weekly contract drop's check on it (`db_contract_partition_maintenance.go`). Built now: the contract-partition fixes are merged. |
 | `search_projection` | The search fallback's inverted index. Each value's projections are replaced, and its update record is published, in one transaction (`search/search.go:AddRawInTx`). Since f071c331c an unchanged value is skipped, so most of the 46% is older than that. The table is read only until the in-memory search sync completes. | Leave it (decided 2026-10-24). Dropping it together with the fallback stays possible later. Do not rebuild and swap it: a write between the copy and the swap would be lost. |
 
+**Implemented (2026-10-24): the first two rows** (`feat/pm-queue`). A heartbeat
+writes `claim_time` every 10 s and moves `release_time` only once less than
+half of the 5-minute lease remains (`task.refreshTaskTimestampLeasesInTx`), so
+the beats between extensions are HOT: about 45 non-HOT versions for a two-hour
+task instead of 720. `pending_task` fillfactor is 50, which leaves room for two
+versions of a row at the 2 kB TOAST threshold where 70 leaves one. A debit or
+legacy chain backs off straight to 30 s at its second consecutive empty pass
+(`work.SettlementChainSettings`); the first only counts, so debits arriving
+every few seconds keep the 2 s cadence instead of trading each run for a kick.
+After its commit, a settlement or deadline close that journaled a debit kicks
+its partition's chain only if the chain left a Redis idle mark, which it sets
+once its backed-off successor has committed and then rereads the journal
+(`task.WakeIdleRunOnce`: `KickTasks`'s update in a pooled transaction that
+skips a held queue key, so producers need no direct maintenance session). An
+active chain gets no queue write, and concurrent producers coalesce into one
+kick. Deviation: legacy enqueuers do not
+kick, since current contracts no longer queue legacy intents and the scheduled
+close handoff and expiry recovery already wake the dispatcher through the
+RunOnce merge; the legacy pending warning moved from 60 s to 90 s (SIGNALS.md
+§2.5b). The debit bands are unchanged.
+
 A new fillfactor applies only to pages written after the change. Existing pages
 take it at the next compaction: a VACUUM FULL window, or PostgreSQL 19's online
 compaction.
@@ -806,6 +827,59 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     857 does for close evidence).
 - **Decided (2026-10-24): 13 weeks,** matching contract retention, so a
   session's events never outlive the contracts they describe.
+- **Implemented (2026-10-24):** branch `feat/pm-events`
+  (`db_provider_work_session_partition.go`, `..._cutover.go`).
+  - **Migration** (`providerWorkSessionPartitionSchemaSql`): functions and a
+    receipt trigger only, so no lock on the event table. The append's retire
+    lookup is bounded by `provider_work_session_admit_floor(connection)`, the
+    id's mint millisecond less a day, and falls back to the unbounded lookup
+    when that finds nothing. Its monitor contract takes the migration's
+    position as its version (`ProviderWorkSessionPartitionMigrationVersion`),
+    reads all three layouts (plain, prepared, partitioned), and supersedes
+    824's contract.
+  - **Sequence identity:** no identity relation. The append is the only
+    writer, and the head guard keeps each client's generator monotonic (the
+    proof is in the file comment).
+  - **Receipt reference: trigger-enforced, not `observed_at` in the receipt.**
+    - A foreign key into the partitioned table runs a referencing-row check of
+      the whole receipt table inside each detach. On PostgreSQL 18 that took
+      1.75 s for a week of a million events against a million receipts, under
+      the parent's ACCESS EXCLUSIVE lock. It would also refuse every week a
+      receipt references.
+    - Receipts are self-contained signed originals, and their readers (chain
+      replay, payout originals) read receipts only, from sequence 1. So
+      receipts outlive the events they sign; dropping them with their events
+      would break those chains.
+    - The trigger checks the reference at insert, the only time a receipt is
+      written: today's weeks first, then every week. The cutover drops the
+      foreign key.
+    - The signer's event lookup is bounded a day below its transaction's
+      start.
+  - **Cutover:** `bringyourctl model migrate provider-work-session-partition
+    [--cutover-week=<Monday>] [--dry-run] [--finalize] [--rollback] [--abort]`.
+    - Prepare builds `(client_id, sequence, observed_at)` concurrently and
+      swaps it in as the primary key, dropping the receipt key and the old key
+      (an estimated 31 GB built and 28 GB returned).
+    - It then stages the parent with `LIKE ... INCLUDING INDEXES` and weeks
+      C..C+4, and adds and validates the bound. The build and the validation
+      run on a session exempt from `transaction_timeout`.
+    - Finalize runs the rolled-back attach probe, then the swap.
+    - Every exclusive step waits for a quiet table, then for at most 3 s per
+      lock, with retries. Every step is resumable; a build that another backend
+      is still running is never dropped.
+    - Rollback keeps every event until the first one at or after C.
+    - The runway pass abandons a cutover not finalized 6 h before C, through
+      the registry's new additive `BeforeCutover` hook.
+  - **Drop:** the family (`AheadRanges` 4, `KeepLegacyPartition` false) sets
+    `urnetwork.provider_work_session_retention` in the drop transaction. Its
+    fence, `provider_work_session_event_drop_guard`, refuses a leaf whose upper
+    bound is not 91 days past by the database's clock. Neither DETACH nor DROP
+    fires a trigger, and event triggers need a superuser, so the database
+    cannot refuse a manual drop.
+  - **Not built:**
+    - an insert-side `EnsureRangeFor` retry; the runway and its monitor cover
+      that case;
+    - receipt retention, which is left for when the signer ships.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
@@ -1043,6 +1117,87 @@ Changes:
     aligned with contract retention, so it outlasts every close report;
   - bringing the mint rate down at the source is a protocol and product
     change outside this plan.
+- **Implemented (2026-10-24):** branch `feat/pm-identity`
+  (`db_identity_retention.go`, `model/network_client_retired_hosted.go`,
+  `model/st_client_key_history_retention.go`).
+  - **Which children are hosted.** `source_client_id` marks every child, not
+    only hosted ones. A hosted identity is a child whose parent has a
+    `proxy_device_config`: a proxy's local authority mints only under the
+    proxy's own client. This is the same test as SIGNALS.md §14.8. Other
+    children keep the 30-day reap, for two readers:
+    - ST epoch reliability joins `network_client` with no `active` filter
+      (`GetStEpochClientReliability`), so a child that earns would lose an
+      unclosed epoch's payout;
+    - the client ancestry walk reads inactive parents
+      (`ResolveClientRootInTx`), so a deleted child would break its own
+      children.
+
+    Hosted windows are leaves, and payers behind the proxy host's shared
+    egress.
+  - **Readers checked for the 1-day delete:**
+    - **Contract creation:** reads only active rows.
+    - **Close, expiry, settlement and payout:** use the network ids copied
+      onto `transfer_contract`, `contract_participant` and the sweeps, and
+      never read the client directory.
+    - **Original-close verification:** reads key history, not
+      `network_client`.
+    - **Usage metering:** reads a payer child's row about 2 minutes after
+      settlement.
+    - **Stats:** filter `active AND source_client_id IS NULL`.
+    - **Contract route rejection cache:** a missing destination is not
+      terminal, so a deleted window's stale return route is re-read once a
+      minute per API process instead of every 6 hours. Not changed.
+  - **Reap.** Task `remove_retired_hosted_network_clients`: every 5 minutes,
+    a 2-minute budget, pages of 5,000.
+    - It reads a new partial index, `network_client_retired_child_deactivate_time
+      (deactivate_time, client_id) WHERE NOT active AND source_client_id IS
+      NOT NULL`, with a cursor, so each retired child is examined once. A
+      window that is still connected is passed.
+    - The index migration is enrolled in completion recovery, so the index
+      can be built out of band beforehand with the same `CREATE INDEX
+      CONCURRENTLY`, and the deploy then only checks it.
+    - Dependents go after each page commits. The shared cascade now also
+      deletes roles and the whole provide mirror.
+    - A chain starts at the horizon. Windows retired before its first run
+      age out through the 30-day reap, so a deploy deletes no backlog at
+      once.
+  - **Provide keys at deactivation.** Every deactivation deletes the
+    client's keys in its own transaction, and their mirror after the commit:
+    `deactivateLockedNetworkClientsInTx`, which covers every removal path, the
+    prober drain and session cleanup, and the abandoned top-level marker.
+    `SetProvide` locks the client row FOR KEY SHARE before it writes. So it
+    commits before a deactivation, or it finds the client inactive and
+    writes nothing (counted, logged at V(1)). A client with no row is still
+    written: the tests rely on it, and the orphan sweep removes such keys.
+  - **`SetProvide` writes the difference.** One read committed transaction
+    under a per-client advisory lock: an unchanged set writes no
+    `provide_key` row, and a changed one deletes, upserts or keeps each mode.
+    **Deviation:** it still records one `provide_key_change` per provide. The
+    announce loop counts it as a provide change, which invalidates a
+    reliability block, so stopping it for unchanged sets would change
+    provider reliability scoring. That is the owner's decision.
+  - **Key history retention.**
+    - A new table, `st_client_key_gone (client_id, gone_time)`, is written
+      by the `network_client` delete trigger. A child is gone at its
+      deactivation, or at its delete if it was still active. A top-level
+      client is gone at its own reap.
+    - The history guard admits a delete only under
+      `urnetwork.client_key_history_retention = on`, and only for a client
+      gone more than 91 days that has no client row and no head left.
+      Update and truncate (a new statement trigger) stay refused.
+    - Task `remove_gone_st_client_key_history`: every 15 minutes, a 4-minute
+      budget. In one short transaction per 500 clients, ordered by
+      `st_client_key_gone_gone_time`, it deletes their heads, then their
+      history, then their records, and then their legacy Redis key.
+    - A weekly discovery pass over the heads records clients deleted before
+      the migration, as gone from the first pass. Their history goes 91 days
+      after it.
+  - Both migrations have monitor suffix contracts, which find their versions
+    by migration content rather than by number.
+  - The index build on `network_client` outlasts A6's 15-minute
+    `transaction_timeout`, so the migration runner now runs every online
+    migration through `WithoutTransactionTimeout`. This branch carries a
+    minimal version of it; `feat/pm-horizon` owns the helper.
 
 ## Cutover requirements
 

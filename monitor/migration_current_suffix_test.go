@@ -148,8 +148,19 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"App Store transaction price truncates milliunits", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
 		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
 		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
-		{"dropped provider session transaction index rebuilt", 824, `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
-		{"provider session head accepts a zero sequence", 824, snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		// the journal's partition preparation republishes the 824 custody
+		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionPartitionMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", server.ProviderWorkSessionPartitionMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"provider session retire lookup unbounded again", server.ProviderWorkSessionPartitionMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderSessionAppendBody)},
+		{"provider session admit floor not immutable", server.ProviderWorkSessionPartitionMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
+		{"provider session receipt reference dropped", server.ProviderWorkSessionPartitionMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
+		{"provider session receipt reference disabled", server.ProviderWorkSessionPartitionMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
+		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionPartitionMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
+		{"provider session drop guard admits every drop", server.ProviderWorkSessionPartitionMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
+		{"provider session journal row guard disabled", server.ProviderWorkSessionPartitionMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
+		{"provider session journal partitioned by sequence", server.ProviderWorkSessionPartitionMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
+			CREATE TABLE provider_work_session_event (LIKE synthetic_plain_journal INCLUDING ALL) PARTITION BY RANGE (sequence)`},
 		// the move guard republishes the 825 custody, including the dropped
 		// index, after 857
 		{"dropped close evidence contract index rebuilt", contractCloseEvidenceMoveGuardMigrationVersion, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
@@ -223,6 +234,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
 		{name: "close evidence guard refuses retention again", version: contractCloseEvidenceMoveGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
+		{name: "task queue pages filled again", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task RESET (fillfactor)`},
+		{name: "task queue pages filled to 70", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task SET (fillfactor = 70)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -312,7 +325,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
-				{824, "provider_work_session_event", "provider_work_session_event_transaction"},
+				// the journal's partition preparation republishes the 824 custody
+				{server.ProviderWorkSessionPartitionMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
 				// the move guard republishes the 825 custody after 857
 				{contractCloseEvidenceMoveGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},

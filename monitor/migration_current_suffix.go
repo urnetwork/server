@@ -4,7 +4,10 @@ package monitor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -17,9 +20,20 @@ func migrationCurrentSuffix(version int, name string, predicates ...string) snMa
 	return contract
 }
 
+// The contracts in version order. An artifact's row column is its version's
+// position, so the probe emits the queries in that order whatever order
+// separately developed branches merged the list in.
+func migrationCurrentSuffixContractsInVersionOrder(contracts []snMainnetMigrationContract) []snMainnetMigrationContract {
+	ordered := slices.Clone(contracts)
+	slices.SortStableFunc(ordered, func(a snMainnetMigrationContract, b snMainnetMigrationContract) int {
+		return a.artifact.requiredVersion - b.artifact.requiredVersion
+	})
+	return ordered
+}
+
 func migrationCurrentSuffixArtifacts() []migrationArtifact {
 	artifacts := make([]migrationArtifact, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContracts {
+	for _, contract := range migrationCurrentSuffixContractsInVersionOrder(migrationCurrentSuffixContracts) {
 		artifacts = append(artifacts, contract.artifact)
 	}
 	return artifacts
@@ -27,7 +41,7 @@ func migrationCurrentSuffixArtifacts() []migrationArtifact {
 
 func migrationCurrentSuffixArtifactQueries() string {
 	queries := make([]string, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContracts {
+	for _, contract := range migrationCurrentSuffixContractsInVersionOrder(migrationCurrentSuffixContracts) {
 		queries = append(queries, contract.query)
 	}
 	return strings.Join(queries, ",\n")
@@ -374,10 +388,12 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
 	// 824 and 825 retire composite artifacts (776, 767-769) that pinned the
 	// dropped index, so each republishes the rest of that custody with the
-	// index required absent instead.
+	// index required absent instead. The session journal's partition
+	// preparation replaces the append body and the receipt key's custody and
+	// republishes the rest (providerWorkSessionPartitionCustodyPredicates).
 	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
 		providerWorkSessionCustodyPredicates(
-			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...).removedAt(server.ProviderWorkSessionPartitionMigrationVersion()),
 	// 857 replaces the evidence guard body and republishes the rest.
 	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
 		contractCloseEvidenceChainWithoutContractIndexArtifactQuery).removedAt(857),
@@ -702,7 +718,20 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 	migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
 	migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
 		contractCloseEvidenceMoveArtifactQuery),
-}, providerUsageArchivePartitionContracts()...)
+}, append(providerUsageArchivePartitionContracts(),
+	retiredChildNetworkClientIndexMigrationContract,
+	clientKeyHistoryRetentionMigrationContract,
+	migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
+		pendingTaskFillfactorArtifactQuery),
+	migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
+		providerWorkSessionPartitionCustodyPredicates()...))...)
+
+// A fillfactor governs only later writes, so the published setting itself is
+// the artifact. The version is looked up by the migration's SQL and follows it
+// wherever a merge places it.
+const pendingTaskFillfactorArtifactQuery = `EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.pending_task')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=50']::text[])`
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.

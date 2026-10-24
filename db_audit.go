@@ -434,6 +434,7 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	d.acceptContractPartitionCutover()
 	d.acceptPartitionCutoverTables(PartitionFamilies())
 	d.acceptCloseEvidencePartitionCutover()
+	d.acceptProviderWorkSessionPartitionCutover()
 
 	sort.Strings(d.missingTables)
 	sort.Strings(d.extraTables)
@@ -931,4 +932,49 @@ func ApplySchemaFix(ctx context.Context, diff *SchemaDiff, forceDropIndexes bool
 			RaisePgResult(tx.Exec(ctx, statement))
 		})
 	}
+}
+
+// The provider work session journal's cutover (PARTITION-MAINTENANCE-PLAN.md
+// C4, MigrateProviderWorkSessionEventsToPartitions) is not drift either. From
+// the identity primary key swap on (and so once partitioned), the receipt
+// foreign key is gone by design: its reference is the receipt trigger, and a
+// key into the partitioned journal would check every receipt at each week's
+// drop. The identity index of an unfinished build, the staged parent with its
+// indexes and the legacy bound check are the cutover's own work in progress;
+// finalize or abort removes the last two.
+func (d *SchemaDiff) acceptProviderWorkSessionPartitionCutover() {
+	table := providerWorkSessionEventTable
+	identity := d.actual.partitioned[table] || slices.ContainsFunc(d.actual.constraints[table], func(con auditConstraint) bool {
+		return con.typ == "p" && con.def == providerWorkSessionEventIdentityKey
+	})
+	if identity {
+		missing := slices.DeleteFunc(d.missingConstraints[providerWorkSessionReceiptTable], func(con auditConstraint) bool {
+			return con.name == providerWorkSessionReceiptForeignKeyName
+		})
+		if len(missing) == 0 {
+			delete(d.missingConstraints, providerWorkSessionReceiptTable)
+		} else {
+			d.missingConstraints[providerWorkSessionReceiptTable] = missing
+		}
+	}
+	extra := slices.DeleteFunc(d.extraConstraints[table], func(name string) bool {
+		return name == providerWorkSessionLegacyBound()
+	})
+	if len(extra) == 0 {
+		delete(d.extraConstraints, table)
+	} else {
+		d.extraConstraints[table] = extra
+	}
+	staged := providerWorkSessionStagedParent()
+	if d.actual.partitioned[staged] && !d.expected.tables[staged] {
+		d.extraTables = slices.DeleteFunc(d.extraTables, func(name string) bool {
+			return name == staged
+		})
+		d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+			return d.actual.indexes[name].table == staged
+		})
+	}
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return name == providerWorkSessionEventIdentityIndexName && d.actual.indexes[name].table == table
+	})
 }
