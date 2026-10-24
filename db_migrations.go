@@ -208,9 +208,7 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
-			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
-			}, OptReadWrite(), OptNoRetry())
+			runOnlineSqlMigration(ctx, v)
 		case *CodeMigration:
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]code = %v\n", i+1, len(migrations), v.callback)
@@ -10720,4 +10718,11 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Bound the cleanup horizon (PARTITION-MAINTENANCE-PLAN.md A6): every
+	// transaction of the application's sessions ends at 15 minutes, as a
+	// default of each pool's own role in this database. New sessions pick it
+	// up as the pools recycle; a maintenance operation that runs longer lifts
+	// it for its own session (WithoutTransactionTimeout).
+	newCodeMigration(ApplicationTransactionTimeoutMigrationId, migrationSetApplicationTransactionTimeout),
 }

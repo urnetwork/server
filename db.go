@@ -295,6 +295,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		configurePgPoolWriteTracking(config)
 		configurePgPoolStatementErrors(config)
 		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
+		configurePgPoolDirectSession(config, self.vaultResourceName == MaintenancePgVaultResourceName)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
