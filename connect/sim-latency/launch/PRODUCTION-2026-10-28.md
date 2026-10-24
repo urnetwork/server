@@ -190,3 +190,29 @@ retention or a published evaluator archive. The official qualification checklist
 remains unchecked until the live lease, artifact storage, API/worker readiness,
 and full calibration evidence are verified. Main API access still refused
 connections on the subsequent October 24 check during confirmed maintenance.
+
+## Exploratory calibration in progress
+
+An isolated nine-replicate preparation run started October 24 using the exact
+image above, 1,800 providers, 200 clients, 80 arrivals/minute, quality window 2,
+four fleet shards, and impairment enabled. Each replicate uses 60-second ramp,
+13-hour synthetic reliability prewarm, 60-second settle, 180-second measured
+window, 120-second request timeout, and up to 20 minutes for client warmup.
+It runs with the production container ceilings on the ten evaluation cores.
+The services and local-leaf configuration are disposable synthetic fixtures;
+main/shared local stores are not inputs. Logs and artifacts are under the
+private preparation workspace's `calibration/` directory.
+
+This is non-official noise-floor exploration, not an authenticated round
+control or a replacement for live qualification. No API/worker image identity
+is invented to make it appear official. Each real round still needs a fresh
+hidden-seed nine-run control bound to its frozen policy. The preparation margin
+must not be labeled freshly calibrated until all replicates and the resulting
+statistical evidence have been checked and retained.
+
+During confirmed main maintenance, the old staging supervisor had no running
+evaluation and repeatedly failed to acquire its database lease. It was stopped
+locally to prevent automatic staging work from overlapping these measurements
+when main returns. No accepted job or main database state was modified. Inspect
+the authoritative staging backlog after maintenance before resuming/replacing
+that supervisor; do not discard accepted work as part of production activation.
