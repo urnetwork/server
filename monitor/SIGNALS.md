@@ -6751,7 +6751,10 @@ partitions, `<table>_legacy` and `<table>_wYYYYMMDD` of the six contract
 tables: the partition-aware rotation never rebuilds one as a whole, so a start
 line naming one comes from a worker without it (the legacy partition holds the
 table's whole history). A plain `contract_extender` or `contract_close_report`
-stays in the rotation and does not match.
+stays in the rotation and does not match. Since 2026-10-24
+(PARTITION-MAINTENANCE-PLAN.md A3) `network_client_connection` is back in the
+rotation, so its start line does not match either, and the churn tables'
+hourly index pass logs `[db]hot vacuum index pass ...`, which never matches.
 
 On 2026-10-05 at 04:26:37Z, a direct native capture identified a concurrent
 whole-table rebuild of `network_client`, with
@@ -7629,9 +7632,12 @@ postmaster restart, malformed frames, failed reads, inventory and
 cancellation.
 
 ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
-`pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
-work behind autovacuum. Source presence does not attest the deployed
-Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
+database analyze, and avoids queueing rebuild/drop work behind autovacuum.
+Since 2026-10-24 the `pending_task` vacuum it ran daily belongs to
+`VacuumHotTables` (`db_maintenance_hot_vacuum.go`), which vacuums the churn
+tables every five minutes with `SKIP_LOCKED` and rebuilds their bloated
+indexes hourly behind the same lock wait. Source presence does not attest the
+deployed Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
 Let independently progressing anti-wraparound work finish (§2.4); do not
 start conflicting maintenance or cancel a pass from this catalog history.
 

@@ -1128,7 +1128,6 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"contract_close",
 		"network_client",
 		"network_client_location_reliability",
-		"network_client_connection",
 		"transfer_contract",
 		"transfer_escrow",
 		"transfer_escrow_sweep",
@@ -1162,6 +1161,11 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		`[db]maintenance table[1/22] cleanup-before transfer_contract_legacy`,
 		`[db]maintenance priority index[1/2] reindex transfer_contract_outcome_null_l`,
 		`[db]maintenance table[1/22] reindex transfer_contract_w2026102`,
+		// network_client_connection is back in the rotation (2026-10-24), and
+		// the churn tables' hourly index pass is the bounded one
+		`[db]maintenance table[1/22] reindex network_client_connection`,
+		`[db]maintenance reindex[1/22] network_client_connection`,
+		`[db]hot vacuum index pass rebuilding network_client_connection_pkey on network_client_connection (100 bytes, compact estimate 10 bytes)`,
 		// Cleanup, ordinary tables, incomplete lines, and completion messages
 		// do not prove a new excluded-table rebuild was selected.
 		`[edge-3][taskworker][g2][cid:fixed][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:300][db]maintenance table[16/22] cleanup-before transfer_escrow`,
