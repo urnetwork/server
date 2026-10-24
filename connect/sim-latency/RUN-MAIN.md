@@ -126,14 +126,24 @@ All six criteria and exact revision/digests must validate. Uncertainty blocks;
 it must not be fabricated as either approval or misconduct. The manager caches
 accepted response bytes for identical idempotent retries, retains the report in
 versioned COMPLIANCE MinIO storage, and alone posts to the scoped reviewer API.
+Completed broker output is retained separately before validation, including
+uncertain, empty, or malformed output. Supervisor retries replay that response;
+they must not resample until a model approves. Such a response remains blocked
+and requires operator investigation, not deletion of the response to force a
+different answer. Changed authenticated context also blocks. A transport failure
+with no completed broker output may retry within the original review deadline.
 The reviewer token is never sent to the model broker. Private attempt records
 and retention receipts remain in the mode-0700 state directory.
 
 Source construction reuses `stage-reviewed-source` automatically with the
 qualified isolated build broker. Tests retain independent Sol 6.1 low ownership.
-No model implementation, real provider access, build broker, or genuine
-qualification is established by a test receipt or by this runbook alone:
-provision and qualify those integrations before enabling the new season.
+The tool-free provider client is `sim-latency review-broker`; its scratch-image
+wrapper and deployment/qualification procedure are in
+[`evaluator/review/README.md`](evaluator/review/README.md). Implementation is not
+live provider access or genuine qualification. Provision the dedicated model
+key, build/install the contained broker and qualify it, and independently
+provision/qualify the build broker before enabling the new season. A test receipt
+or this runbook alone does not satisfy those requirements.
 
 The `automation_progression_blocked` metric/dashboard and
 `CompetitionAutomaticClosingBlocked` alert use the existing
