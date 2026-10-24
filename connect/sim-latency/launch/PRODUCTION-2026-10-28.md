@@ -303,3 +303,12 @@ creation acknowledgment. Mocked-daemon and real local-Git tests passed three
 times under race detection. This is component evidence only: full broker wiring,
 real-container adversarial qualification, independent test-model provenance,
 image assembly, and live host/runtime readiness remain incomplete.
+
+The opt-in trusted-base Docker integration test subsequently caught a real
+mount-policy defect: Docker's tmpfs default made `/work` non-executable, so Go
+could compile tests but could not launch their binaries. The private `/work`
+tmpfs now explicitly permits execution; source and metadata host mounts remain
+read-only, `/tmp` and binary-export tmpfs remain non-executable, and core dumps
+are disabled. Fixed-argument regression coverage and actual Docker mount
+inspection guard this distinction. Full real-container verification is still
+in progress; this is not yet a successful build or qualification receipt.

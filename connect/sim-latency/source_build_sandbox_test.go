@@ -38,8 +38,9 @@ func TestSourceBuildSandboxUsesFixedLimitedIndependentPhases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, required := range []string{"--init", "--pull=never", "--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--cgroupns=private",
+		for _, required := range []string{"--init", "--pull=never", "--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--cgroupns=private", "--ulimit=core=0:0",
 			"--memory=77309411328", "--memory-swap=77309411328", "--pids-limit=65536", "--cpuset-cpus=0,2,4,6,8,10,12,14,16,18",
+			"--tmpfs=/work:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=8589934592",
 			"--mount=type=bind,source=" + input.SourceDirectory + ",target=/workspace,readonly"} {
 			if !slices.Contains(args, required) {
 				t.Fatal("required boundary missing", required)
