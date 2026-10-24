@@ -2853,6 +2853,14 @@ func SetProvide(
 		// reset in case the tx is retried on a transient error
 		removedProvideModes = nil
 
+		// Concurrent replacements for one client must not interleave their
+		// deletes and inserts. Match main's per-client transaction lock.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('provide_key/' || $1::uuid::text, 0))`,
+			clientId,
+		))
+
 		changeTime := server.NowUtc()
 
 		result, err := tx.Query(
