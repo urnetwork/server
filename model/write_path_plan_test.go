@@ -12,20 +12,24 @@ import (
 )
 
 type writePathTestPlanNode struct {
-	NodeType  string                  `json:"Node Type"`
-	IndexName string                  `json:"Index Name"`
-	Plans     []writePathTestPlanNode `json:"Plans"`
+	NodeType     string                  `json:"Node Type"`
+	RelationName string                  `json:"Relation Name"`
+	IndexName    string                  `json:"Index Name"`
+	Plans        []writePathTestPlanNode `json:"Plans"`
 }
 
-// The indexes the plan of query reads. Sequential scans are off for the
-// planning transaction only, so a test-sized table is planned the way a large
-// one is; a reader whose predicate does not imply an index's predicate still
-// cannot use that index.
-func writePathTestPlanIndexes(t testing.TB, ctx context.Context, query string, args ...any) map[string]bool {
+// The indexes the plan of query reads, and the tables it scans sequentially.
+// Sequential scans are off for the planning transaction only, so a test-sized
+// table is planned the way a large one is. A partial index serves a reader only
+// when the reader's predicate implies the index predicate; otherwise the
+// reader still scans the table.
+func writePathTestPlan(t testing.TB, ctx context.Context, query string, args ...any) (indexes map[string]bool, sequentialTables map[string]bool) {
 	t.Helper()
-	indexes := map[string]bool{}
+	indexes = map[string]bool{}
+	sequentialTables = map[string]bool{}
 	server.Tx(ctx, func(tx server.PgTx) {
 		clear(indexes)
+		clear(sequentialTables)
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
 		var raw []byte
 		server.Raise(tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+query, args...).Scan(&raw))
@@ -38,6 +42,9 @@ func writePathTestPlanIndexes(t testing.TB, ctx context.Context, query string, a
 			if node.IndexName != "" {
 				indexes[node.IndexName] = true
 			}
+			if node.NodeType == "Seq Scan" {
+				sequentialTables[node.RelationName] = true
+			}
 			for _, child := range node.Plans {
 				walk(child)
 			}
@@ -46,6 +53,13 @@ func writePathTestPlanIndexes(t testing.TB, ctx context.Context, query string, a
 			walk(plan.Plan)
 		}
 	})
+	return
+}
+
+// The indexes the plan of query reads (writePathTestPlan).
+func writePathTestPlanIndexes(t testing.TB, ctx context.Context, query string, args ...any) map[string]bool {
+	t.Helper()
+	indexes, _ := writePathTestPlan(t, ctx, query, args...)
 	return indexes
 }
 

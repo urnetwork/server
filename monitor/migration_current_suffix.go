@@ -752,6 +752,21 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFillfactor("client_connection_reliability_score", 50)),
 	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), "location reliability pages keep room for changed rows",
 		migrationFillfactor("network_client_location_reliability", 85)),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), "open connections by client and extender",
+		migrationFp2Index("network_client_connection", "network_client_connection_connected_client_id_extender_id", "client_id, extender_id", "connected", false)),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "open connections by client address",
+		migrationFp2Index("network_client_connection", "network_client_connection_connected_client_address_hash", "client_address_hash", "connected", false)),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "closed connections by disconnect time",
+		migrationFp2Index("network_client_connection", "network_client_connection_closed_disconnect_time", "disconnect_time", "(NOT connected)", false)),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), "full connected client index removed",
+		migrationIndexRemoved("network_client_connection", "network_client_connection_connected_client_id")),
+	// retires the v666 index contract
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), "full connection extender index removed",
+		migrationIndexRemoved("network_client_connection", "network_client_connection_client_id_connected_extender_id")),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), "full connection address index removed",
+		migrationIndexRemoved("network_client_connection", "network_client_connection_client_address_hash_connected")),
+	migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "full connection disconnect time index removed",
+		migrationIndexRemoved("network_client_connection", "network_client_connection_connected_disconnect_time")),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -25,6 +25,13 @@ const (
 	WritePathClientScoreWindowIndexDrop
 	WritePathClientScoreFillfactor
 	WritePathLocationReliabilityFillfactor
+	WritePathConnectionOpenClientIndex
+	WritePathConnectionOpenAddressIndex
+	WritePathConnectionClosedDisconnectIndex
+	WritePathConnectionConnectedClientIndexDrop
+	WritePathConnectionClientExtenderIndexDrop
+	WritePathConnectionAddressIndexDrop
+	WritePathConnectionDisconnectTimeIndexDrop
 )
 
 // The user_auth_attempt drop.
@@ -103,19 +110,80 @@ var locationReliabilityFillfactorMigration = newSqlMigration(`
 		ALTER TABLE network_client_location_reliability SET (fillfactor = 85);
 	`)
 
+// The open-connection (client_id, extender_id) index.
+var connectionOpenClientIndexMigration = newRestartableOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_connected_client_id_extender_id`,
+	`CREATE INDEX CONCURRENTLY network_client_connection_connected_client_id_extender_id
+		 ON network_client_connection (client_id, extender_id) WHERE connected`,
+	`DROP INDEX IF EXISTS network_client_connection_connected_client_id_extender_id;
+		 CREATE INDEX network_client_connection_connected_client_id_extender_id
+		 ON network_client_connection (client_id, extender_id) WHERE connected`,
+)
+
+// The open-connection client_address_hash index.
+var connectionOpenAddressIndexMigration = newRestartableOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_connected_client_address_hash`,
+	`CREATE INDEX CONCURRENTLY network_client_connection_connected_client_address_hash
+		 ON network_client_connection (client_address_hash) WHERE connected`,
+	`DROP INDEX IF EXISTS network_client_connection_connected_client_address_hash;
+		 CREATE INDEX network_client_connection_connected_client_address_hash
+		 ON network_client_connection (client_address_hash) WHERE connected`,
+)
+
+// The closed-connection disconnect_time index.
+var connectionClosedDisconnectIndexMigration = newRestartableOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_closed_disconnect_time`,
+	`CREATE INDEX CONCURRENTLY network_client_connection_closed_disconnect_time
+		 ON network_client_connection (disconnect_time) WHERE NOT connected`,
+	`DROP INDEX IF EXISTS network_client_connection_closed_disconnect_time;
+		 CREATE INDEX network_client_connection_closed_disconnect_time
+		 ON network_client_connection (disconnect_time) WHERE NOT connected`,
+)
+
+// The drop of the full (connected, client_id) connection index.
+var connectionConnectedClientIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_connected_client_id`,
+	`DROP INDEX IF EXISTS network_client_connection_connected_client_id`,
+)
+
+// The drop of the full (client_id, connected, extender_id) connection index.
+var connectionClientExtenderIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_client_id_connected_extender_id`,
+	`DROP INDEX IF EXISTS network_client_connection_client_id_connected_extender_id`,
+)
+
+// The drop of the full (client_address_hash, connected) connection index.
+var connectionAddressIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_client_address_hash_connected`,
+	`DROP INDEX IF EXISTS network_client_connection_client_address_hash_connected`,
+)
+
+// The drop of the full (connected, disconnect_time) connection index.
+var connectionDisconnectTimeIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS network_client_connection_connected_disconnect_time`,
+	`DROP INDEX IF EXISTS network_client_connection_connected_disconnect_time`,
+)
+
 var writePathMigrations = map[WritePathMigration]any{
-	WritePathUserAuthAttemptDrop:            userAuthAttemptDropMigration,
-	WritePathHandlerHeartbeatIndexDrop:      handlerHeartbeatIndexDropMigration,
-	WritePathTransferBalanceFillfactor:      transferBalanceFillfactorMigration,
-	WritePathDeviceFillfactor:               deviceFillfactorMigration,
-	WritePathSearchProviderStatsFillfactor:  searchProviderStatsFillfactorMigration,
-	WritePathDebitJournalShardTimeIndex:     transferDebitJournalShardTimeIndexMigration,
-	WritePathDebitJournalAgeIndexDrop:       transferDebitJournalAgeIndexDropMigration,
-	WritePathDebitJournalFillfactor:         transferDebitJournalFillfactorMigration,
-	WritePathProbeCycleNextAttemptIndexDrop: probeCycleNextAttemptIndexDropMigration,
-	WritePathClientScoreWindowIndexDrop:     clientScoreWindowIndexDropMigration,
-	WritePathClientScoreFillfactor:          clientScoreFillfactorMigration,
-	WritePathLocationReliabilityFillfactor:  locationReliabilityFillfactorMigration,
+	WritePathUserAuthAttemptDrop:                userAuthAttemptDropMigration,
+	WritePathHandlerHeartbeatIndexDrop:          handlerHeartbeatIndexDropMigration,
+	WritePathTransferBalanceFillfactor:          transferBalanceFillfactorMigration,
+	WritePathDeviceFillfactor:                   deviceFillfactorMigration,
+	WritePathSearchProviderStatsFillfactor:      searchProviderStatsFillfactorMigration,
+	WritePathDebitJournalShardTimeIndex:         transferDebitJournalShardTimeIndexMigration,
+	WritePathDebitJournalAgeIndexDrop:           transferDebitJournalAgeIndexDropMigration,
+	WritePathDebitJournalFillfactor:             transferDebitJournalFillfactorMigration,
+	WritePathProbeCycleNextAttemptIndexDrop:     probeCycleNextAttemptIndexDropMigration,
+	WritePathClientScoreWindowIndexDrop:         clientScoreWindowIndexDropMigration,
+	WritePathClientScoreFillfactor:              clientScoreFillfactorMigration,
+	WritePathLocationReliabilityFillfactor:      locationReliabilityFillfactorMigration,
+	WritePathConnectionOpenClientIndex:          connectionOpenClientIndexMigration,
+	WritePathConnectionOpenAddressIndex:         connectionOpenAddressIndexMigration,
+	WritePathConnectionClosedDisconnectIndex:    connectionClosedDisconnectIndexMigration,
+	WritePathConnectionConnectedClientIndexDrop: connectionConnectedClientIndexDropMigration,
+	WritePathConnectionClientExtenderIndexDrop:  connectionClientExtenderIndexDropMigration,
+	WritePathConnectionAddressIndexDrop:         connectionAddressIndexDropMigration,
+	WritePathConnectionDisconnectTimeIndexDrop:  connectionDisconnectTimeIndexDropMigration,
 }
 
 // The version a database reaches once the migration has applied: its position

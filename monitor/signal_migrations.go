@@ -338,7 +338,7 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "network_extender_address table and publish index", requiredVersion: 663, rowColumn: 74},
 	{name: "network_extender_publish table and queue index", requiredVersion: 664, rowColumn: 75},
 	{name: "network_client_connection.extender_id", requiredVersion: 665, rowColumn: 76},
-	{name: "network_client_connection_client_id_connected_extender_id", requiredVersion: 666, rowColumn: 77},
+	{name: "network_client_connection_client_id_connected_extender_id", requiredVersion: 666, removedVersion: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), rowColumn: 77},
 	{name: "contract_extender table and primary key", requiredVersion: 667, rowColumn: 78},
 	{name: "network_extender_address.dns_ports", requiredVersion: 668, rowColumn: 79},
 	{name: "network_extender.location_id", requiredVersion: 669, rowColumn: 80},

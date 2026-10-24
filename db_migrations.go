@@ -10843,4 +10843,50 @@ var migrations = []any{
 	// the rows of its clients that are still connecting. It applies to pages
 	// written from now on, and to every page at the next compaction.
 	locationReliabilityFillfactorMigration,
+
+	// network_client_connection holds about 90k open rows and 3.2M closed ones
+	// waiting out the 8 hours before the reaper deletes them. Every open-row
+	// reader filters a literal connected (or connected = true), yet four of
+	// its indexes keyed connected for every row, and the disconnect that flips
+	// it was a non-HOT update writing six index entries. Two partial indexes
+	// of open rows and one of closed rows replace them, all three built
+	// before the full indexes are dropped. A disconnect then writes three
+	// index entries, and the open-row indexes stay the size of the open set.
+	//
+	// Open rows by client, and their extenders: the contract insert's
+	// endpoint extenders (client_id = $1 AND connected AND extender_id IS NOT
+	// NULL), the provider work session and handler retirement reads by client,
+	// the eligibility, prober shard, reliability, sweep, auth and monitor
+	// joins and EXISTS probes on client_id AND connected, and the scans of all
+	// open rows in client order.
+	connectionOpenClientIndexMigration,
+
+	// Open rows by address: IsIpConnectedToNetwork, the ipinfo answer of
+	// whether the caller's address has an open connection
+	// (client_address_hash = $1 AND connected).
+	connectionOpenAddressIndexMigration,
+
+	// Closed rows by disconnect time: the reaper's oldest closed rows
+	// (connected = false AND disconnect_time < $1) and the location pass's
+	// recently closed connections (connected = false AND disconnect_time in a
+	// window, newest first). A disconnect adds the closed version here.
+	connectionClosedDisconnectIndexMigration,
+
+	// The full indexes the partial ones replace, dropped once those exist.
+	// (connected, client_id): its open-row reads by client are served by
+	// network_client_connection_connected_client_id_extender_id.
+	connectionConnectedClientIndexDropMigration,
+
+	// (client_id, connected, extender_id): the same reads, open rows only.
+	connectionClientExtenderIndexDropMigration,
+
+	// (client_address_hash, connected): served by
+	// network_client_connection_connected_client_address_hash.
+	connectionAddressIndexDropMigration,
+
+	// (connected, disconnect_time): its closed-row reads are served by
+	// network_client_connection_closed_disconnect_time. Reads of all a
+	// client's rows keep network_client_connection_client_id_connect_time,
+	// and handler reads network_client_connection_connected_handler_id.
+	connectionDisconnectTimeIndexDropMigration,
 }

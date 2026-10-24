@@ -12,6 +12,15 @@ import (
 
 const extenderMigrationMonitorLastVersion = 674
 
+// The version that retires each extender artifact a later migration
+// supersedes. The signal stops requiring an artifact at its removal, so its
+// column is not judged from then on.
+var extenderMigrationMonitorRemovedArtifacts = map[int]int{
+	// the full connection extender index, replaced by the open-row
+	// network_client_connection_connected_client_id_extender_id
+	666: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop),
+}
+
 // The monitor's unit tests pin the version catalog. This regression executes
 // its actual SQL against the published migration stream and damaged schemas;
 // a catalog entry backed by a constant true cannot satisfy these controls.
@@ -58,17 +67,17 @@ func TestPublishedMigrationMonitorExtenderArtifacts(t *testing.T) {
 				CREATE INDEX network_extender_publish_published_time_create_time
 				ON network_extender_publish (published_time, create_time) WHERE published_time IS NULL
 			`, missing: []int{664}},
-			{name: "connection extender missing", sql: `ALTER TABLE network_client_connection DROP COLUMN extender_id`, missing: []int{665, 666}},
+			// the column drop takes the open-row extender index with it
+			{name: "connection extender missing", sql: `ALTER TABLE network_client_connection DROP COLUMN extender_id`, missing: []int{665, server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex)}},
 			{name: "connection extender required", sql: `ALTER TABLE network_client_connection ALTER COLUMN extender_id SET NOT NULL`, missing: []int{665}},
 			{name: "connection extender default changed", sql: `
 				ALTER TABLE network_client_connection ALTER COLUMN extender_id
 				SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid
 			`, missing: []int{665}},
-			{name: "connection index reordered", sql: `
-				DROP INDEX network_client_connection_client_id_connected_extender_id;
+			{name: "dropped full connection index rebuilt", sql: `
 				CREATE INDEX network_client_connection_client_id_connected_extender_id
-				ON network_client_connection (connected, client_id, extender_id)
-			`, missing: []int{666}},
+				ON network_client_connection (client_id, connected, extender_id)
+			`, missing: []int{server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop)}},
 			{name: "contract participants missing", sql: `ALTER TABLE contract_extender RENAME TO missing_contract_extender`, missing: []int{667, 673, 674}},
 			{name: "contract party width changed", sql: `ALTER TABLE contract_extender ALTER COLUMN party TYPE varchar(32)`, missing: []int{667}},
 			{name: "contract primary key changed", sql: `
@@ -151,6 +160,9 @@ func checkPublishedMigrationMonitor(t testing.TB, ctx context.Context, tx server
 		t.Fatalf("migration artifact row = %v, want version %d and columns through %d", source.artifacts, version, lastArtifactColumn)
 	}
 	for artifactVersion := 662; artifactVersion <= extenderMigrationMonitorLastVersion; artifactVersion++ {
+		if removedVersion, removed := extenderMigrationMonitorRemovedArtifacts[artifactVersion]; removed && removedVersion <= version {
+			continue
+		}
 		wantPresent := artifactVersion <= version
 		for _, absent := range missing {
 			if artifactVersion == absent {

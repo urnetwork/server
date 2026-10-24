@@ -21,6 +21,11 @@ import (
 // failures belong to the caller's transaction, as do missing ownership fences.
 var errProviderWorkEvidenceUnavailable = errors.New("provider work original evidence is unavailable")
 
+// A client's open connections in id order, at most $2, read through
+// network_client_connection_connected_client_id_extender_id, which holds open
+// connections only.
+const providerWorkSessionOpenConnectionsSql = `SELECT connection_id,extender_id FROM network_client_connection WHERE client_id=$1 AND connected ORDER BY connection_id LIMIT $2`
+
 // The signer is optional; its database objects are migration prerequisites.
 // Once SQL starts, every unexpected failure belongs to the caller's transaction.
 func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
@@ -392,7 +397,7 @@ func providerWorkEndpointHeadInTx(ctx context.Context, tx server.PgTx, clientId,
 	}
 	// The independently replayed active set must match the actual original
 	// reservation census. A legacy writer or unsupported extender cannot vanish.
-	rows, err = tx.Query(ctx, `SELECT connection_id,extender_id FROM network_client_connection WHERE client_id=$1 AND connected ORDER BY connection_id LIMIT $2`, clientId, int64(source.authority.MaxEndpointEvents)+1)
+	rows, err = tx.Query(ctx, providerWorkSessionOpenConnectionsSql, clientId, int64(source.authority.MaxEndpointEvents)+1)
 	if err != nil {
 		return head, false, err
 	}

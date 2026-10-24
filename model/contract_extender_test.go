@@ -204,7 +204,7 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 					indexname IN (
 						'contract_extender_pkey',
 						'contract_extender_create_time_contract_id',
-						'network_client_connection_client_id_connected_extender_id'
+						'network_client_connection_connected_client_id_extender_id'
 					)
 				ORDER BY indexname
 				`,
@@ -239,7 +239,8 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 			// party reads, instead of an existence probe per contract (M3)
 			"contract_extender_create_time_contract_id",
 			"contract_extender_pkey",
-			"network_client_connection_client_id_connected_extender_id",
+			// the endpoint read covers open connections only
+			"network_client_connection_connected_client_id_extender_id",
 		}
 		if !slices.Equal(indexes, wantIndexes) {
 			t.Fatalf("extender party indexes = %v, want %v", indexes, wantIndexes)

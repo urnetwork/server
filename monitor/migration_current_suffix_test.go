@@ -237,6 +237,17 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
 		{name: "client score pages filled", version: server.WritePathMigrationVersion(server.WritePathClientScoreFillfactor), sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
 		{name: "location reliability pages filled", version: server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
+		{name: "missing open connection client index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id`},
+		{name: "open connection client index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (client_id, extender_id)`},
+		{name: "open connection client index leads with extender", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (extender_id, client_id) WHERE connected`},
+		{name: "missing open connection address index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash`},
+		{name: "open connection address index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash; CREATE INDEX network_client_connection_connected_client_address_hash ON network_client_connection (client_address_hash)`},
+		{name: "missing closed connection index", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time`},
+		{name: "closed connection index includes open rows", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time; CREATE INDEX network_client_connection_closed_disconnect_time ON network_client_connection (disconnect_time)`},
+		{name: "dropped full connected client index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), sql: `CREATE INDEX network_client_connection_connected_client_id ON network_client_connection (connected, client_id)`},
+		{name: "dropped full connection extender index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), sql: `CREATE INDEX network_client_connection_client_id_connected_extender_id ON network_client_connection (client_id, connected, extender_id)`},
+		{name: "dropped full connection address index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), sql: `CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)`},
+		{name: "dropped full connection disconnect time index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), sql: `CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -290,6 +301,9 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{829, "device", "device_network_id"},
 				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
 				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), "network_client_connection", "network_client_connection_connected_client_id_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "network_client_connection", "network_client_connection_connected_client_address_hash"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "network_client_connection", "network_client_connection_closed_disconnect_time"},
 			} {
 				// read as the signal's index catalog reads it, so a partitioned
 				// contract table's parent index compares without ONLY
@@ -334,6 +348,10 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{831, "audit_device_event", "audit_device_event_stats_device_id"},
 				{server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), "network_client_handler", "network_client_handler_heartbeat_time"},
 				{server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), "client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), "network_client_connection", "network_client_connection_connected_client_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), "network_client_connection", "network_client_connection_client_id_connected_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), "network_client_connection", "network_client_connection_client_address_hash_connected"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "network_client_connection", "network_client_connection_connected_disconnect_time"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

@@ -3021,6 +3021,15 @@ func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
 	})
 }
 
+// Whether an address has an open connection, read through
+// network_client_connection_connected_client_address_hash, which holds open
+// connections only.
+const networkClientAddressConnectedSql = `
+	SELECT true FROM network_client_connection
+	WHERE client_address_hash = $1 AND connected
+	LIMIT 1
+`
+
 func IsIpConnectedToNetwork(
 	ctx context.Context,
 	clientIp string,
@@ -3035,11 +3044,7 @@ func IsIpConnectedToNetwork(
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT true FROM network_client_connection
-				WHERE client_address_hash = $1 AND connected
-				LIMIT 1
-			`,
+			networkClientAddressConnectedSql,
 			addressHash[:],
 		)
 		server.WithPgResult(result, err, func() {
@@ -3504,6 +3509,36 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // (a large one-time pass).
 const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
+// One batch of closed connections older than $1, at most $2, with their
+// location, latency and speed rows. The candidates are read through
+// network_client_connection_closed_disconnect_time, which holds closed
+// connections only.
+const removeDisconnectedConnectionsSql = `
+	WITH candidate AS (
+		SELECT connection_id
+		FROM network_client_connection
+		WHERE
+			connected = false AND
+			disconnect_time < $1
+		LIMIT $2
+	), deleted_location AS (
+		DELETE FROM network_client_location
+		USING candidate
+		WHERE network_client_location.connection_id = candidate.connection_id
+	), deleted_latency AS (
+		DELETE FROM network_client_latency
+		USING candidate
+		WHERE network_client_latency.connection_id = candidate.connection_id
+	), deleted_speed AS (
+		DELETE FROM network_client_speed
+		USING candidate
+		WHERE network_client_speed.connection_id = candidate.connection_id
+	)
+	DELETE FROM network_client_connection
+	USING candidate
+	WHERE network_client_connection.connection_id = candidate.connection_id
+`
+
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
@@ -3519,31 +3554,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
-				`
-				WITH candidate AS (
-					SELECT connection_id
-					FROM network_client_connection
-					WHERE
-						connected = false AND
-						disconnect_time < $1
-					LIMIT $2
-				), deleted_location AS (
-					DELETE FROM network_client_location
-					USING candidate
-					WHERE network_client_location.connection_id = candidate.connection_id
-				), deleted_latency AS (
-					DELETE FROM network_client_latency
-					USING candidate
-					WHERE network_client_latency.connection_id = candidate.connection_id
-				), deleted_speed AS (
-					DELETE FROM network_client_speed
-					USING candidate
-					WHERE network_client_speed.connection_id = candidate.connection_id
-				)
-				DELETE FROM network_client_connection
-				USING candidate
-				WHERE network_client_connection.connection_id = candidate.connection_id
-				`,
+				removeDisconnectedConnectionsSql,
 				minConnectionTime.UTC(),
 				removeConnectionBatchCount,
 			))

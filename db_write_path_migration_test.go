@@ -190,3 +190,108 @@ func TestWritePathMigrationVersionsFollowTheirPosition(t *testing.T) {
 		previousVersion = version
 	}
 }
+
+// The partial indexes of network_client_connection, by the migration that
+// builds each, with the definition PostgreSQL reports for it.
+var writePathTestConnectionIndexes = []struct {
+	migration  WritePathMigration
+	name       string
+	definition string
+	predicate  string
+}{
+	{
+		migration:  WritePathConnectionOpenClientIndex,
+		name:       "network_client_connection_connected_client_id_extender_id",
+		definition: "CREATE INDEX network_client_connection_connected_client_id_extender_id ON public.network_client_connection USING btree (client_id, extender_id) WHERE connected",
+		predicate:  "connected",
+	},
+	{
+		migration:  WritePathConnectionOpenAddressIndex,
+		name:       "network_client_connection_connected_client_address_hash",
+		definition: "CREATE INDEX network_client_connection_connected_client_address_hash ON public.network_client_connection USING btree (client_address_hash) WHERE connected",
+		predicate:  "connected",
+	},
+	{
+		migration:  WritePathConnectionClosedDisconnectIndex,
+		name:       "network_client_connection_closed_disconnect_time",
+		definition: "CREATE INDEX network_client_connection_closed_disconnect_time ON public.network_client_connection USING btree (disconnect_time) WHERE (NOT connected)",
+		predicate:  "(NOT connected)",
+	},
+}
+
+// The exact usable definition and predicate of an index, or empty strings when
+// it does not exist.
+func writePathTestIndexShape(t testing.TB, ctx context.Context, conn PgConn, name string) (definition string, predicate string, valid bool) {
+	t.Helper()
+	result, err := conn.Query(ctx, `SELECT pg_get_indexdef(indexrelid), COALESCE(pg_get_expr(indpred, indrelid), ''), indisvalid AND indisready AND indislive
+		FROM pg_index WHERE indexrelid = to_regclass('public.'||$1)`, name)
+	WithPgResult(result, err, func() {
+		if result.Next() {
+			Raise(result.Scan(&definition, &predicate, &valid))
+		}
+	})
+	return
+}
+
+// After every migration the connection table carries the three partial
+// indexes, each exactly as published, and the full ones are gone.
+func TestNetworkClientConnectionPartialIndexes(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for _, index := range writePathTestConnectionIndexes {
+				definition, predicate, valid := writePathTestIndexShape(t, ctx, conn, index.name)
+				if definition != index.definition || predicate != index.predicate || !valid {
+					t.Errorf("%s = %q predicate %q valid=%t, want %q", index.name, definition, predicate, valid, index.definition)
+				}
+			}
+		}, OptReadOnly())
+	})
+}
+
+// Each partial index migration recovers from an interrupted or look-alike
+// build: its recovery step drops the leftover and the build makes the exact
+// index, again on replay, and its audit form makes the same index.
+func TestNetworkClientConnectionPartialIndexMigrationsRecover(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		MaintenanceDb(ctx, func(conn PgConn) {
+			RaisePgResult(conn.Exec(ctx, `CREATE TABLE network_client_connection (
+				connection_id uuid PRIMARY KEY, client_id uuid NOT NULL, handler_id uuid NULL, extender_id uuid NULL,
+				client_address_hash bytea NULL, connected boolean NOT NULL DEFAULT true, disconnect_time timestamp NULL)`))
+			for _, index := range writePathTestConnectionIndexes {
+				migration, ok := writePathMigrations[index.migration].(*OnlineSqlMigration)
+				if !ok || len(migration.productionSqlSteps()) != 2 {
+					t.Fatalf("%s needs separate recovery and online-create steps", index.name)
+				}
+				// same-name residue over every row, as an interrupted or
+				// hand-made build could leave
+				RaisePgResult(conn.Exec(ctx, `CREATE INDEX `+index.name+` ON network_client_connection (connection_id)`))
+				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, migration))
+				definition, predicate, valid := writePathTestIndexShape(t, ctx, conn, index.name)
+				if definition != index.definition || predicate != index.predicate || !valid {
+					t.Fatalf("%s after recovery = %q predicate %q valid=%t", index.name, definition, predicate, valid)
+				}
+				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, migration))
+				definition, predicate, valid = writePathTestIndexShape(t, ctx, conn, index.name)
+				if definition != index.definition || predicate != index.predicate || !valid {
+					t.Fatalf("%s after replay = %q predicate %q valid=%t", index.name, definition, predicate, valid)
+				}
+			}
+		}, OptReadWrite(), OptNoRetry())
+		MaintenanceTx(ctx, func(tx PgTx) {
+			for _, index := range writePathTestConnectionIndexes {
+				migration := writePathMigrations[index.migration].(*OnlineSqlMigration)
+				RaisePgResult(tx.Exec(ctx, migration.auditSql))
+			}
+		})
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for _, index := range writePathTestConnectionIndexes {
+				definition, predicate, valid := writePathTestIndexShape(t, ctx, conn, index.name)
+				if definition != index.definition || predicate != index.predicate || !valid {
+					t.Fatalf("%s after the audit form = %q predicate %q valid=%t", index.name, definition, predicate, valid)
+				}
+			}
+		}, OptReadOnly(), OptNoRetry())
+	})
+}

@@ -2937,28 +2937,10 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 	}, server.TxReadCommitted)
 }
 
-// this should be called regularly
-// a valid client will have one connected location and one connected address hash
-// A connection is connected while its handler heartbeat within two heartbeat
-// timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
-// before the transaction (network_client_handler_liveness.go).
-func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
-	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
-	server.Raise(policyErr)
-	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
-
-	// old entries are not deleted on each update, but the connected status is updated
-	// - connected clients are updated, and the valid state is reset to match the latest
-	// - if a disconnected client is not in `network_client_location_reliability`,
-	//   the most recent disconnected connection is used to update the values
-
-	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
-
-	// for each client, summarize all the active locations
-	result, err := tx.Query(
-		ctx,
-		`
+// Every open connection whose handler is live, with its location, speed and
+// latency: the rows a pass folds into each connected client. It reads the
+// open-row partial indexes of network_client_connection.
+const clientLocationReliabilityConnectedSql = `
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
@@ -3002,28 +2984,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		WHERE
 			network_client_connection.connected = true
-		`,
-		minHandlerHeartbeatTime,
-		requireSubscriber,
-		nonNilHandlerIds(liveStaleHandlerIds),
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			row := scanClientLocationReliabilityRow(result)
-			r, ok := clientLocationReliabilities[row.clientId]
-			if !ok {
-				r = newClientLocationReliability(row.networkId, true)
-				clientLocationReliabilities[row.clientId] = r
-			}
-			r.networkId = row.networkId
-			r.add(row)
-		}
-	})
-
-	// fill in disconnected clients that are missing from `network_client_location_reliability`
-	result, err = tx.Query(
-		ctx,
 		`
+
+// The connections closed in [$1, $2) of clients with no location reliability
+// row yet, newest first. It reads network_client_connection_closed_disconnect_time,
+// which holds closed connections only.
+const clientLocationReliabilityRecentlyClosedSql = `
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
@@ -3072,7 +3038,51 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		ORDER BY network_client_connection.disconnect_time DESC
 
-		`,
+		`
+
+// this should be called regularly
+// a valid client will have one connected location and one connected address hash
+// A connection is connected while its handler heartbeat within two heartbeat
+// timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
+// before the transaction (network_client_handler_liveness.go).
+func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
+	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
+	server.Raise(policyErr)
+	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
+
+	// old entries are not deleted on each update, but the connected status is updated
+	// - connected clients are updated, and the valid state is reset to match the latest
+	// - if a disconnected client is not in `network_client_location_reliability`,
+	//   the most recent disconnected connection is used to update the values
+
+	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
+
+	// for each client, summarize all the active locations
+	result, err := tx.Query(
+		ctx,
+		clientLocationReliabilityConnectedSql,
+		minHandlerHeartbeatTime,
+		requireSubscriber,
+		nonNilHandlerIds(liveStaleHandlerIds),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			row := scanClientLocationReliabilityRow(result)
+			r, ok := clientLocationReliabilities[row.clientId]
+			if !ok {
+				r = newClientLocationReliability(row.networkId, true)
+				clientLocationReliabilities[row.clientId] = r
+			}
+			r.networkId = row.networkId
+			r.add(row)
+		}
+	})
+
+	// fill in disconnected clients that are missing from `network_client_location_reliability`
+	result, err = tx.Query(
+		ctx,
+		clientLocationReliabilityRecentlyClosedSql,
 		minTime,
 		maxTime,
 		requireSubscriber,
