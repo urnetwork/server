@@ -3,38 +3,24 @@
 package work
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
-
-// Direct Post controls declare the same immutable result scope as the real
-// finalizer, including the original recurring shard key.
-func withLegacyDispatcherQueueTestTx(ctx context.Context, shard int, result *FlushLegacySettlementsResult, callback func(server.PgTx)) {
-	data, err := json.Marshal(result)
-	server.Raise(err)
-	keys, err := NewLegacySettlementDispatcherTaskTarget().(task.TaskCompletionOwnershipTarget).TaskCompletionOwnershipKeys(nil, string(data))
-	server.Raise(err)
-	keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard))))
-	server.OwnedTx(ctx, keys, callback, server.TxReadCommitted, server.OptNoRetry())
-}
 
 func TestSettlementTaskFactoriesDeclareActualQueueScope(t *testing.T) {
 	for _, pair := range []struct {
 		actual task.Target
 		plain  task.Target
 	}{
-		{actual: NewLegacySettlementDispatcherTaskTarget(), plain: task.NewTaskTarget(FlushLegacySettlements)},
 		{actual: NewTransferDebitTaskTarget(), plain: task.NewTaskTarget(FlushTransferDebits)},
-		{actual: model.NewLegacyPayerSettlementTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyPayerSettlements)},
 		{actual: model.NewLegacyNetEscrowMirrorTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror)},
 		{actual: model.NewLegacyProviderTotalsTaskTarget(), plain: task.NewTaskTarget(model.ApplyLegacyProviderTotals)},
+		{actual: NewScheduledContractClosureTaskTarget(), plain: task.NewTaskTarget(CloseScheduledContract)},
 	} {
 		if pair.actual.TargetFunctionName() != pair.plain.TargetFunctionName() {
 			t.Fatal("ownership wrapper changed the durable task function")
@@ -47,31 +33,35 @@ func TestSettlementTaskFactoriesDeclareActualQueueScope(t *testing.T) {
 			t.Fatal("same-key completion invented another publication scope", keys, err)
 		}
 	}
-	dispatcher := NewLegacySettlementDispatcherTaskTarget().(task.TaskCompletionOwnershipTarget)
-	payers := []server.Id{server.NewId(), server.NewId()}
-	data, err := json.Marshal(FlushLegacySettlementsResult{Dispatch: &model.LegacySettlementDispatchResult{PayerNetworkIds: payers}})
+}
+
+// An older worker's scheduled close result can carry an owner handoff to the
+// retired legacy settlement queue. Its completion declares no legacy queue key,
+// and its Post publishes nothing: the expiry sweep retires such a contract.
+func TestScheduledContractClosureIgnoresRetiredOwnerHandoff(t *testing.T) {
+	contractId, payerNetworkId := server.NewId(), server.NewId()
+	args := &CloseScheduledContractArgs{Private: true, ScheduledContractClose: ScheduledContractClose{ContractId: contractId, Deadline: server.NowUtc()}}
+	argsJson, err := json.Marshal(args)
 	server.Raise(err)
-	keys, err := dispatcher.TaskCompletionOwnershipKeys(nil, string(data))
-	if err != nil || len(keys) != len(payers) {
-		t.Fatal("dispatcher did not declare every bounded payer", keys, err)
-	}
-	for _, id := range payers {
-		if !slices.Contains(keys, task.RunOnceOwnershipKey(task.RunOnce("flush_legacy_payer_settlements", id))) {
-			t.Fatal("dispatcher declaration differs from its actual publisher identity")
-		}
-	}
-	for _, bad := range []string{`{`, `{"dispatch":{"payer_network_ids":["00000000-0000-0000-0000-000000000000"]}}`} {
-		if _, err := dispatcher.TaskCompletionOwnershipKeys(nil, bad); err == nil {
-			t.Fatal("dispatcher admitted malformed completion publication", bad)
-		}
-	}
-	tooMany := make([]server.Id, 17)
-	for i := range tooMany {
-		tooMany[i] = server.NewId()
-	}
-	data, err = json.Marshal(FlushLegacySettlementsResult{Dispatch: &model.LegacySettlementDispatchResult{PayerNetworkIds: tooMany}})
+	resultJson, err := json.Marshal(map[string]any{
+		"owner":          map[string]any{"kind": "payer-network", "id": payerNetworkId},
+		"reconciliation": map[string]any{"contract_id": contractId},
+	})
 	server.Raise(err)
-	if _, err := dispatcher.TaskCompletionOwnershipKeys(nil, string(data)); err == nil {
-		t.Fatal("dispatcher expanded beyond its sixteen bounded publications")
+	declaration := NewScheduledContractClosureTaskTarget().(task.TaskCompletionOwnershipTarget)
+	keys, err := declaration.TaskCompletionOwnershipKeys(&task.Task{ArgsJson: string(argsJson)}, string(resultJson))
+	if err != nil || len(keys) != 0 {
+		t.Fatal("a retired owner handoff declared legacy queue keys", keys, err)
+	}
+	var result CloseScheduledContractResult
+	if err := json.Unmarshal(resultJson, &result); err != nil || result.Reconciliation == nil || result.Reconciliation.ContractId != contractId ||
+		result.RetryAt != nil || result.DeferredUntil != nil {
+		t.Fatal("an older result with an owner handoff did not decode as a completed close", result, err)
+	}
+	clientSession := session.NewLocalClientSession(t.Context(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	// No transaction: a Post that wrote anything here would fail.
+	if err := CloseScheduledContractPost(args, &result, clientSession, nil); err != nil {
+		t.Fatal("a retired owner handoff did not complete as a no-op", err)
 	}
 }

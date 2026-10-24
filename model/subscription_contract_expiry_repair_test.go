@@ -36,17 +36,16 @@ func newContractExpiryRepairTestContract(t testing.TB, ctx context.Context, f ne
 func requireContractExpiryRepairUntouched(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, reports int, proof bool) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
-		var gotReports, intents, debits, sweeps int
+		var gotReports, debits, sweeps int
 		var unverified, retained, terminal bool
 		var credit ByteCount
 		server.Raise(conn.QueryRow(ctx, `SELECT usage_unverified,provider_usage IS NOT NULL,outcome IS NOT NULL,
 			(SELECT count(*) FROM contract_close WHERE contract_id=$1),
-			(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1),
 			(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1),
 			(SELECT count(*) FROM transfer_escrow_sweep WHERE contract_id=$1),
 			(SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2)
-			FROM transfer_contract WHERE contract_id=$1`, id, f.balanceId).Scan(&unverified, &retained, &terminal, &gotReports, &intents, &debits, &sweeps, &credit))
-		if unverified != proof || retained != proof || terminal || gotReports != reports || intents != 0 || debits != 0 || sweeps != 0 || credit != 1000 {
+			FROM transfer_contract WHERE contract_id=$1`, id, f.balanceId).Scan(&unverified, &retained, &terminal, &gotReports, &debits, &sweeps, &credit))
+		if unverified != proof || retained != proof || terminal || gotReports != reports || debits != 0 || sweeps != 0 || credit != 1000 {
 			t.Fatal("repair refusal changed proof, report, custody, outcome or financial state")
 		}
 	})
@@ -87,7 +86,8 @@ func TestContractExpiryRepairScopeValidation(t *testing.T) {
 }
 
 // The complete maximum selected cohort covers both observed report shapes.
-// Repair queues the established owner; only that owner debits and releases.
+// Apply continues each through the ordinary expiry owner, which settles the
+// legacy reservation inline; a replay finds every contract terminal.
 func TestContractExpiryRepairPreviewApplyAccounting32(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -123,8 +123,8 @@ func TestContractExpiryRepairPreviewApplyAccounting32(t *testing.T) {
 		}
 		proofs := make([][]byte, 32)
 		for i, entry := range applied.Contracts {
-			if entry.ContractId != ids[i] || entry.Status != "legacy_intent_present" || !entry.ProofCommitted || entry.ObservedOutcome != nil || entry.LegacyIntentPresent == nil || !*entry.LegacyIntentPresent {
-				t.Fatal("apply did not retain proof and delegate custody")
+			if entry.ContractId != ids[i] || entry.Status != "terminal" || !entry.ProofCommitted || entry.ObservedOutcome == nil || *entry.ObservedOutcome != ContractOutcomeSettled {
+				t.Fatal("apply did not retain proof and settle through the ordinary owner")
 			}
 			var snapshot *contractUsageSnapshot
 			proofs[i], snapshot = readContractExpiryTestSnapshot(t, ctx, ids[i])
@@ -138,40 +138,26 @@ func TestContractExpiryRepairPreviewApplyAccounting32(t *testing.T) {
 			} else if len(snapshot.Expiry.Reports) != 2 || snapshot.ByteCount != 3 || !snapshot.Expiry.Reports[ContractPartyDestination].Checkpoint {
 				t.Fatal("original positive checkpoint proof changed")
 			}
-			requireLegacySettlementTestState(t, ctx, f, ids[i], true, false, 1000, 320)
+			// The two positive contracts each consumed 3 bytes.
+			requireLegacySettlementTestState(t, ctx, f, ids[i], true, 994, 0)
 		}
+		requireLegacyProviderDurability(t, ctx, f, ids[0], 0)
+		requireLegacyProviderDurability(t, ctx, f, ids[30], 3)
 		replay, err := RepairContractExpiry(ctx, request)
 		if err != nil {
-			t.Fatal("idempotent delegated replay failed")
+			t.Fatal("idempotent replay failed")
 		}
 		for i, entry := range replay.Contracts {
-			if entry.Status != "legacy_intent_present" || entry.ProofCommitted {
-				t.Fatal("replay bypassed pending owner")
+			if entry.Status != "terminal" || entry.ProofCommitted {
+				t.Fatal("replay reopened a terminal contract")
 			}
 			after, _ := readContractExpiryTestSnapshot(t, ctx, ids[i])
 			if !bytes.Equal(proofs[i], after) {
 				t.Fatal("replay rewrote retained original proof")
 			}
 		}
-		for _, index := range []int{0, 30} {
-			completed, busy, _, err := flushLegacySettlement(ctx, ids[index])
-			if err != nil || !completed || busy {
-				t.Fatal("ordinary financial owner failed after repair")
-			}
-			completed, _, _, err = flushLegacySettlement(ctx, ids[index])
-			if err != nil || completed {
-				t.Fatal("financial replay repeated consumption")
-			}
-		}
-		requireLegacySettlementTestState(t, ctx, f, ids[0], false, true, 997, 300)
-		requireLegacySettlementTestState(t, ctx, f, ids[30], false, true, 997, 300)
+		requireLegacySettlementTestState(t, ctx, f, ids[30], true, 994, 0)
 		requireLegacyProviderDurability(t, ctx, f, ids[30], 3)
-		for _, index := range []int{0, 30} {
-			after, _ := readContractExpiryTestSnapshot(t, ctx, ids[index])
-			if !bytes.Equal(proofs[index], after) {
-				t.Fatal("settlement rewrote original proof")
-			}
-		}
 	})
 }
 
@@ -181,7 +167,7 @@ func TestContractExpiryRepairRefusals(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		for _, kind := range []string{"payer_mismatch", "recent_report", "disputed", "legacy_intent_present", "reservation_mode_changed"} {
+		for _, kind := range []string{"payer_mismatch", "recent_report", "disputed", "reservation_mode_changed"} {
 			id := newContractExpiryRepairTestContract(t, ctx, f, false)
 			payer := f.sourceNetworkId
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -192,10 +178,6 @@ func TestContractExpiryRepairRefusals(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, id, server.NowUtc()))
 				case "disputed":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, id))
-				case "legacy_intent_present":
-					server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, id))
-					server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, false))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET failure_code='accounting',next_attempt_time=clock_timestamp()+interval '1 hour' WHERE contract_id=$1`, id))
 				case "reservation_mode_changed":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET redis_reserved=true WHERE contract_id=$1`, id))
 				}
@@ -204,17 +186,7 @@ func TestContractExpiryRepairRefusals(t *testing.T) {
 			if err != nil || len(result.Contracts) != 1 || result.Contracts[0].Status != kind || result.Contracts[0].ProofCommitted {
 				t.Fatal("unsafe state was admitted or incorrectly classified: " + kind)
 			}
-			if kind != "legacy_intent_present" {
-				requireContractExpiryRepairUntouched(t, ctx, f, id, 1, false)
-			} else {
-				server.Db(ctx, func(conn server.PgConn) {
-					var preserved bool
-					server.Raise(conn.QueryRow(ctx, `SELECT failure_code='accounting' AND next_attempt_time>clock_timestamp() FROM legacy_settlement_intent WHERE contract_id=$1`, id).Scan(&preserved))
-					if !preserved {
-						t.Fatal("accounting hold was altered")
-					}
-				})
-			}
+			requireContractExpiryRepairUntouched(t, ctx, f, id, 1, false)
 		}
 		result, err := RepairContractExpiry(ctx, ContractExpiryRepairRequest{ExpectedPayerNetworkId: f.sourceNetworkId, ContractIds: []server.Id{server.NewId()}, Apply: true})
 		if err != nil || result.Contracts[0].Status != "missing" {
@@ -232,7 +204,7 @@ func TestContractExpiryRepairContinuationRechecks(t *testing.T) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		other := newNetEscrowOrderingTestFixture(t, ctx)
-		for _, kind := range []string{"payer_mismatch", "legacy_intent_present", "continuation_changed"} {
+		for _, kind := range []string{"payer_mismatch", "continuation_changed"} {
 			for stopAt := 1; stopAt <= 2; stopAt++ {
 				id := newContractExpiryRepairTestContract(t, ctx, f, false)
 				scope := &contractExpiryRepairScope{contractId: id, expectedPayer: f.sourceNetworkId}
@@ -254,8 +226,6 @@ func TestContractExpiryRepairContinuationRechecks(t *testing.T) {
 						switch kind {
 						case "payer_mismatch":
 							server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET payer_network_id=$2 WHERE contract_id=$1`, id, other.sourceNetworkId))
-						case "legacy_intent_present":
-							server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, false))
 						case "continuation_changed":
 							server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=close_time+interval '1 microsecond' WHERE contract_id=$1 AND party='source'`, id))
 						}
@@ -276,18 +246,16 @@ func TestContractExpiryRepairContinuationRechecks(t *testing.T) {
 						t.Fatal("withdrawn continuation changed financial state")
 					}
 				})
-				if kind != "legacy_intent_present" {
-					reports := 1
-					if stopAt == 2 {
-						reports = 2
-					}
-					requireContractExpiryRepairUntouched(t, ctx, f, id, reports, true)
+				reports := 1
+				if stopAt == 2 {
+					reports = 2
 				}
+				requireContractExpiryRepairUntouched(t, ctx, f, id, reports, true)
 			}
 		}
-		// Three refusal kinds at the report and settlement boundaries retain
-		// six independent ten-byte reservations.
-		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 60 {
+		// Two refusal kinds at the report and settlement boundaries retain
+		// four independent ten-byte reservations.
+		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 40 {
 			t.Fatal("refused continuations released custody")
 		}
 	})
@@ -359,8 +327,8 @@ func TestContractExpiryRepairBusyAndCanceledPrefix(t *testing.T) {
 		}
 		requireContractExpiryRepairUntouched(t, ctx, f, id, 1, true)
 		result, err = RepairContractExpiry(ctx, request)
-		if err != nil || result.Contracts[0].Status != "legacy_intent_present" {
-			t.Fatal("retained proof did not resume through existing owner")
+		if err != nil || result.Contracts[0].Status != "terminal" {
+			t.Fatal("retained proof did not resume through the ordinary owner")
 		}
 		after, _ = readContractExpiryTestSnapshot(t, ctx, id)
 		if !bytes.Equal(before, after) {

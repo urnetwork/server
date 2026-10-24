@@ -807,6 +807,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.CodeMigrationVersion(server.ApplicationTransactionTimeoutMigrationId),
 			"application role transaction bound", transactionTimeoutRoleDefaultArtifactQuery),
 	},
+	[]snMainnetMigrationContract{
+		// the legacy settlement queue's retirement (PARTITION-MAINTENANCE-PLAN.md
+		// Part B); its version follows the migration's position
+		migrationCurrentSuffix(server.LegacySettlementIntentRetirementMigrationVersion(),
+			legacySettlementIntentRetirementArtifactName, legacySettlementIntentRetirementArtifactQuery),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

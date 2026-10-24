@@ -14,30 +14,33 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// A held provider row must not hold up the upstream grant. The financial owner
-// queues provider totals instead of writing them, so it settles while the row
-// is held and a second contract on the shared grant settles right after it.
-// The projection writes the totals exactly once after the row is released.
+// A held provider row must not hold up the upstream grant. The foreground
+// financial owner queues provider totals instead of writing them, so it settles
+// while the row is held and a second contract on the shared grant settles right
+// after it. The projection writes the totals exactly once after the row is
+// released.
 func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 		defer cancel()
-		f, firstId := legacySettlementTestIntent(t, ctx)
+		f, firstId := legacySettlementTestOpenFinals(t, ctx)
 		other, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
 		server.RunPosts(ctx, posts...)
 		secondId := other.ContractId
-		secondId[15] = byte((int(firstId[15]) + 1) % LegacySettlementShardCount)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET contract_id=$2 WHERE contract_id=$1`, other.ContractId, secondId))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET contract_id=$2 WHERE contract_id=$1`, other.ContractId, secondId))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance(network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,0,0) ON CONFLICT(network_id) DO NOTHING`, f.destinationNetworkId))
 		})
 		server.Raise(CloseContract(ctx, secondId, f.sourceId, 11, false))
-		server.Raise(CloseContract(ctx, secondId, f.destinationId, 11, false))
-		// Synthetic ID rewrites invalidate the cache. Keep this fixture warm.
+		server.Tx(ctx, func(tx server.PgTx) {
+			applied, _, err := applyContractCloseReportInTx(ctx, tx, secondId, f.destinationId, 11, false, nil)
+			server.Raise(err)
+			if !applied {
+				t.Fatal("second contract's destination final did not commit")
+			}
+		}, server.TxReadCommitted)
 		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 		stopHooks := startLegacyStatementHooks(t, ctx)
 		defer stopHooks()
@@ -62,22 +65,21 @@ func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// A wait on the held row fails here instead of hanging the test.
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='2s'`))
-			var completed, busy bool
+			var closed bool
 			var err error
 			hooked, unhook := withLegacyStatementHooks(ctx, tx, provider.hook())
 			defer unhook()
-			ownerPosts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, firstId)
-			if err != nil || !completed || busy {
-				t.Fatal("financial owner waited on the held provider row", completed, busy, err)
+			ownerPosts, closed, err = settleEscrowForegroundInTx(hooked, tx, firstId, ContractOutcomeSettled)
+			if err != nil || !closed {
+				t.Fatal("financial owner waited on the held provider row", closed, err)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if len(provider.statements) != 0 {
 			t.Fatal("financial owner wrote the provider row inside its grant transaction", provider.statements)
 		}
 		server.RunPosts(ctx, ownerPosts...)
-		completed, busy, gate, err := flushLegacySettlement(ctx, secondId)
-		if err != nil || !completed || busy || gate != legacySettlementBusyNone {
-			t.Fatal("held provider row retained the shared grant", completed, busy, gate, err)
+		if err := SettleEscrow(ctx, secondId, ContractOutcomeSettled); err != nil {
+			t.Fatal("held provider row retained the shared grant", err)
 		}
 		// Both totals wait in their projections, not in the financial owners.
 		server.Db(ctx, func(conn server.PgConn) {
@@ -98,20 +100,19 @@ func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 		releaseProvider()
 		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
-			var terminal, metadata, pending int
+			var terminal, metadata int
 			var credit, swept, provided, sweptRevenue, providedRevenue int64
 			server.Raise(conn.QueryRow(ctx, `SELECT
                 (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled'),
                 (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1) AND settled AND payout_byte_count=11),
-                (SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1)),
                 (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
                 (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=ANY($1)),
                 (SELECT provided_byte_count FROM account_balance WHERE network_id=$3),
                 (SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=ANY($1)),
                 (SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$3)`,
-				[]server.Id{firstId, secondId}, f.balanceId, f.destinationNetworkId).Scan(&terminal, &metadata, &pending, &credit, &swept, &provided, &sweptRevenue, &providedRevenue))
-			if terminal != 2 || metadata != 2 || pending != 0 || credit != 978 || swept != 22 || provided != 22 || sweptRevenue != 22 || providedRevenue != 22 {
-				t.Fatal("provider projection changed accounting", terminal, metadata, pending, credit, swept, provided, sweptRevenue, providedRevenue)
+				[]server.Id{firstId, secondId}, f.balanceId, f.destinationNetworkId).Scan(&terminal, &metadata, &credit, &swept, &provided, &sweptRevenue, &providedRevenue))
+			if terminal != 2 || metadata != 2 || credit != 978 || swept != 22 || provided != 22 || sweptRevenue != 22 || providedRevenue != 22 {
+				t.Fatal("provider projection changed accounting", terminal, metadata, credit, swept, provided, sweptRevenue, providedRevenue)
 			}
 		})
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)

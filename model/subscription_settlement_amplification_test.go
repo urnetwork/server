@@ -60,7 +60,8 @@ func TestEscrowSettlementEmptyBatchHasNoStatement(t *testing.T) {
 	}
 }
 
-// A real legacy cohort keeps all terminal rows, exact money, and sibling scope.
+// A real legacy cohort settled inline by expiry keeps all terminal rows, exact
+// money, and sibling scope.
 func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -93,32 +94,14 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		})
 		initialAccount := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId)
 		selected, err := ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
-		if selected != 0 || err != nil {
-			t.Fatalf("queued legacy close was counted as settled: closed=%d error=%v", selected, err)
-		}
-		assertLegacyAmplificationPending(t, ctx, fixture, false, true, 2048, "none")
-		proof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
-		selected, err = ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
-		if selected != 0 || err != nil {
-			t.Fatalf("pending legacy close repeated work: closed=%d error=%v", selected, err)
-		}
-		assertLegacyAmplificationPending(t, ctx, fixture, false, true, 2048, "none")
-		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
-			t.Fatalf("queued legacy intent published payout: got=%+v want=%+v", account, initialAccount)
-		}
-		shard := int(fixture.contractId[15]) % LegacySettlementShardCount
-		flushed, err := FlushLegacySettlements(ctx, shard, nil, 64)
-		if err != nil || flushed.Visited != 1 || flushed.Completed != 1 || flushed.Failed != 0 || flushed.BusyOrGone != 0 {
-			t.Fatalf("public legacy worker did not settle the exact cohort: %+v %v", flushed, err)
+		if selected != 1 || err != nil {
+			t.Fatalf("expiry did not settle the legacy cohort inline: closed=%d error=%v", selected, err)
 		}
 		if _, _, found := GetStream(ctx, fixture.contractId); found {
-			t.Fatal("completed legacy worker retained its retired stream")
+			t.Fatal("settled legacy contract retained its retired stream")
 		}
 		assertSettlementEscrowState(t, ctx, fixture, 46, used, forceCloseDisputeInitialBalance-used)
-		settledProof, snapshot := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
-		if !bytes.Equal(proof, settledProof) {
-			t.Fatal("legacy worker rewrote the original expiry proof")
-		}
+		proof, snapshot := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		if snapshot.ByteCount != used || snapshot.Expiry == nil || len(snapshot.Providers) != 1 ||
 			snapshot.Providers[0].ClientId != destinationId || snapshot.Providers[0].NetworkId != fixture.providerNetworkId {
 			t.Fatalf("batched settlement changed completed provider usage: %s", proof)
@@ -143,7 +126,7 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 				t.Fatalf("sibling reservation=%q, want 1024", value)
 			}
 			if !errors.Is(r.Get(ctx, accountBalanceNetPayoutByteCountKey(fixture.providerNetworkId)).Err(), redis.Nil) {
-				t.Fatal("legacy worker duplicated durable provider payout in Redis")
+				t.Fatal("legacy settlement duplicated durable provider payout in Redis")
 			}
 			if r.Get(ctx, netEscrowKey(zeroBalanceIds[0])).Val() != "512" || r.TTL(ctx, netEscrowKey(zeroBalanceIds[0])).Val() != -1 {
 				t.Fatal("zero reservation changed an unrelated mirror value or TTL")
@@ -156,21 +139,20 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		})
 		var settledRevenue NanoCents
 		server.Db(ctx, func(conn server.PgConn) {
-			var pending int
 			var terminal bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
-				(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1),
 				(SELECT outcome='settled' AND NOT dispute FROM transfer_contract WHERE contract_id=$1),
 				COALESCE(sum(payout_net_revenue_nano_cents),0)
-				FROM transfer_escrow_sweep WHERE contract_id=$1`, fixture.contractId).Scan(&pending, &terminal, &settledRevenue))
-			if pending != 0 || !terminal {
-				t.Fatal("legacy worker did not atomically retire its terminal intent")
+				FROM transfer_escrow_sweep WHERE contract_id=$1`, fixture.contractId).Scan(&terminal, &settledRevenue))
+			if !terminal {
+				t.Fatal("legacy settlement did not retire its terminal outcome")
 			}
 		})
-		// Since ac53dc21 the worker commits the exact earnings with one durable
-		// provider-total owner instead of writing the provider's lifetime total
-		// while it holds the payer's grants. The public total catches up when
-		// that owner runs, and only then; its replay must not add it again.
+		// Since ac53dc21 the settlement commits the exact earnings with one
+		// durable provider-total owner instead of writing the provider's
+		// lifetime total while it holds the payer's grants. The public total
+		// catches up when that owner runs, and only then; its replay must not
+		// add it again.
 		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
 			t.Fatalf("provider total was published before its durable owner ran: got=%+v want=%+v", account, initialAccount)
 		}
@@ -183,10 +165,6 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		}
 		if err := SettleEscrow(ctx, fixture.contractId, ContractOutcomeSettled); err != nil {
 			t.Fatal(err)
-		}
-		flushed, err = FlushLegacySettlements(ctx, shard, nil, 64)
-		if err != nil || flushed.Visited != 0 {
-			t.Fatalf("replayed legacy settlement recreated work: %+v %v", flushed, err)
 		}
 		selected, err = ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
 		if err != nil || selected != 0 {
@@ -278,28 +256,12 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 		initialAccount := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId)
 		addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
 		selected, err := ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
-		if selected != 0 || err != nil {
-			t.Fatalf("queued legacy dispute was counted as settled: closed=%d error=%v", selected, err)
+		if selected != 1 || !errors.Is(err, errContractInsufficientEscrow) {
+			t.Fatalf("legacy dispute did not reach its actual accounting refusal: closed=%d error=%v", selected, err)
 		}
-		assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "none")
 		proof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
-		shard := int(fixture.contractId[15]) % LegacySettlementShardCount
-		readDatabaseTime := func() time.Time {
-			var now time.Time
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&now))
-			})
-			return now
-		}
-		beforeRefusal := readDatabaseTime()
-		flushed, err := FlushLegacySettlements(ctx, shard, nil, 64)
-		afterRefusal := readDatabaseTime()
-		if err != nil || flushed.Visited != 1 || flushed.Failed != 1 || flushed.Completed != 0 || flushed.BusyOrGone != 0 {
-			t.Fatalf("legacy accounting refusal was not retained by its worker: %+v %v", flushed, err)
-		}
-		nextAttempt := assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "accounting")
-		if nextAttempt.Before(beforeRefusal.Add(15*time.Minute)) || nextAttempt.After(afterRefusal.Add(15*time.Minute)) {
-			t.Fatalf("accounting backoff differs from its database clock: before=%s after=%s next=%s", beforeRefusal, afterRefusal, nextAttempt)
+		if _, _, found := GetStream(ctx, fixture.contractId); found != before.streamFound {
+			t.Fatal("refused legacy settlement changed original stream state")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT count(*), count(*) FILTER(WHERE settled), coalesce(sum(payout_byte_count),0),
@@ -325,16 +287,11 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 				t.Fatal("rejection changed reservation or provider payout")
 			}
 		})
+		// The dispute keeps the contract out of quarantine; a replay meets the
+		// same refusal.
 		selected, err = ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
-		if selected != 0 || err != nil {
-			t.Fatalf("refused pending dispute was reclosed: %d %v", selected, err)
-		}
-		flushed, err = FlushLegacySettlements(ctx, shard, nil, 64)
-		if err != nil || flushed.Visited != 0 {
-			t.Fatalf("unchanged accounting refusal entered a hot retry: %+v %v", flushed, err)
-		}
-		if again := assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "accounting"); !again.Equal(nextAttempt) {
-			t.Fatal("retry changed the retained accounting backoff")
+		if selected != 1 || !errors.Is(err, errContractInsufficientEscrow) {
+			t.Fatalf("refused legacy dispute changed its refusal on replay: closed=%d error=%v", selected, err)
 		}
 		replayedProof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		if !bytes.Equal(proof, replayedProof) || readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId) != initialAccount {
@@ -344,7 +301,7 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 }
 
 // The public account reader combines durable totals and unapplied Redis deltas.
-// Legacy worker payouts must be visible exactly once through this same API.
+// Legacy payouts must be visible exactly once through this same API.
 func readLegacyAmplificationAccount(t testing.TB, ctx context.Context, networkId server.Id) AccountBalance {
 	t.Helper()
 	result := GetAccountBalance(&session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId}})
@@ -352,43 +309,6 @@ func readLegacyAmplificationAccount(t testing.TB, ctx context.Context, networkId
 		t.Fatalf("legacy fixture could not read its public account: %+v", result)
 	}
 	return *result.Balance
-}
-
-// Pending legacy intent retains every captured row and grant until one worker
-// owns the atomic financial transaction. Refusal retains the original deadline.
-func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture *forceCloseDisputeFixture, wantDispute, wantStream bool, wantReservation ByteCount, wantFailure string) time.Time {
-	t.Helper()
-	var nextAttempt time.Time
-	server.Db(ctx, func(conn server.PgConn) {
-		var count, settled, payout, balance int64
-		var open, dispute, clearDispute bool
-		var outcome, failure string
-		server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE settled),COALESCE(sum(payout_byte_count),0),
-			(SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
-			(SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1),
-			(SELECT dispute FROM transfer_contract WHERE contract_id=$1),
-			(SELECT outcome FROM legacy_settlement_intent WHERE contract_id=$1),
-			(SELECT clear_dispute FROM legacy_settlement_intent WHERE contract_id=$1),
-			(SELECT COALESCE(failure_code,'') FROM legacy_settlement_intent WHERE contract_id=$1),
-			(SELECT next_attempt_time FROM legacy_settlement_intent WHERE contract_id=$1)
-			FROM transfer_escrow WHERE contract_id=$1`, fixture.contractId, fixture.balanceId).Scan(
-			&count, &settled, &payout, &balance, &open, &dispute, &outcome, &clearDispute, &failure, &nextAttempt))
-		if count != 46 || settled != 0 || payout != 0 || balance != forceCloseDisputeInitialBalance || !open || dispute != wantDispute ||
-			outcome != ContractOutcomeSettled || clearDispute != wantDispute || failure != wantFailure {
-			t.Fatalf("pending legacy custody changed: rows=%d settled=%d payout=%d balance=%d open=%t dispute=%t intent=%s clear=%t failure=%s",
-				count, settled, payout, balance, open, dispute, outcome, clearDispute, failure)
-		}
-	})
-	server.Redis(ctx, func(r server.RedisClient) {
-		reservation, err := r.Get(ctx, netEscrowKey(fixture.balanceId)).Int64()
-		if err != nil || reservation != wantReservation {
-			t.Fatalf("pending legacy reservation=%d want=%d error=%v", reservation, wantReservation, err)
-		}
-	})
-	if _, _, found := GetStream(ctx, fixture.contractId); found != wantStream {
-		t.Fatalf("pending legacy intent changed original stream state: got=%t want=%t", found, wantStream)
-	}
-	return nextAttempt
 }
 
 // Quarantine shares the no-op rule but does not mark escrow paid or settled.

@@ -169,7 +169,6 @@ func TestCloseExpiredOperationalVisitKeepsFailureAndReachesNextRawPage(t *testin
 			var retained bool
 			server.Raise(conn.QueryRow(ctx, `SELECT last_value FROM synthetic_task_expiry_proof_attempts`).Scan(&attempts))
 			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL AND NOT dispute AND NOT usage_unverified
-				AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
 				FROM transfer_contract WHERE contract_id=$1`, first).Scan(&retained))
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[])

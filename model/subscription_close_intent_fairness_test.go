@@ -10,58 +10,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The legacy owner retains its reservation while ordinary later contracts
-// remain eligible for the close sweep's existing independent per-scan cap.
-func TestForceClosePendingIntentCannotOccupySelectionHead(t *testing.T) {
-	for _, disputed := range []bool{false, true} {
-		name := "open"
-		if disputed {
-			name = "disputed"
-		}
-		t.Run(name, func(t *testing.T) {
-			env := server.DefaultTestEnv()
-			env.RerunCount = 0
-			env.Run(t, func(t testing.TB) {
-				ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
-				defer cancel()
-				f, pending := legacySettlementTestIntent(t, ctx)
-				later, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
-				if err != nil {
-					t.Fatal(err)
-				}
-				aged := server.NowUtc().Add(-2 * time.Hour)
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,dispute=$3 WHERE contract_id=$1`, pending, aged, disputed))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, pending, aged))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,dispute=$3 WHERE contract_id=$1`, later, aged.Add(time.Minute), disputed))
-					if disputed {
-						// A no-escrow zero-usage dispute exercises the other selector
-						// without adding a second legacy financial owner.
-						server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
-                            VALUES($1,'source',0,$2,false),($1,'destination',0,$2,false)`, later, aged))
-					}
-				})
-				closed, cursor, err := ForceCloseOpenContractIdsPage(ctx, aged.Add(time.Hour), 1, 1, 0, 0, nil)
-				if err != nil || closed != 0 || cursor == nil {
-					t.Fatalf("owned head did not advance its bounded cursor: closed=%d cursor=%t err=%v", closed, cursor != nil, err)
-				}
-				closed, cursor, err = ForceCloseOpenContractIdsPage(ctx, aged.Add(time.Hour), 1, 1, 0, 0, cursor)
-				if err != nil || closed != 1 {
-					t.Fatalf("pending head starved later %s contract: verified=%d err=%v", name, closed, err)
-				}
-				requireLegacySettlementTestState(t, ctx, f, pending, true, false, 1000, 100)
-				server.Db(ctx, func(conn server.PgConn) {
-					var terminal bool
-					server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1`, later).Scan(&terminal))
-					if !terminal {
-						t.Fatal("later ordinary contract did not reach a final outcome")
-					}
-				})
-			})
-		})
-	}
-}
-
 // Equal creation timestamps need the contract-id tie-breaker. A pass also
 // retains its upper time bound, so later arrivals cannot prevent completion.
 func TestForceCloseCursorTiesAndFixedPassBoundary(t *testing.T) {
@@ -127,9 +75,10 @@ func TestForceCloseCursorTiesAndFixedPassBoundary(t *testing.T) {
 }
 
 // Execute the actual two runtime statements, including their original caps,
-// past a 32k intent-owned head each. The input remains a bounded test fixture;
-// this checks local planner cost and index use, not production scan duration.
-func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
+// past a 32k aged head each. The input remains a bounded test fixture; this
+// checks local planner cost and index use, not production scan duration. Since
+// the legacy settlement queue retired, neither statement probes its table.
+func TestForceCloseSelectorsRemainIndexedWithoutIntentProbe(t *testing.T) {
 	queries := []string{forceCloseOpenContractPageSql, forceCloseDisputedContractPageSql}
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -137,19 +86,15 @@ func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 		defer cancel()
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `WITH inserted AS (
-              INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,dispute)
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,dispute)
               SELECT gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),1,
                   now()-interval '2 hours'+g*interval '1 microsecond',kind.dispute
-              FROM generate_series(1,32768) g CROSS JOIN (VALUES(false),(true)) kind(dispute)
-              RETURNING contract_id
-            ) INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-              SELECT contract_id,get_byte(uuid_send(contract_id),15)%16,'settled' FROM inserted`))
+              FROM generate_series(1,32768) g CROSS JOIN (VALUES(false),(true)) kind(dispute)`))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,dispute)
               SELECT gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),1,
                   now()-interval '1 hour'+g*interval '1 microsecond',kind.dispute
               FROM generate_series(1,32) g CROSS JOIN (VALUES(false),(true)) kind(dispute)`))
-			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract; ANALYZE legacy_settlement_intent; ANALYZE contract_close`))
+			server.RaisePgResult(tx.Exec(ctx, `ANALYZE transfer_contract; ANALYZE contract_close`))
 		})
 		for i, query := range queries {
 			args := []any{server.NowUtc().Add(-5 * time.Minute), 25000, time.Time{}, server.Id{}, server.NowUtc()}
@@ -171,17 +116,11 @@ func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
 			if root["Actual Rows"].(float64) != 25000 {
 				t.Fatalf("bounded raw selector rows=%v want25000", root["Actual Rows"])
 			}
-			var primaryProbe, orderedScan bool
+			var orderedScan bool
 			var walk func(map[string]any)
 			walk = func(n map[string]any) {
 				if n["Relation Name"] == "legacy_settlement_intent" {
-					if n["Node Type"] != "Index Only Scan" && n["Node Type"] != "Index Scan" {
-						t.Fatalf("intent lookup became %v", n["Node Type"])
-					}
-					if n["Actual Rows"].(float64) > 1 {
-						t.Fatal("intent probe returned more than its unique-key owner")
-					}
-					primaryProbe = true
+					t.Fatalf("selector still probes the retired intent queue: %v", n["Node Type"])
 				}
 				if planNodeContractTable(n) == "transfer_contract" && strings.Contains(n["Node Type"].(string), "Index") {
 					orderedScan = true
@@ -193,10 +132,10 @@ func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
 				}
 			}
 			walk(root)
-			if !primaryProbe || !orderedScan {
-				t.Fatal("runtime selector lost indexed ownership or ordered traversal")
+			if !orderedScan {
+				t.Fatal("runtime selector lost its ordered traversal")
 			}
-			t.Logf("selector=%d pending_head=32768 raw_rows=25000 execution_ms=%v", i, plans[0]["Execution Time"])
+			t.Logf("selector=%d aged_head=32768 raw_rows=25000 execution_ms=%v", i, plans[0]["Execution Time"])
 		}
 	})
 }

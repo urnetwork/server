@@ -378,50 +378,6 @@ func TestTransferDebitsSourceFailuresStayUnknown(t *testing.T) {
 	}
 }
 
-// Missing debit coverage must not erase a separate complete settlement finding.
-func TestTransferDebitsUnknownPreservesIndependentSignal(t *testing.T) {
-	now := syntheticSettings(nil).Now()
-	for _, debitFirst := range []bool{false, true} {
-		calls := 0
-		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-			calls++
-			if strings.Contains(query, "max(end_version_number)") {
-				return []Row{{"763", "t"}}, nil
-			}
-			var rows []pgRow
-			switch query {
-			case transferDebitBacklogQuery:
-				rows = debitRows(now)[:15]
-			case legacySettlementBacklogQuery:
-				rows = legacyRows(now)
-				rows[3][2] = "300"
-			default:
-				t.Fatal("independent observation made an unexpected query")
-			}
-			result := make([]Row, len(rows))
-			for i, row := range rows {
-				result[i] = Row(row)
-			}
-			return result, nil
-		}}
-		signals := []Signal{NewLegacySettlementsSignal(), NewTransferDebitsSignal()}
-		if debitFirst {
-			signals[0], signals[1] = signals[1], signals[0]
-		}
-		alerts, err := NewWithSignals(syntheticSettings(source), signals...).Run(context.Background())
-		if err == nil || calls != 4 || len(alerts) != 2 {
-			t.Fatal("debit visibility failure suppressed or replaced an independent observation")
-		}
-		unknown := requireAlertClass(t, alerts, "cannot-observe")
-		if unknown.Identity() != "monitor/visibility|cannot-observe|pg/transfer-debits|" {
-			t.Fatal("debit visibility failure was assigned to the independent signal")
-		}
-		independent := requireAlertClass(t, alerts, "legacy-settlement-pending")
-		if independent.Identity() != "pg/legacy-settlements|legacy-settlement-pending|pg-1|partition-3/pending" || independent.Severity != SeverityPage {
-			t.Fatal("independent complete settlement page was suppressed or weakened")
-		}
-	}
-}
 func TestTransferDebitsRequiresEveryPartitionAndCurrentClock(t *testing.T) {
 	now := time.Now()
 	for _, fault := range []string{"missing", "duplicate", "stale", "nan", "bad_boolean"} {
@@ -525,4 +481,68 @@ func TestTransferDebitsActualIndexedBacklog(t *testing.T) {
 			t.Fatal("durable states were conflated", observations)
 		}
 	})
+}
+
+// A complete independent observation that pages, for the isolation control
+// below. It reads one fixed query and reports one exact frame.
+type transferDebitsIndependentPageProbe struct{}
+
+const transferDebitsIndependentPageQuery = `SELECT 'synthetic independent page'`
+
+func (transferDebitsIndependentPageProbe) id() string             { return "pg/synthetic-independent" }
+func (transferDebitsIndependentPageProbe) tier() string           { return tierWarn }
+func (transferDebitsIndependentPageProbe) cadence() time.Duration { return time.Minute }
+func (self transferDebitsIndependentPageProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if _, err := env.runner.pg(ctx, transferDebitsIndependentPageQuery); err != nil {
+		return nil, err
+	}
+	return []finding{{probeId: self.id(), tier: tierPage, class: "synthetic-independent-page", target: pgTarget(env),
+		frame: "partition-3/pending", sustain: 1, symptom: "A synthetic independent observation pages.",
+		baseline: "The synthetic observation never pages.", observed: "synthetic=page", mechanism: "Synthetic fixture.",
+		action: "None; this is a test fixture.", verify: "None.", playbook: "SIGNALS.md §2.5"}}, nil
+}
+
+// Missing debit coverage must not erase a separate complete finding.
+func TestTransferDebitsUnknownPreservesIndependentSignal(t *testing.T) {
+	now := syntheticSettings(nil).Now()
+	for _, debitFirst := range []bool{false, true} {
+		calls := 0
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			calls++
+			if strings.Contains(query, "max(end_version_number)") {
+				return []Row{{"763", "t"}}, nil
+			}
+			var rows []pgRow
+			switch query {
+			case transferDebitBacklogQuery:
+				rows = debitRows(now)[:15]
+			case transferDebitsIndependentPageQuery:
+				rows = []pgRow{{"synthetic independent page"}}
+			default:
+				t.Fatal("independent observation made an unexpected query")
+			}
+			result := make([]Row, len(rows))
+			for i, row := range rows {
+				result[i] = Row(row)
+			}
+			return result, nil
+		}}
+		independentSignal := &signalAdapter{number: "2.5x", key: "synthetic-independent", name: "Synthetic independent observation", probe: transferDebitsIndependentPageProbe{}}
+		signals := []Signal{independentSignal, NewTransferDebitsSignal()}
+		if debitFirst {
+			signals[0], signals[1] = signals[1], signals[0]
+		}
+		alerts, err := NewWithSignals(syntheticSettings(source), signals...).Run(context.Background())
+		if err == nil || calls != 3 || len(alerts) != 2 {
+			t.Fatal("debit visibility failure suppressed or replaced an independent observation", calls, len(alerts), err)
+		}
+		unknown := requireAlertClass(t, alerts, "cannot-observe")
+		if unknown.Identity() != "monitor/visibility|cannot-observe|pg/transfer-debits|" {
+			t.Fatal("debit visibility failure was assigned to the independent signal")
+		}
+		independent := requireAlertClass(t, alerts, "synthetic-independent-page")
+		if independent.Identity() != "pg/synthetic-independent|synthetic-independent-page|pg-1|partition-3/pending" || independent.Severity != SeverityPage {
+			t.Fatal("independent complete page was suppressed or weakened", independent.Identity(), independent.Severity)
+		}
+	}
 }

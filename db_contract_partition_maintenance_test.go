@@ -35,7 +35,8 @@ func testInsertCloseEvidence(t testing.TB, ctx context.Context, contractId Id, a
 // the cutover: partitions are created ahead, an expired week is dropped only
 // when nothing in it must stay, its usage proof is archived first, a blocked
 // week is reported with its reason, and expired close evidence is deleted
-// unless its contract is unresolved.
+// unless its contract is unresolved. A row left in the retired
+// legacy_settlement_intent table no longer blocks its week.
 func TestContractPartitionMaintenance(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -84,7 +85,8 @@ func TestContractPartitionMaintenance(t *testing.T) {
 		Tx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET settled = true WHERE contract_id = $1`, unresolvedContractId))
 		})
-		// week 3: a legacy settlement intent
+		// week 3: a row left in the retired legacy settlement queue, written
+		// by an older release; the week still retires
 		intentContractId := testContractIdAt(week(3).Add(time.Hour))
 		testInsertContractRows(t, ctx, intentContractId, true)
 		Tx(ctx, func(tx PgTx) {
@@ -94,6 +96,7 @@ func TestContractPartitionMaintenance(t *testing.T) {
 				intentContractId,
 			))
 		})
+		retiringContractIds := append(slices.Clone(settledContractIds), intentContractId)
 
 		// close evidence: expired and resolved, expired but unresolved, recent
 		expiredContractId := testContractIdAt(now.Add(-100 * 24 * time.Hour))
@@ -126,24 +129,25 @@ func TestContractPartitionMaintenance(t *testing.T) {
 		connect.AssertEqual(t, report.Blocked[ContractLegacyPartitionName("transfer_contract")], "an unsettled escrow")
 		connect.AssertEqual(t, report.Blocked[ContractPartitionName("transfer_contract", week(0))], "a sweep of a pending payment")
 		connect.AssertEqual(t, report.Blocked[ContractPartitionName("transfer_contract", week(2))], "an unresolved contract")
-		connect.AssertEqual(t, report.Blocked[ContractPartitionName("transfer_contract", week(3))], "a legacy settlement intent")
-		connect.AssertEqual(t, len(report.Blocked), 4)
-		connect.AssertEqual(t, report.Archived, int64(len(settledContractIds)))
+		connect.AssertEqual(t, len(report.Blocked), 3)
+		connect.AssertEqual(t, report.Archived, int64(len(retiringContractIds)))
 		connect.AssertEqual(t, cursor.ArchivePartition, "")
-		for _, i := range []int{1, 4} {
+		for _, i := range []int{1, 3, 4} {
 			for _, table := range ContractPartitionTables {
 				connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName(table, week(i))), true)
 			}
 		}
-		connect.AssertEqual(t, len(report.Dropped), 2*len(ContractPartitionTables))
-		for _, contractId := range settledContractIds {
+		connect.AssertEqual(t, len(report.Dropped), 3*len(ContractPartitionTables))
+		// the drop neither consulted nor removed the retired queue's row
+		connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, `SELECT EXISTS (SELECT 1 FROM legacy_settlement_intent WHERE contract_id = $1)`, intentContractId), true)
+		for _, contractId := range retiringContractIds {
 			connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, `SELECT EXISTS (SELECT 1 FROM st_provider_usage_archive WHERE contract_id = $1)`, contractId), true)
 			for _, table := range ContractPartitionTables {
 				connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM public.%s WHERE contract_id = $1)`, quoteIdentifier(table)), contractId), false)
 			}
 		}
 		// blocked weeks keep every row
-		for _, contractId := range []Id{legacyContractId, pendingContractId, unresolvedContractId, intentContractId} {
+		for _, contractId := range []Id{legacyContractId, pendingContractId, unresolvedContractId} {
 			connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, `SELECT EXISTS (SELECT 1 FROM transfer_contract WHERE contract_id = $1)`, contractId), true)
 		}
 		// the closed weeks and the parents were analyzed
@@ -160,7 +164,7 @@ func TestContractPartitionMaintenance(t *testing.T) {
 		report, _ = MaintainContractPartitions(ctx, later, cursor, time.Minute)
 		connect.AssertEqual(t, len(report.Created), 0)
 		connect.AssertEqual(t, len(report.Dropped), 0)
-		connect.AssertEqual(t, len(report.Blocked), 4)
+		connect.AssertEqual(t, len(report.Blocked), 3)
 		connect.AssertEqual(t, slices.Contains(report.Analyzed, "transfer_contract"), false)
 
 		// once its payment completes, week 0 retires

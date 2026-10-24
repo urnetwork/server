@@ -18,8 +18,8 @@ type contractExpiryReportContinuation struct {
 	label                 string
 }
 
-// Ordinary expiry and an existing intent choose exactly the same report edits.
-// An accepted adjudication finalizes only its selected, already present report.
+// Ordinary expiry chooses its report edits here. An accepted adjudication
+// finalizes only its selected, already present report.
 func contractExpiryReportContinuations(state *contractExpiryState, outcome ContractOutcome) ([]contractExpiryReportContinuation, error) {
 	sourceFinal := contractExpiryReportContinuation{clientId: state.sourceId, label: "finalize source checkpoint"}
 	destinationFinal := contractExpiryReportContinuation{clientId: state.destinationId, label: "finalize destination checkpoint"}
@@ -108,26 +108,21 @@ func closeContractWithExpiryScope(ctx context.Context, scope *contractExpiryRepa
 	if usedTransferByteCount < 0 {
 		return errors.New("invalid used transfer byte count")
 	}
-	var terminalReplay, deferred bool
+	var terminalReplay bool
 	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
 		var currentOutcome *ContractOutcome
 		server.Raise(tx.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&currentOutcome))
-		var hasEscrow, pending bool
 		if currentOutcome == nil {
-			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
-                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &pending))
-		}
-		if currentOutcome == nil && !hasEscrow {
-			if pending {
-				deferred = true
-				return
+			var hasEscrow bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)`, contractId).Scan(&hasEscrow))
+			if !hasEscrow {
+				server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
 			}
-			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
 		}
 		_, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
 		server.Raise(returnErr)
 	})
-	if terminalReplay || deferred {
+	if terminalReplay {
 		return nil
 	}
 	closed, err := settleContractWithExpiryScope(ctx, contractId, scope)
@@ -148,9 +143,8 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
 		posts = nil
 		resolved = false
-		// Keep the dispute and reservation intact while legacy work is
-		// queued. The worker clears it only in the debit/outcome transaction;
-		// an accounting rejection rolls that clear back with everything else.
+		// The dispute clear and the settlement share this transaction, so an
+		// accounting rejection rolls the clear back with everything else.
 		var owned bool
 		var expiryOwned bool
 		var retained []byte
@@ -169,16 +163,8 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		}
 		_, proofErr := retainedContractExpiryUsage(retained)
 		server.Raise(proofErr)
-		var hasEscrow, legacy, pending bool
-		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
-            EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved),
-            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, contractId).Scan(&hasEscrow, &legacy, &pending))
-		if !hasEscrow && pending {
-			// A new accepted intent owns its outcome. Its worker may hold I;
-			// never wait for or delete it while ordinary expiry holds C.
-			// Cleanup observes the intent and records the usual deferred handoff.
-			return
-		}
+		var hasEscrow bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)`, contractId).Scan(&hasEscrow))
 		if !hasEscrow {
 			server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, contractId))
 		}
@@ -192,17 +178,13 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		}
 		server.Raise(continueContractExpiryReportsInTx(ctx, tx, fresh, ContractOutcomeSettled))
 		if !hasEscrow {
-			// The same source owner handles free intents and ordinary expiry.
+			// The same source owner handles free contracts in ordinary expiry.
 			// Positive reports retain their clock but require no funded payout.
 			posts, resolved, err = settleLegacyContractWithoutEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled, true)
 			server.Raise(err)
 			if !resolved {
 				panic(errors.New("contract remained non-final after force-close attempt"))
 			}
-			return
-		}
-		if legacy {
-			server.Raise(queueLegacySettlementInTx(ctx, tx, contractId, ContractOutcomeSettled, true))
 			return
 		}
 		changed := server.RaisePgResult(tx.Exec(
@@ -218,7 +200,7 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 		if changed.RowsAffected() == 0 {
 			return
 		}
-		posts, resolved, err = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+		posts, resolved, err = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, ContractOutcomeSettled, scope)
 		server.Raise(err)
 		if !resolved {
 			panic(errors.New("contract remained non-final after force-close attempt"))
@@ -273,13 +255,9 @@ func continueContractExpiry(ctx context.Context, tag string, openContract *contr
 			if currentOutcome != nil {
 				return
 			}
-			var hasEscrow, pending bool
-			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
-                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&hasEscrow, &pending))
+			var hasEscrow bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)`, openContract.contractId).Scan(&hasEscrow))
 			if !hasEscrow {
-				if pending {
-					return
-				}
 				server.Raise(validateContractFreeSettlementOwnerInTx(ctx, tx, openContract.contractId))
 				// The proof is sticky, but reports and dispute state can change
 				// after preparation. Revalidate them under this outcome owner.

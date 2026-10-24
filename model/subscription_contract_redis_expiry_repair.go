@@ -62,15 +62,11 @@ func (self *contractRedisExpiryRepairCustody) equals(other *contractRedisExpiryR
 // The contract owner is already checked and locked on apply. The full contract
 // journal predicate includes pairs outside the bounded escrow head.
 func (self *contractExpiryRepairScope) checkRedisInTx(ctx context.Context, tx server.PgTx, contractId server.Id, lock bool) error {
-	var intent, debit, extender bool
+	var debit, extender bool
 	if err := tx.QueryRow(ctx, `SELECT
-		EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
 		EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1),
-		EXISTS(SELECT 1 FROM contract_extender WHERE contract_id=$1)`, contractId).Scan(&intent, &debit, &extender); err != nil {
+		EXISTS(SELECT 1 FROM contract_extender WHERE contract_id=$1)`, contractId).Scan(&debit, &extender); err != nil {
 		return err
-	}
-	if intent {
-		return contractExpiryRepairRefusal("legacy_intent_present")
 	}
 	if debit {
 		return contractExpiryRepairRefusal("debit_present")

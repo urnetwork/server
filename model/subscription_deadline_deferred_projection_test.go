@@ -130,21 +130,20 @@ func requireDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscro
 	server.Db(ctx, func(conn server.PgConn) {
 		var terminal, settled bool
 		var balance, payout, pending ByteCount
-		var journals, intents int
+		var journals int
 		server.Raise(conn.QueryRow(ctx, `SELECT outcome='settled' AND NOT dispute,
 			(SELECT settled FROM transfer_escrow WHERE contract_id=$1 AND balance_id=$2),
 			(SELECT payout_byte_count FROM transfer_escrow WHERE contract_id=$1 AND balance_id=$2),
 			(SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
 			(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=$1),
-			COALESCE((SELECT debit_byte_count FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2 AND NOT applied),0),
-			(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1)
-			FROM transfer_contract WHERE contract_id=$1`, id, f.balanceId).Scan(&terminal, &settled, &payout, &balance, &journals, &pending, &intents))
+			COALESCE((SELECT debit_byte_count FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2 AND NOT applied),0)
+			FROM transfer_contract WHERE contract_id=$1`, id, f.balanceId).Scan(&terminal, &settled, &payout, &balance, &journals, &pending))
 		wantBalance, wantPending, wantJournals := ByteCount(983), ByteCount(0), 0
 		if redis {
 			wantBalance, wantPending, wantJournals = 1000, 17, 1
 		}
-		if !terminal || !settled || payout != 17 || intents != 0 || balance != wantBalance || pending != wantPending || journals != wantJournals || balance-pending != 983 {
-			t.Fatal("deadline lost terminal/debit conservation", terminal, settled, payout, balance, pending, journals, intents)
+		if !terminal || !settled || payout != 17 || balance != wantBalance || pending != wantPending || journals != wantJournals || balance-pending != 983 {
+			t.Fatal("deadline lost terminal/debit conservation", terminal, settled, payout, balance, pending, journals)
 		}
 	}, server.OptNoRetry())
 	if redis {
@@ -191,7 +190,7 @@ func drainDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscrowO
 	if applied, released, busy, err = flushTransferDebitBalance(ctx, f.balanceId); err != nil || busy || applied != 0 || released != 0 {
 		t.Fatal("debit replay repeated charge", err)
 	}
-	requireLegacySettlementTestState(t, ctx, f, id, false, true, 983, 0)
+	requireLegacySettlementTestState(t, ctx, f, id, true, 983, 0)
 	state = readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
 	if state.accountBytes != 17 || state.accountRevenue != 17 || state.sweptBytes != 17 || state.sweptRevenue != 17 || state.owners != 0 {
 		t.Fatal("projection completion lost funded earnings")

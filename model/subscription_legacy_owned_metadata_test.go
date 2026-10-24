@@ -1,4 +1,6 @@
 // Inline metadata reuses only financial authority held in the same transaction.
+// A legacy reservation settles through the foreground owner, which commits its
+// earnings, escrow metadata and durable owners with the outcome.
 package model
 
 import (
@@ -12,6 +14,69 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Records the statements one foreground settlement sends after its grant lock.
+// The grant lock statement itself arms the trace; it is not recorded.
+type legacyOwnedSettlementTrace struct {
+	locked                 bool
+	statements             []string
+	reportReads            int
+	participantHeaderReads int
+}
+
+// A batch reports each of its queued statements.
+func (self *legacyOwnedSettlementTrace) hook() *legacyStatementHook {
+	return &legacyStatementHook{
+		before: func(_ context.Context, sql string, queued []string) {
+			if !self.locked {
+				return
+			}
+			if queued == nil {
+				queued = []string{sql}
+			}
+			for _, query := range queued {
+				self.recordStatement(query)
+			}
+		},
+		after: func(sql string, _ time.Duration, _ error) {
+			if !self.locked && strings.Contains(sql, "FOR UPDATE OF transfer_balance") {
+				self.locked = true
+			}
+		},
+	}
+}
+
+func (self *legacyOwnedSettlementTrace) recordStatement(sql string) {
+	self.statements = append(self.statements, strings.Join(strings.Fields(sql), " "))
+	if strings.Contains(sql, "FROM contract_close") {
+		self.reportReads++
+	}
+	if strings.HasPrefix(strings.TrimSpace(sql), "SELECT") && strings.Contains(sql, "FROM transfer_contract") && strings.Contains(sql, "source_network_id") {
+		self.participantHeaderReads++
+	}
+}
+
+// The number of escrow metadata ownership reads, which only the fallback sends.
+func (self *legacyOwnedSettlementTrace) metadataReads() int {
+	reads := 0
+	for _, statement := range self.statements {
+		if strings.Contains(statement, "SELECT outcome IS NOT NULL") {
+			reads++
+		}
+	}
+	return reads
+}
+
+// A terminal replay of the foreground owner claims nothing.
+func requireLegacyOwnedSettlementReplayInert(t testing.TB, ctx context.Context, id server.Id) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		_, closed, err := settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
+		if err != nil || closed {
+			t.Fatal("replay reclaimed financial settlement", closed, err)
+		}
+	}, server.TxReadCommitted, server.OptNoRetry())
+}
+
 // Cold and warm owners finish both revision transitions without repeated
 // ownership reads. Unusual reservation sets retain the complete old path.
 func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
@@ -21,7 +86,7 @@ func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 		defer cancel()
 		for _, mode := range []string{"warm", "cold", "multigrant", "zero", "settled", "mixed", "missing_unused"} {
-			f, id := legacySettlementTestIntent(t, ctx)
+			f, id := legacySettlementTestOpenFinals(t, ctx)
 			ids := []server.Id{f.balanceId}
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000,end_time=$2 WHERE balance_id=$1`, f.balanceId, server.NowUtc().Add(time.Hour)))
@@ -48,30 +113,24 @@ func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=ANY($1)`, ids))
 				})
 			}
-			trace := &legacyGrantOwnerDiagnostic{afterGrant: func() {}}
+			trace := &legacyOwnedSettlementTrace{}
 			var posts []func() any
 			stopHooks := startLegacyStatementHooks(t, ctx)
 			defer stopHooks()
 			server.Tx(ctx, func(tx server.PgTx) {
-				var completed, busy bool
+				var closed bool
 				var err error
 				hooked, unhook := withLegacyStatementHooks(ctx, tx, trace.hook())
 				defer unhook()
-				posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
+				posts, closed, err = settleEscrowForegroundInTx(hooked, tx, id, ContractOutcomeSettled)
 				server.Raise(err)
-				if !completed || busy {
+				if !closed {
 					t.Fatal(mode, "did not complete")
 				}
 			}, server.TxReadCommitted, server.OptNoRetry())
 			stopHooks()
 			wantFallback := mode == "zero" || mode == "settled" || mode == "mixed"
-			metadataReads := 0
-			for _, statement := range trace.statements {
-				if strings.Contains(statement.sql, "SELECT outcome IS NOT NULL") {
-					metadataReads++
-				}
-			}
-			if (metadataReads == 1) != wantFallback || metadataReads > 1 {
+			if metadataReads := trace.metadataReads(); (metadataReads == 1) != wantFallback || metadataReads > 1 {
 				t.Fatalf("%s metadata ownership rereads=%d, fallback=%t", mode, metadataReads, wantFallback)
 			}
 			after := openEscrowReservedForBalances(ctx, ids)
@@ -107,10 +166,7 @@ func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
 			for _, balanceId := range ids {
 				requireLegacyOwnedMetadataRedis(t, ctx, balanceId, 0)
 			}
-			completed, _, _, err := flushLegacySettlement(ctx, id)
-			if err != nil || completed {
-				t.Fatal(mode, "replay reclaimed financial settlement", err)
-			}
+			requireLegacyOwnedSettlementReplayInert(t, ctx, id)
 			requireLegacyOwnedMetadataFinancialState(t, ctx, f, id, ids)
 			t.Logf("mode=%s fallback=%t owned_sql_calls=%d", mode, wantFallback, len(trace.statements))
 		}
@@ -125,7 +181,7 @@ func TestLegacySettlementOwnedMetadataRejectsChangedRevision(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		neighbor, posts := createNetEscrowOrderingTestContract(ctx, f, 5)
 		server.RunPosts(ctx, posts...)
 		refreshNetEscrow(ctx, []server.Id{f.balanceId})
@@ -140,13 +196,13 @@ func TestLegacySettlementOwnedMetadataRejectsChangedRevision(t *testing.T) {
 				}, server.TxReadCommitted, server.OptNoRetry())
 				mutated = true
 			}}
-			var completed, busy bool
+			var closed bool
 			var err error
 			hooked, unhook := withLegacyStatementHooks(ctx, tx, mutation.hook())
 			defer unhook()
-			posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
+			posts, closed, err = settleEscrowForegroundInTx(hooked, tx, id, ContractOutcomeSettled)
 			server.Raise(err)
-			if !completed || busy || !mutated {
+			if !closed || !mutated {
 				t.Fatal("interleaving did not complete")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
@@ -180,7 +236,7 @@ func TestLegacySettlementOwnedMetadataRollbackAndLostReply(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		ids := []server.Id{f.balanceId}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
@@ -190,9 +246,9 @@ func TestLegacySettlementOwnedMetadataRollbackAndLostReply(t *testing.T) {
 		// Each owner gets a real owned server transaction whose end the test chooses.
 		tx, finish := beginRareGrantTestTx(t, ctx)
 		defer finish(false)
-		abandoned, completed, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
+		abandoned, closed, err := settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
 		server.Raise(err)
-		if !completed || busy {
+		if !closed {
 			t.Fatal("rollback owner failed")
 		}
 		server.Raise(finish(false))
@@ -204,9 +260,9 @@ func TestLegacySettlementOwnedMetadataRollbackAndLostReply(t *testing.T) {
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 100)
 		tx, finish = beginRareGrantTestTx(t, ctx)
 		defer finish(false)
-		posts, completed, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
+		posts, closed, err := settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
 		server.Raise(err)
-		if !completed || busy {
+		if !closed {
 			t.Fatal("commit owner failed")
 		}
 		server.Raise(finish(true))
@@ -214,14 +270,45 @@ func TestLegacySettlementOwnedMetadataRollbackAndLostReply(t *testing.T) {
 		if got := settlementCacheSnapshot(ctx, ids)[f.balanceId]; got.revision != before.revision+2 || got.reserved != 0 {
 			t.Fatal("committed financial metadata depends on a post", before, got)
 		}
-		completed, _, _, err = flushLegacySettlement(ctx, id)
-		if err != nil || completed {
-			t.Fatal("lost reply repeated settlement", completed, err)
-		}
+		requireLegacyOwnedSettlementReplayInert(t, ctx, id)
 		server.RunPosts(ctx, abandoned...)
 		server.RunPosts(ctx, posts...)
 		requireLegacyOwnedMetadataFinancialState(t, ctx, f, id, ids)
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)
+	})
+}
+
+// Count real SQL reads after the exact grant ownership gate, then check the
+// committed debit, escrow release and durable payout before the causal assertion.
+func TestLegacySettlementOwnerReadsOnce(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		f, id := legacySettlementTestOpenFinals(t, ctx)
+		stopHooks := startLegacyStatementHooks(t, ctx)
+		defer stopHooks()
+		trace := &legacyOwnedSettlementTrace{}
+		var posts []func() any
+		server.Tx(ctx, func(tx server.PgTx) {
+			var closed bool
+			var err error
+			hooked, unhook := withLegacyStatementHooks(ctx, tx, trace.hook())
+			defer unhook()
+			posts, closed, err = settleEscrowForegroundInTx(hooked, tx, id, ContractOutcomeSettled)
+			server.Raise(err)
+			if !closed {
+				t.Fatal("synthetic owner did not reach the financial commit")
+			}
+		}, server.TxReadCommitted, server.OptNoRetry())
+		server.RunPosts(ctx, posts...)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 989, 0)
+		requireLegacyProviderDurability(t, ctx, f, id, 11)
+		if !trace.locked || trace.reportReads != 1 || trace.participantHeaderReads != 1 {
+			t.Fatalf("financial owner reread locked contract facts: locked=%t reports=%d participant_headers=%d", trace.locked, trace.reportReads, trace.participantHeaderReads)
+		}
+		t.Logf("one complete legacy financial owner: owned_statements=%d report_reads=%d participant_headers=%d", len(trace.statements), trace.reportReads, trace.participantHeaderReads)
 	})
 }
 
@@ -230,14 +317,13 @@ func requireLegacyOwnedMetadataFinancialState(t testing.TB, ctx context.Context,
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		var credit ByteCount
-		var settled, terminal, pending bool
+		var settled, terminal bool
 		server.Raise(conn.QueryRow(ctx, `SELECT
             (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
             (SELECT bool_and(settled AND settle_time IS NOT NULL AND payout_byte_count=CASE WHEN balance_id=$2 THEN 11 ELSE 0 END) FROM transfer_escrow WHERE contract_id=$1 AND balance_id=ANY($3)),
-            (SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$1),
-            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, id, f.balanceId, ids).Scan(&credit, &settled, &terminal, &pending))
-		if credit != 989 || !settled || !terminal || pending {
-			t.Fatal("inline financial metadata differs", credit, settled, terminal, pending)
+            (SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$1)`, id, f.balanceId, ids).Scan(&credit, &settled, &terminal))
+		if credit != 989 || !settled || !terminal {
+			t.Fatal("inline financial metadata differs", credit, settled, terminal)
 		}
 	})
 	requireLegacyProviderDurability(t, ctx, f, id, 11, 11)

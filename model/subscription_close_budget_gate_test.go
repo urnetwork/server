@@ -277,55 +277,5 @@ func TestForceCloseBudgetAccountingAndMixedErrors(t *testing.T) {
 	}
 }
 
-func TestForceCloseBudgetZeroCloseRetainedHead(t *testing.T) {
-	for _, disputed := range []bool{false, true} {
-		name := "open"
-		if disputed {
-			name = "disputed"
-		}
-		t.Run(name, func(t *testing.T) {
-			env := server.DefaultTestEnv()
-			env.RerunCount = 0
-			env.Run(t, func(t testing.TB) {
-				ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
-				defer cancel()
-				f, pending := legacySettlementTestIntent(t, ctx)
-				later, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
-				if err != nil {
-					t.Fatal(err)
-				}
-				aged := server.NowUtc().Add(-2 * time.Hour)
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,dispute=$3 WHERE contract_id=$1`, pending, aged, disputed))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`, pending, aged))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,dispute=$3 WHERE contract_id=$1`, later, aged.Add(time.Minute), disputed))
-					if disputed {
-						// A no-escrow zero-usage dispute exercises the other selector
-						// without adding a second legacy financial owner.
-						server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,close_time,checkpoint)
-                            VALUES($1,'source',0,$2,false),($1,'destination',0,$2,false)`, later, aged))
-					}
-				})
-				closed, cursor, err := forceCloseOpenContractIdsBudgetedPage(ctx, aged.Add(time.Hour), 10, 1, 0, 0, nil, time.Nanosecond, 1)
-				if err != nil || closed != 0 || cursor == nil {
-					t.Fatalf("owned head did not advance its bounded cursor: closed=%d cursor=%t err=%v", closed, cursor != nil, err)
-				}
-				closed, cursor, err = forceCloseOpenContractIdsBudgetedPage(ctx, aged.Add(time.Hour), 10, 1, 0, 0, cursor, time.Second, 1)
-				if err != nil || closed != 1 {
-					t.Fatalf("pending head starved later %s contract: verified=%d err=%v", name, closed, err)
-				}
-				requireLegacySettlementTestState(t, ctx, f, pending, true, false, 1000, 100)
-				server.Db(ctx, func(conn server.PgConn) {
-					var terminal bool
-					server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1`, later).Scan(&terminal))
-					if !terminal {
-						t.Fatal("later ordinary contract did not reach a final outcome")
-					}
-				})
-			})
-		})
-	}
-}
-
 // Equal creation timestamps need the contract-id tie-breaker. A pass also
 // retains its upper time bound, so later arrivals cannot prevent completion.

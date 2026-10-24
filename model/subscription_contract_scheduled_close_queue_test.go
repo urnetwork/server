@@ -132,27 +132,3 @@ func TestContractCloseRemovesItsQueuedScheduledClose(t *testing.T) {
 		}
 	})
 }
-
-// The cohort settlement closes many legacy contracts in one batch; each one's
-// queued close leaves with it.
-func TestLegacyFinancialCohortRemovesQueuedScheduledCloses(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		f := legacyFinancialCohortSeed(t, ctx, 8)
-		deadline := server.NowUtc().Add(-time.Hour).Truncate(time.Microsecond)
-		for _, id := range f.ids {
-			insertSyntheticScheduledClose(ctx, id, deadline, time.Time{})
-		}
-		page, err := FlushLegacySettlements(ctx, 1, nil, 8)
-		if err != nil || page.Visited != 8 || page.Completed != 8 || page.Failed != 0 {
-			t.Fatal("public cohort did not complete", page, err)
-		}
-		legacyFinancialCohortRequire(t, ctx, f, legacyFinancialCohortCompleted(f.ids))
-		if pending := readSyntheticScheduledCloses(ctx, f.ids); len(pending) != 0 {
-			t.Fatal("cohort settlement left queued scheduled closes", len(pending))
-		}
-	})
-}

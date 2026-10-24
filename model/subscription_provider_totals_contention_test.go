@@ -15,7 +15,7 @@ import (
 )
 
 // The baseline waits on the held provider row before the first financial
-// commit. The producer candidate drains the entire shared-grant cohort while
+// commit. The foreground owner settles the entire shared-grant cohort while
 // that same provider row remains held, then projects every exact allocation.
 func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 	env := server.DefaultTestEnv()
@@ -24,7 +24,7 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 		defer cancel()
 		const count = 512
-		f, firstId := legacySettlementTestIntent(t, ctx)
+		f, firstId := legacySettlementTestOpenFinals(t, ctx)
 		ids := []server.Id{firstId}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=1000000,balance_byte_count=1000000,net_revenue_nano_cents=2000000 WHERE balance_id=$1`, f.balanceId))
@@ -34,13 +34,16 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			e, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
 			server.RunPosts(ctx, posts...)
 			id := e.ContractId
-			id[15] = byte(index % LegacySettlementShardCount)
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET contract_id=$2 WHERE contract_id=$1`, e.ContractId, id))
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET contract_id=$2 WHERE contract_id=$1`, e.ContractId, id))
-			})
+			// Both finals commit; the destination's genuine report owner omits
+			// its settlement continuation, which runs below with the row held.
 			server.Raise(CloseContract(ctx, id, f.sourceId, 11, false))
-			server.Raise(CloseContract(ctx, id, f.destinationId, 11, false))
+			server.Tx(ctx, func(tx server.PgTx) {
+				applied, _, err := applyContractCloseReportInTx(ctx, tx, id, f.destinationId, 11, false, nil)
+				server.Raise(err)
+				if !applied {
+					t.Fatal("destination final report did not commit")
+				}
+			}, server.TxReadCommitted)
 			ids = append(ids, id)
 		}
 		// Keep the cache explicitly cold so foreground financial posts cannot
@@ -59,9 +62,8 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 		var holderPid int
 		server.Raise(held.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPid))
 		server.RaisePgResult(held.Exec(ctx, `SELECT network_id FROM account_balance WHERE network_id=$1 FOR UPDATE`, f.destinationNetworkId))
-		completed, busy, _, err := flushLegacySettlement(ctx, firstId)
-		if err != nil || !completed || busy {
-			t.Fatal("financial settlement waited on the held provider projection row")
+		if err := SettleEscrow(ctx, firstId, ContractOutcomeSettled); err != nil {
+			t.Fatal("financial settlement waited on the held provider projection row", err)
 		}
 		var firstTask server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -130,9 +132,8 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 				t.Fatal("exact projection blocking edge was not observed")
 			}
 		}
-		completed, busy, _, err = flushLegacySettlement(ctx, ids[1])
-		if err != nil || !completed || busy {
-			t.Fatal("blocked projection retained the sibling financial grant")
+		if err := SettleEscrow(ctx, ids[1], ContractOutcomeSettled); err != nil {
+			t.Fatal("blocked projection retained the sibling financial grant", err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var stillBlocked bool
@@ -149,10 +150,9 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			t.Fatal("held projection unexpectedly committed")
 		}
 		requireProviderTotalsTestState(t, ctx, firstTask, f.destinationNetworkId, false, 0, 0)
-		for shard := range LegacySettlementShardCount {
-			page, err := FlushLegacySettlements(ctx, shard, nil, 64)
-			if err != nil || page.Failed != 0 || page.BusyOrGone != 0 || page.More {
-				t.Fatal("provider-held shared-grant cohort did not drain")
+		for _, id := range ids[2:] {
+			if err := SettleEscrow(ctx, id, ContractOutcomeSettled); err != nil {
+				t.Fatal("provider-held shared-grant cohort did not settle", err)
 			}
 		}
 		// The held transaction must still exist throughout the complete drain;
@@ -191,7 +191,6 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 				server.Raise(conn.QueryRow(ctx, `SELECT
                     (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled')=$4 AND
                     (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1) AND settled AND settle_time IS NOT NULL AND payout_byte_count=11)=$4 AND
-                    NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=ANY($1)) AND
                     (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2)=1000000-11*$4 AND
                     (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=ANY($1))=11*$4 AND
                     (SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=ANY($1))=11*$4 AND

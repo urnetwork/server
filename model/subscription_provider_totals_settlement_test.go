@@ -11,17 +11,18 @@ import (
 
 func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
 		collision := providerTotalsTestTask(ctx, id, f.destinationNetworkId)
 		before := task.GetTasks(ctx, collision)[collision].ArgsJson
-		_, _, _, err := flushLegacySettlement(ctx, id)
+		var err error
+		server.HandleError(func() { err = SettleEscrow(ctx, id, ContractOutcomeSettled) }, func(recovered error) { err = recovered })
 		if err == nil {
 			t.Fatal("existing task payload was silently merged into financial settlement")
 		}
-		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
+		requireLegacySettlementTestState(t, ctx, f, id, false, 1000, 100)
 		if got := task.GetTasks(ctx, collision)[collision]; got == nil || got.ArgsJson != before {
 			t.Fatal("collision replaced the existing task allocation")
 		}
@@ -39,9 +40,8 @@ func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id=$1`, collision))
 		})
-		completed, busy, _, err := flushLegacySettlement(ctx, id)
-		if err != nil || !completed || busy {
-			t.Fatal("clean outcome did not enqueue its allocation")
+		if err := SettleEscrow(ctx, id, ContractOutcomeSettled); err != nil {
+			t.Fatal("clean outcome did not enqueue its allocation", err)
 		}
 		var projectionId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -64,10 +64,7 @@ func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T
 		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
 		// RunOnce has been released by finalization. The terminal outcome,
 		// rather than the vanished queue key, still prevents another enqueue.
-		completed, _, _, err = flushLegacySettlement(ctx, id)
-		if err != nil || completed {
-			t.Fatal("terminal outcome replay claimed a second settlement")
-		}
+		requireLegacyOwnedSettlementReplayInert(t, ctx, id)
 		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
 		finalizeProviderTotalsTestMirror(t, ctx, mirrorOwner)
 		server.Db(ctx, func(conn server.PgConn) {
@@ -83,15 +80,15 @@ func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T
 
 func TestLegacyProviderTotalsSurvivesContractAndSweepRetention(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
 		// A committed initial settlement loses its reply and starts no posts.
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, completed, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
+			_, closed, err := settleEscrowForegroundInTx(ctx, tx, id, ContractOutcomeSettled)
 			server.Raise(err)
-			if !completed || busy {
+			if !closed {
 				t.Fatal("retention control did not commit initial settlement")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())

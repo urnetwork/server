@@ -128,6 +128,17 @@ func TestContractPartitionCutover(t *testing.T) {
 		settledContractId := NewId()
 		testInsertContractRows(t, ctx, openContractId, false)
 		testInsertContractRows(t, ctx, settledContractId, true)
+		// Since legacy_settlement_intent's contract key retired, the migrated
+		// schema has no foreign key into the contract tables from outside
+		// them. A synthetic one keeps the cutover's handling of such a key
+		// covered.
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `CREATE TABLE contract_partition_test_outside_reference (
+				contract_id uuid NOT NULL,
+				CONSTRAINT contract_partition_test_outside_key FOREIGN KEY (contract_id) REFERENCES transfer_contract (contract_id)
+			)`))
+			RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_partition_test_outside_reference (contract_id) VALUES ($1)`, openContractId))
+		})
 
 		relkind := func(name string) string {
 			return testContractPartitionScalar[string](t, ctx, `SELECT COALESCE((SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)), '')`, "public."+name)
@@ -275,7 +286,7 @@ func TestContractPartitionCutover(t *testing.T) {
 		// the report foreign key is gone; the outside one is valid
 		exists, _ := foreignKeyValid(contractCloseReportForeignKeyName)
 		connect.AssertEqual(t, exists, false)
-		exists, valid := foreignKeyValid("legacy_settlement_intent_contract_id_fkey")
+		exists, valid := foreignKeyValid("contract_partition_test_outside_key")
 		connect.AssertEqual(t, exists, true)
 		connect.AssertEqual(t, valid, true)
 
@@ -313,7 +324,7 @@ func TestContractPartitionCutover(t *testing.T) {
 		exists, valid = foreignKeyValid(contractCloseReportForeignKeyName)
 		connect.AssertEqual(t, exists, true)
 		connect.AssertEqual(t, valid, false)
-		exists, valid = foreignKeyValid("legacy_settlement_intent_contract_id_fkey")
+		exists, valid = foreignKeyValid("contract_partition_test_outside_key")
 		connect.AssertEqual(t, exists, true)
 		connect.AssertEqual(t, valid, true)
 		connect.AssertEqual(t, testContractPartitionOf(t, ctx, "transfer_contract", openContractId), "transfer_contract")
