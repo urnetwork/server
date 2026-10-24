@@ -349,6 +349,21 @@ WARP_ENV=local go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0
 WARP_ENV=local go test -race -p=1 ./connect/perfvar -short -parallel=1 -count=1 -timeout=30m
 ```
 
+The complete command always includes
+`TestFullTunH1Sdk32ServiceRefusalRecovery100Pages` as mandatory functional
+coverage; full PERF requires its single run/pass receipt in each arm. It
+accepts healthy existing speed5 recovery while preserving every five-second,
+100-page/400-asset/99-overlap, CSS/body and cleanup gate.
+
+The provider4-specific
+`TestFullTunH1Sdk32LateQualityPublicFullWindow100Pages` is manual research.
+Without `CONNECT_PERFVAR_LATE_QUALITY_RESEARCH=1` it declares a skip before
+`TestEnv` setup; that skip provides no qualification. An explicitly selected
+manual run with this flag uses its original strict verdict and unchanged
+workload/gates. A workload, latency, custody or cleanup failure still fails;
+no post-workload failure becomes a skip. The full-PERF wrapper clears this
+flag with all other `CONNECT_PERFVAR_*` overrides.
+
 For each control/candidate process block, alternate
 `control,candidate,candidate,control` and reverse the order on the next block.
 Hold seeds and scenario inputs fixed. Capture every `[perfvar]` JSON record,

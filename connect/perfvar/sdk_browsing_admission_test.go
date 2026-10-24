@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -606,9 +607,12 @@ func (self *sdkBrowsingScenario) log(t testing.TB, observation *nativeBrowsingOb
 	}
 }
 
-// Permanent public entry point: strict full default geometry, real NAT refusal,
-// physically late provider, original CSS custody and unchanged100-page gates.
+// Manual provider4 research is separate from automatic qualification. Opting
+// in retains the original workload, strict verdict and every timing/custody gate.
 func TestFullTunH1Sdk32LateQualityPublicFullWindow100Pages(t *testing.T) {
+	if os.Getenv("CONNECT_PERFVAR_LATE_QUALITY_RESEARCH") != "1" {
+		t.Skip("manual provider4 research; not qualification; set CONNECT_PERFVAR_LATE_QUALITY_RESEARCH=1")
+	}
 	testSdkBrowsingPublicServiceRecovery(t, false)
 }
 

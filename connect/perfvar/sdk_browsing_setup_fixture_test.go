@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -279,6 +280,9 @@ func (self *sdkBrowsingSetupFixture) close() error {
 				}
 			}
 			err := self.device.CloseAndWait(joinCtx)
+			if err != nil {
+				sdkBrowsingCaptureFailedDeviceJoin(self.t, err, runtime.Stack)
+			}
 			self.closeErr = errors.Join(self.closeErr, err)
 			if err == nil {
 				self.afterJoin = self.device.MemoryUsed()
