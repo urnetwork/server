@@ -38,3 +38,19 @@ expirations occurred during client establishment; they did not prevent warmup
 or a completed measured run. This single success does not prove stability or
 make this the final competition scale. The 15,000-provider true-off trial was
 started only after this point exited and cleanup was verified.
+## 15,000-provider impairment-off point
+
+`p15000-off/` retains the next point using the same corrected image and
+protocol. Controller exit was 0; all 200 clients warmed; final marker/sidecar/
+CSV hashes matched; and owned services/network were removed. Of 2,189 requests
+starting in the measurement window, 35 failed (1.5989%). The CSV contains
+2,626 total rows, including requests outside that window; these denominators
+must not be conflated. The failure rate is below the scorer's 3% absolute
+baseline rejection floor, but this single point establishes neither repeated-run
+stability nor the other scoring gates. Failures must remain charged when
+computing the raw score; the sidecar's descriptive latency is not that score.
+
+This true-off result does not reproduce the old defective image's fatal probe
+failure. It also does not prove impairment caused that historical failure.
+The corresponding corrected impairment-on point was started only after clean
+teardown. Final scale and margin remain unselected.

@@ -1,0 +1,101 @@
+{
+  "schema": 2,
+  "kind": "sim-latency-run",
+  "config_sha256": "aa727ab6ff320cd6ed94bb5613c77c980ca5d5416cd10d4bb03f660e59dc72f0",
+  "seed": 20261024,
+  "build_revision": "3d96d16ddb4fc2fb08d3f9003c52e30b9a47241d",
+  "hostname": "9f9b8fced770",
+  "os": "linux",
+  "arch": "amd64",
+  "num_cpu": 10,
+  "flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "false",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "source_epoch": 0,
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-fixed794-p15000-off-source-seal-fix",
+  "request_timeout_ms": 120000,
+  "stats_root": "/work/site/stats/local/sim-127.0.0.1-01a16f8c-ec66-1f43-e071-a85002e27238",
+  "stats_instance_id": "01a16f8c-ec66-1f43-e071-a85002e27238",
+  "results_csv_sha256": "f14eca4c48cff9cd814ee23fb0699c5aa989cb2329198a7ae7a890dd287868cd",
+  "results_csv_bytes": 287595,
+  "final_marker_path": "/artifacts/run.json.complete.json",
+  "completion_state": "complete",
+  "completed_unix_ms": 1792873549730,
+  "measure_start_ms": 1792873253887,
+  "measure_end_ms": 1792873433887,
+  "clients_pool": 200,
+  "clients_established": 200,
+  "rows": 2626,
+  "rows_in_window": 2189,
+  "failures": 35,
+  "block_count": 8,
+  "block_seconds": 22.5,
+  "metrics": {
+    "fail_rate": {
+      "value": 0.015989036089538604,
+      "n": 2189,
+      "block_se": 0.005576986813576628
+    },
+    "goodput_bytes_per_s": {
+      "value": 14836803.466666667,
+      "n": 2189,
+      "block_se": 1002099.8943860347
+    },
+    "throughput_p05_bytes_per_s": {
+      "value": 71110.4613974675,
+      "n": 527,
+      "block_se": 3592.8179119958468
+    },
+    "throughput_p50_bytes_per_s": {
+      "value": 221870.55263409676,
+      "n": 527,
+      "block_se": 8368.592068932756
+    },
+    "throughput_p95_bytes_per_s": {
+      "value": 8650891.892978393,
+      "n": 527,
+      "block_se": 1778563.038898567
+    },
+    "total_p50_ms": {
+      "value": 3714.505,
+      "n": 2154,
+      "block_se": 442.37947779759185
+    },
+    "total_p95_ms": {
+      "value": 38632.338949999976,
+      "n": 2154,
+      "block_se": 1596.8394544764615
+    },
+    "ttfb_p50_ms": {
+      "value": 2282.1165,
+      "n": 2154,
+      "block_se": 291.76888722636875
+    },
+    "ttfb_p95_ms": {
+      "value": 9628.97029999999,
+      "n": 2154,
+      "block_se": 604.4110921408551
+    }
+  }
+}
