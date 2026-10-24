@@ -128,7 +128,7 @@ race log contains 326 passing top-level tests; its SHA-256 is
 The second race log SHA-256 is
 `591c7ab2f3b209d04dbb3f669658ebff4efdbce4d93dded8ab8028fce5cbb0a9`.
 
-The exact production evaluator image build has started. Production qualification,
+The exact production evaluator image build has completed (local checks below). Production qualification,
 fresh calibration, real review/build broker qualification, live deployment,
 settlement acceptance, and scheduled opening remain separate unchecked work.
 The manifest's 16.1% historical floor is explicitly provisional until fresh
@@ -153,3 +153,40 @@ under race detection; real disposable-store tests reject both early and late
 Go/SQL writers and accept the scheduled control in production and staging.
 Deployment/migration and the actual pinned production bootstrap remain pending;
 this control-only change does not alter the frozen evaluated source checkpoint.
+
+## Exact-image local checks — October 24
+
+The production evaluator built from the checkpoint above has immutable local
+image ID `sha256:826569fdeb02f72ec4f24ace7c93b16b69a60e1875c31799c5a0217b402e0d6c`.
+Its preparation tag is
+`urnetwork/sim-latency-evaluator-base:production-20261028-67c87445a`;
+the tag is not an immutable distribution record. The image record SHA-256 is
+`afa94b0e770347f4cc177f4eceb47db6fbb4e9aa714d8453bf0dd23e45fbfa9a`.
+
+Verified locally against that image:
+
+- Container smoke: offline candidate build, isolated PostgreSQL/Redis,
+  migrations, a real 32-provider/8-client simulation, accounting, and pristine
+  baseline/scoring completed. The retained log SHA-256 is
+  `a93295e38f05b2756202b065f4746787cd2dd04f359bdc5aa8c8ec3218d16db8`.
+  This reduced smoke workload is not production-scale calibration.
+- Malicious build-initializer isolation: checks executed unprivileged, the check
+  stage was discarded, and all six protected paths remained immutable.
+- Production-memory resource-bomb cleanup: all ten evaluation CPUs were loaded;
+  the 72-GiB memory limit produced a confirmed OOM kill. Cleanup took 588 ms,
+  leaving zero job containers and networks. Evidence SHA-256 is
+  `8057f235c7f2df106d0bbd295ed798e233b7b85d58098f462805491ba3d858a7`,
+  bound to boot `f0e880cb-c124-4ed6-9edb-43669191d84e`.
+- Read-only host-control verification found 12 physical/logical CPUs, SMT off,
+  performance governor, turbo disabled, ten evaluation cores, and two reserved
+  management cores.
+
+Private preparation logs and records are retained under
+`/home/by/urnetwork/temp/production-20261024.bUpBTuEw`; the resource-bomb
+record also has a root-owned copy under
+`/var/lib/urnetwork/competition-production-20261028/qualification/`.
+These are host-local preparation records, not a claim of authenticated MinIO
+retention or a published evaluator archive. The official qualification checklist
+remains unchecked until the live lease, artifact storage, API/worker readiness,
+and full calibration evidence are verified. Main API access still refused
+connections on the subsequent October 24 check during confirmed maintenance.
