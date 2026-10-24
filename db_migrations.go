@@ -209,7 +209,11 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
 			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
+				// an online build of a large table outlives the role's
+				// transaction_timeout
+				WithoutTransactionTimeout(ctx, conn, func() {
+					Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
+				})
 			}, OptReadWrite(), OptNoRetry())
 		case *CodeMigration:
 			if DbMigrationVerbose {
@@ -10750,4 +10754,27 @@ var migrations = []any{
 	// that gets its guard after the copy, checks the copy week by week and
 	// swaps the names (see providerUsageArchivePartitionSql).
 	providerUsageArchivePartitionMigration,
+
+	// Retired hosted identities are hard deleted a day after their
+	// deactivation (PARTITION-MAINTENANCE-PLAN.md Part D;
+	// db_identity_retention.go). The reap pages the retired children by
+	// deactivation time through this partial index, which holds only retired
+	// children. Building it reads the 455 GB heap twice and waits for older
+	// snapshots, without blocking writes. It is enrolled in completion
+	// recovery (db_identity_retention.go): a completed build is kept, so it may
+	// be pre-created out of band with the same statement, and an interrupted
+	// build's leftover is dropped and rebuilt.
+	newRestartableOnlineSqlMigration(
+		retiredChildNetworkClientIndexRecoverySql,
+		retiredChildNetworkClientIndexSql,
+		retiredChildNetworkClientIndexAuditSql,
+	),
+
+	// Key history retention for clients that are gone (Part D;
+	// db_identity_retention.go): a table of when each client with key history
+	// went, written by the network_client delete trigger, and a history guard
+	// that admits the retention task's deletes of clients gone more than 91
+	// days. Update and truncate stay refused. The truncate trigger is the only
+	// table lock, held briefly on st_client_key_history.
+	newSqlMigration(clientKeyHistoryRetentionSchemaSql),
 }

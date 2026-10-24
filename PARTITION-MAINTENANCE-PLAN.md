@@ -1043,6 +1043,87 @@ Changes:
     aligned with contract retention, so it outlasts every close report;
   - bringing the mint rate down at the source is a protocol and product
     change outside this plan.
+- **Implemented (2026-10-24):** branch `feat/pm-identity`
+  (`db_identity_retention.go`, `model/network_client_retired_hosted.go`,
+  `model/st_client_key_history_retention.go`).
+  - **Which children are hosted.** `source_client_id` marks every child, not
+    only hosted ones. A hosted identity is a child whose parent has a
+    `proxy_device_config`: a proxy's local authority mints only under the
+    proxy's own client. This is the same test as SIGNALS.md §14.8. Other
+    children keep the 30-day reap, for two readers:
+    - ST epoch reliability joins `network_client` with no `active` filter
+      (`GetStEpochClientReliability`), so a child that earns would lose an
+      unclosed epoch's payout;
+    - the client ancestry walk reads inactive parents
+      (`ResolveClientRootInTx`), so a deleted child would break its own
+      children.
+
+    Hosted windows are leaves, and payers behind the proxy host's shared
+    egress.
+  - **Readers checked for the 1-day delete:**
+    - **Contract creation:** reads only active rows.
+    - **Close, expiry, settlement and payout:** use the network ids copied
+      onto `transfer_contract`, `contract_participant` and the sweeps, and
+      never read the client directory.
+    - **Original-close verification:** reads key history, not
+      `network_client`.
+    - **Usage metering:** reads a payer child's row about 2 minutes after
+      settlement.
+    - **Stats:** filter `active AND source_client_id IS NULL`.
+    - **Contract route rejection cache:** a missing destination is not
+      terminal, so a deleted window's stale return route is re-read once a
+      minute per API process instead of every 6 hours. Not changed.
+  - **Reap.** Task `remove_retired_hosted_network_clients`: every 5 minutes,
+    a 2-minute budget, pages of 5,000.
+    - It reads a new partial index, `network_client_retired_child_deactivate_time
+      (deactivate_time, client_id) WHERE NOT active AND source_client_id IS
+      NOT NULL`, with a cursor, so each retired child is examined once. A
+      window that is still connected is passed.
+    - The index migration is enrolled in completion recovery, so the index
+      can be built out of band beforehand with the same `CREATE INDEX
+      CONCURRENTLY`, and the deploy then only checks it.
+    - Dependents go after each page commits. The shared cascade now also
+      deletes roles and the whole provide mirror.
+    - A chain starts at the horizon. Windows retired before its first run
+      age out through the 30-day reap, so a deploy deletes no backlog at
+      once.
+  - **Provide keys at deactivation.** Every deactivation deletes the
+    client's keys in its own transaction, and their mirror after the commit:
+    `deactivateLockedNetworkClientsInTx`, which covers every removal path, the
+    prober drain and session cleanup, and the abandoned top-level marker.
+    `SetProvide` locks the client row FOR KEY SHARE before it writes. So it
+    commits before a deactivation, or it finds the client inactive and
+    writes nothing (counted, logged at V(1)). A client with no row is still
+    written: the tests rely on it, and the orphan sweep removes such keys.
+  - **`SetProvide` writes the difference.** One read committed transaction
+    under a per-client advisory lock: an unchanged set writes no
+    `provide_key` row, and a changed one deletes, upserts or keeps each mode.
+    **Deviation:** it still records one `provide_key_change` per provide. The
+    announce loop counts it as a provide change, which invalidates a
+    reliability block, so stopping it for unchanged sets would change
+    provider reliability scoring. That is the owner's decision.
+  - **Key history retention.**
+    - A new table, `st_client_key_gone (client_id, gone_time)`, is written
+      by the `network_client` delete trigger. A child is gone at its
+      deactivation, or at its delete if it was still active. A top-level
+      client is gone at its own reap.
+    - The history guard admits a delete only under
+      `urnetwork.client_key_history_retention = on`, and only for a client
+      gone more than 91 days that has no client row and no head left.
+      Update and truncate (a new statement trigger) stay refused.
+    - Task `remove_gone_st_client_key_history`: every 15 minutes, a 4-minute
+      budget. In one short transaction per 500 clients, ordered by
+      `st_client_key_gone_gone_time`, it deletes their heads, then their
+      history, then their records, and then their legacy Redis key.
+    - A weekly discovery pass over the heads records clients deleted before
+      the migration, as gone from the first pass. Their history goes 91 days
+      after it.
+  - Both migrations have monitor suffix contracts, which find their versions
+    by migration content rather than by number.
+  - The index build on `network_client` outlasts A6's 15-minute
+    `transaction_timeout`, so the migration runner now runs every online
+    migration through `WithoutTransactionTimeout`. This branch carries a
+    minimal version of it; `feat/pm-horizon` owns the helper.
 
 ## Cutover requirements
 

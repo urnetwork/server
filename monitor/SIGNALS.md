@@ -8102,9 +8102,14 @@ only says how long is left, not why. Facts on 10-22:
   minus one day (2026-10-05), for the next payout. Once the 21-day cutoff
   passes 10-05, nightly drops stop until `ClientExpiration` (30 days) forces
   them on 11-04.
-- **`st_client_key_history` has no retention at all.** It is immutable by
-  trigger, held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90%
-  of its rows belong to inactive clients.
+- **`st_client_key_history` had no retention.** It is immutable by trigger,
+  held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
+  rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
+  `remove_gone_st_client_key_history` deletes a client's history 91 days after
+  the client went (`st_client_key_gone`), so it stays on this append-only list
+  until the first deletes. Those can come about 61 days after that migration:
+  a child the 30-day reap deletes then went at its deactivation, up to 30 days
+  before the migration.
 
 Checks, all cheap and read-only:
 1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
