@@ -329,6 +329,49 @@ Extend it to every index of the A1 tables:
 - **Hand-off:** a table over 50 GB with persistent bloat goes to Part C or D,
   not to repeated compaction.
 
+**Implemented (2026-10-24): the measurement and its signal.** No compaction.
+- **Measurement:** `MeasureDbBloat` (`db_bloat_measure.go`) runs as the weekly
+  run-once chain `measure_db_bloat` (`taskworker/work/db_bloat_measure_work.go`),
+  at Sunday 12:00 UTC, away from the rotation's slots.
+  - Startup seeds the chain only when it has no task, so a deploy never pulls
+    a scheduled run forward. A new chain runs 10 minutes after its deploy.
+  - Each week's first run records the catalog pass: every index, TOAST indexes
+    included, against `dbMaintenanceEstimateBtreeBytes`, and each heap or TOAST
+    relation that is not scanned against the statistics estimate.
+  - Then heap and TOAST relations under 50 GB are scanned with
+    `pgstattuple_approx`, by table name from a cursor, under a one-hour weekly
+    budget. A run that spends it leaves the cursor for next week.
+  - Each scan is bounded at 10 minutes, below A6's 15-minute horizon warning,
+    on a maintenance session exempt from `transaction_timeout` (a minimal
+    `WithoutTransactionTimeout`; A6's version replaces it). The rotation's load
+    check (`dbMaintenanceDeferReason`) defers it, with the priority rebuild's
+    one-hour age bound, since a scan waits for no snapshot. A deferral retries
+    the same week an hour later.
+  - A scan that times out or fails gets the statistics estimate. A scan
+    refused for privilege ends the scans: the rest of the cycle gets the
+    statistics estimate too.
+- **Raw rows:** `db_bloat_measurement` (new migration), one row per relation
+  and run, with the method, the fallback reason, the scanned share, the
+  pgstattuple fields, the estimate's inputs and the heap's dead and live
+  counters. The task deletes rows after 90 days.
+- **Choices beyond the text:**
+  - Relations under 1 MiB are not measured.
+  - A TOAST relation's statistics estimate is its chunk count at four chunks a
+    page, an upper bound on its compact size.
+  - Reclaimable bytes are capped at the relation's size.
+- **Signal:** SIGNALS.md §2.4k, `table-bloat` (`monitor/signal_table_bloat.go`),
+  hourly.
+  - It warns when a relation has at least 5 GB and half its current size
+    reclaimable, per its newest measurement, less any shrink since.
+  - The 94 GB queue under the 10M dead-row line is its fixture test.
+  - A missing, empty or 9-day-stale table is `table-bloat-unobservable`.
+- **Ops step, not applied:** on main, as a superuser:
+  `GRANT pg_stat_scan_tables TO <the role pg_maintenance.yml connects as>;`
+  - Until then, unless that role is a superuser, every heap gets the
+    statistics estimate with reason `pgstattuple-no-execute`.
+  - Check: `SELECT has_function_privilege('pgstattuple_approx(regclass)',
+    'EXECUTE');` as that role returns true.
+
 ### A5. Autovacuum pacing, then capacity
 
 More unthrottled workers would repeat the July buffer-cache eviction. So

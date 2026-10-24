@@ -8314,6 +8314,90 @@ later week. Do not drop the bound checks or the staged parents by hand.
 VERIFY: a complete observation shows the tables partitioned (finalized) or no
 bound check and no staged parent (aborted).
 
+### 2.4k Reclaimable bloat — the share of each relation a rewrite would return
+Probe: `table-bloat`
+
+Why: the §2.4 dead-tuple warning starts at 10M dead rows whatever a table's
+size. Vacuum makes dead space reusable but returns none of it, and a
+time-ordered btree keeps every page that still holds one live entry, so a
+queue of a few hundred live rows never reaches that line while its indexes
+grow: on 2026-10-21 `pending_task` had 94 GB of indexes for about 200 MB of
+rows, and the 2026-10-23 VACUUM FULL reclaimed 87–99% of six churn tables
+(`server/PARTITION-MAINTENANCE-PLAN.md`, Evidence). This line is a share of
+each relation's own size.
+
+Source: the weekly measurement (`server/db_bloat_measure.go`, task
+`measure_db_bloat`, plan item A4) keeps its raw rows in `db_bloat_measurement`
+for 90 days, one per measured relation of every public table:
+- heap and TOAST relations under 50 GB: `pgstattuple_approx`, which reads every
+  page that is not all-visible, under a one-hour weekly scan budget whose
+  cursor resumes the next week; each row records the share it read.
+  Reclaimable is dead tuple bytes plus free space, less the free space the
+  fillfactor F keeps on purpose (live bytes × (100 − F) / F).
+- larger heap and TOAST relations, and every one when the extension or
+  EXECUTE on it (granted to `pg_stat_scan_tables`) is missing: the statistics
+  estimate, live rows (`reltuples`) × average width (`pg_stats`) packed at the
+  fillfactor, against the relation's size; the row records why.
+- indexes, and TOAST indexes: the btree estimate of the priority rebuild
+  (`dbMaintenanceEstimateBtreeBytes`), which fills leaf pages to the index's
+  fillfactor; other access methods are recorded unmeasured.
+
+A partitioned table has no storage of its own, so each partition leaf is
+measured and reported as its own table (a contract week by its leaf name,
+which leaves with its partition).
+
+Check, hourly: each relation's newest measurement within 35 days, credited
+with any shrink since (reclaimable − (measured size − current size), never
+below zero; growth is not added), against the relation's current size.
+- `table-bloat` (WARN, target `<primary>/<table>`, sustain 1): some heap,
+  TOAST relation or index of the table has at least 5 GB and at least half of
+  its current size reclaimable; for an index, half is the priority rebuild's
+  line of twice its compact estimate. The finding lists the table's bloated
+  relations with method, size, share and measurement age, and the table's
+  current live and dead rows from `pg_stat_user_tables` beside the §2.4 line.
+- `table-bloat-unobservable` (WARN, target `<primary>/bloat-measurement`,
+  sustain 2): no or several primaries, a failed read, a wrong host or role, a
+  skewed clock, a malformed frame, the table missing (before its migration),
+  no measurement at all (until the chain's first run, ten minutes after the
+  deploy that seeds it), or a newest measurement older than 9 days (the weekly
+  chain stopped). A stale measurement is still judged.
+
+Implementation (2026-10-24). Two primary-guarded read-only queries: a
+presence read (`to_regclass('public.db_bloat_measurement')`), then, when the
+table exists, the measurement read in fixed eleven-cell frames bound by an end
+row: the primary's hostname, role and statement clock, the newest measurement
+time and window counts; each relation over both lines as measured that still
+exists (at most 64, cut list noted), with its current `pg_relation_size`; and
+each listed table's current row counters. Only sizes, ages, counters, fixed
+method names and plain-identifier relation names leave SQL. Every tunable is
+a field of `TableBloatSettings`.
+
+Synthetic controls replay the 94 GB queue (300 live and 3M dead rows, under
+the §2.4 line), a large table with a small share and a small table with a
+large one, the shrink credit after a rebuild, the line's edges, grouping by
+table, the missing table, no and stale measurements, failed reads, malformed
+frames, inventory authority and cancellation. A native PostgreSQL 18 test
+measures a churned queue's index with the server's measurement, fires the
+signal, rebuilds the index and clears it.
+
+False-positive qualifiers: the btree and statistics estimates are estimates
+(deduplicated btree entries make an index smaller than its estimate, and
+stale statistics move both), and a measurement up to a week old keeps its
+share while the relation grows. False-negative qualifiers: a relation is
+judged on its newest measurement only, so bloat grown since the last weekly
+run waits for the next; a scan cycle longer than the window leaves heaps
+unjudged; a relation under 1 MiB is never measured.
+
+ACTION: an index: confirm the hot-table vacuum and index rebuilds (plan A1,
+A2) run, then rebuild it online with `REINDEX INDEX CONCURRENTLY` through the
+rotation or the priority rebuild (`db_maintenance.go`). A heap or TOAST
+relation: stop the writer making the dead versions (plan Part B) and confirm
+vacuum keeps up (§2.4, A1); the space is reused in place, and returns to the
+filesystem only in a maintenance-window VACUUM FULL until PostgreSQL 19's
+online compaction. Never pg_repack. A table over 50 GB with persistent bloat
+goes to Part C or D. VERIFY: the next weekly measurement, or the relation's
+shrink after a rebuild, takes every relation of the table under the line.
+
 ### 2.5 Task-system meta-health
 Probe: `task-health`
 
