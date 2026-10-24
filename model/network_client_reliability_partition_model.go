@@ -550,6 +550,7 @@ func copyClientReliabilityParallel(
 					}()
 					server.MaintenanceTx(workCtx, func(tx server.PgTx) {
 						server.RaisePgResult(tx.Exec(workCtx, `SET LOCAL statement_timeout = 0`))
+						server.SetTransactionTimeoutInTx(workCtx, tx, 0)
 						tag, e := tx.Exec(workCtx, copySql, lo, hi)
 						server.Raise(e)
 						rows = tag.RowsAffected() // last attempt wins on retry
@@ -613,6 +614,7 @@ func copyClientReliabilityOneshot(
 	logf("oneshot: single sequential-scan copy of blocks >= %d (one pass, no source PK needed)", cutoffBlock)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		// parallelize the seq scan that feeds the insert
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL max_parallel_workers_per_gather = 8`))
 		tag, err := tx.Exec(
@@ -675,6 +677,7 @@ func buildClientReliabilitySecondaryIndex(ctx context.Context, logf func(string,
 	logf("building deferred secondary index %s (sorted one-shot build)", indexName)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL maintenance_work_mem = '2GB'`))
 		// INCLUDE (network_id, client_id) makes the window-score scans index-only:
 		// UpdateClientReliabilityScores / UpdateNetworkReliability(Window)Scores now
@@ -952,6 +955,7 @@ func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64, 
 
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`))
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
 			`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`,
 			clientReliabilityTable,
@@ -1328,15 +1332,18 @@ func UpgradeClientReliabilitySecondaryIndex(ctx context.Context, parallel int, l
 		} else {
 			logf("[%d/%d]%s: CREATE INDEX CONCURRENTLY %s %s", i+1, len(partitions), partition, childName, clientReliabilitySecondaryIndexShape)
 			// CONCURRENTLY cannot run inside a transaction block: run it as a
-			// single autocommit statement on a raw maintenance connection
+			// single autocommit statement on a raw maintenance connection, which
+			// lifts the application role's transaction bound for the build
 			server.MaintenanceDb(ctx, func(conn server.PgConn) {
-				server.RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
-				server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
-					`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s`,
-					childName,
-					partition,
-					clientReliabilitySecondaryIndexShape,
-				)))
+				server.WithoutTransactionTimeout(ctx, conn, func() {
+					server.RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
+					server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
+						`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s`,
+						childName,
+						partition,
+						clientReliabilitySecondaryIndexShape,
+					)))
+				})
 			}, server.OptReadWrite(), server.OptNoRetry())
 		}
 

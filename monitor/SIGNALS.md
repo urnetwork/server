@@ -7510,6 +7510,81 @@ with the table's dead tuples summed across all its partitions and how many are
 over their line. The pure-cascade guidance follows the table. Other partitioned
 tables (`client_reliability`) and plain tables report per relation as before.
 
+An old horizon on its own, with no debt over the floor yet, is §2.4l
+(`transaction-horizon`), which counts slots and prepared transactions too.
+
+### 2.4l Transaction horizon age — one old snapshot pins cleanup everywhere
+Probe: `transaction-horizon`
+
+Why: no vacuum may remove a row version that a transaction older than the
+horizon could still see, so one long holder grows the dead rows of every
+table, the hot queues first (§2.4; server PARTITION-MAINTENANCE-PLAN.md A6).
+The application roles end every transaction at 15 minutes
+(`transaction_timeout`, a role default in the database), so an older horizon
+is held by something outside that bound: a maintenance operation that lifted
+it for its own session (`WithoutTransactionTimeout`), an operator's or
+superuser's session, a replication slot or a standby's feedback, a prepared
+transaction, or a session that started before its role picked up the bound.
+§2.4 keeps the horizon as context for its debt warning; here the horizon is a
+trigger of its own.
+
+Check, one primary-guarded read-only frame every 5 minutes: every holder of
+this database's horizon, ranked as §2.4 ranks horizon candidates (the
+greatest of the holder's xid ages, then the oldest transaction start):
+
+- sessions with `backend_xid` or `backend_xmin`, except autovacuum workers and
+  lazy VACUUMs (`pg_stat_progress_vacuum`), whose snapshots every other vacuum
+  ignores, and sessions of other databases;
+- replication slots with `xmin` or `catalog_xmin`;
+- prepared transactions.
+
+The end row counts every slot and every prepared transaction even when there
+are none, beside `max_prepared_transactions`, so a future one is caught. On
+main both are unused as of 2026-10-24: `max_prepared_transactions` is 0,
+`wal_level` is replica (no logical slots), and the base backup's
+`pg_receivewal` slot holds WAL, not an xmin.
+
+The horizon's age is a lower bound. A client backend's snapshot is no newer
+than its current or last statement, a prepared transaction is as old as its
+prepare, and an inactive slot has held its xmin at least since it went
+inactive. A holder with no such timestamp (an active slot, a walsender
+relaying a standby's feedback) is dated by the probe's own history of the next
+transaction id (`pg_snapshot_xmax(pg_current_snapshot())`): the horizon id was
+assigned before the first earlier read whose next id had passed it. Ids are
+ordered, so any holder's bound also bounds the oldest horizon. The history
+covers 75 minutes; after a monitor restart a holder without a timestamp is
+dated no older than the history so far.
+
+- `transaction-horizon` (WARN at 15 minutes, PAGE at one hour, target
+  `<primary>`, sustain 1). It names the first-ranked holder and lists the
+  next ones: kind, pid, backend type, state, role kind (superuser or
+  ordinary), a fixed statement shape classified inside the database
+  (reindex, index-build, vacuum, cluster, analyze, validate, dump,
+  replication, application), xid ages and transaction age; a slot's name,
+  type and state. Statements, application names, client addresses, role
+  names and prepared-transaction identifiers stay in the database
+  (`application=withheld query=withheld`, `gid=withheld`).
+- `transaction-horizon-unobservable` (WARN, sustain 2): no single configured
+  primary, or the hostname or role guard, the source clock, the frame or its
+  census failed. The horizon is unknown, not healthy.
+
+Every tunable is a field of `TransactionHorizonSettings`. Synthetic frames
+cover each holder kind at both thresholds, the timestamp and history bounds,
+the ranking, a history reset, withholding, and malformed frames.
+
+ACTION, by the first-ranked holder. A maintenance statement is this alarm's
+own operation: check its progress (`pg_stat_progress_create_index`,
+`pg_stat_progress_cluster`) and let an advancing one finish while §2.4's hot
+tables hold; otherwise cancel it, and the rotation resumes the table and
+drops the debris (§2.2a). An application session either predates the bound
+(recycle its pool, then check `SHOW transaction_timeout`) or lifted it (fix
+or page the operation). An operator's or superuser's session: ask its owner.
+A slot or a standby: find the standby's long query, or drop an abandoned slot
+with the owner's go. A prepared transaction: confirm with its owner, then
+COMMIT PREPARED or ROLLBACK PREPARED; a restart does not clear it.
+VERIFY: the holder ends, the horizon stays under 15 minutes on consecutive
+samples, and §2.4's dead tuples stop rising.
+
 ### 2.4a Canceled autovacuum and anti-wraparound progress
 Probe: `pg-autovacuum-discard`
 

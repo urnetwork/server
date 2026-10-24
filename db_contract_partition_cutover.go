@@ -684,7 +684,7 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 			}
 			logf("validating %s: scans %s under SHARE UPDATE EXCLUSIVE; reads and writes continue", bound, table)
 			validateStart := time.Now()
-			err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '60s'`, `SET LOCAL statement_timeout = 0`, statement}, 10, 30*time.Second, logf)
+			err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '60s'`, `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, 10, 30*time.Second, logf)
 			if err != nil {
 				return fmt.Errorf("validate %s: %w", bound, err)
 			}
@@ -979,14 +979,14 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 func analyzeAndValidateContractParents(ctx context.Context, external []contractForeignKey, logf func(string, ...any)) error {
 	for _, table := range ContractPartitionTables {
 		statement := fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table))
-		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
+		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}); err != nil {
 			return fmt.Errorf("analyze %s: %w", table, err)
 		}
 	}
 	logf("analyzed the parents")
 	for _, foreignKey := range external {
 		statement := fmt.Sprintf("ALTER TABLE public.%s VALIDATE CONSTRAINT %s", quoteIdentifier(foreignKey.table), quoteIdentifier(foreignKey.name))
-		err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '15s'`, `SET LOCAL statement_timeout = 0`, statement}, 10, 10*time.Second, logf)
+		err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '15s'`, `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, 10, 10*time.Second, logf)
 		if err != nil {
 			return fmt.Errorf("validate %s: %w", foreignKey.name, err)
 		}
