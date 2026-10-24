@@ -1,5 +1,46 @@
 # Sim-latency competition live-deployment playbook
 
+## Current production preparation — October 24, 2026
+
+Public opening is fixed at **October 28, 2026, 00:00 UTC**. The current launch
+checklist and exact prepared source/image identities are maintained in
+[`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md).
+Use [`RUN-MAIN.md`](RUN-MAIN.md) for the adopted v2 supervisor workflow.
+Do not use the legacy v1 round-creation/review commands below to bootstrap the
+new production season or reinterpret a staging round as production.
+
+The new season uses six weekly admission windows and automatic FIFO scoring.
+After close and authoritative drain, publish the provisional reward decision,
+perform the isolated Sol 6.1 max honesty/safety review, replace substantiated
+dishonest winners in rank order, and build/qualify/promote the approved elected
+winner before opening the next round. Exhaustion carries the incumbent forward;
+uncertainty or infrastructure failure pauses and alerts instead of fabricating
+a decision. Review and promotion do not require an agent to poll a running job.
+
+Production admission costs $20 and has no submission-count ceiling. Each round
+gets one authenticated nine-run control baseline shared by all its submissions;
+production still requires gates, margin and significance. Staging is separately
+scoped with shadow settlement and zero margin. Product source is locked across
+ten repositories; the main API/worker remain independently maintained control
+programs. Evaluations and promotions use private temporary checkouts, not the
+operator's branches. Only direct read-only `config/local` and `vault/local`
+leaves may enter evaluation containers.
+
+The first source bootstrap must pin `--opens-at=2026-10-28T00:00:00Z`.
+The supervisor can advertise a qualified round as `scheduled`; it must not admit
+before that instant. Later rounds receive full weekly windows after actual
+review/build/readiness, not speculative fixed start dates. Production activation,
+fresh calibration, genuine review/build-broker qualification, artifact and
+monitoring verification, and adapter acceptance remain explicit launch gates.
+Historical successful tests or qualification do not satisfy a new exact image.
+
+Runtime policy authority is `config/main/competition.yml`; source/threshold
+authority is `config/main/sim-latency.yml`. The schema-1 `playbook.yml` and the
+September instructions below are retained legacy compatibility evidence, not
+the current v2 deployment policy or a live readiness assertion.
+
+## Historical v1 deployment record — not the current launch procedure
+
 Status date: 2026-09-25
 
 Evaluator/baseline qualification: **historical measured-product qualification
@@ -736,7 +777,7 @@ without a winner.
 
 The command creates one additional temporary root and freshly clones `server`,
 `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`,
-`operator-proxy`, `warp`, and `gvisor`.
+`warp` and `gvisor`.
 It checks out every `sim-latency` branch at the prior epoch commit, applies the
 winner only to the evaluated server-tree surface, and verifies all dependency
 commits remain unchanged. The long-lived local checkouts are discovery-only

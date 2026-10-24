@@ -143,19 +143,7 @@ func contractTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (b
 		relations = append(relations, "public."+table, "public."+contractStagedParentName(table))
 	}
 	MaintenanceDb(ctx, func(conn PgConn) {
-		Raise(conn.QueryRow(
-			ctx,
-			`
-			SELECT count(DISTINCT activity.pid)
-			FROM pg_locks lock
-			JOIN pg_stat_activity activity ON activity.pid = lock.pid
-			WHERE lock.relation = ANY (ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) name))
-				AND activity.pid <> pg_backend_pid()
-				AND activity.xact_start < now() - make_interval(secs => $2)
-			`,
-			relations,
-			maxTransactionAge.Seconds(),
-		).Scan(&busy))
+		busy = partitionRelationsBusy(ctx, conn, relations, maxTransactionAge)
 	})
 	return
 }
@@ -364,11 +352,18 @@ func (self *contractTableShape) cutoverProblems() (problems []string) {
 // the trees are equal. Checks are added after with their validity, since a
 // valid parent check cannot adopt a NOT VALID one.
 func (self *contractTableShape) stagedParentSql() (statements []string) {
+	return self.stagedParentSqlBy("contract_id")
+}
+
+// As stagedParentSql, partitioned by the range of keyColumn, a lowercase
+// column name from the code.
+func (self *contractTableShape) stagedParentSqlBy(keyColumn string) (statements []string) {
 	staged := contractStagedParentName(self.table)
 	statements = append(statements, fmt.Sprintf(
-		"CREATE TABLE public.%s (LIKE public.%s INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES INCLUDING STORAGE INCLUDING COMPRESSION INCLUDING COMMENTS) PARTITION BY RANGE (contract_id)",
+		"CREATE TABLE public.%s (LIKE public.%s INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING INDEXES INCLUDING STORAGE INCLUDING COMPRESSION INCLUDING COMMENTS) PARTITION BY RANGE (%s)",
 		quoteIdentifier(staged),
 		quoteIdentifier(self.table),
+		keyColumn,
 	))
 	for _, check := range self.checks {
 		statements = append(statements, fmt.Sprintf(
@@ -689,7 +684,7 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 			}
 			logf("validating %s: scans %s under SHARE UPDATE EXCLUSIVE; reads and writes continue", bound, table)
 			validateStart := time.Now()
-			err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '60s'`, `SET LOCAL statement_timeout = 0`, statement}, 10, 30*time.Second, logf)
+			err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '60s'`, `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, 10, 30*time.Second, logf)
 			if err != nil {
 				return fmt.Errorf("validate %s: %w", bound, err)
 			}
@@ -984,14 +979,14 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 func analyzeAndValidateContractParents(ctx context.Context, external []contractForeignKey, logf func(string, ...any)) error {
 	for _, table := range ContractPartitionTables {
 		statement := fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table))
-		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
+		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}); err != nil {
 			return fmt.Errorf("analyze %s: %w", table, err)
 		}
 	}
 	logf("analyzed the parents")
 	for _, foreignKey := range external {
 		statement := fmt.Sprintf("ALTER TABLE public.%s VALIDATE CONSTRAINT %s", quoteIdentifier(foreignKey.table), quoteIdentifier(foreignKey.name))
-		err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '15s'`, `SET LOCAL statement_timeout = 0`, statement}, 10, 10*time.Second, logf)
+		err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '15s'`, `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, 10, 10*time.Second, logf)
 		if err != nil {
 			return fmt.Errorf("validate %s: %w", foreignKey.name, err)
 		}

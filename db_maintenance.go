@@ -4,7 +4,9 @@
 // (each partition's leaf of it, once the table is partitioned) and, once an
 // operator enables it, rebuilds it whenever it is bloated, removes
 // the invalid copies an interrupted concurrent rebuild leaves behind, and
-// refreshes planner statistics.
+// refreshes planner statistics. The churn tables are vacuumed every few
+// minutes, and their bloated indexes rebuilt hourly, by VacuumHotTables
+// (db_maintenance_hot_vacuum.go), which reuses the guards below.
 //
 // A concurrent rebuild first adds an invalid _ccnew copy of every index, builds
 // and validates each copy while waiting for older transactions, then swaps the
@@ -21,8 +23,8 @@
 //
 // No rebuild, drop, vacuum or analyze queues behind a lock that an autovacuum
 // holds: after deadlock_timeout PostgreSQL cancels an autovacuum that blocks
-// another session, and a large table's vacuum then starts over. The vacuum
-// and analyze skip a locked table (SKIP_LOCKED); a rebuild or drop waits for
+// another session, and a large table's vacuum then starts over. The analyze
+// skips a locked table (SKIP_LOCKED); a rebuild or drop waits for
 // its table to clear without taking a place in the lock queue, then leaves the
 // table for the continuation or a later cleanup.
 package server
@@ -52,10 +54,11 @@ import (
 
 const DbReindexEpochs = uint64(8)
 
-// The automatic rotation rebuilds a whole table only when its live size (heap,
-// toast, and valid indexes, summed over partition leaves) is at most this. A
-// whole-table rebuild scans the heap twice per index and keeps a second copy of
-// every index until its swap; a larger table such as network_client stays
+// The automatic rotation rebuilds a whole table only when what the rebuild
+// reads and writes (heap and toast, plus the compact size of its indexes,
+// summed over partition leaves; see dbMaintenanceTableBytes) is at most this.
+// A whole-table rebuild scans the heap twice per index and keeps a second copy
+// of every index until its swap; a larger table such as network_client stays
 // cleanup-only unless an operator run sets IncludeLargeTables.
 const DefaultDbMaintenanceMaxReindexTableBytes = int64(16 * 1024 * 1024 * 1024)
 
@@ -82,16 +85,17 @@ const DefaultDbMaintenanceCleanupLockTimeout = 10 * time.Second
 // dbMaintenanceAwaitTableUnlocked.
 const dbMaintenanceLockPollInterval = time.Second
 
-// The daily pending_task vacuum and the final analyze take each table's
-// ShareUpdateExclusiveLock only when it is free. Either one, queued for
-// deadlock_timeout (1s) behind an autovacuum's lock, made PostgreSQL cancel
-// that autovacuum, and a large table's vacuum then starts over: from
-// 2026-10-13 07:11:59 to 07:12:12Z the maintenance session cancelled the
-// autovacuums of transfer_escrow (while it vacuumed transfer_escrow_pkey),
-// transfer_contract (at heap block 51.2M of 62.7M) and pending_task. A skipped
-// table is being vacuumed or analyzed by the session that holds it, or is
-// analyzed by the next run.
-const dbMaintenanceVacuumPendingTaskStatement = `VACUUM (ANALYZE, SKIP_LOCKED) pending_task`
+// The final analyze takes each table's ShareUpdateExclusiveLock only when it
+// is free. Queued for deadlock_timeout (1s) behind an autovacuum's lock, it
+// and the daily pending_task vacuum this run had until 2026-10-24 made
+// PostgreSQL cancel that autovacuum, and a large table's vacuum then starts
+// over: from 2026-10-13 07:11:59 to 07:12:12Z the maintenance session
+// cancelled the autovacuums of transfer_escrow (while it vacuumed
+// transfer_escrow_pkey), transfer_contract (at heap block 51.2M of 62.7M) and
+// pending_task. A skipped table is being vacuumed or analyzed by the session
+// that holds it, or is analyzed by the next run. pending_task is now vacuumed
+// every few minutes by VacuumHotTables (db_maintenance_hot_vacuum.go), also
+// with SKIP_LOCKED.
 const dbMaintenanceAnalyzeStatement = `ANALYZE (SKIP_LOCKED)`
 
 // Bounds a single rebuild statement.
@@ -263,15 +267,19 @@ func dbMaintenanceEstimateBtreeBytes(
 	return (leafPages + 1) * blockSize, true
 }
 
-// A priority index's size against its estimated compact size. On a partitioned
-// table each leaf index is its own priority index: indexName and tableName name
-// the leaf and its partition, and priorityName the partitioned index it belongs
-// to. On an ordinary table priorityName is indexName.
+// A measured index's size against its estimated compact size: a priority index
+// (dbMaintenancePriorityIndexSizes), or any index of a measured table
+// (dbMaintenanceTableIndexSizes). On a partitioned table each leaf index is
+// measured on its own: indexName and tableName name the leaf and its
+// partition, and priorityName the partitioned priority index it belongs to.
+// Otherwise priorityName is indexName.
 type dbMaintenancePriorityIndex struct {
 	priorityName string
 	indexName    string
 	tableName    string
-	indexBytes   int64
+	// the access method; only a btree has a compact estimate
+	method     string
+	indexBytes int64
 	// the main fork of the owning table, which a rebuild reads twice
 	heapBytes int64
 	// zero when the compact size cannot be estimated
@@ -351,6 +359,7 @@ const dbMaintenancePriorityIndexColumnsQuery = `
 		candidate.priority_name,
 		index_class.relname,
 		table_class.relname,
+		index_am.amname,
 		pg_relation_size(index_class.oid),
 		pg_relation_size(table_class.oid),
 		index_class.reltuples::float8,
@@ -389,13 +398,91 @@ const dbMaintenancePriorityIndexColumnsQuery = `
 	ORDER BY index_class.relname, index_attribute.attnum
 `
 
+// One row per column of every valid index of the named public tables, in
+// index column order, in the columns of dbMaintenancePriorityIndexColumnsQuery
+// with each index standing for itself: an ordinary table's own indexes, or
+// those of each leaf of a partitioned table, whose partitioned indexes have no
+// storage of their own. Every access method is listed.
+const dbMaintenanceTableIndexColumnsQuery = `
+	WITH named_table AS (
+		SELECT table_class.oid
+		FROM pg_class table_class
+		INNER JOIN pg_namespace table_namespace ON table_namespace.oid = table_class.relnamespace
+		WHERE table_namespace.nspname = 'public'
+		  AND table_class.relname = ANY($1::text[])
+	), member AS (
+		SELECT named_table.oid AS relid
+		FROM named_table
+		UNION
+		-- pg_partition_tree lists nothing for a table that is not partitioned
+		SELECT tree.relid
+		FROM named_table
+		CROSS JOIN LATERAL pg_partition_tree(named_table.oid) tree
+		WHERE tree.isleaf
+	)
+	SELECT
+		index_class.relname,
+		index_class.relname,
+		table_class.relname,
+		index_am.amname,
+		pg_relation_size(index_class.oid),
+		pg_relation_size(table_class.oid),
+		index_class.reltuples::float8,
+		coalesce((
+			SELECT index_option.option_value::int
+			FROM pg_options_to_table(index_class.reloptions) index_option
+			WHERE index_option.option_name = 'fillfactor'
+		), 90),
+		current_setting('block_size')::bigint,
+		index_attribute.attlen::int,
+		index_attribute.attalign::text,
+		column_stats.avg_width::int,
+		column_stats.null_frac::float8
+	FROM member
+	INNER JOIN pg_class table_class ON table_class.oid = member.relid
+	INNER JOIN pg_index index_state ON index_state.indrelid = table_class.oid
+	INNER JOIN pg_class index_class ON index_class.oid = index_state.indexrelid
+	INNER JOIN pg_am index_am ON index_am.oid = index_class.relam
+	INNER JOIN pg_attribute index_attribute
+		ON index_attribute.attrelid = index_class.oid
+		AND 0 < index_attribute.attnum
+	LEFT JOIN pg_attribute table_attribute
+		ON table_attribute.attrelid = table_class.oid
+		AND table_attribute.attnum = index_state.indkey[index_attribute.attnum - 1]
+		AND 0 < table_attribute.attnum
+	LEFT JOIN pg_stats column_stats
+		ON column_stats.schemaname = 'public'
+		AND NOT column_stats.inherited
+		AND (
+			(column_stats.tablename = table_class.relname AND column_stats.attname = table_attribute.attname)
+			OR (table_attribute.attname IS NULL AND column_stats.tablename = index_class.relname AND column_stats.attname = index_attribute.attname)
+		)
+	WHERE index_state.indisvalid
+	  AND table_class.relkind = 'r'
+	ORDER BY index_class.relname, index_attribute.attnum
+`
+
 // The size and compact estimate of each candidate of the named indexes (see
 // dbMaintenancePriorityIndexColumnsQuery): the index itself on an ordinary
 // public table, or each leaf of a partitioned index; a dropped or renamed name
 // is skipped. A leaf's name is accepted too and measures that leaf alone. An
 // index whose compact size cannot be estimated has compactBytes 0 and is never
 // bloated.
-func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (priorityIndexes []dbMaintenancePriorityIndex, returnErr error) {
+func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) ([]dbMaintenancePriorityIndex, error) {
+	return dbMaintenanceIndexSizes(ctx, dbMaintenancePriorityIndexColumnsQuery, indexNames)
+}
+
+// The size and compact estimate of every valid index of the named tables (see
+// dbMaintenanceTableIndexColumnsQuery); a dropped or renamed name is skipped.
+// An index that is not a btree, or whose compact size cannot otherwise be
+// estimated, has compactBytes 0.
+func dbMaintenanceTableIndexSizes(ctx context.Context, tableNames []string) ([]dbMaintenancePriorityIndex, error) {
+	return dbMaintenanceIndexSizes(ctx, dbMaintenanceTableIndexColumnsQuery, tableNames)
+}
+
+// Reads the rows of one of the index columns queries for names and estimates
+// each btree's compact size.
+func dbMaintenanceIndexSizes(ctx context.Context, query string, names []string) (priorityIndexes []dbMaintenancePriorityIndex, returnErr error) {
 	type indexState struct {
 		priorityIndex dbMaintenancePriorityIndex
 		entryCount    float64
@@ -406,7 +493,7 @@ func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (
 	indexStates := []*indexState{}
 	HandleError(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
-			result, err := conn.Query(ctx, dbMaintenancePriorityIndexColumnsQuery, indexNames)
+			result, err := conn.Query(ctx, query, names)
 			WithPgResult(result, err, func() {
 				for result.Next() {
 					var state indexState
@@ -418,6 +505,7 @@ func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (
 						&state.priorityIndex.priorityName,
 						&state.priorityIndex.indexName,
 						&state.priorityIndex.tableName,
+						&state.priorityIndex.method,
 						&state.priorityIndex.indexBytes,
 						&state.priorityIndex.heapBytes,
 						&state.entryCount,
@@ -452,8 +540,11 @@ func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (
 		return nil, returnErr
 	}
 	for _, state := range indexStates {
-		if compactBytes, ok := dbMaintenanceEstimateBtreeBytes(state.columns, state.entryCount, state.fillfactor, state.blockSize); ok {
-			state.priorityIndex.compactBytes = compactBytes
+		// the estimate follows the btree leaf layout
+		if state.priorityIndex.method == "btree" {
+			if compactBytes, ok := dbMaintenanceEstimateBtreeBytes(state.columns, state.entryCount, state.fillfactor, state.blockSize); ok {
+				state.priorityIndex.compactBytes = compactBytes
+			}
 		}
 		priorityIndexes = append(priorityIndexes, state.priorityIndex)
 	}
@@ -461,15 +552,19 @@ func dbMaintenancePriorityIndexSizes(ctx context.Context, indexNames []string) (
 }
 
 // These tables are too large or too frequently updated to rebuild as a whole;
-// they use partition turnover, targeted indexes, or tuned autovacuum plus an
-// explicitly scheduled one-time pg_repack instead.
+// they use partition turnover, targeted indexes, or tuned autovacuum instead.
+// A table here shrinks only in a maintenance window, with VACUUM FULL, until
+// PostgreSQL 19 brings online compaction (REPACK CONCURRENTLY,
+// PARTITION-MAINTENANCE-PLAN.md A4); never pg_repack or another external tool
+// (owner rule). network_client_connection left the list on 2026-10-24 (A3): it
+// is a plain table, 2.6 GB compact, and its bloated indexes are also rebuilt
+// hourly by VacuumHotTables.
 var dbMaintenanceSkipReindexTables = map[string]bool{
 	"client_reliability":                  true,
 	"contract_participant":                true,
 	"contract_close":                      true,
 	"network_client":                      true,
 	"network_client_location_reliability": true,
-	"network_client_connection":           true,
 	"transfer_contract":                   true,
 	"transfer_escrow":                     true,
 	"transfer_escrow_sweep":               true,
@@ -508,10 +603,13 @@ func dbMaintenanceShouldReindexTable(tableName string) bool {
 // Whether the rotation may rebuild a table as a whole. REINDEX TABLE on a
 // partitioned table rebuilds every partition, so a contract table that is
 // partitioned stays out with its partitions, while the same table before the
-// cutover keeps its place.
+// cutover keeps its place. The partition registry's ReindexExempt families
+// stay out the same way: their partitioned parents and their own leaves,
+// which are dropped whole.
 func dbMaintenanceShouldReindexRelation(tableName string, partitioned bool) bool {
 	return dbMaintenanceShouldReindexTable(tableName) &&
-		!(partitioned && slices.Contains(ContractPartitionTables, tableName))
+		!(partitioned && slices.Contains(ContractPartitionTables, tableName)) &&
+		!PartitionRegistryReindexExempt(tableName, partitioned)
 }
 
 // Returns the ChooseRelationName label that ends a REINDEX CONCURRENTLY
@@ -897,10 +995,9 @@ func dbMaintenanceSampleLoad(ctx context.Context) (load dbMaintenanceLoad, err e
 	return
 }
 
-// Heap, toast, and valid indexes of the table and every member of its partition
-// tree (pg_partition_tree lists nothing for a table that is not partitioned; a
-// partitioned member has no storage of its own). Invalid debris is excluded;
-// cleanup drops it.
+// Heap and toast of the table and every member of its partition tree
+// (pg_partition_tree lists nothing for a table that is not partitioned; a
+// partitioned member has no storage of its own).
 const dbMaintenanceTableBytesQuery = `
 	WITH member AS (
 		SELECT format('%I.%I', 'public', $1::text)::regclass::oid AS relid
@@ -908,27 +1005,51 @@ const dbMaintenanceTableBytesQuery = `
 		SELECT tree.relid
 		FROM pg_partition_tree(format('%I.%I', 'public', $1::text)::regclass) tree
 	)
-	SELECT coalesce(sum(
-		pg_table_size(member.relid) + coalesce((
-			SELECT sum(pg_relation_size(index_state.indexrelid))
-			FROM pg_index index_state
-			WHERE index_state.indrelid = member.relid
-			  AND index_state.indisvalid
-		), 0)
-	), 0)::bigint
+	SELECT coalesce(sum(pg_table_size(member.relid)), 0)::bigint
 	FROM member
 `
 
-// The size the automatic rebuild bound compares; see dbMaintenanceTableBytesQuery.
+// The size the automatic rebuild bound compares: what a whole-table rebuild
+// reads and writes, the heap and toast it scans plus the indexes it builds,
+// summed over partition leaves. Each index counts at its compact estimate
+// (dbMaintenanceEstimateBtreeBytes), not its size on disk, which the rebuild
+// throws away, so a table whose indexes are bloated stays eligible for the
+// rebuild that shrinks them. Measured by the size on disk, pending_task (87 GB)
+// and network_client_connection (21.7 GB) left the rotation exactly when they
+// needed it (2026-10-23). An index without an estimate (not a btree, or never
+// vacuumed or analyzed) counts at its size on disk. Invalid debris is
+// excluded; cleanup drops it.
 func dbMaintenanceTableBytes(ctx context.Context, tableName string) (bytes int64, err error) {
+	var heapBytes int64
 	HandleError(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
-			Raise(conn.QueryRow(ctx, dbMaintenanceTableBytesQuery, tableName).Scan(&bytes))
+			Raise(conn.QueryRow(ctx, dbMaintenanceTableBytesQuery, tableName).Scan(&heapBytes))
 		}, OptNoRetry())
 	}, func(recovered error) {
 		err = recovered
 	})
-	return
+	if err != nil {
+		return 0, err
+	}
+	indexes, err := dbMaintenanceTableIndexSizes(ctx, []string{tableName})
+	if err != nil {
+		return 0, err
+	}
+	return dbMaintenanceRebuildBytes(heapBytes, indexes), nil
+}
+
+// heapBytes plus each index's compact estimate, or its size on disk when it
+// has none.
+func dbMaintenanceRebuildBytes(heapBytes int64, indexes []dbMaintenancePriorityIndex) int64 {
+	bytes := heapBytes
+	for _, index := range indexes {
+		if 0 < index.compactBytes {
+			bytes += index.compactBytes
+		} else {
+			bytes += index.indexBytes
+		}
+	}
+	return bytes
 }
 
 // Whether another backend holds or awaits the table's ShareUpdateExclusiveLock:
@@ -1186,7 +1307,9 @@ func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockT
 // which the wait would cancel, or behind a conflicting lock: it waits for the
 // scope to clear for at most lockTimeout and otherwise returns a
 // *dbMaintenanceLockConflict without starting. lockTimeout still bounds each
-// lock and snapshot wait of the later phases. pid names the server backend for
+// lock and snapshot wait of the later phases. A rebuild can legitimately run
+// past the application role's transaction_timeout (A6), so the statement runs
+// with it off (WithoutTransactionTimeout). pid names the server backend for
 // the cleanup after a failure; it is zero when the statement never started.
 func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement string, lockTimeout time.Duration) (pid int32, err error) {
 	conn, err := AcquireMaintenanceDbConn(ctx)
@@ -1216,7 +1339,23 @@ func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement st
 	pid = backendPid
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, dbMaintenanceReindexTimeout)
 	defer timeoutCancel()
-	_, err = conn.Exec(timeoutCtx, statement)
+	func() {
+		// the setting's own statements raise; the session is discarded either way
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				recoveredErr, ok := recovered.(error)
+				if !ok {
+					panic(recovered)
+				}
+				if err == nil {
+					err = recoveredErr
+				}
+			}
+		}()
+		WithoutTransactionTimeout(timeoutCtx, conn, func() {
+			_, err = conn.Exec(timeoutCtx, statement)
+		})
+	}()
 	return
 }
 
@@ -1674,7 +1813,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 					reindexStatement = ""
 				} else if maxBytes := opts.maxReindexTableBytes(); maxBytes < bytes {
 					glog.Infof(
-						"[db]maintenance table %s is %d bytes, above the %d byte automatic rebuild bound: cleanup only\n",
+						"[db]maintenance table %s rebuild would read and write %d bytes (heap, toast and compact indexes), above the %d byte automatic rebuild bound: cleanup only\n",
 						tableName,
 						bytes,
 						maxBytes,
@@ -1708,20 +1847,10 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		stop(DbMaintenanceDeferred, fmt.Sprintf("locked by another session: %s", strings.Join(lockedObjectNames, ", ")))
 	}
 
-	// A deferred run still analyzes, so the daily pending_task vacuum keeps
-	// its cadence while rebuilds wait for a quieter primary.
+	// A deferred run still analyzes, so planner statistics keep their daily
+	// cadence while rebuilds wait for a quieter primary. The task queue's
+	// explicit vacuum, once a step here, is VacuumHotTables', every few minutes.
 	if opts.Analyze {
-		// The task queue is tiny but extremely update-heavy. An explicit daily
-		// vacuum bounds its poll-index debt even when normal autovacuum timing is
-		// unlucky; the database idle-transaction timeout ensures xmin cannot pin
-		// these versions indefinitely.
-		HandleError(func() {
-			MaintenanceDb(ctx, func(conn PgConn) {
-				glog.Infof("[db]maintenance vacuum analyze pending_task\n")
-				RaisePgResult(conn.Exec(ctx, dbMaintenanceVacuumPendingTaskStatement))
-			}, OptNoRetry())
-		})
-
 		HandleError(func() {
 			MaintenanceDb(ctx, func(conn PgConn) {
 				glog.Infof("[db]maintenance final analyze\n")
@@ -1756,10 +1885,14 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 // in flight. Tables are processed one at a time, smallest first, so peak
 // transient use is bounded by the largest single table rather than their sum.
 //
-// Runs on the maintenance connection in autocommit (VACUUM cannot run inside a
-// transaction). A table that cannot be locked within lock_timeout, or that
-// errors mid-rewrite (e.g. out of disk — VACUUM FULL rolls back cleanly,
-// leaving the table intact), is logged and skipped; the run continues.
+// Runs on a direct maintenance session of its own in autocommit (VACUUM cannot
+// run inside a transaction), discarded after the run so its settings never
+// return to the pool: no statement bound, a lock bound, and no transaction
+// bound, since a large table's rewrite outlasts the application role's
+// (PARTITION-MAINTENANCE-PLAN.md A6). A table that cannot be locked within
+// lock_timeout, or that errors mid-rewrite (e.g. out of disk — VACUUM FULL
+// rolls back cleanly, leaving the table intact), is logged and skipped; the
+// run continues.
 func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(string, ...any)) {
 	skip := func(t string) bool {
 		for _, e := range excludes {
@@ -1807,11 +1940,15 @@ func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(strin
 	}
 	logf("VACUUM FULL plan: %d tables to vacuum, %d skipped", len(todo), len(all)-len(todo))
 
-	MaintenanceDb(ctx, func(conn PgConn) {
+	func() {
+		conn, err := AcquireMaintenanceDbConn(ctx)
+		Raise(err)
+		defer discardPgConnection(ctx, conn)
 		RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
 		// so a table held by another session (e.g. the client_reliability copy)
 		// is skipped rather than blocking the whole run
 		RaisePgResult(conn.Exec(ctx, `SET lock_timeout = '60s'`))
+		RaisePgResult(conn.Exec(ctx, `SET transaction_timeout = 0`))
 
 		for i, ti := range todo {
 			startTime := time.Now()
@@ -1834,7 +1971,7 @@ func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(strin
 			})
 			logf("[%d/%d] %s done: %s -> %s in %.1fs", i+1, len(todo), ti.name, ti.pretty, after, time.Since(startTime).Seconds())
 		}
-	}, OptReadWrite(), OptNoRetry())
+	}()
 
 	logf("VACUUM FULL complete")
 }

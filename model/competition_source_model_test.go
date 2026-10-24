@@ -1,4 +1,4 @@
-// Canonical source locks distinguish the explicit staging graph without changing historical production bytes.
+// Canonical source locks bind the same complete live graph in either mode.
 package model
 
 import (
@@ -9,43 +9,38 @@ import (
 	"testing"
 )
 
-// Retiring the unused staging repository changes the graph, not the canonical serialization contract.
-func TestCompetitionSourceLockDigestPreservesProductionAndBindsStagingGraph(t *testing.T) {
+// The exact independently serialized bytes detect census or format drift.
+func TestCompetitionSourceLockDigestBindsTenRepositoriesInBothModes(t *testing.T) {
 	production := map[string]string{}
-	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		production[name] = strings.Repeat("a", 40)
 	}
 	productionDigest, err := CompetitionSourceLockDigestForMode(production, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical := `{"schema":1,"development_snapshot":false,"repositories":{"connect":"` + production["connect"] + `","glog":"` + production["glog"] + `","goidenticons":"` + production["goidenticons"] + `","gvisor":"` + production["gvisor"] + `","operator-proxy":"` + production["operator-proxy"] + `","proxy":"` + production["proxy"] + `","sdk":"` + production["sdk"] + `","server":"` + production["server"] + `","sn":"` + production["sn"] + `","userwireguard":"` + production["userwireguard"] + `","warp":"` + production["warp"] + `"}}`
+	canonical := `{"schema":1,"development_snapshot":false,"repositories":{"connect":"` + production["connect"] + `","glog":"` + production["glog"] + `","goidenticons":"` + production["goidenticons"] + `","gvisor":"` + production["gvisor"] + `","proxy":"` + production["proxy"] + `","sdk":"` + production["sdk"] + `","server":"` + production["server"] + `","sn":"` + production["sn"] + `","userwireguard":"` + production["userwireguard"] + `","warp":"` + production["warp"] + `"}}`
 	expected := sha256.Sum256([]byte(canonical))
 	if productionDigest != hex.EncodeToString(expected[:]) {
-		t.Fatalf("historical canonical production digest changed: %s", productionDigest)
+		t.Fatalf("canonical production digest changed: %s", productionDigest)
 	}
 	if generic, err := CompetitionSourceLockDigest(production); err != nil || generic != productionDigest {
 		t.Fatalf("generic production lock differs: %s %v", generic, err)
 	}
 	staging := maps.Clone(production)
-	delete(staging, "operator-proxy")
 	stagingDigest, err := CompetitionSourceLockDigestForMode(staging, true)
-	if err != nil || stagingDigest == productionDigest {
-		t.Fatalf("staging graph did not acquire its own valid digest: %s %v", stagingDigest, err)
-	}
-	canonical = strings.Replace(canonical, `"operator-proxy":"`+production["operator-proxy"]+`",`, "", 1)
-	expected = sha256.Sum256([]byte(canonical))
-	if stagingDigest != hex.EncodeToString(expected[:]) {
-		t.Fatal("staging changed the canonical format instead of only its repository graph")
+	if err != nil || stagingDigest != productionDigest {
+		t.Fatalf("equal graphs must have equal source digests: %s %v", stagingDigest, err)
 	}
 	if generic, err := CompetitionSourceLockDigest(staging); err != nil || generic != stagingDigest {
 		t.Fatalf("generic staging lock differs: %s %v", generic, err)
 	}
-	if _, err := CompetitionSourceLockDigestForMode(staging, false); err == nil {
-		t.Fatal("production accepted the shortened staging graph")
-	}
-	if _, err := CompetitionSourceLockDigestForMode(production, true); err == nil {
-		t.Fatal("staging retained the retired repository")
+	for _, staging := range []bool{false, true} {
+		retired := maps.Clone(production)
+		retired["operator-proxy"] = strings.Repeat("a", 40)
+		if _, err := CompetitionSourceLockDigestForMode(retired, staging); err == nil {
+			t.Fatalf("retired repository accepted, staging=%t", staging)
+		}
 	}
 }
 

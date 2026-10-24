@@ -1,0 +1,128 @@
+{
+  "approx_equal_variance_welch_alpha": 0.05,
+  "approx_equal_variance_welch_mean_delta_fraction": 0.08033350760057674,
+  "approx_equal_variance_welch_mean_delta_ms": 1443.4141150551347,
+  "build_revision": "67c87445abe6725b25b3df2a13af7eb99cd4f8ed",
+  "config_sha256": "c7ce283ff9dabd90057fad2d9867d04ec454ef23f857002d1311c54de5f47924",
+  "cv": 0.09760850981024911,
+  "hidden_seed": false,
+  "illustrative_margin_fraction": 0.161,
+  "illustrative_practical_threshold_ms": 14764.363117749997,
+  "kind": "sim-latency-exploratory-failure-charged-calibration",
+  "margin_frozen": false,
+  "mean_raw_p95_ms": 17967.771583333328,
+  "median_raw_p95_ms": 17597.572249999997,
+  "official": false,
+  "replicates": [
+    {
+      "csv": "runs/1.csv",
+      "csv_sha256": "52cb40c6afa3decf47205f8dde5615ade89033cf8df762e13bdf81e2dbd3b373",
+      "run_sha256": "5d42805f20264149cc318b87d6eba0b973d3247a6e76ae7ab4e78aa2622b3105",
+      "failure_charged_p95_ms": 19409.061949999978,
+      "measured_requests": 2410,
+      "failures": 0,
+      "success_rate": 1
+    },
+    {
+      "csv": "runs/2.csv",
+      "csv_sha256": "f377607773cbac24ec43d64519991b36871205e956a06d0a1f5c5f52e05415c9",
+      "run_sha256": "214b3bc10b81be5e71a4fb7472ec420c9d92a10182d1f4c08cf906efbf9b0755",
+      "failure_charged_p95_ms": 20484.56969999999,
+      "measured_requests": 2374,
+      "failures": 2,
+      "success_rate": 0.9991575400168492
+    },
+    {
+      "csv": "runs/3.csv",
+      "csv_sha256": "ac0b773281e4007462b1d9c8fc3cd634562b47503208526cc0b714de9d661e99",
+      "run_sha256": "90ce36ac9dcb0225c27c81a7ab648c57d77c5ca8e0c10e6883142c5e1c97c1b9",
+      "failure_charged_p95_ms": 16586.921500000004,
+      "measured_requests": 2428,
+      "failures": 0,
+      "success_rate": 1
+    },
+    {
+      "csv": "runs/4.csv",
+      "csv_sha256": "3aa624770165fcdc83c511af1f5b34ff47eb30ff8c1b5d043de26e58ff1ffdd0",
+      "run_sha256": "bcebeec0e7d21d457b44ccbbd333e7afb992cfa73c1445eb9740f5737818bc80",
+      "failure_charged_p95_ms": 16326.855149999988,
+      "measured_requests": 2522,
+      "failures": 3,
+      "success_rate": 0.9988104678826328
+    },
+    {
+      "csv": "runs/5.csv",
+      "csv_sha256": "3ccee9e0a41e55c71e4a00caf7db6d44fecf944437b235cd7ca207c39aa5813a",
+      "run_sha256": "792de93e43499450593239f5f8c8115d7611e26e53ef604d3b95d41d28abad46",
+      "failure_charged_p95_ms": 19384.05830000001,
+      "measured_requests": 2448,
+      "failures": 4,
+      "success_rate": 0.9983660130718954
+    },
+    {
+      "csv": "runs/6.csv",
+      "csv_sha256": "503072ac302f2c8a147a3558499778760977720e2a73a980ecbf6e5eb56972d8",
+      "run_sha256": "c748cf86617e7a9063f1f075aace8945bdef7cbd33a7d86b16be650148a48a2f",
+      "failure_charged_p95_ms": 15260.072249999994,
+      "measured_requests": 2512,
+      "failures": 0,
+      "success_rate": 1
+    },
+    {
+      "csv": "runs/7.csv",
+      "csv_sha256": "6fb4507830dffde7a23bf0df17afc105087d07235ee9b1eeb068aa26087d8b5e",
+      "run_sha256": "0f4d71c686c4294c74e8962df8d1d679bf3a846ee92cec136fdc4c75b110b20a",
+      "failure_charged_p95_ms": 17366.516950000005,
+      "measured_requests": 2468,
+      "failures": 3,
+      "success_rate": 0.9987844408427877
+    },
+    {
+      "csv": "runs/8.csv",
+      "csv_sha256": "c8a4fb27021b70ae67aa643b32e6f3c9dfa45b9f5e365a4bd050e940fbf592ba",
+      "run_sha256": "556fd512e86649ed9643a73d6871668bea9fcd5b49f327cd5306b71af3a90eb2",
+      "failure_charged_p95_ms": 19294.31619999999,
+      "measured_requests": 2464,
+      "failures": 8,
+      "success_rate": 0.9967532467532467
+    },
+    {
+      "csv": "runs/9.csv",
+      "csv_sha256": "e4749f09fd9c5141f0a5fee7f2fa9a96664e177f1c7c104752f397046f041e99",
+      "run_sha256": "118bb8269e699585a2dfd9d1082a592811ce99e4bdcc90f3c42692ae50004a93",
+      "failure_charged_p95_ms": 17597.572249999997,
+      "measured_requests": 2486,
+      "failures": 0,
+      "success_rate": 1
+    }
+  ],
+  "request_timeout_ms": 120000,
+  "run_flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "true",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "sample_sd_ms": 1753.8074088601063,
+  "scale_frozen": false,
+  "schema": 1,
+  "scoring_baseline": false,
+  "seed": 20261024,
+  "significance_note": "Illustration only. A real candidate must pass all gates, the frozen practical margin and its own Welch test; candidate variance affects that test."
+}

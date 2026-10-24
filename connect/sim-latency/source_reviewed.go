@@ -294,10 +294,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", patchPath); err != nil {
 				fatalf("source patch apply: %s", err)
 			}
-			if _, err := sourceGitText(ctx, stagedRoot, "-c", "core.fsync=all", "-c", "user.name=URnetwork Competition", "-c", "user.email=competition@invalid", "commit", "--quiet", "--no-gpg-sign", "-m", "competition: separately reviewed source "+reviewId.String()); err != nil {
-				fatalf("source commit: %s", err)
-			}
-			proposal.Commits[repository], err = sourceGitText(ctx, stagedRoot, "rev-parse", "HEAD")
+			proposal.Commits[repository], err = commitReviewedSource(ctx, stagedRoot, reviewId, approved.Review.CreatedAt)
 			if err != nil {
 				fatalf("source commit identity: %s", err)
 			}
@@ -316,15 +313,16 @@ func runStageReviewedSource(opts docopt.Opts) {
 		fatalf("source significance: %s", err)
 	}
 	proposal.RawScore = *approved.Score.RawScore
+	imageManifest, err := reviewedSourceImageManifest(current, proposal)
+	if err != nil {
+		fatalf("reviewed image source identity: %s", err)
+	}
 	buildCtx, buildCancel := context.WithTimeout(ctx, 3*time.Hour)
 	defer buildCancel()
-	output, err := runSourceSupervisorProgram(buildCtx, optString(opts, "--build-command", ""), optString(opts, "--build-sha256", ""), struct {
-		Operation            string                  `json:"operation"`
-		Proposal             *reviewedSourceProposal `json:"proposal"`
-		ConfigLocalDirectory string                  `json:"config_local_directory"`
-		VaultLocalDirectory  string                  `json:"vault_local_directory"`
-		SandboxContract      string                  `json:"sandbox_contract"`
-	}{Operation: "isolated_reviewed_source_build", Proposal: proposal, ConfigLocalDirectory: settings.ConfigLocalDirectory, VaultLocalDirectory: settings.VaultLocalDirectory, SandboxContract: "offline_evaluator_containment_v1"}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+	output, err := runSourceSupervisorProgram(buildCtx, optString(opts, "--build-command", ""), optString(opts, "--build-sha256", ""), reviewedSourceBuildRequest{
+		Operation: "isolated_reviewed_source_build", Proposal: proposal, SourceManifest: imageManifest, SourceGeneration: current.SourceGeneration + 1,
+		ConfigLocalDirectory: settings.ConfigLocalDirectory, VaultLocalDirectory: settings.VaultLocalDirectory, SandboxContract: "offline_evaluator_containment_v1",
+	}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 	if err != nil {
 		fatalf("isolated independent source build: %s", err)
 	}

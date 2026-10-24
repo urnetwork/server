@@ -186,7 +186,9 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	judgmentPath := filepath.Join(self.stateDirectory, fmt.Sprintf("winner-review-%s-%s-%d.json", request.RoundId.String(), request.JobId.String(), request.RewardRevision))
 	output, err := readSourceFile(judgmentPath)
 	if errors.Is(err, os.ErrNotExist) {
-		output, err = runSourceSupervisorProgram(reviewCtx, self.reviewCommand, self.reviewSha256, broker, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+		output, err = winnerReviewCompletedResponse(judgmentPath+".broker-response", broker, func() ([]byte, error) {
+			return runSourceSupervisorProgram(reviewCtx, self.reviewCommand, self.reviewSha256, broker, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+		})
 	}
 	if err != nil {
 		return err
@@ -234,6 +236,51 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 		return err
 	}
 	return writePrivateReviewFile(filepath.Join(root, "review-receipt.json"), content)
+}
+
+// Retain even unresolved or malformed completed responses separately from
+// accepted judgments. Retrying must not sample the model until it approves.
+// Transport failures remain retryable; completed uncertainty needs intervention.
+func winnerReviewCompletedResponse(path string, request winnerReviewBrokerRequest, run func() ([]byte, error)) ([]byte, error) {
+	// The supervisor may renew the execution window without changing the sealed
+	// candidate. Those clocks cannot authorize a different answer for its revision.
+	request.Request.StartedAt = time.Time{}
+	request.Request.Deadline = time.Time{}
+	identity, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(identity)
+	requestSha256 := hex.EncodeToString(digest[:])
+	type completedResponse struct {
+		Schema        int    `json:"schema"`
+		RequestSha256 string `json:"request_sha256"`
+		Output        []byte `json:"output"`
+	}
+	content, err := readSourceFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		output, runErr := run()
+		if runErr != nil {
+			return nil, runErr
+		}
+		content, err = json.Marshal(completedResponse{Schema: 1, RequestSha256: requestSha256, Output: output})
+		if err != nil {
+			return nil, err
+		}
+		if err := cacheWinnerReviewJudgment(path, content); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	var response completedResponse
+	if err := decodeStrictJSONBytes(content, &response, "completed winner broker response"); err != nil {
+		return nil, err
+	}
+	if response.Schema != 1 || response.RequestSha256 != requestSha256 {
+		return nil, errors.New("completed winner review belongs to different authenticated context; operator intervention required")
+	}
+	return response.Output, nil
 }
 
 // Go's JSON decoder folds typed field names. Static review contracts must not

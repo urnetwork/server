@@ -432,6 +432,10 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	}
 
 	d.acceptContractPartitionCutover()
+	d.acceptPartitionCutoverTables(PartitionFamilies())
+	d.acceptCloseEvidencePartitionCutover()
+	d.acceptProviderWorkSessionPartitionCutover()
+	d.acceptFinishedTaskPartitionCutover()
 
 	sort.Strings(d.missingTables)
 	sort.Strings(d.extraTables)
@@ -480,6 +484,30 @@ func (d *SchemaDiff) acceptContractPartitionCutover() {
 	})
 	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
 		return staged[d.actual.indexes[name].table]
+	})
+}
+
+// A partition family's cutover in progress is not drift either: the tables it
+// keeps beside the family's while it stages or until its old table is dropped
+// (PartitionFamily.CutoverTables), with their indexes. Each step of such a
+// cutover removes them, and a fix must not drop the indexes they hold.
+func (d *SchemaDiff) acceptPartitionCutoverTables(families []*PartitionFamily) {
+	cutover := map[string]bool{}
+	for _, family := range families {
+		for _, table := range family.CutoverTables {
+			if d.actual.tables[table] && !d.expected.tables[table] {
+				cutover[table] = true
+			}
+		}
+	}
+	if len(cutover) == 0 {
+		return
+	}
+	d.extraTables = slices.DeleteFunc(d.extraTables, func(table string) bool {
+		return cutover[table]
+	})
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return cutover[d.actual.indexes[name].table]
 	})
 }
 
@@ -902,7 +930,55 @@ func ApplySchemaFix(ctx context.Context, diff *SchemaDiff, forceDropIndexes bool
 			onStatement(i, len(statements), statement)
 		}
 		MaintenanceTx(ctx, func(tx PgTx) {
+			// a plain index build or a validating constraint on a large table
+			// outlasts the application role's 15-minute transaction bound
+			SetTransactionTimeoutInTx(ctx, tx, 0)
 			RaisePgResult(tx.Exec(ctx, statement))
 		})
 	}
+}
+
+// The provider work session journal's cutover (PARTITION-MAINTENANCE-PLAN.md
+// C4, MigrateProviderWorkSessionEventsToPartitions) is not drift either. From
+// the identity primary key swap on (and so once partitioned), the receipt
+// foreign key is gone by design: its reference is the receipt trigger, and a
+// key into the partitioned journal would check every receipt at each week's
+// drop. The identity index of an unfinished build, the staged parent with its
+// indexes and the legacy bound check are the cutover's own work in progress;
+// finalize or abort removes the last two.
+func (d *SchemaDiff) acceptProviderWorkSessionPartitionCutover() {
+	table := providerWorkSessionEventTable
+	identity := d.actual.partitioned[table] || slices.ContainsFunc(d.actual.constraints[table], func(con auditConstraint) bool {
+		return con.typ == "p" && con.def == providerWorkSessionEventIdentityKey
+	})
+	if identity {
+		missing := slices.DeleteFunc(d.missingConstraints[providerWorkSessionReceiptTable], func(con auditConstraint) bool {
+			return con.name == providerWorkSessionReceiptForeignKeyName
+		})
+		if len(missing) == 0 {
+			delete(d.missingConstraints, providerWorkSessionReceiptTable)
+		} else {
+			d.missingConstraints[providerWorkSessionReceiptTable] = missing
+		}
+	}
+	extra := slices.DeleteFunc(d.extraConstraints[table], func(name string) bool {
+		return name == providerWorkSessionLegacyBound()
+	})
+	if len(extra) == 0 {
+		delete(d.extraConstraints, table)
+	} else {
+		d.extraConstraints[table] = extra
+	}
+	staged := providerWorkSessionStagedParent()
+	if d.actual.partitioned[staged] && !d.expected.tables[staged] {
+		d.extraTables = slices.DeleteFunc(d.extraTables, func(name string) bool {
+			return name == staged
+		})
+		d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+			return d.actual.indexes[name].table == staged
+		})
+	}
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return name == providerWorkSessionEventIdentityIndexName && d.actual.indexes[name].table == table
+	})
 }

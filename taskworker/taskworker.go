@@ -26,6 +26,9 @@ import (
 var removedTaskTargets = []string{
 	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
 	"github.com/urnetwork/server/controller.RefreshTransferBalances",
+	// user_auth_attempt is dropped: auth attempts are counted in Redis
+	// (model/auth_model_attempt.go), so nothing wrote or read the table
+	"github.com/urnetwork/server/taskworker/work.RemoveExpiredAuthAttempts",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -95,6 +98,8 @@ func initTaskSchedule(ctx context.Context) {
 		}
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
+		work.ScheduleRemoveRetiredHostedNetworkClients(clientSession, tx)
+		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
@@ -111,8 +116,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
+		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
+		work.ScheduleMeasureDbBloat(clientSession, tx)
+		work.ScheduleVacuumHotTables(clientSession, tx)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
-		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
@@ -143,6 +150,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleMaintainContractPartitions(clientSession, tx)
+		// the partition registry's runway and retention chains (server/db_partition_registry.go)
+		work.ScheduleMaintainPartitionRunway(clientSession, tx)
+		work.ScheduleMaintainPartitionRetention(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientDataUsage(clientSession, tx)
 		// seeded only while degraded.yml enables the contract degradation valve
@@ -331,6 +341,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
+			work.RemoveRetiredHostedNetworkClients,
+			work.RemoveRetiredHostedNetworkClientsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveGoneStClientKeyHistory,
+			work.RemoveGoneStClientKeyHistoryPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,
 			work.SweepOrphanNetworkClientDataPost,
 		),
@@ -405,12 +423,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.DbMaintenancePost,
 		),
 		task.NewTaskTargetWithPost(
-			work.WarmNetworkGetProviderLocations,
-			work.WarmNetworkGetProviderLocationsPost,
+			work.MeasureDbBloat,
+			work.MeasureDbBloatPost,
 		),
 		task.NewTaskTargetWithPost(
-			work.RemoveExpiredAuthAttempts,
-			work.RemoveExpiredAuthAttemptsPost,
+			work.VacuumHotTables,
+			work.VacuumHotTablesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.WarmNetworkGetProviderLocations,
+			work.WarmNetworkGetProviderLocationsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredWalletAuthChallenges,
@@ -502,6 +524,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MaintainContractPartitions,
 			work.MaintainContractPartitionsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MaintainPartitionRunway,
+			work.MaintainPartitionRunwayPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MaintainPartitionRetention,
+			work.MaintainPartitionRetentionPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RollupClientReliabilityStats,

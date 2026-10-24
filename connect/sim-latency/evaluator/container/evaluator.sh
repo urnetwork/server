@@ -277,10 +277,7 @@ if [ "$staging" = true ]; then
     source_branch=sim-latency-staging
     source_mode_args=(--staging)
 fi
-REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
-if [ "$staging" = true ]; then
-    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
-fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 round_id="$(jq -er '.round_id' "$request_path")"
 source_epoch="$(jq -er '.source_epoch' "$request_path")"

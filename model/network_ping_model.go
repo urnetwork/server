@@ -1258,6 +1258,49 @@ func createNetworkPingTablePartition(ctx context.Context, table string, day time
 	}, server.OptNoRetry())
 }
 
+// network_ping's family in the partition registry
+// (PARTITION-MAINTENANCE-PLAN.md A7): the ping table and the tallies kept by
+// day, on the same days, with `keepTimeout` as the retention. The sweep
+// (remove_expired_pings, MaintainNetworkPingPartitions) keeps its own pass, and
+// an insert still creates a day it finds missing; the registry's runway task
+// also creates the days ahead, and its retention task analyzes the parents,
+// which autovacuum never does. The partitions stay in the REINDEX rotation as
+// before. The controller registers it, since the keep timeout is the ping
+// report's (ExtenderPingReportSettings.KeepTimeout).
+func NewNetworkPingPartitionFamily(keepTimeout time.Duration, settings *NetworkPingPartitionSettings) *server.PartitionFamily {
+	return &server.PartitionFamily{
+		Name:        "network_ping",
+		Description: "network_ping and its day tallies, daily by create time; remove_expired_pings drops the days past the keep timeout",
+		Tables:      slices.Clone(networkPingPartitionedTables),
+		// the ping table's key; the tallies key their day or hour on the same
+		// days
+		KeyColumn:       "create_time",
+		KeyKind:         server.PartitionKeyTimestamp,
+		Granularity:     server.PartitionGranularityDaily,
+		AheadRanges:     settings.AheadDays,
+		Retention:       keepTimeout,
+		RetireByOwnTask: true,
+		// the derived-location signal watches the ping days' creation and
+		// drops (SIGNALS.md §2.19c)
+		RunwaySignal:    "2.19c",
+		RetentionSignal: "2.19c",
+		Settings: &server.PartitionFamilySettings{
+			CreateLockTimeout:    settings.LockTimeout,
+			DropLockTimeout:      settings.LockTimeout,
+			DropStatementTimeout: server.DefaultPartitionFamilySettings().DropStatementTimeout,
+		},
+		CreateLeaf: func(ctx context.Context, table string, r server.PartitionRange) error {
+			createNetworkPingTablePartition(ctx, table, r.Lower, settings.LockTimeout)
+			return nil
+		},
+		// the sweep's own cut: a day whose upper bound is older than the keep
+		// timeout, the cut itself kept (PlanNetworkPingPartitions)
+		RangeExpired: func(ctx context.Context, now time.Time, r server.PartitionRange) bool {
+			return r.Upper.Before(now.Add(-keepTimeout))
+		},
+	}
+}
+
 // The sweep's partition pass (GEOMAP §5.7): for network_ping and every tally
 // kept by day, creates the partitions of today and the `settings.AheadDays`
 // days after it that no partition covers, and drops every partition this code

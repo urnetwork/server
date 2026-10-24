@@ -483,21 +483,27 @@ func TestTaskLeaseIsBoundedAndExtendedByKeepalive(t *testing.T) {
 		case <-time.After(1500 * time.Millisecond):
 		}
 
-		// Heartbeats keep the lease comfortably in the future, but it is not tied
-		// to the task's 60-second MaxTime. A worker death therefore recovers in
-		// roughly two seconds in this fixture, not one minute.
-		var releaseTime time.Time
+		// Heartbeats keep the lease in the future, but it is not tied to the
+		// task's 60-second MaxTime. A worker death therefore recovers in roughly
+		// two seconds in this fixture, not one minute. Each heartbeat writes
+		// claim_time and extends release_time only once less than half the
+		// lease remains, so after the latest heartbeat at least half a lease
+		// and at most a whole one is left.
+		var claimTime, releaseTime time.Time
 		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(ctx, "SELECT release_time FROM pending_task WHERE task_id = $1", taskId)
+			result, err := conn.Query(ctx, "SELECT claim_time, release_time FROM pending_task WHERE task_id = $1", taskId)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&releaseTime))
+					server.Raise(result.Scan(&claimTime, &releaseTime))
 				}
 			})
 		})
 		now := server.NowUtc()
-		if !releaseTime.After(now.Add(1 * time.Second)) {
-			t.Fatalf("heartbeat did not extend lease: release_time=%s now=%s", releaseTime, now)
+		if !releaseTime.After(now) {
+			t.Fatalf("heartbeat did not keep the lease ahead: release_time=%s now=%s", releaseTime, now)
+		}
+		if lease := releaseTime.Sub(claimTime); lease < TaskLeaseTimeout/2 || TaskLeaseTimeout < lease {
+			t.Fatalf("lease after the latest heartbeat outside its half-lease band: claim_time=%s release_time=%s", claimTime, releaseTime)
 		}
 		if releaseTime.After(now.Add(5 * time.Second)) {
 			t.Fatalf("lease is still pinned to MaxTime: release_time=%s now=%s", releaseTime, now)

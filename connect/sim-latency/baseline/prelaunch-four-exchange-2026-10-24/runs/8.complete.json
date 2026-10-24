@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-63atmxs5-p1800-on-same-seed-8",
+  "run_manifest_sha256": "556fd512e86649ed9643a73d6871668bea9fcd5b49f327cd5306b71af3a90eb2",
+  "run_manifest_bytes": 2794,
+  "completed_unix_ms": 1792855378600
+}

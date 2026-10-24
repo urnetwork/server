@@ -575,6 +575,11 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		// Open only after readiness, with the full seven-day window. The time
 		// becomes immutable when CreateRound commits; slow prep never shortens it.
 		opensAt := now
+		if !snapshot.Intent.OpensAt.IsZero() {
+			// Bootstrap may pin a public launch date. Recovery must preserve
+			// it rather than opening early or moving the admission window.
+			opensAt = snapshot.Intent.OpensAt.UTC()
+		}
 		round, createErr := self.Driver.CreateRound(operationCtx, *lease, snapshot.Intent, opensAt)
 		if createErr != nil {
 			return "round_creation_blocked", createErr

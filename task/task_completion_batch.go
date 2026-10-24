@@ -34,6 +34,7 @@ func (self *TaskWorker) canBatchTaskCompletion(r *taskExecutionResult) bool {
 // Each row keeps its current durable payload and its own execution result/times.
 // DELETE RETURNING supplies the exact payload removed by this transaction; a
 // failed copy rolls the move back. The identity predicate bounds queue access.
+// As in the single move, the copy skips an id that already finished.
 const taskCompletionBatchSql = `WITH removed AS (
  DELETE FROM pending_task WHERE task_id=ANY($1::uuid[])
   AND (task_id,claim_generation) IN (SELECT * FROM unnest($1::uuid[],$8::bigint[]))
@@ -51,6 +52,7 @@ const taskCompletionBatchSql = `WITH removed AS (
  FROM unnest($1::uuid[],$2::timestamp[],$3::timestamp[],$4::text[])
   AS observed(task_id,run_start_time,run_end_time,result_json)
  JOIN removed ON removed.task_id=observed.task_id
+ WHERE NOT EXISTS (SELECT 1 FROM finished_task WHERE finished_task.task_id=removed.task_id)
  RETURNING task_id
 ), successors AS (
  INSERT INTO pending_task (
@@ -158,6 +160,11 @@ func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResul
 			var copied, removed, successors, expectedSuccessors, invalidGenerations, insertedSuccessors int
 			server.Raise(tx.QueryRow(ctx, taskCompletionBatchSql, ids, starts, ends, values,
 				generations, successorIds, time.Time{}, claims).Scan(&copied, &removed, &successors, &expectedSuccessors, &invalidGenerations, &insertedSuccessors))
+			if removed == len(results) && copied < removed {
+				// every owner held; a member had already finished, so
+				// independent owners finish the others
+				server.Raise(errFinishedTaskIdentityExists)
+			}
 			if copied != len(results) || removed != len(results) || successors != expectedSuccessors || invalidGenerations != 0 {
 				server.Raise(errTaskCompletionBatchOwnership)
 			}

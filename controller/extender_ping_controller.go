@@ -92,6 +92,13 @@ type ExtenderPingReportSettings struct {
 
 // The settings the report, its retention sweep and the derive phase run
 // with.
+// network_ping's family in the partition registry, with the default report's
+// keep timeout as its retention (model.NewNetworkPingPartitionFamily).
+var networkPingPartitionFamily = server.RegisterPartitionFamily(model.NewNetworkPingPartitionFamily(
+	DefaultExtenderPingReportSettings().KeepTimeout(),
+	model.DefaultNetworkPingPartitionSettings(),
+))
+
 func DefaultExtenderPingReportSettings() *ExtenderPingReportSettings {
 	return &ExtenderPingReportSettings{
 		RateLimit:            240,

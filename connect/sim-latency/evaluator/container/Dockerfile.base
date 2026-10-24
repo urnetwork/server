@@ -45,8 +45,7 @@ ARG BASE_SHA
 ARG SOURCE_EPOCH
 ARG SOURCE_CONFIG_SHA256
 ARG SOURCE_LOCK_SHA256
-# The private builder copies exactly the mode-specific locked repositories.
-# Production retains operator-proxy; staging never creates or fetches it.
+# The private builder copies exactly the ten locked live repositories.
 COPY source/ /workspace/
 COPY source-lock.json /opt/urnetwork/source-lock.json
 COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
@@ -69,7 +68,6 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/goidenticons \
     && git config --system --add safe.directory /workspace/userwireguard \
     && git config --system --add safe.directory /workspace/sn \
-    && if [ -d /workspace/operator-proxy ]; then git config --system --add safe.directory /workspace/operator-proxy; fi \
     && git config --system --add safe.directory /workspace/warp \
     && git config --system --add safe.directory /workspace/gvisor \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \

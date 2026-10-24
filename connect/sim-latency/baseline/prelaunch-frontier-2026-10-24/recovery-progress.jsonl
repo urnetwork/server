@@ -1,0 +1,3 @@
+{"providers":1800,"clients":200,"arrivals_per_minute":80,"exchange_hosts":4,"impairment":"on","attempt":"handoff-fix","exit_code":0,"elapsed_seconds":461}
+{"providers":1800,"clients":200,"arrivals_per_minute":80,"exchange_hosts":4,"impairment":"off","attempt":"handoff-fix","exit_code":0,"elapsed_seconds":435}
+{"providers":7200,"clients":200,"arrivals_per_minute":80,"exchange_hosts":4,"impairment":"on","attempt":"handoff-fix","exit_code":127,"elapsed_seconds":659}

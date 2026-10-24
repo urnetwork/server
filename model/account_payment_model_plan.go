@@ -384,12 +384,20 @@ func planPaymentsInTx(
 //
 // This override is local to the plan. Its idle timeout needs no override now
 // that reliability work runs on the same connection instead of a nested owner.
+//
+// A slice's plan has run past the application role's 15-minute transaction
+// bound (1,121 s on 2026-08-31, over 3 h on 2026-09-27, before the October
+// rewrites; unmeasured since), and a plan the bound ended would end every
+// weekly payout the same way. The plan lifts the bound for its own
+// transaction; the Payout task's MaxTime still bounds it, and its cancel
+// reaches the direct maintenance session.
 type paymentPlanTransactionConfigurer interface {
 	Exec(context.Context, string, ...any) (server.PgTag, error)
 }
 
 func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransactionConfigurer) {
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL effective_io_concurrency = 32`))
+	server.SetTransactionTimeoutInTx(ctx, tx, 0)
 }
 
 // computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts

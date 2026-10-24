@@ -8,17 +8,54 @@ set -uo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly HOST_CONFIG=/etc/urnetwork/competition-host.json
 readonly DOCKER_DAEMON_CONFIG=/etc/docker/daemon.json
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/container/resource-boundary.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/container/hash-local-mount.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/container/docker-id-map.sh"
 readonly IRQ_CONTROL="$SCRIPT_DIR/authoritative-host-irqs.sh"
 
-if [ "${1:-}" != --json ] || [ "$#" -ne 1 ]; then
-    printf 'usage: competition-host-self-check --json\n' >&2
+# Prospective-image qualification uses a separate root-owned configuration;
+# it must not replace active host markers before the source transition exists.
+secure_host_path() {
+    local path="$1" current mode
+    [[ "$path" == /* && "$path" != / && "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
+    [ "$(realpath -e -- "$path" 2>/dev/null)" = "$path" ] || return 1
+    case "${2:-file}" in
+        file) [ -f "$path" ] || return 1 ;;
+        directory) [ -d "$path" ] || return 1 ;;
+        *) return 1 ;;
+    esac
+    [ ! -L "$path" ] || return 1
+    current="$path"
+    while :; do
+        [ ! -L "$current" ] || return 1
+        [ "$(stat -c %u -- "$current" 2>/dev/null)" = 0 ] || return 1
+        mode="$(stat -c %a -- "$current" 2>/dev/null)" || return 1
+        [[ "$mode" =~ ^[0-7]{3,4}$ ]] && [ $((8#$mode & 0022)) -eq 0 ] || return 1
+        [ "$current" = / ] && return 0
+        current="$(dirname -- "$current")"
+        [ -d "$current" ] || return 1
+    done
+}
+secure_host_config_path() {
+    secure_host_path "$1" file
+}
+# --- host configuration path helper ends ---
+
+host_config=/etc/urnetwork/competition-host.json
+if [ "${1:-}" = --json ] && [ "$#" -eq 1 ]; then
+    :
+elif [ "${1:-}" = --json ] && [ "$#" -eq 3 ] && [ "$2" = --config ]; then
+    [ "$(id -u)" = 0 ] && secure_host_config_path "$3" || {
+        printf 'competition-host-self-check: alternate configuration requires a root caller and a protected canonical path\n' >&2
+        exit 2
+    }
+    host_config="$3"
+else
+    printf 'usage: competition-host-self-check --json [--config ROOT_OWNED_PATH]\n' >&2
     exit 2
 fi
+readonly HOST_CONFIG="$host_config"
 
 command -v jq >/dev/null 2>&1 || exit 2
 command -v sha256sum >/dev/null 2>&1 || exit 2
@@ -26,7 +63,7 @@ command -v docker >/dev/null 2>&1 || exit 2
 command -v sudo >/dev/null 2>&1 || exit 2
 
 config_secure=false
-if [ -f "$HOST_CONFIG" ]; then
+if secure_host_config_path "$HOST_CONFIG"; then
     config_owner="$(stat -c %u "$HOST_CONFIG" 2>/dev/null || printf 1)"
     config_mode="$(stat -c %a "$HOST_CONFIG" 2>/dev/null || printf 777)"
     if [ "$config_owner" = 0 ] && [ $((8#$config_mode & 0022)) -eq 0 ] && jq -e '.schema == 1' "$HOST_CONFIG" >/dev/null 2>&1; then
@@ -300,20 +337,14 @@ if [ "$docker_id_map_remapped" = true ] &&
     docker_user_namespace=true
 fi
 
-secure_root_path() {
-    local path="$1"
-    [ -n "$path" ] && [ -e "$path" ] && [ "$(stat -c %u "$path" 2>/dev/null)" = 0 ] &&
-        [ $((8#$(stat -c %a "$path" 2>/dev/null) & 0022)) -eq 0 ]
-}
-
 hash_marker() {
     local path="$1" expected="$2"
-    [ -n "$path" ] && [ -f "$path" ] && [ -n "$expected" ] &&
-        [ "$(sha256sum "$path" 2>/dev/null | awk '{print $1}')" = "$expected" ] && secure_root_path "$path"
+    [ -n "$expected" ] && secure_host_path "$path" file &&
+        [ "$(sha256sum "$path" 2>/dev/null | awk '{print $1}')" = "$expected" ]
 }
 
 offline_build_cache=false
-secure_root_path "$offline_cache" && offline_build_cache=true
+secure_host_path "$offline_cache" directory && offline_build_cache=true
 template_database=false
 redis_reset=false
 cleanup_verified=false
@@ -428,7 +459,7 @@ if [ "$cleanup_verified" = true ] && hash_marker "$immutable_marker" "$immutable
     immutable_reports=true
 fi
 artifact_storage=false
-secure_root_path "$artifact_root" && artifact_storage=true
+secure_host_path "$artifact_root" directory && artifact_storage=true
 
 no_production_secrets="$containment_no_production_secrets"
 if [ "$direct_local_mounts" != true ] ||

@@ -98,10 +98,7 @@ else
         *) printf 'production source cannot use a staging evaluator image\n' >&2; exit 1 ;;
     esac
 fi
-REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
-if [ "$staging" = true ]; then
-    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
-fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image_id")"

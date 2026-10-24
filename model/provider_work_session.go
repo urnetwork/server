@@ -21,6 +21,11 @@ import (
 // failures belong to the caller's transaction, as do missing ownership fences.
 var errProviderWorkEvidenceUnavailable = errors.New("provider work original evidence is unavailable")
 
+// A client's open connections in id order, at most $2, read through
+// network_client_connection_connected_client_id_extender_id, which holds open
+// connections only.
+const providerWorkSessionOpenConnectionsSql = `SELECT connection_id,extender_id FROM network_client_connection WHERE client_id=$1 AND connected ORDER BY connection_id LIMIT $2`
+
 // The signer is optional; its database objects are migration prerequisites.
 // Once SQL starts, every unexpected failure belongs to the caller's transaction.
 func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
@@ -197,6 +202,11 @@ var providerWorkSessionIndexRefusalLogUnixMilli atomic.Int64
 // provider_work_session.json, add a migration that builds the index again
 // concurrently and supersedes 824 in the migration signal; the signal pages
 // on a copy built by hand.
+//
+// This transaction's events were appended at or after it began, so the lookup
+// is bounded a day below its start, which prunes the weekly-partitioned journal
+// (PARTITION-MAINTENANCE-PLAN.md C4) to the current week, or the two around a
+// boundary.
 func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
 	source := providerWorkSessionSourceFromContext(ctx)
 	if source == nil {
@@ -220,6 +230,7 @@ func providerWorkSignSessionEventsInTx(ctx context.Context, tx server.PgTx, clie
 	rows, err := tx.Query(ctx, `SELECT e.client_id,e.network_id,e.connection_id,e.sequence,e.kind,e.observed_at,e.extender_id
   FROM provider_work_session_event e LEFT JOIN provider_work_session_receipt r USING(client_id,sequence)
   WHERE e.transaction_id=txid_current() AND e.client_id=ANY($1) AND r.client_id IS NULL
+  AND e.observed_at>=(now() AT TIME ZONE 'UTC')-interval '1 day'
   ORDER BY e.client_id,e.sequence LIMIT $2`, clientIds, int64(source.authority.MaxEndpointEvents)+1)
 	if err != nil {
 		return err
@@ -392,7 +403,7 @@ func providerWorkEndpointHeadInTx(ctx context.Context, tx server.PgTx, clientId,
 	}
 	// The independently replayed active set must match the actual original
 	// reservation census. A legacy writer or unsupported extender cannot vanish.
-	rows, err = tx.Query(ctx, `SELECT connection_id,extender_id FROM network_client_connection WHERE client_id=$1 AND connected ORDER BY connection_id LIMIT $2`, clientId, int64(source.authority.MaxEndpointEvents)+1)
+	rows, err = tx.Query(ctx, providerWorkSessionOpenConnectionsSql, clientId, int64(source.authority.MaxEndpointEvents)+1)
 	if err != nil {
 		return head, false, err
 	}

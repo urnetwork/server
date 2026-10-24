@@ -40,3 +40,15 @@ func TestReliabilityRunningCheckpointConfiguresServerSideTimeout(t *testing.T) {
 		t.Fatalf("reliability checkpoint timeout = %v, want %s", got, want)
 	}
 }
+
+// The reliability transactions over every client keep the checkpoints'
+// two-hour ceiling as their transaction bound in place of the application
+// role's 15 minutes: the running timer is disarmed, then armed afresh.
+func TestReliabilityTransactionReplacesTheRoleTransactionBound(t *testing.T) {
+	recorder := &recordingReliabilityRunningCheckpoint{}
+	boundReliabilityTransactionInTx(context.Background(), recorder)
+	want := "SET LOCAL transaction_timeout = 0; SET LOCAL transaction_timeout = 7200000"
+	if len(recorder.statements) != 1 || recorder.statements[0] != want || len(recorder.arguments[0]) != 0 {
+		t.Fatalf("reliability transaction bound statements = %q, want %q", recorder.statements, want)
+	}
+}

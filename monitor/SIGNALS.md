@@ -1669,10 +1669,13 @@ WHERE function_name LIKE '%UpdateClient%'
   `migration-schema-drift`. Never create the object by hand or delete the task
   row to hide either condition.
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
-  every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
-  future release_time = pre-lease-fix binary or killed worker. Current workers
-  use a five-minute rolling lease, so a killed worker's claim self-releases
-  within five minutes of its final heartbeat. A direct-postgres session lock
+  every ~10s (the keepalive writes claim_time; since 2026-10-24 it moves
+  release_time only once less than half of the five-minute lease remains, so
+  a live claim's release_time sits 2.5–5 minutes ahead and steps forward about
+  every 2.5 minutes). Frozen claim + future release_time = pre-lease-fix binary
+  or killed worker. Current workers use a five-minute rolling lease, so a
+  killed worker's claim self-releases within five minutes of its final
+  heartbeat, often sooner. A direct-postgres session lock
   still prevents duplicate execution if only the heartbeat is starved and the
   original worker remains alive. A raw p95 is not sufficient when repeated
   defects have polluted the tail: use `min(2*p95, max(4*p50, 20m))`, with the
@@ -6751,7 +6754,10 @@ partitions, `<table>_legacy` and `<table>_wYYYYMMDD` of the six contract
 tables: the partition-aware rotation never rebuilds one as a whole, so a start
 line naming one comes from a worker without it (the legacy partition holds the
 table's whole history). A plain `contract_extender` or `contract_close_report`
-stays in the rotation and does not match.
+stays in the rotation and does not match. Since 2026-10-24
+(PARTITION-MAINTENANCE-PLAN.md A3) `network_client_connection` is back in the
+rotation, so its start line does not match either, and the churn tables'
+hourly index pass logs `[db]hot vacuum index pass ...`, which never matches.
 
 On 2026-10-05 at 04:26:37Z, a direct native capture identified a concurrent
 whole-table rebuild of `network_client`, with
@@ -7504,6 +7510,81 @@ with the table's dead tuples summed across all its partitions and how many are
 over their line. The pure-cascade guidance follows the table. Other partitioned
 tables (`client_reliability`) and plain tables report per relation as before.
 
+An old horizon on its own, with no debt over the floor yet, is §2.4l
+(`transaction-horizon`), which counts slots and prepared transactions too.
+
+### 2.4l Transaction horizon age — one old snapshot pins cleanup everywhere
+Probe: `transaction-horizon`
+
+Why: no vacuum may remove a row version that a transaction older than the
+horizon could still see, so one long holder grows the dead rows of every
+table, the hot queues first (§2.4; server PARTITION-MAINTENANCE-PLAN.md A6).
+The application roles end every transaction at 15 minutes
+(`transaction_timeout`, a role default in the database), so an older horizon
+is held by something outside that bound: a maintenance operation that lifted
+it for its own session (`WithoutTransactionTimeout`), an operator's or
+superuser's session, a replication slot or a standby's feedback, a prepared
+transaction, or a session that started before its role picked up the bound.
+§2.4 keeps the horizon as context for its debt warning; here the horizon is a
+trigger of its own.
+
+Check, one primary-guarded read-only frame every 5 minutes: every holder of
+this database's horizon, ranked as §2.4 ranks horizon candidates (the
+greatest of the holder's xid ages, then the oldest transaction start):
+
+- sessions with `backend_xid` or `backend_xmin`, except autovacuum workers and
+  lazy VACUUMs (`pg_stat_progress_vacuum`), whose snapshots every other vacuum
+  ignores, and sessions of other databases;
+- replication slots with `xmin` or `catalog_xmin`;
+- prepared transactions.
+
+The end row counts every slot and every prepared transaction even when there
+are none, beside `max_prepared_transactions`, so a future one is caught. On
+main both are unused as of 2026-10-24: `max_prepared_transactions` is 0,
+`wal_level` is replica (no logical slots), and the base backup's
+`pg_receivewal` slot holds WAL, not an xmin.
+
+The horizon's age is a lower bound. A client backend's snapshot is no newer
+than its current or last statement, a prepared transaction is as old as its
+prepare, and an inactive slot has held its xmin at least since it went
+inactive. A holder with no such timestamp (an active slot, a walsender
+relaying a standby's feedback) is dated by the probe's own history of the next
+transaction id (`pg_snapshot_xmax(pg_current_snapshot())`): the horizon id was
+assigned before the first earlier read whose next id had passed it. Ids are
+ordered, so any holder's bound also bounds the oldest horizon. The history
+covers 75 minutes; after a monitor restart a holder without a timestamp is
+dated no older than the history so far.
+
+- `transaction-horizon` (WARN at 15 minutes, PAGE at one hour, target
+  `<primary>`, sustain 1). It names the first-ranked holder and lists the
+  next ones: kind, pid, backend type, state, role kind (superuser or
+  ordinary), a fixed statement shape classified inside the database
+  (reindex, index-build, vacuum, cluster, analyze, validate, dump,
+  replication, application), xid ages and transaction age; a slot's name,
+  type and state. Statements, application names, client addresses, role
+  names and prepared-transaction identifiers stay in the database
+  (`application=withheld query=withheld`, `gid=withheld`).
+- `transaction-horizon-unobservable` (WARN, sustain 2): no single configured
+  primary, or the hostname or role guard, the source clock, the frame or its
+  census failed. The horizon is unknown, not healthy.
+
+Every tunable is a field of `TransactionHorizonSettings`. Synthetic frames
+cover each holder kind at both thresholds, the timestamp and history bounds,
+the ranking, a history reset, withholding, and malformed frames.
+
+ACTION, by the first-ranked holder. A maintenance statement is this alarm's
+own operation: check its progress (`pg_stat_progress_create_index`,
+`pg_stat_progress_cluster`) and let an advancing one finish while §2.4's hot
+tables hold; otherwise cancel it, and the rotation resumes the table and
+drops the debris (§2.2a). An application session either predates the bound
+(recycle its pool, then check `SHOW transaction_timeout`) or lifted it (fix
+or page the operation). An operator's or superuser's session: ask its owner.
+A slot or a standby: find the standby's long query, or drop an abandoned slot
+with the owner's go. A prepared transaction: confirm with its owner, then
+COMMIT PREPARED or ROLLBACK PREPARED; a restart does not clear it.
+VERIFY: the holder ends, the horizon stays under 15 minutes on consecutive
+samples, and §2.4's dead tuples stop rising.
+
 ### 2.4a Canceled autovacuum and anti-wraparound progress
 Probe: `pg-autovacuum-discard`
 
@@ -7629,9 +7710,12 @@ postmaster restart, malformed frames, failed reads, inventory and
 cancellation.
 
 ACTION: the reviewed `db_maintenance.go` source uses `SKIP_LOCKED` for its
-`pending_task` vacuum and database analyze, and avoids queueing rebuild/drop
-work behind autovacuum. Source presence does not attest the deployed
-Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
+database analyze, and avoids queueing rebuild/drop work behind autovacuum.
+Since 2026-10-24 the `pending_task` vacuum it ran daily belongs to
+`VacuumHotTables` (`db_maintenance_hot_vacuum.go`), which vacuums the churn
+tables every five minutes with `SKIP_LOCKED` and rebuilds their bloated
+indexes hourly behind the same lock wait. Source presence does not attest the
+deployed Taskworker artifact. The existing PostgreSQL owner must verify that boundary.
 Let independently progressing anti-wraparound work finish (§2.4); do not
 start conflicting maintenance or cancel a pass from this catalog history.
 
@@ -8096,9 +8180,14 @@ only says how long is left, not why. Facts on 10-22:
   minus one day (2026-10-05), for the next payout. Once the 21-day cutoff
   passes 10-05, nightly drops stop until `ClientExpiration` (30 days) forces
   them on 11-04.
-- **`st_client_key_history` has no retention at all.** It is immutable by
-  trigger, held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90%
-  of its rows belong to inactive clients.
+- **`st_client_key_history` had no retention.** It is immutable by trigger,
+  held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
+  rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
+  `remove_gone_st_client_key_history` deletes a client's history 91 days after
+  the client went (`st_client_key_gone`), so it stays on this append-only list
+  until the first deletes. Those can come about 61 days after that migration:
+  a child the 30-day reap deletes then went at its deactivation, up to 30 days
+  before the migration.
 
 Checks, all cheap and read-only:
 1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
@@ -8230,6 +8319,11 @@ authority and cancellation. A native PostgreSQL 18 test runs the real query on
 plain tables, on a cutover finalized two weeks ahead and on the current-week
 layout, and drops future partitions to fire it.
 
+The contract tables are the partition registry's `contract` family
+(`server/db_partition_registry.go`); its declaration names this probe, so
+§2.4p leaves it alone, and the registry's runway task creates its weeks ahead
+too.
+
 ACTION: restore `maintain_contract_partitions` (task canaries, `[cp]` log
 lines, lock waits behind its creates). If it cannot run in time, the owner runs
 its partition creation (`server.MaintainContractPartitions`); a partition
@@ -8268,6 +8362,9 @@ Every tunable (R, the grace, the list bound) is a field of
 edge, a blocked legacy partition and blocked weekly partitions, plain tables,
 malformed frames and bounds; a native test runs the real query on the
 current-week layout with the horizon shortened.
+
+The contract tables' registry declaration names this probe, so §2.4q leaves
+the contract family alone.
 
 ACTION: read the task's reason for the oldest blocked week (`[cp]` log lines,
 its run report) and resolve the blocker at its owner: close or settle the
@@ -8313,6 +8410,194 @@ ACTION: the owner decides at once: `--finalize`, or `--abort` and prepare a
 later week. Do not drop the bound checks or the staged parents by hand.
 VERIFY: a complete observation shows the tables partitioned (finalized) or no
 bound check and no staged parent (aborted).
+
+### 2.4k Reclaimable bloat — the share of each relation a rewrite would return
+Probe: `table-bloat`
+
+Why: the §2.4 dead-tuple warning starts at 10M dead rows whatever a table's
+size. Vacuum makes dead space reusable but returns none of it, and a
+time-ordered btree keeps every page that still holds one live entry, so a
+queue of a few hundred live rows never reaches that line while its indexes
+grow: on 2026-10-21 `pending_task` had 94 GB of indexes for about 200 MB of
+rows, and the 2026-10-23 VACUUM FULL reclaimed 87–99% of six churn tables
+(`server/PARTITION-MAINTENANCE-PLAN.md`, Evidence). This line is a share of
+each relation's own size.
+
+Source: the weekly measurement (`server/db_bloat_measure.go`, task
+`measure_db_bloat`, plan item A4) keeps its raw rows in `db_bloat_measurement`
+for 90 days, one per measured relation of every public table:
+- heap and TOAST relations under 50 GB: `pgstattuple_approx`, which reads every
+  page that is not all-visible, under a one-hour weekly scan budget whose
+  cursor resumes the next week; each row records the share it read.
+  Reclaimable is dead tuple bytes plus free space, less the free space the
+  fillfactor F keeps on purpose (live bytes × (100 − F) / F).
+- larger heap and TOAST relations, and every one when the extension or
+  EXECUTE on it (granted to `pg_stat_scan_tables`) is missing: the statistics
+  estimate, live rows (`reltuples`) × average width (`pg_stats`) packed at the
+  fillfactor, against the relation's size; the row records why.
+- indexes, and TOAST indexes: the btree estimate of the priority rebuild
+  (`dbMaintenanceEstimateBtreeBytes`), which fills leaf pages to the index's
+  fillfactor; other access methods are recorded unmeasured.
+
+A partitioned table has no storage of its own, so each partition leaf is
+measured and reported as its own table (a contract week by its leaf name,
+which leaves with its partition).
+
+Check, hourly: each relation's newest measurement within 35 days, credited
+with any shrink since (reclaimable − (measured size − current size), never
+below zero; growth is not added), against the relation's current size.
+- `table-bloat` (WARN, target `<primary>/<table>`, sustain 1): some heap,
+  TOAST relation or index of the table has at least 5 GB and at least half of
+  its current size reclaimable; for an index, half is the priority rebuild's
+  line of twice its compact estimate. The finding lists the table's bloated
+  relations with method, size, share and measurement age, and the table's
+  current live and dead rows from `pg_stat_user_tables` beside the §2.4 line.
+- `table-bloat-unobservable` (WARN, target `<primary>/bloat-measurement`,
+  sustain 2): no or several primaries, a failed read, a wrong host or role, a
+  skewed clock, a malformed frame, the table missing (before its migration),
+  no measurement at all (until the chain's first run, ten minutes after the
+  deploy that seeds it), or a newest measurement older than 9 days (the weekly
+  chain stopped). A stale measurement is still judged.
+
+Implementation (2026-10-24). Two primary-guarded read-only queries: a
+presence read (`to_regclass('public.db_bloat_measurement')`), then, when the
+table exists, the measurement read in fixed eleven-cell frames bound by an end
+row: the primary's hostname, role and statement clock, the newest measurement
+time and window counts; each relation over both lines as measured that still
+exists (at most 64, cut list noted), with its current `pg_relation_size`; and
+each listed table's current row counters. Only sizes, ages, counters, fixed
+method names and plain-identifier relation names leave SQL. Every tunable is
+a field of `TableBloatSettings`.
+
+Synthetic controls replay the 94 GB queue (300 live and 3M dead rows, under
+the §2.4 line), a large table with a small share and a small table with a
+large one, the shrink credit after a rebuild, the line's edges, grouping by
+table, the missing table, no and stale measurements, failed reads, malformed
+frames, inventory authority and cancellation. A native PostgreSQL 18 test
+measures a churned queue's index with the server's measurement, fires the
+signal, rebuilds the index and clears it.
+
+False-positive qualifiers: the btree and statistics estimates are estimates
+(deduplicated btree entries make an index smaller than its estimate, and
+stale statistics move both), and a measurement up to a week old keeps its
+share while the relation grows. False-negative qualifiers: a relation is
+judged on its newest measurement only, so bloat grown since the last weekly
+run waits for the next; a scan cycle longer than the window leaves heaps
+unjudged; a relation under 1 MiB is never measured.
+
+ACTION: an index: confirm the hot-table vacuum and index rebuilds (plan A1,
+A2) run, then rebuild it online with `REINDEX INDEX CONCURRENTLY` through the
+rotation or the priority rebuild (`db_maintenance.go`). A heap or TOAST
+relation: stop the writer making the dead versions (plan Part B) and confirm
+vacuum keeps up (§2.4, A1); the space is reused in place, and returns to the
+filesystem only in a maintenance-window VACUUM FULL until PostgreSQL 19's
+online compaction. Never pg_repack. A table over 50 GB with persistent bloat
+goes to Part C or D. VERIFY: the next weekly measurement, or the relation's
+shrink after a rebuild, takes every relation of the table under the line.
+
+### 2.4p Partition registry runway — every family's inserts need a partition
+Probe: `partition-runway`
+
+Why: the partition registry (`server/db_partition_registry.go`,
+PARTITION-MAINTENANCE-PLAN.md A7) declares every range-partitioned family:
+its tables, key, daily or weekly granularity, the ranges kept ahead and its
+retention. A family keeps no DEFAULT partition for its ranges unless it
+declares one, so an insert past its last partition fails. The registry's
+runway task (`maintain_partition_runway`, every 10 minutes) creates each
+family's ranges ahead, apart from any archive work, and catches up at once
+after downtime. This probe watches every registered family whose declaration
+names no dedicated probe (`RunwaySignal`): today `client_reliability` and
+`provider_egress_health_history`. The contract tables name §2.4h and
+`network_ping` names §2.19c. A family added to the registry is watched here
+without a monitor change.
+
+Check: for each partitioned family (its first table relkind `p`), a range
+counts as covered for a table when one attached partition other than DEFAULT
+holds every key of it; covered ranges are counted consecutively from the one
+after the current range (00:00 UTC days, Monday 00:00 UTC weeks, on the
+primary's statement clock); a gap ends the count. The line is the family's
+`MonitorRunwayRanges`, else min(2, `AheadRanges`).
+
+- `partition-runway` (PAGE, target `<primary>/<family>-partitions`, frame
+  the thinnest table, sustain 2 at a 15-minute cadence): some table of the
+  family covers fewer ranges after the current one than its line, or does not
+  cover the current range (its inserts are failing now).
+- `partition-runway-unobservable` (same target, sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, an
+  incomplete or malformed frame, an unparseable bound, an over-cap census
+  (4,096 partitions), or a family whose first table is partitioned and
+  another not. It pages when the family's last complete observation, at most
+  7 days old, was at its line; otherwise it warns. The memory is per family,
+  process-local, and starts empty at every watcher start.
+- A family whose first table is still plain (before its cutover) has no
+  runway and is healthy.
+
+Implementation (2026-10-24). One primary-guarded, read-only catalog query
+returns, in fixed six-cell frames bound by an end row: the primary's hostname,
+role and statement clock; each family table's kind; and every attached
+partition's name and `pg_get_expr(relpartbound)` bound, with a timestamp key's
+bounds cast back in the reading session so they parse whatever its date style.
+The families, their tables and key kinds are the registry's declarations
+compiled into the watcher. Coverage is computed from the bounds by the
+registry's own rules (`PartitionFamily.Runway`). Every tunable is a field of
+`PartitionRunwaySettings`.
+
+Synthetic controls: a plain family, a healthy runway, one range short, a gap,
+an uncovered current range, a mixed layout, a DEFAULT partition that covers
+nothing, malformed frames and bounds, the remembered unknown severity and
+inventory authority. A native PostgreSQL 18 test runs the real query against
+a partitioned family and drops its future partitions to fire it.
+
+ACTION: restore `maintain_partition_runway` (task canaries, `[partitions]` log
+lines, lock waits behind its creates). If it cannot run in time, the owner
+runs the registry's runway (`server.MaintainPartitionRunways`); a partition
+written by hand must carry its family's canonical name and bounds. Never add
+a DEFAULT partition a family does not declare. VERIFY: two consecutive
+complete observations with every table of the family covering the current
+range and at least its line after it.
+
+### 2.4q Partition registry retention — expired ranges that were not dropped
+Probe: `partition-retention-blocked`
+
+Why: the registry's retention task (`maintain_partition_retention`, every 15
+minutes) drops a family's range once its upper bound is the family's declared
+`Retention` past and its drop precondition, if any, passes again in the
+transaction that detaches it; a family with its own task (`client_reliability`)
+drops through that task. Size is bounded only by those drops. This probe
+watches every registered family that drops ranges and names no dedicated probe
+(`RetentionSignal`): today `client_reliability` (30 days, `ClientExpiration`,
+the longest a payout behind can hold its cutoff; §2.4g's
+`partition-retention-stuck` judges the computed cutoff sooner) and
+`provider_egress_health_history` (7 days). The contract tables name §2.4i and
+`network_ping` names §2.19c.
+
+Check, on the §2.4p catalog read: a partition of the registry's own naming
+and bounds whose upper bound plus the family's retention plus its grace
+(`MonitorRetentionGrace`, else two ranges) is in the past and that still
+exists. The DEFAULT partition and a kept legacy partition
+(`KeepLegacyPartition`) are never counted.
+
+- `partition-retention-blocked` (WARN, target `<primary>/<family>-partitions`,
+  sustain 1 at an hourly cadence): at least one such partition. The finding
+  names the oldest by its upper bound, the count, and up to 8 blocked
+  partitions.
+- `partition-retention-unobservable` (same target, sustain 2): the §2.4p
+  unknown reasons.
+- A family whose first table is still plain has no partition to drop: the
+  check is healthy before its cutover.
+
+Every tunable (the cadence, the list bound) is a field of
+`PartitionRetentionSettings`; each family's horizon and grace are its
+declaration. Synthetic controls cover the horizon edge, a kept legacy and a
+DEFAULT partition, a plain family and malformed frames; a native test runs the
+real query with a family's retention shortened.
+
+ACTION: read the retention's reason for the oldest blocked range (`[partitions]`
+log lines, or the family's own task's) and resolve the blocker at its owner.
+Check that the task runs. Never drop or detach a family's partition by hand: a
+drop bypasses the family's guards and preconditions. VERIFY: the next runs drop
+the range and a complete observation shows no partition past the horizon plus
+grace.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -8388,6 +8673,29 @@ observations so the completion/post transition is not mistaken for a stopped
 worker. Actual cadence can be lengthened by the monitor global minimum; preserve
 source clocks. Source/query failures retain visibility errors. No full journal
 COUNT or customer identifiers are collected.
+
+Idle partitions (2026-10-24, PARTITION-MAINTENANCE-PLAN.md Part B): the second
+consecutive pass that finds its partition's journal empty schedules the next
+pass 30 s out instead of 2 s and leaves a Redis idle mark (`{task_idle_wake}`
+hash tag, two-minute TTL, renewed by each idle pass). A single empty pass between
+debits keeps the 2 s cadence and sets no mark. After its commit, a settlement or deadline close
+that journaled a debit deletes the mark of each partition it wrote, and the
+producer that deleted it kicks the chain, so the next pass is due at once. The
+kick is a pooled transaction that moves the chain's run_at only if its queue
+key is free; a held key means the chain is being claimed, finished or
+rescheduled, which covers the debit. An active partition has no mark: its
+producers pay one Redis round trip and write nothing to the queue, and
+concurrent producers coalesce into one kick. The idle pass sets its mark only after its finishing commit and
+then reads the journal again, so a debit committed in between still wakes it.
+Without a kick (Redis unavailable, a lost post, a producer from an older
+build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
+60 s WARN; the bands are unchanged. An empty partition samples
+`urnetwork_transfer_debit_oldest_seconds` only every 30 s, so its dashboard
+observation age reads up to about 30 s while healthy.
+`urnetwork_task_idle_wake_total{outcome}` counts marks (`marked`), marks
+cleared by a resumed pass (`resumed`), kicks (`kicked`), producer wakes of
+active chains (`active`), cleared marks whose queue key was held (`busy`) or
+whose chain was already due (`due`), and Redis or queue failures (`error`).
 
 `urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
 `flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
@@ -8544,8 +8852,11 @@ protects the grant from expiry and shard deletion.
 
 The probe uses 48 indexed oldest-row seeks: all 16 partitions and each finite
 state `none`, `accounting`, `operational`, including rows whose next attempt is
-in the future. Pending age warns at 60 seconds; any retained accounting or
-operational failure warns immediately. Any age at 300 seconds pages. These are
+in the future. Pending age warns at 90 seconds: an empty partition's
+dispatcher runs every 30 s (2026-10-24), and the payer turn it publishes waits
+its 30 s collection window, so a new intent can be 60 s old before its first
+attempt. Any retained accounting or operational failure warns immediately.
+Any age at 300 seconds pages. These are
 initial design escalation bands, not measured Main capacity. Every partition
 must share a source clock within 30 seconds. Partial, duplicate, malformed or
 stale evidence is unknown. Before schema 763 the probe is inapplicable; a missing
@@ -8558,8 +8869,12 @@ wait 30 seconds. Neither is a verified close. The original error remains logged,
 and this signal retains the unresolved financial state between retries. The
 original 64-visit page advances past busy/failed keys and persists its composite
 cursor. Immediate continuation requires successful progress; otherwise normal
-scheduling waits two seconds. The database loop has a 15-second context and
-individual worker statements use 2-second statement / 250ms lock timeouts.
+scheduling waits two seconds, or thirty from the second consecutive pass that
+began fresh payer, source and registration rounds and found nothing. Legacy
+enqueuers do not kick the dispatcher; the scheduled-close handoff and expiry
+recovery wake it at once through the RunOnce merge. The database loop has a
+15-second context and individual worker statements use 2-second statement /
+250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
 The current 256-visit and payer-turn profiles below supersede the historical
@@ -34773,10 +35088,15 @@ Both registered consumers retain that unknown through their accept filters;
   unvisited work remains unknown, and missing findings do not clear under
   partial coverage. Restore complete observations before claiming recovery.
 
-Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence):
-claim with a future release_time whose keepalive (claim_time refresh every
-~10s while running) has been silent > 2 minutes = unhealthy timestamp refresh,
-not proof that its worker or session is gone.
+Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence): a
+held claim whose keepalive (claim_time refresh every ~10s while running) has
+been silent > 2 minutes, during the five minutes after that heartbeat or an
+older claim's longer lease = unhealthy timestamp refresh, not proof that its
+worker or session is gone. A claim or heartbeat leaves release_time at least
+2.5 minutes after claim_time and a handback sets it to the handback time, so
+the probe counts a row as held while the two are more than two minutes apart.
+Since 2026-10-24 a stalled claim's release_time can lapse before those five
+minutes end; the probe keeps watching it until they do.
 ```sql
 -- claims held with a future release: normal while a task RUNS; suspect when
 -- the claiming container is gone (correlate with deploys/restarts)
@@ -34795,7 +35115,11 @@ ORDER BY release_time DESC;
   can be a temporarily stranded claim. Current binaries cap release_time at five
   minutes after the last heartbeat regardless of run_max_time_seconds, so the
   chain becomes reconsiderable in at most five minutes after its direct
-  ownership session disappears, instead of 30min–24h. A
+  ownership session disappears, instead of 30min–24h. Since 2026-10-24 a
+  heartbeat extends release_time only once less than half the lease remains,
+  so a live claim shows `lease_remaining_s` between about 150 and 300 and a
+  dead owner's claim can lapse sooner than five minutes after its final
+  heartbeat. A
   direct-postgres session advisory lock remains held while a worker is alive,
   so a starved heartbeat alone cannot create a duplicate; PostgreSQL drops the
   lock with the dead worker's connection. A lease remaining far beyond five

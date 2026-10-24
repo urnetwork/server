@@ -148,6 +148,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		}},
 		{target: task.NewTaskTarget(work.CloseExpiredNetworkClientHandlers), schedule: work.ScheduleCloseExpiredNetworkClientHandlers},
 		{target: task.NewTaskTarget(work.RemoveDisconnectedNetworkClients), schedule: work.ScheduleRemoveDisconnectedNetworkClients},
+		{target: task.NewTaskTarget(work.RemoveRetiredHostedNetworkClients), schedule: work.ScheduleRemoveRetiredHostedNetworkClients},
+		{target: task.NewTaskTarget(work.RemoveGoneStClientKeyHistory), schedule: work.ScheduleRemoveGoneStClientKeyHistory},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
@@ -171,8 +173,9 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
 			work.ScheduleDbMaintenance(clientSession, tx, 0)
 		}},
+		// the churn tables' vacuum, which DbMaintenance no longer runs
+		{target: task.NewTaskTarget(work.VacuumHotTables), schedule: work.ScheduleVacuumHotTables},
 		{target: task.NewTaskTarget(work.WarmNetworkGetProviderLocations), schedule: work.ScheduleWarmNetworkGetProviderLocations},
-		{target: task.NewTaskTarget(work.RemoveExpiredAuthAttempts), schedule: work.ScheduleRemoveExpiredAuthAttempts},
 		{target: task.NewTaskTarget(work.RemoveExpiredWalletAuthChallenges), schedule: work.ScheduleRemoveExpiredWalletAuthChallenges},
 		{target: task.NewTaskTarget(work.RemoveExpiredWalletNonces), schedule: work.ScheduleRemoveExpiredWalletNonces},
 		{target: task.NewTaskTarget(work.RemoveExpiredProviderEgressLocations), schedule: work.ScheduleRemoveExpiredProviderEgressLocations},

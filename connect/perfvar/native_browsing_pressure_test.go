@@ -31,6 +31,7 @@ const nativeBrowsingPressureReportByteLimit = 128 * 1024
 type nativeBrowsingRunSettings struct {
 	maxLivePages                int
 	pressure                    *nativeBrowsingPressureObservation
+	nextNavigationOverlap       bool
 	originListenerForTest       func(net.Listener)
 	originServerTlsForTest      *tls.Config
 	originClientTlsForTest      *tls.Config
@@ -53,6 +54,9 @@ func (self nativeBrowsingRunSettings) validate() error {
 	if self.maxLivePages < 2 || nativeBrowsingOriginCount < self.maxLivePages {
 		return errors.New("native browsing live-page window must be between two and four")
 	}
+	if self.nextNavigationOverlap && (self.pressure == nil || self.maxLivePages != nativeBrowsingOriginCount) {
+		return errors.New("next-navigation body overlap requires the four-page pressure workload")
+	}
 	return nil
 }
 
@@ -69,11 +73,13 @@ func nativeBrowsingFinalPageStart(livePages int) int {
 func nativeBrowsingReleasePages(pages []*nativeBrowsingPageState) {
 	for _, page := range pages {
 		page.releaseAssets()
+		page.nextNavigation.release()
 	}
 }
 
 // Both modes announce the same written prefix. Only the clean ordering control
-// waits for retirement; pressure immediately streams the rest through the link.
+// waits for retirement. Revised pressure streams one image up to its final
+// fragment, then waits for the next navigation's handoff, independently of age.
 func nativeBrowsingWriteAssetSuffix(writer http.ResponseWriter, requestCtx, workCtx context.Context, state *nativeBrowsingPageState, body []byte, asset int, streaming bool, progress *nativeBrowsingRequestProgress) bool {
 	count, err := writer.Write(body[:nativeBrowsingHeldPrefixBytes])
 	progress.recordServerWrite(nativeBrowsingHeldPrefixBytes, count, err)
@@ -95,8 +101,25 @@ func nativeBrowsingWriteAssetSuffix(writer http.ResponseWriter, requestCtx, work
 		case <-state.release:
 		}
 	}
-	count, err = writer.Write(body[nativeBrowsingHeldPrefixBytes:])
-	progress.recordServerWrite(len(body)-nativeBrowsingHeldPrefixBytes, count, err)
+	suffixStart := nativeBrowsingHeldPrefixBytes
+	if streaming && asset == 2 && state.nextNavigation != nil {
+		suffixStart = len(body) - nativeBrowsingHeldPrefixBytes
+		count, err = writer.Write(body[nativeBrowsingHeldPrefixBytes:suffixStart])
+		progress.recordServerWrite(suffixStart-nativeBrowsingHeldPrefixBytes, count, err)
+		if err != nil || count != suffixStart-nativeBrowsingHeldPrefixBytes {
+			return requestCtx.Err() != nil
+		}
+		flusher.Flush()
+		select {
+		case <-requestCtx.Done():
+			return true
+		case <-workCtx.Done():
+			return true
+		case <-state.nextNavigation.released:
+		}
+	}
+	count, err = writer.Write(body[suffixStart:])
+	progress.recordServerWrite(len(body)-suffixStart, count, err)
 	return requestCtx.Err() != nil
 }
 
@@ -121,6 +144,7 @@ type nativeBrowsingRequestProgress struct {
 	requestWrites          atomic.Int64
 	requestWriteErrors     atomic.Int64
 	responseStatus         atomic.Int64
+	nextNavigation         *nativeBrowsingNextNavigationBody
 }
 
 // Reading, not request completion, advances the consumed-body counters.
@@ -135,6 +159,9 @@ func (self *nativeBrowsingProgressReader) Read(buffer []byte) (int, error) {
 	self.pressure.receivedBytes.Add(int64(count))
 	if self.progress != nil {
 		self.progress.receivedBytes.Add(int64(count))
+		if count != 0 {
+			self.progress.nextNavigation.signalBodyProgress()
+		}
 	}
 	return count, err
 }
@@ -312,6 +339,7 @@ func nativeBrowsingCaptureBoundary(path *fullTunPath, page int, pressure *native
 // Exactly 100 compact navigation records and two boundary snapshots are kept.
 // Atomic request counters have one fixture lifetime and no history or payload.
 type nativeBrowsingPressureObservation struct {
+	WorkloadVersion                string                                                 `json:"workload_version"`
 	Profile                        networkProfile                                         `json:"device_access"`
 	ProviderProfile                string                                                 `json:"provider_access"`
 	MaximumLivePages               int                                                    `json:"maximum_live_pages"`
@@ -452,6 +480,12 @@ func (self *nativeBrowsingPressurePlan) hooks() *fullTunConstructionTestHooks {
 	}
 }
 
+// The ordinary pressure root explicitly opts into the revised image-tail gate.
+// Other users of streaming bodies retain the original completion policy.
+func (self *nativeBrowsingPressurePlan) runSettings(pressure *nativeBrowsingPressureObservation) nativeBrowsingRunSettings {
+	return nativeBrowsingRunSettings{maxLivePages: self.maxLivePages, pressure: pressure, nextNavigationOverlap: true}
+}
+
 // Four pages accumulate across the existing cell-edge access shape. The
 // provider stays colocated; bodies stream while new HTML requests are offered.
 func TestFullTunH1NativeRapidBrowsingPressure100Pages(t *testing.T) {
@@ -470,7 +504,7 @@ func TestFullTunH1NativeRapidBrowsingPressure100Pages(t *testing.T) {
 			MaximumLivePages: plan.maxLivePages, HttpConnectionsPerOrigin: nativeBrowsingConnectionsPerOrigin,
 			slowNavigation: sdk.DefaultDeviceLocalSettings().SendTimeout,
 			PhaseNames:     [8]string{"get_conn", "got_conn", "connect_start", "connect_done", "tls_start", "tls_done", "wrote_request", "first_byte"},
-			Scope:          "host full-TUN/H1; one shared 2-MiB retained retry budget per endpoint, lane 0; four origins with four connections each and at most four live pages; older bodies stream before retirement; 100 deterministic 50..300-KiB pages; inner plain HTTP/1.1 and synthetic local listeners; no DNS; 300-second application deadline. Connection events may include losing speculative dials. Aggregate counters are navigation-return snapshots. Server writes are local HTTP acceptance; Body.Close is not a socket-close receipt. Process memory is test attribution, not mobile qualification or a throughput baseline."}
+			Scope:          "host full-TUN/H1; one shared 2-MiB retained retry budget per endpoint, lane 0; four origins with four connections each and at most four live pages; revised next-navigation-image-v2 holds only the final 1 KiB of image 2 on pages 0..98 until the next HTML handoff; other body bytes stream before retirement; 100 deterministic 50..300-KiB pages; inner plain HTTP/1.1 and synthetic local listeners; no DNS; 300-second application deadline. Connection events may include losing speculative dials. Aggregate counters are navigation-return snapshots. Server writes are local HTTP acceptance; Body.Close is not a socket-close receipt. Process memory is test attribution, not mobile qualification or a throughput baseline."}
 		for index := range pressure.Navigations {
 			pressure.Navigations[index].ConnectionAcquireNs = -1
 			pressure.Navigations[index].WrittenToFirstByteNs = -1
@@ -502,14 +536,14 @@ func TestFullTunH1NativeRapidBrowsingPressure100Pages(t *testing.T) {
 			t.Logf("[perfvar] native-browsing-pressure100 %s", encoded)
 		}()
 		if err := measureNativeBrowsing100WithSettings(fixture.ctx, fixture.path, observation,
-			nativeBrowsingRunSettings{maxLivePages: plan.maxLivePages, pressure: pressure}); err != nil {
+			plan.runSettings(pressure)); err != nil {
 			t.Fatal(err)
 		}
 		if err := nativeBrowsingPressureLatencyError(observation); err != nil {
 			t.Fatal(err)
 		}
-		if observation.OverlapProofs == 0 || pressure.MaximumPriorRemainingBodyBytes == 0 {
-			t.Fatal("pressure browsing never offered a navigation before older bodies finished")
+		if observation.OverlapProofs != nativeBrowsingPageCount-1 || pressure.MaximumPriorRemainingBodyBytes == 0 {
+			t.Fatalf("pressure browsing body overlap: proofs=%d want=%d", observation.OverlapProofs, nativeBrowsingPageCount-1)
 		}
 		if err := fixture.path.verifyRoute(); err != nil {
 			t.Fatal(err)

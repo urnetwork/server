@@ -122,6 +122,80 @@ func DbMaintenancePost(
 	return nil
 }
 
+// vacuum hot tables
+
+// A run's state goes into the next run's arguments: the table it resumes at,
+// each table's last finished vacuum and analyze, and the last index pass (see
+// server.VacuumHotTables). A chain scheduled fresh starts with none.
+type VacuumHotTablesArgs struct {
+	State server.DbHotVacuumState `json:"state"`
+}
+
+type VacuumHotTablesResult struct {
+	State server.DbHotVacuumState `json:"state"`
+	// when the run started, which times the next run
+	StartTime time.Time `json:"start_time"`
+}
+
+func ScheduleVacuumHotTables(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleVacuumHotTables(clientSession, tx, &VacuumHotTablesArgs{}, server.NowUtc().Add(1*time.Minute))
+}
+
+// One run is active at a time: the run-once key keeps one row, and the
+// claim's ownership lock one execution.
+func scheduleVacuumHotTables(clientSession *session.ClientSession, tx server.PgTx, args *VacuumHotTablesArgs, runAt time.Time) {
+	settings := server.DefaultDbHotVacuumSettings()
+	task.ScheduleTaskInTx(
+		tx,
+		VacuumHotTables,
+		args,
+		clientSession,
+		task.RunOnce("vacuum_hot_tables"),
+		task.RunAt(runAt),
+		// a run starts no work past its budget; this only bounds a run whose
+		// cleanup outlives it
+		task.MaxTime(2*settings.Interval),
+	)
+}
+
+// The next run starts an interval after this one started, so the cadence holds
+// while runs take less than the interval, and at once after a longer one.
+func vacuumHotTablesNextRunAt(startTime time.Time, now time.Time, interval time.Duration) time.Time {
+	runAt := startTime.Add(interval)
+	if runAt.Before(now) {
+		return now
+	}
+	return runAt
+}
+
+func VacuumHotTables(
+	vacuumHotTables *VacuumHotTablesArgs,
+	clientSession *session.ClientSession,
+) (*VacuumHotTablesResult, error) {
+	startTime := server.NowUtc()
+	state := server.VacuumHotTables(clientSession.Ctx, vacuumHotTables.State, server.DefaultDbHotVacuumSettings())
+	return &VacuumHotTablesResult{
+		State:     state,
+		StartTime: startTime,
+	}, nil
+}
+
+func VacuumHotTablesPost(
+	vacuumHotTables *VacuumHotTablesArgs,
+	vacuumHotTablesResult *VacuumHotTablesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	settings := server.DefaultDbHotVacuumSettings()
+	scheduleVacuumHotTables(
+		clientSession,
+		tx,
+		&VacuumHotTablesArgs{State: vacuumHotTablesResult.State},
+		vacuumHotTablesNextRunAt(vacuumHotTablesResult.StartTime, server.NowUtc(), settings.Interval),
+	)
+	return nil
+}
+
 // warm email
 
 type WarmEmailArgs struct {

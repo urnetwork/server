@@ -2,8 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -29,6 +30,39 @@ import (
 // Before the cutover it only guards a prepared cutover from outliving its
 // week, and removes evidence.
 
+// The contract tables' family in the partition registry
+// (PARTITION-MAINTENANCE-PLAN.md A7, db_partition_registry.go). This task keeps
+// its own pass: it analyzes and retires through the family, and keeps the
+// archive step, the evidence deletes and the cutover guard. The registry's
+// runway task creates its weeks ahead too, apart from the archive work.
+// Registered from init, since its create refers back to the family.
+var contractPartitionFamily *PartitionFamily
+
+func init() {
+	contractPartitionFamily = RegisterPartitionFamily(&PartitionFamily{
+		Name:                  "contract",
+		Description:           "the six contract tables, weekly by contract_id; maintain_contract_partitions analyzes and retires them",
+		Tables:                append([]string{}, ContractPartitionTables...),
+		KeyColumn:             "contract_id",
+		KeyKind:               PartitionKeyId,
+		Granularity:           PartitionGranularityWeekly,
+		AheadRanges:           ContractPartitionAheadWeeks,
+		Retention:             ContractRetention,
+		LeafAnalyzeDelay:      contractPartitionAnalyzeDelay,
+		AnalyzeByOwnTask:      true,
+		RetireByOwnTask:       true,
+		ReindexExempt:         true,
+		MonitorRunwayRanges:   2,
+		MonitorRetentionGrace: 2 * contractPartitionWeek,
+		RunwaySignal:          "2.4h",
+		RetentionSignal:       "2.4i",
+		CreateLeaf:            createContractWeekLeaf,
+		DropPrecondition: func(ctx context.Context, conn PgQuerier, r PartitionRange) string {
+			return contractWeekBlocker(ctx, conn, contractWeekOfRange(r))
+		},
+	})
+}
+
 // Where an unfinished pass resumes.
 type ContractRetentionCursor struct {
 	// the partition whose usage proof is being archived, and the next id
@@ -36,6 +70,9 @@ type ContractRetentionCursor struct {
 	ArchiveCursor    *Id    `json:"archive_cursor,omitempty"`
 	// the next close evidence contract id to consider
 	EvidenceCursor *Id `json:"evidence_cursor,omitempty"`
+	// the close evidence partition that id is in, once the evidence is
+	// partitioned (RemoveExpiredCloseEvidence)
+	EvidenceLeaf string `json:"evidence_leaf,omitempty"`
 	// the week whose parents were last analyzed
 	AnalyzedWeek string `json:"analyzed_week,omitempty"`
 }
@@ -54,6 +91,8 @@ type ContractPartitionReport struct {
 	FutureWeeks int
 	// work remains for an immediate rerun
 	More bool
+	// a prepared close evidence cutover outlived its week's margin
+	AbandonedEvidenceCutover bool
 }
 
 const contractArchiveBatchSize = 10000
@@ -69,7 +108,11 @@ func contractPartitionGlogf(format string, args ...any) {
 }
 
 // budget bounds the run: two thirds for the partitions and the rest for the
-// close evidence, so neither backlog starves the other.
+// close evidence, so neither backlog starves the other. The close evidence's
+// own partitions (db_contract_close_evidence_partition.go) are created and
+// dropped by the partition registry's tasks; this task keeps their row
+// deletes and abandons a close evidence cutover that outlives its week's
+// margin, as it does the contract cutover.
 func MaintainContractPartitions(ctx context.Context, now time.Time, cursor ContractRetentionCursor, budget time.Duration) (report *ContractPartitionReport, next ContractRetentionCursor) {
 	report = &ContractPartitionReport{Blocked: map[string]string{}}
 	next = cursor
@@ -98,140 +141,76 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 		}
 	}
 
-	removed, evidenceCursor, more := RemoveExpiredCloseEvidence(ctx, now, cursor.EvidenceCursor, time.Now().Add(budget/3))
+	report.AbandonedEvidenceCutover = abandonStaleCloseEvidenceCutover(ctx, now, DefaultCloseEvidencePartitionSettings(), contractPartitionGlogf)
+
+	removed, evidenceCursor, more := RemoveExpiredCloseEvidence(
+		ctx,
+		now,
+		CloseEvidenceRemovalCursor{Leaf: cursor.EvidenceLeaf, ContractId: cursor.EvidenceCursor},
+		time.Now().Add(budget/3),
+	)
 	report.EvidenceRemoved = removed
-	next.EvidenceCursor = evidenceCursor
+	next.EvidenceLeaf = evidenceCursor.Leaf
+	next.EvidenceCursor = evidenceCursor.ContractId
 	if more {
 		report.More = true
 	}
 	return
 }
 
-// Creates the missing partitions of the current week and the weeks ahead, and
-// counts the weeks after the current one that have one in every table. Until
-// the cutover week starts, the legacy partition covers the weeks before it.
+// Creates the missing partitions of the current week and the weeks ahead
+// through the registry (EnsureRunway), and counts the weeks after the current
+// one that have one in every table. Until the cutover week starts, the legacy
+// partition covers the weeks before it.
 func ensureContractWeekPartitions(ctx context.Context, now time.Time) (created []string, futureWeeks int, err error) {
-	currentWeek := ContractPartitionWeekStart(now)
-	futureWeeks = -1
-	for _, table := range ContractPartitionTables {
-		partitions, listErr := listContractPartitions(ctx, table)
-		if listErr != nil {
-			return created, 0, listErr
-		}
-		existing := map[string]bool{}
-		var legacyUpper time.Time
-		// new partitions take the newest partition's storage settings, so a
-		// setting changed there carries forward
-		template := ContractLegacyPartitionName(table)
-		var newest time.Time
-		for _, partition := range partitions {
-			existing[partition.name] = true
-			if partition.legacy {
-				legacyUpper = partition.upper
-			} else if newest.Before(partition.weekStart) {
-				newest = partition.weekStart
-				template = partition.name
-			}
-		}
-		covered := func(weekStart time.Time) bool {
-			return existing[ContractPartitionName(table, weekStart)] || !legacyUpper.Before(weekStart.Add(contractPartitionWeek))
-		}
-		var parentShape *contractTableShape
-		var templateShape *contractTableShape
-		for week := 0; week <= ContractPartitionAheadWeeks; week += 1 {
-			weekStart := currentWeek.Add(time.Duration(week) * contractPartitionWeek)
-			name := ContractPartitionName(table, weekStart)
-			if covered(weekStart) {
-				continue
-			}
-			if parentShape == nil {
-				MaintenanceDb(ctx, func(conn PgConn) {
-					parentShape = readContractTableShape(ctx, conn, table)
-					templateShape = readContractTableShape(ctx, conn, template)
-				})
-				if parentShape == nil || templateShape == nil {
-					return created, 0, fmt.Errorf("%s or %s is missing", table, template)
-				}
-			}
-			statements, sqlErr := contractWeekPartitionSql(table, parentShape, table, weekStart, templateShape.reloptions, parentShape, table)
-			if sqlErr != nil {
-				return created, 0, sqlErr
-			}
-			if execErr := contractPartitionExec(ctx, append([]string{`SET LOCAL lock_timeout = '5s'`}, statements...)); execErr != nil {
-				// retried on the next run
-				err = fmt.Errorf("create %s: %w", name, execErr)
-				continue
-			}
-			existing[name] = true
-			created = append(created, name)
-		}
-		tableFutureWeeks := 0
-		for week := 1; covered(currentWeek.Add(time.Duration(week) * contractPartitionWeek)); week += 1 {
-			tableFutureWeeks += 1
-		}
-		if futureWeeks < 0 || tableFutureWeeks < futureWeeks {
-			futureWeeks = tableFutureWeeks
+	runway := contractPartitionFamily.EnsureRunway(ctx, now)
+	if 0 < len(runway.Errors) {
+		// retried on the next run
+		err = errors.New(strings.Join(runway.Errors, "; "))
+	}
+	return runway.Created, runway.FutureRanges, err
+}
+
+// Creates table's partition for the week r (the family's CreateLeaf): an empty
+// table with the parent's columns and checks, the storage settings of the
+// newest partition (so a setting changed there carries forward) and the
+// TRUNCATE guards, attached so the parent sees only SHARE UPDATE EXCLUSIVE.
+func createContractWeekLeaf(ctx context.Context, table string, r PartitionRange) error {
+	partitions, err := listContractPartitions(ctx, table)
+	if err != nil {
+		return err
+	}
+	template := ContractLegacyPartitionName(table)
+	var newest time.Time
+	for _, partition := range partitions {
+		if !partition.legacy && newest.Before(partition.weekStart) {
+			newest = partition.weekStart
+			template = partition.name
 		}
 	}
-	return
+	var parentShape *contractTableShape
+	var templateShape *contractTableShape
+	MaintenanceDb(ctx, func(conn PgConn) {
+		parentShape = readContractTableShape(ctx, conn, table)
+		templateShape = readContractTableShape(ctx, conn, template)
+	})
+	if parentShape == nil || templateShape == nil {
+		return fmt.Errorf("%s or %s is missing", table, template)
+	}
+	statements, err := contractWeekPartitionSql(table, parentShape, table, r.Lower, templateShape.reloptions, parentShape, table)
+	if err != nil {
+		return err
+	}
+	lockTimeout := contractPartitionFamily.settings().CreateLockTimeout
+	return contractPartitionExec(ctx, append([]string{fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeout.Milliseconds())}, statements...))
 }
 
 // Analyzes each weekly partition once its week has settled, and the parents
-// once a week.
+// once a week, through the registry.
 func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedWeek string, deadline time.Time) (analyzed []string, nextAnalyzedWeek string) {
-	nextAnalyzedWeek = analyzedWeek
-	analyze := func(statement string) bool {
-		if err := contractPartitionExec(ctx, []string{`SET LOCAL statement_timeout = 0`, statement}); err != nil {
-			glog.Errorf("[cp]%s: %s\n", statement, err)
-			return false
-		}
-		return true
-	}
-	for _, table := range ContractPartitionTables {
-		partitions, err := listContractPartitions(ctx, table)
-		if err != nil {
-			glog.Errorf("[cp]%s\n", err)
-			continue
-		}
-		for _, partition := range partitions {
-			settled := partition.upper.Add(contractPartitionAnalyzeDelay)
-			if partition.legacy || now.Before(settled) || !time.Now().Before(deadline) {
-				continue
-			}
-			var lastAnalyze *time.Time
-			MaintenanceDb(ctx, func(conn PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`SELECT GREATEST(last_analyze, last_autoanalyze) FROM pg_stat_user_tables WHERE relid = to_regclass($1)`,
-					"public."+partition.name,
-				)
-				WithPgResult(result, err, func() {
-					if result.Next() {
-						Raise(result.Scan(&lastAnalyze))
-					}
-				})
-			})
-			if lastAnalyze != nil && !lastAnalyze.Before(settled) {
-				continue
-			}
-			if analyze(fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(partition.name))) {
-				analyzed = append(analyzed, partition.name)
-			}
-		}
-	}
-	if week := ContractPartitionWeekStart(now).Format(time.DateOnly); week != analyzedWeek && time.Now().Before(deadline) {
-		parents := true
-		for _, table := range ContractPartitionTables {
-			if analyze(fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table))) {
-				analyzed = append(analyzed, table)
-			} else {
-				parents = false
-			}
-		}
-		if parents {
-			nextAnalyzedWeek = week
-		}
-	}
+	analyzed = contractPartitionFamily.AnalyzeClosedLeaves(ctx, now, deadline)
+	parents, nextAnalyzedWeek := contractPartitionFamily.AnalyzeParents(ctx, now, analyzedWeek, deadline)
+	analyzed = append(analyzed, parents...)
 	return
 }
 
@@ -247,6 +226,35 @@ func (self contractWeek) leaf(table string) string {
 		return ContractLegacyPartitionName(table)
 	}
 	return ContractPartitionName(table, self.partition.weekStart)
+}
+
+// The week as the registry's range.
+func (self contractWeek) partitionRange() PartitionRange {
+	if self.partition.legacy {
+		return PartitionRange{Upper: self.partition.upper, Legacy: true}
+	}
+	return PartitionRange{Lower: self.partition.weekStart, Upper: self.partition.upper}
+}
+
+// The week of a registry range of the contract tables.
+func contractWeekOfRange(r PartitionRange) contractWeek {
+	name := ContractLegacyPartitionName("transfer_contract")
+	if !r.Legacy {
+		name = ContractPartitionName("transfer_contract", r.Lower)
+	}
+	week := contractWeek{
+		partition: contractPartition{
+			name:      name,
+			legacy:    r.Legacy,
+			weekStart: r.Lower,
+			upper:     r.Upper,
+		},
+		upper: ContractIdFloor(r.Upper),
+	}
+	if !r.Legacy {
+		week.lower = ContractIdFloor(r.Lower)
+	}
+	return week
 }
 
 // Why an expired week cannot be dropped yet, or "" if it can. Each check
@@ -286,24 +294,16 @@ func contractWeekBlocker(ctx context.Context, conn contractCatalogQuerier, week 
 	return ""
 }
 
+// The weeks whose upper bound is ContractRetention past, oldest first: the
+// registry's expired ranges of the contract tables.
 func expiredContractWeeks(ctx context.Context, now time.Time) (weeks []contractWeek, err error) {
-	partitions, err := listContractPartitions(ctx, "transfer_contract")
+	ranges, err := contractPartitionFamily.ExpiredRanges(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-	for _, partition := range partitions {
-		if now.Before(partition.upper.Add(ContractRetention)) {
-			continue
-		}
-		week := contractWeek{partition: partition, upper: ContractIdFloor(partition.upper)}
-		if !partition.legacy {
-			week.lower = ContractIdFloor(partition.weekStart)
-		}
-		weeks = append(weeks, week)
+	for _, r := range ranges {
+		weeks = append(weeks, contractWeekOfRange(r))
 	}
-	slices.SortFunc(weeks, func(a contractWeek, b contractWeek) int {
-		return a.partition.upper.Compare(b.partition.upper)
-	})
 	return
 }
 
@@ -404,82 +404,88 @@ func retireExpiredContractWeeks(ctx context.Context, now time.Time, cursor Contr
 }
 
 // Detaches and drops the week's six partitions in one transaction, children
-// first. The detach takes a brief ACCESS EXCLUSIVE lock on each parent, so the
-// lock wait is short and a busy run retries next time. Once detached, no
-// statement can reach the partitions, so the blockers are checked again there
-// before the drop.
+// first, through the registry's guarded drop (PartitionFamily.DropRange): the
+// blockers are checked again on the detached partitions, which no statement
+// can reach. A detach takes a brief ACCESS EXCLUSIVE lock on each parent, so
+// the drop first waits out no long transaction that holds a contract table
+// lock, the lock wait is short, and a busy run retries next time.
 func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string, err error) {
-	tables := slices.Clone(ContractPartitionTables)
-	slices.Reverse(tables)
 	if busy, busyErr := contractTablesBusy(ctx, DefaultContractPartitionLockSettings().MaxTransactionAge); busyErr != nil {
 		return nil, busyErr
 	} else if 0 < busy {
 		return nil, fmt.Errorf("%d long transaction(s) hold contract table locks; retried next run", busy)
 	}
-	err = contractPartitionTx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
-		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = '60s'`))
-		for _, table := range tables {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-				"ALTER TABLE public.%s DETACH PARTITION public.%s",
-				quoteIdentifier(table),
-				quoteIdentifier(week.leaf(table)),
-			)))
-		}
-		if blocker := contractWeekBlocker(ctx, tx, week); blocker != "" {
-			panic(fmt.Errorf("%s after detach", blocker))
-		}
-		for _, table := range tables {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(week.leaf(table)))))
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-	for _, table := range tables {
-		dropped = append(dropped, week.leaf(table))
-	}
-	return
+	return contractPartitionFamily.DropRange(ctx, week.partitionRange())
 }
 
 // Deletes close evidence accepted more than ContractRetention ago whose
 // contract is resolved or gone, in batches ordered by contract id. Only a
 // transaction that opts in may delete evidence, and the guard of migration 857
-// admits only rows past the same 91 days. A pass ends when a batch comes up
-// short; the next pass starts over to pick up rows whose contract resolved
-// since.
-func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor *Id, deadline time.Time) (removed int64, next *Id, more bool) {
-	upper := ContractIdFloor(now.Add(-ContractRetention))
-	var from Id
-	if cursor != nil {
-		from = *cursor
+// admits only rows past the same 91 days. Once the evidence is partitioned the
+// pass deletes from the leaves the drop cannot take (closeEvidenceRemovalTargets):
+// the DEFAULT partition, the expired weeks a straggler keeps, and the legacy
+// partition, one leaf after another; a week the drop will take, and a week
+// not yet expired, are left alone. A pass ends when the last leaf's batch
+// comes up short; the next pass starts over to pick up rows whose contract
+// resolved since.
+func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor, deadline time.Time) (removed int64, next CloseEvidenceRemovalCursor, more bool) {
+	targets, err := closeEvidenceRemovalTargets(ctx, now)
+	if err != nil {
+		glog.Errorf("[cp]close evidence retention: %s\n", err)
+		return 0, cursor, false
 	}
+	start, from := cursor.resumeIn(targets)
+	for _, target := range targets[start:] {
+		count, last, complete, ok := removeExpiredCloseEvidenceFrom(ctx, target, now, from, deadline)
+		removed += count
+		if !ok {
+			return removed, cursor, false
+		}
+		if !complete {
+			return removed, CloseEvidenceRemovalCursor{Leaf: target, ContractId: &last}, true
+		}
+		from = Id{}
+	}
+	return removed, CloseEvidenceRemovalCursor{}, false
+}
+
+// Deletes the expired evidence of one leaf (or of the plain table) from the
+// contract id from, until deadline. complete says a batch came up short, and
+// ok is false when a batch failed; otherwise last is where the leaf resumes.
+func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.Time, from Id, deadline time.Time) (removed int64, last Id, complete bool, ok bool) {
+	upper := ContractIdFloor(now.Add(-ContractRetention))
+	last = from
 	for time.Now().Before(deadline) {
 		var count int64
-		var last Id
+		batchLast := last
 		err := contractPartitionTx(ctx, func(tx PgTx) {
+			count = 0
+			batchLast = last
 			RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.close_evidence_retention = 'on'`))
 			result, err := tx.Query(
 				ctx,
-				`
-				WITH batch AS (
-					SELECT evidence.client_id, evidence.report_id
-					FROM contract_close_report_evidence evidence
-					WHERE $1 <= evidence.contract_id AND evidence.contract_id < $2
-						AND evidence.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days'
-						AND NOT EXISTS (
-							SELECT 1 FROM transfer_contract
-							WHERE transfer_contract.contract_id = evidence.contract_id AND transfer_contract.outcome IS NULL
-						)
-					ORDER BY evidence.contract_id
-					LIMIT $3
-				)
-				DELETE FROM contract_close_report_evidence evidence
-				USING batch
-				WHERE evidence.client_id = batch.client_id AND evidence.report_id = batch.report_id
-				RETURNING evidence.contract_id
-				`,
-				from,
+				fmt.Sprintf(
+					`
+					WITH batch AS (
+						SELECT evidence.client_id, evidence.report_id
+						FROM public.%[1]s evidence
+						WHERE $1 <= evidence.contract_id AND evidence.contract_id < $2
+							AND evidence.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days'
+							AND NOT EXISTS (
+								SELECT 1 FROM transfer_contract
+								WHERE transfer_contract.contract_id = evidence.contract_id AND transfer_contract.outcome IS NULL
+							)
+						ORDER BY evidence.contract_id
+						LIMIT $3
+					)
+					DELETE FROM public.%[1]s evidence
+					USING batch
+					WHERE evidence.client_id = batch.client_id AND evidence.report_id = batch.report_id
+					RETURNING evidence.contract_id
+					`,
+					quoteIdentifier(leaf),
+				),
+				last,
 				upper,
 				closeEvidenceRetentionBatchSize,
 			)
@@ -488,21 +494,21 @@ func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor *Id, 
 					var contractId Id
 					Raise(result.Scan(&contractId))
 					count += 1
-					if last.Less(contractId) {
-						last = contractId
+					if batchLast.Less(contractId) {
+						batchLast = contractId
 					}
 				}
 			})
 		})
 		if err != nil {
-			glog.Errorf("[cp]close evidence retention: %s\n", err)
-			return removed, cursor, false
+			glog.Errorf("[cp]close evidence retention of %s: %s\n", leaf, err)
+			return removed, last, false, false
 		}
 		removed += count
+		last = batchLast
 		if count < closeEvidenceRetentionBatchSize {
-			return removed, nil, false
+			return removed, last, true, true
 		}
-		from = last
 	}
-	return removed, &from, true
+	return removed, last, false, true
 }

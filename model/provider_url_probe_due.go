@@ -271,7 +271,7 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 	if ordinaryExpiryComplete {
 		_ = writeProviderUrlProbeOrdinaryExpiry(ctx, providerUrlProbeOrdinaryExpiryKey(shardIndex, shardCount), now)
 	}
-	// Seven-day receipt storage cleanup has a durable Taskworker owner. Current
+	// Two-day receipt storage cleanup has a durable Taskworker owner. Current
 	// completion expiry above and measured-history clock predicates retain all
 	// admission authority even when that independent cleanup is delayed;
 	// ordinary admission reads neither completed counts nor their expiry.

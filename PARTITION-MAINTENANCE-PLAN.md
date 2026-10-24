@@ -227,6 +227,33 @@ table can no longer starve these tables. Compact, they are each under 10 GB,
 so a pass over all of them takes seconds. A plain vacuum stops the heap from
 growing, but does not shrink a time-ordered index (A2).
 
+Implemented (2026-10-24): `VacuumHotTables` (`db_maintenance_hot_vacuum.go`),
+run by the run-once chain `vacuum_hot_tables`
+(`taskworker/work/maintenance_work.go`), armed by `InitTasks` and in the
+subnet-operator workload.
+- Each run gives the 12 tables a turn in order with
+  `VACUUM (SKIP_LOCKED, VERBOSE, SKIP_DATABASE_STATS)`, adding ANALYZE once a
+  table's last one is an hour old, on a direct maintenance session.
+  `statement_timeout` is the smaller of 2 minutes and what is left of the
+  4-minute budget, set per statement and reset before the session goes back to
+  the pool; a session that cannot be reset is discarded.
+- The resume table, each table's last finished vacuum and analyze, and the last
+  index pass travel in the task arguments. A timed-out table gives way to the
+  next; a statement the budget cut short keeps its table's turn.
+- The VERBOSE summaries arrive through a per-connection notice dispatcher that
+  only the maintenance pool installs (`db_notice.go`).
+- A table with no finished vacuum for an hour logs a warning and counts
+  `urnetwork_db_hot_vacuum_stale_total`; every turn counts
+  `urnetwork_db_hot_vacuum_attempts_total` by outcome.
+- At 10,000 rows not yet removable in a table, the run logs the oldest holder of
+  each kind (session, slot `xmin`, slot `catalog_xmin`, prepared transaction) by
+  pid, application name, state and ages only.
+- `DbMaintenance` no longer vacuums `pending_task`.
+- Deviations: `SKIP_DATABASE_STATS` is added, since the database-wide frozen-xid
+  update scans `pg_class` and waits for a lock SKIP_LOCKED does not skip, and
+  autovacuum keeps it current. The summaries are matched in English, so a
+  translated `lc_messages` shows as every table going stale.
+
 ### A2. Rebuild a churn table's bloated indexes
 
 The priority rebuild already does the right thing for seven contract indexes:
@@ -250,6 +277,22 @@ Extend it to every index of the A1 tables:
   - defer under load or long transactions (`dbMaintenanceDeferReason`);
   - drop `_ccnew` debris after an interrupted rebuild.
 
+Implemented (2026-10-24): the hot vacuum's hourly pass
+(`dbHotVacuumRun.rebuildBloatedIndexes`).
+- It measures every valid index of the 12 tables, each leaf of a partitioned
+  one on its own (`dbMaintenanceTableIndexSizes`), and rebuilds those at 2× their
+  compact estimate with 64 MiB to reclaim: on by default, most reclaimable first,
+  at most 3 a pass, within what is left of the run budget.
+- Guards: the load guard (a transaction older than a minute defers the pass, and
+  the next run retries it), a skip while the table is vacuumed,
+  `dbMaintenanceAwaitTableUnlocked` through `dbMaintenanceRunReindex`, and debris
+  dropped before and after each rebuild, on a detached context after a failure.
+- An index on a heap over 8 GiB, which a rebuild may not read twice within the
+  budget, is left to the rotation. The seven priority indexes keep their opt-in.
+- Every REINDEX (rotation, priority and hourly) runs under
+  `WithoutTransactionTimeout` (`db_transaction_timeout.go`, whose
+  implementation `feat/pm-horizon` owns).
+
 ### A3. Fix the rotation's size bound and skip list
 
 - **Bound:** measure what a rebuild reads and writes:
@@ -268,6 +311,14 @@ Extend it to every index of the A1 tables:
   still plan "a one-time pg_repack". Replace both with the owner's rule: a
   maintenance-window VACUUM FULL until PostgreSQL 19, then its built-in online
   compaction (A4).
+
+Implemented (2026-10-24):
+- `dbMaintenanceTableBytes` is the heap and toast (`pg_table_size`) plus each
+  index's compact estimate, or its size on disk when it has none (not a btree,
+  or never vacuumed or analyzed).
+- `network_client_connection` left `dbMaintenanceSkipReindexTables`, and the
+  monitor's `db-maintenance-legacy-reindex` pattern no longer pages on it.
+- Both comments now state the owner's rule.
 
 ### A4. Measure bloat now; compact online after PostgreSQL 19
 
@@ -329,6 +380,49 @@ Extend it to every index of the A1 tables:
 - **Hand-off:** a table over 50 GB with persistent bloat goes to Part C or D,
   not to repeated compaction.
 
+**Implemented (2026-10-24): the measurement and its signal.** No compaction.
+- **Measurement:** `MeasureDbBloat` (`db_bloat_measure.go`) runs as the weekly
+  run-once chain `measure_db_bloat` (`taskworker/work/db_bloat_measure_work.go`),
+  at Sunday 12:00 UTC, away from the rotation's slots.
+  - Startup seeds the chain only when it has no task, so a deploy never pulls
+    a scheduled run forward. A new chain runs 10 minutes after its deploy.
+  - Each week's first run records the catalog pass: every index, TOAST indexes
+    included, against `dbMaintenanceEstimateBtreeBytes`, and each heap or TOAST
+    relation that is not scanned against the statistics estimate.
+  - Then heap and TOAST relations under 50 GB are scanned with
+    `pgstattuple_approx`, by table name from a cursor, under a one-hour weekly
+    budget. A run that spends it leaves the cursor for next week.
+  - Each scan is bounded at 10 minutes, below A6's 15-minute horizon warning,
+    on a maintenance session exempt from `transaction_timeout` (a minimal
+    `WithoutTransactionTimeout`; A6's version replaces it). The rotation's load
+    check (`dbMaintenanceDeferReason`) defers it, with the priority rebuild's
+    one-hour age bound, since a scan waits for no snapshot. A deferral retries
+    the same week an hour later.
+  - A scan that times out or fails gets the statistics estimate. A scan
+    refused for privilege ends the scans: the rest of the cycle gets the
+    statistics estimate too.
+- **Raw rows:** `db_bloat_measurement` (new migration), one row per relation
+  and run, with the method, the fallback reason, the scanned share, the
+  pgstattuple fields, the estimate's inputs and the heap's dead and live
+  counters. The task deletes rows after 90 days.
+- **Choices beyond the text:**
+  - Relations under 1 MiB are not measured.
+  - A TOAST relation's statistics estimate is its chunk count at four chunks a
+    page, an upper bound on its compact size.
+  - Reclaimable bytes are capped at the relation's size.
+- **Signal:** SIGNALS.md §2.4k, `table-bloat` (`monitor/signal_table_bloat.go`),
+  hourly.
+  - It warns when a relation has at least 5 GB and half its current size
+    reclaimable, per its newest measurement, less any shrink since.
+  - The 94 GB queue under the 10M dead-row line is its fixture test.
+  - A missing, empty or 9-day-stale table is `table-bloat-unobservable`.
+- **Ops step, not applied:** on main, as a superuser:
+  `GRANT pg_stat_scan_tables TO <the role pg_maintenance.yml connects as>;`
+  - Until then, unless that role is a superuser, every heap gets the
+    statistics estimate with reason `pgstattuple-no-execute`.
+  - Check: `SELECT has_function_privilege('pgstattuple_approx(regclass)',
+    'EXECUTE');` as that role returns true.
+
 ### A5. Autovacuum pacing, then capacity
 
 More unthrottled workers would repeat the July buffer-cache eviction. So
@@ -371,6 +465,104 @@ A1 per-table settings go into a task beside it. Both sit behind their own tag,
 so nothing changes until the owner runs that tag, as a trial after the storage
 expansion with the §2.4 signals watched.
 
+Implemented (2026-10-24), coded and not applied: xops branch
+`feat/pm-autovacuum`. One `playbook-dbs.yml` block, tagged `never` and
+`autovacuum_tuning`, does both parts. It reloads PostgreSQL and never restarts
+it.
+
+- **Global settings:** in `autovacuum-tuning.conf`, which `postgresql.conf`
+  now includes last (`include_if_exists`). Its `conf.d` comes before the
+  file's own settings, so a drop-in there could not replace them.
+  - `autovacuum_vacuum_cost_delay = 2ms`.
+  - `autovacuum_vacuum_cost_limit = 320`: 160,000 cost units a second,
+    shared by the workers on tables without cost settings.
+    - That covers one vacuum at the fastest read pace seen (network_client on
+      2026-10-13: 38,700 blocks a second, 77,400 units at 2 a block read).
+    - It also covers, at the same time, what all of autovacuum dirtied on
+      2026-10-19 (34 MB/s: 4,150 blocks a second, 83,000 units at 20 a block
+      dirtied).
+    - Left unset, the limit would be `vacuum_cost_limit`'s 200.
+  - `autovacuum_max_workers = 10`. That is within the 16 slots, so a reload
+    applies it, and it is the most workers whose 256 MB vacuum rings stay
+    within 1% of shared_buffers.
+  - `autovacuum_work_mem = 1GB`: ten workers hold at most 10 GB, less than
+    six held at 2 GB.
+- **Per-table options:**
+  - The block applies them with psql on the database host: one `ALTER TABLE
+    ... RESET (...), SET (...)` for each table whose options differ.
+  - It sets `lock_timeout = 500ms`, which is under `deadlock_timeout`, so
+    the ALTER never cancels an autovacuum. It retries on lock timeouts only.
+  - Every A1 table gets `autovacuum_vacuum_cost_delay = 0` and both scale
+    factors 0.
+  - The thresholds use the low end of each table's churn estimate.
+
+  | Table | Dead rows / inserts an hour | Vacuum / insert threshold |
+  |---|---|---|
+  | `finished_task` | 129k / 129k | 130,000 / 130,000 |
+  | `network_client_connection` | 0.3-0.8M / 150-400k | 300,000 / 150,000 |
+  | `network_client_location` | 0.15-0.4M / 150-400k | 150,000 / 150,000 |
+  | `transfer_balance` | ~50k / ~1M a day, in one burst | 50,000 / 40,000 |
+  | `provider_url_probe_run` | 0.26-0.53M / 86-177k | 260,000 / 85,000 |
+  | `device` | ~40k / ~40k | 40,000 / 40,000 |
+  | `search_provider_stats` | 1.7-2.4M / 30-40k | 1,700,000 / 30,000 |
+  | `pending_task` | 0.28-0.35M / 129k | 50 (measured, kept) / 1,000 |
+  | `network_client_handler` | 12-16k / ~0, 25 live rows | 50 / 1,000 |
+  | `transfer_debit_journal` | 1.4-2.5M / 0.7-1.3M, 582 live rows | 50 / 1,000 |
+  | `client_connection_reliability_score` | 0.45-0.6M / 15-60k (a guess), ~0.3M rows | 60,000 / 60,000 |
+  | `provider_egress_probe_cycle` | 0.34-0.7M / ~0, 132k rows | 25,000 / 25,000 |
+
+- **Ordinary deploys:** they never install or remove the file. While the
+  file is present, the ordinary verification expects
+  `autovacuum_max_workers` from it.
+- **Verification, under the tag:** the four settings and
+  `autovacuum_worker_slots` as new bringyour sessions see them, and each
+  table's options after the change.
+- **Revert:** `-e autovacuum_tuning_revert=true` removes the file and gives
+  each table back the options the server's migrations gave it, then verifies
+  the `postgresql.conf` values and those options.
+- **To run:**
+  1. Deploy `postgresql.conf` with its include line (`run-dbs.sh
+     --postgresql-config-only`). That is a reload that changes no setting and
+     logs "skipping missing configuration file". The trial refuses to start
+     until the live file includes its own.
+  2. Dry run: `run-dbs.sh --tags autovacuum_tuning --check --diff`. It
+     reports each table option it would change.
+  3. Apply: the same command without `--check`.
+- **Deviations:**
+  - Five A1 tables keep a trigger at or before the one the defaults give them
+    now, fixed, rather than an hour of churn. For each, an hour of churn is
+    more than its live rows, so an hourly trigger would let it grow to
+    several times its size whenever A1's 5-minute vacuum lapses. Vacuuming
+    them takes about a second. `pending_task` keeps its measured 50.
+  - `network_client`, `provide_key` and `network_client_location_reliability`
+    set `autovacuum_vacuum_cost_delay = 0` themselves: the 2026-07-14
+    re-add migrations did it, so the "set nothing today" above does not hold
+    for the first two. The global 2 ms would not pace them, so the trial
+    removes their own delay.
+  - The four contract tables get a per-table `autovacuum_vacuum_cost_limit =
+    200`, the pace they have run at since July. Without it, their own 2 ms
+    delay would run at the raised global limit, 1.6 times faster.
+- **Assumptions:**
+  - A1's `vacuum_hot_tables` runs on main before the trial. The hourly
+    thresholds then back it up rather than replace it.
+  - The contract tables are not cut over to partitions yet. A partitioned
+    parent takes no autovacuum options, so the per-table step would fail at
+    it, and the play would stop before verifying.
+- **Once the trial is accepted:**
+  - The per-table options become a `db_migrations.go` migration, appended as
+    the July ones were.
+  - The global settings move into `postgresql.conf`.
+  - The trial file, its include line and the block go.
+- **Tests:** `main/ansible/tests/test_postgresql_autovacuum_tuning.py` pins:
+  - the `never` gating, through `ansible-playbook --list-tasks`;
+  - the values and their derivations;
+  - reload-only;
+  - the rendered SQL, the lock-timeout retry and check mode;
+  - both verifications and the ordinary deploy's verification.
+
+  The rendered statements were also run on PostgreSQL 18.4: apply, verify,
+  revert and verify, keeping options the trial does not manage.
+
 ### A6. Bound the transaction horizon
 
 - **Timeout:** set `transaction_timeout` for the application role, for example
@@ -404,6 +596,147 @@ expansion with the §2.4 signals watched.
   - Name the holder, ranked as §2.4 already ranks horizon candidates.
 - **Decided (2026-10-24): 15 minutes,** set once the inventory confirms that
   every request and task path fits.
+
+Implemented (2026-10-24): the bound, the exemptions the inventory below
+calls for, and the horizon signal.
+
+- **The setting.** A code migration
+  (`20261024_set_application_transaction_timeout`,
+  `migrationSetApplicationTransactionTimeout` in `db_transaction_timeout.go`)
+  runs `ALTER ROLE CURRENT_USER IN DATABASE <db> SET transaction_timeout =
+  '15min'` once through each pool, so it bounds the role the main pool's
+  PgBouncer servers run as and the maintenance pool's role. Each pool names
+  only the role it connects as, so no role name is written in code or logged;
+  an ordinary role may set its own default without CREATEROLE.
+  - A role default in this database, not `ALTER DATABASE`: a database
+    default would also bound the operator's `postgres` sessions. A superuser
+    role is skipped, with a log line, for the same reason.
+  - Unaffected unless they set it themselves: `postgres` and every other
+    role, other databases, physical replication (a walsender returns from
+    `InitPostgres` before it reads role settings), autovacuum (it forces 0),
+    and pg_dump (17 and 18 run `SET transaction_timeout = 0` against a 17+
+    server, and pg_restore emits it). The logical backup runs as `postgres`
+    anyway.
+  - The monitor's migration contract checks that an ordinary role carries
+    the default in the database, so a lost default is drift, as the
+    2026-08-13 database-level idle timeout went missing on main. The contract
+    names the migration by its id (`server.CodeMigrationVersion`), never a
+    number.
+- **PostgreSQL 18, checked on 18.4:**
+  - The timer is armed when a transaction starts, with the value then in
+    effect, and ends the session with FATAL 25P04; one autocommit statement
+    is covered too.
+  - Inside a transaction a positive value leaves a running timer alone, zero
+    disarms it, and a positive value set after that arms a new timer counted
+    from then.
+  - REINDEX and CREATE INDEX CONCURRENTLY and VACUUM get a fresh timer for
+    each internal transaction.
+- **A transaction the bound ends** fails at once with its cause. 25P04 is
+  never rerun, at a statement or at commit, is not taken for a retryable
+  connection error, and the pool destroys the dead session. Wire tests pin all
+  three; database tests repeat the statement and autocommit cases on both
+  pools.
+- **Exemptions, per operation:**
+  - `WithoutTransactionTimeout(ctx, conn, callback)` lifts the bound for one
+    maintenance session and restores the default when the callback returns or
+    panics, on a context detached from ctx.
+    - It refuses a main pool session (a session SET through the transaction
+      pooler would reach other clients). Maintenance pool sessions are marked
+      direct when they connect.
+    - Inside an explicit transaction it refuses as well: a RESET there could
+      not restore that transaction's deadline, and a rollback would undo it.
+      A whole transaction is exempted from inside instead (next point).
+    - A session it cannot restore (closed, busy, left in a transaction, or a
+      failed RESET) is closed, so the pool destroys it. A nested call keeps
+      the outer exemption.
+  - `SetTransactionTimeoutInTx(ctx, tx, bound)` replaces the bound for the
+    rest of one transaction, also on the main pool: zero lifts it, and a
+    positive bound disarms the running timer and arms a new one.
+  - A source test enforces that a statement list lifting statement_timeout
+    lifts the transaction bound too, and that each exemption in the table
+    below stays wired; operations of the A1-A4 and A7 branches are checked
+    once their files are present.
+
+The long-reader inventory (2026-10-24). "Fits" means no single transaction or
+statement approaches 15 minutes; an exempted operation keeps its own bound
+(its task's MaxTime, whose cancel reaches a direct session, or a statement
+bound) and §2.4l warns while it holds the horizon.
+
+| Path | What it does | Typical / maximum | Disposition |
+|---|---|---|---|
+| `/stats/providers*`, provider and overview stats routes | Main pool statements over contracts, payouts and intervals, no statement_timeout | seconds; unmeasured, cancelled by the 2-minute fill or nginx's 30 s upstream timeout | fits; the bound is now their server-side backstop (alt has no balancer); replica later |
+| Location directory load | One statement over the valid, connected location reliabilities (about 53M rows) | seconds to minutes; unmeasured | fits; replica later |
+| Search sync, leaderboards, transfer stats, verify, prober and provider-work routes | Paged or bounded reads | seconds | fits |
+| Subnet epoch census (`st_epoch_close`, `st_ledger_v2_step`, `st commit`, `st payout-dry-run`) | One statement reads the epoch's live and archived work in one snapshot | 195-419 s for the 24-hour epoch 0; 30-55 min projected for a 7-day epoch | exempted per session: a direct maintenance session (it ran on the main pool); replica later |
+| Payment plan (`Payout`, `payouts plan`) | One transaction per 4-day slice | 1,121 s (2026-08-31) to over 3 h (2026-09-27) before the October rewrites; unmeasured since | exempted per transaction; measure, then smaller slices |
+| `UpdateClientLocationReliabilities`, `UpdateClientReliabilityScores`, `UpdateNetworkReliabilityWindow` | One transaction each over every client; the network window widens after a rollup stall | whole runs 701-1,356 s with every lookback in one transaction before the checkpoints; unmeasured per transaction since | exempted per transaction at the checkpoints' 2-hour ceiling; page the window later (cap it per run) |
+| Reliability running-window checkpoints | Plan, 30-block reads, apply | reads about 10 s | paged; keep the role's bound |
+| `IndexSearchLocations` | One transaction re-indexes changed location search values | short; a full re-index after a search-format change, unmeasured | exempted per transaction |
+| `db_maintenance` rebuilds (rotation, priority, A2 hot indexes) | REINDEX CONCURRENTLY on a discarded session, 2-hour statement bound | rotation phases 0.5-2 min, waits up to 10 min; priority passes read 421-588 GB of heap, 20-65 min each | exempted per session |
+| `db_maintenance` debris drops, final ANALYZE; A1 hot vacuum | 10 s lock waits; one transaction per table (468.7 s for the whole database); 2-minute VACUUM statements | seconds to minutes | fits |
+| A4 bloat scan (`dbBloatScanRelation`) | pgstattuple_approx under its own statement bound | minutes | exempted per session |
+| Partition maintenance: create, drop, archive and evidence batches; contract, `client_reliability` and `network_ping` families | 5 s locks, 60 s statements, 10k- and 5k-row batches | seconds | fits / paged |
+| Partition ANALYZE of closed leaves and parents | ANALYZE with statement_timeout 0 | 1-5 min each; a legacy leaf longer | exempted per transaction (on main, `partitionRegistryAnalyze` still needs the lift) |
+| `CloseExpiredContracts` | Keyset pages of 256, one short transaction per contract, cursor checkpoint | seconds per page | paged (the model) |
+| `RemoveCompletedContracts`, orphan sweeps, close-evidence retention, net-escrow reconcile, flush and settlement chains, client reap, rollups, `TaskCleanup`, audit retention | 1k-50k-row batches, each committed | seconds per batch | paged |
+| `RemoveOldClientLocationReliabilities` | One unbatched DELETE on the 132 GB table, MaxTime 2 min | under its MaxTime | fits (Part B batches it) |
+| `RefreshFreeTransferBalances`, `SweepProviderAuditEvents`, `DeriveLocations` ingest cursors, `RebuildPointsLeaderboard`, `ExportStats` | One transaction or statement each | 60-80 s (`ExportStats`); the others unmeasured, estimated minutes | fits; §2.4l shows any that do not |
+| Tasks with MaxTime of 15 minutes or less; claims, heartbeats, startup scheduling | Bounded by deadline-derived statement timeouts | seconds | fits |
+| stmonitor | Its own observer role, 60 s budgets | under 60 s | fits; not an application role |
+| `db migrate` | One transaction per SQL migration; online migrations' concurrent builds; code migrations | seconds; a concurrent build on a large table takes hours | online migrations exempted per session; a long SQL migration starts with `SET LOCAL transaction_timeout = 0` |
+| `db vacuum` (`VacuumFullAllTables`) | VACUUM FULL table by table | hours on large tables | exempted per session (its own discarded session; its settings no longer return to the pool) |
+| `db audit --fix`, `db backfill-sweep-destination-id` | A plain index build or validating constraint per transaction; 50k-row batches that full-scan the 101 GB sweep heap | minutes to hours; 4-11 min a late batch | exempted per transaction |
+| `model migrate contract-partition` (prepare, finalize, rollback) | VALIDATE of the legacy bounds, ANALYZE ONLY of the parents, foreign key validations | hours for the four large tables | exempted per transaction; the printed manual VALIDATE runs as `postgres` |
+| `model migrate client-reliability-partition`, `model upgrade-client-reliability-index` | Copies, a one-shot index build, the swap; per-partition concurrent builds | hours (dormant: already partitioned); 3-15 min a partition | exempted per transaction / per session |
+| `model migrate provider-egress-health-partition` (C2) | Chunked copy, counts and missing rows; a swap with 60 s statements | minutes | exempted per session (the copy, the swap's unlocked pre-check, missing rows); the locked swap fits |
+| `stats backfill`, `stats migrate-202608` | One main pool transaction each over the retained windows | hours | exempted per transaction |
+| `db backfill-contract-reap-time`, `db sweep-orphans`, `db scrub-client-addresses`, `payouts sn-reconcile`, `model migrate provide-mode`, `refresh-transfer-balances` | Batched or per-item statements | seconds to minutes; late OFFSET blocks and sn-reconcile on payments with millions of sweeps unmeasured | fits |
+| Logical backup (pg_dump, Sunday and Thursday) | One snapshot for 14+ hours, as `postgres` | 14+ h | unaffected by the bound; §2.4l pages on it after an hour; replica later (or physical base backups only) |
+
+Rollout, after `db migrate` applies the migration:
+
+1. Recycle the pools. Restart the services, or wait for the pools' connection
+   lifetime (8 hours plus up to 15 minutes by default). The main pool's
+   sessions are PgBouncer's servers, which keep the old default until they
+   reconnect: run `RECONNECT bringyour` on each PgBouncer instance, or wait
+   for `server_lifetime` (3600 s).
+2. Verify through both pools: `SHOW transaction_timeout` as the application
+   role through PgBouncer (6432) and directly (5432) reads `15min`. As
+   `postgres`, no session of the application roles predates the migration:
+   `SELECT count(*) FROM pg_stat_activity WHERE usename = <role> AND
+   backend_start < <time the migration ran>` reads 0. `bringyourctl db
+   migrate` logs which pools' roles it set, without their names.
+3. Watch §2.4l (`transaction-horizon`) and the task canaries for 25P04
+   failures in the first days. A path the inventory missed fails fast with
+   `terminating connection due to transaction timeout` and its task's own
+   retry policy; it is fixed by paging it or by one of the two exemptions.
+4. To roll back, `ALTER ROLE <role> IN DATABASE bringyour RESET
+   transaction_timeout` for each role, then recycle as in step 1. The
+   monitor's contract then reports drift until a migration retires it.
+
+Monitor: §2.4l (`transaction-horizon`, `monitor/signal_transaction_horizon.go`)
+warns once the oldest horizon is 15 minutes old and pages at an hour,
+counting sessions, replication slots and prepared transactions (the last two
+even when there are none) and naming the holder as §2.4 ranks horizon
+candidates, without statement text, application names, client addresses, role
+names or prepared-transaction identifiers. On main slots and prepared
+transactions are unused: `max_prepared_transactions` is 0, `wal_level` is
+replica, and the base backup's slot holds WAL, not an xmin; the census
+catches a future one.
+
+Deviations:
+
+- The signal is §2.4l: §2.4k is A4's bloat signal.
+- No per-pool metric of the effective value: the only per-connection hook
+  is the pools' startup path, whose failure cleanup is deliberately bounded,
+  and a query added there could fail connection construction. The rollout's
+  `SHOW` and `pg_stat_activity` checks cover it.
+- The census moved from the main pool to a maintenance session, and
+  `VacuumFullAllTables` to a discarded session of its own.
+- The payment plan, the reliability transactions and the census are
+  exempted, not paged: their runs since the October rewrites are unmeasured,
+  and the bound ending them would end payouts and reliability scoring. §2.4l
+  will measure them; page each once it does.
 
 ### A7. One partition maintenance registry
 
@@ -460,6 +793,41 @@ table, not only contracts.
 **Decided (2026-10-24): build it now, including the contract family.** The
 contract-partition fixes are merged.
 
+**Implemented (2026-10-24):** `db_partition_registry.go` (package `server`),
+API documented in its file comment. A family registers one static
+declaration (`RegisterPartitionFamily`): tables, key and key kind (utc
+timestamp, uuid id through `contract_id_floor`, epoch minutes), daily or
+weekly granularity, ranges ahead, retention or never-drop, DEFAULT and
+legacy partitions (`KeepLegacyPartition` for never-dropped legacy), an
+opt-in GUC the drop transaction sets (`DropGuardSetting`), and hooks for its
+own rules (`CreateFrom` for late writes, `CreateLeaf`, `RangeExpired`,
+`DropFence`, `DropPrecondition`, `Archive`). The registry gives canonical
+bounds and names, create-ahead with catch-up in one pass (`EnsureRunway`,
+and `EnsureRangeFor` for a writer), parent `ANALYZE ONLY` once per range
+period and closed-leaf analyze, the guarded drop (guard, fence, every
+detach, the precondition again on the detached leaves, the drops, in one
+transaction) and the retirement pass, with resume state in the task
+arguments. Two chains drive every family: `maintain_partition_runway` every
+10 minutes, apart from archive work, and `maintain_partition_retention`
+every 15. Families moved in, keeping their tasks and rules: contract (its
+task creates, analyzes and drops through the registry; the archive, evidence
+deletes and cutover guard unchanged; `contractWeekBlocker` is the drop
+precondition, with the legacy settlement intent check still one block),
+`client_reliability` (runway from the retention cutoff; drops unchanged)
+and `network_ping` with its tallies (registered by the controller, which owns
+the keep timeout; its sweep unchanged). Added for all three, as planned:
+parent statistics and the separate runway cadence. db_maintenance skips the
+parents and leaves of `ReindexExempt` families (contract, client_reliability,
+the C2 history); network_ping keeps its rotation place as before. Monitor:
+§2.4p `partition-runway` and §2.4q `partition-retention-blocked` watch every
+family whose declaration names no dedicated probe (client_reliability and
+the C2 history); the contract family names §2.4h/§2.4i and network_ping
+§2.19c, and a test holds every family to exactly one probe of each.
+`CutoverTables` keeps a cutover's staged and old tables out of db audit.
+Deviation: the existing families keep their own drop code (the contract's
+goes through the registry's guarded drop); network_ping keeps its own
+planner, whose coverage counts only finite bounds.
+
 ## Part B: write paths
 
 The changes below stop row versions from being written in the first place.
@@ -483,9 +851,96 @@ Each one is small, and each needs a test.
 | `legacy_settlement_intent` | A drained queue: Redis admission now marks escrows `redis_reserved`. The 33.6 GB was a past backlog plus non-HOT retries. | Once all 16 shards are empty, drop the table, its outcome trigger on `transfer_contract`, and its FK, along with the weekly contract drop's check on it (`db_contract_partition_maintenance.go`). Built now: the contract-partition fixes are merged. |
 | `search_projection` | The search fallback's inverted index. Each value's projections are replaced, and its update record is published, in one transaction (`search/search.go:AddRawInTx`). Since f071c331c an unchanged value is skipped, so most of the 46% is older than that. The table is read only until the in-memory search sync completes. | Leave it (decided 2026-10-24). Dropping it together with the fallback stays possible later. Do not rebuild and swap it: a write between the copy and the swap would be lost. |
 
+**Implemented (2026-10-24): the first two rows** (`feat/pm-queue`). A heartbeat
+writes `claim_time` every 10 s and moves `release_time` only once less than
+half of the 5-minute lease remains (`task.refreshTaskTimestampLeasesInTx`), so
+the beats between extensions are HOT: about 45 non-HOT versions for a two-hour
+task instead of 720. `pending_task` fillfactor is 50, which leaves room for two
+versions of a row at the 2 kB TOAST threshold where 70 leaves one. A debit or
+legacy chain backs off straight to 30 s at its second consecutive empty pass
+(`work.SettlementChainSettings`); the first only counts, so debits arriving
+every few seconds keep the 2 s cadence instead of trading each run for a kick.
+After its commit, a settlement or deadline close that journaled a debit kicks
+its partition's chain only if the chain left a Redis idle mark, which it sets
+once its backed-off successor has committed and then rereads the journal
+(`task.WakeIdleRunOnce`: `KickTasks`'s update in a pooled transaction that
+skips a held queue key, so producers need no direct maintenance session). An
+active chain gets no queue write, and concurrent producers coalesce into one
+kick. Deviation: legacy enqueuers do not
+kick, since current contracts no longer queue legacy intents and the scheduled
+close handoff and expiry recovery already wake the dispatcher through the
+RunOnce merge; the legacy pending warning moved from 60 s to 90 s (SIGNALS.md
+§2.5b). The debit bands are unchanged.
+
 A new fillfactor applies only to pages written after the change. Existing pages
 take it at the next compaction: a VACUUM FULL window, or PostgreSQL 19's online
 compaction.
+
+**Implemented (2026-10-24), the rows from `network_client_connection` to
+`transfer_balance` and `user_auth_attempt`:** each migration is a named value
+(`db_write_path_migrations.go`), and its monitor catalog contract reads its
+version from its position in the list (`WritePathMigrationVersion`).
+
+- `network_client_connection`: the three partial indexes are built
+  concurrently, then the full `(connected, client_id)`,
+  `(client_id, connected, extender_id)`, `(client_address_hash, connected)` and
+  `(connected, disconnect_time)` are dropped. Every reader filters a literal
+  `connected` or `connected = false`, which implies the partial predicates;
+  none passes `connected` as a parameter. Reads of all a client's rows keep
+  `(client_id, connect_time)`.
+- `network_client_location_reliability`:
+  - The upsert rewrites a row only when a value changed, or once its
+    `update_block_number` is a day old; the block never moves back.
+  - The block's only reader is the retention delete. It now keeps a row a day
+    longer for the refresh lag, so a row goes 30 to 31 days after its client
+    was last seen, never sooner than before.
+  - The 15-minute delete runs in 10,000-row transactions for at most 90 s.
+    Fillfactor 85.
+  - The pass publishes `urnetwork_client_location_reliability_pass_clients{identity}`
+    (`hosted_child` or `top_level`) and `..._pass_written_rows`. The hosted-child
+    share of the table's own rows needs a scan; sample it:
+
+    ```sql
+    SELECT count(*) AS sampled_rows,
+           count(*) FILTER (WHERE client.source_client_id IS NOT NULL) AS hosted_child_rows,
+           count(*) FILTER (WHERE client.client_id IS NULL) AS gone_client_rows
+    FROM network_client_location_reliability AS reliability TABLESAMPLE SYSTEM (0.01)
+    LEFT JOIN network_client AS client USING (client_id);
+    ```
+- `search_provider_stats`: change guard on `(period_end, match_count)`;
+  fillfactor 70. The open hour keeps its one-minute rollup.
+- `device`: the re-auth locks the device row and rewrites `device_spec` only
+  when it differs. Fillfactor 90.
+- `client_connection_reliability_score`:
+  - The `(lookback_index, max_block_number)` index is dropped, not narrowed:
+    every reader reads a whole lookback or probes the primary key. Fillfactor 50.
+  - **Deviation:** the upsert skips only a row identical to its recomputation,
+    window included. `max_block_number` is each row's publication marker, read
+    by the stale-row delete and the freshness signal (SIGNALS.md §2.15a), and it
+    moves every pass. So a row whose scores are unchanged is still rewritten,
+    now as a HOT update. Skipping it needs a per-lookback publication marker and
+    a freshness signal change first, left for the owner.
+- `transfer_debit_journal`: `(shard, create_time)` replaces
+  `(shard, applied, create_time)`, so marking a row applied is HOT. Fillfactor
+  70. The age readers read a shard oldest first and filter the state; during a
+  backlog the applied age reads the shard's pending rows.
+- `provider_egress_probe_cycle`: only `provider_egress_probe_cycle_next_attempt`
+  is dropped, since every next-attempt read requires `eligible`. Kept:
+  - the slot and non-slot partial pairs: `shard_count` 1 reads only the
+    non-slot indexes, and larger counts only the slot ones. If production's
+    `shard_count` stays above one, the non-slot trio can go along with
+    `shard_count` 1 (owner decision);
+  - the completed-priority pair, which priority admission reads. Outside
+    priority mode it is nearly empty, and a write adds no entry to it.
+- `provider_url_probe_run`: retention 2 days. Readers of an old claim look
+  back at most 28 hours: 24 hours of completion acceptance, plus the 4-hour
+  failure streak before that claim.
+- `network_client_handler`: the `heartbeat_time` index is dropped, so the
+  heartbeat is HOT.
+- `transfer_balance`: fillfactor 85. Grants are inserted together, so one page
+  holds many balances debited at the same time.
+- `user_auth_attempt`: dropped. `RemoveExpiredAuthAttempts` is deleted and
+  listed in `removedTaskTargets`.
 
 ## Part C: partitioning
 
@@ -564,6 +1019,39 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
   - writes during the swap.
 - **Decided (2026-10-24): 7 days.** Daily partitions, each dropped once its
   upper bound is 7 days past.
+- **Implemented (2026-10-24):** the registry's first new family
+  (`model/provider_egress_health_history_partition.go`): daily by
+  `measured_at`, 7 days, three days ahead, created back to the ingest's oldest
+  day, out of the REINDEX rotation.
+  - **Submitters:** the taskworker URL pass and the standalone egress prober
+    both submit URL evidence, whose `measured_at` is the measurement time,
+    fixed on the result, and the run id is minted once onto the result; each
+    run is published once, and a resend of the same result repeats both. But
+    the ingest also takes reports without evidence, which the server times at
+    arrival, so their resend repeats a run id with a new time. So the writer
+    takes a lock per run, looks the run id up across the retained partitions,
+    and inserts with a targetless `ON CONFLICT DO NOTHING`, at read committed
+    (as the ping ingest does), on both layouts. An insert that finds no
+    partition creates the day, unless the measurement is older than the
+    ingest takes.
+  - **Ingest:** URL evidence measured more than a day ago is refused, so a
+    replay is refused or meets its row.
+  - **Readers:** the four bound `measured_at` to 8 hours or less; the fleet
+    diagnostic's receipt history now reaches back at most the retention.
+  - **Cutover:** `bringyourctl model migrate provider-egress-health-partition
+    [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort]
+    [--drop-old]`. Prepare stages the partitioned table and the days through a
+    week ahead, installs a mirror trigger (the change capture) and then copies
+    the window hour by hour; `--swap` checks each day's counts under the lock
+    and swaps the names; `--rollback` mirrors back, copies back and swaps back,
+    keeping later writes; `--drop-old` runs after `--verify` passes. The long
+    copies and checks are exempt from `transaction_timeout`. Deviations: the
+    rows written since prepare are captured by the mirror, not copied under the
+    lock, since the table has no insertion order; and the swap takes ACCESS
+    EXCLUSIVE, not EXCLUSIVE, because the writer reads its run id before it
+    inserts and an EXCLUSIVE lock upgraded at the rename would deadlock with it.
+  - **Monitor:** `monitor/migration_fp2.go` accepts the partitioned shape
+    (leaves, indexes read without ONLY, key `(run_id, measured_at)`).
 
 ### C3. `finished_task`: daily partitions kept 8 days (decided 2026-10-24)
 
@@ -621,6 +1109,62 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
 B1, B2 and A1 alone would keep the table small. The owner chose to partition it
 as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
 
+**Implemented (2026-10-24):** branch `feat/pm-finished`, on the registry (A7).
+
+- **Schema:** three migrations on the plain table. They build a unique
+  `(task_id, run_end_time)` index online, make it the primary key, and add a
+  partial index of failed Posts (`finished_task_post_retry`). The key change
+  lands at deploy, before any cutover.
+- **Identity:** both fenced moves now also refuse a task id that already
+  finished, in any partition (`errFinishedTaskIdentityExists`). Without it,
+  the new key would accept a second end time. A batch that meets such a task
+  falls back to completing its members one by one. A pure test pins that the
+  two moves are the only `INSERT INTO finished_task` outside tests.
+- **Family:** `finished_task` registers daily partitions, 3 days ahead, kept 7
+  days past each upper bound. There is no DEFAULT partition, and the legacy
+  partition retires at C + 7 days.
+- **Fence, as built:**
+  - Only a failed Post (`post_error` set, Post not completed) can have a live
+    finished owner. A day gains no new failed Post after it ends.
+  - The archive step first removes the expired day's failed Posts through
+    TaskCleanup's own owner-admitted group delete. A busy group is left whole.
+  - The drop transaction then:
+    - defers while a transaction older than 5 s holds a `finished_task` lock;
+    - takes ACCESS EXCLUSIVE on the parent and the day;
+    - refuses while the day still holds a failed Post.
+  - After the detach, it checks again that no row ended within the last 7 days.
+  - A held row defers every day's drop, not only its own. Each drop waits at
+    most its 2 s lock bound and retries on the next pass.
+- **Cleanup:** on the partitioned table, TaskCleanup deletes nothing. It
+  creates today's and tomorrow's partitions if they are missing, so a stalled
+  runway cannot leave completions without a partition. On the plain table it
+  keeps today's row retention, and abandons a prepare still unfinalized 2
+  hours before its cutover day.
+- **Cutover:** `bringyourctl model migrate finished-task-partition
+  --cutover-day=<day, at least 12 h ahead> [--dry-run] [--finalize]
+  [--rollback [--max-copy-rows=<n>]] [--abort]`.
+  - It copies nothing. Prepare is resumable, finalize probes the attach in a
+    rolled-back transaction, and the swap is one transaction.
+  - Rollback copies the daily partitions' rows back into the legacy table
+    under its lock. It checks the copy's row count and refuses a task id
+    that is in both. Up to 200,000 rows by default, and nothing before C.
+  - Validate, analyze and the rollback run without `transaction_timeout`.
+  - The registry's runway and retention tasks must be deployed first, and
+    every taskworker must run this build. An older TaskCleanup would keep
+    deleting rows through the partitioned parent by row address. It would
+    only delete eligible rows whose owners it admitted, but it could wait on a
+    held row.
+- **Lookups:** each lookup by task id is one index probe per partition,
+  about 12 with the days ahead, and reads that bound `run_end_time` prune. A
+  DB test pins both.
+- **Monitor:** the three migrations' §8.9 contracts are in
+  `monitor/migration_finished_task_partition.go`, with versions from the
+  server's migration list. They read the catalogs directly, so they hold on
+  the plain table, through a prepared cutover and on the partitioned parent.
+  The unique index's contract ends where the primary key takes the index over.
+- **Future index migrations** on `finished_task` must be partition-aware, like
+  the contract tables'.
+
 ### C4. `provider_work_session_event` (136 GB): weekly partitions, 13 weeks (decided 2026-10-24)
 
 - **Writes:** the connection trigger (`provider_work_session_append`) appends
@@ -644,6 +1188,59 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     857 does for close evidence).
 - **Decided (2026-10-24): 13 weeks,** matching contract retention, so a
   session's events never outlive the contracts they describe.
+- **Implemented (2026-10-24):** branch `feat/pm-events`
+  (`db_provider_work_session_partition.go`, `..._cutover.go`).
+  - **Migration** (`providerWorkSessionPartitionSchemaSql`): functions and a
+    receipt trigger only, so no lock on the event table. The append's retire
+    lookup is bounded by `provider_work_session_admit_floor(connection)`, the
+    id's mint millisecond less a day, and falls back to the unbounded lookup
+    when that finds nothing. Its monitor contract takes the migration's
+    position as its version (`ProviderWorkSessionPartitionMigrationVersion`),
+    reads all three layouts (plain, prepared, partitioned), and supersedes
+    824's contract.
+  - **Sequence identity:** no identity relation. The append is the only
+    writer, and the head guard keeps each client's generator monotonic (the
+    proof is in the file comment).
+  - **Receipt reference: trigger-enforced, not `observed_at` in the receipt.**
+    - A foreign key into the partitioned table runs a referencing-row check of
+      the whole receipt table inside each detach. On PostgreSQL 18 that took
+      1.75 s for a week of a million events against a million receipts, under
+      the parent's ACCESS EXCLUSIVE lock. It would also refuse every week a
+      receipt references.
+    - Receipts are self-contained signed originals, and their readers (chain
+      replay, payout originals) read receipts only, from sequence 1. So
+      receipts outlive the events they sign; dropping them with their events
+      would break those chains.
+    - The trigger checks the reference at insert, the only time a receipt is
+      written: today's weeks first, then every week. The cutover drops the
+      foreign key.
+    - The signer's event lookup is bounded a day below its transaction's
+      start.
+  - **Cutover:** `bringyourctl model migrate provider-work-session-partition
+    [--cutover-week=<Monday>] [--dry-run] [--finalize] [--rollback] [--abort]`.
+    - Prepare builds `(client_id, sequence, observed_at)` concurrently and
+      swaps it in as the primary key, dropping the receipt key and the old key
+      (an estimated 31 GB built and 28 GB returned).
+    - It then stages the parent with `LIKE ... INCLUDING INDEXES` and weeks
+      C..C+4, and adds and validates the bound. The build and the validation
+      run on a session exempt from `transaction_timeout`.
+    - Finalize runs the rolled-back attach probe, then the swap.
+    - Every exclusive step waits for a quiet table, then for at most 3 s per
+      lock, with retries. Every step is resumable; a build that another backend
+      is still running is never dropped.
+    - Rollback keeps every event until the first one at or after C.
+    - The runway pass abandons a cutover not finalized 6 h before C, through
+      the registry's new additive `BeforeCutover` hook.
+  - **Drop:** the family (`AheadRanges` 4, `KeepLegacyPartition` false) sets
+    `urnetwork.provider_work_session_retention` in the drop transaction. Its
+    fence, `provider_work_session_event_drop_guard`, refuses a leaf whose upper
+    bound is not 91 days past by the database's clock. Neither DETACH nor DROP
+    fires a trigger, and event triggers need a superuser, so the database
+    cannot refuse a manual drop.
+  - **Not built:**
+    - an insert-side `EnsureRangeFor` retry; the runway and its monitor cover
+      that case;
+    - receipt retention, which is left for when the signer ships.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
@@ -685,6 +1282,67 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       are still row-deleted;
     - the census prunes;
     - the cutover runs with inserts arriving.
+  - **Implemented (2026-10-24):** a registry family, `close_evidence`
+    (`db_contract_close_evidence_partition.go`): weekly by `report_id`, 4
+    weeks ahead, 91-day retention, a DEFAULT and a kept legacy partition, the
+    drop guarded by `urnetwork.close_evidence_retention`. The cutover is
+    `bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]`
+    (`db_contract_close_evidence_cutover.go`). One migration: the evidence
+    guard also admits a move, the delete half of a row whose identical copy
+    is already in the partition it moves to. Where the build differs:
+    - **Census:** each contract's reports are bounded by its receipts' report
+      ids (`contract_close_report`, written in the same transaction as the
+      evidence and removed only with the contract), not by its times. Times
+      plus a skew window cannot be complete: a client clock days off puts a
+      report in another retained week, and the census never publishes a
+      partial component. The receipts prune to exactly the weeks (or DEFAULT,
+      or legacy) holding the reports. An archived contract, whose receipts
+      left with it, reads every partition. The bound applies only once the
+      evidence is partitioned; on the plain table it would prune nothing, and
+      the census reads every report as before.
+    - **Checks:** the staged parent copies the table's checks with `LIKE ...
+      INCLUDING CONSTRAINTS` rather than re-adding them from their printed
+      definitions. On PostgreSQL 18 the `party` and `original_key_issue`
+      checks re-parse into a different tree (the varchar array's cast moves
+      into its elements), and the attach refuses a check that differs. A
+      `NOT VALID` check on the table blocks the prepare. The contract tables'
+      checks print stably, so their cutover keeps re-adding them.
+    - **Locks:** creating a week takes ACCESS EXCLUSIVE on the parent, then
+      DEFAULT, for milliseconds. Locking DEFAULT alone would let an insert
+      route its row to DEFAULT and then fail the partition check once the
+      week attached; on the parent it waits and then routes into the week.
+      The drop fence takes the same locks and refuses without the opt-in or
+      before 91 days.
+    - **Drop check by index:** each week gets a partial index of the rows it
+      accepts more than a day after the week ends, so the precondition reads
+      only that index and the unresolved contracts older than 90 days
+      (`transfer_contract_outcome_null`). A week therefore drops a day after
+      its retention at the earliest.
+    - **Row deletes** cover the DEFAULT and legacy partitions and the expired
+      weeks a straggler keeps. Weeks not yet expired, and weeks the drop will
+      take, are left to the drop.
+    - **Cutover window:** from adding the bound until the swap, a new report
+      at or past the cutover week is refused, and its client (`ControlSync`)
+      retries it after the swap. The rows already past the bound are moved
+      into the staged DEFAULT first. Until the swap, readers of the table don't
+      see them, so the epoch census waits (`ErrCloseEvidenceCutoverMoving`),
+      and an exact retry of one is refused rather than counted again. The
+      contract task abandons a prepare still unfinalized 6 hours before its
+      week.
+    - **Rollback point:** rollback copies the rows outside the legacy
+      partition back into it, while there are at most 100,000 of them
+      (about until the cutover week).
+    - **Order with C1:** none needed, either way. The evidence has no foreign
+      key, the cutovers lock disjoint tables, and the drop and census reads
+      work on both contract layouts.
+    - **Monitor:** the move guard's artifact reads the custody in both
+      layouts. Its version comes from the migration list, not a literal.
+    - **Owner notes:** one client clock 1-90 days behind keeps every week it
+      reports into for up to its skew past retention, and those weeks are then
+      row-deleted as before (`MonitorRetentionGrace` is 13 weeks for this
+      reason). With `vacuum_truncate = off`, row-deleted space in the legacy
+      partition is reused but not returned. Once the row deletes empty it,
+      reclaiming it is an owner step.
 
 ### C6. Later, on size triggers or decisions
 
@@ -731,6 +1389,46 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
     - proof fields and usage totals compared before and after;
     - the migration restarted midway;
     - a week dropped at 52 weeks and not before.
+  - **Implemented (2026-10-24):** `db_provider_usage_archive_partition.go`.
+    - **Family:** registered in the A7 registry as `st_provider_usage_archive`:
+      weekly by `contract_id` on the contract weeks, 4 weeks ahead, 52 weeks'
+      retention, out of the REINDEX rotation. The runway and retention tasks
+      and the REINDEX exemption come from the registry's wiring.
+    - **Cutover:** one SQL migration, one transaction, so an interruption
+      leaves the plain table as it was and the next run starts over:
+      - read committed, then an EXCLUSIVE write fence on the archive;
+      - a staged parent with the published columns, keys and the old table's
+        grants, a partition per week, and a DEFAULT partition;
+      - the copy, then the per-week check: rows, rows without proof, usage
+        bytes and a hash of every row's proof fields;
+      - the row and TRUNCATE guards, then the swap under ACCESS EXCLUSIVE.
+
+      A capture waiting at the fence lands in the partitioned table.
+    - **Guard bypass:** the staged parent has no guard until the copy is
+      checked, and no other session can see it before the commit. The guard
+      function is unchanged, so no opt-in exists that could forge proof later.
+    - **Deviations:**
+      - *A DEFAULT partition, never dropped.* It takes ids outside every week,
+        such as test contracts with random ids, contracts older than the first
+        week, or a contract archived after its week was dropped. A capture
+        therefore never fails. The trade: a week whose rows reached DEFAULT
+        because the runway was 4 weeks behind can no longer be attached, so the
+        runway alarm matters.
+      - *Weeks start at the oldest live or archived contract's week,* clamped
+        to 2026-06-01 and the current week. That is 2026-06-01 on main; a fresh
+        database starts at the current week.
+      - *The drop opt-in is checked in the drop transaction, not by the
+        database.* Refusing a plain `DROP TABLE` takes an event trigger, which
+        needs a superuser, and the application role is not one
+        (`local/postgres/initdb`). The family's `DropFence` refuses a drop
+        without `urnetwork.usage_archive_retention`, a range that is not one
+        week, and a week the database's clock does not yet put 52 weeks past.
+      - *No drop precondition.* A contract archived after its week was dropped
+        lands in DEFAULT.
+    - **Monitor:** the v746 custody contract reads the partitioned layout,
+      with the archive's guards on every partition. A new catalog contract pins
+      the partitioned shape at the cutover's version, which comes from the
+      migration list.
 
 ### C7. Not partitioned
 
@@ -789,6 +1487,87 @@ Changes:
     aligned with contract retention, so it outlasts every close report;
   - bringing the mint rate down at the source is a protocol and product
     change outside this plan.
+- **Implemented (2026-10-24):** branch `feat/pm-identity`
+  (`db_identity_retention.go`, `model/network_client_retired_hosted.go`,
+  `model/st_client_key_history_retention.go`).
+  - **Which children are hosted.** `source_client_id` marks every child, not
+    only hosted ones. A hosted identity is a child whose parent has a
+    `proxy_device_config`: a proxy's local authority mints only under the
+    proxy's own client. This is the same test as SIGNALS.md §14.8. Other
+    children keep the 30-day reap, for two readers:
+    - ST epoch reliability joins `network_client` with no `active` filter
+      (`GetStEpochClientReliability`), so a child that earns would lose an
+      unclosed epoch's payout;
+    - the client ancestry walk reads inactive parents
+      (`ResolveClientRootInTx`), so a deleted child would break its own
+      children.
+
+    Hosted windows are leaves, and payers behind the proxy host's shared
+    egress.
+  - **Readers checked for the 1-day delete:**
+    - **Contract creation:** reads only active rows.
+    - **Close, expiry, settlement and payout:** use the network ids copied
+      onto `transfer_contract`, `contract_participant` and the sweeps, and
+      never read the client directory.
+    - **Original-close verification:** reads key history, not
+      `network_client`.
+    - **Usage metering:** reads a payer child's row about 2 minutes after
+      settlement.
+    - **Stats:** filter `active AND source_client_id IS NULL`.
+    - **Contract route rejection cache:** a missing destination is not
+      terminal, so a deleted window's stale return route is re-read once a
+      minute per API process instead of every 6 hours. Not changed.
+  - **Reap.** Task `remove_retired_hosted_network_clients`: every 5 minutes,
+    a 2-minute budget, pages of 5,000.
+    - It reads a new partial index, `network_client_retired_child_deactivate_time
+      (deactivate_time, client_id) WHERE NOT active AND source_client_id IS
+      NOT NULL`, with a cursor, so each retired child is examined once. A
+      window that is still connected is passed.
+    - The index migration is enrolled in completion recovery, so the index
+      can be built out of band beforehand with the same `CREATE INDEX
+      CONCURRENTLY`, and the deploy then only checks it.
+    - Dependents go after each page commits. The shared cascade now also
+      deletes roles and the whole provide mirror.
+    - A chain starts at the horizon. Windows retired before its first run
+      age out through the 30-day reap, so a deploy deletes no backlog at
+      once.
+  - **Provide keys at deactivation.** Every deactivation deletes the
+    client's keys in its own transaction, and their mirror after the commit:
+    `deactivateLockedNetworkClientsInTx`, which covers every removal path, the
+    prober drain and session cleanup, and the abandoned top-level marker.
+    `SetProvide` locks the client row FOR KEY SHARE before it writes. So it
+    commits before a deactivation, or it finds the client inactive and
+    writes nothing (counted, logged at V(1)). A client with no row is still
+    written: the tests rely on it, and the orphan sweep removes such keys.
+  - **`SetProvide` writes the difference.** One read committed transaction
+    under a per-client advisory lock: an unchanged set writes no
+    `provide_key` row, and a changed one deletes, upserts or keeps each mode.
+    **Deviation:** it still records one `provide_key_change` per provide. The
+    announce loop counts it as a provide change, which invalidates a
+    reliability block, so stopping it for unchanged sets would change
+    provider reliability scoring. That is the owner's decision.
+  - **Key history retention.**
+    - A new table, `st_client_key_gone (client_id, gone_time)`, is written
+      by the `network_client` delete trigger. A child is gone at its
+      deactivation, or at its delete if it was still active. A top-level
+      client is gone at its own reap.
+    - The history guard admits a delete only under
+      `urnetwork.client_key_history_retention = on`, and only for a client
+      gone more than 91 days that has no client row and no head left.
+      Update and truncate (a new statement trigger) stay refused.
+    - Task `remove_gone_st_client_key_history`: every 15 minutes, a 4-minute
+      budget. In one short transaction per 500 clients, ordered by
+      `st_client_key_gone_gone_time`, it deletes their heads, then their
+      history, then their records, and then their legacy Redis key.
+    - A weekly discovery pass over the heads records clients deleted before
+      the migration, as gone from the first pass. Their history goes 91 days
+      after it.
+  - Both migrations have monitor suffix contracts, which find their versions
+    by migration content rather than by number.
+  - The index build on `network_client` outlasts A6's 15-minute
+    `transaction_timeout`, so the migration runner now runs every online
+    migration through `WithoutTransactionTimeout`. This branch carries a
+    minimal version of it; `feat/pm-horizon` owns the helper.
 
 ## Cutover requirements
 

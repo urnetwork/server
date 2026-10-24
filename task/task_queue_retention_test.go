@@ -15,6 +15,11 @@ import (
 
 func seedTaskQueueRetention(t testing.TB, ctx context.Context) ([]server.Id, time.Time, time.Time) {
 	t.Helper()
+	if finishedTaskPartitioned(ctx) {
+		// retention is then the drop of whole days, with its own forms of
+		// these cases in finished_task_partition_db_test.go
+		t.Skip("finished_task is partitioned; row retention does not run")
+	}
 	ids := make([]server.Id, finishedTaskRetentionGroupSize+1)
 	for index := range ids {
 		ids[index] = server.NewId()

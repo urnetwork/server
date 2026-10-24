@@ -94,3 +94,48 @@ func TestUrlReceiptRetentionSkipsLockedAndCanceledPages(t *testing.T) {
 		}
 	})
 }
+
+// Retention outlasts every reader of an old claim: a completion is accepted
+// at most 24 hours after its claim, and its local failure streak reads the
+// claims of the 4 hours before that one.
+func TestUrlReceiptRetentionOutlastsClaimReaders(t *testing.T) {
+	if providerUrlProbeRunRetention != 48*time.Hour {
+		t.Fatalf("URL receipt retention = %s, want 48h", providerUrlProbeRunRetention)
+	}
+	if lookback := providerUrlProbeCompletionReportMaxAge + ProviderEgressProbeRefreshAge; providerUrlProbeRunRetention < lookback {
+		t.Fatalf("URL receipt retention %s is shorter than the %s its readers look back", providerUrlProbeRunRetention, lookback)
+	}
+}
+
+// Uncounted claims are kept two days, and a counted claim is kept until its
+// expiry uncounts it, whatever its age.
+func TestUrlReceiptRetentionKeepsTwoDays(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		clientId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_url_probe_run
+				(client_id,claim_ordinal,claimed_at,completed_at,received_at,counted)
+				VALUES ($1,1,$2,NULL,NULL,false),($1,2,$3,NULL,NULL,false),($1,3,$3,$3,$3,true)`,
+				clientId, now.Add(-47*time.Hour), now.Add(-49*time.Hour)))
+		})
+		if removed := RemoveExpiredProviderUrlProbeRuns(ctx, now, 100); removed != 1 {
+			t.Fatalf("retention removed %d claims, want the one uncounted claim past two days", removed)
+		}
+		var claimOrdinals []int64
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, `SELECT claim_ordinal FROM provider_url_probe_run WHERE client_id=$1 ORDER BY claim_ordinal`, clientId)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var claimOrdinal int64
+					server.Raise(rows.Scan(&claimOrdinal))
+					claimOrdinals = append(claimOrdinals, claimOrdinal)
+				}
+			})
+		})
+		if len(claimOrdinals) != 2 || claimOrdinals[0] != 1 || claimOrdinals[1] != 3 {
+			t.Fatalf("retained claims %v, want the 47-hour claim and the counted claim", claimOrdinals)
+		}
+	})
+}

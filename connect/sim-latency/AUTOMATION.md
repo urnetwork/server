@@ -53,10 +53,11 @@ adapter inbox binds this mode. Staging-only Git publication uses
 ledger, add pins retroactively, or use production refs to bypass staging checks.
 The new staging graph has exactly ten repositories: `server`, `connect`, `sdk`,
 `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`.
-The retired `operator-proxy` repository must be absent; staging never discovers
-its remote, copies it, or builds it. Production's eleven-repository protocol and
-all historical locks remain unchanged. A frozen module graph that still requires
-the retired repository blocks staging rather than silently dropping a dependency.
+The retired `operator-proxy` repository must be absent in both modes; neither
+discovers its remote, copies it, or builds it. New production and staging locks
+both require the same ten live repositories. Historical evidence remains
+unchanged. A frozen module graph that still requires the retired repository
+blocks activation rather than silently dropping a dependency.
 
 Staging retains the per-round nine-run control, nine candidate runs, FIFO,
 containment and every G1–G6 gate. It names the best placeable candidate without

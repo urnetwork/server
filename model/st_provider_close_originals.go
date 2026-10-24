@@ -7,6 +7,19 @@ import "github.com/urfoundation/sn/payoutartifact"
 // Each row costs at least 512 bytes against the 512 KiB window allowance, so
 // 1025 rows prove overflow. Disjoint indexed prefixes can stop there; only a
 // complete window is sorted and encoded. Usage itself still reads every owner.
+//
+// Once the evidence is partitioned by report_id (PARTITION-MAINTENANCE-PLAN.md
+// C5), each contract's reports are read within the range of its report ids, so
+// the read prunes to the partitions holding them. The contract's own receipts
+// give that range exactly: every report retained beside a live contract has
+// its receipt in contract_close_report (written in the same transaction,
+// removed only with the contract), and a receipt carries the report id the
+// client minted, whatever its clock. Its times alone could not bound the
+// range: a client clock days off puts a report in another retained week, and
+// the census must hold every report. A live contract with no receipts has no
+// reports, and an archived one, whose receipts left with it, reads every
+// partition. While the evidence is a plain table the bound could prune nothing,
+// so every report of the contract is read, exactly as before.
 const stEpochProviderOriginalUsageSql = `
  WITH usage_rows AS MATERIALIZED (` + stEpochProviderUsageSql + `),
  window_rows AS MATERIALIZED (
@@ -39,9 +52,22 @@ const stEpochProviderOriginalUsageSql = `
  SELECT usage.*, CASE WHEN octet_length(combined.body)<=1048576 THEN combined.body ELSE originals.body END, false AS window_only
  FROM usage_rows AS usage CROSS JOIN window_body
  LEFT JOIN LATERAL (
+  SELECT COALESCE((SELECT evidence_table.relkind='p' FROM pg_class evidence_table
+     WHERE evidence_table.oid=to_regclass('public.contract_close_report_evidence')),false)
+   AND EXISTS(SELECT 1 FROM transfer_contract live WHERE live.contract_id=usage.contract_id) AS bounded
+ ) AS report_scope ON true
+ LEFT JOIN LATERAL (
+  SELECT
+   CASE WHEN report_scope.bounded THEN (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id LIMIT 1)
+    ELSE '00000000-0000-0000-0000-000000000000'::uuid END AS first_report_id,
+   CASE WHEN report_scope.bounded THEN (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id DESC LIMIT 1)
+    ELSE 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid END AS last_report_id
+ ) AS report_range ON true
+ LEFT JOIN LATERAL (
   WITH selected AS MATERIALIZED (
    SELECT client_id,report_id,party,acked_byte_count,unacked_byte_count,checkpoint,original_report,original_key_registration,original_key_issue,original_inventory
    FROM contract_close_report_evidence WHERE contract_id=usage.contract_id
+    AND report_range.first_report_id<=report_id AND report_id<=report_range.last_report_id
    ORDER BY client_id,report_id LIMIT 1025
   )
   SELECT CASE WHEN (SELECT count(*) FROM selected) BETWEEN 1 AND 1024

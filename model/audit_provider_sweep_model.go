@@ -558,6 +558,9 @@ func BackfillDeviceAuditEvents(
 	blockMs := int64(ReliabilityBlockDuration / time.Millisecond)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// an operator backfill over the retained window outlasts the
+		// application role's 15-minute transaction bound
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		eventCount = 0
 
 		endDay := startOfUtcDay(server.NowUtc())
@@ -778,6 +781,9 @@ func BackfillProviderAuditEvents(
 	blockMs := int64(ReliabilityBlockDuration / time.Millisecond)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// an operator backfill over the retained window outlasts the
+		// application role's 15-minute transaction bound
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		eventCount = 0
 
 		// clamp the end to the start of the first day with live sweep events,

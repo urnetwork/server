@@ -1146,6 +1146,19 @@ func configureReliabilityRunningCheckpoint(ctx context.Context, tx reliabilityRu
 	))
 }
 
+// The reliability transactions that read or rewrite every client's rows (the
+// location reliabilities, the client scores, the network window) are
+// unmeasured since the October rewrites (scoring every lookback in one
+// transaction took 1,356 s before them), and the network window widens with
+// every stall of the rollup. The application role's 15-minute transaction
+// bound (PARTITION-MAINTENANCE-PLAN.md A6) could end each run the same way,
+// and every retry would read a wider window. Each carries the checkpoints'
+// two-hour ceiling instead, so the server still ends an orphan; the bounded
+// checkpoints above fit the role's bound and keep it.
+func boundReliabilityTransactionInTx(ctx context.Context, tx server.PgCanExec) {
+	server.SetTransactionTimeoutInTx(ctx, tx, reliabilityRunningCheckpointStatementTimeout)
+}
+
 // reliabilityRunningLookback pairs a lookback_index with its window width.
 type reliabilityRunningLookback struct {
 	lookbackIndex int
@@ -1681,6 +1694,7 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		if complete {
 			maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
 			minTime := maxTime.Add(-maxLookback)
@@ -1725,6 +1739,12 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 			// hold SUM(1.0) (independent_sum) and SUM(1.0/valid_client_count)
 			// (reliability_sum) over the window, so this reads the small running
 			// table instead of re-scanning the full client_reliability window.
+			// A row identical to its recomputation, window included, is not
+			// rewritten. The window moves with every pass, and its
+			// max_block_number is the publication marker the stale-row delete
+			// and the freshness signal (SIGNALS.md §2.15a) read, so a pass over
+			// a new window still rewrites every row; no index keys these
+			// columns, so each rewrite stays on its page (HOT).
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -1771,6 +1791,28 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					city_location_id = EXCLUDED.city_location_id,
 					region_location_id = EXCLUDED.region_location_id,
 					country_location_id = EXCLUDED.country_location_id
+				WHERE
+					(
+						client_connection_reliability_score.independent_reliability_score,
+						client_connection_reliability_score.independent_reliability_weight,
+						client_connection_reliability_score.reliability_score,
+						client_connection_reliability_score.reliability_weight,
+						client_connection_reliability_score.min_block_number,
+						client_connection_reliability_score.max_block_number,
+						client_connection_reliability_score.city_location_id,
+						client_connection_reliability_score.region_location_id,
+						client_connection_reliability_score.country_location_id
+					) IS DISTINCT FROM (
+						EXCLUDED.independent_reliability_score,
+						EXCLUDED.independent_reliability_weight,
+						EXCLUDED.reliability_score,
+						EXCLUDED.reliability_weight,
+						EXCLUDED.min_block_number,
+						EXCLUDED.max_block_number,
+						EXCLUDED.city_location_id,
+						EXCLUDED.region_location_id,
+						EXCLUDED.country_location_id
+					)
 				`,
 				minBlockNumber,
 				maxBlockNumber,
@@ -2290,6 +2332,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete, liveStaleHandlerIds)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -2554,6 +2597,8 @@ type clientLocationReliability struct {
 	arinEpochFacts map[int64]*arinEpochFacts
 	networkId      server.Id
 	connected      bool
+	// a hosted child identity, which most readers exclude; counted by the pass
+	hostedChild bool
 	// locations is bucketed by what each connection proved (connect/IPV6.md
 	// A8): the location row is taken from the v4-proven and legacy
 	// connections when any exist, else from the rest (v6-proven or
@@ -2676,6 +2721,8 @@ type clientLocationReliabilityRow struct {
 	relativeLatencyMillis int
 	hasSpeedTest          bool
 	hasLatencyTest        bool
+	// the client is a hosted child identity (network_client.source_client_id set)
+	hostedChild bool
 }
 
 func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocationReliabilityRow) {
@@ -2701,6 +2748,7 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 		&row.arinOldNonQuality,
 		&row.arinEpoch,
 		&row.arinOldEpoch,
+		&row.hostedChild,
 	))
 	// scanning assigns a fresh slice, so copy into the fixed-size key
 	copy(row.clientAddressHash[:], clientAddressHashSlice)
@@ -2709,6 +2757,7 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 
 // add folds one connection row into the client's summary.
 func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
+	self.hostedChild = row.hostedChild
 	self.arinRisk = self.arinRisk || row.arinRisk
 	self.arinNonQuality = self.arinNonQuality || row.arinNonQuality
 	self.arinOldRisk = self.arinOldRisk || row.arinOldRisk
@@ -2899,32 +2948,15 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 	// judged before the transaction: the judgement reads Redis
 	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }
 
-// this should be called regularly
-// a valid client will have one connected location and one connected address hash
-// A connection is connected while its handler heartbeat within two heartbeat
-// timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
-// before the transaction (network_client_handler_liveness.go).
-func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
-	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
-	server.Raise(policyErr)
-	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
-
-	// old entries are not deleted on each update, but the connected status is updated
-	// - connected clients are updated, and the valid state is reset to match the latest
-	// - if a disconnected client is not in `network_client_location_reliability`,
-	//   the most recent disconnected connection is used to update the values
-
-	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
-
-	// for each client, summarize all the active locations
-	result, err := tx.Query(
-		ctx,
-		`
+// Every open connection whose handler is live, with its location, speed and
+// latency: the rows a pass folds into each connected client. It reads the
+// open-row partial indexes of network_client_connection.
+const clientLocationReliabilityConnectedSql = `
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
@@ -2945,7 +2977,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.arin_old_risk,
 			(network_client_location.arin_old_non_quality OR ($2::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
 			network_client_location.arin_database_build_epoch,
-			network_client_location.arin_old_database_build_epoch
+			network_client_location.arin_old_database_build_epoch,
+			network_client.source_client_id IS NOT NULL AS hosted_child
 
 		FROM network_client_connection
 
@@ -2967,28 +3000,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		WHERE
 			network_client_connection.connected = true
-		`,
-		minHandlerHeartbeatTime,
-		requireSubscriber,
-		nonNilHandlerIds(liveStaleHandlerIds),
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			row := scanClientLocationReliabilityRow(result)
-			r, ok := clientLocationReliabilities[row.clientId]
-			if !ok {
-				r = newClientLocationReliability(row.networkId, true)
-				clientLocationReliabilities[row.clientId] = r
-			}
-			r.networkId = row.networkId
-			r.add(row)
-		}
-	})
-
-	// fill in disconnected clients that are missing from `network_client_location_reliability`
-	result, err = tx.Query(
-		ctx,
 		`
+
+// The connections closed in [$1, $2) of clients with no location reliability
+// row yet, newest first. It reads network_client_connection_closed_disconnect_time,
+// which holds closed connections only.
+const clientLocationReliabilityRecentlyClosedSql = `
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
@@ -3009,7 +3026,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.arin_old_risk,
 			(network_client_location.arin_old_non_quality OR ($3::boolean AND NOT network_client_location.arin_old_quality_verified)) AS arin_old_non_quality,
 			network_client_location.arin_database_build_epoch,
-			network_client_location.arin_old_database_build_epoch
+			network_client_location.arin_old_database_build_epoch,
+			network_client.source_client_id IS NOT NULL AS hosted_child
 
 		FROM network_client_connection
 
@@ -3036,7 +3054,51 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		ORDER BY network_client_connection.disconnect_time DESC
 
-		`,
+		`
+
+// this should be called regularly
+// a valid client will have one connected location and one connected address hash
+// A connection is connected while its handler heartbeat within two heartbeat
+// timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
+// before the transaction (network_client_handler_liveness.go).
+func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
+	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
+	server.Raise(policyErr)
+	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
+
+	// old entries are not deleted on each update, but the connected status is updated
+	// - connected clients are updated, and the valid state is reset to match the latest
+	// - if a disconnected client is not in `network_client_location_reliability`,
+	//   the most recent disconnected connection is used to update the values
+
+	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
+
+	// for each client, summarize all the active locations
+	result, err := tx.Query(
+		ctx,
+		clientLocationReliabilityConnectedSql,
+		minHandlerHeartbeatTime,
+		requireSubscriber,
+		nonNilHandlerIds(liveStaleHandlerIds),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			row := scanClientLocationReliabilityRow(result)
+			r, ok := clientLocationReliabilities[row.clientId]
+			if !ok {
+				r = newClientLocationReliability(row.networkId, true)
+				clientLocationReliabilities[row.clientId] = r
+			}
+			r.networkId = row.networkId
+			r.add(row)
+		}
+	})
+
+	// fill in disconnected clients that are missing from `network_client_location_reliability`
+	result, err = tx.Query(
+		ctx,
+		clientLocationReliabilityRecentlyClosedSql,
 		minTime,
 		maxTime,
 		requireSubscriber,
@@ -3185,7 +3247,15 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 	probeEligibilityTime := prepareLocationProbeEligibility(ctx, tx)
 
-	server.RaisePgResult(tx.Exec(
+	// A client's row is rewritten only when one of its values changed, or to
+	// refresh update_block_number once it is
+	// ClientLocationReliabilityRefreshInterval old. Every connected client is
+	// upserted every pass and is mostly unchanged, and update_block_number is
+	// indexed, so writing it each pass was a non-HOT update per connected
+	// client per pass. The block number only ages out disconnected clients
+	// (RemoveOldClientLocationReliabilities), whose cutoff allows for the
+	// refresh lag, and it never moves back.
+	upsertTag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 	    INSERT INTO network_client_location_reliability (
@@ -3248,7 +3318,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    ON CONFLICT (client_id) DO UPDATE
 	    SET
 	    	network_id = EXCLUDED.network_id,
-	    	update_block_number = $1,
+	    	update_block_number = CASE
+	    		WHEN network_client_location_reliability.update_block_number <= $1::bigint - $2::bigint THEN $1
+	    		ELSE network_client_location_reliability.update_block_number
+	    	END,
 	    	city_location_id = EXCLUDED.city_location_id,
 	        region_location_id = EXCLUDED.region_location_id,
 	        country_location_id = EXCLUDED.country_location_id,
@@ -3272,9 +3345,64 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        arin_old_non_quality = EXCLUDED.arin_old_non_quality,
 	        arin_epoch = EXCLUDED.arin_epoch,
 	        arin_old_epoch = EXCLUDED.arin_old_epoch
+	    WHERE
+	    	network_client_location_reliability.update_block_number <= $1::bigint - $2::bigint OR
+	    	(
+	    		network_client_location_reliability.network_id,
+	    		network_client_location_reliability.city_location_id,
+	    		network_client_location_reliability.region_location_id,
+	    		network_client_location_reliability.country_location_id,
+	    		network_client_location_reliability.client_address_hash_count,
+	    		network_client_location_reliability.location_count,
+	    		network_client_location_reliability.connected,
+	    		network_client_location_reliability.max_net_type_score,
+	    		network_client_location_reliability.max_net_type_score_speed,
+	    		network_client_location_reliability.max_bytes_per_second,
+	    		network_client_location_reliability.min_relative_latency_ms,
+	    		network_client_location_reliability.has_speed_test,
+	    		network_client_location_reliability.has_latency_test,
+	    		network_client_location_reliability.ipv4_proven,
+	    		network_client_location_reliability.ipv6_proven,
+	    		network_client_location_reliability.egress_index,
+	    		network_client_location_reliability.egress_quality,
+	    		network_client_location_reliability.egress_evidence_time,
+	    		network_client_location_reliability.arin_risk,
+	    		network_client_location_reliability.arin_non_quality,
+	    		network_client_location_reliability.arin_old_risk,
+	    		network_client_location_reliability.arin_old_non_quality,
+	    		network_client_location_reliability.arin_epoch,
+	    		network_client_location_reliability.arin_old_epoch
+	    	) IS DISTINCT FROM (
+	    		EXCLUDED.network_id,
+	    		EXCLUDED.city_location_id,
+	    		EXCLUDED.region_location_id,
+	    		EXCLUDED.country_location_id,
+	    		EXCLUDED.client_address_hash_count,
+	    		EXCLUDED.location_count,
+	    		EXCLUDED.connected,
+	    		EXCLUDED.max_net_type_score,
+	    		EXCLUDED.max_net_type_score_speed,
+	    		EXCLUDED.max_bytes_per_second,
+	    		EXCLUDED.min_relative_latency_ms,
+	    		EXCLUDED.has_speed_test,
+	    		EXCLUDED.has_latency_test,
+	    		EXCLUDED.ipv4_proven,
+	    		EXCLUDED.ipv6_proven,
+	    		EXCLUDED.egress_index,
+	    		EXCLUDED.egress_quality,
+	    		EXCLUDED.egress_evidence_time,
+	    		EXCLUDED.arin_risk,
+	    		EXCLUDED.arin_non_quality,
+	    		EXCLUDED.arin_old_risk,
+	    		EXCLUDED.arin_old_non_quality,
+	    		EXCLUDED.arin_epoch,
+	    		EXCLUDED.arin_old_epoch
+	    	)
 	    `,
 		updateBlockNumber,
+		clientLocationReliabilityRefreshBlocks,
 	))
+	recordClientLocationReliabilityPass(clientLocationReliabilities, upsertTag.RowsAffected())
 
 	// TODO on pg17 this could be part of a MERGE with source missing
 	server.RaisePgResult(tx.Exec(
@@ -3316,20 +3444,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// })
 }
 
-func RemoveOldClientLocationReliabilities(ctx context.Context, maxTime time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		minTime := maxTime.Add(-ClientLocationExpiration)
-		minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM network_client_location_reliability
-			WHERE update_block_number <= $1
-			`,
-			minBlockNumber,
-		))
-	})
+// Removes the rows of clients not seen for ClientLocationExpiration, in
+// bounded batches (network_client_location_reliability_retention.go).
+func RemoveOldClientLocationReliabilities(ctx context.Context, maxTime time.Time) (removedCount int64) {
+	return defaultClientLocationReliabilityRetentionSettings().removeOld(ctx, maxTime)
 }
 
 func UpdateClientLocationReliabilityMultipliersWithDefaults(ctx context.Context) {

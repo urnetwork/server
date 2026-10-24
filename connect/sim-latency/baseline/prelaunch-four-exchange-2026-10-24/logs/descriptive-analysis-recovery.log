@@ -1,0 +1,32 @@
+[env]glog not configured from command line. Using default configuration.
+I1024 15:34:11.430454       1 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1024 15:34:11.430683       1 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1024 15:34:11.430715       1 env.go:81] [env]settings loaded
+[sim-latency] baseline: warning: between-run sd is below the within-run block SE for ttfb_p50_ms, ttfb_p95_ms, total_p50_ms, throughput_p50_bytes_per_s, goodput_bytes_per_s: the noise floor is likely understated; add replicates
+[sim-latency] wrote /output/descriptive-baseline.json
+baseline noise floor: 9 replicates, alpha 0.05
+  metric                                   mean             sd       cv      sd±   min Δ (1/side)
+  fail_rate                           9.031e-04         0.0011   120.5%      25%           0.0029
+  ttfb_p50_ms                             152.8           22.7    14.8%      25%             59.6
+  ttfb_p95_ms                              1761          104.5     5.9%      25%            274.8
+  total_p50_ms                             1067          106.4    10.0%      25%            279.7
+  total_p95_ms                            17811           1684     9.5%      25%             4428
+  throughput_p05_bytes_per_s             133178          16692    12.5%      25%            43896
+  throughput_p50_bytes_per_s             584029          55228     9.5%      25%           145239
+  throughput_p95_bytes_per_s           26140616        3592679    13.7%      25%          9448021
+  goodput_bytes_per_s                  17330537         306119     1.8%      25%           805031
+
+measurement convergence — min detectable Δ with m runs per side (primaries):
+  m                                       1          2          3          4          5          6          7          8  ...
+  ttfb_p95_ms                         274.8      194.3      158.7      137.4      122.9      112.2      103.9       97.2  ...
+  m                                       1          2          3          4          5          6          7          8  ...
+  throughput_p50_bytes_per_s         145239     102699      83854      72619      64953      59293      54895      51350  ...
+
+estimate stability — sd from the first m replicates (primaries):
+  m                                       2          3          4          5          6          7          8          9
+  ttfb_p95_ms                          76.0       53.8      110.6      109.5       99.7       94.2       87.6      104.5
+  m                                       2          3          4          5          6          7          8          9
+  throughput_p50_bytes_per_s          131.6      65590      63805      55503      60099      59077      54995      55228
+
+the sd estimate itself carries ~±25% sampling uncertainty at k=9; if the
+stability series still drifts, add replicates before trusting tight verdicts

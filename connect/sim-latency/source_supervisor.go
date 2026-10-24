@@ -73,26 +73,34 @@ func runSourceSupervisorWorkerCommand(ctx context.Context, path, expectedDigest 
 	return err
 }
 
-// Output capture is bounded without closing a live child's pipes. Only a
-// caller expecting a machine document treats stdout truncation as failure;
-// diagnostics never become protocol authority or enter a durable public error.
-func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string, machineOutput bool) ([]byte, error) {
+// Verify an immutable executable without running it; qualifier admission uses
+// this same gate before starting expensive build work and again before launch.
+func verifySourceSupervisorProgram(path, expectedDigest string) error {
 	if !filepath.IsAbs(path) || !validSha256(expectedDigest) {
-		return nil, errors.New("pinned automation integration is not configured")
+		return errors.New("pinned automation integration is not configured")
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o111 == 0 || info.Size() > maximumAutomationExecutableBytes {
-		return nil, errors.New("automation integration must be a non-writable regular executable")
+		return errors.New("automation integration must be a non-writable regular executable")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	hash := sha256.New()
 	_, hashErr := io.Copy(hash, io.LimitReader(file, maximumAutomationExecutableBytes+1))
 	closeErr := file.Close()
 	if hashErr != nil || closeErr != nil || hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
-		return nil, errors.New("automation integration executable digest does not match")
+		return errors.New("automation integration executable digest does not match")
+	}
+	return nil
+}
+
+// Recheck the executable immediately before every launch, including after an
+// earlier preflight accepted the independently configured qualification hook.
+func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string, machineOutput bool) ([]byte, error) {
+	if err := verifySourceSupervisorProgram(path, expectedDigest); err != nil {
+		return nil, err
 	}
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
@@ -291,12 +299,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 			selectedMargin = proposal.Significance.RecommendedNextEpochTakeoverMarginPercent
 		}
 		intent.Threshold, intent.ThresholdEvidenceSha256 = selectedMargin/100, proposal.Significance.ScoreSha256
-		manifest.EvaluationSource.Generations = append(manifest.EvaluationSource.Generations, reviewedSourceGeneration{
-			Generation: intent.SourceGeneration, Kind: intent.Kind, SourceLockSha256: intent.SourceLockSha256,
-			SignificantImprovementPercent: selectedMargin, ThresholdEvidenceSha256: intent.ThresholdEvidenceSha256,
-			SourceApprovalId: proposal.ReviewId.String(), SourceApprovalDigest: proposal.ReviewDecisionDigest, EvaluatedBaseSourceLockSha256: current.SourceLockSha256,
-			PatchSha256: proposal.PatchSha256, ScoreSha256: proposal.Significance.ScoreSha256, Significance: proposal.Significance, Repositories: sourceRepositoriesFromCommits(proposal.Commits),
-		})
+		manifest.EvaluationSource.Generations = append(manifest.EvaluationSource.Generations, reviewedGenerationForProposal(current, proposal))
 		if err := copyReviewedSourcePatch(proposal, root); err != nil {
 			return nil, err
 		}
