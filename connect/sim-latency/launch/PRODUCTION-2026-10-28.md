@@ -331,6 +331,18 @@ The package `tests.sh` wrapper currently refuses to start because its shared
 local launcher lock has no readable owner. That preflight is not bypassed or
 counted as passing. A direct race-enabled package Go suite also failed its six
 database integration preflights because `WARP_ENV` was not set to `local`.
-Neither result is a simulator correctness failure or successful full-suite
-proof; restore the launcher-managed test environment before rerunning the
-supported wrapper. No independent model-run test provenance is claimed.
+The supported release-gate helper subsequently supplied disposable services,
+exact daemon-assigned endpoints and private synthetic resources without touching
+the legacy shared containers. This restored the real `tests.sh` path and exposed
+two provider-selection tests whose unspecified caller IP required an absent
+GeoIP database. Both now use the portable documentation-subnet fixture through
+a shared test-only constructor, with a deterministic address regression. Full
+wrapper reruns are in progress. No production geography behavior changed, and
+no independent model-run test provenance is claimed.
+
+Reviewed-image assembly now has a generated, tested copy-only Dockerfile plan:
+its base alias binds the exact incumbent image, and binary/manifest/lock bytes
+bind the approved generation. It contains no `RUN`, `ONBUILD`, `ADD`, external
+frontend or extra execution stage, and copies no config/vault inputs. This is
+an assembly-plan component, not a built reviewed-winner image or completed
+broker CLI; execution, installed qualification and live publication remain open.
