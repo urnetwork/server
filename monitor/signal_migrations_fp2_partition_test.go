@@ -58,7 +58,8 @@ func TestMigrationFp2CatalogAcceptsPartitionedHistory(t *testing.T) {
 		}
 		var partitioned bool
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, migrationEgressHealthHistoryPartitionedSql).Scan(&partitioned))
+			// the contract's layout test is an expression, so it is selected
+			server.Raise(conn.QueryRow(ctx, "SELECT "+migrationEgressHealthHistoryPartitionedSql).Scan(&partitioned))
 		})
 		if !partitioned {
 			t.Fatal("the cutover did not partition the history")
