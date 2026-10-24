@@ -54,10 +54,11 @@ import (
 
 const DbReindexEpochs = uint64(8)
 
-// The automatic rotation rebuilds a whole table only when its live size (heap,
-// toast, and valid indexes, summed over partition leaves) is at most this. A
-// whole-table rebuild scans the heap twice per index and keeps a second copy of
-// every index until its swap; a larger table such as network_client stays
+// The automatic rotation rebuilds a whole table only when what the rebuild
+// reads and writes (heap and toast, plus the compact size of its indexes,
+// summed over partition leaves; see dbMaintenanceTableBytes) is at most this.
+// A whole-table rebuild scans the heap twice per index and keeps a second copy
+// of every index until its swap; a larger table such as network_client stays
 // cleanup-only unless an operator run sets IncludeLargeTables.
 const DefaultDbMaintenanceMaxReindexTableBytes = int64(16 * 1024 * 1024 * 1024)
 
@@ -551,15 +552,19 @@ func dbMaintenanceIndexSizes(ctx context.Context, query string, names []string) 
 }
 
 // These tables are too large or too frequently updated to rebuild as a whole;
-// they use partition turnover, targeted indexes, or tuned autovacuum plus an
-// explicitly scheduled one-time pg_repack instead.
+// they use partition turnover, targeted indexes, or tuned autovacuum instead.
+// A table here shrinks only in a maintenance window, with VACUUM FULL, until
+// PostgreSQL 19 brings online compaction (REPACK CONCURRENTLY,
+// PARTITION-MAINTENANCE-PLAN.md A4); never pg_repack or another external tool
+// (owner rule). network_client_connection left the list on 2026-10-24 (A3): it
+// is a plain table, 2.6 GB compact, and its bloated indexes are also rebuilt
+// hourly by VacuumHotTables.
 var dbMaintenanceSkipReindexTables = map[string]bool{
 	"client_reliability":                  true,
 	"contract_participant":                true,
 	"contract_close":                      true,
 	"network_client":                      true,
 	"network_client_location_reliability": true,
-	"network_client_connection":           true,
 	"transfer_contract":                   true,
 	"transfer_escrow":                     true,
 	"transfer_escrow_sweep":               true,
@@ -987,10 +992,9 @@ func dbMaintenanceSampleLoad(ctx context.Context) (load dbMaintenanceLoad, err e
 	return
 }
 
-// Heap, toast, and valid indexes of the table and every member of its partition
-// tree (pg_partition_tree lists nothing for a table that is not partitioned; a
-// partitioned member has no storage of its own). Invalid debris is excluded;
-// cleanup drops it.
+// Heap and toast of the table and every member of its partition tree
+// (pg_partition_tree lists nothing for a table that is not partitioned; a
+// partitioned member has no storage of its own).
 const dbMaintenanceTableBytesQuery = `
 	WITH member AS (
 		SELECT format('%I.%I', 'public', $1::text)::regclass::oid AS relid
@@ -998,27 +1002,51 @@ const dbMaintenanceTableBytesQuery = `
 		SELECT tree.relid
 		FROM pg_partition_tree(format('%I.%I', 'public', $1::text)::regclass) tree
 	)
-	SELECT coalesce(sum(
-		pg_table_size(member.relid) + coalesce((
-			SELECT sum(pg_relation_size(index_state.indexrelid))
-			FROM pg_index index_state
-			WHERE index_state.indrelid = member.relid
-			  AND index_state.indisvalid
-		), 0)
-	), 0)::bigint
+	SELECT coalesce(sum(pg_table_size(member.relid)), 0)::bigint
 	FROM member
 `
 
-// The size the automatic rebuild bound compares; see dbMaintenanceTableBytesQuery.
+// The size the automatic rebuild bound compares: what a whole-table rebuild
+// reads and writes, the heap and toast it scans plus the indexes it builds,
+// summed over partition leaves. Each index counts at its compact estimate
+// (dbMaintenanceEstimateBtreeBytes), not its size on disk, which the rebuild
+// throws away, so a table whose indexes are bloated stays eligible for the
+// rebuild that shrinks them. Measured by the size on disk, pending_task (87 GB)
+// and network_client_connection (21.7 GB) left the rotation exactly when they
+// needed it (2026-10-23). An index without an estimate (not a btree, or never
+// vacuumed or analyzed) counts at its size on disk. Invalid debris is
+// excluded; cleanup drops it.
 func dbMaintenanceTableBytes(ctx context.Context, tableName string) (bytes int64, err error) {
+	var heapBytes int64
 	HandleError(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
-			Raise(conn.QueryRow(ctx, dbMaintenanceTableBytesQuery, tableName).Scan(&bytes))
+			Raise(conn.QueryRow(ctx, dbMaintenanceTableBytesQuery, tableName).Scan(&heapBytes))
 		}, OptNoRetry())
 	}, func(recovered error) {
 		err = recovered
 	})
-	return
+	if err != nil {
+		return 0, err
+	}
+	indexes, err := dbMaintenanceTableIndexSizes(ctx, []string{tableName})
+	if err != nil {
+		return 0, err
+	}
+	return dbMaintenanceRebuildBytes(heapBytes, indexes), nil
+}
+
+// heapBytes plus each index's compact estimate, or its size on disk when it
+// has none.
+func dbMaintenanceRebuildBytes(heapBytes int64, indexes []dbMaintenancePriorityIndex) int64 {
+	bytes := heapBytes
+	for _, index := range indexes {
+		if 0 < index.compactBytes {
+			bytes += index.compactBytes
+		} else {
+			bytes += index.indexBytes
+		}
+	}
+	return bytes
 }
 
 // Whether another backend holds or awaits the table's ShareUpdateExclusiveLock:
@@ -1782,7 +1810,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 					reindexStatement = ""
 				} else if maxBytes := opts.maxReindexTableBytes(); maxBytes < bytes {
 					glog.Infof(
-						"[db]maintenance table %s is %d bytes, above the %d byte automatic rebuild bound: cleanup only\n",
+						"[db]maintenance table %s rebuild would read and write %d bytes (heap, toast and compact indexes), above the %d byte automatic rebuild bound: cleanup only\n",
 						tableName,
 						bytes,
 						maxBytes,
