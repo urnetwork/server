@@ -13,6 +13,7 @@
   "evaluated_server_commit": "67c87445abe6725b25b3df2a13af7eb99cd4f8ed",
   "evaluator_image_digest": "sha256:826569fdeb02f72ec4f24ace7c93b16b69a60e1875c31799c5a0217b402e0d6c",
   "valid_baseline_samples": 0,
+  "usable_capacity_points": 2,
   "official_baseline_frozen": false,
   "scale_frozen": false,
   "margin_frozen": false,
@@ -25,6 +26,8 @@
       "impairment": false,
       "completion_state": "incomplete",
       "incomplete_code": "unclean_teardown",
+      "controller_exit_code": 1,
+      "capacity_eligible": false,
       "baseline_eligible": false
     },
     {
@@ -33,6 +36,39 @@
       "impairment": true,
       "completion_state": "incomplete",
       "incomplete_code": "matchmaking_probe_failed",
+      "controller_exit_code": 1,
+      "capacity_eligible": false,
+      "baseline_eligible": false
+    },
+    {
+      "path": "p1800-on-handoff-fix",
+      "providers": 1800,
+      "impairment": true,
+      "completion_state": "complete",
+      "incomplete_code": "",
+      "controller_exit_code": 0,
+      "capacity_eligible": true,
+      "baseline_eligible": false
+    },
+    {
+      "path": "p1800-off-handoff-fix",
+      "providers": 1800,
+      "impairment": false,
+      "completion_state": "complete",
+      "incomplete_code": "",
+      "controller_exit_code": 0,
+      "capacity_eligible": true,
+      "baseline_eligible": false
+    },
+    {
+      "path": "p7200-on-handoff-fix",
+      "providers": 7200,
+      "impairment": true,
+      "completion_state": "complete",
+      "incomplete_code": "",
+      "controller_exit_code": 127,
+      "controller_failure": "mutable_shell_script_unread_tail_changed_after_simulation_completed",
+      "capacity_eligible": false,
       "baseline_eligible": false
     }
   ]

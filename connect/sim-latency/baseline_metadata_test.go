@@ -13,9 +13,9 @@ import (
 	"testing"
 )
 
-// Failed frontier measurements retain raw identity and explicit ineligibility;
-// completing a measurement window alone must never create a valid baseline.
-func TestFrontierIncompletePointsRemainIneligibleAndBoundToRawArtifacts(t *testing.T) {
+// Capacity trials retain raw identity and explicit baseline ineligibility.
+// Clean simulation exit alone cannot erase a failing controller receipt.
+func TestFrontierPointsRemainNonOfficialAndBoundToRawArtifacts(t *testing.T) {
 	root := filepath.Join("baseline", "prelaunch-frontier-2026-10-24")
 	content, err := os.ReadFile(filepath.Join(root, "INDEX.json"))
 	if err != nil {
@@ -24,21 +24,31 @@ func TestFrontierIncompletePointsRemainIneligibleAndBoundToRawArtifacts(t *testi
 	var index struct {
 		Official             bool   `json:"official"`
 		ValidBaselineSamples int    `json:"valid_baseline_samples"`
+		UsableCapacityPoints int    `json:"usable_capacity_points"`
 		ExchangeHosts        int    `json:"exchange_hosts"`
 		EvaluatedCommit      string `json:"evaluated_server_commit"`
 		Points               []struct {
-			Path             string `json:"path"`
-			CompletionState  string `json:"completion_state"`
-			IncompleteCode   string `json:"incomplete_code"`
-			BaselineEligible *bool  `json:"baseline_eligible"`
+			Path               string `json:"path"`
+			CompletionState    string `json:"completion_state"`
+			IncompleteCode     string `json:"incomplete_code"`
+			BaselineEligible   *bool  `json:"baseline_eligible"`
+			CapacityEligible   *bool  `json:"capacity_eligible"`
+			ControllerExitCode int    `json:"controller_exit_code"`
 		} `json:"points"`
 	}
 	if err := json.Unmarshal(content, &index); err != nil || index.Official || index.ValidBaselineSamples != 0 || len(index.Points) == 0 || index.ExchangeHosts <= 0 {
 		t.Fatal("failed frontier archive claims official or usable baseline evidence", err)
 	}
+	capacityCount := 0
 	for _, point := range index.Points {
-		if !filepath.IsLocal(point.Path) || point.BaselineEligible == nil || *point.BaselineEligible || point.CompletionState != "incomplete" || point.IncompleteCode == "" {
-			t.Fatal("failed frontier point lost explicit baseline ineligibility", point.Path)
+		if !filepath.IsLocal(point.Path) || point.BaselineEligible == nil || *point.BaselineEligible || point.CapacityEligible == nil ||
+			(point.CompletionState != "complete" && point.CompletionState != "incomplete") ||
+			(point.CompletionState == "complete") != (point.IncompleteCode == "") ||
+			*point.CapacityEligible != (point.CompletionState == "complete" && point.ControllerExitCode == 0) {
+			t.Fatal("frontier point lost explicit eligibility or controller outcome", point.Path)
+		}
+		if *point.CapacityEligible {
+			capacityCount++
 		}
 		content, err := os.ReadFile(filepath.Join(root, point.Path, "run.json"))
 		if err != nil {
@@ -67,6 +77,9 @@ func TestFrontierIncompletePointsRemainIneligibleAndBoundToRawArtifacts(t *testi
 		if copyErr != nil || gzipErr != nil || closeErr != nil || run.ConfigSha256 != fmt.Sprintf("%x", hash.Sum(nil)) {
 			t.Fatal("failed frontier provider input differs from measured config", point.Path, copyErr, gzipErr, closeErr)
 		}
+	}
+	if capacityCount != index.UsableCapacityPoints {
+		t.Fatal("frontier capacity census differs from retained outcomes", capacityCount, index.UsableCapacityPoints)
 	}
 }
 

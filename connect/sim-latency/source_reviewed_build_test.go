@@ -4,6 +4,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +14,36 @@ import (
 	"github.com/urnetwork/server/model"
 	"gopkg.in/yaml.v3"
 )
+
+// Exercise the measurement preflight with real private Git trees and an image
+// lock. A prepared generation must work before any future round is mapped.
+func TestReviewedImagePreflightSelectsGenerationWithoutInventingFutureRound(t *testing.T) {
+	request := sourceBuildContextFixture(t)
+	manifest, err := decodeSourceManifest(request.SourceManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range manifest.EvaluationSource.Rounds {
+		if round.SourceGeneration == request.SourceGeneration {
+			t.Fatal("fixture fabricated a future-round mapping instead of testing a prospective image")
+		}
+	}
+	lock, err := json.Marshal(evaluatorSourceLock{Schema: 1, Repositories: request.Proposal.Commits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "source-lock.json")
+	if err := os.WriteFile(path, lock, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	repositoriesRoot := filepath.Dir(request.Proposal.StagedRoots["server"])
+	if err := verifySourceEpoch(manifest, request.SourceGeneration, repositoriesRoot, path); err != nil {
+		t.Fatal("image preflight confused a source generation with a competition round", err)
+	}
+	if err := verifySourceEpoch(manifest, 0, repositoriesRoot, path); err == nil {
+		t.Fatal("new reviewed image was accepted as the unchanged incumbent generation")
+	}
+}
 
 // Supply the same immutable manifest stored by the actual active pointer.
 func reviewedImageFixture(t *testing.T, staging bool) (*model.CompetitionSourceActivation, *reviewedSourceProposal) {

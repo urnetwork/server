@@ -61,6 +61,34 @@ were stopped after the point's terminal exit and verified container cleanup.
 Resume the missing lower-scale points after the current test window; do not
 start larger points or declare capacity from either incomplete attempt.
 
+The lower-scale recovery finished: 1,800 providers passed impairment on and off
+in 461 and 435 seconds with clean teardown. The 7,200-provider on simulation
+also completed and drained cleanly, but its host wrapper returned 127 after a
+live controller-script edit displaced Bash's unread tail. Its measured sidecar
+and failing controller outcome are both preserved, not relabeled as a clean
+whole-pipeline pass. All five measured attempts are now versioned in the frontier
+archive; only the two 1,800-provider trials are usable capacity points, and none
+is an official baseline sample.
+
+The next public-seed nine-run set uses fresh disposable PostgreSQL/Redis per
+replicate and the same 1,800-provider/four-exchange-instance workload. It stops
+on any failed replicate instead of silently resampling. The root-owned,
+read-only `r9-controller-v1` bundle fixes the mutable-controller failure and
+checks script/input digests before and after execution. The source-case script
+digest is `35f5d0148e25d85a0075a6067400619ef7b4fc2114aa9f2e1b255582642ebc49`;
+measurement script digest is
+`1cade50cd96f2c7529c89b3afb8a60a47567a564bdd7f3aa84dadf54d464a3cd`.
+This remains exploratory calibration, not final scale selection, hidden-seed
+commitment, an official scoring baseline or a finalized margin.
+
+Deterministic FIFO-barrier Go regressions reproduce the live-shell unread-tail
+failure and verify the immutable snapshot control. A composed real-Git-tree
+regression also confirms that schema-2 preflight already selects a source
+generation without inventing a future-round mapping; no production fix was
+needed for that suspected issue. These and archive metadata checks passed
+three race repetitions (19.080 seconds). All earlier raw `v1` evidence remains
+unchanged. No main control-plane writes occurred during the maintenance hold.
+
 The public API still returns `503 source_not_ready`, and sille's configured
 MinIO endpoint `172.28.208.177:23900` refuses TCP connections. No main database
 write or production activation has been attempted while maintenance confirmation

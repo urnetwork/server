@@ -1,21 +1,36 @@
-# Four-host frontier — incomplete points, October 24
+# Four-exchange-instance frontier — October 24
 
 These are public-seed exploratory capacity attempts, **not an official baseline**.
-Neither measured point passed every correctness/completion gate. Their latency
-values must not enter a baseline, significance calculation, ranking or launch
-readiness claim. Keeping failed attempts prevents selective reporting.
+These capacity trials are not a predeclared nine-run calibration set. Their
+latency values must not enter an epoch baseline, significance calculation or
+ranking. Keeping unsuccessful attempts prevents selective reporting. All exchange
+instances run on the single evaluation host, not four physical machines.
 
 | Providers | Clients | Impairment | Completion | Reason |
 | --- | --- | --- | --- | --- |
 | 7,200 | 200 | off | incomplete | `unclean_teardown`: shard 0 required KILL after TERM |
 | 15,000 | 200 | on | incomplete | `matchmaking_probe_failed`: provider lookup exhausted its HTTP attempts |
+| 1,800 | 200 | on | complete | controller exit 0; 461 seconds, clean teardown |
+| 1,800 | 200 | off | complete | controller exit 0; 435 seconds, clean teardown |
+| 7,200 | 200 | on | simulation complete; controller failed | controller exit 127 after a live script edit displaced Bash's unread tail |
 
-Both used four exchange hosts, four fleet shards, 80 arrivals/minute, a public
+All points used four exchange hosts, four fleet shards, 80 arrivals/minute, a public
 seed of 20261024, quality window 2, a 60-second ramp, synthetic 13-hour
 reliability prewarm, 60-second settle, a 180-second measurement window, and
-120-second request timeouts. Both warmed all 200 clients. The 15,000-provider
+120-second request timeouts. All warmed all 200 clients. The 15,000-provider
 point stopped during measurement. The 7,200-provider point completed measurement
 but failed teardown; completed measurement alone is not a successful evaluation.
+
+The two 1,800-provider trials are usable capacity evidence, not a frozen scale or
+threshold. The 7,200-provider on trial completed the simulation, wrote its
+completion marker and drained every shard without intervention. Its host
+controller was edited while its long Docker command was running; after that
+command returned, Bash read a shifted tail fragment (`nput/measure.sh`) and
+returned 127. Preserve that exit status, not an invented exit 0 or a claim of
+submission tampering. The private calibration now uses a separate root-owned,
+read-only controller bundle with before/after digests. Deterministic Go tests use
+FIFO barriers to reproduce the live-script failure and verify the snapshot
+mitigation. No signal was delivered to this trial either.
 
 The frozen evaluated server is
 `67c87445abe6725b25b3df2a13af7eb99cd4f8ed`; the evaluator image is
@@ -29,7 +44,7 @@ runner diagnostics. Gzip files use deterministic compression; decompression
 recovers the original bytes. `measure.sh` is the actual common in-container
 measurement command. All services were disposable synthetic local-only fixtures;
 no main config/vault trees entered the evaluator. Timed measurements did not
-overlap Go builds or tests. Both points' Docker stacks were removed. A late
+overlap Go builds or tests. All points' Docker stacks were removed. A late
 shutdown stack-capture controller was armed for the 15,000-provider point but
 observed all shards exit, so **no diagnostic signal was delivered**.
 
