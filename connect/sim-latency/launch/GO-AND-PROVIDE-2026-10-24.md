@@ -109,3 +109,57 @@ smoke and three-pass candidate gate started in
 here. Both preparation commits are published only on
 `preparation/sim-latency-provide-20261024`, not activated as the competition
 checkpoint. The successful main gate remains valid and unchanged.
+
+## Completed candidate gate and prepared checkpoint publication
+
+The corrected candidate passed its fresh independent gate with Go 1.27.3:
+focused smoke 9/9 passes, then three consecutive complete suite invocations,
+each with 332 top-level passes (one initial lifecycle plus 331 race tests).
+Outer durations were 140, 117 and 116 seconds; race-package durations were
+114.326, 109.513 and 109.254 seconds. Archive verification covered all 2,706
+files in that frozen tree. Its smaller archive is not main's 2,866-file archive.
+Cleanup exited 0 and the candidate remained clean at `6261c15454...`.
+
+| Log | SHA-256 |
+| --- | --- |
+| `smoke.log` | `224cea63a39ca1773edce3317e2c2a0e6d01089dfe3d4a30e4a7ea904e821900` |
+| `full-1.log` | `741fa0c14db454aeedc1d24da886ab4cb8e6481646bcbdb660031ef0c9e047ad` |
+| `full-2.log` | `186eb8e0a947195b4f5d3cf7bd18ca8e9463c694b6c687c78427f7c45e79d083` |
+| `full-3.log` | `b6040fb6ddac9cebd651b3426b7794cb71cd3fae1ac0dde69d7fff114da925cf` |
+| `baseline.log` | `fb9006c5b441d37e42e754ec19ecd5276ae075db7450e94bde548537da9d6906` |
+
+Only after this gate, the published server `sim-latency` branch fast-forwarded
+from `3d96d16...` to `6261c15454adec5a00680e4c3332f628a0aed1e7`. All other nine
+repository pins remain unchanged. Config main
+`cf8b9b584c93137a44a618bd9adf589f8b23749f` publishes the preparation ledger:
+
+- Canonical model source lock:
+  `52b6d63a32ba21cb011d122de80ea8d51d82cb164a165d906223fb07c6b7b694`.
+- Source manifest file SHA-256:
+  `838b132d2c19112e50fefaabfabda81e22127638e8ba281f0c0141ab82d30612`.
+- Preparatory source-choice record SHA-256:
+  `6f6203d143af29238b0cd2e30126b10b175d1f990ad598a9c019e7961b429966`.
+- Prior ledger archived byte-for-byte as
+  `history/sim-latency-2026-10-24-182809.yml`, retaining SHA-256
+  `6fca07712cc22b9bb3f9c30ef974392c8e49eff808cab491a8a2ffca08eeeb81`.
+
+A clean Linux/amd64, CGO-disabled, greenteagc smoke executable built with
+Go 1.27.3 and `vcs.modified=false`, SHA-256
+`9e967c54d65da7e0225b27ae818f3bd38acb6bcb3bc8f2885f703325362df759`.
+It is not the future image's simulator digest. The new evaluator build started
+in `temp/provide-evaluator-build-20261024.Aq1Q7w99`, using a fresh ten-repository
+metadata workspace and sparse source-ledger checkout. Actual image identity,
+container qualification and new calibration are still pending.
+
+The config push first failed because Git LFS's optional locking endpoint was
+unreachable. Every changed file was verified to have no LFS filter; a per-command
+lock-verification override allowed the normal pre-push hook to complete. No LFS
+object upload, commit hook, force push or unrelated worktree was bypassed.
+Remote config main was read back at the exact published commit.
+
+The new descriptor explicitly says `prepared_not_activated`,
+`runtime_qualified:false` and `hidden_baseline_committed:false`. The 16.1%
+historical floor remains provisional pending fresh calibration. The active
+staging competition policy, main database and production admission were not
+changed. Prior image/CSV/report identities remain historical evidence for their
+original source; they do not qualify this checkpoint.
