@@ -69,13 +69,14 @@ func TestRetainedBaselineMetadataDigests(t *testing.T) {
 			Path   string `json:"path"`
 			Sha256 string `json:"sha256"`
 		} `json:"report"`
-		Datasets []map[string]json.RawMessage `json:"datasets"`
+		Datasets           []map[string]json.RawMessage `json:"datasets"`
+		AdditionalDatasets []map[string]json.RawMessage `json:"additional_datasets"`
 	}
 	if err := json.Unmarshal(indexBytes, &index); err != nil {
 		t.Fatal(err)
 	}
 	checkDigest(index.Report.Path, index.Report.Sha256, "INDEX.json report")
-	for _, dataset := range index.Datasets {
+	for _, dataset := range append(index.Datasets, index.AdditionalDatasets...) {
 		for key, digestBytes := range dataset {
 			if !strings.HasSuffix(key, "_sha256") {
 				continue

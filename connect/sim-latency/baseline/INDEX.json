@@ -26,6 +26,14 @@
     "path": "final-baseline.html",
     "sha256": "cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9"
   },
+  "additional_datasets": [
+    {
+      "id": "prelaunch-2026-10-24",
+      "official": false,
+      "index_path": "prelaunch-2026-10-24/INDEX.json",
+      "index_sha256": "96fd0570bf0fbbce2657f850e0fa9c5b704451a677cb58810d12790ec85b4ce2"
+    }
+  ],
   "datasets": [
     {
       "id": "frontier",

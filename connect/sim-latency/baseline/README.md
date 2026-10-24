@@ -1,5 +1,12 @@
 # Sim-latency baseline preservation
 
+The October 24 prepared-source exploration is separately retained in
+[`prelaunch-2026-10-24/`](prelaunch-2026-10-24/README.md). It contains nine
+non-official same-seed replicates and their noise diagnostics, not a replacement
+for an authenticated official epoch baseline. The `v1` data below remains
+unchanged and historical; its source/image qualification does not qualify a
+new production release.
+
 This directory is the Git-versioned, host-independent copy of the terminal
 sim-latency calibration data. A clone of the repository contains the data
 needed to authenticate and revisit the selected scale, baseline stability,
