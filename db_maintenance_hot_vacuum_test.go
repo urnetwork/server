@@ -218,7 +218,9 @@ func (self *testDbHotVacuumClock) advance(duration time.Duration) {
 // How the synthetic server answers one table's VACUUM.
 type testDbHotVacuumReply struct {
 	notices []*pgproto3.NoticeResponse
-	err     *pgproto3.ErrorResponse
+	// Explicit leaf inventory for partitioned parents; nil means a heap.
+	relations []string
+	err       *pgproto3.ErrorResponse
 	// how far the statement advances the clock
 	duration time.Duration
 }
@@ -277,6 +279,22 @@ func newTestDbHotVacuumServer(t *testing.T, clock *testDbHotVacuumClock) *testDb
 			return server.statementErrors[query]
 		}
 		fixture.queryRows = func(_ int, query string) ([]pgproto3.FieldDescription, [][][]byte) {
+			server.stateLock.Lock()
+			for tableName, reply := range server.replies {
+				if query == dbHotVacuumRelationsSql(tableName) {
+					relations := reply.relations
+					if relations == nil {
+						relations = []string{tableName}
+					}
+					rows := [][][]byte{}
+					for _, relation := range relations {
+						rows = append(rows, [][]byte{[]byte("synthetic.public." + relation)})
+					}
+					server.stateLock.Unlock()
+					return []pgproto3.FieldDescription{{Name: []byte("relation"), DataTypeOID: 25, DataTypeSize: -1, TypeModifier: -1}}, rows
+				}
+			}
+			server.stateLock.Unlock()
 			if query != dbHorizonHoldersQuery {
 				return nil, nil
 			}
@@ -369,6 +387,7 @@ func testDbHotVacuumStatements(tableName string, analyze bool, timeout time.Dura
 	}
 	return []string{
 		fmt.Sprintf("SET statement_timeout = %d", timeout.Milliseconds()),
+		dbHotVacuumRelationsSql(tableName),
 		statement + pgx.Identifier{"public", tableName}.Sanitize(),
 		"RESET statement_timeout",
 	}
@@ -546,7 +565,7 @@ func TestDbHotVacuumRunResumesWhereTheBudgetEnded(t *testing.T) {
 	mark = server.mark()
 	run = newDbHotVacuumRun(settings, server.pool, clock.now, run.state)
 	run.run(t.Context())
-	if statements := server.statements(mark); len(statements) < 3 || !slices.Equal(statements[:3], testDbHotVacuumStatements("synthetic_hot_b", false, 2*time.Minute)) {
+	if statements := server.statements(mark); len(statements) < 4 || !slices.Equal(statements[:4], testDbHotVacuumStatements("synthetic_hot_b", false, 2*time.Minute)) {
 		t.Fatalf("third run statements = %q", statements)
 	}
 }
