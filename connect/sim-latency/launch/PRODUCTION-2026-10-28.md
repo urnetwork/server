@@ -1,5 +1,26 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
+## Current preparation pointer — October 24, 21:45 UTC
+
+Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
+retains the chronological preparation journal below; its earlier checkpoint
+tables and measurements must not be interpreted as the latest qualified release.
+
+The latest tested preparation is server
+`6261c15454adec5a00680e4c3332f628a0aed1e7` on `sim-latency`, with the other nine
+repository pins unchanged. Config main
+`cf8b9b584c93137a44a618bd9adf589f8b23749f` publishes canonical source lock
+`52b6d63a32ba21cb011d122de80ea8d51d82cb164a165d906223fb07c6b7b694`.
+Go **1.27.3** is mandatory. The exact test, archival, compiler and publication
+evidence is in [GO-AND-PROVIDE-2026-10-24.md](GO-AND-PROVIDE-2026-10-24.md).
+
+The new evaluator build is live, not qualified. Current source publication is
+explicitly `prepared_not_activated`; final scale/margin, fresh calibration,
+hidden epoch baseline and production runtime activation remain unproven.
+The current source ledger is `config/main/sim-latency.yml`; old ledgers and image
+identities remain immutable historical evidence. Do not reuse their qualification
+or attach their measurements to the new source lock.
+
 Preparation started October 24. The public opening is fixed; preparation and
 qualification start immediately. Current upstream development heads replace the
 previous plan to wait for a Monday source freeze. Do not admit public submissions

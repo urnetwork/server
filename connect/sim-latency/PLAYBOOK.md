@@ -9,6 +9,13 @@ Use [`RUN-MAIN.md`](RUN-MAIN.md) for the adopted v2 supervisor workflow.
 Do not use the legacy v1 round-creation/review commands below to bootstrap the
 new production season or reinterpret a staging round as production.
 
+Go **1.27.3** is mandatory for competition builds and tests. Select that exact
+installed toolchain before invoking the guarded entrypoints. The latest tested
+preparation and its still-open runtime/calibration gates are summarized at the
+top of the launch journal and in
+[`launch/GO-AND-PROVIDE-2026-10-24.md`](launch/GO-AND-PROVIDE-2026-10-24.md).
+Published source pins alone do not mean the competition is ready or active.
+
 The new season uses six weekly admission windows and automatic FIFO scoring.
 After close and authoritative drain, publish the provisional reward decision,
 perform the isolated Sol 6.1 max honesty/safety review, replace substantiated
