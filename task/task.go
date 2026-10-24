@@ -128,6 +128,8 @@ var ReleaseTimeout = 30 * time.Second
 // execution, the session advisory lock prevents duplicate live execution, and
 // this timeout bounds crash recovery. Five minutes comfortably covers routine
 // scheduler/DB stalls without stranding a two-hour task for the full two hours.
+// A claim sets release_time this far ahead, and heartbeats extend it only once
+// less than half remains (refreshTaskTimestampLeasesInTx).
 var TaskLeaseTimeout = 5 * time.Minute
 
 // A timestamp lease bounds recovery after a dead worker, while this
@@ -2513,6 +2515,37 @@ func refreshTaskTimestampLeases(
 	if len(tasks) == 0 {
 		return
 	}
+	refreshed := int64(0)
+	server.Tx(ctx, func(tx server.PgTx) {
+		refreshed = refreshTaskTimestampLeasesInTx(ctx, tx, tasks, server.NowUtc())
+	}, server.TxReadCommitted, server.OptNoRetry())
+	taskTimestampLeaseRefreshSkippedCounter.Add(float64(int64(len(tasks)) - refreshed))
+}
+
+// One heartbeat at now, in the caller's read committed transaction. Every
+// heartbeat writes claim_time, the liveness that operators and monitors read.
+// release_time moves only when less than half of TaskLeaseTimeout remains, to
+// now plus TaskLeaseTimeout. It feeds the generated available_block that both
+// poll indexes key on, so each write of it is a non-HOT update; claim_time is
+// in no index, so a heartbeat between extensions is HOT wherever its page has
+// room (pending_task leaves half of each page free for this). That is one
+// non-HOT version per half lease instead of one per heartbeat: about 45
+// rather than 720 for a two-hour task. After each committed heartbeat a live
+// owner's release_time is at least half a lease ahead. A dead owner's task is
+// reclaimable TaskLeaseTimeout after its last extension, which is never later
+// than TaskLeaseTimeout after its last heartbeat. The session advisory lock,
+// not this timestamp, excludes a second live owner. Returns the rows written:
+// a busy queue key or a row lock held by another writer skips them until the
+// next heartbeat.
+func refreshTaskTimestampLeasesInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	tasks map[server.Id]*Task,
+	now time.Time,
+) (refreshed int64) {
+	if len(tasks) == 0 {
+		return 0
+	}
 	ids := make([]server.Id, 0, len(tasks))
 	claims := make([]int64, 0, len(tasks))
 	keys := make([]server.PgOwnershipKey, 0, len(tasks))
@@ -2521,26 +2554,23 @@ func refreshTaskTimestampLeases(
 		claims = append(claims, task.ClaimGeneration)
 		keys = append(keys, taskQueueOwnershipKey(task.TaskId, task.RunOnceKey))
 	}
-	refreshed := int64(0)
-	server.Tx(ctx, func(tx server.PgTx) {
-		admitted, err := server.TryTxOwnership(ctx, tx, keys)
-		server.Raise(err)
-		if !admitted {
-			return
-		}
-		claimTime := server.NowUtc()
-		releaseTime := claimTime.Add(TaskLeaseTimeout)
-		tag := server.RaisePgResult(tx.Exec(ctx, `WITH owned AS MATERIALIZED (
-			SELECT pending_task.task_id FROM pending_task
-			JOIN unnest($1::uuid[],$4::bigint[]) AS expected(task_id,claim_generation)
-			USING(task_id,claim_generation)
-			ORDER BY pending_task.task_id FOR UPDATE OF pending_task SKIP LOCKED
-		)
-		UPDATE pending_task SET claim_time=$2,release_time=GREATEST(release_time,$3)
-		FROM owned WHERE pending_task.task_id=owned.task_id`, ids, claimTime, releaseTime, claims))
-		refreshed = tag.RowsAffected()
-	}, server.TxReadCommitted, server.OptNoRetry())
-	taskTimestampLeaseRefreshSkippedCounter.Add(float64(int64(len(tasks)) - refreshed))
+	admitted, err := server.TryTxOwnership(ctx, tx, keys)
+	server.Raise(err)
+	if !admitted {
+		return 0
+	}
+	releaseTime := now.Add(TaskLeaseTimeout)
+	renewBefore := now.Add(TaskLeaseTimeout / 2)
+	tag := server.RaisePgResult(tx.Exec(ctx, `WITH owned AS MATERIALIZED (
+		SELECT pending_task.task_id FROM pending_task
+		JOIN unnest($1::uuid[],$4::bigint[]) AS expected(task_id,claim_generation)
+		USING(task_id,claim_generation)
+		ORDER BY pending_task.task_id FOR UPDATE OF pending_task SKIP LOCKED
+	)
+	UPDATE pending_task SET claim_time=$2,
+		release_time=CASE WHEN pending_task.release_time<$5 THEN $3 ELSE pending_task.release_time END
+	FROM owned WHERE pending_task.task_id=owned.task_id`, ids, now, releaseTime, claims, renewBefore))
+	return tag.RowsAffected()
 }
 
 // tryRefreshTaskTimestampLeases converts only the pooled timestamp-refresh

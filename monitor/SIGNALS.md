@@ -1669,10 +1669,13 @@ WHERE function_name LIKE '%UpdateClient%'
   `migration-schema-drift`. Never create the object by hand or delete the task
   row to hide either condition.
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
-  every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
-  future release_time = pre-lease-fix binary or killed worker. Current workers
-  use a five-minute rolling lease, so a killed worker's claim self-releases
-  within five minutes of its final heartbeat. A direct-postgres session lock
+  every ~10s (the keepalive writes claim_time; since 2026-10-24 it moves
+  release_time only once less than half of the five-minute lease remains, so
+  a live claim's release_time sits 2.5–5 minutes ahead and steps forward about
+  every 2.5 minutes). Frozen claim + future release_time = pre-lease-fix binary
+  or killed worker. Current workers use a five-minute rolling lease, so a
+  killed worker's claim self-releases within five minutes of its final
+  heartbeat, often sooner. A direct-postgres session lock
   still prevents duplicate execution if only the heartbeat is starved and the
   original worker remains alive. A raw p95 is not sufficient when repeated
   defects have polluted the tail: use `min(2*p95, max(4*p50, 20m))`, with the
@@ -34795,7 +34798,11 @@ ORDER BY release_time DESC;
   can be a temporarily stranded claim. Current binaries cap release_time at five
   minutes after the last heartbeat regardless of run_max_time_seconds, so the
   chain becomes reconsiderable in at most five minutes after its direct
-  ownership session disappears, instead of 30min–24h. A
+  ownership session disappears, instead of 30min–24h. Since 2026-10-24 a
+  heartbeat extends release_time only once less than half the lease remains,
+  so a live claim shows `lease_remaining_s` between about 150 and 300 and a
+  dead owner's claim can lapse sooner than five minutes after its final
+  heartbeat. A
   direct-postgres session advisory lock remains held while a worker is alive,
   so a starved heartbeat alone cannot create a duplicate; PostgreSQL drops the
   lock with the dead worker's connection. A lease remaining far beyond five

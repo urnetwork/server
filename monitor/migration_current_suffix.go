@@ -696,6 +696,21 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
+	migrationCurrentSuffix(pendingTaskHeartbeatFillfactorMigrationVersion, "task queue pages keep room for heartbeat versions",
+		migrationFillfactor("pending_task", 50)),
+}
+
+// The migration that sets pending_task's fillfactor for HOT heartbeats. Its
+// position follows the migrations merged before it; this is the one place
+// that names it.
+const pendingTaskHeartbeatFillfactorMigrationVersion = 858
+
+// A fillfactor governs only later writes, so the published setting itself is
+// the artifact.
+func migrationFillfactor(table string, fillfactor int) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.%s')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=%d']::text[])`, table, fillfactor)
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
