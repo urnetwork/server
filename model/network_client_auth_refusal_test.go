@@ -526,6 +526,72 @@ func TestAuthNetworkClientReauthUpdatesClientAndDevice(t *testing.T) {
 	})
 }
 
+// A re-auth rewrites the device only when its spec changed: the same spec
+// leaves the row version (xmin) as it was, a new spec writes it, and an empty
+// spec is still written as it always was. The client row is updated each time.
+func TestAuthNetworkClientReauthRewritesOnlyAChangedDeviceSpec(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		_, userSession := authClientTestNetwork(ctx, "test")
+		clientId, deviceId := authClientTestClient(ctx, t, userSession)
+		deviceState := func() (xmin string, deviceSpec string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT xmin::text, device_spec FROM device WHERE device_id = $1`,
+					deviceId,
+				).Scan(&xmin, &deviceSpec))
+			})
+			return
+		}
+		reauth := func(deviceSpec string) {
+			result, err := AuthNetworkClient(
+				&AuthNetworkClientArgs{
+					ClientId:    &clientId,
+					Description: "after",
+					DeviceSpec:  deviceSpec,
+				},
+				userSession,
+			)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error, nil)
+			connect.AssertNotEqual(t, result.ByClientJwt, nil)
+		}
+
+		xminBefore, deviceSpecBefore := deviceState()
+		connect.AssertEqual(t, deviceSpecBefore, "before")
+		_, authTimeBefore, _ := authClientTestClientState(ctx, clientId)
+
+		// the same spec
+		reauth("before")
+		xmin, deviceSpec := deviceState()
+		if xmin != xminBefore || deviceSpec != "before" {
+			t.Fatalf("an unchanged spec rewrote the device: xmin %s -> %s, spec %q", xminBefore, xmin, deviceSpec)
+		}
+		description, authTime, _ := authClientTestClientState(ctx, clientId)
+		connect.AssertEqual(t, description, "after")
+		if !authTimeBefore.Before(authTime) {
+			t.Fatalf("the re-auth did not update the auth time: %s -> %s", authTimeBefore, authTime)
+		}
+
+		// a changed spec
+		reauth("changed")
+		xmin, deviceSpec = deviceState()
+		if xmin == xminBefore || deviceSpec != "changed" {
+			t.Fatalf("a changed spec was not written: xmin %s -> %s, spec %q", xminBefore, xmin, deviceSpec)
+		}
+
+		// an empty spec is a change too
+		xminBefore = xmin
+		reauth("")
+		xmin, deviceSpec = deviceState()
+		if xmin == xminBefore || deviceSpec != "" {
+			t.Fatalf("an empty spec was not written: xmin %s -> %s, spec %q", xminBefore, xmin, deviceSpec)
+		}
+	})
+}
+
 // The countries that country_code selects are read once per process. A test
 // env starts each test on a new database, so the read is reset with the env,
 // as the other location caches are. Otherwise every later test would see the

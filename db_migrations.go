@@ -10763,4 +10763,16 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE transfer_balance SET (fillfactor = 85);
 	`),
+
+	// device rows are rewritten in place: a re-auth whose device_spec changed
+	// (authNetworkClientWithParentState, which no longer rewrites an unchanged
+	// spec), a rename, and the app version a connect reports
+	// (SetDeviceClientVersion). None of those columns is indexed, so each is a
+	// HOT update when its page has room. 90 is enough because a device is
+	// rewritten rarely once those writes skip unchanged values. It applies to
+	// pages written from now on, and to every page at the next compaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE device SET (fillfactor = 90);
+	`),
 }

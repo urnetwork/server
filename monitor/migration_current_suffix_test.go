@@ -225,6 +225,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "legacy auth attempt table recreated", version: 858, sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
 		{name: "dropped handler heartbeat index rebuilt", version: 859, sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
 		{name: "transfer balance pages filled", version: 860, sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
+		{name: "device pages filled", version: 861, sql: `ALTER TABLE device SET (fillfactor = 100)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

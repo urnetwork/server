@@ -702,6 +702,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("network_client_handler", "network_client_handler_heartbeat_time")),
 	migrationCurrentSuffix(860, "transfer balance pages keep room for in-place debits",
 		migrationFillfactor("transfer_balance", 85)),
+	migrationCurrentSuffix(861, "device pages keep room for in-place updates",
+		migrationFillfactor("device", 90)),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

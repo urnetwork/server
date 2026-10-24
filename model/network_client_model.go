@@ -969,25 +969,49 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				return
 			}
 
-			tag := server.RaisePgResult(tx.Exec(
+			// The device row is locked as the update would lock it, but its
+			// spec is rewritten only when it changed. A client re-auths with
+			// the same spec almost every time, and rewriting it anyway made a
+			// new row version per re-auth.
+			deviceFound := false
+			deviceSpecChanged := false
+			result, err = tx.Query(
 				clientSession.Ctx,
 				`
-					UPDATE device
-					SET
-						device_spec = $2
-					WHERE
-						device_id = $1
+					SELECT device_spec IS DISTINCT FROM $2 FROM device
+					WHERE device_id = $1
+					FOR NO KEY UPDATE
 				`,
 				deviceId,
 				authClient.DeviceSpec,
-			))
-			if tag.RowsAffected() == 0 {
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceSpecChanged))
+					deviceFound = true
+				}
+			})
+			if !deviceFound {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Device does not exist.",
 					},
 				}
 				return
+			}
+			if deviceSpecChanged {
+				server.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`
+						UPDATE device
+						SET
+							device_spec = $2
+						WHERE
+							device_id = $1
+					`,
+					deviceId,
+					authClient.DeviceSpec,
+				))
 			}
 
 			server.RaisePgResult(tx.Exec(
