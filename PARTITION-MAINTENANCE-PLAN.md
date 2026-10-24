@@ -483,6 +483,25 @@ Each one is small, and each needs a test.
 | `legacy_settlement_intent` | A drained queue: Redis admission now marks escrows `redis_reserved`. The 33.6 GB was a past backlog plus non-HOT retries. | Once all 16 shards are empty, drop the table, its outcome trigger on `transfer_contract`, and its FK, along with the weekly contract drop's check on it (`db_contract_partition_maintenance.go`). Built now: the contract-partition fixes are merged. |
 | `search_projection` | The search fallback's inverted index. Each value's projections are replaced, and its update record is published, in one transaction (`search/search.go:AddRawInTx`). Since f071c331c an unchanged value is skipped, so most of the 46% is older than that. The table is read only until the in-memory search sync completes. | Leave it (decided 2026-10-24). Dropping it together with the fallback stays possible later. Do not rebuild and swap it: a write between the copy and the swap would be lost. |
 
+**Implemented (2026-10-24): the first two rows** (`feat/pm-queue`). A heartbeat
+writes `claim_time` every 10 s and moves `release_time` only once less than
+half of the 5-minute lease remains (`task.refreshTaskTimestampLeasesInTx`), so
+the beats between extensions are HOT: about 45 non-HOT versions for a two-hour
+task instead of 720. `pending_task` fillfactor is 50, which leaves room for two
+versions of a row at the 2 kB TOAST threshold where 70 leaves one. A debit or
+legacy chain backs off straight to 30 s at its second consecutive empty pass
+(`work.SettlementChainSettings`); the first only counts, so debits arriving
+every few seconds keep the 2 s cadence instead of trading each run for a kick.
+After its commit, a settlement or deadline close that journaled a debit kicks
+its partition's chain only if the chain left a Redis idle mark, which it sets
+once its backed-off successor has committed and then rereads the journal
+(`task.WakeIdleRunOnce`, `KickTasks`). An active chain gets no queue write, and
+concurrent producers coalesce into one kick. Deviation: legacy enqueuers do not
+kick, since current contracts no longer queue legacy intents and the scheduled
+close handoff and expiry recovery already wake the dispatcher through the
+RunOnce merge; the legacy pending warning moved from 60 s to 90 s (SIGNALS.md
+§2.5b). The debit bands are unchanged.
+
 A new fillfactor applies only to pages written after the change. Existing pages
 take it at the next compaction: a VACUUM FULL window, or PostgreSQL 19's online
 compaction.
