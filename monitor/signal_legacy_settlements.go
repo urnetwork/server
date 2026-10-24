@@ -117,14 +117,17 @@ func (p legacySettlementProbe) check(ctx context.Context, env *probeEnv) ([]find
 			if age >= 300 {
 				tier = tierPage
 			}
-			healthy := age == -1 || i == 0 && age < 60
+			// An empty partition's dispatcher waits 30s between passes and the
+			// payer turn it publishes waits its 30s collection window, so a new
+			// intent can be 60s old before its first settlement attempt.
+			healthy := age == -1 || i == 0 && age < 90
 			findings = append(findings, finding{probeId: p.id(), tier: tier, class: "legacy-settlement-pending", target: pgTarget(env), frame: fmt.Sprintf("partition-%d/%s", o.shard, state), healthy: healthy, sustain: 1,
 				symptom:   "A legacy settlement remains reserved and has not completed its durable financial transaction.",
 				observed:  fmt.Sprintf("oldest_seconds=%.3f partition=%d state=%s scheduled=%t future_task_lease=%t", age, o.shard, state, o.scheduled, o.leased),
-				baseline:  "Pending WARN at 60s, retained failures WARN immediately, all states PAGE at 300s. Design bands, not measured Main capacity. Empty=-1.",
+				baseline:  "Pending WARN at 90s (a 30s idle dispatcher back-off plus the 30s payer collection window precede the first attempt), retained failures WARN immediately, all states PAGE at 300s. Design bands, not measured Main capacity. Empty=-1.",
 				mechanism: "An acknowledged intent retains its reservation until debit, provider payouts, metadata and outcome commit together. A retry delay or future lease does not establish recovery.",
 				action:    "Check the actual worker generation, cursor, original finite failure and bounded SQL waits. Preserve the intent and its reservation; never count deferred work as completed accounting.",
-				verify:    "All 16 source-clock-qualified partitions are visible, failures drain and oldest pending age falls below 60s.", playbook: "SIGNALS.md §2.5b"})
+				verify:    "All 16 source-clock-qualified partitions are visible, failures drain and oldest pending age falls below 90s.", playbook: "SIGNALS.md §2.5b"})
 		}
 		findings = append(findings, finding{probeId: p.id(), tier: tierWarn, class: "legacy-settlement-worker-missing", target: pgTarget(env), frame: fmt.Sprintf("partition-%d", o.shard), healthy: o.scheduled, sustain: 2,
 			symptom: "A legacy settlement partition has no scheduled recovery task.", observed: fmt.Sprintf("partition=%d scheduled=%t", o.shard, o.scheduled), baseline: "16 independent keys; two observations allow a short completion/post transition.",

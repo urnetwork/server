@@ -118,7 +118,7 @@ func (p transferDebitProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			findings = append(findings, finding{probeId: p.id(), tier: tier, class: "debit-writeback-lag", target: pgTarget(env), frame: fmt.Sprintf("partition-%d/%s", o.shard, state.name), healthy: state.age < 60, sustain: 1,
 				symptom:   "Asynchronous payer consumption has not drained within its operational budget.",
 				observed:  fmt.Sprintf("oldest_seconds=%.3f partition=%d state=%s scheduled=%t future_task_lease=%t", state.age, o.shard, state.name, o.scheduled, o.leased),
-				baseline:  "WARN at 60s and PAGE at 300s; design escalation bands, not measured Main capacity. Empty=-1.",
+				baseline:  "WARN at 60s and PAGE at 300s; design escalation bands, not measured Main capacity. An empty partition's worker runs every 30s and its next debit kicks it; without that kick a debit still drains within one 30s back-off and one 15s page. Empty=-1.",
 				mechanism: "Pending records await grouped PostgreSQL debit; redis_release records already committed and await reservation release/cleanup. A task lease does not prove a live owner.",
 				action:    "Check the partition cursor and actual task owner, bounded SQL waits, Redis release errors and worker image. Retain journal rows; do not release reservations or delete debt manually.",
 				verify:    "Observe renewed successful worker completions and oldest age below 60s, with all 16 partitions sharing one current source clock.", playbook: "SIGNALS.md §2.5a"})

@@ -35,12 +35,14 @@ func TestLegacySettlementsAuthorityAndRetainedFailure(t *testing.T) {
 	if err != nil || len(alerts) != 0 {
 		t.Fatal("healthy full empty observation failed", alerts, err)
 	}
-	rows[1][2] = "59"
+	// A new intent of an idle partition waits out the dispatcher back-off and
+	// the payer collection window before its first attempt.
+	rows[1][2] = "89"
 	alerts, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil || len(alerts) != 0 {
 		t.Fatal("short pending burst falsely warned", alerts, err)
 	}
-	rows[1][2] = "60"
+	rows[1][2] = "90"
 	rows[2][3] = "2"
 	rows[3][4] = "301"
 	alerts, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source))

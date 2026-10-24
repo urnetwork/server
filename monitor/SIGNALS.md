@@ -8392,6 +8392,26 @@ worker. Actual cadence can be lengthened by the monitor global minimum; preserve
 source clocks. Source/query failures retain visibility errors. No full journal
 COUNT or customer identifiers are collected.
 
+Idle partitions (2026-10-24, PARTITION-MAINTENANCE-PLAN.md Part B): the second
+consecutive pass that finds its partition's journal empty schedules the next
+pass 30 s out instead of 2 s and leaves a Redis idle mark (`{task_idle_wake}`
+hash tag, two-minute TTL, renewed by each idle pass). A single empty pass between
+debits keeps the 2 s cadence and sets no mark. After its commit, a settlement or deadline close
+that journaled a debit deletes the mark of each partition it wrote, and the
+producer that deleted it kicks the chain (`task.KickTasks`), so the next pass
+is due at once. An active partition has no mark: its producers pay one Redis
+round trip and write nothing to the queue, and concurrent producers coalesce
+into one kick. The idle pass sets its mark only after its finishing commit and
+then reads the journal again, so a debit committed in between still wakes it.
+Without a kick (Redis unavailable, a lost post, a producer from an older
+build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
+60 s WARN; the bands are unchanged. An empty partition samples
+`urnetwork_transfer_debit_oldest_seconds` only every 30 s, so its dashboard
+observation age reads up to about 30 s while healthy.
+`urnetwork_task_idle_wake_total{outcome}` counts marks (`marked`), marks
+cleared by a resumed pass (`resumed`), kicks (`kicked`), producer wakes of
+active chains (`active`) and Redis or queue failures (`error`).
+
 `urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
 `flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
 supply per-process drill-down. State `pending` awaits PG debit; `redis_release`
@@ -8547,8 +8567,11 @@ protects the grant from expiry and shard deletion.
 
 The probe uses 48 indexed oldest-row seeks: all 16 partitions and each finite
 state `none`, `accounting`, `operational`, including rows whose next attempt is
-in the future. Pending age warns at 60 seconds; any retained accounting or
-operational failure warns immediately. Any age at 300 seconds pages. These are
+in the future. Pending age warns at 90 seconds: an empty partition's
+dispatcher runs every 30 s (2026-10-24), and the payer turn it publishes waits
+its 30 s collection window, so a new intent can be 60 s old before its first
+attempt. Any retained accounting or operational failure warns immediately.
+Any age at 300 seconds pages. These are
 initial design escalation bands, not measured Main capacity. Every partition
 must share a source clock within 30 seconds. Partial, duplicate, malformed or
 stale evidence is unknown. Before schema 763 the probe is inapplicable; a missing
@@ -8561,8 +8584,12 @@ wait 30 seconds. Neither is a verified close. The original error remains logged,
 and this signal retains the unresolved financial state between retries. The
 original 64-visit page advances past busy/failed keys and persists its composite
 cursor. Immediate continuation requires successful progress; otherwise normal
-scheduling waits two seconds. The database loop has a 15-second context and
-individual worker statements use 2-second statement / 250ms lock timeouts.
+scheduling waits two seconds, or thirty from the second consecutive pass that
+began fresh payer, source and registration rounds and found nothing. Legacy
+enqueuers do not kick the dispatcher; the scheduled-close handoff and expiry
+recovery wake it at once through the RunOnce merge. The database loop has a
+15-second context and individual worker statements use 2-second statement /
+250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
 The current 256-visit and payer-turn profiles below supersede the historical
