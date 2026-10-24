@@ -94,3 +94,26 @@ the active host configuration was not changed.
 
 Installing these control programs does not freeze continuously updated main API
 software and does not alter the evaluated source commits or previous evidence.
+
+## Frozen evaluator scripts installed separately
+
+At 17:25 UTC the unmodified container-script directory from the clean frozen
+server `67c87445abe6725b25b3df2a13af7eb99cd4f8ed` was installed under
+`/usr/local/libexec/urnetwork/competition-evaluator-826569fd-67c87445/container`.
+Every installed file compares byte-for-byte with that checkout. Directories and
+shell programs are root-owned 0555; other files are root-owned 0444. Shell syntax
+validation passed. No active config pin or running worker was changed.
+
+| Frozen evaluator entry point | SHA-256 |
+| --- | --- |
+| `evaluator.sh` | `d55eac73bebd5a3be1ef01c0ad024633a3c71d01b481350386b06810e64feed2` |
+| `build-submission.sh` | `460a6bb91f8ba20f818f4bcf8b245840aa796f34e9710edf5c359c7c4d4227de` |
+| `prepare-evaluation-source.sh` | `af4e3c92ff1668a59b93aa6649293a06afaaf0bb707447ad92abac4e047c29a2` |
+
+These scripts accompany evaluator image
+`sha256:826569fdeb02f72ec4f24ace7c93b16b69a60e1875c31799c5a0217b402e0d6c`;
+its embedded simulator/scorer SHA-256 is
+`dd682292eba9d38f0fecd7b48ecdd1a96f942fe44fdbc44927bff472226d89ab`.
+The newer main control binary above is not a replacement for that measured
+simulator. Neither filesystem installation constitutes whole-worker or
+authority-bearing exact-image qualification.
