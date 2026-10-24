@@ -57,8 +57,8 @@ func TestMeasureDbBloatNextTaskKeepsTheWeek(t *testing.T) {
 	}
 }
 
-// The body records the week's measurements on the migrated schema, and a
-// canceled invocation is not acknowledged.
+// The body records the week's measurements on the migrated schema, its post
+// leaves one successor, and a canceled invocation is not acknowledged.
 func TestMeasureDbBloatTaskRecordsTheWeekAndRejectsCancellation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
