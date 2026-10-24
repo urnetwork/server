@@ -200,3 +200,15 @@ func TestSourceBuildSandboxSuccessRequiresAuthenticatedCleanup(t *testing.T) {
 		t.Fatal("successful check lacked its exact output and cleanup", err)
 	}
 }
+
+// A clean container exit and convincing text are not a compiled-source receipt.
+func TestSourceBuildSandboxRejectsSuccessfulCompilerWithoutBoundExecutable(t *testing.T) {
+	input := sourceSandboxFixture()
+	input.Phase = "compile"
+	input.MetadataDirectory = filepath.Join(filepath.Dir(input.SourceDirectory), input.Phase, "metadata")
+	input.OutputDirectory = filepath.Join(filepath.Dir(input.SourceDirectory), input.Phase, "output")
+	daemon := &sourceSandboxDaemonFixture{input: input, startOutput: "synthetic compilation succeeded"}
+	if _, _, err := executeSourceBuildSandbox(context.Background(), input, sourceSandboxTestSettings(), daemon.run); err == nil || !daemon.removed {
+		t.Fatal("successful exit bypassed binary authentication or cleanup", err)
+	}
+}

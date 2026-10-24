@@ -203,6 +203,9 @@ func executeSourceBuildSandbox(ctx context.Context, input sourceBuildSandboxInpu
 	if ctx.Err() != nil {
 		resultErr = errors.Join(resultErr, ctx.Err())
 	}
+	if resultErr == nil && input.Phase == "compile" {
+		_, resultErr = verifySourceBuildBinary(output.content, input.Commit)
+	}
 	if resultErr != nil {
 		resultErr = fmt.Errorf("reviewed source %s: %w", input.Phase, resultErr)
 	}

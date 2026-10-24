@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"debug/buildinfo"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -107,21 +106,8 @@ func TestSourceBuildSandboxRealTrustedBasePhases(t *testing.T) {
 			t.Fatalf("real %s phase failed: %v; private diagnostics retained", phase, err)
 		}
 		if phase == "compile" {
-			info, err := buildinfo.Read(bytes.NewReader(stdout))
-			if err != nil {
-				t.Fatal("compiler did not return a Go binary", err)
-			}
-			actualCommit, modified := "", ""
-			for _, setting := range info.Settings {
-				if setting.Key == "vcs.revision" {
-					actualCommit = setting.Value
-				}
-				if setting.Key == "vcs.modified" {
-					modified = setting.Value
-				}
-			}
-			if actualCommit != commit || modified != "false" {
-				t.Fatal("compiled artifact does not bind exact clean source")
+			if _, err := verifySourceBuildBinary(stdout, commit); err != nil {
+				t.Fatal(err)
 			}
 			if err := writePrivateReviewFile(filepath.Join(settings.StateDirectory, owner, phase, "output", "sim-latency"), stdout); err != nil {
 				t.Fatal(err)

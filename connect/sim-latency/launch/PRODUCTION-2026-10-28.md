@@ -319,3 +319,15 @@ identical to the frozen evaluator simulator. Probe log SHA-256:
 Fixed-boundary regressions passed three consecutive race-enabled runs. These
 prove the trusted-base component path, not adversarial winner qualification,
 independent model-owned test execution, or complete live broker integration.
+
+Artifact authentication now also inspects the binary's Go build metadata as
+data on the host: exact simulator module/package, exact clean approved Git
+revision, Linux/amd64 executable mode and disabled cgo are mandatory. A clean
+container exit returning text or unrelated bytes fails and still triggers
+authenticated cleanup. A second actual Docker probe passed the stricter
+artifact check, reproducing the identical frozen binary; log SHA-256:
+`a13a37271124a174c40bbca929fe36af658b4cdb8dd796c735800a50d089255d`.
+The package `tests.sh` wrapper currently refuses to start because its shared
+local launcher lock has no readable owner. That preflight is not bypassed or
+counted as passing; a direct offline package Go suite is being checked
+separately, without claiming independent model-run test provenance.
