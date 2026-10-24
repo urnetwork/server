@@ -669,9 +669,13 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
 - **Lookups:** each lookup by task id is one index probe per partition,
   about 12 with the days ahead, and reads that bound `run_end_time` prune. A
   DB test pins both.
-- **Left for the lead:** monitor §8.9 artifact contracts for the three
-  migrations, which need their final version numbers. Future index migrations
-  on `finished_task` must be partition-aware, like the contract tables'.
+- **Monitor:** the three migrations' §8.9 contracts are in
+  `monitor/migration_finished_task_partition.go`, with versions from the
+  server's migration list. They read the catalogs directly, so they hold on
+  the plain table, through a prepared cutover and on the partitioned parent.
+  The unique index's contract ends where the primary key takes the index over.
+- **Future index migrations** on `finished_task` must be partition-aware, like
+  the contract tables'.
 
 ### C4. `provider_work_session_event` (136 GB): weekly partitions, 13 weeks (decided 2026-10-24)
 

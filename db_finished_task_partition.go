@@ -143,6 +143,69 @@ const finishedTaskPrimaryKeyDefinition = "PRIMARY KEY (task_id, run_end_time)"
 // The index of failed Posts, which the drop's fence reads.
 const FinishedTaskPostRetryIndexName = "finished_task_post_retry"
 
+// The migrations of the partitioning, which run on the plain table before any
+// cutover (their reasons are at their place in the migration list). The
+// accessors below find each one's version by identity: versions are
+// positional, so they follow the migrations wherever the list places them.
+var finishedTaskIdentityIndexMigration = newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS finished_task_task_id_run_end_time
+	`, `
+		CREATE UNIQUE INDEX CONCURRENTLY finished_task_task_id_run_end_time
+		ON finished_task (task_id, run_end_time)
+	`, `
+		DROP INDEX IF EXISTS finished_task_task_id_run_end_time;
+		CREATE UNIQUE INDEX finished_task_task_id_run_end_time
+		ON finished_task (task_id, run_end_time)
+	`)
+
+var finishedTaskPrimaryKeyMigration = newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE finished_task
+			DROP CONSTRAINT finished_task_pkey,
+			ADD CONSTRAINT finished_task_pkey PRIMARY KEY USING INDEX finished_task_task_id_run_end_time;
+	`)
+
+var finishedTaskPostRetryIndexMigration = newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS finished_task_post_retry
+	`, `
+		CREATE INDEX CONCURRENTLY finished_task_post_retry
+		ON finished_task (task_id)
+		WHERE post_error IS NOT NULL AND NOT post_completed
+	`, `
+		DROP INDEX IF EXISTS finished_task_post_retry;
+		CREATE INDEX finished_task_post_retry
+		ON finished_task (task_id)
+		WHERE post_error IS NOT NULL AND NOT post_completed
+	`)
+
+// The version of the migration that builds the unique (task_id,
+// run_end_time) index online.
+func FinishedTaskIdentityIndexMigrationVersion() int {
+	return finishedTaskMigrationVersion(finishedTaskIdentityIndexMigration)
+}
+
+// The version of the migration that moves the primary key onto that index,
+// which renames the index to finished_task_pkey.
+func FinishedTaskPrimaryKeyMigrationVersion() int {
+	return finishedTaskMigrationVersion(finishedTaskPrimaryKeyMigration)
+}
+
+// The version of the migration that builds the failed Post index online.
+func FinishedTaskPostRetryIndexMigrationVersion() int {
+	return finishedTaskMigrationVersion(finishedTaskPostRetryIndexMigration)
+}
+
+// The version a database reaches once migration has applied: its position in
+// the migration list plus one.
+func finishedTaskMigrationVersion(migration any) int {
+	for i, m := range migrations {
+		if m == migration {
+			return i + 1
+		}
+	}
+	panic(fmt.Errorf("%T is not in the migration list", migration))
+}
+
 // The days of finished_task as the registry names and bounds them. It is
 // never registered: the task package registers the family with its fence.
 var finishedTaskDays = &PartitionFamily{
