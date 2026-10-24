@@ -1,5 +1,34 @@
 # Inactive host-control release — October 24, 2026
 
+## Later native release installation
+
+At 20:00 UTC the four already-built native control programs from clean main
+`822902437d8614b18ed89a850b5c1646a47c55a3` were installed separately under
+`/usr/local/libexec/urnetwork/competition-control-822902437-61f7a622`.
+The directory and all four programs are root:root 0555; installed SHA-256
+values match the retained build outputs:
+
+| Program | SHA-256 |
+| --- | --- |
+| `competitionprepare` | `b6d9e2eba649e8d4530e495d09be7504397b156b0285fb44d6497d8eae7c2433` |
+| `competitionqualify` | `c069d27e78ccdbe4765fc13ae0de02c3eabadcf204ed2761e5ab3815de489e96` |
+| `competitionworker` | `1003f4dbb1cc2a68bd5bc8278f7110cc7a9314600b5da20b9f6c7a6d26d1d6e7` |
+| `sim-latency` | `61f7a62206227d03b76f64fa558731df09bf7bef57f241954b3b050a91671143` |
+
+This release includes the per-intent API identity correction described in
+[CONTROL-AND-MODE-2026-10-24.md](CONTROL-AND-MODE-2026-10-24.md). It is not
+activated: no service, wrapper/settings pin or active host configuration was
+changed. The older complete release below remains untouched. Trusted wrappers,
+settings and genuine provider-backed qualification must be bound to their exact
+chosen release before activation. No build or test ran during this installation.
+These are native control programs, not an evaluator-image or worker OCI digest.
+
+At 19:59 UTC the public API still returned 503, MinIO at
+`172.28.208.177:23900` refused connections, and the dedicated review credential
+was absent. Main maintenance remains a control-plane write hold.
+
+## Earlier complete inactive bundle
+
 Installed on sille at 17:19 UTC for launch preparation, **not activated**.
 This release controls evaluation and reviewed-source promotion; it does not
 replace or advance the frozen ten-repository evaluated checkpoint recorded in
