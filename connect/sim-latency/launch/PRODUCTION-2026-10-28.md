@@ -361,3 +361,14 @@ bind the approved generation. It contains no `RUN`, `ONBUILD`, `ADD`, external
 frontend or extra execution stage, and copies no config/vault inputs. This is
 an assembly-plan component, not a built reviewed-winner image or completed
 broker CLI; execution, installed qualification and live publication remain open.
+
+The next assembly components materialize only allowlisted inputs into Docker's
+context and execute a copy-only image build with pull/network disabled. The
+incumbent tag's actual image ID is checked, inherited `ONBUILD` hooks are
+rejected, logs/inspection output are bounded, and the returned image must bind
+the private build owner and evaluator-base kind. Alias substitution, inherited
+execution, ownership loss, wrong image kind and log overflow are exercised by
+deterministic fake-daemon tests, passing three race-enabled runs. This is not
+yet a real assembly/qualification receipt or a wired, deployable build broker.
+The control smoke after merging unrelated main maintenance changes also passed;
+the evaluated source checkpoint remains unchanged.
