@@ -10735,4 +10735,19 @@ var migrations = []any{
 	// its thresholds can be checked against them. The measurement deletes rows
 	// after 90 days. A new table needs no lock_timeout.
 	newSqlMigration(dbBloatMeasurementTableSql),
+
+	// Close evidence partitions (PARTITION-MAINTENANCE-PLAN.md C5): the
+	// evidence guard also admits a move, the delete half of a row whose
+	// identical copy already sits in the partition it moves to (see
+	// contractCloseReportEvidenceMoveGuardSql). Retention keeps the 91-day
+	// rule; update and truncate stay refused.
+	newSqlMigration(contractCloseReportEvidenceMoveGuardSql),
+
+	// st_provider_usage_archive partitioned by contract week, so its one-year
+	// retention drops whole weeks (PARTITION-MAINTENANCE-PLAN.md C6). The
+	// archive guard refuses a row whose contract is gone, so this is not a
+	// plain copy: one transaction fences writers, copies into a staged table
+	// that gets its guard after the copy, checks the copy week by week and
+	// swaps the names (see providerUsageArchivePartitionSql).
+	providerUsageArchivePartitionMigration,
 }

@@ -33,7 +33,7 @@ func migrationCurrentSuffixArtifactQueries() string {
 	return strings.Join(queries, ",\n")
 }
 
-var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
+var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 	migrationCurrentSuffix(794, "tiered extender directory and release custody",
 		snMainnetMigrationColumns("network_extender",
 			snMainnetMigrationColumn{name: "directory_tier", kind: "smallint", notNull: true, defaultExpression: "0"},
@@ -694,9 +694,15 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
 	migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery),
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
+	// the move guard replaces the evidence guard body and republishes the rest
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
-		contractCloseEvidenceRetentionArtifactQuery),
-}
+		contractCloseEvidenceRetentionArtifactQuery).removedAt(contractCloseEvidenceMoveGuardMigrationVersion),
+	migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery),
+	migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery),
+	migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
+	migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
+		contractCloseEvidenceMoveArtifactQuery),
+}, providerUsageArchivePartitionContracts()...)
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.

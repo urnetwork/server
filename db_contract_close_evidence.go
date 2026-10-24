@@ -41,3 +41,44 @@ BEGIN
  RAISE EXCEPTION 'original contract close reports are immutable';
 END $close_report_guard$;
 `
+
+// Weekly partitions of the evidence (PARTITION-MAINTENANCE-PLAN.md C5) move
+// rows between partitions twice: the cutover moves rows minted past its week
+// out of the plain table into the staged partitioned table, and creating a
+// week moves that week's rows out of the DEFAULT partition into it. A move is
+// not a retention delete, so it has its own value of the same opt-in: with
+// urnetwork.close_evidence_retention = 'move' the guard admits deleting a row
+// only once an identical copy is where the row moves to. From the plain table
+// that is the staged parent of its cutover; from the DEFAULT partition, the
+// weekly partition of its report id's week (report ids lead with their
+// creation millisecond, and weekly partitions are named for their Monday).
+// Retention deletes ('on') keep the 91-day rule; updates and truncates stay
+// refused.
+const contractCloseReportEvidenceMoveGuardSql = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger LANGUAGE plpgsql AS $close_report_guard$
+DECLARE
+ destination text;
+ moved boolean := false;
+BEGIN
+ IF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'on' THEN
+  IF OLD.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days' THEN
+   RETURN OLD;
+  END IF;
+ ELSIF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'move' AND TG_TABLE_SCHEMA = 'public' THEN
+  IF TG_TABLE_NAME = 'contract_close_report_evidence' THEN
+   destination := 'contract_close_report_evidence_p';
+  ELSIF TG_TABLE_NAME = 'contract_close_report_evidence_default' THEN
+   destination := 'contract_close_report_evidence_w' || to_char(date_trunc('week', timestamp '1970-01-01 00:00:00' + ('x' || substr(replace(OLD.report_id::text, '-', ''), 1, 12))::bit(48)::bigint * interval '1 millisecond'), 'YYYYMMDD');
+  END IF;
+  IF destination IS NOT NULL AND to_regclass('public.' || quote_ident(destination)) IS NOT NULL THEN
+   EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I moved_row WHERE moved_row.client_id = $1 AND moved_row.report_id = $2 AND moved_row = $3)', destination)
+    INTO moved USING OLD.client_id, OLD.report_id, OLD;
+   IF moved THEN
+    RETURN OLD;
+   END IF;
+  END IF;
+ END IF;
+ RAISE EXCEPTION 'original contract close reports are immutable';
+END $close_report_guard$;
+`

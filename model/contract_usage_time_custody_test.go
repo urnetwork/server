@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,10 +88,17 @@ func TestStContractUsageMissingCloseTimeProbeStaysBounded(t *testing.T) {
 				}
 			}
 			visit(plan)
-			for _, name := range []string{"transfer_contract_usage_missing_time", "st_provider_usage_archive_close_time"} {
-				if !indexes[name] {
-					t.Fatalf("missing-time probe lost %s: %s", name, raw)
-				}
+			if !indexes["transfer_contract_usage_missing_time"] {
+				t.Fatalf("missing-time probe lost transfer_contract_usage_missing_time: %s", raw)
+			}
+			// the archive is partitioned by contract week, so its probe reads
+			// the close-time index's copy on each partition
+			var archiveIndexes []string
+			server.Raise(conn.QueryRow(ctx, `SELECT array_agg(index_relation.relname::text)
+				FROM pg_partition_tree('public.st_provider_usage_archive_close_time'::regclass) tree
+				JOIN pg_class index_relation ON index_relation.oid = tree.relid`).Scan(&archiveIndexes))
+			if !slices.ContainsFunc(archiveIndexes, func(name string) bool { return indexes[name] }) {
+				t.Fatalf("missing-time probe lost st_provider_usage_archive_close_time (%v): %s", archiveIndexes, raw)
 			}
 		})
 	})

@@ -41,19 +41,23 @@ func TestDbMaintenanceSkipsContractPartitionsAndPartitionedContractTables(t *tes
 		}
 	}
 	// names that only look like contract partitions (a Tuesday, a short
-	// date, a constraint name), the plain evidence table, and partitioned
-	// tables outside the contract tables are unaffected
+	// date, a constraint name) and partitioned tables outside the contract
+	// tables are unaffected
 	for _, name := range []string{
 		"transfer_contract_w20261020",
 		"transfer_contract_w2026101",
 		"transfer_contract_legacy_bound",
-		"contract_close_report_evidence",
 		"network_ping",
 		"account_feedback",
 	} {
 		if !dbMaintenanceShouldReindexRelation(name, false) || !dbMaintenanceShouldReindexRelation(name, true) {
 			t.Errorf("%s left the rotation", name)
 		}
+	}
+	// the plain evidence table keeps its place; once partitioned it leaves
+	// with its family's leaves (PartitionRegistryReindexExempt)
+	if !dbMaintenanceShouldReindexRelation("contract_close_report_evidence", false) {
+		t.Error("the plain contract_close_report_evidence left the rotation")
 	}
 
 	plain := dbMaintenancePriorityIndex{priorityName: "transfer_escrow_unsettled_balance_contract", indexName: "transfer_escrow_unsettled_balance_contract"}
