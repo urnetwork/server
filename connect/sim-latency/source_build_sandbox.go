@@ -19,20 +19,20 @@ import (
 // Deployment owns these ceilings; candidate input cannot change them. Every
 // phase gets a fresh cache and metadata directory, never another phase's writes.
 type sourceBuildSandboxSettings struct {
-	StateDirectory string
-	CpuSet         string
-	CgroupParent   string
-	MemoryBytes    int64
-	WorkBytes      int64
-	TmpBytes       int64
-	MetadataBytes  int64
-	MetadataFiles  int
-	BinaryBytes    int
-	Pids           int
-	NoFile         int
-	Timeout        time.Duration
-	CleanupTimeout time.Duration
-	OutputBytes    int
+	StateDirectory string        `json:"state_directory"`
+	CpuSet         string        `json:"cpu_set"`
+	CgroupParent   string        `json:"cgroup_parent"`
+	MemoryBytes    int64         `json:"memory_bytes"`
+	WorkBytes      int64         `json:"work_bytes"`
+	TmpBytes       int64         `json:"tmp_bytes"`
+	MetadataBytes  int64         `json:"metadata_bytes"`
+	MetadataFiles  int           `json:"metadata_files"`
+	BinaryBytes    int           `json:"binary_bytes"`
+	Pids           int           `json:"pids"`
+	NoFile         int           `json:"no_file"`
+	Timeout        time.Duration `json:"timeout"`
+	CleanupTimeout time.Duration `json:"cleanup_timeout"`
+	OutputBytes    int           `json:"output_bytes"`
 }
 
 // Match the authoritative host's evaluation allocation, reserving management

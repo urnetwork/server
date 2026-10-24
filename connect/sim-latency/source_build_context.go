@@ -52,13 +52,22 @@ func cloneSourceBuildRepository(ctx context.Context, repository, source, destina
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("source build clone destination already exists or is unreadable")
 	}
-	if _, err := sourceGitText(ctx, parent, "clone", "--quiet", "--no-checkout", "--no-local", "--no-hardlinks", source, destination); err != nil {
+	if err := os.Mkdir(destination, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(destination, 0o700); err != nil {
+	// Fetch one committed tree through Git transport. Full clone would ask a
+	// partial source for unrelated history and may trigger remote lazy fetches.
+	if _, err := sourceGitText(ctx, parent, "init", "--quiet", "--template=", "--", destination); err != nil {
 		return err
 	}
-	if _, err := sourceGitText(ctx, destination, "remote", "set-url", "origin", sourceBuildPublicOrigin(repository)); err != nil {
+	if _, err := sourceGitText(ctx, destination, "remote", "add", "origin", sourceBuildPublicOrigin(repository)); err != nil {
+		return err
+	}
+	if _, err := sourceGitText(ctx, destination, "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--depth=1", "--", source, expectedCommit); err != nil {
+		return fmt.Errorf("exact approved source fetch: %w", err)
+	}
+	// FETCH_HEAD contains the private transport path, not public provenance.
+	if err := os.Remove(filepath.Join(destination, ".git", "FETCH_HEAD")); err != nil {
 		return err
 	}
 	if _, err := sourceGitText(ctx, destination, "checkout", "--quiet", "--detach", expectedCommit); err != nil {
@@ -182,7 +191,7 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 			return nil, fmt.Errorf("source build repository %s is missing", repository)
 		}
 		if err := cloneSourceBuildRepository(ctx, repository, source, filepath.Join(result.SourceDirectory, repository), request.Proposal.Commits[repository]); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("source build repository %s: %w", repository, err)
 		}
 	}
 	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(result.SourceDirectory, "server"), request.Proposal.Commits["server"], request.Proposal.Staging); err != nil {

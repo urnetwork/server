@@ -92,6 +92,7 @@ Usage:
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
+  sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
@@ -103,6 +104,8 @@ Usage:
   sim-latency --version
 
 Options:
+  --build-settings=<path> Private deployment settings for the isolated source build broker.
+  --build-settings-sha256=<digest> Immutable installed build-settings digest.
   --model-key-file=<path> Dedicated OpenAI API key leaf; no main credentials belong in the broker.
   --opens-at=<time>      Pin the initial automation opening (RFC3339; immutable on recovery).
   --staging             Require an explicitly staging v2 manifest and staging source refs.
@@ -274,6 +277,8 @@ Options:
 		runSourceReviewPacket(opts)
 	case optBool(opts, "review-broker"):
 		runWinnerReviewBroker(opts)
+	case optBool(opts, "source-build-broker"):
+		runSourceBuildBroker(opts)
 	case optBool(opts, "launch-preflight"):
 		requireMainEnvironment("launch-preflight")
 		runLaunchPreflight(opts)

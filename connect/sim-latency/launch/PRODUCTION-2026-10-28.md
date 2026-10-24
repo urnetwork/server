@@ -395,3 +395,28 @@ and cleanup completes. Metadata/sandbox/pipeline regressions passed three
 race-enabled runs. This integrated coordinator still needs its real full-path
 probe, deployable broker entry point, independent model-owned testing and host
 qualification before it may return a promotion-authorizing receipt.
+
+The real full-path probe exposed a partial-repository failure: a full Git clone
+requested unavailable historical objects from the frozen gvisor checkout.
+Build cloning now initializes an empty private repository and fetches only the
+exact approved commit at depth one, with no tags, inherited template or object
+alternates; private `FETCH_HEAD` transport metadata is removed. A deterministic
+fixture removes the approved tree's parent commit, proves full cloning fails,
+then proves the exact-commit path succeeds. Repository-specific errors now
+identify the failing stage without publishing private Git diagnostics.
+
+The corrected actual offline pipeline then passed in 190.15 seconds including
+private synthetic-change preparation (153.76 seconds inside the coordinator).
+All ten repositories, metadata export/validation, check, compile, authenticated
+new-commit binary and image assembly completed. Its temporary image was removed;
+no live review, branch publication or qualification was performed. Probe log
+SHA-256: `61fc946da65058e13b08c37da3ac523d610cd6567d0eff666e20eae77c3d191f`.
+
+`source-build-broker` now provides the supervisor-facing entry point, with a
+digest-pinned private settings file and independently pinned qualification
+executable. It checks qualifier availability before expensive work, rechecks
+the program before execution, propagates termination through contained cleanup,
+and accepts only complete evidence for the exact built image and owner. Broker,
+Git-fetch, sandbox and supervisor regressions passed three race-enabled runs.
+The actual independent low-model/host qualifier still must be implemented,
+provisioned and qualified; no stub receipt is permitted for launch.
