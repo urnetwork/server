@@ -94,6 +94,32 @@ func TestAsyncDebitSettlementWakesOnlyABackedOffFlushChain(t *testing.T) {
 	})
 }
 
+// An ordinary bilateral close settles through the foreground owner without an
+// expiry scope, and its committed debit kicks the backed-off chain as the
+// deferred settlement's does. Only a scoped repair leaves the chain alone.
+func TestAsyncDebitBilateralCloseWakesABackedOffFlushChain(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		shard := transferDebitShard(f.balanceId)
+		backOffTransferDebitWakeStandIn(t, ctx, shard, true)
+		contract := createRedisAdmissionTest(ctx, f, 100)
+		server.Raise(CloseContract(ctx, contract.ContractId, f.sourceId, 11, false))
+		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.Before(server.NowUtc().Add(10 * time.Second)) {
+			t.Fatal("one party's close moved the chain", runAt)
+		}
+		server.Raise(CloseContract(ctx, contract.ContractId, f.destinationId, 11, false))
+		if _, pending, applied := asyncDebitTestState(t, ctx, f.balanceId); pending+applied != 1 {
+			t.Fatal("the bilateral close did not journal its debit", pending, applied)
+		}
+		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.After(server.NowUtc()) {
+			t.Fatal("the bilateral close's debit did not kick its backed-off chain", runAt)
+		}
+	})
+}
+
 // A deadline close of a Redis contract journals its debit too, and its
 // committed posts kick the partition's backed-off chain.
 func TestDeadlineCloseWakesABackedOffFlushChain(t *testing.T) {
