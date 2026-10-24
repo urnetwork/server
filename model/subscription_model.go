@@ -3737,7 +3737,7 @@ func settleEscrowInTx(
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (posts []func() any, closed bool, returnErr error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false)
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, true)
 }
 
 func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) ([]func() any, bool, error) {
@@ -3745,9 +3745,14 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 }
 
 // Ordinary and scoped closes use the same durable debit owner. The caller's
-// expiry transaction already enforces its scope before this continuation.
-func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, _ *contractExpiryRepairScope) ([]func() any, bool, error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true)
+// expiry transaction already enforces its scope before this continuation. A
+// scoped repair's debits wait for the flush chain's own pass: its debit workers
+// finish independently of the deadline that the repair's contracts share
+// (subscription_contract_redis_expiry_repair.go), and a wake would add a Redis
+// call that a stalled Redis lets spend that deadline. The wake outlives its
+// caller's cancellation, so only its own timeout would bound it.
+func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, scope *contractExpiryRepairScope) ([]func() any, bool, error) {
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, scope == nil)
 }
 
 // Current Redis contracts append independent consumption records. A legacy
@@ -3757,7 +3762,10 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // exact earnings, escrow metadata and durable mirror and provider-total
 // owners, as the retired legacy settlement queue's worker did
 // (PARTITION-MAINTENANCE-PLAN.md, Part B).
-func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
+//
+// With wakeDebitFlush, a journaled debit's posts kick its partition's
+// backed-off flush chain.
+func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, inlineFinancial bool, wakeDebitFlush bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3882,7 +3890,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
                 (contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 				contractId, balanceId, sweepPayouts[balanceId].payoutByteCount, transferDebitShard(balanceId)))
 		}
-		if 0 < len(lockedBalanceIds) {
+		if wakeDebitFlush && 0 < len(lockedBalanceIds) {
 			// After the commit, a backed-off flush chain of these partitions
 			// is kicked; an active one is not touched.
 			posts = append(posts, transferDebitWakePost(ctx, lockedBalanceIds))

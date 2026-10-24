@@ -1,5 +1,6 @@
 // Both settlement paths that journal a debit wake their partition's backed-off
-// flush chain after the commit, and leave an active chain's queue row alone.
+// flush chain after the commit, and leave an active chain's queue row alone. A
+// scoped expiry repair does not wake (subscription_contract_redis_expiry_projection_test.go).
 package model
 
 import (
