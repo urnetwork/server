@@ -5,6 +5,8 @@ package monitor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -696,7 +698,23 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
+	// unpublished: named by its id, so its version follows the merge order
+	migrationCurrentSuffix(server.CodeMigrationVersion(server.ApplicationTransactionTimeoutMigrationId),
+		"application role transaction bound", transactionTimeoutRoleDefaultArtifactQuery),
 }
+
+// The application roles' 15-minute transaction bound (server
+// PARTITION-MAINTENANCE-PLAN.md A6) is a default of each pool's role in this
+// database. The migration skips a superuser role, so an ordinary role carries
+// it; a lost default is drift, as the 2026-08-13 database-level idle timeout
+// went missing on main. Only a boolean leaves the database, never a role name.
+const transactionTimeoutRoleDefaultArtifactQuery = `EXISTS (SELECT 1
+		FROM pg_db_role_setting setting_row
+		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
+		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
+		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND NOT role_row.rolsuper
+		AND setting = 'transaction_timeout=15min')`
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.
