@@ -697,6 +697,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	// the move guard replaces the evidence guard body and republishes the rest
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery).removedAt(contractCloseEvidenceMoveGuardMigrationVersion),
+	migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery),
+	migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery),
+	migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
 	migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
 		contractCloseEvidenceMoveArtifactQuery),
 }
