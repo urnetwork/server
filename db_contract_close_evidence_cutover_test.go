@@ -226,6 +226,32 @@ func TestCloseEvidencePartitionCutover(t *testing.T) {
 	})
 }
 
+// db audit takes neither a prepared cutover nor the partitioned table for
+// drift (acceptCloseEvidencePartitionCutover), and the staged parent's copied
+// checks, indexes and not-null constraints match the migrated table's, so
+// after the swap and after a rollback the table matches it again.
+func TestAuditSchemaCleanThroughTheCloseEvidenceCutover(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testCloseEvidenceCutoverSettings()
+		// two weeks ahead, so finalize is never too close to the week
+		cutoverWeek := PartitionGranularityWeekly.RangeStart(NowUtc()).Add(14 * 24 * time.Hour)
+		audit := func(state string) {
+			if result := AuditSchema(ctx); result.Diff.HasDifferences() {
+				t.Fatalf("%s drifts:\n%s", state, result.Diff.Report())
+			}
+		}
+		testCloseEvidenceNoError(t, testCloseEvidenceMigrate(t, ctx, settings, CloseEvidencePartitionMigrateOptions{CutoverWeek: cutoverWeek}))
+		audit("a prepared close evidence cutover")
+		testCloseEvidenceNoError(t, testCloseEvidenceMigrate(t, ctx, settings, CloseEvidencePartitionMigrateOptions{Finalize: true}))
+		connect.AssertEqual(t, IsCloseEvidencePartitioned(ctx), true)
+		audit("the partitioned close evidence")
+		testCloseEvidenceNoError(t, testCloseEvidenceMigrate(t, ctx, settings, CloseEvidencePartitionMigrateOptions{Rollback: true}))
+		connect.AssertEqual(t, IsCloseEvidencePartitioned(ctx), false)
+		audit("the rolled back close evidence")
+	})
+}
+
 // A transaction left open on another connection, to hold a writer's lock
 // while a cutover step runs.
 type testCloseEvidenceOpenWriter struct {
