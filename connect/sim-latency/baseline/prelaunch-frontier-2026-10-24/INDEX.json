@@ -13,13 +13,23 @@
   "evaluated_server_commit": "67c87445abe6725b25b3df2a13af7eb99cd4f8ed",
   "evaluator_image_digest": "sha256:826569fdeb02f72ec4f24ace7c93b16b69a60e1875c31799c5a0217b402e0d6c",
   "valid_baseline_samples": 0,
-  "usable_capacity_points": 2,
+  "usable_capacity_points": 3,
   "official_baseline_frozen": false,
   "scale_frozen": false,
   "margin_frozen": false,
   "measurement_overlapped_builds_or_tests": false,
   "diagnostic_signal_delivered": false,
   "points": [
+    {
+      "path": "p7200-off-handoff-fix",
+      "providers": 7200,
+      "impairment": false,
+      "completion_state": "complete",
+      "incomplete_code": "",
+      "controller_exit_code": 0,
+      "capacity_eligible": true,
+      "baseline_eligible": false
+    },
     {
       "path": "p7200-off",
       "providers": 7200,

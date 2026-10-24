@@ -75,6 +75,14 @@ whole-pipeline pass. All five measured attempts are now versioned in the frontie
 archive; only the two 1,800-provider trials are usable capacity points, and none
 is an official baseline sample.
 
+A separate immutable-controller 7,200-provider impairment-off attempt completed
+cleanly at about 17:33 UTC: all 200 clients warmed, all four shards drained,
+controller exit 0, no diagnostic signal and no leftover trial containers. Its
+complete artifacts are retained in the frontier archive as
+`p7200-off-handoff-fix`; the earlier failed run is unchanged. This adds capacity
+evidence but neither explains the intermittent teardown failure nor establishes
+nine-run stability, a calibrated margin, final scale or a hidden-seed baseline.
+
 The next public-seed nine-run set uses fresh disposable PostgreSQL/Redis per
 replicate and the same 1,800-provider/four-exchange-instance workload. It stops
 on any failed replicate instead of silently resampling. The root-owned,

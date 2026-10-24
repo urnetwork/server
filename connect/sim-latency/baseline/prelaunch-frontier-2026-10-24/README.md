@@ -13,6 +13,7 @@ instances run on the single evaluation host, not four physical machines.
 | 1,800 | 200 | on | complete | controller exit 0; 461 seconds, clean teardown |
 | 1,800 | 200 | off | complete | controller exit 0; 435 seconds, clean teardown |
 | 7,200 | 200 | on | simulation complete; controller failed | controller exit 127 after a live script edit displaced Bash's unread tail |
+| 7,200 | 200 | off | complete, separate fresh attempt | immutable controller exit 0; clean teardown; no diagnostic signal |
 
 All points used four exchange hosts, four fleet shards, 80 arrivals/minute, a public
 seed of 20261024, quality window 2, a 60-second ramp, synthetic 13-hour
@@ -21,7 +22,8 @@ reliability prewarm, 60-second settle, a 180-second measurement window, and
 point stopped during measurement. The 7,200-provider point completed measurement
 but failed teardown; completed measurement alone is not a successful evaluation.
 
-The two 1,800-provider trials are usable capacity evidence, not a frozen scale or
+The two 1,800-provider trials and the later clean 7,200-provider off attempt are
+usable capacity evidence, not a frozen scale or
 threshold. The 7,200-provider on trial completed the simulation, wrote its
 completion marker and drained every shard without intervention. Its host
 controller was edited while its long Docker command was running; after that
@@ -31,6 +33,16 @@ submission tampering. The private calibration now uses a separate root-owned,
 read-only controller bundle with before/after digests. Deterministic Go tests use
 FIFO barriers to reproduce the live-script failure and verify the snapshot
 mitigation. No signal was delivered to this trial either.
+
+The separate `p7200-off-handoff-fix` attempt completed at approximately
+17:33 UTC. It used the root-owned immutable controller and the same public seed,
+fresh services and workload flags; all 200 clients warmed and all four shards
+drained without forced termination. The diagnostic observer found the runner
+already gone before its late stack-capture point, so no signal was sent. Its
+sidecar, completion marker, exact CSV, compressed providers and complete log are
+retained here. The original failed attempt remains unchanged and still counts
+as a failure: this single success does not resolve or explain an intermittent
+shutdown defect and must not be substituted into a calibration set.
 
 The frozen evaluated server is
 `67c87445abe6725b25b3df2a13af7eb99cd4f8ed`; the evaluator image is

@@ -1,5 +1,5 @@
 6499cb1b08eb1780cf3576e9eb24d78fb6e3ad07ab0cfad1ed14052bcc61b633  .gitattributes
-cef80870f746306cfa7c076a8dab3b244114bde4c49cc193415bfb39b0312e82  INDEX.json
+acf3a1b4bf11dae786216a1f4ecc6afea55bf77c4fd027f1745a64478f064282  INDEX.json
 200c0a45b53331fa0fbf942f4fba3804c52b0aef23f9f2a5e0a137a9cfd0b5f8  README.md
 cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9  final-baseline.html
 768c57b3d341eeb31861ba848a595b94f9e6f0b71d0364e29205968bc3aedf1e  go.mod
@@ -96,8 +96,8 @@ e4749f09fd9c5141f0a5fee7f2fa9a96664e177f1c7c104752f397046f041e99  prelaunch-four
 118bb8269e699585a2dfd9d1082a592811ce99e4bdcc90f3c42692ae50004a93  prelaunch-four-exchange-2026-10-24/runs/9.run.json
 db7d7da3158c5525e1eb74b05a986997dd3bfbb5c4236e5ca10903f01c5bd82f  prelaunch-four-exchange-2026-10-24/source-manifest.yml
 b1ef358a1f6aa393ea441f6e3ddb384bbf026a1355b80b8d43766188340d2a05  prelaunch-four-exchange-2026-10-24/source-record.json
-e7e00fdf36a11c9dc1658c25c57f8e8faccd87690b8b848521cfbed552fdabc2  prelaunch-frontier-2026-10-24/INDEX.json
-ae9704d0aa47ad832eb9a8143d22f90e69bf8e2f57a1d859cca798f3dee2876b  prelaunch-frontier-2026-10-24/README.md
+1215f7aab27d7dbcd992c5aef9ff88e62cea167b2853eaf698f687074d4894f2  prelaunch-frontier-2026-10-24/INDEX.json
+bc8b3a53fd45758ef25e14709f189b6980774edd3267621cba7dac1797b1713a  prelaunch-frontier-2026-10-24/README.md
 7a0ca68ee10bd2c5b395fdb81d490d6303597bf3617825b7067c76a6a67c7a4d  prelaunch-frontier-2026-10-24/harness-p1800-off.log
 27e98e95f2fa5b1c738b2a139cbb5de1987aa7695d52183ea6a41d70cdb8c7eb  prelaunch-frontier-2026-10-24/harness-p1800-on.log
 9c1720361cbae13c062b080236e21d1abbadc5022ad54148d85cd222ccab40e4  prelaunch-frontier-2026-10-24/harness-p7200-on.log
@@ -114,6 +114,11 @@ d2c2b9b061183b4b438b0fd1019070a58ca490f5f41c064880ccaa6f4fd0ed05  prelaunch-fron
 c2559889296d594ab02227a28b484ec18f56457dba75326025ed1c05ef102e6c  prelaunch-frontier-2026-10-24/p1800-on-handoff-fix/results.csv
 c427f48650ed54a5f509d6ebdb6f97776fa8b2a831bb7abeee591f3ac993b716  prelaunch-frontier-2026-10-24/p1800-on-handoff-fix/run.json
 488e59156fb9ee3d3991fd9ad97bbc6fd67f9c150fbce1946ffaa0ec6594da6d  prelaunch-frontier-2026-10-24/p1800-on-handoff-fix/runner.log.gz
+429f5cb7eba422de79fd94afbbd101d7c3ddc00054bc595049d8aad74cef4fe1  prelaunch-frontier-2026-10-24/p7200-off-handoff-fix/providers.yml.gz
+58f2ee0fe69446d7dad50758b10a86c204c261448a6686dc9e59bfe9950390a4  prelaunch-frontier-2026-10-24/p7200-off-handoff-fix/results.csv
+5169cf34cff1b9b3c1be707d99207ce8259c0088e39db0180a28d105a17d91bf  prelaunch-frontier-2026-10-24/p7200-off-handoff-fix/run.json
+2fdd3854668bb851d3e5a368351ce72e83b8e14398722f6c3af6f37bf57bddcd  prelaunch-frontier-2026-10-24/p7200-off-handoff-fix/run.json.complete.json
+84d751a52a68b422579a36c38f7f850dbd60b74138f5979faf0537744fe46ce4  prelaunch-frontier-2026-10-24/p7200-off-handoff-fix/runner.log.gz
 429f5cb7eba422de79fd94afbbd101d7c3ddc00054bc595049d8aad74cef4fe1  prelaunch-frontier-2026-10-24/p7200-off/providers.yml.gz
 4a1c354daf1474f6f84811637cb4fe61dce2526c6265b7e50b6e7b96b76e22c7  prelaunch-frontier-2026-10-24/p7200-off/results.csv
 9da9fbe9c32b1867d4505c638abc067c147030b9a69b3cdb851f09a8e7be7c62  prelaunch-frontier-2026-10-24/p7200-off/run.json
