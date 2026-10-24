@@ -661,7 +661,11 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     under its lock. It checks the copy's row count and refuses a task id
     that is in both. Up to 200,000 rows by default, and nothing before C.
   - Validate, analyze and the rollback run without `transaction_timeout`.
-  - The registry's runway and retention tasks must be deployed first.
+  - The registry's runway and retention tasks must be deployed first, and
+    every taskworker must run this build. An older TaskCleanup would keep
+    deleting rows through the partitioned parent by row address. It would
+    only delete eligible rows whose owners it admitted, but it could wait on a
+    held row.
 - **Lookups:** each lookup by task id is one index probe per partition,
   about 12 with the days ahead, and reads that bound `run_end_time` prune. A
   DB test pins both.
