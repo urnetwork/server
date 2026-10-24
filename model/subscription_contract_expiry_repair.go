@@ -23,13 +23,12 @@ type ContractExpiryRepairRequest struct {
 }
 
 // Results contain private contract identities, but no balances, report amounts,
-// credentials or raw errors. An observed intent is delegated work, not settlement.
+// credentials or raw errors.
 type ContractExpiryRepairContract struct {
-	ContractId          server.Id        `json:"contract_id"`
-	Status              string           `json:"status"`
-	ProofCommitted      bool             `json:"proof_committed"`
-	ObservedOutcome     *ContractOutcome `json:"observed_outcome"`
-	LegacyIntentPresent *bool            `json:"legacy_intent_present"`
+	ContractId      server.Id        `json:"contract_id"`
+	Status          string           `json:"status"`
+	ProofCommitted  bool             `json:"proof_committed"`
+	ObservedOutcome *ContractOutcome `json:"observed_outcome"`
 }
 
 type ContractExpiryRepairResult struct {
@@ -115,9 +114,8 @@ func configureContractExpiryRepairTx(ctx context.Context, tx server.PgTx) {
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 }
 
-// The applying caller holds the contract before checking intent absence. Intent
-// producers also own that contract, so they cannot enter between the check and
-// this transaction's writes. Do not wait for an intent while holding the contract.
+// The applying caller holds the contract before checking its reservation mode,
+// so no settlement can enter between the check and this transaction's writes.
 func (scope *contractExpiryRepairScope) checkInTx(ctx context.Context, tx server.PgTx, contractId server.Id, lock bool) error {
 	if contractId != scope.contractId {
 		return contractExpiryRepairRefusal("scope_mismatch")
@@ -147,16 +145,12 @@ func (scope *contractExpiryRepairScope) checkInTx(ctx context.Context, tx server
 	if scope.redis != nil {
 		return scope.checkRedisInTx(ctx, tx, contractId, lock)
 	}
-	var intent, legacy, redis, debit bool
+	var legacy, redis, debit bool
 	if err := tx.QueryRow(ctx, `SELECT
-		EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
 		EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved),
 		EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND redis_reserved),
-		EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)`, contractId).Scan(&intent, &legacy, &redis, &debit); err != nil {
+		EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)`, contractId).Scan(&legacy, &redis, &debit); err != nil {
 		return err
-	}
-	if intent {
-		return contractExpiryRepairRefusal("legacy_intent_present")
 	}
 	if debit {
 		return contractExpiryRepairRefusal("debit_present")
@@ -237,14 +231,12 @@ func observeContractExpiryRepair(ctx context.Context, scope *contractExpiryRepai
 			configureContractExpiryRepairTx(ctx, tx)
 			var payer *server.Id
 			var outcome *ContractOutcome
-			var intent bool
-			server.Raise(tx.QueryRow(ctx, `SELECT payer_network_id,outcome,
-				EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
-				FROM transfer_contract WHERE contract_id=$1`, scope.contractId).Scan(&payer, &outcome, &intent))
+			server.Raise(tx.QueryRow(ctx, `SELECT payer_network_id,outcome
+				FROM transfer_contract WHERE contract_id=$1`, scope.contractId).Scan(&payer, &outcome))
 			if payer == nil || *payer != scope.expectedPayer {
 				server.Raise(contractExpiryRepairRefusal("payer_mismatch"))
 			}
-			result.ObservedOutcome, result.LegacyIntentPresent = outcome, &intent
+			result.ObservedOutcome = outcome
 		}, server.TxReadCommitted, pgx.ReadOnly, server.OptNoRetry())
 		return nil
 	})
@@ -252,9 +244,10 @@ func observeContractExpiryRepair(ctx context.Context, scope *contractExpiryRepai
 
 // RepairContractExpiry previews or continues only the selected quiet legacy
 // contracts. The five-minute cutoff is the deployed ordinary expiry policy.
-// Apply retains original report proof before invoking the shared continuation;
-// it never quarantines accounting failures, flushes grants or releases custody.
-// A deadline may leave a committed proof/report prefix for the ordinary owner.
+// Apply retains original report proof before invoking the shared continuation,
+// which settles the legacy reservation inline through its ordinary owner; it
+// never quarantines accounting failures or flushes grants. A deadline may leave
+// a committed proof/report prefix for the ordinary owner.
 func RepairContractExpiry(ctx context.Context, request ContractExpiryRepairRequest) (result ContractExpiryRepairResult, returnErr error) {
 	return repairContractExpiry(ctx, request, false)
 }
@@ -326,12 +319,9 @@ func repairContractExpiry(ctx context.Context, request ContractExpiryRepairReque
 			if observationErr != nil && err == nil {
 				entry.Status = "observation_failed"
 			} else if entry.Status == "continuation_returned" {
-				switch {
-				case entry.ObservedOutcome != nil:
+				if entry.ObservedOutcome != nil {
 					entry.Status = "terminal"
-				case entry.LegacyIntentPresent != nil && *entry.LegacyIntentPresent:
-					entry.Status = "legacy_intent_present"
-				default:
+				} else {
 					entry.Status = "open"
 				}
 			}

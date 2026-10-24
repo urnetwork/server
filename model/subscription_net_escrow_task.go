@@ -1,4 +1,4 @@
-// Legacy settlement mirrors have a coalesced durable owner outside the financial page.
+// Legacy settlement mirrors have a coalesced durable owner outside the financial transaction.
 package model
 
 import (
@@ -77,8 +77,8 @@ func refreshCachedLegacyNetEscrow(ctx context.Context, balanceIds []server.Id) {
 	}
 }
 
-// The durable task owns only this balance's optional mirror. No grant, intent,
-// outcome or pending-task row lock is held during history reads or Redis I/O.
+// The durable task owns only this balance's optional mirror. No grant, outcome
+// or pending-task row lock is held during history reads or Redis I/O.
 // A lost Redis acknowledgement repeats the same fenced absolute write.
 func ApplyLegacyNetEscrowMirror(_ json.RawMessage, clientSession *session.ClientSession) (result *LegacyNetEscrowMirrorResult, returnErr error) {
 	identity, ok := task.ExecutionIdentityFromContext(clientSession.Ctx)

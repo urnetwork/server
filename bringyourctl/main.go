@@ -106,7 +106,6 @@ Usage:
     bringyourctl contracts repair-expiry-route-check
     bringyourctl contracts repair-expiry --private-stdin [--apply]
     bringyourctl contracts repair-redis-expiry --private-stdin [--apply]
-    bringyourctl contracts drain-legacy --private-stdin [--apply]
     bringyourctl contracts queue-expiry
     bringyourctl contracts schedule-open-closures [--limit=<n>]
     bringyourctl contracts close-expired [-c <count>]
@@ -400,10 +399,6 @@ func main() {
 		}
 		if queueExpiry, _ := opts.Bool("queue-expiry"); queueExpiry {
 			os.Exit(runContractExpiryRecovery(context.Background(), os.Stdout, invokeContractExpiryRecovery))
-		}
-		if drainLegacy, _ := opts.Bool("drain-legacy"); drainLegacy {
-			apply, _ := opts.Bool("--apply")
-			os.Exit(runPrivateLegacySettlementDrain(context.Background(), os.Stdin, os.Stdout, apply, invokeLegacySettlementDrain))
 		}
 		if routeCheck, _ := opts.Bool("repair-expiry-route-check"); routeCheck {
 			os.Exit(runContractExpiryRouteCheck(context.Background(), os.Stdout, inspectContractExpiryRoute))

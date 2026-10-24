@@ -316,12 +316,6 @@ func TestContractCloseLegacyLowerBoundDisputeDirection(t *testing.T) {
 						}
 						server.Raise(CloseContract(ctx, id, client, 0, false))
 					}
-					if legacyEscrow && legacyLower {
-						completed, busy, _, err := flushLegacySettlement(ctx, id)
-						if !completed || busy || err != nil {
-							t.Fatal("compatible legacy lower bound did not settle", completed, busy, err)
-						}
-					}
 					var terminal, disputed, beforeExpiration bool
 					var payout ByteCount
 					server.Db(ctx, func(conn server.PgConn) {

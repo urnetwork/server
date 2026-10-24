@@ -47,16 +47,6 @@ func TestNormalCloseCheckpointReplayRootCause(t *testing.T) {
 					ClientId: f.destinationId, AckedByteCount: 100}))
 				closeErr := send(ContractCloseReport{ReportId: server.NewId(), ContractId: contractId,
 					ClientId: f.sourceId, AckedByteCount: 500})
-				if legacyEscrow {
-					if closeErr != nil {
-						t.Fatal("legacy report did not commit its financial handoff", closeErr)
-					}
-					var completed, busy bool
-					completed, busy, _, closeErr = flushLegacySettlement(ctx, contractId)
-					if busy || !completed {
-						t.Fatalf("normal legacy settlement completed=%t busy=%t identified=%t", completed, busy, identified)
-					}
-				}
 				if closeErr != nil {
 					t.Fatal("checkpoint retry prevented normal settlement", identified, closeErr)
 				}
@@ -128,20 +118,19 @@ func TestNormalCloseCheckpointReplayDisputeRootCause(t *testing.T) {
 					server.Raise(CloseContract(ctx, contractId, report.ClientId, report.AckedByteCount, report.Checkpoint))
 				}
 			}
-			var terminal, disputed, beforeExpiration, intent bool
+			var terminal, disputed, beforeExpiration bool
 			var sourceBytes, destinationBytes, earned ByteCount
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL,dispute,
 					expiration_time > clock_timestamp() AT TIME ZONE 'UTC',
-					EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
 					(SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party='source'),
 					(SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party='destination'),
 					COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$1),0)
 					FROM transfer_contract WHERE contract_id=$1`, contractId).
-					Scan(&terminal, &disputed, &beforeExpiration, &intent, &sourceBytes, &destinationBytes, &earned))
+					Scan(&terminal, &disputed, &beforeExpiration, &sourceBytes, &destinationBytes, &earned))
 			})
 			wantDestination, wantEarned := 40*mib, 40*mib
-			if !terminal || disputed || !beforeExpiration || intent || sourceBytes != 40*mib || destinationBytes != wantDestination || earned != wantEarned {
+			if !terminal || disputed || !beforeExpiration || sourceBytes != 40*mib || destinationBytes != wantDestination || earned != wantEarned {
 				t.Fatalf("duplicated report did not determine ordinary dispute: identified=%t terminal=%t disputed=%t source=%d destination=%d earned=%d",
 					identified, terminal, disputed, sourceBytes, destinationBytes, earned)
 			}
@@ -174,14 +163,14 @@ func TestNormalCloseGrantRetentionRootCause(t *testing.T) {
 			if !unsafeRetention {
 				removeCompletedTransferBalanceBatches(ctx, cutoff)
 			}
-			for _, clientId := range []server.Id{f.sourceId, f.destinationId} {
-				_, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId,
-					ClientId: clientId, AckedByteCount: 500})
-				server.Raise(err)
-			}
-			completed, busy, _, err := flushLegacySettlement(ctx, contract.ContractId)
-			if busy || completed == unsafeRetention || unsafeRetention && !errors.Is(err, errContractInsufficientEscrow) || !unsafeRetention && err != nil {
-				t.Fatalf("retention control did not determine normal settlement: unsafe=%t completed=%t busy=%t err=%v", unsafeRetention, completed, busy, err)
+			_, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId,
+				ClientId: f.sourceId, AckedByteCount: 500})
+			server.Raise(err)
+			// The second final settles the legacy reservation inline.
+			_, err = CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId,
+				ClientId: f.destinationId, AckedByteCount: 500})
+			if unsafeRetention && !errors.Is(err, errContractInsufficientEscrow) || !unsafeRetention && err != nil {
+				t.Fatalf("retention control did not determine normal settlement: unsafe=%t err=%v", unsafeRetention, err)
 			}
 			var terminal, beforeExpiration bool
 			var earned ByteCount

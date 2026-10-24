@@ -45,12 +45,12 @@ type contractSettlementOwner struct {
 // Keep the row lock and report read as successive statements: Read Committed
 // must take the report snapshot after any competing contract owner commits.
 // One batch removes client waits without combining their statement snapshots.
-func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, closeOwners ...ContractCloseOwner) (*contractSettlementOwner, error) {
+func readContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (*contractSettlementOwner, error) {
 	owner, err := readContractSettlementRowsInTx(ctx, tx, contractId)
 	if err != nil {
 		return nil, err
 	}
-	return resolveContractSettlementOwnerInTx(ctx, tx, contractId, owner, closeOwners...)
+	return resolveContractSettlementOwnerInTx(ctx, tx, contractId, owner)
 }
 
 // The forced deadline owner also needs the original rows when payer metadata
@@ -83,21 +83,15 @@ func readContractSettlementRowsInTx(ctx context.Context, tx server.PgTx, contrac
 	return owner, nil
 }
 
-func resolveContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner *contractSettlementOwner, closeOwners ...ContractCloseOwner) (*contractSettlementOwner, error) {
+func resolveContractSettlementOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner *contractSettlementOwner) (*contractSettlementOwner, error) {
 	if owner.participants.payerNetworkId == nil {
-		// A legacy worker passes the owner it just resolved under this same
-		// contract lock. Direct settlement resolves it on the caller's tx.
-		// Never let the old companion endpoint fallback replace real escrow
-		// evidence for billing or the paying client's usage meter.
-		var resolved ContractCloseOwner
-		if len(closeOwners) > 0 {
-			resolved = closeOwners[0]
-		} else {
-			var err error
-			resolved, _, err = readContractCloseOwnerInConn(ctx, tx, contractId)
-			if err != nil {
-				return nil, err
-			}
+		// Settlement resolves the owner on the caller's tx, under this same
+		// contract lock. Never let the old companion endpoint fallback
+		// replace real escrow evidence for billing or the paying client's
+		// usage meter.
+		resolved, _, err := readContractCloseOwnerInConn(ctx, tx, contractId)
+		if err != nil {
+			return nil, err
 		}
 		if resolved.Kind == ContractCloseOwnerPayerNetwork {
 			owner.participants.payerNetworkId = &resolved.Id

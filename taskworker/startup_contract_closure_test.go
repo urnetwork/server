@@ -72,10 +72,17 @@ func testStartupAllOpenContractClosures(t *testing.T, profile WorkloadProfile) {
 		}
 		registered, err := InitTaskWorkerForProfile(ctx, nil, profile)
 		server.Raise(err)
-		for _, target := range []task.Target{work.NewStartupContractClosureTaskTarget(), work.NewScheduledContractClosureTaskTarget(), model.NewLegacySourceSettlementTaskTarget(), model.NewLegacyPayerSettlementTaskTarget()} {
+		for _, target := range []task.Target{work.NewStartupContractClosureTaskTarget(), work.NewScheduledContractClosureTaskTarget()} {
 			if !registered.HasTarget(target.TargetFunctionName()) {
 				registered.Close()
 				t.Fatal("profile omitted a normal closure owner", profile, target.TargetFunctionName())
+			}
+		}
+		// The retired legacy settlement queue's owners are reaped, not run.
+		for _, functionName := range removedTaskTargets {
+			if registered.HasTarget(functionName) {
+				registered.Close()
+				t.Fatal("profile registered a removed target", profile, functionName)
 			}
 		}
 		registered.Close()

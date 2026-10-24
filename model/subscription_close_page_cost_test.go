@@ -22,8 +22,7 @@ const testingClosePageCurrentSql = `
                     source_contract_close.close_time,source_contract_close.used_transfer_byte_count,source_contract_close.checkpoint,
                     destination_contract_close.close_time,destination_contract_close.used_transfer_byte_count,destination_contract_close.checkpoint,
                     t.create_time,
-                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $3
+                    (t.usage_unverified OR (t.create_time <= $3
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3))),
                     CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
                         THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
@@ -41,8 +40,7 @@ const testingDisputePageCurrentSql = `
                     ORDER BY create_time,contract_id LIMIT $2
                 )
                 SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
-                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $1
+                    (t.usage_unverified OR (t.create_time <= $1
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1))),
                     CASE WHEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC'
                         THEN COALESCE(t.expiration_time, t.create_time + interval '60 minutes') END AS next_expiration_time
@@ -68,7 +66,7 @@ func testingLoadedClosePagePlan(t testing.TB, ctx context.Context, query string,
 }
 
 // Unrelated historical rows must not change the selected raw page or any
-// source/destination report and quiet/pending eligibility value in that page.
+// source/destination report and quiet eligibility value in that page.
 func testingLoadedClosePageDigest(t testing.TB, ctx context.Context, query string, args ...any) (string, int) {
 	t.Helper()
 	var digest string
@@ -102,9 +100,6 @@ func TestForceClosePageRetainedHistoryBounded(t *testing.T) {
        SELECT md5('synthetic-close-contract-'||g)::uuid,party,0,
          CASE WHEN g%5=0 THEN $1::timestamp ELSE $1::timestamp-interval '2 hours' END,
          g<=100000 AND g%3=0 FROM generate_series(1,600000)g CROSS JOIN (VALUES('source'),('destination'))p(party)`, now))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-       SELECT md5('synthetic-close-contract-'||g)::uuid,get_byte(uuid_send(md5('synthetic-close-contract-'||g)::uuid),15)%16,'settled'
-       FROM generate_series(1,100000)g WHERE g%7=0`))
 			// Exercise missing one/both reports as well as complete/checkpoint rows.
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM contract_close WHERE contract_id IN
                 (SELECT md5('synthetic-close-contract-'||g)::uuid FROM generate_series(1,100000)g WHERE g%11=0)
@@ -112,7 +107,7 @@ func TestForceClosePageRetainedHistoryBounded(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM contract_close WHERE contract_id IN
                 (SELECT md5('synthetic-close-contract-'||g)::uuid FROM generate_series(1,100000)g WHERE g%13=0)
                 AND party='destination'`))
-			for _, table := range []string{"transfer_contract", "contract_close", "legacy_settlement_intent"} {
+			for _, table := range []string{"transfer_contract", "contract_close"} {
 				server.RaisePgResult(tx.Exec(ctx, "ANALYZE "+table))
 			}
 		})

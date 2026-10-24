@@ -29,10 +29,10 @@ func TestContractExpiryQueueCommandUsesNormalOwnerKickoff(t *testing.T) {
 		if !ok || time.Until(deadline) > contractExpiryRepairCommandBudget || time.Until(deadline) <= 0 {
 			t.Fatal("queue publication escaped its bounded command context")
 		}
-		return work.ContractExpiryRecoveryResult{RequestedAt: time.Now().UTC(), SweepRequests: 1, LegacyDispatcherRequests: 16}, nil
+		return work.ContractExpiryRecoveryResult{RequestedAt: time.Now().UTC(), SweepRequests: 1}, nil
 	})
 	if code != 0 || called != 1 || !strings.Contains(output.String(), `"status":"queued"`) ||
-		!strings.Contains(output.String(), `"sweep_requests":1`) || !strings.Contains(output.String(), `"legacy_dispatcher_requests":16`) {
+		!strings.Contains(output.String(), `"sweep_requests":1`) || strings.Contains(output.String(), "legacy_dispatcher_requests") {
 		t.Fatal("command did not acknowledge exactly the committed queue request")
 	}
 }
@@ -60,5 +60,23 @@ func TestContractExpiryQueueFailureCannotAcknowledgeWork(t *testing.T) {
 		return work.ContractExpiryRecoveryResult{}, nil
 	}) != 1 || called || !strings.Contains(output.String(), `"status":"parent_canceled"`) {
 		t.Fatal("already-canceled global kickoff reached the queue")
+	}
+}
+
+// The legacy settlement drain retired with legacy_settlement_intent; the
+// expiry repair commands that shared its private input stay.
+func TestContractsDrainLegacyCommandIsRetired(t *testing.T) {
+	parser := &docopt.Parser{HelpHandler: docopt.NoHelpHandler}
+	if _, err := parser.ParseArgs(bringyourctlUsage, []string{"contracts", "drain-legacy", "--private-stdin", "--apply"}, "synthetic"); err == nil {
+		t.Fatal("the retired legacy settlement drain still parses")
+	}
+	for _, command := range []string{"repair-expiry", "repair-redis-expiry"} {
+		opts, err := parser.ParseArgs(bringyourctlUsage, []string{"contracts", command, "--private-stdin", "--apply"}, "synthetic")
+		if err != nil {
+			t.Fatal(command, "no longer parses", err)
+		}
+		if selected, _ := opts.Bool(command); !selected {
+			t.Fatal(command, "did not select its own command")
+		}
 	}
 }

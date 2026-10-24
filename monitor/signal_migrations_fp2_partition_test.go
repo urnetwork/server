@@ -3,6 +3,7 @@
 package monitor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,12 +42,16 @@ func TestMigrationFp2CatalogAcceptsPartitionedHistory(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		query := migrationFp2TestQuery(t)
+		// The probe emits the published FP2 contracts and, after them, the
+		// write-path successor that owns v723 at head (it drops the full
+		// deadline index v723 pinned); both must read the same on either layout.
 		read := func() []bool {
 			var matches []bool
+			var successor bool
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, query).Scan(&matches))
+				server.Raise(conn.QueryRow(ctx, query).Scan(&matches, &successor))
 			})
-			return matches
+			return append(matches, successor)
 		}
 		before := read()
 		now := server.NowUtc()
@@ -67,7 +72,11 @@ func TestMigrationFp2CatalogAcceptsPartitionedHistory(t *testing.T) {
 		after := read()
 		for index := range before {
 			if before[index] != after[index] {
-				t.Fatalf("v%d contract changed across the cutover: %t then %t", index+722, before[index], after[index])
+				name := fmt.Sprintf("v%d", index+722)
+				if index == len(before)-1 {
+					name = "v723 successor"
+				}
+				t.Fatalf("%s contract changed across the cutover: %t then %t", name, before[index], after[index])
 			}
 		}
 		var quota bool

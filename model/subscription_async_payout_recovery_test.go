@@ -240,7 +240,7 @@ func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing
 		neighbor := createRedisAdmissionTest(ctx, f, 37)
 		asyncPayoutRecoveryReports(ctx, held.ContractId, 80)
 		asyncPayoutRecoveryReports(ctx, neighbor.ContractId, 11)
-		reports := legacyDrainTestReports(ctx, held.ContractId)
+		reports := contractCloseTestReports(ctx, held.ContractId)
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts, closed, err := settleEscrowForegroundInTx(ctx, tx, held.ContractId, ContractOutcomeSettled)
 			if err == nil || closed || len(posts) != 0 {
@@ -251,7 +251,7 @@ func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		terminal, journals, sweeps, owners, _, _ := asyncPayoutRecoveryState(t, ctx, held.ContractId)
-		if terminal || journals+sweeps+owners != 0 || string(reports) != string(legacyDrainTestReports(ctx, held.ContractId)) {
+		if terminal || journals+sweeps+owners != 0 || string(reports) != string(contractCloseTestReports(ctx, held.ContractId)) {
 			t.Fatal("refusal lost original reports or financial liability")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {

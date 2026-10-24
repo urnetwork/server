@@ -114,8 +114,7 @@ func TestSettlementPageCancellationAcceptsAStoppedStatementsOwnTimeout(t *testin
 }
 
 // An operator's cancel shares 57014 with a statement timeout but is not the
-// statement's own timeout, so it refuses the yield even beside the stop, as
-// the grant wait refuses it.
+// statement's own timeout, so it refuses the yield even beside the stop.
 func TestSettlementPageCancellationRejectsAnOperatorCancelBesideTheStop(t *testing.T) {
 	operatorCancel := &pgconn.PgError{Code: pgerrcode.QueryCanceled, Message: "canceling statement due to user request"}
 	for index, cause := range []error{
@@ -125,8 +124,5 @@ func TestSettlementPageCancellationRejectsAnOperatorCancelBesideTheStop(t *testi
 		if isSettlementPageCancellation(cause) {
 			t.Fatal("an operator cancel beside the stop authorized a yield", index)
 		}
-	}
-	if legacySettlementGrantWaitExpired(operatorCancel) {
-		t.Fatal("the grant wait accepted an operator cancel")
 	}
 }

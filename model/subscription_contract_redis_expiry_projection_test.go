@@ -166,7 +166,7 @@ func repairRedisExpiryWithProjectionGate(t testing.TB, ctx context.Context, requ
 	}
 	for _, entry := range got.result.Contracts {
 		if entry.Status != "terminal" || !entry.ProofCommitted || entry.ObservedOutcome == nil ||
-			*entry.ObservedOutcome != ContractOutcomeSettled || entry.LegacyIntentPresent == nil || *entry.LegacyIntentPresent {
+			*entry.ObservedOutcome != ContractOutcomeSettled {
 			t.Fatal("scoped expiry lost a terminal observation behind optional work")
 		}
 	}

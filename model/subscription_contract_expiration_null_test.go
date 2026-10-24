@@ -105,8 +105,8 @@ func TestContractExpirationNullLockedProofKeepsRecentReport(t *testing.T) {
 	})
 }
 
-// Both funding paths preserve exact delivered work. Existing legacy intents
-// remain byte-identical across an expiry revisit until their payer owner commits.
+// Both funding paths preserve exact delivered work: a Redis reservation through
+// its debit owner, a legacy reservation settled inline by the expiry itself.
 func TestContractExpirationNullRetainsFinancialOwnersAndReplay(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -138,12 +138,8 @@ func TestContractExpirationNullRetainsFinancialOwnersAndReplay(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(-61*time.Minute)))
 			})
 			count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-			want := int64(0)
-			if redis {
-				want = 1
-			}
-			if err != nil || count != want {
-				t.Fatalf("redis=%t NULL funding owner count=%d want=%d error=%v", redis, count, want, err)
+			if err != nil || count != 1 {
+				t.Fatalf("redis=%t NULL funding owner count=%d want=1 error=%v", redis, count, err)
 			}
 			proof, decoded := readContractExpiryTestSnapshot(t, ctx, id)
 			if decoded.Expiry == nil || decoded.ByteCount != 300 || len(decoded.Expiry.Reports) != 2 {
@@ -154,33 +150,15 @@ func TestContractExpirationNullRetainsFinancialOwnersAndReplay(t *testing.T) {
 				if err != nil || result.Failed != 0 {
 					t.Fatal("NULL Redis debit failed", err)
 				}
-			} else {
-				requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 1000)
-				readIntent := func() []byte {
-					var raw []byte
-					server.Db(ctx, func(conn server.PgConn) {
-						server.Raise(conn.QueryRow(ctx, `SELECT to_jsonb(i) FROM legacy_settlement_intent i WHERE contract_id=$1`, id).Scan(&raw))
-					})
-					return raw
-				}
-				before := readIntent()
-				count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
-				if err != nil || count != 0 || !bytes.Equal(before, readIntent()) {
-					t.Fatal("expiry rewrote the existing payer intent", err)
-				}
-				complete, busy, _, err := flushLegacySettlement(ctx, id)
-				if err != nil || !complete || busy {
-					t.Fatalf("NULL legacy continuation complete=%t busy=%t error=%v", complete, busy, err)
-				}
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+			requireLegacySettlementTestState(t, ctx, f, id, true, 700, 0)
 			requireLegacyProviderDurability(t, ctx, f, id, 300)
 			count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
 			after, _ := readContractExpiryTestSnapshot(t, ctx, id)
 			if err != nil || count != 0 || !bytes.Equal(proof, after) {
 				t.Fatal("NULL expiry replay changed the original proof", err)
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, false, true, 700, 0)
+			requireLegacySettlementTestState(t, ctx, f, id, true, 700, 0)
 			requireLegacyProviderDurability(t, ctx, f, id, 300)
 		}
 	})

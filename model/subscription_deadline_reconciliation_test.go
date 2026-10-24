@@ -22,9 +22,9 @@ func requireDeadlineProviderDurability(t testing.TB, ctx context.Context, networ
 	}
 }
 
-// Insufficient escrow, depleted credit and deleted grants previously left an
-// accepted intent permanently open. Each fixture retains its original reports
-// while the deadline pays the funded portion once and releases the reservation.
+// Insufficient escrow, depleted credit and deleted grants must not leave a
+// contract open. Each fixture retains its original reports while the deadline
+// pays the funded portion once and releases the reservation.
 func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -36,7 +36,7 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 			pending                      ByteCount
 			missing, redis               bool
 		}{
-			{name: "underfunded intent", reported: 300, available: 1000, charged: 100},
+			{name: "underfunded reservation", reported: 300, available: 1000, charged: 100},
 			{name: "remaining balance", reported: 17, available: 7, charged: 7},
 			{name: "empty balance", reported: 17, available: 0, charged: 0},
 			{name: "missing grant", reported: 17, missing: true},
@@ -54,9 +54,6 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 			}
 			server.Raise(CloseContract(ctx, id, f.sourceId, sample.reported, true))
 			server.Tx(ctx, func(tx server.PgTx) {
-				if !sample.redis {
-					server.Raise(queueLegacySettlementInTx(ctx, tx, id, ContractOutcomeSettled, true))
-				}
 				if sample.missing {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=$1`, f.balanceId))
 				} else {
@@ -77,10 +74,8 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 			server.Db(ctx, func(conn server.PgConn) {
 				var terminal, settled bool
 				var payout, remaining, provided ByteCount
-				var intents int
-				server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL AND NOT dispute,
-					(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=$1)
-					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&terminal, &intents))
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL AND NOT dispute
+					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&terminal))
 				server.Raise(conn.QueryRow(ctx, `SELECT settled,payout_byte_count FROM transfer_escrow WHERE contract_id=$1`, id).Scan(&settled, &payout))
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1),0),
 					COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0)`, f.balanceId, f.destinationNetworkId).Scan(&remaining, &provided))
@@ -88,8 +83,8 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 				if sample.redis {
 					expectedBalance = sample.available
 				}
-				if !terminal || !settled || intents != 0 || payout != sample.charged || provided != 0 || remaining != expectedBalance {
-					t.Fatal("closure and durable finances did not commit together", sample.name, terminal, settled, intents, payout, remaining, provided)
+				if !terminal || !settled || payout != sample.charged || provided != 0 || remaining != expectedBalance {
+					t.Fatal("closure and durable finances did not commit together", sample.name, terminal, settled, payout, remaining, provided)
 				}
 				var pending ByteCount
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(sum(debit_byte_count),0) FROM transfer_debit_journal
@@ -112,8 +107,7 @@ func TestDeadlineReconciliationClosesAccountingFailures(t *testing.T) {
 	})
 }
 
-// Cancellation is an explicit retryable failure, not a successful handoff or a
-// reason to discard the accepted financial intent.
+// Cancellation is an explicit retryable failure, never a successful close.
 func TestDeadlineReconciliationCancellationRollsBack(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -123,9 +117,6 @@ func TestDeadlineReconciliationCancellationRollsBack(t *testing.T) {
 		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
 		server.RunPosts(ctx, posts...)
 		server.Raise(CloseContract(ctx, contract.ContractId, f.sourceId, 17, true))
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.Raise(queueLegacySettlementInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled, false))
-		})
 		before := readRedisExpiryRepairTestState(ctx, contract.ContractId)
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
@@ -265,82 +256,44 @@ func TestDeadlineReconciliationSignedPublicationFailureRollsBack(t *testing.T) {
 	})
 }
 
-// A deadline must use the same reconciliation policy through the payer task,
-// its cohort fallback, and the global expiry scan. Pending retry times cannot
-// hide expired contracts from the expiry owner.
-func TestDeadlineReconciliationAdjacentOwners(t *testing.T) {
+// The global expiry scan retires an expired legacy contract through the same
+// deadline reconciliation policy, charging only the funded remainder.
+func TestDeadlineReconciliationThroughExpirySweep(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		for _, path := range []string{"payer", "cohort", "expiry sweep"} {
-			f := newNetEscrowOrderingTestFixture(t, ctx)
-			count := 1
-			if path == "cohort" {
-				count = 2
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
+		server.RunPosts(ctx, posts...)
+		id := contract.ContractId
+		server.Raise(CloseContract(ctx, id, f.sourceId, 17, true))
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(-time.Hour)))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=7 WHERE balance_id=$1`, f.balanceId))
+		})
+		completed, _, err := ForceCloseOpenContractIdsPage(ctx, server.NowUtc().Add(-5*time.Minute), 32, 1, 0, 0, nil)
+		if err != nil || completed != 1 {
+			t.Fatal("expiry scan skipped an expired legacy contract", completed, err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var terminal bool
+			var balance, charged, provided ByteCount
+			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1`, id).Scan(&terminal))
+			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count,
+				(SELECT sum(payout_byte_count) FROM transfer_escrow WHERE contract_id=$2),
+				COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$3),0)
+				FROM transfer_balance WHERE balance_id=$1`, f.balanceId, id, f.destinationNetworkId).Scan(&balance, &charged, &provided))
+			if !terminal || balance != 0 || charged != 7 || provided != 0 {
+				t.Fatal("expiry sweep overcharged or left the contract open", terminal, balance, charged, provided)
 			}
-			ids := []server.Id{}
-			for range count {
-				contract, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
-				server.RunPosts(ctx, posts...)
-				ids = append(ids, contract.ContractId)
-				server.Raise(CloseContract(ctx, contract.ContractId, f.sourceId, 17, true))
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.Raise(queueLegacySettlementInTx(ctx, tx, contract.ContractId, ContractOutcomeSettled, false))
-				})
-			}
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=ANY($1)`, ids, server.NowUtc().Add(-time.Hour)))
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=7 WHERE balance_id=$1`, f.balanceId))
-				due := server.NowUtc().Add(-time.Minute)
-				if path == "expiry sweep" {
-					due = server.NowUtc().Add(time.Hour)
-				}
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=ANY($1)`, ids, due))
-			})
-			if path == "cohort" {
-				attempts, err := flushLegacySettlementCohort(ctx, ids)
-				if err != nil || len(attempts) == 0 || !attempts[0].fallback {
-					t.Fatal("expired cohort bypassed reconciliation", attempts, err)
-				}
-			}
-			if path == "expiry sweep" {
-				completed, _, err := ForceCloseOpenContractIdsPage(ctx, server.NowUtc().Add(-5*time.Minute), 32, 1, 0, 0, nil)
-				if err != nil || completed != 1 {
-					t.Fatal("expiry scan skipped due accepted intent", completed, err)
-				}
-			} else {
-				page, err := FlushLegacyPayerSettlements(ctx, f.sourceNetworkId, nil, 8)
-				if err != nil || page.Completed != count || page.Failed != 0 {
-					t.Fatal("payer failed deadline reconciliation", path, page, err)
-				}
-			}
-			server.Db(ctx, func(conn server.PgConn) {
-				var terminal int
-				var balance, charged, provided ByteCount
-				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome IS NOT NULL`, ids).Scan(&terminal))
-				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count,
-					(SELECT sum(payout_byte_count) FROM transfer_escrow WHERE contract_id=ANY($2)),
-					COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$3),0)
-					FROM transfer_balance WHERE balance_id=$1`, f.balanceId, ids, f.destinationNetworkId).Scan(&balance, &charged, &provided))
-				if terminal != count || balance != 0 || charged != 7 || provided != 0 {
-					t.Fatal("adjacent owner overcharged or left a contract open", path, terminal, balance, charged, provided)
-				}
-			})
-			var pending ByteCount
-			for _, id := range ids {
-				state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-				pending += state.pendingBytes
-				if state.accountBytes != 0 || state.sweptBytes != state.pendingBytes {
-					t.Fatal("adjacent owner lost exact pending provider allocation")
-				}
-			}
-			if pending != 7 {
-				t.Fatal("adjacent owner changed total funded allocation", pending)
-			}
-			if remaining := Testing_NetEscrowByteCount(ctx, f.balanceId); remaining != 0 {
-				t.Fatal("deadline retained a spent reservation", path, remaining)
-			}
+		})
+		state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
+		if state.accountBytes != 0 || state.sweptBytes != 7 || state.pendingBytes != 7 {
+			t.Fatal("expiry sweep lost exact pending provider allocation", state.accountBytes, state.sweptBytes, state.pendingBytes)
+		}
+		if remaining := Testing_NetEscrowByteCount(ctx, f.balanceId); remaining != 0 {
+			t.Fatal("deadline retained a spent reservation", remaining)
 		}
 	})
 }

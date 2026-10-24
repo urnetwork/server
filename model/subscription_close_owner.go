@@ -1,4 +1,4 @@
-// Close routing keeps financial payer networks separate from retained source
+// Close ownership keeps financial payer networks separate from retained source
 // clients. A missing cached payer never proves that a legacy escrow is free.
 package model
 
@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 type ContractCloseOwnerKind string
@@ -25,17 +24,6 @@ var errContractCloseOwnerUnresolved = errors.New("contract close owner is unreso
 type ContractCloseOwner struct {
 	Kind ContractCloseOwnerKind `json:"kind"`
 	Id   server.Id              `json:"id"`
-}
-
-func (self ContractCloseOwner) valid() bool {
-	return self.Id != (server.Id{}) && (self.Kind == ContractCloseOwnerPayerNetwork || self.Kind == ContractCloseOwnerSourceClient)
-}
-
-func (self ContractCloseOwner) runOnce() *task.RunOnceOption {
-	if self.Kind == ContractCloseOwnerPayerNetwork {
-		return task.RunOnce("flush_legacy_payer_settlements", self.Id)
-	}
-	return task.RunOnce("flush_legacy_source_settlements", self.Id)
 }
 
 // Explicit retained payer metadata remains authoritative. Otherwise actual
@@ -89,38 +77,9 @@ func readContractCloseOwnerInConn(ctx context.Context, query server.PgCanQuery, 
 	return
 }
 
-// Existing payer workers and new source workers use exactly the scheduler's
-// selector before financial work. A stale queue hint is repaired under its
-// private intent/contract locks and rediscovered under its actual owner.
-// An explicit locked payer and a known empty escrow can be resolved without
-// another query. Historical NULL-payer escrow alone needs the durable lookup.
-func validateLegacyCloseOwnerHeaderInTx(ctx context.Context, tx server.PgTx, contractId, sourceId server.Id,
-	payerNetworkId *server.Id, hasEscrow *bool) (ContractCloseOwner, bool, error) {
-	var actual ContractCloseOwner
-	var err error
-	if payerNetworkId != nil || (hasEscrow != nil && !*hasEscrow) {
-		actual, err = selectContractCloseOwner(sourceId, payerNetworkId, nil, false)
-	} else {
-		actual, sourceId, err = readContractCloseOwnerInConn(ctx, tx, contractId)
-	}
-	if err != nil {
-		return actual, false, err
-	}
-	expected, scoped := ctx.Value(legacySettlementCloseScopeKey{}).(ContractCloseOwner)
-	if !scoped || actual == expected {
-		return actual, true, nil
-	}
-	var payer *server.Id
-	if actual.Kind == ContractCloseOwnerPayerNetwork {
-		payer = &actual.Id
-	}
-	_, err = tx.Exec(ctx, `UPDATE legacy_settlement_intent SET payer_network_id=$2,source_client_id=$3 WHERE contract_id=$1`, contractId, payer, sourceId)
-	return actual, false, err
-}
-
 // Free contracts have report/usage custody but no debit or payout to fund.
-// Retire the intent and claim the outcome in the same transaction, matching
-// the ordinary no-escrow close path even when reported bytes are positive.
+// Claim the outcome as the ordinary no-escrow close path does, even when
+// reported bytes are positive.
 func settleLegacyContractWithoutEscrowInTx(ctx context.Context, tx server.PgTx, contractId server.Id,
 	outcome ContractOutcome, clearDispute bool) (posts []func() any, closed bool, err error) {
 	if err = validateContractFreeSettlementOwnerInTx(ctx, tx, contractId); err != nil {
@@ -135,9 +94,6 @@ func settleLegacyContractWithoutEscrowInTx(ctx context.Context, tx server.PgTx, 
 		if err != nil {
 			return
 		}
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM legacy_settlement_intent WHERE contract_id=$1`, contractId); err != nil {
-		return
 	}
 	closed, err = claimContractOutcomeInTx(ctx, tx, contractId, outcome)
 	if err == nil && closed && clockByteCount > 0 {

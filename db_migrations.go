@@ -10990,4 +10990,11 @@ var migrations = []any{
 	// up as the pools recycle; a maintenance operation that runs longer lifts
 	// it for its own session (WithoutTransactionTimeout).
 	newCodeMigration(ApplicationTransactionTimeoutMigrationId, migrationSetApplicationTransactionTimeout),
+
+	// Retire the legacy settlement queue (PARTITION-MAINTENANCE-PLAN.md, Part
+	// B): refuse while any intent remains, then drop the outcome guard on
+	// transfer_contract, its function, and the queue's contract key. The empty
+	// table stays until a later release, because the previous release still
+	// reads it (see legacySettlementIntentRetirementSql).
+	newSqlMigration(legacySettlementIntentRetirementSql),
 }

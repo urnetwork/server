@@ -29,6 +29,13 @@ var removedTaskTargets = []string{
 	// user_auth_attempt is dropped: auth attempts are counted in Redis
 	// (model/auth_model_attempt.go), so nothing wrote or read the table
 	"github.com/urnetwork/server/taskworker/work.RemoveExpiredAuthAttempts",
+	// the legacy settlement queue retired with legacy_settlement_intent
+	// (PARTITION-MAINTENANCE-PLAN.md, Part B): the 16 flush_legacy_settlements
+	// shard dispatchers and the per-payer and per-source owner turns they
+	// published
+	"github.com/urnetwork/server/taskworker/work.FlushLegacySettlements",
+	"github.com/urnetwork/server/model.ApplyLegacyPayerSettlements",
+	"github.com/urnetwork/server/model.ApplyLegacySourceSettlements",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -411,9 +418,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveCompletedContractsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
-		work.NewLegacySettlementDispatcherTaskTarget(),
-		model.NewLegacyPayerSettlementTaskTarget(),
-		model.NewLegacySourceSettlementTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,

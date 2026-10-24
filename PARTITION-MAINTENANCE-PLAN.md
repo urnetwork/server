@@ -942,6 +942,82 @@ version from its position in the list (`WritePathMigrationVersion`).
 - `user_auth_attempt`: dropped. `RemoveExpiredAuthAttempts` is deleted and
   listed in `removedTaskTargets`.
 
+**Implemented (2026-10-24), the `legacy_settlement_intent` row and its 16
+`flush_legacy_settlements_*` chains:** the queue is retired in two steps. This
+release removes every reader and writer and drops the queue's guards; a later
+release drops the empty table.
+- No writer remains. The only INSERT was `queueLegacySettlementInTx`, reached
+  from the foreground settlement for a contract whose escrows were not all
+  `redis_reserved`, and from expired-dispute settlement. Both are gone. In SQL,
+  the outcome guard only reads the table, and its two row triggers
+  (`legacy_settlement_intent_assign_payer`,
+  `legacy_settlement_intent_resolve_close_owner`) only read other tables and
+  fill the row being written; nothing else writes it. Every public admission
+  has marked its escrow `redis_reserved` since the policy switched on
+  2026-10-03 01:16:08Z (`75b409734` made it unconditional), and the contracts
+  admitted before it expired by about 04:00Z on 2026-10-22. `model`'s
+  `TestModelSourcesDoNotReferenceRetiredLegacySettlementQueue` keeps every
+  model source free of the table.
+- Settlement: an open contract with a legacy reservation settles inline in its
+  own close, through the path the queue's worker ran: the debit, outcome,
+  exact earnings, escrow metadata, and the durable mirror and provider-total
+  owners commit together (`settleEscrowWithOptionsInTx` with
+  `inlineFinancial`). Public close, expiry, expired disputes, expiry repair and
+  `SettleEscrow` use it. The deadline close already settled inline; it no
+  longer reads or deletes an intent.
+- Removed: the queue, its payer, source and cohort owners, the chains with
+  their scheduling, ownership keys, kicks and idle backoff (the transfer-debit
+  chains keep theirs), `bringyourctl contracts
+  drain-legacy`, and the monitor's `legacy-settlements` probe with its two
+  classes. `removedTaskTargets` reaps `work.FlushLegacySettlements`,
+  `model.ApplyLegacyPayerSettlements` and `model.ApplyLegacySourceSettlements`.
+  The close pages, the deadline owner batch, expiry, the reaper, expiry repair
+  (its `legacy_intent_present` status and field) and the weekly contract drop
+  (`contractWeekBlocker`) no longer read the table.
+- Migration, appended last (`legacySettlementIntentRetirementSql`,
+  `db_legacy_settlement_intent.go`; its version is found by identity,
+  `LegacySettlementIntentRetirementMigrationVersion`): with `lock_timeout` 5s
+  it locks `transfer_contract`, then `legacy_settlement_intent`, in ACCESS
+  EXCLUSIVE mode, raises if any intent remains, then drops the trigger
+  `transfer_contract_legacy_settlement_owner`, the function
+  `guard_legacy_settlement_intent_outcome()` and the key
+  `legacy_settlement_intent_contract_id_fkey`. The outcome guard runs inside
+  writers that already hold `transfer_contract`, so locking in that order
+  cannot deadlock with them, and the check after both locks sees every
+  committed intent. A refusal or lock timeout leaves it unapplied; rerun
+  `db migrate`.
+- Monitor: the 763 contract ends at the retirement's version, and a new
+  contract at that version requires the table's published shape plus the
+  guard, function and key gone (also on every contract partition). Both read
+  the version from the migration's position. SIGNALS.md §2.5b records the
+  retirement.
+- Before deploying (owner, read-only on main):
+  `SELECT count(*) FROM legacy_settlement_intent` must be 0, or the migration
+  refuses. Also check, with the same expectation, that no open contract still
+  holds a legacy reservation:
+  `SELECT count(*) FROM transfer_contract c WHERE c.outcome IS NULL AND EXISTS (SELECT 1 FROM transfer_escrow e WHERE e.contract_id = c.contract_id AND NOT e.redis_reserved)`.
+  One would settle correctly under this release, but a previous-release binary
+  can still queue an intent for it during the rollout. The migration takes
+  ACCESS EXCLUSIVE on `transfer_contract` for a moment: apply it when quiet.
+- Deviations:
+  - The table and its two row triggers stay one release. Migrations apply
+    before the new binaries serve (startup readiness requires the head), and
+    the previous release still reads the table on expiry, the deadline close,
+    the close pages and the reaper. Drop the table, with
+    `assign_legacy_settlement_intent_payer()` and
+    `assign_legacy_settlement_close_owner()`, once every job (api, connect,
+    taskworker, alt, proxy, monitor) runs this release; that change also
+    retires the monitor's payer and close-owner contracts and the tests that
+    insert a leftover intent row.
+  - A legacy reservation's close now meets its payer's grant owner directly:
+    a busy owner refuses the close (`errTransferBalanceOwnershipBusy`) for the
+    client or expiry to retry, and an accounting refusal at expiry takes the
+    same no-payout quarantine as a Redis contract, where the queue retried
+    both with backoff. No such contract is expected to remain.
+  - Tests of the queue machinery itself were deleted; tests of settlement,
+    expiry, repair, mirrors and provider totals were converted to the inline
+    owner.
+
 ## Part C: partitioning
 
 A candidate is a table whose retention can drop a whole time range, and whose

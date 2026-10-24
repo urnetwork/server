@@ -47,7 +47,7 @@ func tryTransferBalanceOwnershipInTx(ctx context.Context, tx server.PgTx, balanc
 	return server.TryTxOwnership(ctx, tx, transferBalanceOwnershipKeys(balanceIds))
 }
 
-// Read exact contract tuples after private contract/intent custody. Include
+// Read exact contract tuples after private contract custody. Include
 // missing grants: their legacy escrow can still advance a retained revision.
 // The complete key set is proportional to the supplied contracts' reservations;
 // no payload-size fallback is allowed to bypass the common balance owner.

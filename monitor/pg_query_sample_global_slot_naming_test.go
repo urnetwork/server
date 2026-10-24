@@ -34,7 +34,7 @@ func TestPgSampleGlobalRunSlotNamingDoesNotRelabelSharedSshAcquire(t *testing.T)
 	if !strings.Contains(alert.Observed, "phase=source-or-adapter cause=unknown") || !strings.Contains(alert.Observed, "source_contact_attempted=unknown") || strings.Contains(alert.Observed, "global-run-slot-admission") {
 		t.Fatal("shared SSH acquisition invented a global-slot or no-contact fact")
 	}
-	other := visibilityAlert(syntheticSettings(nil), NewLegacySettlementsSignal(), err)
+	other := visibilityAlert(syntheticSettings(nil), NewTransferDebitsSignal(), err)
 	if !strings.Contains(other.Observed, "ssh_admission_failures=acquire") || strings.Contains(other.Observed, "global-run-slot-admission") {
 		t.Fatal("global naming changed the independent shared SSH acquire projection")
 	}

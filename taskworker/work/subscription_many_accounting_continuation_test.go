@@ -54,7 +54,6 @@ func TestCloseExpiredManyAccountingRejectionsKeepCursorCountsAndCustody(t *testi
 					e.settled,e.redis_reserved,e.balance_byte_count,e.payout_byte_count,b.balance_byte_count,
 					(SELECT jsonb_agg(jsonb_build_array(party,used_transfer_byte_count,close_time,checkpoint) ORDER BY party)
 					 FROM contract_close WHERE contract_id=c.contract_id),
-					(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=c.contract_id),
 					(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=c.contract_id)
 				) ORDER BY c.contract_id)::text
 				FROM transfer_contract c JOIN transfer_escrow e USING(contract_id)

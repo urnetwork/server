@@ -134,19 +134,8 @@ func testTaskworkerStartupExpiresContracts(t *testing.T, profile WorkloadProfile
 		if err != nil || len(finished) != 1 || finished[0] != closeTaskId || len(retried)+len(posts) != 0 {
 			t.Fatal("startup-seeded expiry did not complete its bounded page", finished, retried, posts, err)
 		}
-		// Deadline reconciliation settles an expired legacy contract and retires
-		// its intent in one transaction. Redis retains its debit journal.
-		server.Db(ctx, func(conn server.PgConn) {
-			var pending int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1)`, expiredIds).Scan(&pending))
-			if pending != 0 {
-				t.Fatal("startup expiry left an expired legacy intent", pending)
-			}
-		})
-		legacy, err := model.FlushLegacySettlements(ctx, int(legacyExpiredId[15])%model.LegacySettlementShardCount, nil, 32)
-		if err != nil || legacy.Visited != 0 {
-			t.Fatal("startup expiry left a legacy financial continuation", legacy, err)
-		}
+		// Deadline reconciliation settles an expired legacy contract in one
+		// transaction. Redis retains its debit journal.
 		debit, err := model.FlushTransferDebits(ctx, int(balanceId[15])%model.TransferDebitShardCount, nil, 1)
 		if err != nil || debit.Failed != 0 {
 			t.Fatal("startup expiry lost the Redis financial continuation", debit, err)
