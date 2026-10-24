@@ -23,3 +23,18 @@ baseline, final scale, reference separability, a significance margin or full
 runtime qualification. No threshold is inferred from this one sample. Do not
 compare these impairment-off latencies as product improvements over historical
 impairment-on measurements. Additional scale trials remain in progress.
+
+## 7,200-provider impairment-off point
+
+`p7200-off/` preserves the separate larger trial using the same image,
+200 clients, seed, ramp/settle/measurement durations and workload rate.
+It completed with controller exit 0, all 200 clients warmed, 2,744 measured
+requests, zero failures and clean teardown. The sidecar's CSV digest and the
+completion marker's sidecar digest match the retained files. The source-sealing
+controller's SHA-256 remained unchanged before/after execution.
+
+Preparation took longer than the smaller point. Acknowledgment-lifetime
+expirations occurred during client establishment; they did not prevent warmup
+or a completed measured run. This single success does not prove stability or
+make this the final competition scale. The 15,000-provider true-off trial was
+started only after this point exited and cleanup was verified.
