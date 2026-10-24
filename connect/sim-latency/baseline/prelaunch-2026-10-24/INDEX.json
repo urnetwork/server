@@ -17,6 +17,7 @@
   "clients": 200,
   "arrivals_per_minute": 80,
   "quality_window": 2,
+  "exchange_hosts": 1,
   "duration_seconds": 180,
   "impairment_enabled": true,
   "service_resources": "disposable_synthetic_local_only",

@@ -11,6 +11,39 @@ import (
 	"testing"
 )
 
+// The exploratory dataset is not interchangeable with the four-host policy.
+// Compare its declared topology to every retained measured run, not a comment.
+func TestExploratoryBaselineExchangeHostCensusMatchesRawRuns(t *testing.T) {
+	root := filepath.Join("baseline", "prelaunch-2026-10-24")
+	content, err := os.ReadFile(filepath.Join(root, "INDEX.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		ExchangeHosts int `json:"exchange_hosts"`
+		Replicates    int `json:"replicates"`
+	}
+	if err := json.Unmarshal(content, &index); err != nil || index.ExchangeHosts <= 0 || index.Replicates <= 0 {
+		t.Fatal("exploratory topology metadata is absent or invalid", err)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "runs", "*.run.json"))
+	if err != nil || len(paths) != index.Replicates {
+		t.Fatal("exploratory run census differs from declared replicates", err)
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var run struct {
+			Flags map[string]string `json:"flags"`
+		}
+		if err := json.Unmarshal(content, &run); err != nil || run.Flags["hosts"] != fmt.Sprint(index.ExchangeHosts) {
+			t.Fatal("declared exchange topology differs from retained measurement", path, err)
+		}
+	}
+}
+
 // Mutable report metadata must stay bound to its bytes in both the index and
 // manifest. The separate verifier authenticates the complete retained dataset.
 func TestRetainedBaselineMetadataDigests(t *testing.T) {

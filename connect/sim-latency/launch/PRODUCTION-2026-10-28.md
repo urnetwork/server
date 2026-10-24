@@ -195,7 +195,7 @@ connections on the subsequent October 24 check during confirmed maintenance.
 
 An isolated nine-replicate preparation run started October 24 using the exact
 image above, 1,800 providers, 200 clients, 80 arrivals/minute, quality window 2,
-four fleet shards, and impairment enabled. Each replicate uses 60-second ramp,
+four fleet shards, one exchange host, and impairment enabled. Each replicate uses 60-second ramp,
 13-hour synthetic reliability prewarm, 60-second settle, 180-second measured
 window, 120-second request timeout, and up to 20 minutes for client warmup.
 It runs with the production container ceilings on the ten evaluation cores.
@@ -219,6 +219,21 @@ is invented to make it appear official. Each real round still needs a fresh
 hidden-seed nine-run control bound to its frozen policy. The preparation margin
 must not be labeled freshly calibrated until all replicates and the resulting
 statistical evidence have been checked and retained.
+
+The preserved run metadata records `flags.hosts = "1"`, while the configured
+competition policy uses four exchange hosts. The archive index/readme now make
+that difference explicit. A four-host impairment on/off frontier is required
+before choosing production scale; the one-host samples must not be silently
+relabelled as exact-workload production evidence.
+
+The next capacity frontier uses the exact prepared image and source, four
+exchange hosts, 200 clients, 80 arrivals/minute, quality window 2 and four fleet
+shards, at 1,800 / 7,200 / 15,000 / 48,000 / 100,000 providers with impairment
+on and off. Points execute serially in fresh disposable stacks, with existing
+memory/CPU ceilings, a 40-minute per-point bound and verified project cleanup.
+This is public-seed capacity/duration evidence, not an official control sample
+or a significance estimate. Preserve failed points and do not build/test during
+timed measurements; same-seed and reference calibration follow scale selection.
 
 During confirmed main maintenance, the old staging supervisor had no running
 evaluation and repeatedly failed to acquire its database lease. It was stopped
@@ -475,6 +490,9 @@ without overwrite, and replay rechecks retained logs instead of calling Docker.
 Completed failures cannot be resampled. Concurrent callers, unknown/interrupted
 owners, changed plans, corrupt records and missing/modified/redirected evidence
 are deterministic regression cases. Journal/correctness tests passed three
-race-enabled runs. The real full-path probe is being updated to verify journal
-replay with zero additional Docker calls. Provider-response journaling and the
+race-enabled runs. The real full-path probe then passed all 33 mandatory tests
+and verified immutable journal replay with zero additional Docker calls.
+Full probe duration was 219.73 seconds; log SHA-256:
+`56b75ca2317908bb88b417fee4355c7cacbd33dd778c2b131dab6ce6e84807a8`.
+Owned image/container cleanup passed. Provider-response journaling and the
 complete independent-model/host qualifier remain unfinished launch work.

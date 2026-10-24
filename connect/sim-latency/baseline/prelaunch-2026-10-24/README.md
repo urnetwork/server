@@ -15,11 +15,15 @@ production qualification, or authority to open the competition. The configured
 ## Workload and results
 
 1,800 providers; 200 clients; 80 arrivals/minute; quality window 2; four fleet
-shards; impairment enabled; 60-second ramp; 13-hour **synthetic** reliability
+shards; **one exchange host**; impairment enabled; 60-second ramp; 13-hour **synthetic** reliability
 prewarm; 60-second settle; 180-second measured window; 120-second request timeout.
 All nine established the full 200-client pool. There were 21,849 measured
 requests and 34 failures (0.156% overall). All replicates are preserved, including
 the slower seventh replicate; no run was discarded to tighten the estimate.
+
+The configured competition workload has four exchange hosts. This one-host
+exploration is not an exact-workload production calibration; use a separately
+retained four-host frontier/calibration before freezing production scale.
 
 The primary run-level p95 latency has mean **18,786.12 ms**, standard deviation
 **2,254.11 ms**, and between-run CV **12.00%**. The median of the nine run-level
