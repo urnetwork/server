@@ -10742,4 +10742,12 @@ var migrations = []any{
 	// contractCloseReportEvidenceMoveGuardSql). Retention keeps the 91-day
 	// rule; update and truncate stay refused.
 	newSqlMigration(contractCloseReportEvidenceMoveGuardSql),
+
+	// st_provider_usage_archive partitioned by contract week, so its one-year
+	// retention drops whole weeks (PARTITION-MAINTENANCE-PLAN.md C6). The
+	// archive guard refuses a row whose contract is gone, so this is not a
+	// plain copy: one transaction fences writers, copies into a staged table
+	// that gets its guard after the copy, checks the copy week by week and
+	// swaps the names (see providerUsageArchivePartitionSql).
+	providerUsageArchivePartitionMigration,
 }

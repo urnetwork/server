@@ -9,7 +9,11 @@ import (
 )
 
 // Numeric migration progress alone cannot establish durable cleanup custody.
-// Partitioned, the capture and its TRUNCATE guard must cover every partition.
+// Partitioned, the capture and its TRUNCATE guard must cover every partition
+// of transfer_contract, and the archive's own guards every partition of the
+// archive (server.ProviderUsageArchivePartitionMigrationVersion). The archive's
+// partitioned close-time index renders ON ONLY and is valid only with a valid
+// attached copy on every partition.
 var providerUsageArchiveArtifactQuery = `(
 	(SELECT count(*) = 4 FROM (VALUES
 		('contract_id','uuid','NO'), ('outcome','character varying','NO'),
@@ -25,7 +29,9 @@ var providerUsageArchiveArtifactQuery = `(
 	AND EXISTS (SELECT 1 FROM pg_index
 		WHERE indrelid=to_regclass('public.st_provider_usage_archive')
 			AND indexrelid=to_regclass('public.st_provider_usage_archive_close_time') AND indisvalid AND indisready
-			AND pg_get_indexdef(indexrelid)='CREATE INDEX st_provider_usage_archive_close_time ON public.st_provider_usage_archive USING btree (close_time, contract_id)')
+			AND pg_get_indexdef(indexrelid) IN (
+				'CREATE INDEX st_provider_usage_archive_close_time ON public.st_provider_usage_archive USING btree (close_time, contract_id)',
+				'CREATE INDEX st_provider_usage_archive_close_time ON ONLY public.st_provider_usage_archive USING btree (close_time, contract_id)'))
 	AND (SELECT count(*) = 2 FROM (VALUES
 		('st_provider_usage_archive_guard', '` + strings.ReplaceAll(server.ProviderUsageArchiveGuardFunctionBodySql, "'", "''") + `'),
 		('transfer_contract_usage_archive_capture', '` + strings.ReplaceAll(server.ProviderUsageArchiveCaptureFunctionBodySql, "'", "''") + `')
@@ -47,4 +53,5 @@ var providerUsageArchiveArtifactQuery = `(
 			AND actual.tgnargs=0 AND actual.tgqual IS NULL AND actual.tgattr=''::int2vector
 			AND NOT actual.tgisinternal))
 	AND ` + migrationContractLeafTriggers("transfer_contract", "transfer_contract_usage_archive_capture", "transfer_contract_usage_archive_truncate_guard") + `
+	AND ` + migrationContractLeafTriggers("st_provider_usage_archive", "st_provider_usage_archive_guard", "st_provider_usage_archive_truncate_guard") + `
 )`

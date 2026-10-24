@@ -945,6 +945,46 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
     - proof fields and usage totals compared before and after;
     - the migration restarted midway;
     - a week dropped at 52 weeks and not before.
+  - **Implemented (2026-10-24):** `db_provider_usage_archive_partition.go`.
+    - **Family:** registered in the A7 registry as `st_provider_usage_archive`:
+      weekly by `contract_id` on the contract weeks, 4 weeks ahead, 52 weeks'
+      retention, out of the REINDEX rotation. The runway and retention tasks
+      and the REINDEX exemption come from the registry's wiring.
+    - **Cutover:** one SQL migration, one transaction, so an interruption
+      leaves the plain table as it was and the next run starts over:
+      - read committed, then an EXCLUSIVE write fence on the archive;
+      - a staged parent with the published columns, keys and the old table's
+        grants, a partition per week, and a DEFAULT partition;
+      - the copy, then the per-week check: rows, rows without proof, usage
+        bytes and a hash of every row's proof fields;
+      - the row and TRUNCATE guards, then the swap under ACCESS EXCLUSIVE.
+
+      A capture waiting at the fence lands in the partitioned table.
+    - **Guard bypass:** the staged parent has no guard until the copy is
+      checked, and no other session can see it before the commit. The guard
+      function is unchanged, so no opt-in exists that could forge proof later.
+    - **Deviations:**
+      - *A DEFAULT partition, never dropped.* It takes ids outside every week,
+        such as test contracts with random ids, contracts older than the first
+        week, or a contract archived after its week was dropped. A capture
+        therefore never fails. The trade: a week whose rows reached DEFAULT
+        because the runway was 4 weeks behind can no longer be attached, so the
+        runway alarm matters.
+      - *Weeks start at the oldest live or archived contract's week,* clamped
+        to 2026-06-01 and the current week. That is 2026-06-01 on main; a fresh
+        database starts at the current week.
+      - *The drop opt-in is checked in the drop transaction, not by the
+        database.* Refusing a plain `DROP TABLE` takes an event trigger, which
+        needs a superuser, and the application role is not one
+        (`local/postgres/initdb`). The family's `DropFence` refuses a drop
+        without `urnetwork.usage_archive_retention`, a range that is not one
+        week, and a week the database's clock does not yet put 52 weeks past.
+      - *No drop precondition.* A contract archived after its week was dropped
+        lands in DEFAULT.
+    - **Monitor:** the v746 custody contract reads the partitioned layout,
+      with the archive's guards on every partition. A new catalog contract pins
+      the partitioned shape at the cutover's version, which comes from the
+      migration list.
 
 ### C7. Not partitioned
 
