@@ -6,7 +6,7 @@ Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
 retains the chronological preparation journal below; its earlier checkpoint
 tables and measurements must not be interpreted as the latest qualified release.
 
-The latest tested preparation is server
+The last source-ledger publication remains server
 `6261c15454adec5a00680e4c3332f628a0aed1e7` on `sim-latency`, with the other nine
 repository pins unchanged. Config main
 `cf8b9b584c93137a44a618bd9adf589f8b23749f` publishes canonical source lock
@@ -27,6 +27,9 @@ transaction-snapshot and shard-construction corrections have passing focused
 regressions and still require full validation, a coherent replacement source
 ledger/image and fresh measurements. See
 [STARTUP-AND-SNAPSHOT-2026-10-24.md](STARTUP-AND-SNAPSHOT-2026-10-24.md).
+The tested source-branch tip containing both fixes is
+`0d58d0d91b069c62bcfb39cd72166c26925b786a`; it is not yet the ledger's new
+checkpoint or a qualified replacement evaluator image.
 No previous checkpoint's measurements are being reused as the new baseline.
 Current source publication is
 explicitly `prepared_not_activated`; final scale/margin, fresh calibration,

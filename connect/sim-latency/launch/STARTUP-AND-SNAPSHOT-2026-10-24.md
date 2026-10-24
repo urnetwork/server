@@ -82,5 +82,18 @@ fresh-child impairment regressions then passed three race repetitions:
 `temp/provide-frontier-20261024.B0P1kUpz/fleet-ready-fixed.log`, SHA-256
 `aabf82a0502f4a19723b3d15ec8b7f28581aa222c583adcdc3e667732c74345e`.
 
+The same 21 tests passed three race repetitions on the frozen-source checkout
+(63/63), log `fleet-ready-private-fixed.log` in that root, SHA-256
+`0244f9c2550a47eacffa4dfbc1626922ee38d846a317612d7600ddae331957d1`.
+Both fixes are published together on `sim-latency` at server
+`0d58d0d91b069c62bcfb39cd72166c26925b786a`. Main's tested harness/regression
+commit is `afea543ff`; main's product transaction already had the correct
+isolation. Neither source publication changes a frozen round or activates an
+image. The last published source ledger still identifies the earlier checkpoint
+until full validation and coherent replacement-artifact preparation finish.
+
+The failed run's complete log/workload/partial-result bytes are also preserved
+in [the versioned baseline archive](../baseline/prelaunch-provide-frontier-2026-10-24/README.md).
+
 No fresh complete frontier point has yet qualified these two fixes together.
 Do not reinterpret the failed run as successful or reuse it as their control.

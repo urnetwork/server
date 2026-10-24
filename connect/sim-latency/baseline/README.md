@@ -1,5 +1,11 @@
 # Sim-latency baseline preservation
 
+The later Go 1.27.3, provide-lock 15,000-provider impairment-on attempt is in
+[`prelaunch-provide-frontier-2026-10-24/`](prelaunch-provide-frontier-2026-10-24/README.md).
+It failed at matchmaking probe 6 and is retained with full logs and partial
+data. It is not a baseline or accepted scale. Subsequent transaction-snapshot
+and fleet-readiness fixes require a new image and fresh measurements.
+
 Corrected-image capacity results are in
 [`prelaunch-corrected-frontier-2026-10-24/`](prelaunch-corrected-frontier-2026-10-24/README.md).
 The 1,800- and 7,200-provider true impairment-off points both completed, each
