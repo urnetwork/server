@@ -134,6 +134,7 @@ Usage:
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -167,10 +168,12 @@ Options:
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
     --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
-                   go to weekly partitions; prepare only.
+                   (or close reports) go to weekly partitions; prepare only.
     --rollback     Undo the contract partition swap while no weekly
-                   partition holds a row.
-    --abort        Drop a prepared, unfinalized contract partition cutover.
+                   partition holds a row (the close evidence swap while few
+                   rows are outside its legacy partition).
+    --abort        Drop a prepared, unfinalized contract (or close evidence)
+                   partition cutover.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -473,6 +476,8 @@ func main() {
 				modelMigrateClientReliabilityPartition(opts)
 			} else if contractPartition, _ := opts.Bool("contract-partition"); contractPartition {
 				modelMigrateContractPartition(opts)
+			} else if closeEvidencePartition, _ := opts.Bool("close-evidence-partition"); closeEvidencePartition {
+				modelMigrateCloseEvidencePartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2747,6 +2752,38 @@ func modelMigrateContractPartition(opts docopt.Opts) {
 	if err := server.MigrateContractsToPartitions(context.Background(), options); err != nil {
 		panic(err)
 	}
+}
+
+// Partitions the close evidence by report_id (PARTITION-MAINTENANCE-PLAN.md
+// C5; server.MigrateCloseEvidenceToPartitions): prepare (with
+// --cutover-week), then --finalize before that week; --rollback and --abort
+// undo. Each step can be rehearsed with --dry-run, and each resumes when run
+// again.
+func modelMigrateCloseEvidencePartition(opts docopt.Opts) {
+	options, err := closeEvidencePartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateCloseEvidenceToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func closeEvidencePartitionMigrateOptions(opts docopt.Opts) (options server.CloseEvidencePartitionMigrateOptions, err error) {
+	contractOptions, err := contractPartitionMigrateOptions(opts)
+	if err != nil {
+		return
+	}
+	return server.CloseEvidencePartitionMigrateOptions{
+		CutoverWeek: contractOptions.CutoverWeek,
+		DryRun:      contractOptions.DryRun,
+		Finalize:    contractOptions.Finalize,
+		Rollback:    contractOptions.Rollback,
+		Abort:       contractOptions.Abort,
+	}, nil
 }
 
 func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractPartitionMigrateOptions, err error) {

@@ -10720,4 +10720,11 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Close evidence partitions (PARTITION-MAINTENANCE-PLAN.md C5): the
+	// evidence guard also admits a move, the delete half of a row whose
+	// identical copy already sits in the partition it moves to (see
+	// contractCloseReportEvidenceMoveGuardSql). Retention keeps the 91-day
+	// rule; update and truncate stay refused.
+	newSqlMigration(contractCloseReportEvidenceMoveGuardSql),
 }
