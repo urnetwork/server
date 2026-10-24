@@ -1,6 +1,36 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 24, 23:02 UTC
+## Current preparation pointer — October 24, 23:58 UTC
+
+The latest source-ledger publication is config main
+`949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
+`0d58d0d91b069c62bcfb39cd72166c26925b786a`, canonical source lock
+`37555f58bbf1235f10600f8c1de7dafeef356985f719f5e029fdb8c2e69c9b4a`.
+All other nine repository pins are unchanged. Both the main runtime checkout
+at `d16a6adbc` and the evaluated-source checkout passed three consecutive full
+suites with Go 1.27.3. The later host-only preflight correction passed 63 focused
+race executions and actual ten-repository remote verification in 9 seconds;
+see [SOURCE-PREFLIGHT-2026-10-24.md](SOURCE-PREFLIGHT-2026-10-24.md).
+
+Manifest file SHA-256:
+`156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f`.
+Preparation-descriptor SHA-256:
+`a393a426fb57b14df8aa22e55027c690751bbd3dfd8a1261b387bbb040f16743`.
+The exact prior ledger is archived at
+`config/history/sim-latency-2026-10-24-213002.yml` with SHA-256
+`838b132d2c19112e50fefaabfabda81e22127638e8ba281f0c0141ab82d30612`.
+
+A fresh evaluator build is active under mono-root-relative
+`temp/ready-snapshot-evaluator-build-20261024.MCorfDyJ`, using the clean main
+`9a3b7970a` builder scripts and immutable corrected source tool, with fresh exact
+checkouts of all ten frozen repositories in the build context. Its local tag is
+`urnetwork/sim-latency-evaluator-base:ready-snapshot-0d58d0d9`. No immutable image
+ID, qualification or performance result is claimed before it finishes. Neither
+production nor a new staging round is activated. Final scale/margin, fresh
+calibration, hidden epoch baseline, genuine provider-backed qualification and
+live production readiness remain incomplete; 16.1% is still a provisional floor.
+
+## Earlier preparation pointer — October 24, 23:02 UTC
 
 Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
 retains the chronological preparation journal below; its earlier checkpoint

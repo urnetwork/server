@@ -43,6 +43,24 @@ Evidence root relative to the mono root:
 | `remote-tag-prefix.log` | `842c00e871d77df62e851e587e7a0d9d44357b7a28c1a95deeff1d46de5f2ddd` |
 | `remote-preflight-final.log` | `6fb751c5a3fb06a274e498b6888dfa236b310b88d8f5798c026875db6363920d` |
 
-An updated clean Go 1.27.3 source-tool build and live remote verification must
-still pass before this helper is used to publish an evaluator image. No provider,
-main API, database, MinIO or scoring operation was used in the focused tests.
+## Installed tool and live remote proof
+
+The corrected source tool was built from clean main
+`9a3b7970ad1ad2b2faa6f06908a95ff0e8255a98`, Go 1.27.3, Linux/amd64, CGO
+disabled, greenteagc and trimpath, with `vcs.modified=false`. Installed directory:
+`/usr/local/libexec/urnetwork/competition-source-preflight-9a3b7970a-e27b5964`.
+Its directory and `sim-latency` executable are root:root 0555. Binary SHA-256:
+`e27b5964d25a166d2487e7ab35a62634b1a693f2fe381e9c0dee4c04dedd0a5c`.
+This additive tool does not replace an active worker, supervisor or old bundle.
+
+Independent readback and a new actual `source-record` invocation passed in
+9 seconds. The real parser and remote graph returned epoch 0, production mode,
+branch `sim-latency` and all ten exact commits. The canonical digest is
+`37555f58bbf1235f10600f8c1de7dafeef356985f719f5e029fdb8c2e69c9b4a`.
+No operator checkout changed and no new temporary clone/process remained.
+`source-record-corrected.json` in the evidence root above has SHA-256
+`7cc7c8586f8c50dc9ee54701a8b388382258ba861bc47b95120417e1346fab27`.
+The earlier C5 timeout remains a separate failed attempt, not an overwritten log.
+
+No provider, main API, database, MinIO or scoring operation was used in the
+focused tests or live metadata check. Runtime qualification remains separate.
