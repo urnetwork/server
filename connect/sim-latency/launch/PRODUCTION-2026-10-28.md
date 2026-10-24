@@ -336,9 +336,24 @@ exact daemon-assigned endpoints and private synthetic resources without touching
 the legacy shared containers. This restored the real `tests.sh` path and exposed
 two provider-selection tests whose unspecified caller IP required an absent
 GeoIP database. Both now use the portable documentation-subnet fixture through
-a shared test-only constructor, with a deterministic address regression. Full
-wrapper reruns are in progress. No production geography behavior changed, and
-no independent model-run test provenance is claimed.
+a shared test-only constructor, with a deterministic address regression. No
+production geography behavior changed, and no independent model-run test
+provenance is claimed.
+
+The supported `connect/sim-latency/tests.sh` then passed three consecutive
+complete invocations on the code committed as `529be0f76`. Every invocation ran
+the six-epoch lifecycle first and then the full race-enabled package suite.
+Package durations were 104.097, 99.708 and 99.570 seconds. The release-gate
+helper removed both exact owned service containers; no containers with that
+owner remained. Preserved log SHA-256 values, in pass order:
+
+- `ea3e1471a57f6c438f8db53fc22fc4dbe37f49f7a5e030ca20152c5f14f22125`
+- `5f8020bb9a547bc6b240c0fde7a893ef17b06d0f59a8b2d8a7168c18c7969848`
+- `b7a5ad71c9fdf275748c7dc9dc9bc909097e1fe40c494b0d571acbd369bd21f1`
+
+These are shell-run Go tests, not a claim that the required independent low-
+reasoning model executed the tests. Live main API, MinIO, reviewer credentials,
+and complete reviewed-winner broker qualification remain separate launch gates.
 
 Reviewed-image assembly now has a generated, tested copy-only Dockerfile plan:
 its base alias binds the exact incumbent image, and binary/manifest/lock bytes
