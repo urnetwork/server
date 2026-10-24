@@ -53,19 +53,15 @@ func authAttemptRedisEntries(t testing.TB, ctx context.Context, key string) []re
 	return entries
 }
 
-func authAttemptDatabaseRowCount(t testing.TB, ctx context.Context) int {
+// The legacy user_auth_attempt table is dropped: the limiter counts only in
+// Redis, so an attempt that wrote the table would fail rather than pass.
+func authAttemptLegacyTableExists(t testing.TB, ctx context.Context) bool {
 	t.Helper()
-	count := 0
+	exists := false
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT COUNT(*) FROM user_auth_attempt`)
-		server.WithPgResult(result, err, func() {
-			if !result.Next() {
-				t.Fatal("user_auth_attempt count returned no row")
-			}
-			server.Raise(result.Scan(&count))
-		})
+		server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('public.user_auth_attempt') IS NOT NULL`).Scan(&exists))
 	})
-	return count
+	return exists
 }
 
 func authAttemptTestSession(ctx context.Context, address string) *session.ClientSession {
@@ -175,8 +171,8 @@ func TestUserAuthAttemptGlobalAndAddressLimitsAreCountBounded(t *testing.T) {
 			t.Fatalf("anonymous history size = %d, want %d", got, settings.addressLimit)
 		}
 
-		if got := authAttemptDatabaseRowCount(t, ctx); got != 0 {
-			t.Fatalf("Redis limiter wrote %d legacy database rows", got)
+		if authAttemptLegacyTableExists(t, ctx) {
+			t.Fatal("the legacy user_auth_attempt table exists after every migration")
 		}
 	})
 }

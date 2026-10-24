@@ -26,6 +26,9 @@ import (
 var removedTaskTargets = []string{
 	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
 	"github.com/urnetwork/server/controller.RefreshTransferBalances",
+	// user_auth_attempt is dropped: auth attempts are counted in Redis
+	// (model/auth_model_attempt.go), so nothing wrote or read the table
+	"github.com/urnetwork/server/taskworker/work.RemoveExpiredAuthAttempts",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -112,7 +115,6 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
-		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
@@ -407,10 +409,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.WarmNetworkGetProviderLocations,
 			work.WarmNetworkGetProviderLocationsPost,
-		),
-		task.NewTaskTargetWithPost(
-			work.RemoveExpiredAuthAttempts,
-			work.RemoveExpiredAuthAttemptsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredWalletAuthChallenges,

@@ -696,6 +696,14 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
+	migrationCurrentSuffix(858, "legacy auth attempt table dropped",
+		migrationTableRemoved("user_auth_attempt")),
+}
+
+// A retired table stays dropped: a recreated copy under the published name
+// would again be a table that nothing reads.
+func migrationTableRemoved(table string) string {
+	return fmt.Sprintf(`to_regclass('public.%s') IS NULL`, table)
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

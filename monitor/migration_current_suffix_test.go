@@ -222,6 +222,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
 		{name: "close evidence guard refuses retention again", version: 857, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
+		{name: "legacy auth attempt table recreated", version: 858, sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

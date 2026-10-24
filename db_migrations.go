@@ -10720,4 +10720,16 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// user_auth_attempt is retired (PARTITION-MAINTENANCE-PLAN.md Part B): auth
+	// attempts are counted in Redis (model/auth_model_attempt.go), and its last
+	// reader, the RemoveExpiredAuthAttempts drain, is deleted and reaped as a
+	// removed task target. No foreign key or view depends on the table. A
+	// taskworker built before this that still runs the drain fails that run
+	// until it is replaced; nothing else reads the table. The drop holds the
+	// unused table's exclusive lock only.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		DROP TABLE IF EXISTS user_auth_attempt;
+	`),
 }
