@@ -67,3 +67,45 @@ SHA-256 `0efb020fd720452d0f8c9552b9438cf87b4807b044a92f3d78a84ee2db8e813f`.
 The corrected launcher explicitly selected the installed toolchain before any
 fixture compilation. Broader simulator validation is still required after
 publishing this smoke-tested phase. Main maintenance remains a write hold.
+
+## Broader gate and retained fixture failure
+
+Main `a128580b6` subsequently passed three consecutive complete simulator
+`tests.sh -count=1` invocations under independent Sol 6.1 low execution and
+Go 1.27.3. Outer durations were 210, 141 and 140 seconds; race-package durations
+were 137.502, 132.446 and 132.466 seconds. Each invocation reported 433 top-level
+passes including the initial six-epoch gate. Archive verification also passed
+exact coverage and hashes for 2,866 files. Private root:
+`temp/provide-full-independent-20261024.mY1WhXgV`.
+
+| Log | SHA-256 |
+| --- | --- |
+| `main-1.log` | `7f22efffc1cd81d3e41b1949a87f456f963d386472431b1eaabe576cfcc68e54` |
+| `main-2.log` | `fc20a5e5a72deebea832db2d7556f92fbb35732ec81cc1fec39084c4a9f97ac7` |
+| `main-3.log` | `dd1cc2cb6641238f2801c8386cba4384288f2faea7d228d64529b422081406e8` |
+| `main-baseline.log` | `8f48a53341d83a88ec173416c60e4ce65350114eea6af0596520f85c10f65c61` |
+
+The preparation-branch candidate `395207e9b` failed its first full invocation
+because two older tests supplied an unspecified caller address. That falls
+through the IP override lookup to `mmdb/geolite2.mmdb`, which the portable suite
+fixture intentionally does not materialize. The same fixture is sufficient for
+main's tests because main uses an explicit reserved-subnet caller instead.
+This is a deterministic fixture mismatch, not a measured performance failure
+and not evidence that the SQL serialization backport regressed.
+
+The invocation's built-in retries were allowed to terminate without edits or
+external resampling. It exited 1 after 326 seconds (race package 188.078), with
+329 top-level passes and two failing tests. No second or third candidate
+invocation ran. Cleanup exited 0. The retained `candidate-1.log` SHA-256 is
+`4a3d9cacfb398413f5417c966495332027c310f01c374a0b10ef987d16baebe2`.
+
+Preparation commit `6261c15454adec5a00680e4c3332f628a0aed1e7` backports only
+main's existing `client_session_fixture_test.go` helper/regression and its two
+test call sites from `529be0f76`. It uses the portable fixture's documentation
+subnet instead of depending on a production location database. No fixture
+generation policy, runtime code or gate was relaxed. A new independent focused
+smoke and three-pass candidate gate started in
+`temp/provide-full-candidate-fixed-20261024.xyJiO9y2`; its result is not claimed
+here. Both preparation commits are published only on
+`preparation/sim-latency-provide-20261024`, not activated as the competition
+checkpoint. The successful main gate remains valid and unchanged.
