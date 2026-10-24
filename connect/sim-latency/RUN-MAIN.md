@@ -176,6 +176,15 @@ sim-latency bootstrap-source --enable-automation \
   --manifest-commit=REPLACE_WITH_APPROVED_CONFIG_COMMIT
 ```
 
+For an announced initial launch, also pass `--opens-at=YYYY-MM-DDTHH:MM:SSZ`.
+The timestamp must be in the future when first staged and have at most
+microsecond precision. It is persisted in the immutable source intent. Recovery
+without the flag preserves that pin; a different flag cannot move it. Once
+qualified, the supervisor can create a `scheduled` round before that instant;
+admission remains start-inclusive/end-exclusive. The database independently
+requires the exact pinned opening and the full admission window. Later unpinned
+rounds still open after actual review/build/readiness, not on a guessed date.
+
 Bootstrap registers generation 1/source generation 0 for epoch 1 and persists
 recovery material. It does not activate a pointer, create a round, or invent a
 review. Repeating the same command resumes the exact commit. The supervisor below

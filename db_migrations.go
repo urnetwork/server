@@ -10723,4 +10723,14 @@ var migrations = []any{
 
 	// Both production and staging use only the ten live source repositories.
 	newSqlMigration(competitionSourceRetirementMigration()),
+
+	// Preserve an explicitly scheduled source opening independently of the supervisor.
+	newSqlMigration(competitionScheduledOpeningMigration()),
+
+	// Raw bloat measurements (PARTITION-MAINTENANCE-PLAN.md A4; see
+	// dbBloatMeasurementTableSql): the weekly measurement records how much of
+	// each relation a rewrite would return, so the monitor's bloat signal and
+	// its thresholds can be checked against them. The measurement deletes rows
+	// after 90 days. A new table needs no lock_timeout.
+	newSqlMigration(dbBloatMeasurementTableSql),
 }

@@ -123,6 +123,10 @@ func runBootstrapSource(opts docopt.Opts) {
 			fatalf("baseline recovery: %s", err)
 		}
 	}
+	opensAt, openingErr := bootstrapSourceOpening(optString(opts, "--opens-at", ""), intent, server.NowUtc())
+	if openingErr != nil {
+		fatalf("baseline opening: %s", openingErr)
+	}
 	if intent == nil {
 		sourceConfig, repositoriesRoot, lock, err := configuredSourcePathsForMode(opts, settings.AutomationPolicy.Staging)
 		if err != nil || lock != "" {
@@ -162,7 +166,7 @@ func runBootstrapSource(opts docopt.Opts) {
 			SourceLockSha256: generation.SourceLockSha256, Commits: generation.Repositories.commitsForMode(manifest.Staging), GitRefs: map[string]model.CompetitionSourceGitRef{}, Manifest: manifestBytes,
 			ManifestCommit: manifestCommit, ManifestSha256: hex.EncodeToString(digest[:]), ConfigExpectedCommit: manifestCommit,
 			Threshold: settings.EvaluationPolicy.TakeoverMargin, ThresholdEvidenceSha256: generation.ThresholdEvidenceSha256,
-			EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256, PreparedAt: time.Now().UTC()}
+			EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256, PreparedAt: time.Now().UTC(), OpensAt: opensAt}
 		publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: 1, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, Bootstrap: true}
 		for _, repository := range append(sourceRepositoryNamesForMode(intent.Staging), "config") {
 			commit, branch := intent.Commits[repository], sourceBranch(intent.Staging)

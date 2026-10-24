@@ -89,7 +89,7 @@ Usage:
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> --prepare-command=<path> --prepare-sha256=<digest> [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once]
   sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>]
-  sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
@@ -102,6 +102,7 @@ Usage:
   sim-latency --version
 
 Options:
+  --opens-at=<time>      Pin the initial automation opening (RFC3339; immutable on recovery).
   --staging             Require an explicitly staging v2 manifest and staging source refs.
   -h --help              Show this screen.
   --version              Show version.
