@@ -2853,8 +2853,8 @@ func SetProvide(
 		// reset in case the tx is retried on a transient error
 		removedProvideModes = nil
 
-		// Concurrent replacements for one client must not interleave their
-		// deletes and inserts. Match main's per-client transaction lock.
+		// Concurrent replacements must serialize. The read-committed option
+		// below is essential: the lock query must not freeze a pre-wait snapshot.
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended('provide_key/' || $1::uuid::text, 0))`,
@@ -2914,7 +2914,7 @@ func SetProvide(
 		// Public re-entry must not wait for the next fleet reliability rollup.
 		updateProviderUrlProbeEligibilityForClient(ctx, tx, clientId)
 
-	})
+	}, server.TxReadCommitted)
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
