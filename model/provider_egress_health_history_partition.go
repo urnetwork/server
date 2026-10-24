@@ -64,6 +64,9 @@ func newProviderEgressHealthHistoryPartitionFamily(settings *ProviderEgressHealt
 		Retention:           settings.Retention,
 		ReindexExempt:       true,
 		MonitorRunwayRanges: 2,
+		// the cutover's staged table before the swap, and the old table until
+		// --drop-old
+		CutoverTables: []string{providerEgressHealthHistoryStagedTable, providerEgressHealthHistoryOldTable},
 		// a delayed result keeps its measured_at, so the days back to the
 		// ingest's oldest must exist
 		CreateFrom: func(ctx context.Context, now time.Time) time.Time {

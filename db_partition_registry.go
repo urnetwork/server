@@ -358,6 +358,10 @@ type PartitionFamily struct {
 	// the registry's.
 	RunwaySignal    string
 	RetentionSignal string
+	// Tables an operator cutover of the family keeps beside its tables while
+	// it stages or until the old table is dropped, such as <table>_new and
+	// <table>_old. db audit does not report them or their indexes as drift.
+	CutoverTables []string
 	// nil uses DefaultPartitionFamilySettings.
 	Settings *PartitionFamilySettings
 
