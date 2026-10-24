@@ -29,11 +29,15 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// impairEnabled gates the provider network impairment (default on). Set from
-// the --impair flag. When off, providers dial the exchange with a plain
-// connection — a clean baseline for isolating impairment from the rest of the
-// stack.
-var impairEnabled = true
+// Each fleet owns its mode. A subprocess receives it explicitly rather than
+// silently reverting to a process-global default when its parent disables it.
+type FleetSettings struct {
+	ImpairmentEnabled bool
+}
+
+func DefaultFleetSettings() FleetSettings {
+	return FleetSettings{ImpairmentEnabled: true}
+}
 
 const providerRegistrationTimeout = 15 * time.Second
 
@@ -55,6 +59,7 @@ type simProvider struct {
 
 type Fleet struct {
 	ctx          context.Context
+	settings     FleetSettings
 	config       *Config
 	apiUrl       string
 	wsUrls       []string
@@ -92,9 +97,11 @@ func NewFleet(
 	wsUrls []string,
 	wsPorts map[int]bool,
 	rampDuration time.Duration,
+	settings FleetSettings,
 ) (*Fleet, error) {
 	self := &Fleet{
 		ctx:               ctx,
+		settings:          settings,
 		config:            config,
 		apiUrl:            apiUrl,
 		wsUrls:            wsUrls,
@@ -175,14 +182,14 @@ func (self *Fleet) newSimProvider(entry ProviderEntry, index int) (*simProvider,
 	extraHeaders.Set("X-UR-Forwarded-For", fmt.Sprintf("%s:%d", entry.Ip, 40000+index%20000))
 
 	// impair only the platform websocket connection, not the provider's api
-	// calls (matched by destination port). `--impair=false` establishes a clean
+	// calls (matched by destination port). `--no-impair` establishes a clean
 	// baseline (useful for isolating impairment from the rest of the stack).
 	dialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
-		if impairEnabled && self.isWsAddr(addr) {
+		if self.settings.ImpairmentEnabled && self.isWsAddr(addr) {
 			return newImpairConn(conn, params, entry.Seed), nil
 		}
 		return conn, nil

@@ -52,6 +52,7 @@ type RunOptions struct {
 	// observation
 	RequestTimeout time.Duration
 	FleetShards    int
+	FleetSettings  *FleetSettings
 	// site listen address (providers egress here over loopback)
 	SiteListen string
 	Services   *ServicesConfig
@@ -73,6 +74,16 @@ type RunOptions struct {
 }
 
 const apexScoreSchema = 1
+
+// Nil keeps the historical default. An explicit owner value cannot be changed
+// by another run or by a previous CLI invocation in the same process.
+func (self *RunOptions) fleetSettings() FleetSettings {
+	if self.FleetSettings == nil {
+		return DefaultFleetSettings()
+	}
+	return *self.FleetSettings
+}
+
 const officialScorerVersion = "sim-latency-score/1"
 const teardownTimeout = 20 * time.Second
 
@@ -428,7 +439,7 @@ func Run(options *RunOptions) (retErr error) {
 			return phaseError(ctx, "fleet_start_failed", "start fleet shards", err)
 		}
 	} else {
-		fleet, err = NewFleet(ctx, config, config.Fleet, services.ApiUrl(), services.WsUrls(), services.WsPorts(), options.Ramp)
+		fleet, err = NewFleet(ctx, config, config.Fleet, services.ApiUrl(), services.WsUrls(), services.WsPorts(), options.Ramp, options.fleetSettings())
 		if err != nil {
 			return phaseError(ctx, "fleet_start_failed", "start in-process fleet", err)
 		}
@@ -709,7 +720,7 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 				2,
 				64,
 			),
-			"impair": fmt.Sprintf("%t", impairEnabled),
+			"impair": fmt.Sprintf("%t", options.fleetSettings().ImpairmentEnabled),
 			"reset":  fmt.Sprintf("%t", options.Reset),
 		},
 	}, nil
@@ -1217,6 +1228,23 @@ func startProviderDynamics(ctx context.Context, fleet *Fleet, procs []*fleetProc
 	return nil
 }
 
+// The complete child command carries owner settings across the process boundary;
+// absence of a flag means the same enabled default as an in-process fleet.
+func fleetProcessArgs(options *RunOptions, services *Services, index int) []string {
+	args := []string{
+		"fleet", "--epoch", strconv.Itoa(options.Epoch),
+		"--source-config", options.SourceConfig, "--repos-root", options.RepositoriesRoot,
+		"--providers", options.ConfigPath, "--shard", intToStr(index) + "/" + intToStr(options.FleetShards),
+		"--api-url", services.ApiUrl(), "--ws-urls", strings.Join(services.WsUrls(), ","),
+		"--ramp", options.Ramp.String(), "--evaluation-id", options.EvaluationId,
+		"--accounting-command-fd", "3", "--accounting-response-fd", "4",
+	}
+	if !options.fleetSettings().ImpairmentEnabled {
+		args = append(args, "--no-impair")
+	}
+	return args
+}
+
 // spawnFleetShards launches the fleet as N subprocesses, each connecting to
 // this run's services. Every process is reaped immediately by a dedicated
 // waiter; successful evaluation teardown later verifies each exits cleanly.
@@ -1237,20 +1265,7 @@ func spawnFleetShards(options *RunOptions, config *Config, services *Services) (
 			accountingCommandWriter.Close()
 			return procs, errors.Join(err, stopFleetShards(procs, teardownTimeout))
 		}
-		cmd := exec.Command(self,
-			"fleet",
-			"--epoch", strconv.Itoa(options.Epoch),
-			"--source-config", options.SourceConfig,
-			"--repos-root", options.RepositoriesRoot,
-			"--providers", options.ConfigPath,
-			"--shard", intToStr(i)+"/"+intToStr(options.FleetShards),
-			"--api-url", services.ApiUrl(),
-			"--ws-urls", strings.Join(services.WsUrls(), ","),
-			"--ramp", options.Ramp.String(),
-			"--evaluation-id", options.EvaluationId,
-			"--accounting-command-fd", "3",
-			"--accounting-response-fd", "4",
-		)
+		cmd := exec.Command(self, fleetProcessArgs(options, services, i)...)
 		cmd.Env = os.Environ()
 		cmd.Stdout = os.Stderr // fleet emits no CSV; keep stdout clean
 		cmd.Stderr = os.Stderr
