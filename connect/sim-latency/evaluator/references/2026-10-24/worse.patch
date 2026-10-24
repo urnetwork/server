@@ -1,0 +1,13 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -75,6 +75,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId server.Id) bool {
+ 	if self.ctx.Err() != nil {
+ 		return false
+ 	}
++	// Deliberately slower calibration reference, never a proposed product fix.
++	time.Sleep(25 * time.Millisecond)
++
+ 	pair := model.NewUnorderedTransferPair(sourceId, destinationId)
+ 	now := time.Now()
+ 	cached, read := false, false
