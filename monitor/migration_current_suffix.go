@@ -5,6 +5,8 @@ package monitor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -696,6 +698,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
+	// The retirement's version follows its migration's position.
+	migrationCurrentSuffix(server.LegacySettlementIntentRetirementMigrationVersion(),
+		legacySettlementIntentRetirementArtifactName, legacySettlementIntentRetirementArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

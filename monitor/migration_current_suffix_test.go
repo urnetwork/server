@@ -222,6 +222,22 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
 		{name: "close evidence guard refuses retention again", version: 857, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
+		// The retired queue's guard, function and key stay gone; its empty
+		// table keeps the published shape.
+		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{name: "retired legacy settlement outcome guard restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+			CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract
+			FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`},
+		{name: "retired legacy settlement contract key restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)`},
+		{name: "retained legacy settlement queue loses its due index", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `DROP INDEX legacy_settlement_intent_due`},
+		{name: "retained legacy settlement queue loses its shard check", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
+		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

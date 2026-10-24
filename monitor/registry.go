@@ -74,7 +74,6 @@ func NewSignals() []Signal {
 		NewContractPartitionCutoverPendingSignal(),
 		NewTaskHealthSignal(),
 		NewTransferDebitsSignal(),
-		NewLegacySettlementsSignal(),
 		NewOpenContractsSignal(),
 		NewCloseDurationSignal(),
 		NewContractDegradationSignal(),

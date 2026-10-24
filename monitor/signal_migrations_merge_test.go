@@ -3,25 +3,70 @@
 package monitor
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/urnetwork/server"
 )
 
+// One catalog fault at a time: the exact production probe attributes it to its
+// owning artifact, and restoring it leaves no drift.
+type migrationMergedFault struct{ apply, restore, artifact string }
+
+func requireMigrationMergedFaults(t testing.TB, ctx context.Context, faults []migrationMergedFault) {
+	t.Helper()
+	for _, fault := range faults {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, fault.apply))
+		})
+		_, drift := migrationPingDatabaseCheck(t, ctx)
+		if !strings.Contains(drift, fault.artifact) {
+			t.Fatalf("merged probe attributed a changed catalog object incorrectly: want %s, got %s", fault.artifact, drift)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, fault.restore))
+		})
+		if _, drift := migrationPingDatabaseCheck(t, ctx); drift != "" {
+			t.Fatalf("restored merged schema reported drift: %s", drift)
+		}
+	}
+}
+
+// The legacy settlement queue's published guards, required until the version
+// that retires them (server.LegacySettlementIntentRetirementMigrationVersion).
+var legacySettlementIntentMergedFaults = []migrationMergedFault{
+	{apply: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`, restore: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'none'`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`, restore: `ALTER TABLE legacy_settlement_intent ADD CHECK(shard=get_byte(uuid_send(contract_id),15)%16)`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `DROP INDEX legacy_settlement_intent_due`, restore: `CREATE INDEX legacy_settlement_intent_due ON legacy_settlement_intent(shard,next_attempt_time,contract_id)`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `ALTER TABLE transfer_contract DISABLE TRIGGER transfer_contract_legacy_settlement_owner`, restore: `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_legacy_settlement_owner`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome,dispute ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, restore: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$`, restore: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $body$` + legacySettlementOutcomeGuardBody + `$body$`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey DEFERRABLE`, restore: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey NOT DEFERRABLE`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`, restore: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id)`, artifact: "legacy settlement intent and ownership guards@v763"},
+	{apply: `ALTER TABLE legacy_settlement_intent ADD COLUMN test_shared_balance_id uuid REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE legacy_settlement_intent DROP COLUMN test_shared_balance_id`, artifact: "legacy settlement intent and ownership guards@v763"},
+}
+
 // Visit the published main head and each hardening append using the exact
 // production probe. A shifted SELECT expression fails before fault injection.
+// The legacy settlement queue's guards are faulted one version before their
+// retirement, the last head that still requires them.
 func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		retirement := server.LegacySettlementIntentRetirementMigrationVersion()
 		for version := 741; version <= server.MigrationCount(); version++ {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			_, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
 				t.Fatalf("coherent merged schema at version %d reported drift: %s", version, drift)
 			}
+			if version == retirement-1 {
+				requireMigrationMergedFaults(t, ctx, legacySettlementIntentMergedFaults)
+				checkMigrationForeignKeyEnabledCatalog(t, ctx, "legacy_settlement_intent", "transfer_contract", "legacy settlement intent and ownership guards@v763")
+			}
 		}
-		for _, fault := range []struct{ apply, restore, artifact string }{
+		requireMigrationMergedFaults(t, ctx, []migrationMergedFault{
 			{apply: `ALTER TABLE circle_transfer_request ALTER COLUMN review_required SET DEFAULT true`, restore: `ALTER TABLE circle_transfer_request ALTER COLUMN review_required SET DEFAULT false`, artifact: "Circle customer transfer custody and append-only observations@v762"},
 			{apply: `ALTER TABLE circle_transfer_request DROP CONSTRAINT circle_transfer_request_idempotency_key_key`, restore: `ALTER TABLE circle_transfer_request ADD UNIQUE(idempotency_key)`, artifact: "Circle customer transfer custody and append-only observations@v762"},
 			{apply: `ALTER TABLE circle_transfer_observation DROP CONSTRAINT circle_transfer_observation_digest_check`, restore: `ALTER TABLE circle_transfer_observation ADD CHECK(length(digest)=64)`, artifact: "Circle customer transfer custody and append-only observations@v762"},
@@ -41,15 +86,6 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			{apply: `ALTER TABLE solana_unfulfilled_payment ALTER COLUMN sender_account TYPE varchar(65)`, restore: `ALTER TABLE solana_unfulfilled_payment ALTER COLUMN sender_account TYPE varchar(64)`, artifact: "Solana payment amount reservations@v761"},
 			{apply: `ALTER TABLE solana_payment_amount_reservation DROP CONSTRAINT solana_payment_amount_reservation_pkey`, restore: `ALTER TABLE solana_payment_amount_reservation ADD PRIMARY KEY(amount_micro)`, artifact: "Solana payment amount reservations@v761"},
 			{apply: `DROP INDEX solana_payment_intent_expected_amount_micro`, restore: `CREATE INDEX solana_payment_intent_expected_amount_micro ON solana_payment_intent(expected_amount_micro,expires_at) WHERE expected_amount_micro IS NOT NULL`, artifact: "Solana payment amount reservations@v761"},
-			{apply: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`, restore: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'none'`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`, restore: `ALTER TABLE legacy_settlement_intent ADD CHECK(shard=get_byte(uuid_send(contract_id),15)%16)`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `DROP INDEX legacy_settlement_intent_due`, restore: `CREATE INDEX legacy_settlement_intent_due ON legacy_settlement_intent(shard,next_attempt_time,contract_id)`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE transfer_contract DISABLE TRIGGER transfer_contract_legacy_settlement_owner`, restore: `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_legacy_settlement_owner`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome,dispute ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, restore: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$`, restore: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $body$` + legacySettlementOutcomeGuardBody + `$body$`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey DEFERRABLE`, restore: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey NOT DEFERRABLE`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`, restore: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id)`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE legacy_settlement_intent ADD COLUMN test_shared_balance_id uuid REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE legacy_settlement_intent DROP COLUMN test_shared_balance_id`, artifact: "legacy settlement intent and ownership guards@v763"},
 
 			{
 				apply:    `ALTER TABLE provider_egress_health ALTER COLUMN security_measured_at SET DEFAULT now()`,
@@ -96,22 +132,7 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 				restore:  `ALTER TABLE transfer_balance_net_escrow_snapshot ALTER COLUMN revision DROP DEFAULT`,
 				artifact: "durable net escrow reservation snapshot@v754",
 			},
-		} {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.RaisePgResult(conn.Exec(ctx, fault.apply))
-			})
-			_, drift := migrationPingDatabaseCheck(t, ctx)
-			if !strings.Contains(drift, fault.artifact) {
-				t.Fatalf("merged probe attributed a changed catalog object incorrectly: want %s, got %s", fault.artifact, drift)
-			}
-			server.Db(ctx, func(conn server.PgConn) {
-				server.RaisePgResult(conn.Exec(ctx, fault.restore))
-			})
-			if _, drift := migrationPingDatabaseCheck(t, ctx); drift != "" {
-				t.Fatalf("restored merged schema reported drift: %s", drift)
-			}
-		}
+		})
 		checkMigrationForeignKeyEnabledCatalog(t, ctx, "circle_transfer_observation", "circle_transfer_request", "Circle customer transfer custody and append-only observations@v762")
-		checkMigrationForeignKeyEnabledCatalog(t, ctx, "legacy_settlement_intent", "transfer_contract", "legacy settlement intent and ownership guards@v763")
 	})
 }

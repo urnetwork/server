@@ -51,3 +51,49 @@ const legacySettlementPayerSchemaSql = `
  BEFORE INSERT ON legacy_settlement_intent FOR EACH ROW
  EXECUTE FUNCTION assign_legacy_settlement_intent_payer();
 `
+
+// Retires the legacy settlement queue's guards (PARTITION-MAINTENANCE-PLAN.md,
+// Part B). Every escrow admitted since Redis admission became unconditional is
+// redis_reserved, and no current binary reads or writes this table. The
+// migration refuses while any intent remains, then drops the outcome guard on
+// transfer_contract, its function, and the table's contract key.
+//
+// The table itself stays, empty, for one release: migrations apply before the
+// binaries that need them serve, so the previous release still reads it on
+// its expiry, deadline-close and reaper paths. A later release drops it with
+// its two insert-time trigger functions, once no deployed binary reads it.
+//
+// The guard runs inside an outcome writer that already holds transfer_contract,
+// so transfer_contract is locked first. Locking in the guard's order cannot
+// deadlock with those writers. Both locks are bounded by the lock timeout; a
+// timed out or refused run leaves the migration unapplied and can be retried.
+// The intent check follows both locks, so it sees every committed intent and
+// no new one can commit before this transaction does.
+const legacySettlementIntentRetirementSql = `
+	SET LOCAL lock_timeout = '5s';
+	LOCK TABLE transfer_contract IN ACCESS EXCLUSIVE MODE;
+	LOCK TABLE legacy_settlement_intent IN ACCESS EXCLUSIVE MODE;
+	DO $legacy_settlement_intent_retirement$
+	BEGIN
+		IF EXISTS (SELECT 1 FROM legacy_settlement_intent) THEN
+			RAISE EXCEPTION 'legacy_settlement_intent still holds pending legacy settlements; settle them before retiring the queue'
+				USING HINT = 'PARTITION-MAINTENANCE-PLAN.md, Part B: the table must be empty before this migration applies.';
+		END IF;
+	END
+	$legacy_settlement_intent_retirement$;
+	DROP TRIGGER IF EXISTS transfer_contract_legacy_settlement_owner ON transfer_contract;
+	DROP FUNCTION IF EXISTS guard_legacy_settlement_intent_outcome();
+	ALTER TABLE legacy_settlement_intent DROP CONSTRAINT IF EXISTS legacy_settlement_intent_contract_id_fkey;
+`
+
+// The version (slice index + 1) at which the retirement applies, found by the
+// migration's identity, or 0 when this binary has none. The monitor's catalog
+// contract follows the migration wherever a merge places it.
+func LegacySettlementIntentRetirementMigrationVersion() int {
+	for index, migration := range migrations {
+		if sql, ok := migration.(*SqlMigration); ok && sql.sql == legacySettlementIntentRetirementSql {
+			return index + 1
+		}
+	}
+	return 0
+}

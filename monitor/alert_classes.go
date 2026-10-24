@@ -388,8 +388,6 @@ var alertClassKinds = map[string]alertClassKind{
 	"journal-buffer-short":                                incidentAlertClass,
 	"journal-buffer-vacuum":                               incidentAlertClass,
 	"keyevent-config-drift":                               incidentAlertClass,
-	"legacy-settlement-pending":                           incidentAlertClass,
-	"legacy-settlement-worker-missing":                    incidentAlertClass,
 	"log-shipper-churn":                                   incidentAlertClass,
 	"log-shipper-down":                                    incidentAlertClass,
 	"log-shipper-fd-budget":                               incidentAlertClass,

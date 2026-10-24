@@ -10720,4 +10720,11 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Retire the legacy settlement queue (PARTITION-MAINTENANCE-PLAN.md, Part
+	// B): refuse while any intent remains, then drop the outcome guard on
+	// transfer_contract, its function, and the queue's contract key. The empty
+	// table stays until a later release, because the previous release still
+	// reads it (see legacySettlementIntentRetirementSql).
+	newSqlMigration(legacySettlementIntentRetirementSql),
 }

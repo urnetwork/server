@@ -107,7 +107,10 @@ about 60 a week earlier).
 - **Foreign keys into these tables:**
   - `contract_close_report -> transfer_contract` ON DELETE CASCADE
   - `legacy_settlement_intent -> transfer_contract` (no action; its comment
-    says it blocks retention)
+    says it blocks retention). Retired 2026-10-24: the legacy settlement
+    queue's retirement migration drops this key and the outcome guard below
+    (PARTITION-MAINTENANCE-PLAN.md, Part B). The cutover reads the keys and
+    triggers it finds, so after that migration it carries neither.
 
   Nothing references the other tables.
 - **The partition key never moves.** No statement updates `contract_id`, and
@@ -358,7 +361,9 @@ than R and every row in it meets all of these:
 - every escrow is settled (`transfer_escrow.settled`);
 - no sweep belongs to a pending payment;
 - no `legacy_settlement_intent` row references it (PostgreSQL also refuses to
-  drop a partition that a foreign key still references);
+  drop a partition that a foreign key still references). Retired 2026-10-24:
+  the queue's retirement drops that key, and the weekly drop no longer
+  consults the table;
 - the subnet usage proof is archived. A drop bypasses the BEFORE DELETE
   capture trigger, so the drop task first copies settled `provider_usage` rows
   into `st_provider_usage_archive` with the same predicate as
@@ -482,7 +487,9 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
    statement trigger does not fire for a statement that names a partition.
 5. **The outside foreign key is validated at once.**
    `legacy_settlement_intent`'s foreign key is recreated `NOT VALID` on the
-   parent and validated right after the swap; that table is small.
+   parent and validated right after the swap; that table is small. Once the
+   legacy settlement queue's retirement has applied (2026-10-24) there is no
+   outside foreign key left to carry.
 6. **The close report foreign key is dropped**, as decided. Rollback restores
    it `NOT VALID`.
 7. **The swap can be undone.** Between the swap and the cutover week every new
@@ -502,12 +509,14 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
 
 - **Dropping a week.** A week's partitions are dropped once the week ended
   more than 13 weeks ago and none of these blockers holds: an unresolved
-  contract, an unsettled escrow, a payment hold on a sweep, or a legacy
-  settlement intent. Payment holds match the row reaper: pending retention
-  stamping, or an incomplete payment that is uncanceled or carries an external
-  attempt's idempotency key, payment record, or transaction hash. Canceling an
-  external attempt alone does not release its hold. Each check reads a partial
-  or key index of the week's own partitions.
+  contract, an unsettled escrow, or a payment hold on a sweep. (A legacy
+  settlement intent was a fourth blocker until the queue retired on
+  2026-10-24; PARTITION-MAINTENANCE-PLAN.md, Part B.) Payment holds match the
+  row reaper: pending retention stamping, or an incomplete payment that is
+  uncanceled or carries an external attempt's idempotency key, payment
+  record, or transaction hash. Canceling an external attempt alone does not
+  release its hold. Each check reads a partial or key index of the week's own
+  partitions.
 - **Usage proof is archived by deleting contracts.** All three outcomes carry
   usage credit. So archiving a week means deleting every one of its contracts,
   10,000 at a time, through the parent. The capture trigger archives each row

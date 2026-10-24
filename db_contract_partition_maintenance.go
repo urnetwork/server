@@ -19,11 +19,10 @@ import (
 //   - analyze each weekly partition once, a day after its week, and the parents
 //     once a week (autovacuum does not analyze a partitioned parent);
 //   - retire each week that ended more than ContractRetention ago: once every
-//     contract is resolved, every escrow settled, no sweep belongs to a pending
-//     payment and no legacy settlement intent refers to it, archive its usage
-//     proof by deleting its credit-bearing contracts through the archive capture
-//     trigger, then detach and drop the week's six partitions in one short
-//     transaction;
+//     contract is resolved, every escrow settled and no sweep belongs to a
+//     pending payment, archive its usage proof by deleting its credit-bearing
+//     contracts through the archive capture trigger, then detach and drop the
+//     week's six partitions in one short transaction;
 //   - delete close evidence older than the horizon (migration 857).
 //
 // Before the cutover it only guards a prepared cutover from outliving its
@@ -279,9 +278,6 @@ func contractWeekBlocker(ctx context.Context, conn contractCatalogQuerier, week 
 		quoteIdentifier(week.leaf("transfer_escrow_sweep")),
 	)) {
 		return "a sweep of a pending payment"
-	}
-	if exists(`SELECT EXISTS (SELECT 1 FROM legacy_settlement_intent WHERE $1 <= contract_id AND contract_id < $2)`, week.lower, week.upper) {
-		return "a legacy settlement intent"
 	}
 	return ""
 }

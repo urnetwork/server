@@ -43,12 +43,25 @@ var legacySettlementIntentKeyClonesArtifactQuery = migrationForeignKeyPartitionC
 	"('RI_FKey_noaction_upd',17)",
 )
 
+// The published table shape. The 763 artifact and the retirement that keeps the
+// empty table share these exact strings.
+const legacySettlementIntentColumns = `('contract_id','uuid','NO',NULL),('shard','smallint','NO',NULL),('outcome','text','NO',NULL),('clear_dispute','boolean','NO','false'),('create_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('next_attempt_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('failure_code','text','NO','''none''::text')`
+
+const legacySettlementIntentPrimaryKey = `('PRIMARY KEY (contract_id)')`
+
+// The retirement drops this key; the 763 artifact keeps requiring it.
+const legacySettlementIntentContractKey = `('FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)')`
+
+const legacySettlementIntentChecks = `('CHECK ((shard = (get_byte(uuid_send(contract_id), 15) % 16)))'),('CHECK ((outcome = ANY (ARRAY[''settled''::text, ''dispute_resolved_to_source''::text, ''dispute_resolved_to_destination''::text])))'),('CHECK ((failure_code = ANY (ARRAY[''none''::text, ''accounting''::text, ''operational''::text])))')`
+
+var legacySettlementIntentIndexArtifactQuery = financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_age", "shard, failure_code, create_time") + ` AND ` +
+	financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_due", "shard, next_attempt_time, contract_id")
+
 var legacySettlementIntentArtifactQuery = `(` +
 	migrationFp2Table("legacy_settlement_intent") + ` AND ` +
-	financialColumnsArtifact("legacy_settlement_intent", `('contract_id','uuid','NO',NULL),('shard','smallint','NO',NULL),('outcome','text','NO',NULL),('clear_dispute','boolean','NO','false'),('create_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('next_attempt_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)'),('failure_code','text','NO','''none''::text')`) + ` AND ` +
-	financialConstraintsArtifact("legacy_settlement_intent", `('PRIMARY KEY (contract_id)'),('FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)'),('CHECK ((shard = (get_byte(uuid_send(contract_id), 15) % 16)))'),('CHECK ((outcome = ANY (ARRAY[''settled''::text, ''dispute_resolved_to_source''::text, ''dispute_resolved_to_destination''::text])))'),('CHECK ((failure_code = ANY (ARRAY[''none''::text, ''accounting''::text, ''operational''::text])))')`) + ` AND ` +
-	financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_age", "shard, failure_code, create_time") + ` AND ` +
-	financialIndexArtifact("legacy_settlement_intent", "legacy_settlement_intent_due", "shard, next_attempt_time, contract_id") + ` AND ` +
+	financialColumnsArtifact("legacy_settlement_intent", legacySettlementIntentColumns) + ` AND ` +
+	financialConstraintsArtifact("legacy_settlement_intent", legacySettlementIntentPrimaryKey+","+legacySettlementIntentContractKey+","+legacySettlementIntentChecks) + ` AND ` +
+	legacySettlementIntentIndexArtifactQuery + ` AND ` +
 	financialGuardArtifact("transfer_contract", "transfer_contract_legacy_settlement_owner", "guard_legacy_settlement_intent_outcome", legacySettlementOutcomeGuardBody, 19, "outcome") + ` AND
  ` + migrationContractLeafTriggers("transfer_contract", "transfer_contract_legacy_settlement_owner") + ` AND
  NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.legacy_settlement_intent') AND contype='f'
@@ -68,3 +81,21 @@ var legacySettlementIntentArtifactQuery = `(` +
  AND t.tgenabled IN ('O','A') AND t.tgtype=expected.trigger_type AND t.tgqual IS NULL
  AND NOT t.tgdeferrable AND NOT t.tginitdeferred AND t.tgnargs=0
  AND n.nspname='pg_catalog' AND p.proname=expected.function_name)))`
+
+// The legacy settlement queue's retirement (PARTITION-MAINTENANCE-PLAN.md, Part
+// B) supersedes the 763 artifact at its own version, wherever a merge places
+// it. The empty table stays, so its published shape is required again here;
+// the payer and close-owner artifacts keep their own columns. The outcome
+// guard, its function and the contract key must be gone, including any clone
+// of the guard on a contract partition, so neither a rolling writer nor a
+// restore can bring the queue's owner back unnoticed.
+const legacySettlementIntentRetirementArtifactName = "retired legacy settlement guards and contract key"
+
+var legacySettlementIntentRetirementArtifactQuery = `(` +
+	migrationFp2Table("legacy_settlement_intent") + ` AND ` +
+	financialColumnsArtifact("legacy_settlement_intent", legacySettlementIntentColumns) + ` AND ` +
+	financialConstraintsArtifact("legacy_settlement_intent", legacySettlementIntentPrimaryKey+","+legacySettlementIntentChecks) + ` AND ` +
+	legacySettlementIntentIndexArtifactQuery + ` AND
+ NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.legacy_settlement_intent') AND contype='f') AND
+ NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='transfer_contract_legacy_settlement_owner') AND
+ to_regprocedure('public.guard_legacy_settlement_intent_outcome()') IS NULL)`
