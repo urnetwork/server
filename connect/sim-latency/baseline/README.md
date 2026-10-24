@@ -1,5 +1,12 @@
 # Sim-latency baseline preservation
 
+The current four-exchange-instance, fresh-service nine-run evidence is in
+[`prelaunch-four-exchange-2026-10-24/`](prelaunch-four-exchange-2026-10-24/README.md).
+It includes failure-charged raw-score analysis, all completion markers, full
+compressed logs and the original post-processing failure plus its recovery.
+It is exploratory, not a frozen production baseline or margin. It must not be
+mixed with the one-exchange-instance dataset below or historical `v1` data.
+
 The October 24 prepared-source exploration is separately retained in
 [`prelaunch-2026-10-24/`](prelaunch-2026-10-24/README.md). It contains nine
 non-official same-seed replicates and their noise diagnostics, not a replacement

@@ -159,6 +159,21 @@ installation, genuine provider access, production host/artifact readiness,
 reference calibration or season activation. No main control-plane writes were
 performed during the maintenance hold.
 
+The complete four-instance dataset is now versioned at
+[`../baseline/prelaunch-four-exchange-2026-10-24/`](../baseline/prelaunch-four-exchange-2026-10-24/README.md),
+separate from the earlier one-instance evidence. Its raw CSVs, sidecars, final
+markers, compressed full logs, controller snapshots and both analysis outcomes
+are retained. New dataset/source/topology/marker/failed-row regression checks
+passed three race repetitions (16.415 seconds); full archive verification covers
+2,826 files, with every historical `v1` checksum unchanged.
+
+The tested qualifier phase was committed as `777388323`, merged with upstream
+main in `01473cd8f` and pushed. The post-merge focused race/lifecycle regressions
+passed three repetitions (8.579 seconds). The measured checkpoint remains
+`67c87445abe6725b25b3df2a13af7eb99cd4f8ed`, not advancing control main.
+Read-only checks at 15:50 UTC still show API `503 source_not_ready` and refused
+TCP connections to sille's MinIO endpoint. Production has not been activated.
+
 ### Restart/review-build validation — October 24, 13:38 UTC
 
 The build broker now durably binds one review to one image/owner and original

@@ -1,0 +1,56 @@
+# Production preparation checkpoint for the October 28 opening.
+# Publishing pins does not enable production, approve a runtime, or open a round.
+# The old manifest is retained in history/sim-latency-2026-09-25.yml.
+# The 16.1% historical floor is provisional until fresh exact-image calibration;
+# its evidence is server/connect/sim-latency/baseline/final-baseline.html.
+# No new measurements or policy approval are claimed by these source identities.
+schema: 2
+staging: false
+frozen_at: 2026-10-24T07:42:39Z
+
+evaluation_source:
+  branch: sim-latency
+  generations:
+    - generation: 0
+      kind: baseline
+      source_lock_sha256: f8954162b28894aa96c7bd75b2aadb32e5724fa1852f32b0e6db7eb12f5645f5
+      significant_improvement_percent: 16.1
+      threshold_evidence_sha256: cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9
+      repositories:
+          server:
+            commit: 67c87445abe6725b25b3df2a13af7eb99cd4f8ed
+          connect:
+            commit: e90d59eb404f973dba6e9d0689ecd94e2718c10e
+          sdk:
+            commit: d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb
+          proxy:
+            commit: af1d364fe34b807c31936642bff7d3fd849ab2a4
+          glog:
+            commit: 1c4954b017d9e8140a4e7020f914eb27410a41c6
+          goidenticons:
+            commit: 39ccec1b69db3a6f67e7346d6f44863499e6241d
+          userwireguard:
+            commit: f9a92f0e5f5577a80d358065c4d39ca21f971a1c
+          sn:
+            commit: 6e686aabd53b7c45b154051fd268138988224eba
+          warp:
+            commit: 8dfa405ec380a60307952778921f05bba1c59a33
+          gvisor:
+            commit: 57c9e137f7407ad6cd41dcca1ba304a446e09c79
+  rounds:
+    - epoch: 1
+      source_generation: 0
+      activation_generation: 1
+      source_decision_digest: d567743996c7b8187ea5f1891e1e7384c7e75092d9c784dfc200af4fae5f4d84
+      kind: reviewed_source_carry_forward
+      reason: initial_reviewed_source
+      source_lock_sha256: f8954162b28894aa96c7bd75b2aadb32e5724fa1852f32b0e6db7eb12f5645f5
+      significant_improvement_percent: 16.1
+
+control_plane_identity:
+  api_branch: main
+  worker_branch: main
+  runtime_image_digest_environment: WARP_IMAGE_DIGEST
+  persist_per_evaluation: true
+  freeze_main_commits: false
+

@@ -1,0 +1,6 @@
+[env]glog not configured from command line. Using default configuration.
+I1024 15:30:10.617811 2378480 env.go:1202] [env]try /home/by/urnetwork/config, [settings.yml]
+I1024 15:30:10.617973 2378480 env.go:1202] [env]try /home/by/urnetwork/config/all, [settings.yml]
+I1024 15:30:10.618065 2378480 env.go:1202] [env]try /home/by/urnetwork/site, [settings.yml]
+I1024 15:30:10.618096 2378480 env.go:81] [env]settings loaded
+[sim-latency] source epoch preflight: could not locate config/main/sim-latency.yml

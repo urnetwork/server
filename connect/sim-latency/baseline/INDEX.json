@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-four-exchange-2026-10-24",
+      "official": false,
+      "index_path": "prelaunch-four-exchange-2026-10-24/INDEX.json",
+      "index_sha256": "5eaffc43a606bbf7538849b484071d82e1e052fd66bd3efafe07240d39779252"
+    },
+    {
       "id": "prelaunch-2026-10-24",
       "official": false,
       "index_path": "prelaunch-2026-10-24/INDEX.json",
