@@ -148,7 +148,7 @@ or this runbook alone does not satisfy those requirements.
 The supervisor-facing offline build entry point is
 `sim-latency source-build-broker --build-settings=<private-json> --build-settings-sha256=<digest>`.
 Its immutable wrapper, private settings and independent qualifier contract are
-documented in [`evaluator/build/README.md`](evaluator/build/README.md). The broker
+documented in [`evaluator/source-build/README.md`](evaluator/source-build/README.md). The broker
 builds artifacts first, then requires a pinned qualifier receipt for that exact
 image and attempt. A missing qualifier, changed pin, cancellation, or incomplete
 model/containment evidence returns no usable receipt. Do not substitute the
