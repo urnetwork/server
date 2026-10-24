@@ -141,8 +141,17 @@ func TestContractExpiryRepairPreviewApplyAccounting32(t *testing.T) {
 			// The two positive contracts each consumed 3 bytes.
 			requireLegacySettlementTestState(t, ctx, f, ids[i], true, 994, 0)
 		}
-		requireLegacyProviderDurability(t, ctx, f, ids[0], 0)
-		requireLegacyProviderDurability(t, ctx, f, ids[30], 3)
+		// Every contract of the cohort settled at apply. The two positive ones
+		// each swept their 3 bytes to the one destination network, whose
+		// durable provider total holds both.
+		for i, id := range ids {
+			swept := int64(0)
+			if i >= 30 {
+				swept = 3
+			}
+			requireLegacyProviderSwept(t, ctx, f, id, swept)
+		}
+		requireLegacyProviderCohortDurability(t, ctx, f, ids, 6)
 		replay, err := RepairContractExpiry(ctx, request)
 		if err != nil {
 			t.Fatal("idempotent replay failed")
@@ -157,7 +166,7 @@ func TestContractExpiryRepairPreviewApplyAccounting32(t *testing.T) {
 			}
 		}
 		requireLegacySettlementTestState(t, ctx, f, ids[30], true, 994, 0)
-		requireLegacyProviderDurability(t, ctx, f, ids[30], 3)
+		requireLegacyProviderCohortDurability(t, ctx, f, ids, 6)
 	})
 }
 
