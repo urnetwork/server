@@ -134,10 +134,24 @@ func winnerModelInput(request winnerReviewBrokerRequest) ([]byte, error) {
 // Reads streamed events within independent total and per-event bounds. Only a
 // completed provider response can authorize a judgment; partial text never does.
 func readWinnerModelResponse(reader io.Reader, settings winnerModelSettings) (*winnerModelResponse, error) {
+	content, err := readPinnedSolModelResponse(reader, settings)
+	if err != nil {
+		return nil, err
+	}
+	var response winnerModelResponse
+	if err := json.Unmarshal(content, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// Preserve complete output items for stateless tool continuations, including
+// opaque encrypted reasoning. No hidden reasoning is decoded or requested.
+func readPinnedSolModelResponse(reader io.Reader, settings winnerModelSettings) (json.RawMessage, error) {
 	limited := &io.LimitedReader{R: reader, N: settings.MaximumStreamBytes + 1}
 	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, min(4096, settings.MaximumEventBytes)), settings.MaximumEventBytes)
-	var completed *winnerModelResponse
+	var completed json.RawMessage
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -148,8 +162,8 @@ func readWinnerModelResponse(reader io.Reader, settings winnerModelSettings) (*w
 			continue
 		}
 		var event struct {
-			Type     string              `json:"type"`
-			Response winnerModelResponse `json:"response"`
+			Type     string          `json:"type"`
+			Response json.RawMessage `json:"response"`
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			return nil, errors.New("review provider stream is malformed")
@@ -159,12 +173,13 @@ func readWinnerModelResponse(reader io.Reader, settings winnerModelSettings) (*w
 			if completed != nil {
 				return nil, errors.New("review provider emitted multiple completed responses")
 			}
-			completed = &event.Response
+			completed = event.Response
 		case "error", "response.failed", "response.incomplete":
 			return nil, errors.New("review provider did not complete its judgment")
 		}
 	}
-	if scanner.Err() != nil || limited.N <= 0 || completed == nil || completed.Status != "completed" || completed.Model != model.CompetitionWinnerReviewModel || completed.Id == "" {
+	var identity struct{ Status, Model, Id string }
+	if scanner.Err() != nil || limited.N <= 0 || completed == nil || json.Unmarshal(completed, &identity) != nil || identity.Status != "completed" || identity.Model != model.CompetitionWinnerReviewModel || identity.Id == "" {
 		return nil, errors.New("review provider response is incomplete, oversized or unpinned")
 	}
 	return completed, nil

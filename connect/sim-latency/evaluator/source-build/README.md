@@ -72,3 +72,24 @@ The broker entry point and interlocks require deployment qualification. A real
 independent qualifier is still required; this repository does not install or
 assert one by supplying an executable pathname. Do not enable production with
 a stub qualifier or use synthetic test receipts as operational evidence.
+
+The independent test-model client in `source_test_model.go` uses Sol 6.1 low
+with one forced, argument-free `run_prescribed_tests` tool. Its trusted callback
+owns the fixed suite; the model cannot choose commands or grant approval. A
+second, tool-disabled response must agree with the observed exit status and
+nonzero test count. Evidence binds the exact image, suite, logs and both actual
+provider response IDs, and records usage. Model commentary cannot substitute
+for execution. Short provider deadlines do not shorten the separate test
+budget or extend an earlier parent deadline.
+
+This client has mocked transport/authority regression coverage, not live model
+qualification. The installed qualifier must still integrate the real fixed-suite
+executor, durable plan/response/execution journal, host/containment evidence and
+artifact retention. Do not retry a completed failed/uncertain test or model
+outcome until operator investigation; only an incomplete transport may resume
+the same original plan without rerunning completed tests.
+
+The implementation follows the official [function-calling contract](https://developers.openai.com/api/docs/guides/function-calling)
+and [stateless reasoning-item replay](https://developers.openai.com/api/docs/guides/reasoning).
+Opaque encrypted reasoning items are forwarded for continuation, never decoded
+or exposed as an audit explanation. No main/model credential enters model input.

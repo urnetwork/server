@@ -438,3 +438,16 @@ authority `172.28.208.177:23900`. The earlier port-9000 probe did not test that
 configured authority. Maintenance completion has been requested from the
 operator; control-plane writes remain paused and the old staging supervisor
 remains intentionally stopped. The dedicated review API key is still absent.
+
+The independent Sol 6.1 low test client is implemented with one forced
+argument-free fixed-suite tool, tool-disabled completion, exact image/suite/log
+binding, provider IDs and usage, and observed exit/test-count checks. It shares
+bounded pinned-model SSE parsing with the max review client while preserving
+opaque reasoning items only for stateless continuation. Provider-request and
+test-execution deadlines are distinct. Tests reject tool escape/repetition,
+changed identity, zero-test or unlogged success, failed-test blessing,
+ambiguous/case-aliased judgments, redirects and canceled work; three consecutive
+race-enabled client/review regression runs passed. This is mocked provider
+evidence only. The real fixed-suite executor, durable qualifier journal,
+containment/host evidence, dedicated-key access and live qualification remain
+required before the broker may authorize promotion.
