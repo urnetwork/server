@@ -54,3 +54,29 @@ This true-off result does not reproduce the old defective image's fatal probe
 failure. It also does not prove impairment caused that historical failure.
 The corresponding corrected impairment-on point was started only after clean
 teardown. Final scale and margin remain unselected.
+
+## 15,000-provider impairment-on rejection
+
+`p15000-on/` preserves the corrected image's corresponding impaired attempt.
+It warmed all 200 clients (the first pass left 24 missing; the existing
+missing-only retry recovered them), but failed matchmaking probe 6 during
+measurement: HTTP request attempts exhausted. Teardown additionally required
+KILL for shard 1 after it failed to exit on TERM. Controller exit was 1;
+the sidecar is incomplete and there is no completion marker. Compose cleanup
+removed every owned container and network, and the controller checksum was
+unchanged. This point is not eligible for a baseline or a placeable score.
+
+The partial CSV has 637 requests and 97 failures (15.23%). This is partial
+failure evidence, not a complete-window estimate. Service diagnostics contain
+provide-key uniqueness errors and a PostgreSQL deadlock during registration;
+their causal relationship to the fatal matchmaking probe is not established.
+An early resource snapshot observed about 10.08 GiB / 72 GiB and 1.44 CPU cores;
+it is not a peak-resource measurement or proof that later overload was absent.
+
+The parent also started prewarming before all child constructors completed.
+That startup-ordering observation is not yet a reproduced root-cause defect.
+Do not claim a fix, change the frozen source or infer that impairment alone
+caused every historical failure from these observations. The next lower
+7,200-provider impairment-on point started after this attempt exited and
+cleanup was independently checked; no parallel scoring, resampling or timeout
+relaxation was introduced.

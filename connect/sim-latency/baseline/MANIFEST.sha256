@@ -1,4 +1,10 @@
-7cf21d14e6c9abf2a06b7ed3432836eb259ff41a7c7178e68de932b900d09861  prelaunch-corrected-frontier-2026-10-24/README.md
+8b7812d4ae9cec1e31d12341d81bbe927cc7788adbdaa3c83d3aaf1c132c6ef1  prelaunch-corrected-frontier-2026-10-24/README.md
+0583d6121db94e2090f003f6f0cc8f5c6c5b5df538365b92035719c85f2d281a  prelaunch-corrected-frontier-2026-10-24/p15000-on/controller.log.gz
+295cde9b460a9a88e32634f88ae39c8e19f37141477ebd129b132d87a769dc2a  prelaunch-corrected-frontier-2026-10-24/p15000-on/process-argv.txt
+294e4b35590ba083aa933076c2d7bb491294104aadcb7e6dd2cffcbe62838783  prelaunch-corrected-frontier-2026-10-24/p15000-on/resource-snapshot.txt
+3fd1e25d381626528b93c89e593b5d1ca71b54c73c6149e55d7a75c6c7be209c  prelaunch-corrected-frontier-2026-10-24/p15000-on/results.csv
+de5dd912fc9c64b2399d6d9b692cb5959b46dd3f62c850db0a4eb28b624ef948  prelaunch-corrected-frontier-2026-10-24/p15000-on/run.json
+8bcdb1f876ca5d30ce79b10c481be8dd98db4e1cb70c990a233a6b16df0d98cb  prelaunch-corrected-frontier-2026-10-24/p15000-on/services.log.gz
 b6655534d209850707a473a3411b85f9148606fc8b86b7754ec8de5301014d89  prelaunch-corrected-frontier-2026-10-24/p15000-off/controller.log.gz
 d8ca81d599a2b00279d9041e13e729b9a0c6e6fa1e03189959ba4aeea7527c74  prelaunch-corrected-frontier-2026-10-24/p15000-off/process-argv.txt
 f14eca4c48cff9cd814ee23fb0699c5aa989cb2329198a7ae7a890dd287868cd  prelaunch-corrected-frontier-2026-10-24/p15000-off/results.csv

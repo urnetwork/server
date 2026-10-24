@@ -1,0 +1,103 @@
+{
+  "schema": 2,
+  "kind": "sim-latency-run",
+  "config_sha256": "aa727ab6ff320cd6ed94bb5613c77c980ca5d5416cd10d4bb03f660e59dc72f0",
+  "seed": 20261024,
+  "build_revision": "3d96d16ddb4fc2fb08d3f9003c52e30b9a47241d",
+  "hostname": "d39493c186d4",
+  "os": "linux",
+  "arch": "amd64",
+  "num_cpu": 10,
+  "flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "true",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "source_epoch": 0,
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-fixed794-p15000-on-source-seal-fix",
+  "request_timeout_ms": 120000,
+  "stats_root": "/work/site/stats/local/sim-127.0.0.1-01a16f98-8892-352d-3ee1-62eea7196fdf",
+  "stats_instance_id": "01a16f98-8892-352d-3ee1-62eea7196fdf",
+  "results_csv_sha256": "3fd1e25d381626528b93c89e593b5d1ca71b54c73c6149e55d7a75c6c7be209c",
+  "results_csv_bytes": 68486,
+  "final_marker_path": "/artifacts/run.json.complete.json",
+  "completion_state": "incomplete",
+  "completed_unix_ms": 1792874522604,
+  "incomplete_code": "matchmaking_probe_failed",
+  "incomplete_message": "incomplete evaluation (matchmaking_probe_failed) during measured window: matchmaking probe 6: find providers: http request attempts exhausted; teardown: fleet shard 1 did not exit after TERM\nfleet shard 1 exit: signal: killed",
+  "measure_start_ms": 1792874428441,
+  "measure_end_ms": 1792874608441,
+  "clients_pool": 200,
+  "clients_established": 200,
+  "rows": 637,
+  "rows_in_window": 637,
+  "failures": 97,
+  "block_count": 8,
+  "block_seconds": 22.5,
+  "metrics": {
+    "fail_rate": {
+      "value": 0.152276295133438,
+      "n": 637,
+      "block_se": 0.0957136132097239
+    },
+    "goodput_bytes_per_s": {
+      "value": 3276599.472222222,
+      "n": 637,
+      "block_se": 1423369.3129344652
+    },
+    "throughput_p05_bytes_per_s": {
+      "value": 134654.88167775958,
+      "n": 96,
+      "block_se": 38017.18856437147
+    },
+    "throughput_p50_bytes_per_s": {
+      "value": 619219.8690296005,
+      "n": 96,
+      "block_se": 101070.66773160614
+    },
+    "throughput_p95_bytes_per_s": {
+      "value": 1595132.4554124102,
+      "n": 96,
+      "block_se": 220144.26342890027
+    },
+    "total_p50_ms": {
+      "value": 1557.823,
+      "n": 540,
+      "block_se": 199.45350860099254
+    },
+    "total_p95_ms": {
+      "value": 13351.111649999997,
+      "n": 540,
+      "block_se": 2054.7326314159345
+    },
+    "ttfb_p50_ms": {
+      "value": 548.0160000000001,
+      "n": 540,
+      "block_se": 58.75129512094938
+    },
+    "ttfb_p95_ms": {
+      "value": 6365.058849999986,
+      "n": 540,
+      "block_se": 2089.160103406614
+    }
+  }
+}
