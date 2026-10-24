@@ -2,14 +2,73 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// Failed frontier measurements retain raw identity and explicit ineligibility;
+// completing a measurement window alone must never create a valid baseline.
+func TestFrontierIncompletePointsRemainIneligibleAndBoundToRawArtifacts(t *testing.T) {
+	root := filepath.Join("baseline", "prelaunch-frontier-2026-10-24")
+	content, err := os.ReadFile(filepath.Join(root, "INDEX.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Official             bool   `json:"official"`
+		ValidBaselineSamples int    `json:"valid_baseline_samples"`
+		ExchangeHosts        int    `json:"exchange_hosts"`
+		EvaluatedCommit      string `json:"evaluated_server_commit"`
+		Points               []struct {
+			Path             string `json:"path"`
+			CompletionState  string `json:"completion_state"`
+			IncompleteCode   string `json:"incomplete_code"`
+			BaselineEligible *bool  `json:"baseline_eligible"`
+		} `json:"points"`
+	}
+	if err := json.Unmarshal(content, &index); err != nil || index.Official || index.ValidBaselineSamples != 0 || len(index.Points) == 0 || index.ExchangeHosts <= 0 {
+		t.Fatal("failed frontier archive claims official or usable baseline evidence", err)
+	}
+	for _, point := range index.Points {
+		if !filepath.IsLocal(point.Path) || point.BaselineEligible == nil || *point.BaselineEligible || point.CompletionState != "incomplete" || point.IncompleteCode == "" {
+			t.Fatal("failed frontier point lost explicit baseline ineligibility", point.Path)
+		}
+		content, err := os.ReadFile(filepath.Join(root, point.Path, "run.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var run RunStats
+		if err := json.Unmarshal(content, &run); err != nil || run.CompletionState != point.CompletionState || run.IncompleteCode != point.IncompleteCode || run.BuildRevision != index.EvaluatedCommit || run.Flags["hosts"] != fmt.Sprint(index.ExchangeHosts) {
+			t.Fatal("failed frontier index differs from actual run identity or completion", point.Path, err)
+		}
+		csv, err := os.ReadFile(filepath.Join(root, point.Path, "results.csv"))
+		if err != nil || run.ResultsCsvBytes != int64(len(csv)) || run.ResultsCsvSha256 != fmt.Sprintf("%x", sha256.Sum256(csv)) {
+			t.Fatal("failed frontier CSV differs from retained sidecar", point.Path, err)
+		}
+		file, err := os.Open(filepath.Join(root, point.Path, "providers.yml.gz"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader, err := gzip.NewReader(file)
+		if err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, reader)
+		gzipErr, closeErr := reader.Close(), file.Close()
+		if copyErr != nil || gzipErr != nil || closeErr != nil || run.ConfigSha256 != fmt.Sprintf("%x", hash.Sum(nil)) {
+			t.Fatal("failed frontier provider input differs from measured config", point.Path, copyErr, gzipErr, closeErr)
+		}
+	}
+}
 
 // The exploratory dataset is not interchangeable with the four-host policy.
 // Compare its declared topology to every retained measured run, not a comment.

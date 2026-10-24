@@ -45,12 +45,63 @@ them. Sweep evidence is currently private under
 `temp/production-frontier-20261024.63AtMXS5`; archive completed results before
 selecting scale. This sweep does not replace nine-run calibration.
 
+The first measured point (7,200 providers, impairment off) warmed all 200
+clients and completed measurement, but exited nonzero after 691 seconds:
+`unclean_teardown`, fleet shard 0 required KILL after TERM. Its sidecar marks
+the run incomplete. Retain its CSV/metadata/logs for shutdown diagnosis; do not
+count its latency metrics as a usable baseline or infer a capacity limit until
+the lifecycle failure is understood. The serial sweep has advanced to the
+15,000-provider impairment-on point. That point also warmed all 200 clients but
+failed during measurement with `matchmaking_probe_failed`; its fleet then
+drained cleanly without a diagnostic signal. Both points, including exact CSVs,
+sidecars, compressed inputs/logs and pre-measurement harness failures, are now
+preserved under `baseline/prelaunch-frontier-2026-10-24/` and remain explicitly
+ineligible for baseline use. The original batch and waiting recovery controller
+were stopped after the point's terminal exit and verified container cleanup.
+Resume the missing lower-scale points after the current test window; do not
+start larger points or declare capacity from either incomplete attempt.
+
 The public API still returns `503 source_not_ready`, and sille's configured
 MinIO endpoint `172.28.208.177:23900` refuses TCP connections. No main database
 write or production activation has been attempted while maintenance confirmation
 is pending.
 
 ## Execution checklist
+
+### Restart/review-build validation — October 24, 13:38 UTC
+
+The build broker now durably binds one review to one image/owner and original
+deadline, reuses authenticated completed artifacts, refuses unfinished pipeline
+reservations, and prevents concurrent controllers with a process-owned lock.
+Reviewed Git commits use the authenticated review timestamp and fixed identities
+so re-materialization does not change the source lock. Independent test handling
+retains the original plan, raw provider streams before validation, execution
+observations and final evidence. Unfinished transports pause for reconciliation;
+they do not silently sample another judgment. These are control changes, not
+changes to the frozen evaluated checkpoint.
+
+Focused race regressions passed three repetitions (19.144 seconds; log SHA-256
+`38136da7dbf56dd6382a4955d398100f86295c1eecd2e9160916f5a309b8cfd0`).
+The full real-container offline probe passed all 33 prescribed correctness tests
+and journal replay with no additional candidate test execution. Its log digest is
+`539a4e971e2da03ef986ca7d4e31ee6e2dfd8aafed79b055c7b5c6bb9425b553`;
+test-log digest is
+`927bc47d32f914dbe5aab028c114dc13cc076907945b38e8cb26231af00a0908`.
+Provider streams in that probe were **mocked**, not genuine model provenance.
+The temporary image and containers were removed.
+
+Three consecutive full `tests.sh` passes, each including the six-epoch lifecycle
+and race suite, completed in 115.213, 110.268 and 109.991 seconds. Retained logs:
+
+- `bdce61da90f2aa3449259fd80b41d2b86d1bd3f5acd285160e56e5ea6e77c878`
+- `69b877be9233699929a9df3f28fc84aa6c5cd54d0ca7fdae2737c5bacb42eb17`
+- `8c8821df6753399b7eda70e9ea6be8702b63077fd0b4579efdc33eb461fe4917`
+
+The separately owned disposable database/Redis fixtures were cleaned up. Archive
+verification passed all 2,763 files; historical `v1` bytes and their checksums
+remain unchanged. Real model access, installed qualifier integration, host and
+artifact readiness, supported-scale calibration and production activation are
+still outstanding; these test passes do not close those launch gates.
 
 - [x] Fetch development heads and inspect operator worktrees without modifying them.
 - [x] Compile the candidate graph and pass the simulator harness against its pinned dependencies.

@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -136,11 +135,6 @@ func runSourceBuildBroker(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(input, &request, "reviewed source build request"); err != nil {
 		fatalf("source build request: %s", err)
 	}
-	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		fatalf("source build attempt identity: %s", err)
-	}
-	owner := hex.EncodeToString(nonce[:])
 	qualify := func(ctx context.Context, qualification sourceBuildQualificationRequest) (reviewedSourceBuildReceipt, error) {
 		var receipt reviewedSourceBuildReceipt
 		output, err := runSourceSupervisorProgram(ctx, settings.QualificationCommand, settings.QualificationSha256, qualification,
@@ -152,16 +146,13 @@ func runSourceBuildBroker(opts docopt.Opts) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	receipt, err := executeSourceBuildBroker(ctx, request, owner, settings, runSourceBuildDocker, executeSourceBuildPipeline, qualify)
+	receipt, err := executeJournaledSourceBuildBroker(ctx, request, settings, runSourceBuildDocker, executeSourceBuildPipeline, qualify)
 	if err != nil {
 		fatalf("source build broker: %s", err)
 	}
 	output, err := json.Marshal(receipt)
 	if err != nil {
 		fatalf("source build receipt encoding: %s", err)
-	}
-	if err := writePrivateReviewFile(filepath.Join(settings.Sandbox.StateDirectory, owner, "qualified-build-receipt.json"), output); err != nil {
-		fatalf("source build receipt persistence: %s", err)
 	}
 	fmt.Printf("%s\n", output)
 }

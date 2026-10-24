@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-exploratory-four-host-frontier",
+  "official": false,
+  "recorded_at": "2026-10-24",
+  "seed": 20261024,
+  "exchange_hosts": 4,
+  "fleet_shards": 4,
+  "clients": 200,
+  "arrivals_per_minute": 80,
+  "quality_window": 2,
+  "duration_seconds": 180,
+  "evaluated_server_commit": "67c87445abe6725b25b3df2a13af7eb99cd4f8ed",
+  "evaluator_image_digest": "sha256:826569fdeb02f72ec4f24ace7c93b16b69a60e1875c31799c5a0217b402e0d6c",
+  "valid_baseline_samples": 0,
+  "official_baseline_frozen": false,
+  "scale_frozen": false,
+  "margin_frozen": false,
+  "measurement_overlapped_builds_or_tests": false,
+  "diagnostic_signal_delivered": false,
+  "points": [
+    {
+      "path": "p7200-off",
+      "providers": 7200,
+      "impairment": false,
+      "completion_state": "incomplete",
+      "incomplete_code": "unclean_teardown",
+      "baseline_eligible": false
+    },
+    {
+      "path": "p15000-on",
+      "providers": 15000,
+      "impairment": true,
+      "completion_state": "incomplete",
+      "incomplete_code": "matchmaking_probe_failed",
+      "baseline_eligible": false
+    }
+  ]
+}
