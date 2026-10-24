@@ -96,10 +96,10 @@ func TestLegacySettlementPostBatchLostClockReplyIsNotReplayed(t *testing.T) {
 		marked := context.WithValue(ctx, legacyPostClockReplyKey{}, hook)
 		batched, finish := withLegacySettlementPostBatch(marked)
 		server.RunPosts(batched, legacySettlementClockPost(batched, 11), legacySettlementClockPost(batched, 11))
-		if hook.calls.Load() != 0 {
-			t.Fatal("a batched clock post published before its owner finished")
+		// The reset clock is absent, and it stays absent until the owner finishes.
+		if clock, ok := GetClock(ctx); hook.calls.Load() != 0 || ok {
+			t.Fatal("a batched clock post published before its owner finished", hook.calls.Load(), clock)
 		}
-		requireRedisExpiryClock(t, ctx, "0")
 		finish()
 		if hook.calls.Load() != 1 {
 			t.Fatal("the batch did not publish its clock in one pipeline", hook.calls.Load())
