@@ -685,6 +685,58 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       are still row-deleted;
     - the census prunes;
     - the cutover runs with inserts arriving.
+  - **Implemented (2026-10-24):** a registry family, `close_evidence`
+    (`db_contract_close_evidence_partition.go`): weekly by `report_id`, 4
+    weeks ahead, 91-day retention, a DEFAULT and a kept legacy partition, the
+    drop guarded by `urnetwork.close_evidence_retention`. The cutover is
+    `bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]`
+    (`db_contract_close_evidence_cutover.go`). One migration: the evidence
+    guard also admits a move, the delete half of a row whose identical copy
+    is already in the partition it moves to. Where the build differs:
+    - **Census:** each contract's reports are bounded by its receipts' report
+      ids (`contract_close_report`, written in the same transaction as the
+      evidence and removed only with the contract), not by its times. Times
+      plus a skew window cannot be complete: a client clock days off puts a
+      report in another retained week, and the census never publishes a
+      partial component. The receipts prune to exactly the weeks (or DEFAULT,
+      or legacy) holding the reports. An archived contract, whose receipts
+      left with it, reads every partition.
+    - **Locks:** creating a week takes ACCESS EXCLUSIVE on the parent, then
+      DEFAULT, for milliseconds. Locking DEFAULT alone would let an insert
+      route its row to DEFAULT and then fail the partition check once the
+      week attached; on the parent it waits and then routes into the week.
+      The drop fence takes the same locks and refuses without the opt-in or
+      before 91 days.
+    - **Drop check by index:** each week gets a partial index of the rows it
+      accepts more than a day after the week ends, so the precondition reads
+      only that index and the unresolved contracts older than 90 days
+      (`transfer_contract_outcome_null`). A week therefore drops a day after
+      its retention at the earliest.
+    - **Row deletes** cover the DEFAULT and legacy partitions and the expired
+      weeks a straggler keeps. Weeks not yet expired, and weeks the drop will
+      take, are left to the drop.
+    - **Cutover window:** from adding the bound until the swap, a new report
+      at or past the cutover week is refused, and its client (`ControlSync`)
+      retries it after the swap. The rows already past the bound are moved
+      into the staged DEFAULT first. Until the swap, readers of the table don't
+      see them, so the epoch census waits (`ErrCloseEvidenceCutoverMoving`),
+      and an exact retry of one is refused rather than counted again. The
+      contract task abandons a prepare still unfinalized 6 hours before its
+      week.
+    - **Rollback point:** rollback copies the rows outside the legacy
+      partition back into it, while there are at most 100,000 of them
+      (about until the cutover week).
+    - **Order with C1:** none needed, either way. The evidence has no foreign
+      key, the cutovers lock disjoint tables, and the drop and census reads
+      work on both contract layouts.
+    - **Monitor:** the move guard's artifact reads the custody in both
+      layouts. Its version comes from the migration list, not a literal.
+    - **Owner notes:** one client clock 1-90 days behind keeps every week it
+      reports into for up to its skew past retention, and those weeks are then
+      row-deleted as before (`MonitorRetentionGrace` is 13 weeks for this
+      reason). With `vacuum_truncate = off`, row-deleted space in the legacy
+      partition is reused but not returned. Once the row deletes empty it,
+      reclaiming it is an owner step.
 
 ### C6. Later, on size triggers or decisions
 
