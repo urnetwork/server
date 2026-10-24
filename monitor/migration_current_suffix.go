@@ -694,8 +694,11 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "registration", kind: "bytea"})),
 	migrationCurrentSuffix(855, "elected-winner review and successor source guards", competitionMigration855ArtifactQuery),
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
+	// the move guard replaces the evidence guard body and republishes the rest
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
-		contractCloseEvidenceRetentionArtifactQuery),
+		contractCloseEvidenceRetentionArtifactQuery).removedAt(contractCloseEvidenceMoveGuardMigrationVersion),
+	migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
+		contractCloseEvidenceMoveArtifactQuery),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

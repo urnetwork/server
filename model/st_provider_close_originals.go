@@ -7,6 +7,18 @@ import "github.com/urfoundation/sn/payoutartifact"
 // Each row costs at least 512 bytes against the 512 KiB window allowance, so
 // 1025 rows prove overflow. Disjoint indexed prefixes can stop there; only a
 // complete window is sorted and encoded. Usage itself still reads every owner.
+//
+// The evidence is partitioned by report_id (PARTITION-MAINTENANCE-PLAN.md C5),
+// so each contract's reports are read within the range of its report ids, and
+// the read prunes to the partitions holding them. The contract's own receipts
+// give that range exactly: every report retained beside a live contract has
+// its receipt in contract_close_report (written in the same transaction,
+// removed only with the contract), and a receipt carries the report id the
+// client minted, whatever its clock. Its times alone could not bound the
+// range: a client clock days off puts a report in another retained week, and
+// the census must hold every report. A contract with no receipts has no
+// reports, and an archived one, whose receipts left with it, reads every
+// partition.
 const stEpochProviderOriginalUsageSql = `
  WITH usage_rows AS MATERIALIZED (` + stEpochProviderUsageSql + `),
  window_rows AS MATERIALIZED (
@@ -39,9 +51,17 @@ const stEpochProviderOriginalUsageSql = `
  SELECT usage.*, CASE WHEN octet_length(combined.body)<=1048576 THEN combined.body ELSE originals.body END, false AS window_only
  FROM usage_rows AS usage CROSS JOIN window_body
  LEFT JOIN LATERAL (
+  SELECT
+   (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id LIMIT 1) AS first_report_id,
+   (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id DESC LIMIT 1) AS last_report_id,
+   EXISTS(SELECT 1 FROM transfer_contract live WHERE live.contract_id=usage.contract_id) AS live
+ ) AS report_range ON true
+ LEFT JOIN LATERAL (
   WITH selected AS MATERIALIZED (
    SELECT client_id,report_id,party,acked_byte_count,unacked_byte_count,checkpoint,original_report,original_key_registration,original_key_issue,original_inventory
    FROM contract_close_report_evidence WHERE contract_id=usage.contract_id
+    AND CASE WHEN report_range.live THEN report_range.first_report_id ELSE '00000000-0000-0000-0000-000000000000'::uuid END<=report_id
+    AND report_id<=CASE WHEN report_range.live THEN report_range.last_report_id ELSE 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid END
    ORDER BY client_id,report_id LIMIT 1025
   )
   SELECT CASE WHEN (SELECT count(*) FROM selected) BETWEEN 1 AND 1024

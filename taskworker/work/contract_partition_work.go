@@ -53,14 +53,15 @@ func MaintainContractPartitions(
 		maintainContractPartitions.Cursor,
 		maintainContractPartitionsBudget,
 	)
-	if 0 < len(report.Created) || 0 < len(report.Dropped) || 0 < report.Archived || 0 < report.EvidenceRemoved || report.AbandonedCutover {
+	if 0 < len(report.Created) || 0 < len(report.Dropped) || 0 < report.Archived || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows, abandoned cutover %t\n",
+			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows, abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Dropped,
 			report.Archived,
 			report.EvidenceRemoved,
 			report.AbandonedCutover,
+			report.AbandonedEvidenceCutover,
 		)
 	}
 	for partition, reason := range report.Blocked {
