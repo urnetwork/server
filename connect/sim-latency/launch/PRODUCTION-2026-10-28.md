@@ -134,3 +134,22 @@ settlement acceptance, and scheduled opening remain separate unchecked work.
 The manifest's 16.1% historical floor is explicitly provisional until fresh
 calibration; publishing it is not an assertion of a newly measured baseline or
 permission to bootstrap/open production.
+
+## Fixed-opening control integration
+
+The control-plane follow-up adds `bootstrap-source --opens-at=2026-10-28T00:00:00Z`
+using the source intent's existing immutable `opens_at` field. The supervisor
+preserves it across restart rather than substituting the current clock. Once
+qualified, the round can be advertised as `scheduled` before the opening;
+admission becomes open at the start-inclusive boundary without an operator
+having to start a process at midnight. Later epochs without a pin retain their
+normal post-review/readiness opening.
+
+An additive migration independently binds exact pinned openings in the round
+insert guard, retaining the full window, runtime, winner policy, source-mode,
+qualification, and lease requirements. It does not reinstall the obsolete
+repository-count guard. Deterministic parser/recovery and supervisor tests pass
+under race detection; real disposable-store tests reject both early and late
+Go/SQL writers and accept the scheduled control in production and staging.
+Deployment/migration and the actual pinned production bootstrap remain pending;
+this control-only change does not alter the frozen evaluated source checkpoint.

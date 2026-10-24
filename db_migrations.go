@@ -10723,4 +10723,7 @@ var migrations = []any{
 
 	// Both production and staging use only the ten live source repositories.
 	newSqlMigration(competitionSourceRetirementMigration()),
+
+	// Preserve an explicitly scheduled source opening independently of the supervisor.
+	newSqlMigration(competitionScheduledOpeningMigration()),
 }
