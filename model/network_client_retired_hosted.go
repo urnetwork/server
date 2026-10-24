@@ -151,13 +151,16 @@ func RemoveRetiredHostedNetworkClients(
 				return
 			}
 			result, err = tx.Query(ctx, removeRetiredHostedNetworkClientsSql, reapableClientIds, horizon)
+			// the windows of one proxy share its device
+			deviceIds := map[server.Id]bool{}
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var clientId server.Id
 					var deviceId *server.Id
 					server.Raise(result.Scan(&clientId, &deviceId))
 					batchClientIds = append(batchClientIds, clientId)
-					if deviceId != nil {
+					if deviceId != nil && !deviceIds[*deviceId] {
+						deviceIds[*deviceId] = true
 						batchDeviceIds = append(batchDeviceIds, *deviceId)
 					}
 				}
