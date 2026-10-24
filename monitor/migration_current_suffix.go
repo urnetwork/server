@@ -33,7 +33,7 @@ func migrationCurrentSuffixArtifactQueries() string {
 	return strings.Join(queries, ",\n")
 }
 
-var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
+var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 	migrationCurrentSuffix(794, "tiered extender directory and release custody",
 		snMainnetMigrationColumns("network_extender",
 			snMainnetMigrationColumn{name: "directory_tier", kind: "smallint", notNull: true, defaultExpression: "0"},
@@ -696,7 +696,7 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
-}
+}, providerUsageArchivePartitionContracts()...)
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.
