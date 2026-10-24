@@ -203,6 +203,12 @@ func raiseProviderEgressHealthInsertErr(err error, measuredAt time.Time) {
 // run_id) and on the partitioned one. An insert that finds no partition for
 // its day creates the day (the registry's EnsureRangeFor) and stores once more.
 func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) {
+	setProviderEgressHealthAt(ctx, health, server.NowUtc())
+}
+
+// The store as the clock reads now, which only judges whether a missing day
+// may be created; a test moves it across the retention.
+func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth, now time.Time) {
 	if health.UrlProbeEvidence != nil {
 		// Arrival time must not rejuvenate a delayed measurement. Do not mutate
 		// the caller's receipt; publication retries may share the same value.
@@ -258,7 +264,7 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 	}
 	// a day older than the ingest takes is a day retention may have dropped
 	// already, and recreating it would let a replay meet no row
-	if maxIngestAge := DefaultProviderEgressHealthHistorySettings().MaxIngestAge; health.MeasuredAt.Before(server.NowUtc().Add(-maxIngestAge)) {
+	if maxIngestAge := DefaultProviderEgressHealthHistorySettings().MaxIngestAge; health.MeasuredAt.Before(now.Add(-maxIngestAge)) {
 		panic(fmt.Errorf("%w: the measurement is older than the ingest's %s, so its day is not created", partitionMissingErr, maxIngestAge))
 	}
 	_, err = providerEgressHealthHistoryPartitionFamily.EnsureRangeFor(ctx, health.MeasuredAt)

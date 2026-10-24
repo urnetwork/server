@@ -70,6 +70,9 @@ type ProviderEgressHealthHistoryCutoverOptions struct {
 	Logf     func(string, ...any)
 	// nil uses DefaultProviderEgressHealthHistoryCutoverSettings
 	Settings *ProviderEgressHealthHistoryCutoverSettings
+	// a test's barrier: runs in the swap transaction once it holds its locks
+	// and its check passed, before the names change
+	swapLocked func()
 }
 
 // Tunables of the cutover.
@@ -127,10 +130,11 @@ func MigrateProviderEgressHealthHistoryToPartitions(ctx context.Context, now tim
 		return errors.New("choose one of --swap, --verify, --rollback, --abort and --drop-old")
 	}
 	cutover := &providerEgressHealthHistoryCutover{
-		now:      now.UTC(),
-		dryRun:   options.DryRun,
-		logf:     logf,
-		settings: settings,
+		now:        now.UTC(),
+		dryRun:     options.DryRun,
+		logf:       logf,
+		settings:   settings,
+		swapLocked: options.swapLocked,
 	}
 	switch {
 	case options.Swap:
@@ -157,10 +161,11 @@ func MigrateProviderEgressHealthHistoryToPartitions(ctx context.Context, now tim
 
 // One run of the cutover. Not safe for concurrent use.
 type providerEgressHealthHistoryCutover struct {
-	now      time.Time
-	dryRun   bool
-	logf     func(string, ...any)
-	settings *ProviderEgressHealthHistoryCutoverSettings
+	now        time.Time
+	dryRun     bool
+	logf       func(string, ...any)
+	settings   *ProviderEgressHealthHistoryCutoverSettings
+	swapLocked func()
 }
 
 // A relation's kind, or "" when it does not exist.
@@ -908,6 +913,9 @@ func (self *providerEgressHealthHistoryCutover) swap(ctx context.Context) error 
 			// of the table's, so equal counts are equal rows
 			if differ := providerEgressHealthHistoryDayDifferences(ctx, tx, providerEgressHealthHistoryTable, providerEgressHealthHistoryStagedTable, from, until); 0 < len(differ) {
 				panic(fmt.Errorf("the copy differs on %s; run prepare again", providerEgressHealthHistoryDayList(differ)))
+			}
+			if self.swapLocked != nil {
+				self.swapLocked()
 			}
 			for _, statement := range statements {
 				server.RaisePgResult(tx.Exec(ctx, statement))
