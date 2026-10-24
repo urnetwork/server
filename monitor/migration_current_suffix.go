@@ -698,6 +698,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		contractCloseEvidenceRetentionArtifactQuery),
 	migrationCurrentSuffix(858, "legacy auth attempt table dropped",
 		migrationTableRemoved("user_auth_attempt")),
+	migrationCurrentSuffix(859, "handler heartbeat index removed",
+		migrationIndexRemoved("network_client_handler", "network_client_handler_heartbeat_time")),
 }
 
 // A retired table stays dropped: a recreated copy under the published name

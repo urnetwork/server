@@ -10732,4 +10732,18 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		DROP TABLE IF EXISTS user_auth_attempt;
 	`),
+
+	// network_client_handler holds one row per connect handler process, a few
+	// dozen, and each heartbeats every 5 s. The heartbeat rewrites
+	// heartbeat_time, which this index keys, so every heartbeat was a non-HOT
+	// update that added an index entry. Its readers filter heartbeat_time over
+	// the whole table (the stale-handler scan and fresh count in
+	// network_client_handler_liveness.go, the provider liveness lease read and
+	// the monitor's handler counts), which a sequential scan of a few dozen
+	// rows answers; every other reader probes the primary key. Without the
+	// index the heartbeat is HOT.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS network_client_handler_heartbeat_time`,
+		`DROP INDEX IF EXISTS network_client_handler_heartbeat_time`,
+	),
 }

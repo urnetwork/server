@@ -223,6 +223,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "close evidence guard refuses retention again", version: 857, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
 		{name: "legacy auth attempt table recreated", version: 858, sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
+		{name: "dropped handler heartbeat index rebuilt", version: 859, sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -318,6 +319,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
 				{831, "audit_device_event", "audit_device_event_stats_device_id"},
+				{859, "network_client_handler", "network_client_handler_heartbeat_time"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool
