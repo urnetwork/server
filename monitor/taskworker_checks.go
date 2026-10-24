@@ -21,10 +21,11 @@ import (
 //
 //   - pg/task-lease-stranded (12.3): a claimed task whose keepalive went
 //     silent. While a task runs, its worker refreshes claim_time every
-//     ~ReleaseTimeout/3 (10s); a claim with a future release_time and a
-//     claim_time silent > 2 minutes means its timestamp refresh is unhealthy,
-//     not that its worker is dead. Session advisory ownership can outlive the
-//     five-minute timestamp lease. A deploy does not rewrite
+//     ~ReleaseTimeout/3 (10s); a claim whose claim_time has been silent > 2
+//     minutes, within the five minutes after that heartbeat, means its
+//     timestamp refresh is unhealthy, not that its worker is dead. Session
+//     advisory ownership can outlive the five-minute timestamp lease. A deploy
+//     does not rewrite
 //     the claim (InitTasks never touches claims); `bringyourctl task release`
 //     is available when immediate recovery is worth the operator check.
 //
@@ -51,15 +52,23 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 	findings := []finding{}
 
-	// stranded leases: claim held into the future with a silent keepalive
+	// Stranded leases: a held claim with a silent keepalive. A claim leaves
+	// release_time a whole lease after claim_time and a heartbeat at least half
+	// a lease after it, while a handback sets it to the handback time, seconds
+	// after the last heartbeat; two minutes apart marks a row its claim still
+	// holds. Heartbeats extend release_time only once half the lease is left
+	// (task.refreshTaskTimestampLeasesInTx), so a stalled claim's timestamp can
+	// lapse 2.5 minutes after its last heartbeat. The window stays the five
+	// minutes after that heartbeat, or the whole lease of an older claim.
 	strandedRows, err := env.runner.pg(ctx, `
 		SELECT split_part(function_name,'.',3) AS task,
 		       round(extract(epoch FROM now()-claim_time))::int AS silent_s,
 		       round(extract(epoch FROM release_time-now()))::int AS lease_remaining_s,
 		       run_max_time_seconds
 		FROM pending_task
-		WHERE now() < release_time
-		  AND claim_time < now() - interval '2 minutes'
+		WHERE claim_time < now() - interval '2 minutes'
+		  AND claim_time + interval '2 minutes' < release_time
+		  AND now() < greatest(release_time, claim_time + interval '5 minutes')
 		ORDER BY lease_remaining_s DESC LIMIT 10;
 	`)
 	if err != nil {
@@ -72,12 +81,12 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		findings = append(findings, finding{
 			probeId: "pg/task-lease-stranded", tier: tierWarn,
 			class: "task-lease-stranded", target: target, frame: task, sustain: 2,
-			symptom: fmt.Sprintf("task %s timestamp keepalive silent %ss but timestamp lease held %ss more (max_time %ss) — owner liveness needs independent verification",
+			symptom: fmt.Sprintf("task %s timestamp keepalive silent %ss with %ss left on its timestamp lease, negative once lapsed (max_time %ss) — owner liveness needs independent verification",
 				task, r.str(1), r.str(2), r.str(3)),
-			baseline: "a running task refreshes claim_time every ~10s; the timestamp lease expires within 5m, but a surviving session advisory lock continues to exclude duplicate ownership (12.3)",
+			baseline: "a running task refreshes claim_time every ~10s and extends its timestamp lease once half of its 5m is left; the lease lapses 2.5-5m after the last heartbeat, but a surviving session advisory lock continues to exclude duplicate ownership (12.3)",
 			observed: fmt.Sprintf("silent_s=%s lease_remaining_s=%s max_time_s=%s claim_identity=withheld", r.str(1), r.str(2), r.str(3)),
 			context:  "correlate with exact taskworker generation, resource pressure, advisory session heartbeat, refresh errors and deploys; timestamp expiry alone does not make an advisory-owned task claimable",
-			evidence: fmt.Sprintf("timestamp lease expires in %ss, advisory ownership not established by this probe; the durable claim identifier remains available only through the protected operator lookup", r.str(2)),
+			evidence: fmt.Sprintf("timestamp lease ends in %ss (negative once lapsed), advisory ownership not established by this probe; the durable claim identifier remains available only through the protected operator lookup", r.str(2)),
 			action:   "Observe timestamp expiry and independently establish session ownership. If immediate recovery is required, first prove the claiming worker is dead, then obtain the exact claim through the protected operator path and use the supported task release command without copying the identifier into an alert or transcript. Releasing a running task can permit duplicate execution.",
 			verify:   "The stranded lease expires or is safely released after its owner is proven dead, one successor claims the task, and the task reaches a real terminal result without duplicate execution.",
 			playbook: "SIGNALS.md 12.3",

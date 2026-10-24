@@ -1669,10 +1669,13 @@ WHERE function_name LIKE '%UpdateClient%'
   `migration-schema-drift`. Never create the object by hand or delete the task
   row to hide either condition.
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
-  every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
-  future release_time = pre-lease-fix binary or killed worker. Current workers
-  use a five-minute rolling lease, so a killed worker's claim self-releases
-  within five minutes of its final heartbeat. A direct-postgres session lock
+  every ~10s (the keepalive writes claim_time; since 2026-10-24 it moves
+  release_time only once less than half of the five-minute lease remains, so
+  a live claim's release_time sits 2.5–5 minutes ahead and steps forward about
+  every 2.5 minutes). Frozen claim + future release_time = pre-lease-fix binary
+  or killed worker. Current workers use a five-minute rolling lease, so a
+  killed worker's claim self-releases within five minutes of its final
+  heartbeat, often sooner. A direct-postgres session lock
   still prevents duplicate execution if only the heartbeat is starved and the
   original worker remains alive. A raw p95 is not sufficient when repeated
   defects have polluted the tail: use `min(2*p95, max(4*p50, 20m))`, with the
@@ -8596,6 +8599,29 @@ worker. Actual cadence can be lengthened by the monitor global minimum; preserve
 source clocks. Source/query failures retain visibility errors. No full journal
 COUNT or customer identifiers are collected.
 
+Idle partitions (2026-10-24, PARTITION-MAINTENANCE-PLAN.md Part B): the second
+consecutive pass that finds its partition's journal empty schedules the next
+pass 30 s out instead of 2 s and leaves a Redis idle mark (`{task_idle_wake}`
+hash tag, two-minute TTL, renewed by each idle pass). A single empty pass between
+debits keeps the 2 s cadence and sets no mark. After its commit, a settlement or deadline close
+that journaled a debit deletes the mark of each partition it wrote, and the
+producer that deleted it kicks the chain, so the next pass is due at once. The
+kick is a pooled transaction that moves the chain's run_at only if its queue
+key is free; a held key means the chain is being claimed, finished or
+rescheduled, which covers the debit. An active partition has no mark: its
+producers pay one Redis round trip and write nothing to the queue, and
+concurrent producers coalesce into one kick. The idle pass sets its mark only after its finishing commit and
+then reads the journal again, so a debit committed in between still wakes it.
+Without a kick (Redis unavailable, a lost post, a producer from an older
+build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
+60 s WARN; the bands are unchanged. An empty partition samples
+`urnetwork_transfer_debit_oldest_seconds` only every 30 s, so its dashboard
+observation age reads up to about 30 s while healthy.
+`urnetwork_task_idle_wake_total{outcome}` counts marks (`marked`), marks
+cleared by a resumed pass (`resumed`), kicks (`kicked`), producer wakes of
+active chains (`active`), cleared marks whose queue key was held (`busy`) or
+whose chain was already due (`due`), and Redis or queue failures (`error`).
+
 `urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
 `flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
 supply per-process drill-down. State `pending` awaits PG debit; `redis_release`
@@ -8751,8 +8777,11 @@ protects the grant from expiry and shard deletion.
 
 The probe uses 48 indexed oldest-row seeks: all 16 partitions and each finite
 state `none`, `accounting`, `operational`, including rows whose next attempt is
-in the future. Pending age warns at 60 seconds; any retained accounting or
-operational failure warns immediately. Any age at 300 seconds pages. These are
+in the future. Pending age warns at 90 seconds: an empty partition's
+dispatcher runs every 30 s (2026-10-24), and the payer turn it publishes waits
+its 30 s collection window, so a new intent can be 60 s old before its first
+attempt. Any retained accounting or operational failure warns immediately.
+Any age at 300 seconds pages. These are
 initial design escalation bands, not measured Main capacity. Every partition
 must share a source clock within 30 seconds. Partial, duplicate, malformed or
 stale evidence is unknown. Before schema 763 the probe is inapplicable; a missing
@@ -8765,8 +8794,12 @@ wait 30 seconds. Neither is a verified close. The original error remains logged,
 and this signal retains the unresolved financial state between retries. The
 original 64-visit page advances past busy/failed keys and persists its composite
 cursor. Immediate continuation requires successful progress; otherwise normal
-scheduling waits two seconds. The database loop has a 15-second context and
-individual worker statements use 2-second statement / 250ms lock timeouts.
+scheduling waits two seconds, or thirty from the second consecutive pass that
+began fresh payer, source and registration rounds and found nothing. Legacy
+enqueuers do not kick the dispatcher; the scheduled-close handoff and expiry
+recovery wake it at once through the RunOnce merge. The database loop has a
+15-second context and individual worker statements use 2-second statement /
+250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
 The current 256-visit and payer-turn profiles below supersede the historical
@@ -34980,10 +35013,15 @@ Both registered consumers retain that unknown through their accept filters;
   unvisited work remains unknown, and missing findings do not clear under
   partial coverage. Restore complete observations before claiming recovery.
 
-Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence):
-claim with a future release_time whose keepalive (claim_time refresh every
-~10s while running) has been silent > 2 minutes = unhealthy timestamp refresh,
-not proof that its worker or session is gone.
+Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence): a
+held claim whose keepalive (claim_time refresh every ~10s while running) has
+been silent > 2 minutes, during the five minutes after that heartbeat or an
+older claim's longer lease = unhealthy timestamp refresh, not proof that its
+worker or session is gone. A claim or heartbeat leaves release_time at least
+2.5 minutes after claim_time and a handback sets it to the handback time, so
+the probe counts a row as held while the two are more than two minutes apart.
+Since 2026-10-24 a stalled claim's release_time can lapse before those five
+minutes end; the probe keeps watching it until they do.
 ```sql
 -- claims held with a future release: normal while a task RUNS; suspect when
 -- the claiming container is gone (correlate with deploys/restarts)
@@ -35002,7 +35040,11 @@ ORDER BY release_time DESC;
   can be a temporarily stranded claim. Current binaries cap release_time at five
   minutes after the last heartbeat regardless of run_max_time_seconds, so the
   chain becomes reconsiderable in at most five minutes after its direct
-  ownership session disappears, instead of 30min–24h. A
+  ownership session disappears, instead of 30min–24h. Since 2026-10-24 a
+  heartbeat extends release_time only once less than half the lease remains,
+  so a live claim shows `lease_remaining_s` between about 150 and 300 and a
+  dead owner's claim can lapse sooner than five minutes after its final
+  heartbeat. A
   direct-postgres session advisory lock remains held while a worker is alive,
   so a starved heartbeat alone cannot create a duplicate; PostgreSQL drops the
   lock with the dead worker's connection. A lease remaining far beyond five

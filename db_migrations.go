@@ -10777,4 +10777,15 @@ var migrations = []any{
 	// days. Update and truncate stay refused. The truncate trigger is the only
 	// table lock, held briefly on st_client_key_history.
 	newSqlMigration(clientKeyHistoryRetentionSchemaSql),
+
+	// A running task's heartbeat now writes only claim_time between lease
+	// extensions (task.refreshTaskTimestampLeasesInTx). No index covers it, so
+	// the update is HOT when the row's page has room for the new version.
+	// Fillfactor 50 keeps half of each page for those versions. The queue holds
+	// a few thousand live rows, so halving the rows per page costs megabytes;
+	// a row keeps its args and JWT JSON inline up to the 2 kB TOAST threshold,
+	// and half a page fits two such versions where 70 would fit one. Every
+	// later insert honors the setting, so the table converges as its rows turn
+	// over, without a rewrite. See taskHeartbeatFillfactorSql.
+	newSqlMigration(taskHeartbeatFillfactorSql),
 }

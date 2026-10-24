@@ -3889,6 +3889,11 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
                 (contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 				contractId, balanceId, sweepPayouts[balanceId].payoutByteCount, transferDebitShard(balanceId)))
 		}
+		if 0 < len(lockedBalanceIds) {
+			// After the commit, a backed-off flush chain of these partitions
+			// is kicked; an active one is not touched.
+			posts = append(posts, transferDebitWakePost(ctx, lockedBalanceIds))
+		}
 	} else {
 		for _, balanceId := range lockedBalanceIds {
 			if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {

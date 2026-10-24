@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -716,7 +718,16 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 		contractCloseEvidenceMoveArtifactQuery),
 }, append(providerUsageArchivePartitionContracts(),
 	retiredChildNetworkClientIndexMigrationContract,
-	clientKeyHistoryRetentionMigrationContract)...)
+	clientKeyHistoryRetentionMigrationContract,
+	migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
+		pendingTaskFillfactorArtifactQuery))...)
+
+// A fillfactor governs only later writes, so the published setting itself is
+// the artifact. The version is looked up by the migration's SQL and follows it
+// wherever a merge places it.
+const pendingTaskFillfactorArtifactQuery = `EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.pending_task')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=50']::text[])`
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.
