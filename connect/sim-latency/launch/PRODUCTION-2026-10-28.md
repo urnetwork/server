@@ -216,3 +216,32 @@ locally to prevent automatic staging work from overlapping these measurements
 when main returns. No accepted job or main database state was modified. Inspect
 the authoritative staging backlog after maintenance before resuming/replacing
 that supervisor; do not discard accepted work as part of production activation.
+
+## Review broker preparation
+
+Server control-plane commit `0bb6f10f98e7239c0460cbfee7c3deda08ada83d`
+implements `review-broker`, a tool-free Sol 6.1 max Responses API client, and
+durably preserves completed unresolved responses before validation. A retry
+cannot keep requesting new judgments until approval appears. Identity/policy
+changes fail closed; transport failures without completed output may retry
+within the original durable deadline. This does not change the frozen evaluated
+server commit or replace its evaluator image.
+
+Focused race tests passed, including three repeated invocations. The repeated
+test log SHA-256 is
+`e1f1c613de54a6c9b32298e525a240aa353bf126a41ab68e2da3e377570c8af1`.
+The clean static control binary SHA-256 is
+`e0a02ad59f37b937bb0f5c141e1933a7937f8a14c6bed9802080889acdc6ceb0`;
+its scratch image ID is
+`sha256:250d108319778e2500712317eee0c5eeefa0c4adc1d6bab41eee9ffdcebcb214`.
+A network-disabled, read-only, non-root startup probe correctly refused the
+missing dedicated model key. That probe's log SHA-256 is
+`84d90d83ab65ae5c08c397658df468dd008594e527345432f8e550d00f394191`.
+
+The model key is not provisioned, the broker is not enabled in the supervisor,
+and no live provider review or full containment qualification is claimed.
+Follow [`../evaluator/review/README.md`](../evaluator/review/README.md) to
+provision and qualify the actual installed boundary. Independent build-broker
+qualification remains separate. Full harness repetition is in progress during
+an intentional calibration inter-replicate pause, not concurrently with timed
+scoring; resume calibration after those checks finish.
