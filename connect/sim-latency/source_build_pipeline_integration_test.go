@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -107,7 +108,9 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 	}
 	request := reviewedSourceBuildRequest{Operation: "isolated_reviewed_source_build", Proposal: &proposal, SourceManifest: prospective, SourceGeneration: generation.Generation + 1,
 		ConfigLocalDirectory: "/synthetic/config/local", VaultLocalDirectory: "/synthetic/vault/local", SandboxContract: "offline_evaluator_containment_v1"}
+	dockerCalls := 0
 	docker := func(commandCtx context.Context, args []string, out, diagnostics io.Writer) error {
+		dockerCalls++
 		command := exec.CommandContext(commandCtx, "/usr/bin/sudo", append([]string{"-n", "/usr/bin/docker", "--host=unix:///var/run/docker.sock"}, args...)...)
 		command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
 		command.Stdout, command.Stderr = out, diagnostics
@@ -125,7 +128,7 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 			t.Error("temporary synthetic probe image cleanup failed", err)
 		}
 	}()
-	correctness, err := executeSourceCorrectnessSuite(ctx, request, *artifacts, owner, settings, docker)
+	correctness, err := executeJournaledSourceCorrectness(ctx, request, *artifacts, owner, settings, defaultSourceTestJournalSettings(), docker)
 	if err != nil {
 		t.Fatalf("offline correctness probe failed; private evidence retained at %s: %v", artifacts.Directory, err)
 	}
@@ -135,6 +138,11 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 	}
 	if err := writePrivateReviewFile(filepath.Join(artifacts.Directory, "synthetic-probe-correctness.json"), correctnessBytes); err != nil {
 		t.Fatal(err)
+	}
+	beforeReplay := dockerCalls
+	replay, err := executeJournaledSourceCorrectness(ctx, request, *artifacts, owner, settings, defaultSourceTestJournalSettings(), docker)
+	if err != nil || !reflect.DeepEqual(correctness, replay) || dockerCalls != beforeReplay {
+		t.Fatal("completed actual correctness replay changed facts or invoked Docker again", err)
 	}
 	t.Logf("observed offline correctness tests=%d logs_sha256=%s; direct Go execution, not model provenance", correctness.TestCount, correctness.TestLogsSha256)
 	data, err := json.Marshal(artifacts)

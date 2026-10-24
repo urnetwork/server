@@ -468,3 +468,13 @@ and full probe log SHA-256 is
 The temporary image and all owned containers were removed successfully. This
 is direct Go execution against synthetic source-review fixtures; no live
 model, complete database-suite or physical-host qualification is claimed here.
+
+The correctness executor now has a durable execution journal. Exact plan identity
+is reserved and directory-synced before dispatch; observations publish atomically
+without overwrite, and replay rechecks retained logs instead of calling Docker.
+Completed failures cannot be resampled. Concurrent callers, unknown/interrupted
+owners, changed plans, corrupt records and missing/modified/redirected evidence
+are deterministic regression cases. Journal/correctness tests passed three
+race-enabled runs. The real full-path probe is being updated to verify journal
+replay with zero additional Docker calls. Provider-response journaling and the
+complete independent-model/host qualifier remain unfinished launch work.
