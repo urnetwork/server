@@ -209,7 +209,11 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
 			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
+				// an online build of a large table outlives the role's
+				// transaction_timeout
+				WithoutTransactionTimeout(ctx, conn, func() {
+					Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
+				})
 			}, OptReadWrite(), OptNoRetry())
 		case *CodeMigration:
 			if DbMigrationVerbose {
@@ -10721,12 +10725,13 @@ var migrations = []any{
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
 
-	// Retired child clients are hard deleted a day after their deactivation
-	// (PARTITION-MAINTENANCE-PLAN.md Part D; db_identity_retention.go). The
-	// reap reads them by deactivation time through this partial index, which
-	// holds only the children waiting for it. Building it reads the 455 GB
-	// heap twice and waits for older snapshots, without blocking writes; an
-	// interrupted build's leftover is dropped and rebuilt.
+	// Retired hosted identities are hard deleted a day after their
+	// deactivation (PARTITION-MAINTENANCE-PLAN.md Part D;
+	// db_identity_retention.go). The reap pages the retired children by
+	// deactivation time through this partial index, which holds only retired
+	// children. Building it reads the 455 GB heap twice and waits for older
+	// snapshots, without blocking writes; an interrupted build's leftover is
+	// dropped and rebuilt.
 	newRestartableOnlineSqlMigration(
 		retiredChildNetworkClientIndexRecoverySql,
 		retiredChildNetworkClientIndexSql,
