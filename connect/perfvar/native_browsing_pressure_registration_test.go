@@ -39,6 +39,10 @@ func TestNativeBrowsingPressureRegistrationPreservesFrozenWorkload(t *testing.T)
 	if err := (nativeBrowsingRunSettings{maxLivePages: plan.maxLivePages}).validate(); err != nil {
 		t.Fatal(err)
 	}
+	settings := plan.runSettings(&nativeBrowsingPressureObservation{})
+	if err := settings.validate(); err != nil || !settings.nextNavigationOverlap || settings.maxLivePages != plan.maxLivePages {
+		t.Fatalf("pressure registration lost its revised next-navigation body overlap: %v", err)
+	}
 	plannedBytes := 0
 	for page := range nativeBrowsingPageCount {
 		pageBytes := nativeBrowsingPageBytes(page)
