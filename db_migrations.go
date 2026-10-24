@@ -10823,4 +10823,22 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE transfer_debit_journal SET (fillfactor = 70);
 	`),
+
+	// provider_egress_probe_cycle_next_attempt (next_attempt_at, client_id)
+	// predates the eligible flag. Every reader that orders or bounds
+	// next_attempt_at also requires eligible: the URL due claim, its promotion,
+	// pending and renewal repair heads (provider_url_probe_due.go,
+	// provider_url_probe_completed_priority.go,
+	// provider_url_probe_renewal_compat.go) read the eligible partial index
+	// with one shard and the slot partial index with several, and the
+	// monitor's freshness sample reads the slot index. So no query reads this
+	// index, while every write of next_attempt_at, for eligible and retired
+	// providers alike, added an entry to it. The slot and non-slot partial
+	// pairs both stay, since one shard reads the non-slot indexes and several
+	// shards the slot ones. The completed-priority pair stays too: it is
+	// nearly empty outside priority mode, so it costs almost nothing.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS provider_egress_probe_cycle_next_attempt`,
+		`DROP INDEX IF EXISTS provider_egress_probe_cycle_next_attempt`,
+	),
 }

@@ -713,6 +713,9 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		transferDebitJournalHotArtifactQuery),
 	migrationCurrentSuffix(865, "transfer debit journal pages keep room for the applied version",
 		migrationFillfactor("transfer_debit_journal", 70)),
+	// 866 retires the v723 composite, which pinned the dropped index
+	migrationCurrentSuffix(866, "URL receipt history and durable probe queue without the unread full deadline index",
+		migrationFp2DurableQueueWithoutFullDeadlineIndexQuery),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

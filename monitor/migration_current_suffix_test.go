@@ -232,6 +232,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped debit journal applied age index rebuilt", version: 864, sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
 		{name: "debit journal shard index missing", version: 864, sql: `DROP INDEX transfer_debit_journal_shard`},
 		{name: "debit journal pages filled", version: 865, sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "dropped full probe deadline index rebuilt", version: 866, sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
+		{name: "probe queue identity missing", version: 866, sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

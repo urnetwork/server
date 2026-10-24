@@ -395,7 +395,7 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "competition staging lifecycle winner eligibility", requiredVersion: 720, rowColumn: 131},
 	{name: "competition staging winner approval and append-only guards", requiredVersion: 721, rowColumn: 132},
 	{name: "connection and rollup ARIN exception facts", requiredVersion: 722, rowColumn: 133},
-	{name: "URL receipt history and durable probe queue", requiredVersion: 723, rowColumn: 134},
+	{name: "URL receipt history and durable probe queue", requiredVersion: 723, removedVersion: 866, rowColumn: 134},
 	{name: "provider_egress_health.security_measured_at", requiredVersion: 724, rowColumn: 135},
 	{name: "probe queue eligibility and partial due index", requiredVersion: 725, rowColumn: 136},
 	{name: "URL receipt marker and pre-version success index", requiredVersion: 726, removedVersion: 729, rowColumn: 137},
