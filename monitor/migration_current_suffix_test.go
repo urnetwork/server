@@ -226,6 +226,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped handler heartbeat index rebuilt", version: 859, sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
 		{name: "transfer balance pages filled", version: 860, sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
 		{name: "device pages filled", version: 861, sql: `ALTER TABLE device SET (fillfactor = 100)`},
+		{name: "search provider stats pages filled", version: 862, sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

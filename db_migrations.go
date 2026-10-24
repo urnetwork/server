@@ -10775,4 +10775,17 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE device SET (fillfactor = 90);
 	`),
+
+	// RollupSearchProviderStats rolls the open hour up every minute, so a row
+	// of a provider matched through the hour is rewritten up to 60 times.
+	// UpsertSearchProviderStats now skips a row whose count is unchanged, and
+	// the columns it rewrites (period_end, match_count) are not indexed, so a
+	// rewrite is HOT when the page has room. The hour's rows are inserted
+	// together, one page holds many of them, and each keeps rewriting through
+	// its hour, hence 70. It applies to pages written from now on, and to
+	// every page at the next compaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE search_provider_stats SET (fillfactor = 70);
+	`),
 }

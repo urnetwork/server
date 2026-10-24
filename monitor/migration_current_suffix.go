@@ -704,6 +704,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationFillfactor("transfer_balance", 85)),
 	migrationCurrentSuffix(861, "device pages keep room for in-place updates",
 		migrationFillfactor("device", 90)),
+	migrationCurrentSuffix(862, "search provider stats pages keep room for open-hour rollups",
+		migrationFillfactor("search_provider_stats", 70)),
 }
 
 // Free space a table keeps on every page it writes, so an update of an
