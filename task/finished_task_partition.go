@@ -167,19 +167,20 @@ func releaseFinishedTaskPartitionPosts(ctx context.Context, leaf string, cursor 
 // The drop transaction's fence, after the registry's lock and statement
 // bounds and before any detach. It defers while a long transaction holds a
 // finished_task lock, so the exclusive request never queues completions
-// behind one; locks the parent and every partition, which a Post retry's
-// statements wait behind until the drop commits; and then refuses while the
-// day still holds a failed Post, whose owner was busy when the release ran.
-// Raises to refuse.
+// behind one; then locks the parent, which every statement on the table locks
+// first, and the day, as the detach will, so a Post retry's next statement
+// waits until the drop commits; and then refuses while the day still holds a
+// failed Post, whose owner was busy when the release ran. Raises to refuse.
 func fenceFinishedTaskPartitionDrop(ctx context.Context, tx server.PgTx, leaf string, settings *server.FinishedTaskPartitionSettings) {
 	if holders := server.FinishedTaskLongLockHolders(ctx, tx, settings.MaxTransactionAge); 0 < holders {
 		server.Raise(fmt.Errorf("%d transaction(s) older than %s hold finished_task locks", holders, settings.MaxTransactionAge))
 	}
-	server.RaisePgResult(tx.Exec(ctx, `LOCK TABLE public.finished_task IN ACCESS EXCLUSIVE MODE`))
+	quoted := "public." + pgx.Identifier{leaf}.Sanitize()
+	server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`LOCK TABLE ONLY public.finished_task, %s IN ACCESS EXCLUSIVE MODE`, quoted)))
 	var remaining int
 	server.Raise(tx.QueryRow(
 		ctx,
-		fmt.Sprintf(`SELECT count(*) FROM ONLY public.%s WHERE post_error IS NOT NULL AND NOT post_completed`, pgx.Identifier{leaf}.Sanitize()),
+		fmt.Sprintf(`SELECT count(*) FROM ONLY %s WHERE post_error IS NOT NULL AND NOT post_completed`, quoted),
 	).Scan(&remaining))
 	if 0 < remaining {
 		server.Raise(fmt.Errorf("%d failed Post(s) in %s wait for their finished owners", remaining, leaf))
