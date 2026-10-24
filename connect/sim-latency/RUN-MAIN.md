@@ -154,6 +154,22 @@ image and attempt. A missing qualifier, changed pin, cancellation, or incomplete
 model/containment evidence returns no usable receipt. Do not substitute the
 synthetic offline pipeline probe for genuine winner review or qualification.
 
+The evaluator host's private `/etc/urnetwork/competition-qualification.json`
+must bind `reviewed_build_state_directory` to that same mode-0700, root-owned
+build state. After the API acknowledges the exact prepared source, the updated
+host qualifier holds the global evaluation slot and authenticates the original
+review-indexed reservation, owner receipts, tests/containment and prospective
+host profile. It checks the actual new fingerprint using the pinned checker's
+root-only `--json --config` interface, rechecks the supervisor fence and unchanged
+active file, then atomically updates only the reviewed image/fingerprint pins.
+The old reset/readiness markers are not promoted into new-image proof. The real
+runtime qualification and independent worker acknowledgment must still pass
+before source activation or the next epoch opening. Missing inventory, stale
+approval, boot drift, lost authority or changed local leaves block and alert.
+Deploy the updated qualification executable and checker together; an older
+checker that lacks the protected alternate-config interface cannot prepare a
+promoted winner. Initial checkpoint provisioning remains an explicit root step.
+
 The `automation_progression_blocked` metric/dashboard and
 `CompetitionAutomaticClosingBlocked` alert use the existing
 `service=sim-latency` routing to support@ur.xyz. Deploy the accompanying
@@ -400,6 +416,18 @@ recording a worker receipt. The API acknowledges its own installation through
 the authenticated source-readiness endpoint. The adapter must obtain both; a
 successful exit without those exact durable receipts is retried, not cached as
 `preparation_ready`. Main competition configuration is not hand-edited per epoch.
+
+In the trusted preparation and host-qualification settings, `api_image_digest`
+is an optional deployment restriction, not a requirement to freeze main for a
+season. Leave it empty when main API deployments advance independently. The
+adapter still authenticates the HTTPS response against the separately read,
+immutable API readiness row, binds its actual runtime digest for this intent,
+and rejects a different identity at completion. Host qualification records that
+observed digest in its retained profile/result. An existing intent reuses its
+original valid acknowledgment without rewriting it after a rollout; a new intent
+can acknowledge the new main release. If an explicit digest is configured, it
+remains a strict restriction. Worker identity, pinned programs, exact source and
+both-role quorum requirements are unchanged.
 
 The repository now supplies that concrete worker stdin mode; point the worker
 setting at its independently qualified release binary and pin the binary digest.

@@ -24,24 +24,7 @@ import (
 
 // Independent build/test evidence binds the exact reviewed source and isolated
 // execution boundary, not a caller's unsupported "build passed" assertion.
-type reviewedSourceBuildReceipt struct {
-	Schema                  int       `json:"schema"`
-	Staging                 bool      `json:"staging,omitempty"`
-	ReviewId                server.Id `json:"review_id"`
-	PatchSha256             string    `json:"patch_sha256"`
-	SourceLockSha256        string    `json:"source_lock_sha256"`
-	EvaluatorImageDigest    string    `json:"evaluator_image_digest"`
-	HostQualificationSha256 string    `json:"host_qualification_sha256"`
-	ContainmentSha256       string    `json:"containment_sha256"`
-	TestEvidenceSha256      string    `json:"test_evidence_sha256"`
-	SandboxId               string    `json:"sandbox_id"`
-	Offline                 bool      `json:"offline"`
-	NoMainCredentials       bool      `json:"no_main_credentials"`
-	ReadOnlySource          bool      `json:"read_only_source"`
-	Passed                  bool      `json:"passed"`
-	TestModel               string    `json:"test_model"`
-	TestReasoning           string    `json:"test_reasoning"`
-}
+type reviewedSourceBuildReceipt = controller.CompetitionReviewedSourceBuildReceipt
 
 // Completed proposals do not occupy activation generations or alter refs.
 // Choice later rechecks genuine approval and the unchanged evaluated base.
@@ -98,14 +81,7 @@ func validateReviewedSourceBuild(receipt reviewedSourceBuildReceipt, reviewId se
 
 // Binds independent image qualification to the explicit mode as well as pins.
 func validateReviewedSourceBuildForMode(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool) error {
-	if receipt.Schema != 1 || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
-		!receipt.Passed || !receipt.Offline || !receipt.NoMainCredentials || !receipt.ReadOnlySource || receipt.SandboxId == "" ||
-		receipt.TestModel != "gpt-6.1-sol" || receipt.TestReasoning != "low" ||
-		!strings.HasPrefix(receipt.EvaluatorImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(receipt.EvaluatorImageDigest, "sha256:")) ||
-		!validSha256(receipt.HostQualificationSha256) || !validSha256(receipt.ContainmentSha256) || !validSha256(receipt.TestEvidenceSha256) {
-		return errors.New("reviewed source requires exact independent isolated build/test and containment evidence")
-	}
-	return nil
+	return controller.ValidateCompetitionReviewedSourceBuildReceipt(receipt, reviewId, patchDigest, lockDigest, staging)
 }
 
 // Selects only a completed, applicable proposal at the frozen deadline. Exact

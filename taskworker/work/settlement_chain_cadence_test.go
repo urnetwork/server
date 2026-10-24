@@ -83,38 +83,3 @@ func TestTransferDebitFlushEmptyOnlyForAnEmptyPartition(t *testing.T) {
 		}
 	}
 }
-
-// Only a pass that began fresh rounds and found nothing at all is empty.
-func TestLegacySettlementDispatchEmptyOnlyForAnEmptyFreshRound(t *testing.T) {
-	id := server.NewId()
-	payerCursor := &model.LegacySettlementPayerCursor{End: id}
-	registrationCursor := &model.LegacySettlementOwnerCursor{End: id}
-	fresh := &FlushLegacySettlementsArgs{Shard: 3}
-	for _, c := range []struct {
-		name     string
-		args     *FlushLegacySettlementsArgs
-		dispatch *model.LegacySettlementDispatchResult
-		want     bool
-	}{
-		{name: "empty", args: fresh, dispatch: &model.LegacySettlementDispatchResult{}, want: true},
-		{name: "empty_backed_off", args: &FlushLegacySettlementsArgs{Shard: 3, EmptyPasses: 2}, dispatch: &model.LegacySettlementDispatchResult{}, want: true},
-		// The compatibility cursor passes through every pass unchanged.
-		{name: "empty_with_compatibility_cursor", args: &FlushLegacySettlementsArgs{Shard: 3, Cursor: &model.LegacySettlementCursor{ContractId: id}},
-			dispatch: &model.LegacySettlementDispatchResult{}, want: true},
-		{name: "payer_round_end", args: &FlushLegacySettlementsArgs{Shard: 3, PayerCursor: payerCursor}, dispatch: &model.LegacySettlementDispatchResult{}},
-		{name: "source_round_end", args: &FlushLegacySettlementsArgs{Shard: 3, SourceCursor: payerCursor}, dispatch: &model.LegacySettlementDispatchResult{}},
-		{name: "registration_round_end", args: &FlushLegacySettlementsArgs{Shard: 3, RegistrationCursor: registrationCursor}, dispatch: &model.LegacySettlementDispatchResult{}},
-		{name: "more", args: fresh, dispatch: &model.LegacySettlementDispatchResult{More: true}},
-		{name: "payer_probed", args: fresh, dispatch: &model.LegacySettlementDispatchResult{Probes: 1}},
-		{name: "source_probed", args: fresh, dispatch: &model.LegacySettlementDispatchResult{SourceProbes: 1}},
-		{name: "payer_ready", args: fresh, dispatch: &model.LegacySettlementDispatchResult{PayerNetworkIds: []server.Id{id}}},
-		{name: "source_ready", args: fresh, dispatch: &model.LegacySettlementDispatchResult{SourceClientIds: []server.Id{id}}},
-		{name: "registered", args: fresh, dispatch: &model.LegacySettlementDispatchResult{Registered: 1}},
-		{name: "unresolved", args: fresh, dispatch: &model.LegacySettlementDispatchResult{RegistrationUnresolved: 1}},
-		{name: "registration_failed", args: fresh, dispatch: &model.LegacySettlementDispatchResult{RegistrationFailed: true}},
-	} {
-		if got := legacySettlementDispatchEmpty(c.args, c.dispatch); got != c.want {
-			t.Errorf("%s: empty=%t, want %t", c.name, got, c.want)
-		}
-	}
-}

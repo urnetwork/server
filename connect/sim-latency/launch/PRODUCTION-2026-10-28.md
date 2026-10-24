@@ -5,6 +5,19 @@ qualification start immediately. Current upstream development heads replace the
 previous plan to wait for a Monday source freeze. Do not admit public submissions
 before the opening or reinterpret an existing staging round as production.
 
+The inactive root-owned October 24 host-control installation, exact artifact
+identities, test evidence and remaining activation gates are recorded in
+[HOST-CONTROL-2026-10-24.md](HOST-CONTROL-2026-10-24.md). It does not change the
+frozen evaluated source below or assert live production readiness.
+
+**Frontier correction (October 24, 18:01 UTC):** the frozen executable's
+`--no-impair` mode was not propagated to fleet subprocesses. All four-shard
+requested-off points below actually had impaired children, so their on/off
+interpretations and capacity eligibility are withdrawn. Raw runs remain retained;
+the frontier index explicitly records the invalid mode. The impairment-on R9
+dataset is unaffected. A fixed, authenticated executable and true off trials are
+required before final scale selection; no old sidecar is rewritten to fake them.
+
 ## Candidate source checkpoint
 
 Fetched October 24 from the development branches below. These are candidate
@@ -69,6 +82,14 @@ and failing controller outcome are both preserved, not relabeled as a clean
 whole-pipeline pass. All five measured attempts are now versioned in the frontier
 archive; only the two 1,800-provider trials are usable capacity points, and none
 is an official baseline sample.
+
+A separate immutable-controller 7,200-provider impairment-off attempt completed
+cleanly at about 17:33 UTC: all 200 clients warmed, all four shards drained,
+controller exit 0, no diagnostic signal and no leftover trial containers. Its
+complete artifacts are retained in the frontier archive as
+`p7200-off-handoff-fix`; the earlier failed run is unchanged. This adds capacity
+evidence but neither explains the intermittent teardown failure nor establishes
+nine-run stability, a calibrated margin, final scale or a hidden-seed baseline.
 
 The next public-seed nine-run set uses fresh disposable PostgreSQL/Redis per
 replicate and the same 1,800-provider/four-exchange-instance workload. It stops
@@ -173,6 +194,46 @@ passed three repetitions (8.579 seconds). The measured checkpoint remains
 `67c87445abe6725b25b3df2a13af7eb99cd4f8ed`, not advancing control main.
 Read-only checks at 15:50 UTC still show API `503 source_not_ready` and refused
 TCP connections to sille's MinIO endpoint. Production has not been activated.
+
+### Reviewed-image host handoff — October 24, 16:43 UTC
+
+The automatic promotion path now installs the reviewed image's expected host
+fingerprint inside the existing fenced qualification operation, after genuine
+API acknowledgment and acquisition of the singleton evaluation slot. Previously
+the qualifier required the new image pin while the host document still held
+the incumbent pin. The new step authenticates the review-indexed reservation,
+matching broker/owner receipts, retained tests/containment and same-boot host
+profile; it reproduces the actual fingerprint through the pinned alternate-config
+checker before changing the active document. Only image/fingerprint pins change.
+The old markers do not become readiness for a new image or round: real runtime
+qualification, protected artifact retention and worker acknowledgment still run.
+
+The root qualification inventory now needs `reviewed_build_state_directory`,
+matching the build broker's private root-owned state. It is required for new
+elected-winner-policy deployment, not accepted from submissions. Existing exact
+root provisioning and carry-forward remain supported. Shared evidence types keep
+producer/consumer wire shapes identical instead of copying private CLI schemas.
+Restart tests also cover an interrupted exclusive publication leaving a private
+temporary hard link: trusted root records remain readable, while the untrusted
+submission-artifact hard-link restriction remains intact.
+
+Focused producer/consumer regressions passed three race repetitions. The expanded
+controller preparation suite, including actual disposable-DB qualification-slot
+tests, passed three race repetitions (24.374 seconds; log
+`a89ffc4155ee63c11add6521d18d8fba8ec8259bf67f1eb7b13ab447c4905495`).
+An earlier direct invocation correctly failed environment preflight before DB
+tests because it omitted the standard local test environment; that log remains
+retained. The corrected harness sources `test-env.sh` explicitly.
+Three consecutive full simulator-suite invocations then passed in 195, 124 and
+124 seconds, with owned fixture cleanup. Logs:
+
+- `1175349797a91059e0f92c7621fe81431114f404d2c83ab75e76d99d452d1ddf`
+- `637f07171946d47466e0b6cb8a2b5e48b981e4f209a3d6ecf9451355f12dfa75`
+- `3bc9e9d83e39d989b64ad7555a5b1b291f6d88a7fb27a7037126fee02068fb2f`
+
+These are implementation/test results, not a live main-DB preparation proof.
+No main writes, active host-document replacement or production activation occurred
+during maintenance. The frozen measured checkpoint and nine raw runs are unchanged.
 
 ### Restart/review-build validation — October 24, 13:38 UTC
 

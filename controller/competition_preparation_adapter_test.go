@@ -358,7 +358,7 @@ func TestCompetitionPreparationAdapterRejectsOldApiAndRedirects(t *testing.T) {
 		}))
 		adapter.config.ApiBaseUrl, adapter.client = api.URL, api.Client()
 		adapter.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		err := adapter.acknowledgeApi(context.Background(), &request.Intent)
+		_, err := adapter.acknowledgeApi(context.Background(), &request.Intent)
 		api.Close()
 		if err == nil {
 			t.Fatalf("status %d bypassed exact capability or redirect refusal", status)

@@ -43,7 +43,7 @@ type contractCloseReportAbort struct{ cause error }
 // finality and identified work already covered by a legacy checkpoint bound.
 // Exact retries remain successful after settlement or contract-directory cleanup.
 // Success acknowledges the report, not necessarily a terminal outcome:
-// checkpoints, disputes and deferred legacy settlement can remain unfinished.
+// checkpoints and disputes can remain unfinished.
 func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (applied bool, returnErr error) {
 	applied, _, returnErr = closeContractWithReportUsage(ctx, report)
 	return

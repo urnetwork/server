@@ -1,6 +1,14 @@
 # Provisional reference submissions
 
-These patches exercise the exact current editable surface,
+**Historical development references, not the October 28 launch inputs.** All
+three patches below fail `git apply --check` against the October 24 frozen
+server `67c87445abe6725b25b3df2a13af7eb99cd4f8ed`. The contract manager has
+changed architecture since their original base. Preserve their identities as
+historical evidence; do not rebase them silently or reuse their build or
+ordering claims. Fresh, explicitly unqualified October checkpoint inputs live
+in [2026-10-24/](2026-10-24/README.md).
+
+At their original development checkpoint, these patches exercised the editable surface,
 `connect/resident_contract_manager.go`, and are inputs to the noise and
 separability campaign. They are not accepted competition references yet.
 
@@ -14,7 +22,7 @@ separability campaign. They are not accepted competition references yet.
   production-valid and plausibly faster under the current workload, but the
   official campaign—not this rationale—decides whether it is actually better.
 
-The current development target is base Git SHA
+Their historical development target is base Git SHA
 `472e6ae1c0054452c7cf9cac9736325dfbcdd616`, evaluator-base image
 `sha256:20e5700deffad5e5f32922f2318c5f3b3670b54f0493b61f4a5196ebea600c65`,
 and patch-policy SHA-256

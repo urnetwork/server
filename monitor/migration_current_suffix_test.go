@@ -262,6 +262,22 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped full connection extender index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), sql: `CREATE INDEX network_client_connection_client_id_connected_extender_id ON network_client_connection (client_id, connected, extender_id)`},
 		{name: "dropped full connection address index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), sql: `CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)`},
 		{name: "dropped full connection disconnect time index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), sql: `CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)`},
+		// The retired queue's guard, function and key stay gone; its empty
+		// table keeps the published shape.
+		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{name: "retired legacy settlement outcome guard restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+			CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract
+			FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`},
+		{name: "retired legacy settlement contract key restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)`},
+		{name: "retained legacy settlement queue loses its due index", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `DROP INDEX legacy_settlement_intent_due`},
+		{name: "retained legacy settlement queue loses its shard check", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
+		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

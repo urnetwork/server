@@ -49,9 +49,7 @@ func TestSubnetOperatorWorkloadKeepsRequiredTargets(t *testing.T) {
 		task.NewTaskTarget(work.StFinalizePoke), task.NewTaskTarget(work.SweepVerifyTrails),
 		task.NewTaskTarget(work.RollupVerifyProviderStats), task.NewTaskTarget(work.RemoveOldVerifyProviderStats),
 		task.NewTaskTarget(work.RefreshVerifyProxyEgress), task.NewTaskTarget(work.CloseExpiredContracts),
-		task.NewTaskTarget(work.ReconcileNetEscrow), task.NewTaskTarget(work.FlushLegacySettlements),
-		model.NewLegacyPayerSettlementTaskTarget(),
-		model.NewLegacySourceSettlementTaskTarget(),
+		task.NewTaskTarget(work.ReconcileNetEscrow), work.NewTransferDebitTaskTarget(),
 		task.NewTaskTarget(work.RefreshContractHoles),
 		task.NewTaskTarget(model.RemoveNetworkClientsTask),
 		task.NewTaskTarget(work.DbMaintenance), task.NewTaskTarget(work.BackfillClock),
@@ -65,6 +63,11 @@ func TestSubnetOperatorWorkloadKeepsRequiredTargets(t *testing.T) {
 	for _, legacyName := range []string{"main.TaskCleanup", "bringyour.com/service/taskworker/work.CloseExpiredContracts"} {
 		if !worker.HasTarget(legacyName) {
 			t.Errorf("subnet operator lost retained alias %s", legacyName)
+		}
+	}
+	for _, functionName := range removedTaskTargets {
+		if worker.HasTarget(functionName) {
+			t.Errorf("subnet operator registered removed target %s", functionName)
 		}
 	}
 	for _, target := range []task.Target{

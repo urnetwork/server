@@ -218,9 +218,11 @@ type CloseScheduledContractArgs struct {
 }
 
 // A deferred close keeps RetryAt so an older Post still reschedules it at its
-// deadline; a current Post honors the later deferral instead.
+// deadline; a current Post honors the later deferral instead. An older
+// worker's result can also carry an owner handoff to the retired legacy
+// settlement queue; it decodes without that field, and the expiry sweep
+// retires such a contract past its deadline.
 type CloseScheduledContractResult struct {
-	Owner          *model.ContractCloseOwner             `json:"owner,omitempty"`
 	RetryAt        *time.Time                            `json:"retry_at,omitempty"`
 	Reconciliation *model.ContractDeadlineReconciliation `json:"reconciliation,omitempty"`
 	DeferredUntil  *time.Time                            `json:"deferred_until,omitempty"`
@@ -341,14 +343,11 @@ func CloseScheduledContract(args *CloseScheduledContractArgs, clientSession *ses
 	}
 }
 
-// Early wakes retain the deadline. Owner handoffs are only for results written
-// by older workers; new due results already committed terminal reconciliation.
-// Register those retained hints with their owner wake; busy or changed custody
-// yields a new child without changing its deadline. A deferral, by an owner
-// held through the wait or a slot that did not free, wakes later; its
-// unchanged arguments keep the original deadline authority. A contract another
-// closer retired meanwhile gets no successor: it could only finish as a
-// terminal no-op.
+// Early wakes retain the deadline; due results already committed terminal
+// reconciliation. A deferral, by an owner held through the wait or a slot that
+// did not free, wakes later; its unchanged arguments keep the original
+// deadline authority. A contract another closer retired meanwhile gets no
+// successor: it could only finish as a terminal no-op.
 func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseScheduledContractResult,
 	clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.DeferredUntil != nil || result.RetryAt != nil {
@@ -367,20 +366,6 @@ func CloseScheduledContractPost(args *CloseScheduledContractArgs, result *CloseS
 		default:
 			scheduleContractClose(clientSession, tx, args)
 		}
-	}
-	if result.Owner != nil {
-		queued, err := model.QueueRegisteredLegacyCloseContractInTx(clientSession, tx, args.ContractId, *result.Owner)
-		if err != nil {
-			return err
-		}
-		if !queued {
-			task.ScheduleTaskInTx(tx, CloseScheduledContract, args, clientSession,
-				model.ScheduledContractCloseRunOnce(args.ContractId), task.RunAt(server.NowUtc().Add(2*time.Second)),
-				task.MaxTime(30*time.Second), task.RequireQueueOwnership(tx))
-			return nil
-		}
-		shard := int(args.ContractId[15]) % model.LegacySettlementShardCount
-		scheduleFlushLegacySettlements(clientSession, tx, shard, nil, nil, true, nil, nil)
 	}
 	return nil
 }
@@ -407,33 +392,10 @@ func (self *scheduledContractClosureTarget) Run(ctx context.Context, queued *tas
 	return self.Target.Run(ctx, queued)
 }
 
-func (self *scheduledContractClosureTarget) TaskCompletionOwnershipKeys(t *task.Task, raw string) ([]server.PgOwnershipKey, error) {
-	var result CloseScheduledContractResult
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, err
-	}
-	if result.Owner == nil {
-		return nil, nil
-	}
-	var args CloseScheduledContractArgs
-	if err := json.Unmarshal([]byte(t.ArgsJson), &args); err != nil {
-		return nil, err
-	}
-	var payers, sources []server.Id
-	switch result.Owner.Kind {
-	case model.ContractCloseOwnerPayerNetwork:
-		payers = []server.Id{result.Owner.Id}
-	case model.ContractCloseOwnerSourceClient:
-		sources = []server.Id{result.Owner.Id}
-	default:
-		return nil, fmt.Errorf("invalid scheduled close owner")
-	}
-	keys, err := model.LegacyCloseSettlementQueueOwnershipKeys(payers, sources)
-	if err != nil {
-		return nil, err
-	}
-	shard := int(args.ContractId[15]) % model.LegacySettlementShardCount
-	return append(keys, task.RunOnceOwnershipKey(task.RunOnce(fmt.Sprintf("flush_legacy_settlements_%d", shard)))), nil
+// The Post writes only this contract's own close key, which completion always
+// owns.
+func (self *scheduledContractClosureTarget) TaskCompletionOwnershipKeys(_ *task.Task, _ string) ([]server.PgOwnershipKey, error) {
+	return nil, nil
 }
 
 func NewScheduledContractClosureTaskTarget() task.Target {

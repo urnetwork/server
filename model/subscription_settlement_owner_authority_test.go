@@ -18,7 +18,7 @@ func TestSettlementOwnerReadsReportsAfterContractWait(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		_, id := legacySettlementTestIntent(t, ctx)
+		_, id := legacySettlementTestOpenFinals(t, ctx)
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
 		held := server.RaisePgResult(conn.Begin(ctx))
@@ -88,7 +88,7 @@ func TestLegacySettlementOwnerKeepsFreshUsageParticipants(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		provider, providerNetwork, streamId, sibling := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		addContractPayoutTestClients(ctx, map[server.Id]server.Id{provider: providerNetwork})
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -104,18 +104,18 @@ func TestLegacySettlementOwnerKeepsFreshUsageParticipants(t *testing.T) {
 		defer stopHooks()
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {
-			var completed, busy bool
+			var closed bool
 			var err error
 			hooked, unhook := withLegacyStatementHooks(ctx, tx, owner.hook())
 			defer unhook()
-			posts, completed, busy, _, err = flushLegacySettlementInTx(hooked, tx, id)
+			posts, closed, err = settleEscrowForegroundInTx(hooked, tx, id, ContractOutcomeSettled)
 			server.Raise(err)
-			if !completed || busy {
+			if !closed {
 				t.Fatal("stream control failed to settle")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		server.RunPosts(ctx, posts...)
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 989, 0)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 989, 0)
 		requireLegacyProviderDurability(t, ctx, f, id, 11)
 		var raw []byte
 		server.Db(ctx, func(conn server.PgConn) {
@@ -145,16 +145,15 @@ func TestLegacySettlementOwnerSeparatesBillingAndUsageDirection(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_origin_is_source=false WHERE contract_id=$1`, id))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=15 WHERE contract_id=$1 AND party='destination'`, id))
 		})
-		completed, busy, _, err := flushLegacySettlement(ctx, id)
-		if err != nil || !completed || busy {
+		if err := SettleEscrow(ctx, id, ContractOutcomeSettled); err != nil {
 			t.Fatal("opposite retained usage direction failed settlement", err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, id, false, true, 987, 0)
+		requireLegacySettlementTestState(t, ctx, f, id, true, 987, 0)
 		requireLegacyProviderDurability(t, ctx, f, id, 13)
 		var raw []byte
 		server.Db(ctx, func(conn server.PgConn) {
@@ -176,24 +175,26 @@ func TestLegacySettlementOwnerPreservesUsageRefusals(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		for _, mode := range []string{"checkpoint", "negative_unselected", "missing_direction"} {
-			f, id := legacySettlementTestIntent(t, ctx)
+			f, id := legacySettlementTestOpenFinals(t, ctx)
+			outcome := ContractOutcomeSettled
 			server.Tx(ctx, func(tx server.PgTx) {
 				switch mode {
 				case "checkpoint":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=true WHERE contract_id=$1 AND party='source'`, id))
 				case "negative_unselected":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET outcome='dispute_resolved_to_destination' WHERE contract_id=$1`, id))
+					outcome = ContractOutcomeDisputeResolvedToDestination
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=-1 WHERE contract_id=$1 AND party='source'`, id))
 				case "missing_direction":
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_origin_is_source=NULL WHERE contract_id=$1`, id))
 				}
 			})
-			completed, _, _, err := flushLegacySettlement(ctx, id)
-			if err == nil || completed {
+			var err error
+			server.HandleError(func() { err = SettleEscrow(ctx, id, outcome) }, func(recovered error) { err = recovered })
+			if err == nil {
 				t.Fatal(mode, "invalid usage committed a financial prefix")
 			}
-			requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
-			requireLegacyDrainNoFinancialPrefix(t, ctx, id)
+			requireLegacySettlementTestState(t, ctx, f, id, false, 1000, 100)
+			requireLegacySettlementNoFinancialPrefix(t, ctx, id)
 		}
 	})
 }

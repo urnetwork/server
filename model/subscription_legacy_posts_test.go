@@ -1,10 +1,11 @@
-// Commit, cancellation and ambiguous-reply controls exercise the real owners.
+// The post batch a deadline owner shares across its turns: coalescing, and the
+// ambiguous-reply control on its one clock pipeline.
 package model
 
 import (
 	"context"
-	"errors"
 	"io"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,106 +14,38 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func TestLegacySettlementPostBatchCanceledPrefixAndResume(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		first, firstId, second, secondIds := legacyHeadRevisitFixture(t, ctx, 1)
-		testingResetClock(ctx)
-		defer testingResetClock(ctx)
-		bounded, expire := context.WithCancelCause(ctx)
-		defer expire(context.Canceled)
-		visits := 0
-		shard := int(firstId[15]) % LegacySettlementShardCount
-		page, err := flushLegacySettlementsPage(ctx, bounded, shard, nil, 2,
-			func(callCtx context.Context, id server.Id, wait *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error) {
-				visits++
-				if visits != 1 || id != firstId {
-					t.Fatal("canceled page admitted another financial visit")
-				}
-				completed, busy, gate, err := flushLegacySettlementWithGrantWait(callCtx, id, wait)
-				if err != nil || !completed || busy {
-					t.Fatal("prefix did not reach the real committed owner", err)
-				}
-				// Cancellation occurs after its enqueuing post has joined and
-				// before the next selection. No timeout or scheduler race orders it.
-				expire(errLegacySettlementPageBudget)
-				return completed, busy, gate, err
-			})
-		if err != nil || page.Completed != 1 || page.Visited != 1 || !page.More || page.Cursor == nil || page.Cursor.ContractId != firstId {
-			t.Fatalf("cancellation lost the committed prefix: %+v %v", page, err)
+// Batched clock and stream posts only record their committed values until the
+// owner finishes the batch; a nested owner shares the outer batch.
+func TestLegacySettlementPostBatchCoalescesClockAndStreamPosts(t *testing.T) {
+	ctx, finish := withLegacySettlementPostBatch(t.Context())
+	batch := ctx.Value(legacySettlementPostBatchKey{}).(*legacySettlementPostBatch)
+	nested, nestedFinish := withLegacySettlementPostBatch(ctx)
+	if nested.Value(legacySettlementPostBatchKey{}).(*legacySettlementPostBatch) != batch {
+		t.Fatal("a nested owner replaced the shared batch")
+	}
+	// The outer owner alone drains the batch.
+	nestedFinish()
+	contractIds := []server.Id{server.NewId(), server.NewId()}
+	for _, post := range []server.PostFunction{
+		legacySettlementClockPost(nested, 11),
+		legacySettlementStreamPost(nested, contractIds[0]),
+		legacySettlementClockPost(ctx, 17),
+		legacySettlementStreamPost(ctx, contractIds[1]),
+	} {
+		if result := post(); result != nil {
+			t.Fatal("a batched post returned follow-up work", result)
 		}
-		requireLegacySettlementTestState(t, ctx, first, firstId, false, true, 989, 0)
-		requireLegacySettlementTestState(t, ctx, second, secondIds[0], true, false, 1000000, 100)
-		requireLegacyProviderDurability(t, ctx, first, firstId, 11)
-		requireRedisExpiryClock(t, ctx, "11")
-		resumed, err := FlushLegacySettlements(ctx, shard, page.Cursor, 2)
-		if err != nil || resumed.Completed != 1 || resumed.Visited != 1 || resumed.Cursor != nil {
-			t.Fatal("resumption did not own only the remaining intent", resumed, err)
+	}
+	func() {
+		batch.stateLock.Lock()
+		defer batch.stateLock.Unlock()
+		if !slices.Equal(batch.clockByteCounts, []ByteCount{11, 17}) || !slices.Equal(batch.streamContractIds, contractIds) {
+			t.Fatal("the batch lost or reordered a committed projection", batch.clockByteCounts, batch.streamContractIds)
 		}
-		requireLegacySettlementTestState(t, ctx, second, secondIds[0], false, true, 999989, 0)
-		requireLegacyProviderDurability(t, ctx, second, secondIds[0], 11)
-		requireRedisExpiryClock(t, ctx, "22")
-		if replay, err := FlushLegacySettlements(ctx, shard, nil, 2); err != nil || replay.Visited != 0 {
-			t.Fatal("canceled prefix replay repeated consumption", replay, err)
-		}
-		requireRedisExpiryClock(t, ctx, "22")
-	})
-}
-
-func TestLegacySettlementPostBatchRollbackPublishesNothing(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		owner, id := legacySettlementTestIntent(t, ctx)
-		streamId := AddToStream(ctx, id, owner.sourceId, owner.destinationId, nil)
-		testingResetClock(ctx)
-		defer testingResetClock(ctx)
-		reconcileClockCandidate(ctx, 0)
-		batched, finish := withLegacySettlementPostBatch(ctx)
-		synthetic := errors.New("synthetic financial rollback before projection admission")
-		var caught error
-		server.HandleError(func() {
-			server.Tx(batched, func(tx server.PgTx) {
-				posts, complete, busy, _, err := flushLegacySettlementInTx(batched, tx, id)
-				server.Raise(err)
-				if !complete || busy || len(posts) == 0 {
-					t.Fatal("rollback did not exercise the financial body and projection construction")
-				}
-				panic(synthetic)
-			}, server.TxReadCommitted, server.OptNoRetry())
-		}, func(err error) { caught = err })
-		finish()
-		finish()
-		if caught != synthetic {
-			t.Fatal("financial rollback changed its cause", caught)
-		}
-		requireLegacySettlementTestState(t, ctx, owner, id, true, false, 1000, 100)
-		requireLegacyProviderDurability(t, ctx, owner, id, 0)
-		requireRedisExpiryClock(t, ctx, "0")
-		if got, _, ok := GetStream(ctx, id); !ok || got != streamId {
-			t.Fatal("rolled-back financial attempt removed its live stream")
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var count int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1`, legacyColdPageMirrorFunction).Scan(&count))
-			if count != 0 {
-				t.Fatal("rolled-back financial attempt retained durable mirror work")
-			}
-		})
-		page, err := FlushLegacySettlements(ctx, int(id[15])%LegacySettlementShardCount, nil, 1)
-		if err != nil || page.Completed != 1 {
-			t.Fatal("rollback prevented later ordinary settlement", page, err)
-		}
-		requireRedisExpiryClock(t, ctx, "11")
-		if _, _, ok := GetStream(ctx, id); ok {
-			t.Fatal("committed page failed to remove the original stream")
-		}
-	})
+		// An empty batch finishes without any Redis work.
+		batch.clockByteCounts, batch.streamContractIds = nil, nil
+	}()
+	finish()
 }
 
 type legacyPostClockReplyKey struct{}
@@ -147,46 +80,37 @@ func (self *legacyPostClockReplyHook) ProcessPipelineHook(next redis.ProcessPipe
 	}
 }
 
+// The batch publishes its clock increments in one non-retrying pipeline. A
+// reply lost after Redis applied them is not replayed, and a second finish
+// has nothing left to publish.
 func TestLegacySettlementPostBatchLostClockReplyIsNotReplayed(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-		first, id, second, secondIds := legacyHeadRevisitFixture(t, ctx, 1)
 		testingResetClock(ctx)
 		defer testingResetClock(ctx)
 		hook := &legacyPostClockReplyHook{}
 		server.RedisDoOnce(ctx, func(client server.RedisClient) { client.AddHook(hook) })
 		marked := context.WithValue(ctx, legacyPostClockReplyKey{}, hook)
-		page, err := FlushLegacySettlements(marked, int(id[15])%LegacySettlementShardCount, nil, 2)
-		if err != nil || page.Completed != 2 || page.Failed != 0 || hook.calls.Load() != 1 {
-			t.Fatal("lost optional reply changed finances or repeated the batch", page, err, hook.calls.Load())
+		batched, finish := withLegacySettlementPostBatch(marked)
+		server.RunPosts(batched, legacySettlementClockPost(batched, 11), legacySettlementClockPost(batched, 11))
+		// The reset clock is absent, and it stays absent until the owner finishes.
+		if clock, ok := GetClock(ctx); hook.calls.Load() != 0 || ok {
+			t.Fatal("a batched clock post published before its owner finished", hook.calls.Load(), clock)
+		}
+		finish()
+		if hook.calls.Load() != 1 {
+			t.Fatal("the batch did not publish its clock in one pipeline", hook.calls.Load())
 		}
 		requireRedisExpiryClock(t, ctx, "22")
-		requireLegacySettlementTestState(t, ctx, first, id, false, true, 989, 0)
-		requireLegacySettlementTestState(t, ctx, second, secondIds[0], false, true, 999989, 0)
-		requireLegacyProviderDurability(t, ctx, first, id, 11)
-		requireLegacyProviderDurability(t, ctx, second, secondIds[0], 11)
-		if replay, err := FlushLegacySettlements(marked, int(id[15])%LegacySettlementShardCount, nil, 2); err != nil || replay.Visited != 0 || hook.calls.Load() != 1 {
-			t.Fatal("financial replay retried an ambiguous clock publication", replay, err)
+		finish()
+		if hook.calls.Load() != 1 {
+			t.Fatal("a repeated finish retried an ambiguous clock publication", hook.calls.Load())
 		}
 		requireRedisExpiryClock(t, ctx, "22")
 	})
-}
-
-func TestLegacySettlementPostBatchBoundsDistinctMirrors(t *testing.T) {
-	ctx, _ := withLegacySettlementPostBatch(t.Context())
-	batch := ctx.Value(legacySettlementPostBatchKey{}).(*legacySettlementPostBatch)
-	ids := make([]server.Id, LegacySettlementPageLimit+1)
-	for index := range ids {
-		ids[index] = server.NewId()
-	}
-	legacySettlementMirrorPost(ctx, ids)()
-	legacySettlementMirrorPost(ctx, ids)()
-	if len(batch.mirrorBalanceIdSet) != LegacySettlementPageLimit {
-		t.Fatal("page mirror memory escaped its distinct-balance ceiling")
-	}
 }
 
 func TestStreamRemovalBatchPreservesSharedMembersAndReplay(t *testing.T) {

@@ -195,12 +195,18 @@ func TestWithoutTransactionTimeoutPgClosesSessionLeftInTransaction(t *testing.T)
 func TestWithoutTransactionTimeoutPgRefusesMainPoolSession(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// sessions opened before the migration set the role default run
+		// without the bound, so start new ones
+		PgReset()
 		MaintenanceDb(ctx, func(conn PgConn) {
 			if direct, _ := conn.Conn().PgConn().CustomData()[pgDirectSessionKey].(bool); !direct {
 				t.Fatal("a maintenance pool session is not marked direct")
 			}
 		})
 		Db(ctx, func(conn PgConn) {
+			if value := showTransactionTimeout(t, ctx, conn); value != testApplicationTransactionTimeout {
+				t.Fatalf("the main pool session starts with transaction_timeout=%s, want %s", value, testApplicationTransactionTimeout)
+			}
 			called := false
 			recovered := captureDbErrorPanic(func() {
 				WithoutTransactionTimeout(ctx, conn, func() { called = true })
@@ -208,8 +214,8 @@ func TestWithoutTransactionTimeoutPgRefusesMainPoolSession(t *testing.T) {
 			if recovered != errTransactionTimeoutPooledSession || called {
 				t.Fatalf("recovered=%v called=%t, want a refusal", recovered, called)
 			}
-			if value := showTransactionTimeout(t, ctx, conn); value == "0" {
-				t.Fatal("a refused main pool session was exempted")
+			if value := showTransactionTimeout(t, ctx, conn); value != testApplicationTransactionTimeout {
+				t.Fatalf("a refused main pool session has transaction_timeout=%s, want %s", value, testApplicationTransactionTimeout)
 			}
 		})
 	})

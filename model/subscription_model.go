@@ -857,7 +857,6 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	if len(balanceIds) == 0 {
 		return pending
 	}
-	defer enterLegacySettlementTiming(ctx, legacySettlementColdCensus)()
 	server.Tx(ctx, func(tx server.PgTx) {
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
 		pending = readNetEscrowSnapshots(ctx, tx, balanceIds)
@@ -1267,13 +1266,6 @@ func isForceCloseAccountingRejection(closeErr error, quarantineErr error, cleanu
 func isForceCloseQuarantinedAccountingRejection(closeErr error, quarantineClaimed bool, quarantineErr error, cleanupErr error) bool {
 	return quarantineClaimed && quarantineErr == nil && cleanupErr == nil &&
 		isOnlyContractError(closeErr, errContractInsufficientEscrow)
-}
-
-// A fresh intent read delegates this row only after every preceding phase
-// succeeded. Finding the pending sentinel in a joined error cannot erase an
-// operational failure or authorize an accounting-only page checkpoint.
-func isForceCloseDeferredSettlement(closeErr error, quarantineErr error, cleanupErr error) bool {
-	return closeErr == nil && quarantineErr == nil && cleanupErr == errLegacySettlementPending
 }
 
 // Only the exact guard permits one post-failure read. Missing, changed, or
@@ -2842,9 +2834,8 @@ func createContractNoEscrowInTx(
 // observed increment, rather than summing ambiguous retries. This may
 // undercount distinct work; callers with stable identities use
 // CloseContractWithReport for exact counts. The final increment is added
-// once. A nil error may acknowledge a checkpoint, dispute or durable
-// settlement intent; expiration has the stronger terminal guarantee
-// documented on ReconcileContractAtDeadline.
+// once. A nil error may acknowledge a checkpoint or dispute; expiration has
+// the stronger terminal guarantee documented on ReconcileContractAtDeadline.
 func CloseContract(
 	ctx context.Context,
 	contractId server.Id,
@@ -3237,8 +3228,8 @@ func observeContractSettlementTxForTest(ctx context.Context, contractId server.I
 // would: the mean of the two for payment, the receiver's for the clock, and
 // the smaller for usage. The checkpoint is completed exactly as the expiry
 // task completes one, as a zero-byte final, in the settlement's own
-// transaction, so later reports and legacy settlement intents see an ordinary
-// two-final contract and a failed settlement rolls the completion back.
+// transaction, so later reports see an ordinary two-final contract and a
+// failed settlement rolls the completion back.
 func settleContractWithOptions(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope, receiverFollowsSenderFinal bool) (closed bool, completedCheckpoint bool, returnErr error) {
 	var posts []func() any
 	var clockTransferByteCount ByteCount
@@ -3737,15 +3728,16 @@ func meanContractByteCount(first, second ByteCount) (ByteCount, error) {
 	return lower + (upper-lower)/2, nil
 }
 
-// The exact legacy implementation remains the worker's financial authority.
-// Foreground calls select the durable deferred path below instead.
+// The original synchronous settlement: a legacy reservation writes its
+// earnings, escrow metadata and provider display totals in posts after the
+// caller's commit. Production callers use the foreground owner below.
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (posts []func() any, closed bool, returnErr error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, false)
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false)
 }
 
 func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) ([]func() any, bool, error) {
@@ -3755,13 +3747,17 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 // Ordinary and scoped closes use the same durable debit owner. The caller's
 // expiry transaction already enforces its scope before this continuation.
 func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, _ *contractExpiryRepairScope) ([]func() any, bool, error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true)
 }
 
-// Current Redis contracts append independent consumption records. Legacy
-// callers queue an intent without releasing their reservation; the worker uses
-// the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
-func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool, closeOwners ...ContractCloseOwner) (posts []func() any, closed bool, returnErr error) {
+// Current Redis contracts append independent consumption records. A legacy
+// (unmarked) reservation, admitted before Redis admission became the only
+// path, settles in the caller's transaction through its original atomic
+// debit/outcome path. With inlineFinancial that transaction also commits its
+// exact earnings, escrow metadata and durable mirror and provider-total
+// owners, as the retired legacy settlement queue's worker did
+// (PARTITION-MAINTENANCE-PLAN.md, Part B).
+func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3770,9 +3766,6 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var asyncDebit, hasEscrow bool
 	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
         FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
-	if deferLegacy && hasEscrow && !asyncDebit {
-		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
-	}
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
@@ -3812,7 +3805,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	})
 	var usedTransferByteCount ByteCount
 	var clockTransferByteCount ByteCount
-	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId, closeOwners...)
+	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3955,16 +3948,14 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
+			mirrorPost := func() any {
+				refreshNetEscrow(ctx, mirrorBalanceIds)
+				return nil
+			}
 			if inlineFinancial {
 				// One durable owner per balance coalesces every close, including a
 				// cache hit that can be invalidated before this post gets to run.
 				queueLegacyNetEscrowMirrorsInTx(ctx, tx, mirrorBalanceIds)
-			}
-			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
-				refreshNetEscrow(ctx, mirrorBalanceIds)
-				return nil
-			})
-			if inlineFinancial {
 				mirrorPost = legacySettlementMirrorPost(ctx, mirrorBalanceIds)
 			}
 			if len(reservationSnapshots) < len(positiveReservations) {
@@ -4448,7 +4439,7 @@ func recordForceCloseContract(resolution string, tag string) {
 // - one or more checkpoints
 // - dispute (settled with both sides accepted)
 // ContractExpiryPosition is an ordered continuation through a bounded raw
-// selection page, including contracts already owned by legacy settlement.
+// selection page.
 type ContractExpiryPosition struct {
 	CreateTime time.Time `json:"create_time"`
 	ContractId server.Id `json:"contract_id"`
@@ -4548,10 +4539,10 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	}
 	openRawRows, disputeRawRows := []forceCloseRawRow{}, []forceCloseRawRow{}
 
-	// LIMIT bounds raw candidates before pending-intent and quiet-period
-	// checks. The cursor advances through skipped rows too; a retained old
-	// financial cohort cannot occupy every future selection. The existing
-	// row-level proof and intent race guard still own every mutation.
+	// LIMIT bounds raw candidates before quiet-period checks. The cursor
+	// advances through skipped rows too; a retained old financial cohort
+	// cannot occupy every future selection. The existing row-level proof
+	// still owns every mutation.
 	rawOpen, rawDisputed := 0, 0
 	if !next.OpenDone {
 		position := ContractExpiryPosition{}
@@ -4719,18 +4710,15 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		found := false
 		finalized := false
 		disputed := false
-		pending := false
 		readState := func() {
 			found = false
 			finalized = false
 			disputed = false
-			pending = false
 			server.Db(ctx, func(conn server.PgConn) {
 				result, err := conn.Query(
 					ctx,
 					`
-                        SELECT outcome IS NOT NULL, dispute,
-                            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
+                        SELECT outcome IS NOT NULL, dispute
                         FROM transfer_contract
                         WHERE contract_id = $1
                     `,
@@ -4739,15 +4727,12 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
 						found = true
-						server.Raise(result.Scan(&finalized, &disputed, &pending))
+						server.Raise(result.Scan(&finalized, &disputed))
 					}
 				})
 			})
 		}
 		readState()
-		if found && !finalized && pending {
-			return errLegacySettlementPending
-		}
 		if allowDisputeSettlement && found && !finalized && disputed {
 			// A successful close can create a dispute after both selection scans.
 			// Resolve once, then re-read; failed closes never enter this path.
@@ -4770,9 +4755,6 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 				})
 			}
 			readState()
-			if found && !finalized && pending {
-				return errLegacySettlementPending
-			}
 		}
 		if !found {
 			return fmt.Errorf("contract disappeared before force-close verification")
@@ -4812,7 +4794,6 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 	// A row past its deadline whose payer grant another closer held.
 	ownerBusy := make([]bool, len(openContracts))
 	busyOwners := newForceCloseBusyOwners()
-	deferredSettlements := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
 	quarantinedAccountingRejections := make([]bool, len(openContracts))
 	// A failed row whose terminal state was not verified after its visit.
@@ -4864,11 +4845,6 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 					reconciled, reconciliationPosts = reconcileContractAtDeadlineInTx(ctx, tx, openContract.contractId, *expirationTime)
 					return
 				}
-				var pending bool
-				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&pending))
-				if pending {
-					return
-				}
 				fresh, err = prepareContractExpiryInTx(ctx, tx, openContract.contractId, minTime)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
@@ -4887,7 +4863,7 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 			return
 		}
 		if fresh == nil && prepareErr == nil {
-			// A fresh report or pending intent withdrew this candidate.
+			// A fresh report withdrew this candidate.
 			// Its eligibility check completed without a financial close;
 			// the proper owner or a later quiet pass retains retirement.
 			eligibilitySkipped[j] = true
@@ -4922,7 +4898,6 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		)
 		accountingRejections[j] = isForceCloseAccountingRejection(closeErr, quarantineErr, cleanupErr)
 		quarantinedAccountingRejections[j] = isForceCloseQuarantinedAccountingRejection(closeErr, quarantineClaimed, quarantineErr, cleanupErr)
-		deferredSettlements[j] = isForceCloseDeferredSettlement(closeErr, quarantineErr, cleanupErr)
 		leftOpen[j] = cleanupErr != nil
 		contractCompleted[j] = true
 		contractVisited[j] = true
@@ -5094,8 +5069,8 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		next = &partial
 	}
 
-	for index, closed := range attempted[:started] {
-		if closed && !deferredSettlements[index] {
+	for _, closed := range attempted[:started] {
+		if closed {
 			closeCount++
 		}
 	}
@@ -5119,12 +5094,6 @@ func forceCloseOpenContractIdsPageDispatched(ctx context.Context, minTime time.T
 		if eligibilitySkipped[index] {
 			// A current eligibility rejection is a completed scan visit, not
 			// a close or a reason to discard other rows' classified errors.
-			continue
-		}
-		if deferredSettlements[index] {
-			// A durable intent is acknowledged work, not a verified close or an
-			// accounting success. Its separate worker owns progress and errors.
-			forceCloseContractCounter.WithLabelValues("deferred").Inc()
 			continue
 		}
 		if !contractCompleted[index] {
@@ -6154,7 +6123,6 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					SELECT due.contract_id
 					FROM due
 					WHERE
-						EXISTS (SELECT 1 FROM legacy_settlement_intent WHERE contract_id=due.contract_id) OR
 						EXISTS (
 							SELECT 1
 							FROM transfer_escrow_sweep

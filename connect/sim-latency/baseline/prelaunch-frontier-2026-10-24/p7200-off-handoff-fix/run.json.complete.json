@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-63atmxs5-p7200-off-handoff-fix",
+  "run_manifest_sha256": "5169cf34cff1b9b3c1be707d99207ce8259c0088e39db0180a28d105a17d91bf",
+  "run_manifest_bytes": 2834,
+  "completed_unix_ms": 1792863153885
+}

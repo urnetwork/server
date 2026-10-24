@@ -66,10 +66,9 @@ func evalStartupClosureTask(t testing.TB, ctx context.Context, worker *task.Task
 	}
 }
 
-// Generated open is false for disputes. Reports, legacy intent presence and a
-// missing expiration must not hide any legacy row. Each shape's twin with a
-// stored deadline, past or future, gets no queued close: the deadline pass
-// closes it at that deadline.
+// Generated open is false for disputes. Reports and a missing expiration must
+// not hide any legacy row. Each shape's twin with a stored deadline, past or
+// future, gets no queued close: the deadline pass closes it at that deadline.
 func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -99,15 +98,9 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 			}
 			return id
 		}
-		retain := func(id server.Id, index int, expiration *time.Time) {
+		retain := func(id server.Id, expiration *time.Time) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, expiration))
-				if index == 5 {
-					// Historical source intents can lack registration hints. The
-					// scanner must enumerate them before any owner classification.
-					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-						VALUES($1,$2,'settled')`, id, int(id[15])%model.LegacySettlementShardCount))
-				}
 			})
 		}
 		for index := range 8 {
@@ -116,7 +109,7 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 				continue
 			}
 			legacyId := shape(index)
-			retain(legacyId, index, nil)
+			retain(legacyId, nil)
 			wanted[legacyId] = started.Add(model.DefaultContractExpiration)
 			expiration := started.Add(-time.Minute)
 			switch index % 4 {
@@ -126,7 +119,7 @@ func TestStartupContractClosureSchedulesEveryNonterminalShape(t *testing.T) {
 				expiration = started.Add(3 * time.Hour)
 			}
 			storedId := shape(index)
-			retain(storedId, index, &expiration)
+			retain(storedId, &expiration)
 			stored = append(stored, storedId)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -349,9 +342,9 @@ func TestScheduledContractClosureFutureWakeRetainsDeadline(t *testing.T) {
 	})
 }
 
-// A retained intent with unclassified owner hints and a malformed report still
-// receives its real owner and registration wake; startup never edits its proof.
-func TestScheduledContractClosureReconcilesUnclassifiedMalformedIntent(t *testing.T) {
+// A due contract with a malformed report still closes at its deadline; the
+// close never edits its proof.
+func TestScheduledContractClosureReconcilesMalformedReport(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -361,25 +354,7 @@ func TestScheduledContractClosureReconcilesUnclassifiedMalformedIntent(t *testin
 		server.Raise(err)
 		server.Raise(model.CloseContract(ctx, id, sourceId, 17, true))
 		deadline := server.NowUtc().Truncate(time.Microsecond).Add(-time.Minute)
-		shard := int(id[15]) % model.LegacySettlementShardCount
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time)
-				VALUES($1,$2,'settled',$3)`, id, shard, deadline))
-			// Current inserts are classified by the database trigger. Retain an
-			// older unclassified row through its supported NULL-hint update seam.
-			var classified, unclassified bool
-			server.Raise(tx.QueryRow(ctx, `SELECT source_client_id=$2 AND payer_network_id IS NULL
-				FROM legacy_settlement_intent WHERE contract_id=$1`, id, sourceId).Scan(&classified))
-			if !classified {
-				t.Fatal("current insert did not classify the synthetic source intent")
-			}
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent
-				SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, id))
-			server.Raise(tx.QueryRow(ctx, `SELECT source_client_id IS NULL AND payer_network_id IS NULL
-				FROM legacy_settlement_intent WHERE contract_id=$1`, id).Scan(&unclassified))
-			if !unclassified {
-				t.Fatal("retained source fixture did not preserve missing owner hints")
-			}
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=-1 WHERE contract_id=$1`, id))
 		})
 		read := func() (raw string) {
@@ -402,7 +377,7 @@ func TestScheduledContractClosureReconcilesUnclassifiedMalformedIntent(t *testin
 		evalStartupClosureTask(t, ctx, worker, readExpiryRecoveryQueue(t, ctx)[key.String()].id)
 		queue := readExpiryRecoveryQueue(t, ctx)
 		if len(queue) != 0 || before != read() {
-			t.Fatal("malformed intent required another task or changed original reports")
+			t.Fatal("malformed report required another task or changed original reports")
 		}
 		if _, terminal := model.GetContractClose(ctx, id); !terminal {
 			t.Fatal("successful child left malformed contract open")
@@ -411,7 +386,7 @@ func TestScheduledContractClosureReconcilesUnclassifiedMalformedIntent(t *testin
 			var capped time.Time
 			server.Raise(conn.QueryRow(ctx, `SELECT expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&capped))
 			if !capped.Equal(deadline) {
-				t.Fatal("accepted intent did not receive its due retirement cap")
+				t.Fatal("malformed contract did not receive its due retirement cap")
 			}
 		})
 	})
@@ -467,9 +442,10 @@ func TestScheduledContractClosureEarlierDuplicateClosesAtMinimum(t *testing.T) {
 	})
 }
 
-// The due child finishes a retained source intent even when its dispatch hints
-// are missing. Task success now requires the actual terminal state.
-func TestScheduledContractClosureClosesRetainedSourceIntent(t *testing.T) {
+// legacy_settlement_intent is retired: a row left in it (written by a rolling
+// older binary) neither defers nor changes a due close, and the close leaves
+// that row untouched. Task success requires the actual terminal state.
+func TestScheduledContractClosureIgnoresRetiredIntentRow(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -479,27 +455,20 @@ func TestScheduledContractClosureClosesRetainedSourceIntent(t *testing.T) {
 		server.Raise(err)
 		server.Raise(model.CloseContract(ctx, id, sourceId, 17, true))
 		deadline := server.NowUtc().Truncate(time.Microsecond).Add(-time.Minute)
-		shard := int(id[15]) % model.LegacySettlementShardCount
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`, id, server.NowUtc().Add(3*time.Hour)))
+			// An older binary's accepted intent, with a dispute outcome that a
+			// queue owner would once have adopted.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome,next_attempt_time)
-				VALUES($1,$2,'settled',$3)`, id, shard, deadline))
-			// Current inserts are classified by the database trigger. Retain an
-			// older unclassified row through its supported NULL-hint update seam.
-			var classified, unclassified bool
-			server.Raise(tx.QueryRow(ctx, `SELECT source_client_id=$2 AND payer_network_id IS NULL
-				FROM legacy_settlement_intent WHERE contract_id=$1`, id, sourceId).Scan(&classified))
-			if !classified {
-				t.Fatal("current insert did not classify the synthetic source intent")
-			}
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent
-				SET payer_network_id=NULL,source_client_id=NULL WHERE contract_id=$1`, id))
-			server.Raise(tx.QueryRow(ctx, `SELECT source_client_id IS NULL AND payer_network_id IS NULL
-				FROM legacy_settlement_intent WHERE contract_id=$1`, id).Scan(&unclassified))
-			if !unclassified {
-				t.Fatal("retained source fixture did not preserve missing owner hints")
-			}
+				VALUES($1,get_byte(uuid_send($1),15)%16,'dispute_resolved_to_source',$2)`, id, deadline))
 		})
+		readIntent := func() (raw string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT row_to_json(i)::text FROM legacy_settlement_intent i WHERE contract_id=$1`, id).Scan(&raw))
+			})
+			return
+		}
+		intentBefore := readIntent()
 		read := func() (raw string) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT jsonb_build_array(
@@ -519,30 +488,31 @@ func TestScheduledContractClosureClosesRetainedSourceIntent(t *testing.T) {
 		defer child.Close()
 		evalStartupClosureTask(t, ctx, child, readExpiryRecoveryQueue(t, ctx)[key.String()].id)
 		server.Db(ctx, func(conn server.PgConn) {
-			var nonterminal, verified, missingProof, exactCap, unclassified bool
+			var nonterminal, verified, missingProof, exactCap bool
 			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL,NOT usage_unverified,provider_usage IS NULL,
-				expiration_time=$2,EXISTS(SELECT 1 FROM legacy_settlement_intent
-					WHERE contract_id=$1 AND source_client_id IS NULL AND payer_network_id IS NULL)
-				FROM transfer_contract WHERE contract_id=$1`, id, deadline).Scan(&nonterminal, &verified, &missingProof, &exactCap, &unclassified))
-			if nonterminal || verified || missingProof || !exactCap || unclassified {
-				t.Fatal("child did not finish accepted source intent", nonterminal, verified, missingProof, exactCap, unclassified)
+				expiration_time=$2
+				FROM transfer_contract WHERE contract_id=$1`, id, deadline).Scan(&nonterminal, &verified, &missingProof, &exactCap))
+			if nonterminal || verified || missingProof || !exactCap {
+				t.Fatal("child did not finish the due contract", nonterminal, verified, missingProof, exactCap)
 			}
 		})
 		if read() != before {
-			t.Fatal("child changed accepted source intent, reports or provider proof")
+			t.Fatal("child changed reports or provider proof")
+		}
+		if readIntent() != intentBefore {
+			t.Fatal("the close consulted or rewrote a retired intent row")
 		}
 		if queue := readExpiryRecoveryQueue(t, ctx); len(queue) != 0 {
 			t.Fatal("child left a settlement handoff", queue)
 		}
 		closed, terminal := model.GetContractClose(ctx, id)
 		if !terminal || closed.Outcome != model.ContractOutcomeSettled {
-			t.Fatal("registered source worker did not close its capped partial intent")
+			t.Fatal("the close adopted the retired intent's outcome or left the contract open", closed)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
 			server.Raise(conn.QueryRow(ctx, `SELECT usage_unverified
 				AND (SELECT count(*)=1 AND bool_and(checkpoint AND used_transfer_byte_count=17) FROM contract_close WHERE contract_id=$1)
-				AND NOT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
 				AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)

@@ -118,26 +118,23 @@ func TestContractExpirationCheckpointCannotExtendLegacyEscrow(t *testing.T) {
 		if err != nil || count != 1 {
 			t.Fatalf("legacy deadline did not finish its financial closure: count=%d err=%v", count, err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 700, 0)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, 700, 0)
 		requireDeadlineProviderDurability(t, ctx, f.destinationNetworkId, contract.ContractId, 300)
 		_, proof := readContractExpiryTestSnapshot(t, ctx, contract.ContractId)
 		if proof.Expiry == nil || proof.ByteCount != 300 || len(proof.Expiry.Reports) != 2 ||
 			!proof.Expiry.Reports[ContractPartySource].Checkpoint || !proof.Expiry.Reports[ContractPartyDestination].Checkpoint {
 			t.Fatal("absolute expiry lost the original delivered-work checkpoints")
 		}
-		complete, busy, _, err := flushLegacySettlement(ctx, contract.ContractId)
-		if err != nil || complete || !busy {
-			t.Fatalf("retired intent was not classified as gone: complete=%t busy_or_gone=%t err=%v", complete, busy, err)
+		count, _, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 32, 1, 0, 0, nil)
+		if err != nil || count != 0 {
+			t.Fatalf("terminal legacy deadline was selected again: count=%d err=%v", count, err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 700, 0)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, 700, 0)
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 300)
-		if _, _, _, err := flushLegacySettlement(ctx, contract.ContractId); err != nil {
-			t.Fatal(err)
-		}
 		if err := CloseContract(ctx, contract.ContractId, f.sourceId, 300, true); !errors.Is(err, errContractAlreadySettled) {
 			t.Fatalf("late checkpoint revived expired accounting: %v", err)
 		}
-		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, false, true, 700, 0)
+		requireLegacySettlementTestState(t, ctx, f, contract.ContractId, true, 700, 0)
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 300)
 	})
 }

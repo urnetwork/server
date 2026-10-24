@@ -30,12 +30,11 @@ func newExpiryDeadlineFixture(t testing.TB, ctx context.Context) expiryDeadlineF
 		created  time.Time
 		expires  time.Time
 		disputed bool
-		pending  bool
 	}{
 		{created: now.Add(-50 * time.Minute), expires: now.Add(45 * time.Minute)},
 		{created: now.Add(-50 * time.Minute), expires: fixture.firstExpiration, disputed: true},
 		{created: now.Add(-30 * time.Minute)},
-		{created: now.Add(-20 * time.Minute), expires: fixture.lastExpiration, disputed: true, pending: true},
+		{created: now.Add(-20 * time.Minute), expires: fixture.lastExpiration, disputed: true},
 		{created: now.Add(time.Minute), expires: now.Add(10 * time.Minute)},
 	} {
 		id, err := CreateContractNoEscrow(ctx, networkId, sourceId, networkId, destinationId, 100)
@@ -48,10 +47,6 @@ func newExpiryDeadlineFixture(t testing.TB, ctx context.Context) expiryDeadlineF
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,expiration_time=$3,dispute=$4 WHERE contract_id=$1`,
 				id, row.created, expiration, row.disputed))
-			if row.pending {
-				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-					VALUES($1,get_byte(uuid_send($1::uuid),15)%16,'settled')`, id))
-			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		fixture.ids = append(fixture.ids, id)
 	}
@@ -70,13 +65,6 @@ func TestExpiryDeadlineRawPagesKeepBothBoundsAndNullFallback(t *testing.T) {
 		for _, id := range fixture.ids {
 			before[id] = readRedisExpiryRepairTestState(ctx, id)
 		}
-		readIntent := func() (snapshot string) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT to_jsonb(i)::text FROM legacy_settlement_intent i WHERE contract_id=$1`, fixture.ids[3]).Scan(&snapshot))
-			})
-			return
-		}
-		intentBefore := readIntent()
 		cursor := &ContractExpiryCursor{ScanBefore: fixture.now}
 		count, next, deadline, err := forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 1, 1, 1, 0, cursor)
 		if err != nil || count != 0 || next == nil || deadline == nil || !deadline.Equal(fixture.firstExpiration) ||
@@ -86,7 +74,7 @@ func TestExpiryDeadlineRawPagesKeepBothBoundsAndNullFallback(t *testing.T) {
 		count, next, deadline, err = forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 1, 1, 1, 0, next)
 		if err != nil || count != 0 || next == nil || deadline == nil || !deadline.Equal(fixture.lastExpiration) ||
 			next.Open == nil || next.Open.ContractId != fixture.ids[2] || next.Dispute == nil || next.Dispute.ContractId != fixture.ids[3] {
-			t.Fatal("second page lost a live or intent-owned deadline", count, err)
+			t.Fatal("second page lost a live deadline", count, err)
 		}
 		count, next, deadline, err = forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 1, 1, 1, 0, next)
 		if err != nil || count != 0 || next != nil || deadline != nil {
@@ -102,21 +90,16 @@ func TestExpiryDeadlineRawPagesKeepBothBoundsAndNullFallback(t *testing.T) {
 		}
 		for _, id := range fixture.ids {
 			if !bytes.Equal(before[id], readRedisExpiryRepairTestState(ctx, id)) {
-				t.Fatal("deadline observation changed reports, financial rows or intent custody")
+				t.Fatal("deadline observation changed reports or financial rows")
 			}
-		}
-		if readIntent() != intentBefore {
-			t.Fatal("deadline observation changed an existing settlement owner's arguments")
 		}
 	})
 }
 
-// An expired row that already has a settlement owner cannot contribute a past
-// hint on every new scan, which would turn the recurring sweep into a hot loop.
-// Since 65190bed the sweep reconciles an arrived deadline itself, before it
-// looks for an intent, and retires the intent in the same commit. So the first
-// scan closes the expired rows of its epoch, and the next scan finds nothing
-// to close and no deadline to wake for.
+// An expired row cannot contribute a past hint on every new scan, which would
+// turn the recurring sweep into a hot loop. Since 65190bed the sweep reconciles
+// an arrived deadline itself, so the first scan closes the expired rows of its
+// epoch, and the next scan finds nothing to close and no deadline to wake for.
 func TestExpiryDeadlineExpiredOwnedRowsDoNotRepeatImmediateWake(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -126,35 +109,31 @@ func TestExpiryDeadlineExpiredOwnedRowsDoNotRepeatImmediateWake(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=ANY($1::uuid[])`,
 				fixture.ids, fixture.now.Add(-time.Minute)))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO legacy_settlement_intent(contract_id,shard,outcome)
-				SELECT id,get_byte(uuid_send(id),15)%16,'settled' FROM unnest($1::uuid[]) row(id)
-				ON CONFLICT(contract_id) DO NOTHING`, fixture.ids))
 		})
 		// The last fixture row was created after the scan epoch.
 		epochIds, laterIds := fixture.ids[:len(fixture.ids)-1], fixture.ids[len(fixture.ids)-1:]
-		readCustody := func(ids []server.Id) (terminal int, intents int) {
+		readTerminal := func(ids []server.Id) (terminal int) {
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT
-					(SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) AND outcome IS NOT NULL),
-					(SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1::uuid[]))`, ids).Scan(&terminal, &intents))
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract
+					WHERE contract_id=ANY($1::uuid[]) AND outcome IS NOT NULL`, ids).Scan(&terminal))
 			})
 			return
 		}
 		count, next, deadline, err := forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 32, 1, 1, 0,
 			&ContractExpiryCursor{ScanBefore: fixture.now})
 		if err != nil || count != int64(len(epochIds)) || next != nil || deadline != nil {
-			t.Fatal("expired intent-owned rows were not reconciled at their deadline", count, err)
+			t.Fatal("expired rows were not reconciled at their deadline", count, err)
 		}
-		if terminal, intents := readCustody(epochIds); terminal != len(epochIds) || intents != 0 {
-			t.Fatal("deadline reconciliation did not close the rows and retire their intents together", terminal, intents)
+		if terminal := readTerminal(epochIds); terminal != len(epochIds) {
+			t.Fatal("deadline reconciliation did not close the rows", terminal)
 		}
-		if terminal, intents := readCustody(laterIds); terminal != 0 || intents != len(laterIds) {
-			t.Fatal("the scan epoch reconciled a row created after it", terminal, intents)
+		if terminal := readTerminal(laterIds); terminal != 0 {
+			t.Fatal("the scan epoch reconciled a row created after it", terminal)
 		}
 		count, next, deadline, err = forceCloseOpenContractIdsPage(ctx, fixture.now.Add(-12*time.Minute), 32, 1, 1, 0,
 			&ContractExpiryCursor{ScanBefore: fixture.now})
 		if err != nil || count != 0 || next != nil || deadline != nil {
-			t.Fatal("expired intent-owned rows repeatedly requested an immediate sweep", count, err)
+			t.Fatal("expired rows repeatedly requested an immediate sweep", count, err)
 		}
 	})
 }

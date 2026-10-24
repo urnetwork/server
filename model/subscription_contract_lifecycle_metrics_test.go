@@ -122,35 +122,28 @@ func TestContractLifecycleCountersRedisCreateReuseCloseReplay(t *testing.T) {
 	})
 }
 
-// A queued legacy intent is still nonterminal. Run real asynchronous mirror
-// and provider owners before using their state as the conservation oracle.
+// A legacy reservation settles inline at its second final, counting one close.
+// Run the real asynchronous mirror and provider owners before using their
+// state as the conservation oracle. A replayed final is refused; financial
+// idempotence is proved by the unchanged state and counters.
 func TestContractLifecycleCountersLegacyCreateFinancialCloseReplay(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		before := readContractLifecycleCounterTestSnapshot(t)
-		fixture, id := legacySettlementTestIntent(t, ctx)
-		requireContractLifecycleCounterTestDelta(t, before, 1, 0)
-		requireLegacySettlementTestState(t, ctx, fixture, id, true, false, 1000, 100)
-		completed, busy, busyGate, err := flushLegacySettlement(ctx, id)
-		if err != nil || !completed || busy {
-			t.Fatal("real legacy owner did not complete", completed, busy, err)
-		}
+		fixture, id := legacySettlementTestContract(t, ctx)
 		requireContractLifecycleCounterTestDelta(t, before, 1, 1)
 		legacyMirrorTestRun(t, ctx, fixture.balanceId)
 		projectLegacyProviderTotalsForTest(t, ctx)
-		requireLegacySettlementTestState(t, ctx, fixture, id, false, true, 989, 0)
+		requireLegacySettlementTestState(t, ctx, fixture, id, true, 989, 0)
 		requireLegacyProviderDurability(t, ctx, fixture, id, 11)
-		// The exact deleted intent returns the existing busy-or-gone result;
-		// financial idempotence is proved by the unchanged state and counters.
-		completed, busy, busyGate, err = flushLegacySettlement(ctx, id)
-		if err != nil || completed || !busy || busyGate != legacySettlementBusyIntent {
-			t.Fatal("terminal replay lost its missing-intent disposition", completed, busy, busyGate, err)
+		if err := CloseContract(ctx, id, fixture.destinationId, 11, false); !errors.Is(err, errContractAlreadySettled) {
+			t.Fatal("settled legacy contract accepted a replayed final", err)
 		}
 		legacyMirrorTestRun(t, ctx, fixture.balanceId)
 		projectLegacyProviderTotalsForTest(t, ctx)
-		requireLegacySettlementTestState(t, ctx, fixture, id, false, true, 989, 0)
+		requireLegacySettlementTestState(t, ctx, fixture, id, true, 989, 0)
 		requireLegacyProviderDurability(t, ctx, fixture, id, 11)
 		requireContractLifecycleCounterTestDelta(t, before, 1, 1)
 	})

@@ -37,13 +37,16 @@ type CompetitionPreparationRequest struct {
 
 // Deployment-owned inputs stay outside frozen candidate source. Commands are
 // trusted control-plane brokers, not candidate programs; their SHA-256 pins and
-// explicit role images are reviewed together. The token remains in a private file.
+// worker identity are reviewed together. API identity may instead be discovered
+// from its exact durable acknowledgment. The token remains in a private file.
 type CompetitionPreparationConfig struct {
-	Environment             string `json:"environment"`
-	CompetitionId           string `json:"competition_id"`
-	SeasonId                string `json:"season_id"`
-	Staging                 bool   `json:"staging"`
-	ApiBaseUrl              string `json:"api_base_url"`
+	Environment   string `json:"environment"`
+	CompetitionId string `json:"competition_id"`
+	SeasonId      string `json:"season_id"`
+	Staging       bool   `json:"staging"`
+	ApiBaseUrl    string `json:"api_base_url"`
+	// Optional deployment restriction. Without it, the durable acknowledgment
+	// binds this intent's actual API release, not a season-wide main build.
 	ApiImageDigest          string `json:"api_image_digest"`
 	SourcePromoterTokenFile string `json:"source_promoter_token_file"`
 	QualificationCommand    string `json:"qualification_command"`
@@ -182,7 +185,7 @@ type competitionPreparationAdapter struct {
 func validateCompetitionPreparationConfig(settings *Settings, config CompetitionPreparationConfig) error {
 	if settings == nil || config.Environment != settings.AutomationPolicy.Environment || config.CompetitionId != settings.CompetitionId || config.SeasonId != settings.AutomationPolicy.SeasonId || config.Staging != settings.AutomationPolicy.Staging ||
 		!settings.AutomationPolicy.Enabled || settings.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability ||
-		!imageDigestPattern.MatchString(config.ApiImageDigest) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || !tokenNamePattern.MatchString(config.WorkerId) || config.TimeoutSeconds < 60 || config.TimeoutSeconds > 4*60*60 {
+		(config.ApiImageDigest != "" && !imageDigestPattern.MatchString(config.ApiImageDigest)) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || !tokenNamePattern.MatchString(config.WorkerId) || config.TimeoutSeconds < 60 || config.TimeoutSeconds > 4*60*60 {
 		return errors.New("preparation configuration does not bind its scope, runtime images and bounded duration")
 	}
 	endpoint, err := url.Parse(config.ApiBaseUrl)
@@ -262,7 +265,8 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 	if _, err := self.checkFence(ctx, self.settings, request); err != nil {
 		return nil, err
 	}
-	if err := self.acknowledgeApi(ctx, intent); err != nil {
+	apiImage, err := self.acknowledgeApi(ctx, intent)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := self.checkFence(ctx, self.settings, request); err != nil {
@@ -289,7 +293,7 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 		return nil, err
 	}
 	for _, role := range readiness {
-		if role.Role == "api" && role.RuntimeImageDigest != self.config.ApiImageDigest || role.Role == "worker" && (role.RuntimeImageDigest != self.config.WorkerImageDigest || role.ActorId != self.config.WorkerId) {
+		if role.Role == "api" && role.RuntimeImageDigest != apiImage || role.Role == "worker" && (role.RuntimeImageDigest != self.config.WorkerImageDigest || role.ActorId != self.config.WorkerId) {
 			return nil, errors.New("prepared role differs from the pinned deployment identity")
 		}
 	}
@@ -299,59 +303,58 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 	return &CompetitionPreparationResult{Generation: intent.Generation, TargetRoundId: intent.TargetRoundId, EnvelopeSha256: receipt.Sha256, EnvelopeKey: receipt.Key, EnvelopeVersion: receipt.VersionId}, nil
 }
 
-// Reuse only an immutable genuine acknowledgment for this exact intent and
-// pinned release. A later API rollout must not rewrite the original role row.
+// Reuse only an immutable genuine acknowledgment for this exact intent and any
+// configured release restriction. A later rollout never rewrites that role row.
 // Without one, token bytes go only to the configured TLS endpoint, whose new
 // response must advertise blob capability and its independent runtime identity.
-func (self *competitionPreparationAdapter) acknowledgeApi(ctx context.Context, intent *model.CompetitionSourceActivation) error {
+func (self *competitionPreparationAdapter) acknowledgeApi(ctx context.Context, intent *model.CompetitionSourceActivation) (string, error) {
 	readiness, err := self.receipts(ctx, self.settings, intent.Generation)
 	if err != nil {
-		return err
+		return "", err
 	}
-	apiCount := 0
 	for _, receipt := range readiness {
-		if receipt.Role != "api" {
-			continue
+		if receipt.Role == "api" {
+			return competitionSourceApiRuntimeIdentity(intent, self.config.ApiImageDigest, readiness)
 		}
-		apiCount++
-		if !sourcePreparationReceiptMatches(intent, receipt) || receipt.RuntimeImageDigest != self.config.ApiImageDigest || apiCount > 1 {
-			return errors.New("persisted API readiness differs from the exact intent or pinned deployment identity")
-		}
-	}
-	if apiCount == 1 {
-		return nil
 	}
 	content, err := readCompetitionPreparationFile(self.config.SourcePromoterTokenFile, 4096, true)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer clear(content)
 	token := strings.TrimSpace(string(content))
 	if token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return errors.New("source-promoter credential is malformed")
+		return "", errors.New("source-promoter credential is malformed")
 	}
 	endpoint := strings.TrimRight(self.config.ApiBaseUrl, "/") + "/competition/v2/source/" + strconv.FormatInt(intent.Generation, 10) + "/readiness"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := self.client.Do(request)
 	if err != nil {
-		return errors.New("source readiness API transport failed")
+		return "", errors.New("source readiness API transport failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK || response.Header.Get("X-Competition-Api-Capability") != model.CompetitionRuntimeBlobCapability {
-		return errors.New("source readiness API did not acknowledge the required runtime capability")
+		return "", errors.New("source readiness API did not acknowledge the required runtime capability")
 	}
 	var receipt model.CompetitionSourceReadiness
 	if err := decodeCompetitionPreparationJson(response.Body, 64*1024, &receipt); err != nil {
-		return err
+		return "", err
 	}
-	if receipt.Role != "api" || receipt.RuntimeImageDigest != self.config.ApiImageDigest || !sourcePreparationReceiptMatches(intent, receipt) {
-		return errors.New("source readiness API returned another intent or runtime identity")
+	if receipt.Role != "api" || (self.config.ApiImageDigest != "" && receipt.RuntimeImageDigest != self.config.ApiImageDigest) || !sourcePreparationReceiptMatches(intent, receipt) {
+		return "", errors.New("source readiness API returned another intent or runtime identity")
 	}
-	return nil
+	// A valid HTTPS response alone is not a durable acknowledgment. Require the
+	// independently read role row to name that same observed release before
+	// qualification can execute, even without a deployment-wide expected pin.
+	durable, err := self.receipts(ctx, self.settings, intent.Generation)
+	if err != nil {
+		return "", err
+	}
+	return competitionSourceApiRuntimeIdentity(intent, receipt.RuntimeImageDigest, durable)
 }
 
 // Only pinned trusted brokers execute. Candidate identities remain JSON data,

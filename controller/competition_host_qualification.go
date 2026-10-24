@@ -45,7 +45,10 @@ type CompetitionHostQualificationConfig struct {
 	WorkerCommand      string `json:"worker_command"`
 	WorkerSha256       string `json:"worker_sha256"`
 	WorkerImageDigest  string `json:"worker_image_digest"`
-	ApiImageDigest     string `json:"api_image_digest"`
+	// Optional deployment restriction; retained evidence always records the
+	// independently observed API identity for this exact source intent.
+	ApiImageDigest              string `json:"api_image_digest"`
+	ReviewedBuildStateDirectory string `json:"reviewed_build_state_directory,omitempty"`
 }
 
 // A successful result identifies retained proof, not a worker readiness
@@ -142,23 +145,29 @@ func competitionHostQualificationSettings(settings *Settings) *Settings {
 	return &copy
 }
 
-// The API digest comes from the actual authenticated API role receipt. Pins
-// in trusted deployment config constrain it but are never evidence by themselves.
-func competitionQualificationApiReceipt(intent *model.CompetitionSourceActivation, expectedImage string, receipts []model.CompetitionSourceReadiness) error {
+// The authenticated durable receipt freezes identity for one intent. Main may
+// advance between intents without pretending that the evaluated source changed.
+// An optional deployment restriction still rejects any other API image.
+func competitionSourceApiRuntimeIdentity(intent *model.CompetitionSourceActivation, expectedImage string, receipts []model.CompetitionSourceReadiness) (string, error) {
+	if expectedImage != "" && !imageDigestPattern.MatchString(expectedImage) {
+		return "", errors.New("API runtime restriction is malformed")
+	}
 	count := 0
+	image := ""
 	for _, receipt := range receipts {
 		if receipt.Role != "api" {
 			continue
 		}
 		count++
-		if !sourcePreparationReceiptMatches(intent, receipt) || receipt.RuntimeImageDigest != expectedImage {
-			return errors.New("host qualification requires the exact genuine API readiness receipt")
+		if !sourcePreparationReceiptMatches(intent, receipt) || (expectedImage != "" && receipt.RuntimeImageDigest != expectedImage) {
+			return "", errors.New("host qualification requires the exact genuine API readiness receipt")
 		}
+		image = receipt.RuntimeImageDigest
 	}
 	if count != 1 {
-		return errors.New("host qualification requires exactly one durable API role receipt")
+		return "", errors.New("host qualification requires exactly one durable API role receipt")
 	}
-	return nil
+	return image, nil
 }
 
 // An existing singleton lease blocks every ordinary worker Claim. No public
@@ -213,9 +222,21 @@ func checkCompetitionQualificationSlot(ctx context.Context, owner string) error 
 func validateCompetitionQualificationConfig(settings *Settings, config CompetitionHostQualificationConfig, bootId, workerImage string) error {
 	if settings == nil || config.Schema != 1 || config.Environment != settings.AutomationPolicy.Environment || config.CompetitionId != settings.CompetitionId ||
 		config.SeasonId != settings.AutomationPolicy.SeasonId || config.Staging != settings.AutomationPolicy.Staging ||
-		!imageDigestPattern.MatchString(config.ApiImageDigest) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || workerImage != config.WorkerImageDigest ||
+		(config.ApiImageDigest != "" && !imageDigestPattern.MatchString(config.ApiImageDigest)) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || workerImage != config.WorkerImageDigest ||
 		len(bootId) != 36 || config.ResourceBombBootId != bootId || !sha256Pattern.MatchString(config.ResourceBombSha256) {
 		return errors.New("qualification scope, actual worker image or current-boot bomb evidence does not match")
+	}
+	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy && config.ReviewedBuildStateDirectory == "" {
+		return errors.New("automatic winner-source preparation requires its private reviewed-build inventory")
+	}
+	if config.ReviewedBuildStateDirectory != "" {
+		if err := competitionQualificationRootPath(config.ReviewedBuildStateDirectory, true); err != nil {
+			return err
+		}
+		info, err := os.Lstat(config.ReviewedBuildStateDirectory)
+		if err != nil || info.Mode().Perm()&0o077 != 0 {
+			return errors.New("reviewed build inventory must remain root-private")
+		}
 	}
 	for _, command := range []struct{ path, digest string }{
 		{config.WorkerCommand, config.WorkerSha256}, {config.PromotionCommand, config.PromotionSha256},
@@ -258,7 +279,7 @@ func readCompetitionQualificationHostConfig(path string, settings *Settings) (*c
 	}
 	var raw map[string]json.RawMessage
 	var host competitionQualificationHostConfig
-	if json.Unmarshal(content, &raw) != nil || json.Unmarshal(content, &host) != nil || host.Schema != 1 ||
+	if decodeFailureEvidenceJson(content, &raw) != nil || json.Unmarshal(content, &host) != nil || host.Schema != 1 ||
 		host.HardwareId != settings.EvaluationPolicy.HardwareId || host.ImageDigest != settings.EvaluatorImageDigest ||
 		host.QualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
 		host.ConfigLocalDirectory != settings.ConfigLocalDirectory || host.VaultLocalDirectory != settings.VaultLocalDirectory ||
@@ -651,6 +672,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err != nil {
 		return nil, err
 	}
+	request.Intent = *intent
 	settings, err = sourceSettingsFromIntent(settings, intent)
 	if err != nil {
 		return nil, err
@@ -674,13 +696,13 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err != nil {
 		return nil, err
 	}
-	if err := competitionQualificationApiReceipt(intent, config.ApiImageDigest, receipts); err != nil {
-		return nil, err
-	}
-	hostConfig, _, err := readCompetitionQualificationHostConfig(config.HostConfig, settings)
+	apiImage, err := competitionSourceApiRuntimeIdentity(intent, config.ApiImageDigest, receipts)
 	if err != nil {
 		return nil, err
 	}
+	// Retained qualification evidence records the observed release even when
+	// deployment configuration deliberately does not pin continuously moving main.
+	config.ApiImageDigest = apiImage
 	profileSettings := competitionHostQualificationSettings(settings)
 	profileBytes, err := json.Marshal(struct {
 		Kind            string                             `json:"kind"`
@@ -727,6 +749,16 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	}()
 	defer func() { stop(nil); <-done }()
 	ctx = operationCtx
+	// Source construction pins the next image's expected hardware fingerprint,
+	// not its runtime readiness. Install only that reviewed transition after
+	// acquiring the singleton slot, then perform the full real qualification.
+	if err := ensureCompetitionReviewedHostConfig(ctx, settings, config, request, owner, bootId); err != nil {
+		return nil, err
+	}
+	hostConfig, _, err := readCompetitionQualificationHostConfig(config.HostConfig, settings)
+	if err != nil {
+		return nil, err
+	}
 	if markerBytes, readErr := readRegularFile(hostConfig.RebaselineManifest, 64*1024); readErr == nil && competitionQualificationRootPath(hostConfig.RebaselineManifest, false) == nil {
 		var marker competitionHostQualificationMarker
 		digest := sha256.Sum256(markerBytes)

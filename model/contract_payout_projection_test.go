@@ -13,13 +13,12 @@ import (
 // account totals, and replay of that same owner must not repeat its increment.
 func TestLegacySettlementPayoutAccountRequiresAppliedProjection(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
-		f, id := legacySettlementTestIntent(t, ctx)
+		f, id := legacySettlementTestOpenFinals(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
-		completed, busy, _, err := flushLegacySettlement(ctx, id)
-		if err != nil || !completed || busy {
-			t.Fatalf("payout projection fixture settlement completed=%t busy=%t err=%v", completed, busy, err)
+		if err := SettleEscrow(ctx, id, ContractOutcomeSettled); err != nil {
+			t.Fatalf("payout projection fixture settlement failed: %v", err)
 		}
 		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
 		if got := contractPayoutTestAccountAmount(t, ctx, f.destinationNetworkId); got != (contractPayoutTestAmount{}) {

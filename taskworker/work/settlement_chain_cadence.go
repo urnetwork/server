@@ -1,10 +1,10 @@
-// The settlement recovery chains, flush_transfer_debits_* and
-// flush_legacy_settlements_*, re-arm themselves from their Posts. An empty
-// partition used to re-arm every two seconds like a busy one: the 32 chains
-// made at least 16 completions a second, each a pending_task insert, claim and
-// delete plus a finished_task row, about 1.4M rows a day with both queues
-// empty. A chain now backs off to the idle delay once consecutive passes have
-// found its partition empty.
+// The transfer debit recovery chains, flush_transfer_debits_*, re-arm
+// themselves from their Posts. An empty partition used to re-arm every two
+// seconds like a busy one: with the 16 legacy settlement chains, since retired
+// with their queue, the 32 chains made at least 16 completions a second, each a
+// pending_task insert, claim and delete plus a finished_task row, about 1.4M
+// rows a day with both queues empty. A chain now backs off to the idle delay
+// once consecutive passes have found its partition empty.
 //
 // The back-off goes straight to the idle delay rather than growing toward it.
 // A debit journaled while its chain is backed off kicks the chain
@@ -12,10 +12,7 @@
 // latency, and each step of a growing curve would only add an idle run to every
 // quiet spell. Without a kick (a lost Redis mark, a crash before the mark, a
 // producer from an older build) a debit waits at most the idle delay plus one
-// run, inside the 60-second warning of SIGNALS.md §2.5a. Legacy intents get
-// no kick: current contracts no longer queue them, and the other producers
-// wake their partition through the RunOnce merge. Their warning allows for the
-// idle delay (§2.5b).
+// run, inside the 60-second warning of SIGNALS.md §2.5a.
 //
 // The chain backs off only after a second consecutive empty pass. Debits that
 // arrive every few seconds leave single empty passes between them; backing off
@@ -30,7 +27,7 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// Tunables of both settlement chain families.
+// Tunables of the settlement chains.
 type SettlementChainSettings struct {
 	// Delay before the next run after a run that found work and has no
 	// immediate continuation, or found the partition empty fewer than

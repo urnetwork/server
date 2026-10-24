@@ -28,12 +28,14 @@ func TestFrontierPointsRemainNonOfficialAndBoundToRawArtifacts(t *testing.T) {
 		ExchangeHosts        int    `json:"exchange_hosts"`
 		EvaluatedCommit      string `json:"evaluated_server_commit"`
 		Points               []struct {
-			Path               string `json:"path"`
-			CompletionState    string `json:"completion_state"`
-			IncompleteCode     string `json:"incomplete_code"`
-			BaselineEligible   *bool  `json:"baseline_eligible"`
-			CapacityEligible   *bool  `json:"capacity_eligible"`
-			ControllerExitCode int    `json:"controller_exit_code"`
+			Path                string `json:"path"`
+			CompletionState     string `json:"completion_state"`
+			IncompleteCode      string `json:"incomplete_code"`
+			BaselineEligible    *bool  `json:"baseline_eligible"`
+			CapacityEligible    *bool  `json:"capacity_eligible"`
+			ControllerExitCode  int    `json:"controller_exit_code"`
+			RequestedImpairment bool   `json:"impairment"`
+			ImpairmentModeValid *bool  `json:"impairment_mode_valid"`
 		} `json:"points"`
 	}
 	if err := json.Unmarshal(content, &index); err != nil || index.Official || index.ValidBaselineSamples != 0 || len(index.Points) == 0 || index.ExchangeHosts <= 0 {
@@ -41,10 +43,14 @@ func TestFrontierPointsRemainNonOfficialAndBoundToRawArtifacts(t *testing.T) {
 	}
 	capacityCount := 0
 	for _, point := range index.Points {
+		// This archive is pinned to the defective historical image: all four
+		// children enabled impairment, regardless of the parent's recorded flag.
+		// Fixed-image trials need their own authenticated source/archive identity.
 		if !filepath.IsLocal(point.Path) || point.BaselineEligible == nil || *point.BaselineEligible || point.CapacityEligible == nil ||
 			(point.CompletionState != "complete" && point.CompletionState != "incomplete") ||
 			(point.CompletionState == "complete") != (point.IncompleteCode == "") ||
-			*point.CapacityEligible != (point.CompletionState == "complete" && point.ControllerExitCode == 0) {
+			point.ImpairmentModeValid == nil || *point.ImpairmentModeValid != point.RequestedImpairment ||
+			*point.CapacityEligible != (point.CompletionState == "complete" && point.ControllerExitCode == 0 && *point.ImpairmentModeValid) {
 			t.Fatal("frontier point lost explicit eligibility or controller outcome", point.Path)
 		}
 		if *point.CapacityEligible {
@@ -55,7 +61,7 @@ func TestFrontierPointsRemainNonOfficialAndBoundToRawArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 		var run RunStats
-		if err := json.Unmarshal(content, &run); err != nil || run.CompletionState != point.CompletionState || run.IncompleteCode != point.IncompleteCode || run.BuildRevision != index.EvaluatedCommit || run.Flags["hosts"] != fmt.Sprint(index.ExchangeHosts) {
+		if err := json.Unmarshal(content, &run); err != nil || run.CompletionState != point.CompletionState || run.IncompleteCode != point.IncompleteCode || run.BuildRevision != index.EvaluatedCommit || run.Flags["hosts"] != fmt.Sprint(index.ExchangeHosts) || run.Flags["impair"] != fmt.Sprint(point.RequestedImpairment) {
 			t.Fatal("failed frontier index differs from actual run identity or completion", point.Path, err)
 		}
 		csv, err := os.ReadFile(filepath.Join(root, point.Path, "results.csv"))

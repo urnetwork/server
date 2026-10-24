@@ -250,7 +250,8 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
-| 2.5c | Runbook | `contract-rate`, `legacy-settlements`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.5b | Runbook | `migrations` pins the retired queue: its guards and contract key dropped, its empty table kept until a later release drops it. The legacy settlement probe retired with the queue on 2026-10-24 (PARTITION-MAINTENANCE-PLAN.md, Part B). |
+| 2.5c | Runbook | `contract-rate`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -8339,9 +8340,10 @@ Why: once the contract tables are partitioned, size is bounded only by the
 retention horizon R = 13 weeks (`ContractRetention`, owner decision
 2026-10-23). `maintain_contract_partitions` drops a week's six partitions
 together once the week ended more than R ago and every contract in it is
-resolved, every escrow settled, no sweep belongs to a pending payment and no
-legacy settlement intent refers to it; it archives the week's usage proof
-first. A blocked week stays, and the task reports its reason.
+resolved, every escrow settled and no sweep belongs to a pending payment; it
+archives the week's usage proof first. A blocked week stays, and the task
+reports its reason. (A legacy settlement intent no longer blocks a week: the
+queue retired on 2026-10-24, §2.5b.)
 
 Check, on the §2.4h catalog read: a partition, legacy or weekly, whose upper
 bound plus R plus 2 weeks is in the past and that still exists. The legacy
@@ -8368,8 +8370,8 @@ the contract family alone.
 
 ACTION: read the task's reason for the oldest blocked week (`[cp]` log lines,
 its run report) and resolve the blocker at its owner: close or settle the
-contracts, complete or cancel the pending payment, finish the legacy
-settlement. Check that the task runs. Never drop or detach a contract
+contracts, or complete or cancel the pending payment. Check that the task
+runs. Never drop or detach a contract
 partition by hand: a drop bypasses the usage archive capture and the
 preconditions. VERIFY: the next runs drop the week and a complete observation
 shows no partition past the horizon plus grace.
@@ -8771,8 +8773,15 @@ until migration 763 and its worker are deployed; §2.5b owns that separate
 contention boundary and its eventual settlement control.
 
 ### 2.5b Legacy settlement intent recovery
-Probe: `legacy-settlements`
-Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
+Retired (2026-10-24): the legacy settlement queue is retired
+(PARTITION-MAINTENANCE-PLAN.md, Part B). Every escrow admitted since Redis
+admission became unconditional is Redis reserved, and an open contract with a
+legacy reservation now settles inline in its own close. Its workers, its 16
+shard chains and its probe (with the classes `legacy-settlement-pending` and
+`legacy-settlement-worker-missing`) are gone. The retirement migration refuses
+while any intent remains, then drops the outcome guard, its function and the
+contract key; `migrations` pins that state. The empty table stays one release
+for the previous binaries, which still read it. The record below is history.
 
 Payer-index readiness errors (2026-10-08): one bounded native capture on the
 selected edge1 Taskworker g1/g2 processes matched both container config digests
@@ -28972,7 +28981,10 @@ hold in either layout (`migration_contract_partition.go`):
   dropped on one week's partition is drift.
 - 763 leaves the per-partition clones of the legacy settlement foreign key out
   of its census of other keys, and requires an enabled clone of both action
-  triggers on every `transfer_contract` partition.
+  triggers on every `transfer_contract` partition. From the queue's retirement
+  (§2.5b) 763 is no longer required; the retirement's own contract requires
+  the outcome guard, its function and the key gone, their partition clones
+  included.
 - 764 requires the cascade key from `contract_close_report` while the tables
   are plain. Once `transfer_contract` is partitioned it requires the key absent
   (the cutover drops it by owner decision, and a restored key would hold back
@@ -28981,7 +28993,9 @@ hold in either layout (`migration_contract_partition.go`):
 
 `TestMigrationsContractPartitionedCatalog` and
 `TestMigrationsContractCloseReportKeyAbsentOnlyWhenPartitioned` build both
-layouts themselves and inject each of these faults.
+layouts themselves and inject each of these faults;
+`TestMigrationsContractPartitionedLegacySettlementKeyClones` checks the legacy
+settlement key's clones one version before the queue's retirement.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`

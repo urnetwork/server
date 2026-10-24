@@ -22,22 +22,20 @@ import (
 )
 
 // A legacy-escrow contract whose receiver checkpoints after the sender's
-// final records that checkpoint as a final and queues the same durable
-// settlement intent two finals queue; its worker then settles it normally.
-// A receiver checkpoint before the sender's final queues nothing.
-func TestCoveredCheckpointQueuesLegacyEscrowSettlement(t *testing.T) {
+// final records that checkpoint as a final and settles inline, as two finals
+// do. A receiver checkpoint before the sender's final settles nothing.
+func TestCoveredCheckpointSettlesLegacyEscrowInline(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		const byteCount = ByteCount(11)
-		readState := func(contractId server.Id) (checkpoint bool, used ByteCount, pending, terminal bool) {
+		readState := func(contractId server.Id) (checkpoint bool, used ByteCount, terminal bool) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT checkpoint,used_transfer_byte_count,
-					EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
 					(SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1)
-					FROM contract_close WHERE contract_id=$1 AND party=$2`, contractId, ContractPartyDestination).Scan(&checkpoint, &used, &pending, &terminal))
+					FROM contract_close WHERE contract_id=$1 AND party=$2`, contractId, ContractPartyDestination).Scan(&checkpoint, &used, &terminal))
 			})
 			return
 		}
@@ -50,8 +48,8 @@ func TestCoveredCheckpointQueuesLegacyEscrowSettlement(t *testing.T) {
 		if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: early.ContractId, ClientId: f.sourceId, AckedByteCount: byteCount}); err != nil {
 			t.Fatal(err)
 		}
-		if checkpoint, _, pending, terminal := readState(early.ContractId); !checkpoint || pending || terminal {
-			t.Fatalf("receiver checkpoint before the sender's final changed the contract: checkpoint=%t pending=%t terminal=%t", checkpoint, pending, terminal)
+		if checkpoint, _, terminal := readState(early.ContractId); !checkpoint || terminal {
+			t.Fatalf("receiver checkpoint before the sender's final changed the contract: checkpoint=%t terminal=%t", checkpoint, terminal)
 		}
 
 		escrow, posts := createNetEscrowOrderingTestContract(ctx, f, 60)
@@ -69,16 +67,10 @@ func TestCoveredCheckpointQueuesLegacyEscrowSettlement(t *testing.T) {
 		if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: escrow.ContractId, ClientId: f.destinationId, AckedByteCount: byteCount, Checkpoint: true}); err != nil {
 			t.Fatal(err)
 		}
-		if checkpoint, used, pending, terminal := readState(escrow.ContractId); checkpoint || used != byteCount || !pending || terminal {
-			t.Fatalf("covered checkpoint after the sender's final: checkpoint=%t bytes=%d pending=%t terminal=%t, want a final of %d bytes with a queued intent", checkpoint, used, pending, terminal, byteCount)
+		if checkpoint, used, terminal := readState(escrow.ContractId); checkpoint || used != byteCount || !terminal {
+			t.Fatalf("covered checkpoint after the sender's final: checkpoint=%t bytes=%d terminal=%t, want a settled final of %d bytes", checkpoint, used, terminal, byteCount)
 		}
-		result, err := FlushLegacySettlements(ctx, int(escrow.ContractId[15])%LegacySettlementShardCount, nil, 64)
-		if err != nil || result.Completed != 1 {
-			t.Fatal("legacy worker did not settle the completed checkpoint", result, err)
-		}
-		if _, _, pending, terminal := readState(escrow.ContractId); pending || !terminal {
-			t.Fatalf("legacy worker left the completed checkpoint unsettled: pending=%t terminal=%t", pending, terminal)
-		}
+		requireLegacySettlementTestState(t, ctx, f, escrow.ContractId, true, 1000-byteCount, 40)
 	})
 }
 
