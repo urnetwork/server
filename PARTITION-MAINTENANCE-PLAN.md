@@ -1,9 +1,11 @@
 # Partitioning and maintenance plan: ongoing bloat
 
-Status: PLAN, written 2026-10-23 during the edge-2 disk-full outage. It was
-revised the same day after a code review of each table and a design review,
-whose findings are folded in throughout. Nothing here is implemented.
-**Decision** marks an item that needs the owner.
+Status: PLAN with the owner's final decisions (2026-10-24); implementation in
+progress. Written 2026-10-23 during the edge-2 disk-full outage, then revised
+after a code review of each table and a design review
+(`PARTITION-MAINTENANCE-PLAN-REVIEW.md`), whose findings are folded in
+throughout. Each section marks its **Decided** choice; "Final decisions" below
+lists them together.
 
 Companion to `CONTRACT-PARTITION.md`, which covers the six contract tables
 (built, not cut over). This plan covers the rest of the database, plus the
@@ -16,6 +18,23 @@ upgrade to soon. Until then, a table shrinks only in a maintenance window
 `REINDEX CONCURRENTLY`, as the rotation does today.
 
 Sizes are decimal GB, as SIGNALS.md §5.14 measures them.
+
+## Final decisions (2026-10-24)
+
+| Item | Decision |
+|---|---|
+| A4 | Online compaction is deferred until PostgreSQL 19, at least a month away. The bloat measurement and its signal are built now. |
+| A5 | Autovacuum pacing, workers, memory and the A1 per-table settings are coded in `playbook-dbs.yml` behind their own tag, and applied only when the owner runs it. |
+| A6 | `transaction_timeout` of 15 minutes for the application role, after the long-reader inventory, plus the horizon signal. |
+| C2 | `provider_egress_health_history`: daily partitions, 7 days. |
+| C3 | `finished_task`: built. Daily partitions kept 8 days, dropped behind the owner fence. |
+| C4 | `provider_work_session_event`: weekly partitions, dropped after 13 weeks. |
+| C5 | `contract_close_report_evidence`: weekly `report_id` partitions dropped once they expire, with the built row deletes kept for the rest. |
+| C6 | `st_provider_usage_archive`: weekly partitions by contract week, 1-year retention. |
+| D | Retired hosted identities and their provide keys are hard-deleted after 1 day. Key history of a client that is gone is deleted 91 days after it's gone. The mint rate is a product question outside this plan. |
+| Contract-dependent work | A7's reuse of the contract checks and retiring `legacy_settlement_intent` go ahead now: the contract-partition review fixes are merged (`09cd98565`). |
+| `search_projection` | Left as is. |
+| `search_provider_stats` | Change guard only; the open hour keeps its one-minute rollup. |
 
 ## Summary
 
@@ -304,7 +323,9 @@ Extend it to every index of the A1 tables:
   long REPEATABLE READ transaction reads. Automate only after that: one table
   at a time, under the rotation's load deferrals, with its own budget apart
   from routine vacuum.
-  - **Decision:** whether it ever runs on its own.
+  - **Decided (2026-10-24): deferred.** PostgreSQL 19 is at least a month
+    away, so compaction and any automation of it wait for the upgrade. The
+    measurement and the bloat signal above are built now.
 - **Hand-off:** a table over 50 GB with persistent bloat goes to Part C or D,
   not to repeated compaction.
 
@@ -344,8 +365,11 @@ rows pass min(`autovacuum_vacuum_max_threshold`, base threshold + scale factor
 × rows). At scale 0.2, the 100M cap applies to every table over 500M rows, so
 raising a large table's base threshold alone changes nothing.
 
-**Decision:** the cost budget and worker count. Set them in a trial after the
-storage expansion, with the §2.4 signals watched.
+**Decided (2026-10-24): code it, apply later.** The global pacing, worker count
+and memory go into the PostgreSQL config that `playbook-dbs.yml` manages. The
+A1 per-table settings go into a task beside it. Both sit behind their own tag,
+so nothing changes until the owner runs that tag, as a trial after the storage
+expansion with the §2.4 signals watched.
 
 ### A6. Bound the transaction horizon
 
@@ -378,8 +402,8 @@ storage expansion, with the §2.4 signals watched.
     If slots or prepared transactions are unused on main, confirm that
     instead.
   - Name the holder, ranked as §2.4 already ranks horizon candidates.
-- **Decision:** the bound. 15 minutes is the proposal, once the inventory
-  confirms every request and task path fits.
+- **Decided (2026-10-24): 15 minutes,** set once the inventory confirms that
+  every request and task path fits.
 
 ### A7. One partition maintenance registry
 
@@ -409,10 +433,15 @@ The registry keeps each family's own rules:
   again, and may need index rebuilds, as the contract legacy leaf's priority
   indexes do;
 - families that are never dropped;
-- the contract checks, unchanged.
+- the contract checks, as completed by the contract-partition review fixes
+  (`09cd98565`): rollback under its locks, and the row reaper's payment
+  guards in retirement.
 
 It also needs, for every family:
 
+- **Canonical bounds:** daily partitions start at 00:00 UTC and weekly ones at
+  Monday 00:00 UTC, as the contract weeks do, so a range never straddles two
+  partitions.
 - **Parent statistics:** autovacuum never analyzes a partitioned parent, so
   the registry analyzes each parent on a schedule, not only each leaf.
 - **Create-ahead on its own cadence,** apart from slow archive or compaction
@@ -428,6 +457,9 @@ maintenance, as C2 would, and moves into the registry later.
 The monitor's runway and blocked-retention probes then cover every registered
 table, not only contracts.
 
+**Decided (2026-10-24): build it now, including the contract family.** The
+contract-partition fixes are merged.
+
 ## Part B: write paths
 
 The changes below stop row versions from being written in the first place.
@@ -439,7 +471,7 @@ Each one is small, and each needs a test.
 | `pending_task`, `finished_task` | 16 `flush_transfer_debits_*` and 16 `flush_legacy_settlements_*` chains re-arm every 2 s even when they find nothing. That is at least 16 completions a second, about 1.4M `finished_task` rows a day, each also a `pending_task` insert, claim and delete. The legacy queue is empty. | Back off an idle chain from 2 s to 30 s, and have the enqueue path kick its shard's chain (`KickTasks`) so latency stays low when work arrives. Stop the legacy chains when that table retires. |
 | `network_client_connection` | Disconnect flips `connected`, which is in five indexes: a non-HOT update writing six index entries. About 97% of rows are closed and waiting out the 8 hours, and all of them sit in the indexes the open-row reads use. | Partial indexes for open rows: `(client_id, extender_id) WHERE connected`, `(client_address_hash) WHERE connected`, keep `(handler_id) WHERE connected`, and add `(disconnect_time) WHERE NOT connected` for the reaper. The hot indexes then hold about 90k entries instead of 3.3M. Check that each reader's predicate matches. |
 | `network_client_location_reliability` (132 GB) | `UpdateClientLocationReliabilitiesInTx` upserts every connected client every 30 minutes with no change guard. It sets the indexed `update_block_number`, so every rewrite is non-HOT. The retention delete is one unbatched statement every 15 minutes. | Add an `IS DISTINCT FROM` guard. Refresh `update_block_number` only when it is about a day old. Fillfactor 85. Batch the delete. Measure how many rows are hosted child identities (`source_client_id IS NOT NULL`), which most readers exclude anyway. |
-| `search_provider_stats` | `RollupSearchProviderStats` re-upserts every row of the open hour every minute: about 60 versions per row. A closed hour rolls up once, and its Redis bucket is then deleted. | Add a change guard, so an unchanged row is not rewritten. If the current hour's stats may lag 10 minutes, roll up the open hour every 10 minutes. Fillfactor 70. Do not regenerate the table: a closed hour's Redis source no longer exists. |
+| `search_provider_stats` | `RollupSearchProviderStats` re-upserts every row of the open hour every minute: about 60 versions per row. A closed hour rolls up once, and its Redis bucket is then deleted. | Add a change guard, so an unchanged row is not rewritten. Fillfactor 70. The open hour keeps its one-minute rollup: a 10-minute cadence would delay current-hour stats, and isn't adopted. Do not regenerate the table: a closed hour's Redis source no longer exists. |
 | `device` | The re-auth branch of `authNetworkClientWithParentState` rewrites `device_spec` on every re-auth, changed or not. | Change guard. Fillfactor 90. |
 | `client_connection_reliability_score` | Each reliability pass upserts every client × lookback, then deletes stale rows. The upserts are non-HOT because `max_block_number` is indexed. | Drop that index, or narrow it to `(lookback_index)`. Skip unchanged rows. Fillfactor 50. |
 | `transfer_debit_journal` | Insert, then `applied = true`, then delete seconds later. The update is non-HOT because `applied` is in the age index. | Re-key the age index to `(shard, create_time)`. Fillfactor 70. |
@@ -448,8 +480,8 @@ Each one is small, and each needs a test.
 | `network_client_handler` | A heartbeat every 5 s per handler, non-HOT only because `heartbeat_time` is indexed, on a table of a few dozen rows. | Drop the index. |
 | `transfer_balance` | In-place updates on the admission path. | Fillfactor 85–90. |
 | `user_auth_attempt` | Nothing writes or reads it any more; rate limiting moved to Redis. | Drop the table, and retire `RemoveExpiredAuthAttempts` through `removedTaskTargets`. |
-| `legacy_settlement_intent` | A drained queue: Redis admission now marks escrows `redis_reserved`. The 33.6 GB was a past backlog plus non-HOT retries. | Once all 16 shards are empty, drop the table, its outcome trigger on `transfer_contract`, and its FK. The weekly contract partition drop checks this table today (`db_contract_partition_maintenance.go:283`). |
-| `search_projection` | The search fallback's inverted index. Each value's projections are replaced, and its update record is published, in one transaction (`search/search.go:AddRawInTx`). Since f071c331c an unchanged value is skipped, so most of the 46% is older than that. The table is read only until the in-memory search sync completes. | Leave it, or drop it together with the fallback. Do not rebuild and swap it: a write between the copy and the swap would be lost. |
+| `legacy_settlement_intent` | A drained queue: Redis admission now marks escrows `redis_reserved`. The 33.6 GB was a past backlog plus non-HOT retries. | Once all 16 shards are empty, drop the table, its outcome trigger on `transfer_contract`, and its FK, along with the weekly contract drop's check on it (`db_contract_partition_maintenance.go`). Built now: the contract-partition fixes are merged. |
+| `search_projection` | The search fallback's inverted index. Each value's projections are replaced, and its update record is published, in one transaction (`search/search.go:AddRawInTx`). Since f071c331c an unchanged value is skipped, so most of the 46% is older than that. The table is read only until the in-memory search sync completes. | Leave it (decided 2026-10-24). Dropping it together with the fallback stays possible later. Do not rebuild and swap it: a write between the copy and the swap would be lost. |
 
 A new fillfactor applies only to pages written after the change. Existing pages
 take it at the next compaction: a VACUUM FULL window, or PostgreSQL 19's online
@@ -530,9 +562,10 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
   - a replay at the retention boundary, which must not credit cycle progress
     twice;
   - writes during the swap.
-- **Decision:** retention. 7 days covers every reader with room.
+- **Decided (2026-10-24): 7 days.** Daily partitions, each dropped once its
+  upper bound is 7 days past.
 
-### C3. `finished_task`: possible, but needs a design proof first
+### C3. `finished_task`: daily partitions kept 8 days (decided 2026-10-24)
 
 - **Writes:** insert-only at completion. The row moves from `pending_task` in
   one fenced statement (`DELETE ... RETURNING` in `task/task_run_once.go`;
@@ -562,12 +595,14 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
       duplicate in another leaf.
 - **Key:** `run_end_time`, not `task_id`. A task's id is minted when it is
   scheduled, and one task finished 96 days later.
-- **Options:**
-  - **Keep daily partitions 8 days,** dropping each 7 days after its upper
-    bound, behind the owner fence. That is about 14 GB at today's volume and
-    about 7 GB after B2. Lookups by `task_id` probe up to 9 partitions.
-  - **Or move a failed Post's row to a side table** when it fails, and drop
-    history at 24 hours.
+- **Chosen: keep daily partitions 8 days,** dropping each 7 days after its
+  upper bound, behind the owner fence. That is about 14 GB at today's volume
+  and about 7 GB after B2. Lookups by `task_id` probe up to 9 partitions.
+  - Not chosen: moving a failed Post's row to a side table when it fails, and
+    dropping history at 24 hours.
+- **Identity:** the fenced move from `pending_task` stays the only writer. A
+  test pins that a completion inserts exactly one row, and the cutover copies
+  nothing (the old table attaches as is), so no backfill can duplicate a task.
 - **Cutover:** attach the current table as a legacy partition behind a
   validated `CHECK (run_end_time < C)`, as the contract cutover does. It then
   ages out as one partition.
@@ -583,9 +618,10 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
   - the existing `task/task_queue_retention_test.go` cases, against the
     partitioned schema.
 
-After B1, B2 and A1, the table stays small without this, so C3 is optional.
+B1, B2 and A1 alone would keep the table small. The owner chose to partition it
+as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
 
-### C4. `provider_work_session_event` (136 GB): retention decision first
+### C4. `provider_work_session_event` (136 GB): weekly partitions, 13 weeks (decided 2026-10-24)
 
 - **Writes:** the connection trigger (`provider_work_session_append`) appends
   an admit and a retire event for every connection of every client, provider
@@ -593,37 +629,62 @@ After B1, B2 and A1, the table stays small without this, so C3 is optional.
 - **All live:** guard triggers refuse UPDATE, DELETE and TRUNCATE.
 - **Signer not deployed:** the signer these events exist for has not shipped
   (migration 824; `providerWorkSignSessionEventsInTx`).
-- **Cheapest fix:** stop appending for non-provider clients while no signer
+- **Not chosen:** stopping events for non-provider clients while no signer
   runs.
-- **If retention is allowed:**
-  - weekly or monthly `RANGE (observed_at)`, with primary key
+- **Design:**
+  - weekly `RANGE (observed_at)`, with primary key
     `(client_id, sequence, observed_at)`;
   - rework the FK from `provider_work_session_receipt`;
   - give the retire lookup a lower bound from the connection id's timestamp;
+  - cut over without copying: the current table attaches as a legacy
+    partition behind a validated `CHECK (observed_at < C)`;
   - drop only behind an explicit policy check, since a drop bypasses the
-    guards.
-- **Decision:** retention, or no events for non-provider clients.
+    guards: only the retention task drops, only weeks whose upper bound is 13
+    weeks past, and only under an opt-in setting it alone sets (as migration
+    857 does for close evidence).
+- **Decided (2026-10-24): 13 weeks,** matching contract retention, so a
+  session's events never outlive the contracts they describe.
 
-### C5. `contract_close_report_evidence` (170 GB): decide before about 2027-01-05
+### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
-Deletes start about 91 days after the oldest evidence rows.
+Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
 
-- **Built:** migration 857 and `RemoveExpiredCloseEvidence` (every 15 minutes)
-  delete rows accepted more than 91 days ago whose contracts are resolved.
-  - At 1.3 GB an hour (SIGNALS.md §2.4f), 91 days is about 2.8 TB.
-  - Removing it takes tens of millions of guarded row deletes a day.
-- **Alternative: weekly `RANGE (report_id)`.**
-  - `report_id` is in the primary key and is time-ordered: the reporting
-    client mints it with `NewId()` (connect's `transfer_contract_manager.go`).
-  - So `ON CONFLICT (client_id, report_id)` stays enforceable, and retention
-    becomes a drop.
-  - Costs: client clocks skew, so admission needs a range check or a
-    catch-all partition. The ST epoch census
-    (`model/st_provider_close_originals.go`) must also bound `report_id` using
-    the contract's times.
-  - A `report_id` week is when the report was minted, not when it was
-    accepted. The 91 days would then count from minting.
-- **Decision:** row deletes, or partitions by `report_id`.
+- **Built, and kept:** migration 857 and `RemoveExpiredCloseEvidence` (every 15
+  minutes) delete rows accepted more than 91 days ago whose contracts are
+  resolved.
+  - At 1.3 GB an hour (SIGNALS.md §2.4f), 91 days is about 2.8 TB. Row deletes
+    alone would mean tens of millions of guarded deletes a day.
+- **Design: weekly `RANGE (report_id)`, dropped when a week expires.**
+  - `report_id` is in the primary key and time-ordered: the reporting client
+    mints it with `NewId()` (connect's `transfer_contract_manager.go`). So
+    `ON CONFLICT (client_id, report_id)` stays enforceable.
+  - **Drop rule:** a week drops once its upper bound is 91 days past and every
+    row in it meets the 857 rule (accepted more than 91 days ago, contract
+    resolved or gone). The check runs again in the transaction that detaches
+    the week. A week holding a straggler stays. Its qualifying rows are
+    row-deleted as today, and it drops once the rest qualify.
+  - **Guard:** a drop bypasses the 857 row guard, so only the retention task
+    drops, under the same opt-in setting, and only weeks the check passed.
+  - **Clock skew:** clients mint `report_id` with their own clocks. A catch-all
+    (DEFAULT) partition takes ids outside the created weeks, so no report is
+    ever refused. It is never dropped; the row deletes empty it. Before a week
+    is created, any of that week's rows in the catch-all move into it, because
+    PostgreSQL refuses to create a partition whose rows sit in DEFAULT.
+  - **Cutover without copying:** the current table attaches as a legacy
+    partition behind a validated `CHECK (report_id < floor(C))`. Rows already
+    past that bound, from clients running ahead, move into the catch-all
+    first. The legacy partition is never dropped automatically; the row
+    deletes empty it over time.
+  - **Census:** the ST epoch census (`model/st_provider_close_originals.go`)
+    bounds `report_id` using the contract's times, so it prunes to the weeks
+    it needs.
+  - **Tests:**
+    - a report minted ahead of the server clock lands in the catch-all, and
+      later in its week;
+    - a week with one unresolved contract isn't dropped, and its other rows
+      are still row-deleted;
+    - the census prunes;
+    - the cutover runs with inserts arriving.
 
 ### C6. Later, on size triggers or decisions
 
@@ -648,19 +709,28 @@ Deletes start about 91 days after the oldest evidence rows.
       idempotency key.
 - **`search_provider_stats`:** daily `RANGE (period_start)` would match its
   30-day retention, but buys little at 4.3 GB once Part B fixes its upsert.
-- **`st_provider_usage_archive`** (1.5 GB): it grows about 20 GB a week once
-  contract retention archives every retired week.
-  - If it gets retention, partition it, but not by a plain copy.
-  - Its insert guard requires the matching live `transfer_contract` row
-    (`db_provider_usage_archive.go`). An already-archived row cannot pass the
-    guard again once its contract is gone.
-  - Archive writes land in contract weeks long past, so partitions must exist
-    for historical ranges.
-  - While retention is undecided, nothing drops it automatically.
-  - Tests, if it is partitioned: an archived row whose contract is gone, and a
-    terminal contract archived during the migration. Compare proof fields and
-    usage totals before and after, and restart the migration midway.
-  - **Decision:** archive retention.
+- **`st_provider_usage_archive`** (1.5 GB): one-year retention (decided
+  2026-10-24). It grows about 20 GB a week once contract retention archives
+  every retired week.
+  - **Partitions:** weekly by contract week, on the contract tables' bounds
+    (Monday 00:00 UTC, through `contract_id_floor()`). Archive writes land in
+    weeks long past, so weeks exist from the oldest contract (2026-06-01)
+    onward, created ahead of the contract weeks being retired.
+  - **Retention:** a week drops once its upper bound is 52 weeks past. A drop
+    bypasses the append-only guard, so only the retention registry drops it.
+  - **Cutover:** not a plain copy. The insert guard requires the matching live
+    `transfer_contract` row (`db_provider_usage_archive.go`), so an
+    already-archived row can't pass it again once its contract is gone. The
+    table is small, so one migration copies it into the partitioned table
+    with the guard bypassed for that copy only. It then checks the copy
+    exactly (row count, and per-week sums of usage) and swaps the names under
+    a write lock.
+  - **Tests:**
+    - an archived row whose contract is gone;
+    - a terminal contract archived during the migration;
+    - proof fields and usage totals compared before and after;
+    - the migration restarted midway;
+    - a week dropped at 52 weeks and not before.
 
 ### C7. Not partitioned
 
@@ -695,8 +765,9 @@ Changes:
 - **Hard-delete retired hosted identities sooner.**
   - Today a retire is a soft delete (`RemoveNetworkClient`), and the hard
     delete comes 30 days later (`NetworkClientReapAfterDeactivate`).
-  - Use a short horizon, never before the 75-minute contract linger, after
-    checking the close and settlement readers.
+  - Hard-delete them 1 day after retirement, well past the 75-minute contract
+    linger, after checking the close and settlement readers. Top-level
+    clients keep their current policy.
 - **Delete provide keys at deactivation.** An inactive client cannot be a
   contract destination.
 - **Make `SetProvide` write only the difference.** It deletes and re-inserts
@@ -711,10 +782,13 @@ Changes:
     retained head marks a complete archived history
     (`db_client_key_policy_history.go`), so a client's history goes only after
     all of its heads.
-- **Decision:**
-  - the horizons;
-  - whether to bring the mint rate down at the source, which is a protocol and
-    product change.
+- **Decided (2026-10-24):**
+  - retired hosted identities and their provide keys: hard-deleted 1 day after
+    retirement;
+  - key history of a client that is gone: deleted 91 days after it's gone,
+    aligned with contract retention, so it outlasts every close report;
+  - bringing the mint rate down at the source is a protocol and product
+    change outside this plan.
 
 ## Cutover requirements
 
@@ -731,36 +805,32 @@ Every table swap or partition cutover in this plan needs:
 
 ## Decisions
 
-1. **A4:** whether `REPACK (CONCURRENTLY)` ever runs on its own after
-   PostgreSQL 19, or stays operator-run.
-2. **A5:** the autovacuum cost budget and worker count, after the storage
-   expansion.
-3. **A6:** the `transaction_timeout` bound.
-4. **C2:** `provider_egress_health_history` retention (7 days proposed).
-5. **C4:** `provider_work_session_event` retention, or no events for
-   non-provider clients.
-6. **C5:** evidence row deletes, or `RANGE (report_id)`, before about
-   2027-01-05.
-7. **C6:** `st_provider_usage_archive` retention.
-8. **D:** identity retention horizons, and the mint rate.
+All decided on 2026-10-24; see "Final decisions" at the top. No open owner
+questions remain. Two confirmations happen during implementation:
+
+- **C2:** confirm that every egress submitter's retry repeats its
+  `measured_at`. If one doesn't, add the per-run `run_id` check.
+- **A4:** at the PostgreSQL 19 upgrade, confirm REPACK's `wal_level` needs and
+  its lock behavior.
 
 ## Order of work
 
 1. **Edge-2 maintenance:** VACUUM FULL of everything that fit (done). The five
-   largest tables wait for the storage expansion and the contract cutover.
-2. **Stop the queue bloat:** A1, A2, A3, and Part B's first two rows
+   largest tables wait for the storage expansion (in progress) and the
+   contract cutover.
+2. **Phase 1, stop the queue bloat:** A1, A2, A3, and Part B's first two rows
    (`pending_task` heartbeats, idle chains).
-3. **C2:** `provider_egress_health_history`. It returns about 125 GB, at low
-   risk.
-4. **After the storage expansion:** A6 (horizon), then A5 (pacing, then
-   workers).
-5. **The rest of Part B,** including retiring `user_auth_attempt` and
-   `legacy_settlement_intent`.
-6. **Part D,** once its horizons are decided.
-7. **Contract cutover** (`CONTRACT-PARTITION.md`), then the C4 and C5
-   decisions and the A7 registry. C3 is optional, and needs its design proof
-   first.
-8. **After the PostgreSQL 19 upgrade:** A4 compaction, reported first.
+3. **Phase 2, the rest of Part B,** including retiring `user_auth_attempt`
+   and `legacy_settlement_intent`.
+4. **Phase 3, the horizon and measurement:** A6 (inventory, timeout, horizon
+   signal) and the A4 bloat measurement and signal. A5 is coded behind its
+   playbook tag, not applied.
+5. **Phase 4, the registry:** A7, with C2 as its first new family.
+6. **Phase 5:** C3 and C4.
+7. **Phase 6:** C5 and C6.
+8. **Phase 7:** Part D.
+9. **Contract cutover** (`CONTRACT-PARTITION.md`), when the owner schedules it.
+10. **After the PostgreSQL 19 upgrade:** A4 compaction, reported first.
 
 Every change ships with tests (owner rule). A change with a migration merges
 to main before any database test applies it.
