@@ -1,5 +1,35 @@
 # Inactive host-control release — October 24, 2026
 
+## Exact-Go native control release — 21:47 UTC
+
+The latest four native control programs were built from clean main
+`c5f3e70d76219798f4ed704c2c535d1aa4cb5f56`, using Go 1.27.3, Linux/amd64,
+CGO disabled and greenteagc. Each binary reports `vcs.modified=false` and that
+exact revision. This release includes both per-intent API acknowledgment
+authentication and the strict Go 1.27.3 build/artifact policy. The corresponding
+main runtime code passed three consecutive full simulator suites before build.
+
+Installed directory:
+`/usr/local/libexec/urnetwork/competition-control-c5f3e70d7-98b9412e`.
+The directory and all four programs are root:root 0555. Installed hashes match
+the retained build outputs:
+
+| Program | SHA-256 |
+| --- | --- |
+| `competitionprepare` | `51be152b2cb58a2bfdcb06cd7c3d5fb10ee5d6819826ee4ffbaf300949da5efc` |
+| `competitionqualify` | `91429d7a5f58d014841bf852ef9c16833f780023fbcd19d0445d7fdc95ab8311` |
+| `competitionworker` | `ca69337cf487920548d159f6afba2b5a325f5a994b65e315577ed97b769c61d9` |
+| `sim-latency` | `98b9412e6c5f0161895864eeb0e9f645a54790bd68d62e57289b10fa806b2ebd` |
+
+Complete binary build-info records are retained under the mono-root-relative
+`temp/main-control-go1273-20261024.KcjKPbrp`. No test or scoring run overlapped
+this build; it overlapped only the separate trusted evaluator-image preparation.
+This native release is inactive. No unit, wrapper/settings pin, host config,
+staging supervisor or main control-plane row was changed. Older release
+directories remain untouched. These program hashes are not OCI worker-image
+digests and must not be presented as such. Exact release wiring and genuine
+review/build/host qualification remain required before production activation.
+
 ## Later native release installation
 
 At 20:00 UTC the four already-built native control programs from clean main
