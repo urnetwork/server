@@ -18,7 +18,7 @@ import (
 // WARN and the PAGE before it, the PAGE after it, the schedule the
 // taskworkers publish, and the overrides every finding names.
 
-// The owner's start, 2026-10-21 00:00 UTC.
+// A fixed published schedule, independent of the code's fallback default.
 var modernGateReadinessTestStart = time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 
 // An observation as four settled taskworkers publish it, all on the same
@@ -396,12 +396,46 @@ func TestModernGateReadinessFollowsThePublishedSchedule(t *testing.T) {
 		t.Errorf("an hour before the moved start: findings %+v err %v, want both buckets", findings, err)
 	}
 
+	defaultStart := model.DefaultQualitySpeedModernProviderStart()
+	defaultNow := defaultStart.Add(-time.Hour)
 	unpublished := modernGateReadinessObservation{}
-	if _, err := evaluateModernGateReadiness(unpublished, now); err == nil || !strings.Contains(err.Error(), "urnetwork_stats_provider_modern_gate_on") {
+	if _, err := evaluateModernGateReadiness(unpublished, defaultNow); err == nil || !strings.Contains(err.Error(), "urnetwork_stats_provider_modern_gate_on") {
 		t.Errorf("no schedule inside the default windows: err %v, want a visibility failure", err)
 	}
-	if findings, err := evaluateModernGateReadiness(unpublished, start.AddDate(0, 0, -10)); err != nil || len(modernGateReadinessTestFailing(t, findings)) != 0 {
+	if findings, err := evaluateModernGateReadiness(unpublished, defaultStart.AddDate(0, 0, -10)); err != nil || len(modernGateReadinessTestFailing(t, findings)) != 0 {
 		t.Errorf("no schedule ten days before: findings %+v err %v, want quiet", findings, err)
+	}
+}
+
+// A missing schedule uses the current code default, including the exact
+// 72-hour warning edge and 18:00 UTC watch end; published overrides stay separate.
+func TestModernGateReadinessDefaultFallbackWindowBoundaries(t *testing.T) {
+	start := model.DefaultQualitySpeedModernProviderStart()
+	watchEnd := time.Date(start.Year(), start.Month(), start.Day(), 18, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		now       time.Time
+		wantError bool
+	}{
+		{name: "before warning", now: start.Add(-72*time.Hour - time.Nanosecond)},
+		{name: "at warning", now: start.Add(-72 * time.Hour), wantError: true},
+		{name: "before start", now: start.Add(-time.Hour), wantError: true},
+		{name: "at start", now: start, wantError: true},
+		{name: "before watch end", now: watchEnd.Add(-time.Nanosecond), wantError: true},
+		{name: "at watch end", now: watchEnd},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			findings, err := evaluateModernGateReadiness(modernGateReadinessObservation{}, test.now)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "urnetwork_stats_provider_modern_gate_on") {
+					t.Fatalf("missing schedule: err %v, want default-window visibility failure", err)
+				}
+				return
+			}
+			if err != nil || len(modernGateReadinessTestFailing(t, findings)) != 0 {
+				t.Fatalf("outside default window: findings %+v err %v, want quiet", findings, err)
+			}
+		})
 	}
 }
 
@@ -523,7 +557,7 @@ func TestModernGateReadinessSignalPreservesClockSkewAndInactiveCounts(t *testing
 // Non-finite and negative clock values stay observation errors at parsing,
 // before a source time can be converted into a readiness decision.
 func TestModernGateReadinessSignalRejectsInvalidCountTimes(t *testing.T) {
-	start := modernGateReadinessTestStart
+	start := model.DefaultQualitySpeedModernProviderStart()
 	now := start.Add(-time.Hour)
 	observation := modernGateReadinessTestObservation(now, 90, 10, 90, 10)
 	payload := modernGateReadinessTestPayload(t, now, modernGateReadinessTestProcesses(4, now, false, &start), now, observation.shadow, observation.buckets)
@@ -839,7 +873,7 @@ func TestModernGateReadinessSignalJudgesSettledProcesses(t *testing.T) {
 // gate off as it says, and beside a Mimir that cannot be read. Without a
 // failure nothing fires.
 func TestModernGateReadinessSignalWarnsOnAFailedPostponement(t *testing.T) {
-	start := modernGateReadinessTestStart
+	start := model.DefaultQualitySpeedModernProviderStart()
 	now := start.Add(-time.Hour)
 	failure := "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date"
 	// the taskworkers on the failed release: the gate off and no start
