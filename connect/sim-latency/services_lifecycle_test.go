@@ -77,7 +77,7 @@ func TestSimulationHandlersRestoreAndMaintainProviderEligibility(t *testing.T) {
 		self := newSimulationLifecycleHost(ctx, cancel)
 		defer self.Close()
 		self.SetPrewarmed(performances)
-		caller := session.Testing_CreateClientSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "synthetic-caller", false, false))
+		caller := simulationTestClientSession(ctx, session.NewByJwt(server.NewId(), server.NewId(), "synthetic-caller", false, false))
 		assertReliabilityConnected := func(phase string, want bool) {
 			t.Helper()
 			self.RunPipelineOnce(ctx)
