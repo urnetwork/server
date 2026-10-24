@@ -10788,4 +10788,16 @@ var migrations = []any{
 	// later insert honors the setting, so the table converges as its rows turn
 	// over, without a rewrite. See taskHeartbeatFillfactorSql.
 	newSqlMigration(taskHeartbeatFillfactorSql),
+
+	// provider_work_session_event moves to weekly observed_at partitions kept
+	// 13 weeks (PARTITION-MAINTENANCE-PLAN.md C4), cut over by an owner-run
+	// command (MigrateProviderWorkSessionEventsToPartitions). This publishes
+	// what is correct on the plain and the partitioned table alike: the retire
+	// lookup bounded below by its connection id's mint time, so it prunes to
+	// the weeks since; the receipt's reference to its event enforced by a
+	// trigger, which stays when the cutover drops the receipt foreign key; and
+	// the drop guard that only the retention task's guarded drop passes. It
+	// replaces functions and adds a trigger to the receipt table, so it takes
+	// no lock on the event table (db_provider_work_session_partition.go).
+	newSqlMigration(providerWorkSessionPartitionSchemaSql),
 }

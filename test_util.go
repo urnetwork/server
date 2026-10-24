@@ -1270,6 +1270,9 @@ cluster: %t`,
 		if testContractPartitions() {
 			Testing_PartitionContracts(ctx)
 		}
+		if testProviderWorkSessionPartitions() {
+			Testing_PartitionProviderWorkSessionEvents(ctx)
+		}
 	}
 
 	if self.Warmup {

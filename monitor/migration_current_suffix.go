@@ -388,10 +388,12 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
 	// 824 and 825 retire composite artifacts (776, 767-769) that pinned the
 	// dropped index, so each republishes the rest of that custody with the
-	// index required absent instead.
+	// index required absent instead. The session journal's partition
+	// preparation replaces the append body and the receipt key's custody and
+	// republishes the rest (providerWorkSessionPartitionCustodyPredicates).
 	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
 		providerWorkSessionCustodyPredicates(
-			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...).removedAt(server.ProviderWorkSessionPartitionMigrationVersion()),
 	// 857 replaces the evidence guard body and republishes the rest.
 	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
 		contractCloseEvidenceChainWithoutContractIndexArtifactQuery).removedAt(857),
@@ -720,7 +722,9 @@ var migrationCurrentSuffixContracts = append([]snMainnetMigrationContract{
 	retiredChildNetworkClientIndexMigrationContract,
 	clientKeyHistoryRetentionMigrationContract,
 	migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
-		pendingTaskFillfactorArtifactQuery))...)
+		pendingTaskFillfactorArtifactQuery),
+	migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
+		providerWorkSessionPartitionCustodyPredicates()...))...)
 
 // A fillfactor governs only later writes, so the published setting itself is
 // the artifact. The version is looked up by the migration's SQL and follows it
