@@ -1354,32 +1354,38 @@ func removeDeactivatedProvideKeysInTx(ctx context.Context, tx server.PgTx, clien
 	result, err := tx.Query(
 		ctx,
 		`
-			DELETE FROM provide_key
-			WHERE client_id = ANY($1)
-			RETURNING client_id
+			DELETE FROM provide_key USING network_client
+			WHERE provide_key.client_id = ANY($1)
+			AND network_client.client_id = provide_key.client_id
+			RETURNING provide_key.client_id, network_client.network_id
 		`,
 		clientIds,
 	)
 	if err != nil {
 		return err
 	}
-	removedClientIds := map[server.Id]bool{}
+	removedClientIdNetworkIds := map[server.Id]server.Id{}
 	for result.Next() {
-		var clientId server.Id
-		if err := result.Scan(&clientId); err != nil {
+		var clientId, networkId server.Id
+		if err := result.Scan(&clientId, &networkId); err != nil {
 			result.Close()
 			return err
 		}
-		removedClientIds[clientId] = true
+		removedClientIdNetworkIds[clientId] = networkId
 	}
 	result.Close()
 	if err := result.Err(); err != nil {
 		return err
 	}
-	if 0 < len(removedClientIds) {
-		mirrorClientIds := slices.Collect(maps.Keys(removedClientIds))
+	if 0 < len(removedClientIdNetworkIds) {
+		mirrorClientIds := slices.Collect(maps.Keys(removedClientIdNetworkIds))
 		server.AddTxPostCommit(tx, "provide_mirror_deactivation/"+server.NewId().String(), func() any {
 			removeProvideMirrors(ctx, mirrorClientIds)
+			peerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), server.TxPostCommitTimeout)
+			defer cancel()
+			for clientId, networkId := range removedClientIdNetworkIds {
+				updateNetworkPeerProvideModes(peerCtx, networkId, clientId, nil)
+			}
 			return nil
 		})
 	}
@@ -1399,7 +1405,7 @@ func removeProvideMirrors(ctx context.Context, clientIds []server.Id) {
 				// DEL per client stays in one slot
 				_, err := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 					for _, clientId := range chunk {
-						pipe.Del(mirrorCtx, provideMirrorKeys(clientId)...)
+						pipe.Del(mirrorCtx, provideMirrorInvalidationKeys(clientId)...)
 					}
 					return nil
 				})
@@ -2458,6 +2464,29 @@ func provideMirrorKeys(clientId server.Id) []string {
 	return keys
 }
 
+// Revocation removes the publication token in the same operation as the keys,
+// so an already committed provide cannot restore them afterward.
+func provideMirrorInvalidationKeys(clientId server.Id) []string {
+	return append(provideMirrorKeys(clientId), provideMirrorHoldKey(clientId))
+}
+
+// Only the provide that still owns the hold may publish. Every key shares the
+// client's Redis slot. Expiry or revocation of the hold also refuses a delayed
+// publication; ordinary confirmed read-through then fills the current keys.
+var provideMirrorPublishScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('DEL', unpack(KEYS, 2))
+redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+for i = 3, #KEYS do
+ local argument = 4 + 2 * (i - 3)
+ if ARGV[argument] == '1' then
+  redis.call('SET', KEYS[i], ARGV[argument+1], 'PX', ARGV[3])
+ end
+end
+redis.call('DEL', KEYS[1])
+return 1
+`)
+
 // Places a provide's hold and clears the mirror, so that no refill writes the
 // keys from before the provide and a provide whose mirror write fails leaves
 // no mirror. KEYS[1] is the hold and KEYS[2..] the mirror; ARGV[1] is the
@@ -2467,16 +2496,6 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('DEL', unpack(KEYS, 2))
 return 1
 `)
-
-// Releases a provide's hold unless a later provide holds the mirror. It runs
-// inside the provide's mirror write, so it is evaluated by source. KEYS[1] is
-// the hold and ARGV[1] the hold token.
-const provideMirrorUnholdScriptSource = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-	return redis.call('DEL', KEYS[1])
-end
-return 0
-`
 
 // MigrateProvideMode backfills the redis provide-key state from postgres for
 // clients whose provide_key rows predate the redis layer. The db is the source
@@ -2720,7 +2739,14 @@ func refillProvideMirror(ctx context.Context, clientId server.Id, secretKeys map
 	if !filled {
 		return
 	}
+	confirmProvideMirror(ctx, clientId, secretKeys, keys, provideModesListJson)
+}
 
+// Best-effort holds can fail during a Redis outage. Confirm every write that
+// may have landed, including a lost reply, so an old successful token cannot
+// publish over a newer commit whose hold failed. Taking back a same-mode newer
+// mirror is harmless: a confirmed read-through restores its current secrets.
+func confirmProvideMirror(ctx context.Context, clientId server.Id, secretKeys map[ProvideMode][]byte, keys []string, provideModesListJson []byte) {
 	confirmed := false
 	server.HandleError(func() {
 		confirmed = maps.EqualFunc(loadProvideSecretKeys(ctx, clientId), secretKeys, bytes.Equal)
@@ -2963,12 +2989,14 @@ func init() {
 // connection, so most provides change nothing and write no provide_key row.
 //
 // Provides of one client take a transaction advisory lock first, so each reads
-// the keys the one before it committed, and the last to commit wins. A set
-// that changes locks the client row FOR KEY SHARE, which conflicts with the FOR
+// the keys the one before it committed, and the last to commit wins. Each
+// provide locks the client row FOR KEY SHARE, which conflicts with the FOR
 // UPDATE of a deactivation, which deletes the keys: the provide commits first
 // and the deactivation deletes its keys, or it finds the client inactive and
 // writes nothing. A client without a row is written as before; the orphan
 // sweep removes its keys.
+// The mirror token is placed under those locks and checked atomically on
+// publication, so a delayed post cannot replace a newer set or revocation.
 //
 // Every applied provide still records a provide_key_change row, changed or
 // not: the announce loop counts each as a provide change for reliability
@@ -2978,7 +3006,6 @@ func SetProvide(
 	clientId server.Id,
 	secretKeys map[ProvideMode][]byte,
 ) {
-	var removedProvideModes []ProvideMode
 	var inactive bool
 
 	// The mirror is written after the commit, and that write can fail (redis
@@ -2992,21 +3019,8 @@ func SetProvide(
 	// source of truth and a client does not resend an in-band provide that
 	// failed. A stale empty list then lasts at most `provideMirrorEmptyTtl`.
 	holdToken := server.NewId().String()
-	func() {
-		holdCtx, holdCancel := context.WithTimeout(ctx, provideMirrorHoldTimeout)
-		defer holdCancel()
-		server.HandleError(func() {
-			server.Redis(holdCtx, func(r server.RedisClient) {
-				// all keys share the {pm_<clientId>} hash tag (one slot)
-				holdKeys := append([]string{provideMirrorHoldKey(clientId)}, provideMirrorKeys(clientId)...)
-				server.Raise(provideMirrorHoldScript.Run(holdCtx, r, holdKeys, holdToken, provideMirrorHoldTtl.Milliseconds()).Err())
-			})
-		})
-	}()
-
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx is retried on a transient error
-		removedProvideModes = nil
 		inactive = false
 
 		changeTime := server.NowUtc()
@@ -3016,6 +3030,30 @@ func SetProvide(
 			`SELECT pg_advisory_xact_lock(hashtextextended('provide_key/' || $1::uuid::text, 0))`,
 			clientId,
 		))
+
+		// Even an unchanged provide publishes. Lock its active row and place
+		// its token under the advisory lock, in PostgreSQL commit order.
+		var active bool
+		err := tx.QueryRow(ctx, `SELECT active FROM network_client WHERE client_id = $1 FOR KEY SHARE`, clientId).Scan(&active)
+		if errors.Is(err, pgx.ErrNoRows) {
+			active = true
+		} else {
+			server.Raise(err)
+		}
+		if !active {
+			inactive = true
+			return
+		}
+		func() {
+			holdCtx, holdCancel := context.WithTimeout(ctx, provideMirrorHoldTimeout)
+			defer holdCancel()
+			server.HandleError(func() {
+				server.Redis(holdCtx, func(r server.RedisClient) {
+					holdKeys := append([]string{provideMirrorHoldKey(clientId)}, provideMirrorKeys(clientId)...)
+					server.Raise(provideMirrorHoldScript.Run(holdCtx, r, holdKeys, holdToken, provideMirrorHoldTtl.Milliseconds()).Err())
+				})
+			})
+		}()
 
 		// read committed: this read sees the keys of a provide that held the
 		// lock before this one
@@ -3039,26 +3077,6 @@ func SetProvide(
 
 		difference := newProvideKeyDifference(storedSecretKeys, secretKeys)
 		if !difference.empty() {
-			var active bool
-			err := tx.QueryRow(
-				ctx,
-				`
-				SELECT active FROM network_client
-				WHERE client_id = $1
-				FOR KEY SHARE
-				`,
-				clientId,
-			).Scan(&active)
-			if errors.Is(err, pgx.ErrNoRows) {
-				active = true
-			} else {
-				server.Raise(err)
-			}
-			if !active {
-				inactive = true
-				return
-			}
-
 			if 0 < len(difference.removedProvideModes) {
 				server.RaisePgResult(tx.Exec(
 					ctx,
@@ -3092,8 +3110,6 @@ func SetProvide(
 				})
 			}
 		}
-		removedProvideModes = difference.removedProvideModes
-
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -3116,47 +3132,46 @@ func SetProvide(
 		if glog.V(1) {
 			glog.Infof("[ncm][%s]provide refused: the client is inactive\n", clientId)
 		}
-		// the hold cleared the mirror, and a refill mirrors the keys the
-		// deactivation left: none
-		server.HandleError(func() {
-			server.Redis(ctx, func(r server.RedisClient) {
-				server.Raise(r.Eval(ctx, provideMirrorUnholdScriptSource, []string{provideMirrorHoldKey(clientId)}, holdToken).Err())
-			})
-		})
 		return
 	}
 
-	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
+	publishProvideMirror(ctx, clientId, holdToken, secretKeys)
+	refreshNetworkPeerProvideModes(ctx, clientId)
+}
 
-		provideModesList := slices.Collect(maps.Keys(secretKeys))
-		provideModesListJson, _ := json.Marshal(provideModesList)
-		provideModesListTtl := provideMirrorTtl
-		if len(provideModesList) == 0 {
-			provideModesListTtl = provideMirrorEmptyTtl
-		}
-		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, provideModesListTtl)
-
-		for provideMode, secretKey := range secretKeys {
-			pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, provideMirrorTtl)
-		}
-		for _, provideMode := range removedProvideModes {
-			if _, ok := secretKeys[provideMode]; !ok {
-				pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
-			}
-		}
-		pipe.Eval(ctx, provideMirrorUnholdScriptSource, []string{provideMirrorHoldKey(clientId)}, holdToken)
-
-		_, err := pipe.Exec(ctx)
-		server.Raise(err)
-	})
-
-	// update the peer registry so connected network peers see the change
-	provideModes := map[ProvideMode]bool{}
-	for provideMode := range secretKeys {
-		provideModes[provideMode] = true
+// Publish and confirm outside both the PostgreSQL transaction and the Redis
+// callback, so validation never acquires a second connection of either pool.
+func publishProvideMirror(ctx context.Context, clientId server.Id, holdToken string, secretKeys map[ProvideMode][]byte) {
+	provideModesList := slices.Sorted(maps.Keys(secretKeys))
+	provideModesListJson, _ := json.Marshal(provideModesList)
+	ttl := provideMirrorTtl
+	if len(provideModesList) == 0 {
+		ttl = provideMirrorEmptyTtl
 	}
-	UpdateNetworkPeerProvideModes(ctx, clientId, provideModes)
+	keys := []string{provideMirrorHoldKey(clientId), provideModesKey(clientId)}
+	args := []any{holdToken, provideModesListJson, ttl.Milliseconds()}
+	allModes := append(slices.Clone(provideMirrorProvideModes), provideModesList...)
+	slices.Sort(allModes)
+	for _, provideMode := range slices.Compact(allModes) {
+		keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
+		secretKey, exists := secretKeys[provideMode]
+		present := 0
+		if exists {
+			present = 1
+		}
+		args = append(args, present, secretKey)
+	}
+	var published int64
+	var publishErr error
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			published, publishErr = provideMirrorPublishScript.Run(ctx, r, keys, args...).Int64()
+		})
+	}, func(err error) { publishErr = err })
+	if published != 0 || publishErr != nil {
+		confirmProvideMirror(ctx, clientId, secretKeys, keys[1:], provideModesListJson)
+	}
+	server.Raise(publishErr)
 }
 
 // Every connected client's announce loop calls this on each sync. The count is
@@ -4112,7 +4127,7 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 					// the whole provide mirror, whatever its keys were: they are
 					// deleted at deactivation, and that post can be lost. One
 					// client's keys share a slot
-					pipe.Del(ctx, provideMirrorKeys(clientId)...)
+					pipe.Del(ctx, provideMirrorInvalidationKeys(clientId)...)
 					for _, reverseKey := range verifyClientEgressKeys(clientId) {
 						reverseCmds[i] = append(reverseCmds[i], pipe.HGetAll(ctx, reverseKey))
 					}
@@ -4305,7 +4320,7 @@ func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
 		server.Redis(ctx, func(r server.RedisClient) {
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for clientId, provideModes := range clientProvideModes {
-					pipe.Del(ctx, provideModesKey(clientId))
+					pipe.Del(ctx, provideMirrorInvalidationKeys(clientId)...)
 					for _, provideMode := range provideModes {
 						pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
 					}

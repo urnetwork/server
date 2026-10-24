@@ -724,7 +724,7 @@ suite_proxy_process_start_identity() {
   local owner_pid="$1"
   local start_identity
   suite_proxy_positive_integer_validate "owner pid" "$owner_pid" || return $?
-  start_identity="$(LC_ALL=C ps -o lstart= -p "$owner_pid" 2>/dev/null | LC_ALL=C awk '
+  start_identity="$(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$owner_pid" 2>/dev/null | LC_ALL=C awk '
     NF == 5 {
       printf "%s-%s-%s-%s-%s", $1, $2, $3, $4, $5
       found = 1
