@@ -134,6 +134,7 @@ Usage:
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -167,7 +168,8 @@ Options:
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
     --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
-                   go to weekly partitions; prepare only.
+                   (or provider work session events) go to weekly partitions;
+                   prepare only.
     --rollback     Undo the contract partition swap while no weekly
                    partition holds a row.
     --abort        Drop a prepared, unfinalized contract partition cutover.
@@ -473,6 +475,8 @@ func main() {
 				modelMigrateClientReliabilityPartition(opts)
 			} else if contractPartition, _ := opts.Bool("contract-partition"); contractPartition {
 				modelMigrateContractPartition(opts)
+			} else if sessionPartition, _ := opts.Bool("provider-work-session-partition"); sessionPartition {
+				modelMigrateProviderWorkSessionPartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2750,6 +2754,37 @@ func modelMigrateContractPartition(opts docopt.Opts) {
 }
 
 func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractPartitionMigrateOptions, err error) {
+	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
+		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	return
+}
+
+// Partitions provider_work_session_event by observed_at week
+// (PARTITION-MAINTENANCE-PLAN.md C4; server.MigrateProviderWorkSessionEventsToPartitions):
+// prepare (with --cutover-week), then --finalize before that week; --rollback
+// and --abort undo. Each step can be rehearsed with --dry-run.
+func modelMigrateProviderWorkSessionPartition(opts docopt.Opts) {
+	options, err := providerWorkSessionPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateProviderWorkSessionEventsToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func providerWorkSessionPartitionMigrateOptions(opts docopt.Opts) (options server.ProviderWorkSessionPartitionMigrateOptions, err error) {
 	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
 		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
 		if err != nil {

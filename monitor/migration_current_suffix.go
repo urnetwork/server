@@ -5,6 +5,8 @@ package monitor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -374,10 +376,12 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 			snMainnetMigrationColumn{name: "currency", kind: "character varying(3)"})),
 	// 824 and 825 retire composite artifacts (776, 767-769) that pinned the
 	// dropped index, so each republishes the rest of that custody with the
-	// index required absent instead.
+	// index required absent instead. The session journal's partition
+	// preparation replaces the append body and the receipt key's custody and
+	// republishes the rest (providerWorkSessionPartitionCustodyPredicates).
 	migrationCurrentSuffix(824, "provider session custody without the unread transaction index",
 		providerWorkSessionCustodyPredicates(
-			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...),
+			migrationIndexRemoved("provider_work_session_event", "provider_work_session_event_transaction"))...).removedAt(server.ProviderWorkSessionPartitionMigrationVersion()),
 	// 857 replaces the evidence guard body and republishes the rest.
 	migrationCurrentSuffix(825, "close evidence custody without the duplicate contract index",
 		contractCloseEvidenceChainWithoutContractIndexArtifactQuery).removedAt(857),
@@ -696,6 +700,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
+	migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
+		providerWorkSessionPartitionCustodyPredicates()...),
 }
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages

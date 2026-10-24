@@ -39,3 +39,13 @@ func CompetitionWinnerReviewBodiesSql() (sourceAuthorized, roundInsertGuard, win
 func ContractIdFloorBodySql() string {
 	return strings.Split(contractIdFloorSql, "$$")[1]
 }
+
+// The session journal's partition preparation (PARTITION-MAINTENANCE-PLAN.md
+// C4): the retire lookup's floor, the append that uses it, the receipt
+// reference and the drop guard.
+func ProviderWorkSessionPartitionBodiesSql() (admitFloor, sessionAppend, receiptReference, dropGuard string) {
+	return strings.Split(providerWorkSessionAdmitFloorSql, "$admit_floor$")[1],
+		strings.Split(providerWorkSessionPartitionAppendSql, "$session_append$")[1],
+		strings.Split(providerWorkSessionReceiptReferenceSql, "$receipt_reference$")[1],
+		strings.Split(providerWorkSessionEventDropGuardSql, "$event_drop_guard$")[1]
+}

@@ -153,13 +153,14 @@ func snMainnetMigrationTestContract(t testing.TB, version int) snMainnetMigratio
 }
 
 // The contract that checks a published version's custody at head: its own, or
-// the later contract that superseded it (824 keeps v776's custody once the
-// transaction index is dropped).
+// the latest contract of the chain that superseded it (824 keeps v776's custody
+// once the transaction index is dropped, and the journal's partition
+// preparation keeps 824's).
 func snMainnetMigrationHeadTestContract(t testing.TB, version int) snMainnetMigrationContract {
 	t.Helper()
 	contract := snMainnetMigrationTestContract(t, version)
-	if contract.artifact.removedVersion != 0 && contract.artifact.removedVersion <= server.MigrationCount() {
-		return migrationCurrentSuffixTestContract(t, contract.artifact.removedVersion)
+	for contract.artifact.removedVersion != 0 && contract.artifact.removedVersion <= server.MigrationCount() {
+		contract = migrationCurrentSuffixTestContract(t, contract.artifact.removedVersion)
 	}
 	return contract
 }
@@ -383,8 +384,8 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			})
 		}
 	})
-	// v776's custody faults at head belong to its 824 successor, whose fixture
-	// is in TestMigrationsCurrentSuffixSchemaFaultsReachSignal.
+	// v776's custody faults at head belong to its successors, whose fixtures
+	// are in TestMigrationsCurrentSuffixSchemaFaultsReachSignal.
 	if len(observed) != 14 {
 		t.Fatalf("mainnet schema fault fixture returned %d alert observations, want 14", len(observed))
 	}
