@@ -9,8 +9,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -94,7 +96,13 @@ func TestSourceCorrectnessSuiteUsesContainedImageAndRetainsExactLogs(t *testing.
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "correctness", "metadata"), 0o700) })
 	image := "sha256:" + strings.Repeat("b", 64)
 	daemon := &sourceSandboxDaemonFixture{input: sourceBuildSandboxInput{Owner: owner, Phase: "correctness"}, startOutput: string(sourceCorrectnessEventFixture(t, ""))}
-	result, err := executeSourceCorrectnessSuite(context.Background(), request, sourceBuildArtifacts{Directory: root, ImageId: image}, owner, settings, daemon.run)
+	dockerCalls := 0
+	docker := func(ctx context.Context, args []string, out, diagnostics io.Writer) error {
+		dockerCalls++
+		return daemon.run(ctx, args, out, diagnostics)
+	}
+	artifacts := sourceBuildArtifacts{Directory: root, ImageId: image}
+	result, err := executeJournaledSourceCorrectness(context.Background(), request, artifacts, owner, settings, defaultSourceTestJournalSettings(), docker)
 	if err != nil || result == nil || result.TestCount <= 0 || result.ExitCode != 0 || result.ImageId != image || result.SuiteSha256 != sourceCorrectnessSuiteDigest() || !daemon.removed {
 		t.Fatal("fixed suite lost containment, observation or cleanup", result, err)
 	}
@@ -105,6 +113,11 @@ func TestSourceCorrectnessSuiteUsesContainedImageAndRetainsExactLogs(t *testing.
 	digest := sha256.Sum256(content)
 	if result.TestLogsSha256 != hex.EncodeToString(digest[:]) {
 		t.Fatal("test evidence hash does not bind retained exact logs")
+	}
+	beforeReplay := dockerCalls
+	replay, err := executeJournaledSourceCorrectness(context.Background(), request, artifacts, owner, settings, defaultSourceTestJournalSettings(), docker)
+	if err != nil || !reflect.DeepEqual(result, replay) || dockerCalls != beforeReplay {
+		t.Fatal("completed correctness replay started another container or changed results", err)
 	}
 }
 

@@ -105,3 +105,13 @@ suite, not the complete repository/database suite or live smoke/host proof.
 The full real-container synthetic probe passed all 33 tests with owned-image
 and container cleanup. Direct shell-run probes do not constitute model-owned
 execution or a complete live qualification receipt.
+
+`executeJournaledSourceCorrectness` durably reserves the exact image/owner/patch/
+source/suite plan before container execution. It atomically publishes completed
+observations and revalidates their retained log bytes on replay. Completed
+failures remain failures; a changed plan, corrupt record, missing evidence, or
+unfinished reservation cannot start another execution. A pending reservation
+means active **or** interrupted, not proof its process stopped. Reconcile the
+actual owner rather than deleting the journal to force another test draw.
+The real qualifier still needs provider-response journaling and full deployment
+integration; this execution journal alone is not a model or host receipt.
