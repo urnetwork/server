@@ -32,6 +32,7 @@ type nativeBrowsingAssetOwnership struct {
 	ClientFinished           int   `json:"client_finished"`
 	Canceled                 int   `json:"canceled"`
 	CanceledClientPending    int   `json:"canceled_client_pending"`
+	BodiesOpened             int   `json:"bodies_opened"`
 	BodiesClosed             int   `json:"bodies_closed"`
 	BodyCloseErrors          int   `json:"body_close_errors"`
 	ServerStarted            int   `json:"server_started"`
@@ -99,6 +100,9 @@ func (self *nativeBrowsingPressureObservation) assetOwnershipSnapshot() nativeBr
 				if serverStarted && !serverFinished {
 					result.CanceledServerPending++
 				}
+			}
+			if progress.bodyOpened.Load() {
+				result.BodiesOpened++
 			}
 			if progress.bodyClosed.Load() {
 				result.BodiesClosed++

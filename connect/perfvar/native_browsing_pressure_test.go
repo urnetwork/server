@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -28,13 +29,27 @@ const nativeBrowsingPressureReportByteLimit = 128 * 1024
 
 // Page capacity is a workload setting, not additional production queue space.
 type nativeBrowsingRunSettings struct {
-	maxLivePages int
-	pressure     *nativeBrowsingPressureObservation
+	maxLivePages                int
+	pressure                    *nativeBrowsingPressureObservation
+	originListenerForTest       func(net.Listener)
+	originServerTlsForTest      *tls.Config
+	originClientTlsForTest      *tls.Config
+	originDestinationForTest    func(int, net.Listener) string
+	afterOriginsClosedForTest   func()
+	wrapOriginHandlerForTest    func(http.Handler) http.Handler
+	applicationDeadlineForTest  time.Duration
+	beforePageNavigationForTest func(context.Context, int, func()) error
+	requestTraceForTest         func(string) *httptrace.ClientTrace
+	wrapResponseReaderForTest   func(string, io.Reader) io.Reader
+	afterFetchForTest           func(string, nativeBrowsingAssetResult)
 }
 
 // Four origins with four HTTP connections each leave a navigation connection
 // available beside at most three older assets per origin before the next tap.
 func (self nativeBrowsingRunSettings) validate() error {
+	if (self.originServerTlsForTest == nil) != (self.originClientTlsForTest == nil) {
+		return errors.New("browsing TLS requires both verified client and server configurations")
+	}
 	if self.maxLivePages < 2 || nativeBrowsingOriginCount < self.maxLivePages {
 		return errors.New("native browsing live-page window must be between two and four")
 	}
@@ -98,6 +113,7 @@ type nativeBrowsingRequestProgress struct {
 	serverWritten          atomic.Int64
 	serverWriteError       atomic.Bool
 	serverShortWrite       atomic.Bool
+	bodyOpened             atomic.Bool
 	bodyClosed             atomic.Bool
 	bodyCloseError         atomic.Bool
 	serverReceipt          *clientconnect.MonitorValue[nativeBrowsingServerReceipt]
@@ -256,6 +272,9 @@ type nativeBrowsingPressureBoundary struct {
 // Only canonical aggregate counters are sampled at navigation return. No
 // socket, endpoint state or transport callback is retained by this report.
 func nativeBrowsingCaptureBoundary(path *fullTunPath, page int, pressure *nativeBrowsingPressureObservation) *nativeBrowsingPressureBoundary {
+	if pressure.captureBoundaryForTest != nil {
+		return pressure.captureBoundaryForTest(path, page, pressure)
+	}
 	result := &nativeBrowsingPressureBoundary{Page: page, AtNs: time.Now().UnixNano(),
 		BridgeStarted: path.bridgeSends.startedCount.Load(), BridgeRefused: path.bridgeSends.failureCount.Load(),
 		BridgeSendNs: int64(path.bridgeSends.sendDurationNanoseconds.Load()), Multi: path.multiClient.MemorySnapshot(),
@@ -313,6 +332,7 @@ type nativeBrowsingPressureObservation struct {
 	AssetDrain                     nativeBrowsingAssetOwnership                           `json:"asset_drain"`
 	MaximumPriorRemainingBodyBytes int64                                                  `json:"maximum_prior_remaining_body_bytes"`
 	Scope                          string                                                 `json:"scope"`
+	captureBoundaryForTest         func(*fullTunPath, int, *nativeBrowsingPressureObservation) *nativeBrowsingPressureBoundary
 	slowNavigation                 time.Duration
 	activeRequests                 atomic.Int64
 	maximumActiveRequests          atomic.Int64

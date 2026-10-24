@@ -249,6 +249,19 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	}
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
+	browsingURL := nativeBrowsingURL
+	browsingHTML := nativeBrowsingHTML
+	if settings.originServerTlsForTest != nil {
+		browsingURL = func(page, asset int) string {
+			return strings.Replace(nativeBrowsingURL(page, asset), "http://", "https://", 1)
+		}
+		browsingHTML = func(page int) []byte {
+			// HTTPS adds one character to each of five URL references. Trim
+			// only existing trailing padding; the HTML remains exactly 2048B.
+			text := strings.ReplaceAll(string(nativeBrowsingHTML(page)), "http://", "https://")
+			return []byte(text[:nativeBrowsingHTMLBytes])
+		}
+	}
 	var pages [nativeBrowsingPageCount]*nativeBrowsingPageState
 	for index := range pages {
 		pages[index] = newNativeBrowsingPageState()
@@ -263,7 +276,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	assetServer := &nativeBrowsingAssetServer{workCtx: workCtx, pages: &pages,
 		streaming: settings.pressure != nil, pressure: settings.pressure,
 		liveHandlers: &liveHandlers, peakHandlers: &peakHandlers}
-	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	var handler http.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
 		if len(parts) < 2 {
 			http.NotFound(writer, request)
@@ -276,7 +289,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		}
 		if parts[0] == "page" && len(parts) == 2 {
 			writer.Header().Set("Content-Type", "text/html")
-			_, _ = writer.Write(nativeBrowsingHTML(page))
+			_, _ = writer.Write(browsingHTML(page))
 			return
 		}
 		if parts[0] != "asset" || len(parts) != 3 {
@@ -290,39 +303,47 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		}
 		assetServer.serveAsset(writer, request, page, asset)
 	})
+	if settings.wrapOriginHandlerForTest != nil {
+		handler = settings.wrapOriginHandlerForTest(handler)
+	}
 	var listeners [nativeBrowsingOriginCount]net.Listener
 	var servers [nativeBrowsingOriginCount]*http.Server
 	var serverWorkers sync.WaitGroup
 	var assetWorkers sync.WaitGroup
-	transport := &http.Transport{MaxConnsPerHost: nativeBrowsingConnectionsPerOrigin,
-		MaxIdleConns:        nativeBrowsingOriginCount * nativeBrowsingConnectionsPerOrigin,
-		MaxIdleConnsPerHost: nativeBrowsingConnectionsPerOrigin,
-		DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil || port != "80" {
-				return nil, errors.New("unexpected synthetic origin port")
+	dialOrigin := func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		wantPort := "80"
+		if settings.originServerTlsForTest != nil {
+			wantPort = "443"
+		}
+		if err != nil || port != wantPort {
+			return nil, errors.New("unexpected synthetic origin port")
+		}
+		for index, listener := range listeners {
+			if host != fmt.Sprintf("origin%d.test", index) || listener == nil {
+				continue
 			}
-			for index, listener := range listeners {
-				if host == fmt.Sprintf("origin%d.test", index) && listener != nil {
-					// A custom Tun dial does not emit net.Dialer trace events. These
-					// pressure-only events enclose the actual fixture dial, not pool wait.
-					var trace *httptrace.ClientTrace
-					if settings.pressure != nil {
-						trace = httptrace.ContextClientTrace(dialCtx)
-					}
-					if trace != nil && trace.ConnectStart != nil {
-						trace.ConnectStart(network, address)
-					}
-					connection, dialErr := path.appTun.DialContext(dialCtx, network, listener.Addr().String())
-					if trace != nil && trace.ConnectDone != nil {
-						trace.ConnectDone(network, address, dialErr)
-					}
-					return connection, dialErr
-				}
+			destination := listener.Addr().String()
+			if settings.originDestinationForTest != nil {
+				destination = settings.originDestinationForTest(index, listener)
 			}
-			return nil, errors.New("unexpected synthetic origin")
-		},
+			var trace *httptrace.ClientTrace
+			if settings.pressure != nil {
+				trace = httptrace.ContextClientTrace(dialCtx)
+			}
+			if trace != nil && trace.ConnectStart != nil {
+				trace.ConnectStart(network, address)
+			}
+			connection, dialErr := path.appTun.DialContext(dialCtx, network, destination)
+			if trace != nil && trace.ConnectDone != nil {
+				trace.ConnectDone(network, address, dialErr)
+			}
+			return connection, dialErr
+		}
+		return nil, errors.New("unexpected synthetic origin")
 	}
+	transport := newNativeBrowsingInnerTransport(dialOrigin, settings)
+
 	defer func() {
 		cancelWork()
 		nativeBrowsingReleasePages(pages[:])
@@ -343,6 +364,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		case <-joinCtx.Done():
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing owners did not join"))
 		}
+		if settings.afterOriginsClosedForTest != nil {
+			settings.afterOriginsClosedForTest()
+		}
 		observation.MaximumConcurrentAssetHandlers = peakHandlers.Load()
 		observation.MaximumConcurrentLogicalAssets = peakAssets.Load()
 		if liveHandlers.Load() != 0 {
@@ -358,13 +382,26 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			return err
 		}
 		listeners[index] = listener
-		httpServer := &http.Server{Handler: handler}
+		if settings.originListenerForTest != nil {
+			settings.originListenerForTest(listener)
+		}
+		httpServer, serveListener := newNativeBrowsingInnerServer(handler, listener, settings)
 		servers[index] = httpServer
 		serverWorkers.Add(1)
-		go func() { defer serverWorkers.Done(); _ = httpServer.Serve(listener) }()
+		go func() { defer serverWorkers.Done(); _ = httpServer.Serve(serveListener) }()
+	}
+	if settings.applicationDeadlineForTest > 0 {
+		applicationCtx, cancelApplication := context.WithTimeout(workCtx, settings.applicationDeadlineForTest)
+		defer cancelApplication()
+		workCtx = applicationCtx
 	}
 	client := &http.Client{Transport: transport}
-	fetch := func(requestCtx context.Context, target string, expected []byte, trace *nativeBrowsingHttpTrace, progress *nativeBrowsingRequestProgress) nativeBrowsingAssetResult {
+	fetch := func(requestCtx context.Context, target string, expected []byte, trace *nativeBrowsingHttpTrace, progress *nativeBrowsingRequestProgress) (result nativeBrowsingAssetResult) {
+		if settings.afterFetchForTest != nil {
+			// Runs after the original body-close/progress/request-owner defers,
+			// with the same validated result and original measured durations.
+			defer func() { settings.afterFetchForTest(target, result) }()
+		}
 		start := time.Now()
 		if settings.pressure != nil {
 			settings.pressure.beginFetch(len(expected))
@@ -390,9 +427,17 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		if progress != nil {
 			request = request.WithContext(httptrace.WithClientTrace(request.Context(), progress.retryTrace()))
 		}
+		if settings.requestTraceForTest != nil {
+			if observer := settings.requestTraceForTest(target); observer != nil {
+				request = request.WithContext(httptrace.WithClientTrace(request.Context(), observer))
+			}
+		}
 		response, err := client.Do(request)
 		if err != nil {
 			return nativeBrowsingAssetResult{firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
+		}
+		if progress != nil {
+			progress.bodyOpened.Store(true)
 		}
 		defer func() {
 			closeErr := response.Body.Close()
@@ -401,15 +446,21 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 				progress.bodyClosed.Store(true)
 			}
 		}()
+		if settings.originClientTlsForTest != nil && (response.ProtoMajor != 1 || response.TLS == nil || len(response.TLS.VerifiedChains) == 0) {
+			return nativeBrowsingAssetResult{status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: errors.New("synthetic HTTPS origin did not verify TLS and HTTP/1.1")}
+		}
 		if progress != nil {
 			progress.responseStatus.Store(int64(response.StatusCode))
 		}
 		var reader io.Reader = response.Body
+		if settings.wrapResponseReaderForTest != nil {
+			reader = settings.wrapResponseReaderForTest(target, reader)
+		}
 		if settings.pressure != nil {
 			reader = &nativeBrowsingProgressReader{reader: reader, pressure: settings.pressure, progress: progress}
 		}
 		body, err := io.ReadAll(io.LimitReader(reader, int64(len(expected)+1)))
-		result := nativeBrowsingAssetResult{bytes: len(body), status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
+		result = nativeBrowsingAssetResult{bytes: len(body), status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
 		result.err = nativeBrowsingResponseError(response.StatusCode, body, expected, result.err)
 		return result
 	}
@@ -483,7 +534,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		observation.CompletedNavigations++
 		return nil
 	}
-	navigation := nativeBrowsingURL(0, -1)
+	navigation := browsingURL(0, -1)
 	for page := range nativeBrowsingPageCount {
 		state := pages[page]
 		row := &observation.Pages[page]
@@ -505,8 +556,13 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			row.PreviousAssetsHeld = 2
 			observation.OverlapProofs++
 		}
-		if navigation != nativeBrowsingURL(page, -1) {
+		if navigation != browsingURL(page, -1) {
 			return errors.New("HTML next-navigation link changed origin or page")
+		}
+		if settings.beforePageNavigationForTest != nil {
+			if err := settings.beforePageNavigationForTest(workCtx, page, transport.CloseIdleConnections); err != nil {
+				return err
+			}
 		}
 		var trace *nativeBrowsingHttpTrace
 		if settings.pressure != nil {
@@ -524,7 +580,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 				}
 			}
 		}
-		htmlResult := fetch(workCtx, navigation, nativeBrowsingHTML(page), trace, nil)
+		htmlResult := fetch(workCtx, navigation, browsingHTML(page), trace, nil)
 		if settings.pressure != nil {
 			// Capture even failed/canceled HTML before its error can start teardown.
 			settings.pressure.finishNavigation(path, page, trace, htmlResult)
@@ -538,14 +594,14 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		if row.NavigationStalled && settings.pressure == nil {
 			return fmt.Errorf("NATIVE_BROWSING_NAVIGATION_STALL: page=%d first_byte=%s prior_assets_held=%d", page, htmlResult.firstByte, row.PreviousAssetsHeld)
 		}
-		assets, next, err := nativeBrowsingReferences(nativeBrowsingHTML(page))
+		assets, next, err := nativeBrowsingReferences(browsingHTML(page))
 		if err != nil {
 			return err
 		}
 		navigation = next
 		for asset, target := range assets {
 			parsed, err := url.Parse(target)
-			if err != nil || parsed.String() != nativeBrowsingURL(page, asset) {
+			if err != nil || parsed.String() != browsingURL(page, asset) {
 				return errors.New("HTML asset reference changed")
 			}
 			assetCtx, cancel := context.WithCancel(workCtx)
