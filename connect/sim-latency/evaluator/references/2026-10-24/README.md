@@ -1,7 +1,11 @@
 # October 24 reference preparation — not qualified
 
-These inputs target frozen server
-`67c87445abe6725b25b3df2a13af7eb99cd4f8ed`, not moving main. They are private
+These inputs were prepared against frozen server
+`67c87445abe6725b25b3df2a13af7eb99cd4f8ed`, not moving main. Both also pass
+`git apply --check` against the corrected frozen server
+`3d96d16ddb4fc2fb08d3f9003c52e30b9a47241d`: the impairment-forwarding
+backport did not change this product file. This is source compatibility only,
+not a build, correctness or performance qualification. They are private
 calibration candidates, not submissions, accepted references, published images
 or evidence of measured separability.
 

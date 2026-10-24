@@ -41,3 +41,12 @@ It uses the same global exclusive scoring lock, refuses an active staging
 supervisor, and retains the 40-minute outer safety bound. Builds and tests must
 not overlap timed scoring. Neither attempt activates production or writes the
 main control plane during the maintenance hold.
+
+At 19:58 UTC the corrected attempt reached simulation. The actual parent and
+all four child fleet process argument lists carried `--no-impair`. The retained
+`process-argv.txt` SHA-256 is
+`08500936495575747d22cb009c9b32905ed15c2cccdd1c7ef849f5bc76250d92`.
+Docker inspection independently showed `/workspace`, `/input`,
+`/runtime/config/local` and `/runtime/vault/local` read-only; only `/artifacts`
+was a writable bind. This proves the observed mode forwarding and bind layout,
+not completion, statistical stability or full containment qualification.
