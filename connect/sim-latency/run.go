@@ -438,6 +438,10 @@ func Run(options *RunOptions) (retErr error) {
 		if err != nil {
 			return phaseError(ctx, "fleet_start_failed", "start fleet shards", err)
 		}
+		if err := waitFleetShardsReady(ctx, fleetProcs); err != nil {
+			return phaseError(ctx, "fleet_readiness_failed", "wait for fleet construction", err)
+		}
+		logf("fleet construction acknowledged by all %d shards before ramp and prewarm", len(fleetProcs))
 	} else {
 		fleet, err = NewFleet(ctx, config, config.Fleet, services.ApiUrl(), services.WsUrls(), services.WsPorts(), options.Ramp, options.fleetSettings())
 		if err != nil {
@@ -988,6 +992,7 @@ func logRunSummary(stats *RunStats) {
 
 const fleetAccountingSnapshotCommand = "snapshot"
 const fleetDynamicsStartCommand = "start-dynamics"
+const fleetReadyCommand = "ready"
 const fleetAccountingSnapshotTimeout = 5 * time.Second
 
 // Serves the private parent/child measurement-control pipe. Snapshot never
@@ -1007,6 +1012,10 @@ func serveFleetAccounting(
 	for scanner.Scan() {
 		var response int64
 		switch scanner.Text() {
+		case fleetReadyCommand:
+			// This server starts only after NewFleet has constructed every
+			// provider. Readiness must not start measurement dynamics.
+			response = 0
 		case fleetAccountingSnapshotCommand:
 			response = snapshot()
 			if response < 0 {
@@ -1223,6 +1232,68 @@ func startProviderDynamics(ctx context.Context, fleet *Fleet, procs []*fleetProc
 			return ctx.Err()
 		case <-time.After(fleetAccountingSnapshotTimeout):
 			return fmt.Errorf("fleet shard %d dynamics start timed out", proc.index)
+		}
+	}
+	return nil
+}
+
+// Waits for construction on every shard before the parent begins its ramp or
+// prewarm clock. A child exit or cancellation joins all local response waiters;
+// it cannot authorize a partial fleet or leave an acknowledgement for later.
+func waitFleetShardsReady(ctx context.Context, procs []*fleetProcess) error {
+	if ctx == nil || len(procs) == 0 {
+		return errors.New("fleet readiness requires a context and fleet shards")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, proc := range procs {
+		if proc == nil || proc.accountingCommandWriter == nil || proc.accountingResponses == nil || proc.done == nil {
+			return errors.New("fleet readiness control pipe is incomplete")
+		}
+		if proc.finished() {
+			return fmt.Errorf("fleet shard %d exited before construction readiness", proc.index)
+		}
+	}
+	// Each fresh private pipe receives one small command before its first
+	// response; a slow constructor must not delay requesting another shard.
+	for _, proc := range procs {
+		if _, err := io.WriteString(proc.accountingCommandWriter, fleetReadyCommand+"\n"); err != nil {
+			return fmt.Errorf("request fleet shard %d construction readiness: %w", proc.index, err)
+		}
+	}
+	readyCtx, cancel := context.WithCancel(ctx)
+	results := make(chan error, len(procs))
+	var workers sync.WaitGroup
+	defer func() { cancel(); workers.Wait() }()
+	for _, proc := range procs {
+		workers.Add(1)
+		go func(proc *fleetProcess) {
+			defer workers.Done()
+			var err error
+			select {
+			case response, ok := <-proc.accountingResponses:
+				if !ok {
+					err = fmt.Errorf("fleet shard %d construction readiness pipe closed", proc.index)
+				} else if response.err != nil {
+					err = fmt.Errorf("fleet shard %d construction readiness: %w", proc.index, response.err)
+				} else if response.byteCount != 0 {
+					err = fmt.Errorf("fleet shard %d invalid construction acknowledgement %d", proc.index, response.byteCount)
+				} else if proc.finished() {
+					err = fmt.Errorf("fleet shard %d exited at construction readiness", proc.index)
+				}
+			case <-proc.done:
+				err = fmt.Errorf("fleet shard %d exited during construction readiness", proc.index)
+			case <-readyCtx.Done():
+				err = readyCtx.Err()
+			}
+			results <- err
+		}(proc)
+	}
+	for range procs {
+		if err := <-results; err != nil {
+			cancel()
+			return err
 		}
 	}
 	return nil
