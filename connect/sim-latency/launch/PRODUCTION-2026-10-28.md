@@ -420,3 +420,21 @@ and accepts only complete evidence for the exact built image and owner. Broker,
 Git-fetch, sandbox and supervisor regressions passed three race-enabled runs.
 The actual independent low-model/host qualifier still must be implemented,
 provisioned and qualified; no stub receipt is permitted for launch.
+
+The clean Linux/amd64, cgo-disabled control binary from server
+`f01855276c6d1d0d04289d1d435c2b011648929a` built with
+`vcs.modified=false`; SHA-256:
+`6de33048b7a29204e1962279dd39c87ee202c1bc6802199651922301b711f1fa`.
+Its actual root-run broker CLI rejected a digest-pinned settings file naming a
+missing independent qualifier before reading a build request or creating a
+container. Exit status was 1 and stdout was empty, not a counterfeit receipt.
+The binary is a preparation artifact, not an installed/qualified release.
+
+At 2026-10-24 11:31 UTC main API and PostgreSQL were reachable again, but
+authenticated `/competition/readyz` returned 503 with
+`frozen_source_activation: false`; public `/competition/info` returned
+`source_not_ready`. Sille could not connect to the actual configured MinIO
+authority `172.28.208.177:23900`. The earlier port-9000 probe did not test that
+configured authority. Maintenance completion has been requested from the
+operator; control-plane writes remain paused and the old staging supervisor
+remains intentionally stopped. The dedicated review API key is still absent.
