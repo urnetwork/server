@@ -1,7 +1,8 @@
 // Synthetic frames exercise the transaction horizon signal (SIGNALS.md §2.4l)
 // through its public adapter: each holder kind at both thresholds, the
 // timestamp and next-id history bounds, the ranking, withholding and malformed
-// frames. No database is read.
+// frames. No database is read; signal_transaction_horizon_native_test.go runs
+// the read on the test PostgreSQL.
 package monitor
 
 import (
