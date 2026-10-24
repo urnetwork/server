@@ -82,8 +82,10 @@ func TestPartitionRegistryNativeCatalog(t *testing.T) {
 		contractPartitionNativeExec(t, ctx, `CREATE TABLE synthetic_native_weeks (report_id uuid NOT NULL PRIMARY KEY) PARTITION BY RANGE (report_id)`)
 		now := server.NowUtc()
 		for _, family := range families {
-			// a day of history before today, so the retention has one to judge
-			report := family.EnsureRunway(ctx, now.AddDate(0, 0, -10))
+			// days of history before today, inside the history's retention
+			// and grace (7 and 2 days), so the healthy read has older days to
+			// judge and the shortened retention below has days to block
+			report := family.EnsureRunway(ctx, now.AddDate(0, 0, -5))
 			if 0 < len(report.Errors) {
 				t.Fatalf("%s runway: %v", family.Name, report.Errors)
 			}
@@ -108,7 +110,7 @@ func TestPartitionRegistryNativeCatalog(t *testing.T) {
 			t.Fatalf("a short runway was not found: %s %s", alert.Frame, alert.Observed)
 		}
 
-		// a retention of a day leaves the days ten days back blocked
+		// a retention of a day leaves the days five days back blocked
 		alert = contractPartitionNativeAlert(t, run(partitionRegistryNativeSignals(families[:1], 24*time.Hour)[1]), "partition-retention-blocked")
 		if !strings.Contains(alert.Observed, "family=synthetic_native_history") {
 			t.Fatalf("a day past its retention was not blocked: %s", alert.Observed)
