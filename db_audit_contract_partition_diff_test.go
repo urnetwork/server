@@ -71,3 +71,38 @@ func TestSchemaDiffAcceptsContractPartitionCutover(t *testing.T) {
 		t.Fatalf("look-alikes: extra tables %v, indexes %v, constraints %v", diff.extraTables, diff.extraIdx, diff.extraConstraints)
 	}
 }
+
+// A partition family's cutover tables and their indexes are not extra objects
+// while they exist; another extra table, or an extra index elsewhere, still
+// is, and a cutover table the migrations do define is compared as usual.
+func TestSchemaDiffAcceptsPartitionCutoverTables(t *testing.T) {
+	family := &PartitionFamily{Name: "synthetic_history", Tables: []string{"synthetic_history"}, CutoverTables: []string{"synthetic_history_new", "synthetic_history_old"}}
+	expected := &SchemaSnapshot{
+		tables:      map[string]bool{"synthetic_history": true},
+		columns:     map[string][]auditColumn{},
+		indexes:     map[string]auditIndex{},
+		constraints: map[string][]auditConstraint{},
+		partitioned: map[string]bool{},
+	}
+	actual := &SchemaSnapshot{
+		tables:      map[string]bool{"synthetic_history": true, "synthetic_history_old": true, "synthetic_extra": true},
+		columns:     map[string][]auditColumn{},
+		indexes:     map[string]auditIndex{"synthetic_history_old_time": {table: "synthetic_history_old", def: "CREATE INDEX synthetic_history_old_time ON public.synthetic_history_old USING btree (measured_at)"}, "synthetic_history_stray": {table: "synthetic_history", def: "CREATE INDEX synthetic_history_stray ON public.synthetic_history USING btree (run_id)"}},
+		constraints: map[string][]auditConstraint{},
+		partitioned: map[string]bool{"synthetic_history": true},
+	}
+	diff := diffSchemas(expected, actual)
+	diff.acceptPartitionCutoverTables([]*PartitionFamily{family})
+	if !slices.Equal(diff.extraTables, []string{"synthetic_extra"}) {
+		t.Fatalf("extra tables %v", diff.extraTables)
+	}
+	if !slices.Equal(diff.extraIdx, []string{"synthetic_history_stray"}) {
+		t.Fatalf("extra indexes %v", diff.extraIdx)
+	}
+	// without the family the old table is drift
+	diff = diffSchemas(expected, actual)
+	diff.acceptPartitionCutoverTables(nil)
+	if !slices.Contains(diff.extraTables, "synthetic_history_old") || !slices.Contains(diff.extraIdx, "synthetic_history_old_time") {
+		t.Fatalf("the old table was accepted without a family: %v %v", diff.extraTables, diff.extraIdx)
+	}
+}

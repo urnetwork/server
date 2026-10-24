@@ -603,10 +603,13 @@ func dbMaintenanceShouldReindexTable(tableName string) bool {
 // Whether the rotation may rebuild a table as a whole. REINDEX TABLE on a
 // partitioned table rebuilds every partition, so a contract table that is
 // partitioned stays out with its partitions, while the same table before the
-// cutover keeps its place.
+// cutover keeps its place. The partition registry's ReindexExempt families
+// stay out the same way: their partitioned parents and their own leaves,
+// which are dropped whole.
 func dbMaintenanceShouldReindexRelation(tableName string, partitioned bool) bool {
 	return dbMaintenanceShouldReindexTable(tableName) &&
-		!(partitioned && slices.Contains(ContractPartitionTables, tableName))
+		!(partitioned && slices.Contains(ContractPartitionTables, tableName)) &&
+		!PartitionRegistryReindexExempt(tableName, partitioned)
 }
 
 // Returns the ChooseRelationName label that ends a REINDEX CONCURRENTLY

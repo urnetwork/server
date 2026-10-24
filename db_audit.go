@@ -432,6 +432,7 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	}
 
 	d.acceptContractPartitionCutover()
+	d.acceptPartitionCutoverTables(PartitionFamilies())
 
 	sort.Strings(d.missingTables)
 	sort.Strings(d.extraTables)
@@ -480,6 +481,30 @@ func (d *SchemaDiff) acceptContractPartitionCutover() {
 	})
 	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
 		return staged[d.actual.indexes[name].table]
+	})
+}
+
+// A partition family's cutover in progress is not drift either: the tables it
+// keeps beside the family's while it stages or until its old table is dropped
+// (PartitionFamily.CutoverTables), with their indexes. Each step of such a
+// cutover removes them, and a fix must not drop the indexes they hold.
+func (d *SchemaDiff) acceptPartitionCutoverTables(families []*PartitionFamily) {
+	cutover := map[string]bool{}
+	for _, family := range families {
+		for _, table := range family.CutoverTables {
+			if d.actual.tables[table] && !d.expected.tables[table] {
+				cutover[table] = true
+			}
+		}
+	}
+	if len(cutover) == 0 {
+		return
+	}
+	d.extraTables = slices.DeleteFunc(d.extraTables, func(table string) bool {
+		return cutover[table]
+	})
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return cutover[d.actual.indexes[name].table]
 	})
 }
 

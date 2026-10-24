@@ -8236,6 +8236,11 @@ authority and cancellation. A native PostgreSQL 18 test runs the real query on
 plain tables, on a cutover finalized two weeks ahead and on the current-week
 layout, and drops future partitions to fire it.
 
+The contract tables are the partition registry's `contract` family
+(`server/db_partition_registry.go`); its declaration names this probe, so
+§2.4p leaves it alone, and the registry's runway task creates its weeks ahead
+too.
+
 ACTION: restore `maintain_contract_partitions` (task canaries, `[cp]` log
 lines, lock waits behind its creates). If it cannot run in time, the owner runs
 its partition creation (`server.MaintainContractPartitions`); a partition
@@ -8274,6 +8279,9 @@ Every tunable (R, the grace, the list bound) is a field of
 edge, a blocked legacy partition and blocked weekly partitions, plain tables,
 malformed frames and bounds; a native test runs the real query on the
 current-week layout with the horizon shortened.
+
+The contract tables' registry declaration names this probe, so §2.4q leaves
+the contract family alone.
 
 ACTION: read the task's reason for the oldest blocked week (`[cp]` log lines,
 its run report) and resolve the blocker at its owner: close or settle the
@@ -8403,6 +8411,110 @@ filesystem only in a maintenance-window VACUUM FULL until PostgreSQL 19's
 online compaction. Never pg_repack. A table over 50 GB with persistent bloat
 goes to Part C or D. VERIFY: the next weekly measurement, or the relation's
 shrink after a rebuild, takes every relation of the table under the line.
+
+### 2.4p Partition registry runway — every family's inserts need a partition
+Probe: `partition-runway`
+
+Why: the partition registry (`server/db_partition_registry.go`,
+PARTITION-MAINTENANCE-PLAN.md A7) declares every range-partitioned family:
+its tables, key, daily or weekly granularity, the ranges kept ahead and its
+retention. A family keeps no DEFAULT partition for its ranges unless it
+declares one, so an insert past its last partition fails. The registry's
+runway task (`maintain_partition_runway`, every 10 minutes) creates each
+family's ranges ahead, apart from any archive work, and catches up at once
+after downtime. This probe watches every registered family whose declaration
+names no dedicated probe (`RunwaySignal`): today `client_reliability` and
+`provider_egress_health_history`. The contract tables name §2.4h and
+`network_ping` names §2.19c. A family added to the registry is watched here
+without a monitor change.
+
+Check: for each partitioned family (its first table relkind `p`), a range
+counts as covered for a table when one attached partition other than DEFAULT
+holds every key of it; covered ranges are counted consecutively from the one
+after the current range (00:00 UTC days, Monday 00:00 UTC weeks, on the
+primary's statement clock); a gap ends the count. The line is the family's
+`MonitorRunwayRanges`, else min(2, `AheadRanges`).
+
+- `partition-runway` (PAGE, target `<primary>/<family>-partitions`, frame
+  the thinnest table, sustain 2 at a 15-minute cadence): some table of the
+  family covers fewer ranges after the current one than its line, or does not
+  cover the current range (its inserts are failing now).
+- `partition-runway-unobservable` (same target, sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, an
+  incomplete or malformed frame, an unparseable bound, an over-cap census
+  (4,096 partitions), or a family whose first table is partitioned and
+  another not. It pages when the family's last complete observation, at most
+  7 days old, was at its line; otherwise it warns. The memory is per family,
+  process-local, and starts empty at every watcher start.
+- A family whose first table is still plain (before its cutover) has no
+  runway and is healthy.
+
+Implementation (2026-10-24). One primary-guarded, read-only catalog query
+returns, in fixed six-cell frames bound by an end row: the primary's hostname,
+role and statement clock; each family table's kind; and every attached
+partition's name and `pg_get_expr(relpartbound)` bound, with a timestamp key's
+bounds cast back in the reading session so they parse whatever its date style.
+The families, their tables and key kinds are the registry's declarations
+compiled into the watcher. Coverage is computed from the bounds by the
+registry's own rules (`PartitionFamily.Runway`). Every tunable is a field of
+`PartitionRunwaySettings`.
+
+Synthetic controls: a plain family, a healthy runway, one range short, a gap,
+an uncovered current range, a mixed layout, a DEFAULT partition that covers
+nothing, malformed frames and bounds, the remembered unknown severity and
+inventory authority. A native PostgreSQL 18 test runs the real query against
+a partitioned family and drops its future partitions to fire it.
+
+ACTION: restore `maintain_partition_runway` (task canaries, `[partitions]` log
+lines, lock waits behind its creates). If it cannot run in time, the owner
+runs the registry's runway (`server.MaintainPartitionRunways`); a partition
+written by hand must carry its family's canonical name and bounds. Never add
+a DEFAULT partition a family does not declare. VERIFY: two consecutive
+complete observations with every table of the family covering the current
+range and at least its line after it.
+
+### 2.4q Partition registry retention — expired ranges that were not dropped
+Probe: `partition-retention-blocked`
+
+Why: the registry's retention task (`maintain_partition_retention`, every 15
+minutes) drops a family's range once its upper bound is the family's declared
+`Retention` past and its drop precondition, if any, passes again in the
+transaction that detaches it; a family with its own task (`client_reliability`)
+drops through that task. Size is bounded only by those drops. This probe
+watches every registered family that drops ranges and names no dedicated probe
+(`RetentionSignal`): today `client_reliability` (30 days, `ClientExpiration`,
+the longest a payout behind can hold its cutoff; §2.4g's
+`partition-retention-stuck` judges the computed cutoff sooner) and
+`provider_egress_health_history` (7 days). The contract tables name §2.4i and
+`network_ping` names §2.19c.
+
+Check, on the §2.4p catalog read: a partition of the registry's own naming
+and bounds whose upper bound plus the family's retention plus its grace
+(`MonitorRetentionGrace`, else two ranges) is in the past and that still
+exists. The DEFAULT partition and a kept legacy partition
+(`KeepLegacyPartition`) are never counted.
+
+- `partition-retention-blocked` (WARN, target `<primary>/<family>-partitions`,
+  sustain 1 at an hourly cadence): at least one such partition. The finding
+  names the oldest by its upper bound, the count, and up to 8 blocked
+  partitions.
+- `partition-retention-unobservable` (same target, sustain 2): the §2.4p
+  unknown reasons.
+- A family whose first table is still plain has no partition to drop: the
+  check is healthy before its cutover.
+
+Every tunable (the cadence, the list bound) is a field of
+`PartitionRetentionSettings`; each family's horizon and grace are its
+declaration. Synthetic controls cover the horizon edge, a kept legacy and a
+DEFAULT partition, a plain family and malformed frames; a native test runs the
+real query with a family's retention shortened.
+
+ACTION: read the retention's reason for the oldest blocked range (`[partitions]`
+log lines, or the family's own task's) and resolve the blocker at its owner.
+Check that the task runs. Never drop or detach a family's partition by hand: a
+drop bypasses the family's guards and preconditions. VERIFY: the next runs drop
+the range and a complete observation shows no partition past the horizon plus
+grace.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`

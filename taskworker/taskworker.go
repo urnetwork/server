@@ -146,6 +146,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleMaintainContractPartitions(clientSession, tx)
+		// the partition registry's runway and retention chains (server/db_partition_registry.go)
+		work.ScheduleMaintainPartitionRunway(clientSession, tx)
+		work.ScheduleMaintainPartitionRetention(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientDataUsage(clientSession, tx)
 		// seeded only while degraded.yml enables the contract degradation valve
@@ -513,6 +516,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MaintainContractPartitions,
 			work.MaintainContractPartitionsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MaintainPartitionRunway,
+			work.MaintainPartitionRunwayPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MaintainPartitionRetention,
+			work.MaintainPartitionRetentionPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RollupClientReliabilityStats,
