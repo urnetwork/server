@@ -10720,4 +10720,49 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// finished_task moves to daily partitions by run end time
+	// (PARTITION-MAINTENANCE-PLAN.md C3), and a partitioned table's unique
+	// keys must include its partition key, so the primary key becomes
+	// (task_id, run_end_time). Build its index online first; a retry removes
+	// residue from an interrupted concurrent build.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS finished_task_task_id_run_end_time
+	`, `
+		CREATE UNIQUE INDEX CONCURRENTLY finished_task_task_id_run_end_time
+		ON finished_task (task_id, run_end_time)
+	`, `
+		DROP INDEX IF EXISTS finished_task_task_id_run_end_time;
+		CREATE UNIQUE INDEX finished_task_task_id_run_end_time
+		ON finished_task (task_id, run_end_time)
+	`),
+
+	// The primary key takes over that index, catalog work only. A task id
+	// stays unique without it: the completion move is the only writer and
+	// refuses an id that already finished (task/task_run_once.go). The
+	// lock_timeout keeps this change from queueing completions behind a long
+	// transaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE finished_task
+			DROP CONSTRAINT finished_task_pkey,
+			ADD CONSTRAINT finished_task_pkey PRIMARY KEY USING INDEX finished_task_task_id_run_end_time;
+	`),
+
+	// The failed Posts that a Post retry may still run. Before a day's
+	// partition drops, they leave through their finished owners, and the
+	// drop's fence reads this index (task/finished_task_partition.go). Failed
+	// Posts are rare, so the index stays small; built online.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS finished_task_post_retry
+	`, `
+		CREATE INDEX CONCURRENTLY finished_task_post_retry
+		ON finished_task (task_id)
+		WHERE post_error IS NOT NULL AND NOT post_completed
+	`, `
+		DROP INDEX IF EXISTS finished_task_post_retry;
+		CREATE INDEX finished_task_post_retry
+		ON finished_task (task_id)
+		WHERE post_error IS NOT NULL AND NOT post_completed
+	`),
 }

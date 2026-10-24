@@ -134,6 +134,7 @@ Usage:
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -169,8 +170,15 @@ Options:
     --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
                    go to weekly partitions; prepare only.
     --rollback     Undo the contract partition swap while no weekly
-                   partition holds a row.
-    --abort        Drop a prepared, unfinalized contract partition cutover.
+                   partition holds a row, or the finished_task swap, copying
+                   back the rows of its daily partitions.
+    --abort        Drop a prepared, unfinalized contract or finished_task
+                   partition cutover.
+    --cutover-day=<date>  The day (YYYY-MM-DD, UTC) from which finished tasks
+                   go to daily partitions, at least 12 hours ahead; prepare only.
+    --max-copy-rows=<n>  With a finished_task --rollback, the most rows of the
+                   daily partitions it copies back under its exclusive lock;
+                   omitted uses 200000.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -473,6 +481,8 @@ func main() {
 				modelMigrateClientReliabilityPartition(opts)
 			} else if contractPartition, _ := opts.Bool("contract-partition"); contractPartition {
 				modelMigrateContractPartition(opts)
+			} else if finishedTaskPartition, _ := opts.Bool("finished-task-partition"); finishedTaskPartition {
+				modelMigrateFinishedTaskPartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2760,6 +2770,48 @@ func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractP
 	options.Finalize, _ = opts.Bool("--finalize")
 	options.Rollback, _ = opts.Bool("--rollback")
 	options.Abort, _ = opts.Bool("--abort")
+	return
+}
+
+// Partitions finished_task daily by run end time (PARTITION-MAINTENANCE-PLAN.md
+// C3): prepare (with --cutover-day), then --finalize at least 2 hours before
+// that day; --rollback and --abort undo. Each step can be rehearsed with
+// --dry-run, and an interrupted step can be run again.
+func modelMigrateFinishedTaskPartition(opts docopt.Opts) {
+	options, err := finishedTaskPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateFinishedTasksToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func finishedTaskPartitionMigrateOptions(opts docopt.Opts) (options server.FinishedTaskPartitionMigrateOptions, err error) {
+	if cutoverDay, _ := opts.String("--cutover-day"); cutoverDay != "" {
+		options.CutoverDay, err = time.Parse(time.DateOnly, cutoverDay)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	options.Settings = server.DefaultFinishedTaskPartitionSettings()
+	if maxCopyRows, _ := opts.String("--max-copy-rows"); maxCopyRows != "" {
+		options.Settings.RollbackMaxCopyRows, err = strconv.ParseInt(maxCopyRows, 10, 64)
+		if err != nil {
+			return
+		}
+		if options.Settings.RollbackMaxCopyRows < 0 {
+			err = fmt.Errorf("--max-copy-rows must not be negative: %d", options.Settings.RollbackMaxCopyRows)
+			return
+		}
+	}
 	return
 }
 
