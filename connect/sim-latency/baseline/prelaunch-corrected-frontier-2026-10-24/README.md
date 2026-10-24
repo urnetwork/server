@@ -80,3 +80,21 @@ caused every historical failure from these observations. The next lower
 7,200-provider impairment-on point started after this attempt exited and
 cleanup was independently checked; no parallel scoring, resampling or timeout
 relaxation was introduced.
+
+## 7,200-provider impairment-on point
+
+`p7200-on/` retains the corresponding smaller impaired trial. It completed
+with controller exit 0, all 200 clients warmed, 2,293 in-window requests and
+16 failures (0.6978%). The CSV has 2,678 total rows; outside-window rows are
+retained but must not enter the measured denominator. Completion-marker,
+sidecar and CSV hashes matched; all owned containers/network were removed;
+and the immutable controller checksum was unchanged.
+
+The simulator's sidecar reports impairment enabled, using the same corrected
+image and protocol. Unlike the neighboring trials, a live process-argument
+snapshot was not captured for this point. A successful single impaired point
+does not establish same-seed stability, reference separability, complete scorer
+gate qualification or cold baseline-plus-candidate runtime feasibility under
+the three-hour cap. Source extraction, service startup, simulation warmup,
+measurement and request drain all contribute to wall time; they are not all
+part of the 180-second measurement window. No official scale is frozen here.

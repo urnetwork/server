@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-fixed794-p7200-on-source-seal-fix",
+  "run_manifest_sha256": "b9d2c9864e8dc245b7e632f90ac54631fc5901f3b92f3f0091f67ae37e60def4",
+  "run_manifest_bytes": 2813,
+  "completed_unix_ms": 1792875268935
+}
