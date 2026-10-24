@@ -111,6 +111,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
+		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
+		work.ScheduleMeasureDbBloat(clientSession, tx)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
@@ -403,6 +405,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.DbMaintenance,
 			work.DbMaintenancePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MeasureDbBloat,
+			work.MeasureDbBloatPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.WarmNetworkGetProviderLocations,
