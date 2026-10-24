@@ -125,6 +125,18 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 			t.Error("temporary synthetic probe image cleanup failed", err)
 		}
 	}()
+	correctness, err := executeSourceCorrectnessSuite(ctx, request, *artifacts, owner, settings, docker)
+	if err != nil {
+		t.Fatalf("offline correctness probe failed; private evidence retained at %s: %v", artifacts.Directory, err)
+	}
+	correctnessBytes, err := json.Marshal(correctness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateReviewFile(filepath.Join(artifacts.Directory, "synthetic-probe-correctness.json"), correctnessBytes); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("observed offline correctness tests=%d logs_sha256=%s; direct Go execution, not model provenance", correctness.TestCount, correctness.TestLogsSha256)
 	data, err := json.Marshal(artifacts)
 	if err != nil {
 		t.Fatal(err)

@@ -58,7 +58,7 @@ type sourceBuildSandboxInput struct {
 // Builds fixed argv rather than interpolating paths, commits or code in shell
 // syntax. The only shell program is this trusted immutable Go-tool protocol.
 func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceBuildSandboxSettings) ([]string, error) {
-	if input.Phase != "check" && input.Phase != "compile" && input.Phase != "metadata" || !validSha256(input.Owner) || !sourceGitShaPattern.MatchString(input.Commit) ||
+	if input.Phase != "check" && input.Phase != "compile" && input.Phase != "metadata" && input.Phase != "correctness" || !validSha256(input.Owner) || !sourceGitShaPattern.MatchString(input.Commit) ||
 		!strings.HasPrefix(input.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(input.ImageId, "sha256:")) ||
 		settings.CpuSet == "" || settings.CgroupParent == "" || settings.MemoryBytes <= 0 || settings.WorkBytes <= 0 || settings.TmpBytes <= 0 ||
 		settings.MetadataBytes <= 0 || settings.MetadataFiles <= 0 || settings.BinaryBytes <= 0 || settings.Pids <= 0 || settings.NoFile <= 0 || settings.Timeout <= 0 || settings.CleanupTimeout <= 0 || settings.OutputBytes <= 0 {
@@ -107,6 +107,8 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 		script = "tar -C /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v -cf - ."
 	} else if input.Phase == "check" {
 		script += "go vet ./connect/...; go test -run '^$' ./connect/..."
+	} else if input.Phase == "correctness" {
+		script += sourceCorrectnessSuiteScript()
 	} else {
 		args = append(args, "--tmpfs=/output:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.Itoa(settings.BinaryBytes))
 		script += "go build -trimpath -o /output/sim-latency ./connect/sim-latency; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.revision=//p')\" = \"$SOURCE_BUILD_COMMIT\"; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.modified=//p')\" = false; cat /output/sim-latency"

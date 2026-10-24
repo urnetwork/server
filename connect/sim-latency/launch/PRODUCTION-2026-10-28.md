@@ -451,3 +451,12 @@ race-enabled client/review regression runs passed. This is mocked provider
 evidence only. The real fixed-suite executor, durable qualifier journal,
 containment/host evidence, dedicated-key access and live qualification remain
 required before the broker may authorize promotion.
+
+The fixed offline correctness executor now runs 33 mandatory named tests across
+three packages in a separate contained phase. It authenticates exact Go test
+run/pass events, rejects missing/skipped/repeated/unfinished tests and incomplete
+packages, preserves stdout/stderr and binds the exact retained log bytes to the
+image/suite result. Package accounting is linear in the bounded event stream.
+Executor/parser/model-boundary regressions passed three race-enabled runs.
+The real full-pipeline probe is being extended to exercise this suite; no live
+model, complete database-suite or physical-host qualification is claimed here.
