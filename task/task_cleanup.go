@@ -21,6 +21,13 @@
 // An old failed Post can still run, so age never substitutes for its finished
 // owner: a group whose owners are not all free is left whole for a later
 // sweep, and nothing waits on a busy owner or row.
+//
+// All of this is the plain table's retention. Once finished_task is
+// partitioned (PARTITION-MAINTENANCE-PLAN.md C3), retention is the drop of
+// whole days, behind the same owner admission (finished_task_partition.go),
+// and the cleanup deletes nothing. While the table is plain, each run also
+// abandons a cutover prepared but not finalized in time, whose check would
+// otherwise refuse every completion from its cutover day on.
 package task
 
 import (
@@ -173,8 +180,12 @@ func removeFinishedTasksAfter(
 
 // Removes every row past `minTime` whose Post completed, and every row past
 // `postErrorMinTime`, in one complete sweep from the oldest row, using the same
-// groups as the cleanup task. The recurring task bounds its sweeps by time.
+// groups as the cleanup task. The recurring task bounds its sweeps by time. A
+// partitioned table removes nothing: its retention is the partition drop.
 func RemoveFinishedTasks(ctx context.Context, minTime time.Time, postErrorMinTime time.Time) (removeCount int64) {
+	if finishedTaskPartitioned(ctx) {
+		return 0
+	}
 	_, removeCount, _ = removeFinishedTasksAfter(
 		ctx,
 		FinishedTaskPosition{},
@@ -228,13 +239,32 @@ func taskCleanupNow(ctx context.Context) func() time.Time {
 }
 
 // One budgeted run from the position in its arguments. Retention is measured
-// from the run's start.
+// from the run's start. On a partitioned table the run removes nothing and
+// completes its sweep; it only makes sure today and tomorrow have a day, so a
+// stalled partition runway never leaves a completion without one.
 func TaskCleanup(
 	taskCleanup *TaskCleanupArgs,
 	clientSession *session.ClientSession,
 ) (*TaskCleanupResult, error) {
 	now := taskCleanupNow(clientSession.Ctx)
 	startTime := now()
+	if finishedTaskPartitioned(clientSession.Ctx) {
+		// the registry's runway keeps these days long ahead, so this creates
+		// one only when that task has stalled
+		for _, day := range []time.Time{startTime, startTime.AddDate(0, 0, 1)} {
+			if created, err := finishedTaskPartitionFamily.EnsureRangeFor(clientSession.Ctx, day); err != nil {
+				glog.Errorf("[task]cleanup could not create the finished_task day of %s: %s\n", day.Format(time.DateOnly), err)
+			} else if 0 < len(created) {
+				glog.Errorf("[task]cleanup created the missing finished_task days %v: the partition runway is behind\n", created)
+			}
+		}
+		return &TaskCleanupResult{}, nil
+	}
+	if abandoned, err := server.GuardFinishedTaskPartitionCutover(clientSession.Ctx, startTime, finishedTaskPartitionSettings); err != nil {
+		glog.Errorf("[task]cleanup could not guard a prepared finished_task cutover: %s\n", err)
+	} else if abandoned {
+		glog.Infof("[task]cleanup abandoned the finished_task cutover prepared too late\n")
+	}
 	after := FinishedTaskPosition{}
 	if taskCleanup.After != nil {
 		after = *taskCleanup.After

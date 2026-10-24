@@ -7,17 +7,107 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
+
+// A completed uncertain judgment stays uncertain across supervisor retries and
+// clock renewal, rather than repeatedly sampling until approval appears.
+func TestWinnerReviewCompletedUncertaintyCannotBeResampled(t *testing.T) {
+	result, template, policy := winnerBrokerFixture()
+	result.Review.SourceDisposition = "deferred"
+	content, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := winnerReviewBrokerRequest{Operation: "review_elected_winner", Template: template,
+		Request: controller.CompetitionWinnerReviewRequest{Policy: policy, StartedAt: time.Unix(10, 0), Deadline: time.Unix(20, 0)}}
+	path := filepath.Join(t.TempDir(), "completed.json")
+	calls := 0
+	run := func() ([]byte, error) {
+		calls++
+		if calls > 1 {
+			t.Fatal("uncertain completed review was sampled again")
+		}
+		return content, nil
+	}
+	for i := range 2 {
+		request.Request.StartedAt = request.Request.StartedAt.Add(time.Duration(i) * time.Hour)
+		request.Request.Deadline = request.Request.Deadline.Add(time.Duration(i) * time.Hour)
+		output, err := winnerReviewCompletedResponse(path, request, run)
+		if err != nil || string(output) != string(content) {
+			t.Fatal("completed uncertainty was not retained", err)
+		}
+		var replay winnerReviewBrokerResult
+		if err := json.Unmarshal(output, &replay); err != nil {
+			t.Fatal(err)
+		}
+		if validateWinnerReviewBrokerResult(&replay, template, policy) == nil {
+			t.Fatal("retained uncertainty became an accepted judgment")
+		}
+	}
+	if calls != 1 {
+		t.Fatal("wrong broker invocation count", calls)
+	}
+}
+
+// Malformed and empty completed model output is evidence, not permission to
+// obtain another model answer under the same immutable candidate identity.
+func TestWinnerReviewCompletedMalformedResponsesAreRetained(t *testing.T) {
+	for _, content := range [][]byte{nil, []byte("not-json")} {
+		path := filepath.Join(t.TempDir(), "completed.json")
+		request := winnerReviewBrokerRequest{Operation: "review_elected_winner"}
+		for i := range 2 {
+			output, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+				if i != 0 {
+					t.Fatal("malformed completed response was sampled again")
+				}
+				return content, nil
+			})
+			if err != nil || string(output) != string(content) {
+				t.Fatal("completed malformed response changed", err)
+			}
+		}
+	}
+}
+
+// A failed transport has no completed judgment to preserve and may retry.
+// Once completed, a changed packet or policy must fail closed, not rerun.
+func TestWinnerReviewCompletedResponseBindsContextAndRetriesTransport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "completed.json")
+	request := winnerReviewBrokerRequest{Operation: "review_elected_winner"}
+	transportErr := errors.New("synthetic transport unavailable")
+	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+		return nil, transportErr
+	}); !errors.Is(err, transportErr) {
+		t.Fatal("transport error was lost", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("transport failure cached as a completed judgment", err)
+	}
+	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+		return []byte("synthetic completed response"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request.Instructions = "changed trusted instructions"
+	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+		t.Fatal("different request reused the response identity")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("changed review context was accepted")
+	}
+}
 
 // Every finding is real fixture data, never a default approval in production.
 func winnerBrokerFixture() (winnerReviewBrokerResult, model.CompetitionIntegrityReviewRequest, model.CompetitionAutomationPolicy) {

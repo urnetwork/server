@@ -106,6 +106,19 @@ func MigrationIdentity(index int) (string, error) {
 	return migrationIdentity(migrations[index])
 }
 
+// The version a database reaches by applying the code migration with this id,
+// or 0 when no migration has it. A monitor contract names an unpublished
+// migration by its id, so the version follows the migration wherever a merge
+// places it.
+func CodeMigrationVersion(id string) int {
+	for index, migration := range migrations {
+		if codeMigration, ok := migration.(*CodeMigration); ok && codeMigration.id == id {
+			return index + 1
+		}
+	}
+	return 0
+}
+
 func migrationPrefixIdentity(count int) (string, error) {
 	if count < 0 || count > len(migrations) {
 		return "", fmt.Errorf("migration prefix count %d outside [0,%d]", count, len(migrations))

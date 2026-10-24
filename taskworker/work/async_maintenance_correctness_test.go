@@ -104,10 +104,6 @@ func TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence(t *testing.T) {
 				seed: `INSERT INTO user_auth_verify(user_auth_verify_id,user_id,verify_time,verify_code)
 					VALUES($1,$1,'2000-01-01','old'),($2,$2,'2099-01-01','live')`,
 				verify: `SELECT count(*)=1 AND bool_and(user_auth_verify_id=$2) FROM user_auth_verify WHERE user_auth_verify_id IN ($1,$2)`},
-			{asyncMaintenanceCase: newAsyncMaintenanceCase(RemoveExpiredAuthAttempts, RemoveExpiredAuthAttemptsPost, &RemoveExpiredAuthAttemptsArgs{}),
-				seed: `INSERT INTO user_auth_attempt(user_auth_attempt_id,success,attempt_time)
-					VALUES($1,false,'2000-01-01'),($2,false,'2099-01-01')`,
-				verify: `SELECT count(*)=1 AND bool_and(user_auth_attempt_id=$2) FROM user_auth_attempt WHERE user_auth_attempt_id IN ($1,$2)`},
 			{asyncMaintenanceCase: newAsyncMaintenanceCase(CloseExpiredNetworkClientHandlers, CloseExpiredNetworkClientHandlersPost, &CloseExpiredNetworkClientHandlersArgs{}),
 				seed:   `INSERT INTO network_client_handler(handler_id,heartbeat_time) VALUES($1,'2000-01-01'),($2,'2099-01-01')`,
 				verify: `SELECT count(*)=1 AND bool_and(handler_id=$2) FROM network_client_handler WHERE handler_id IN ($1,$2)`},

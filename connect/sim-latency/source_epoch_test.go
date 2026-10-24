@@ -77,7 +77,6 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 					Goidenticons:  sourceRepository{Commit: repositoryCommits["goidenticons"]},
 					Userwireguard: sourceRepository{Commit: repositoryCommits["userwireguard"]},
 					Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
-					OperatorProxy: sourceRepository{Commit: repositoryCommits["operator-proxy"]},
 					Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
 					Gvisor:        sourceRepository{Commit: repositoryCommits["gvisor"]},
 				},
@@ -286,7 +285,7 @@ func TestSourceManifestRejectsMissingRepositoryCommit(t *testing.T) {
 }
 
 func TestSourceManifestRejectsMissingDependencyCommits(t *testing.T) {
-	for _, repository := range []string{"glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
+	for _, repository := range []string{"glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
 		repositoryCommits[repository] = ""
 		err := validateSourceManifest(sourceTestManifest(repositoryCommits))
@@ -321,7 +320,7 @@ func TestEvaluatorSourceLockRequiresCompleteRepositorySet(t *testing.T) {
 
 // Reject extra names even when one has replaced a missing required dependency.
 func TestEvaluatorSourceLockRejectsUnexpectedRepositories(t *testing.T) {
-	for _, omittedRepository := range []string{"", "operator-proxy", "warp", "gvisor"} {
+	for _, omittedRepository := range []string{"", "warp", "gvisor"} {
 		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
 		delete(repositoryCommits, omittedRepository)
 		repositoryCommits["unexpected"] = strings.Repeat("b", 40)

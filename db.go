@@ -111,6 +111,8 @@ var safeMaintenancePool = &safePgPool{
 	ctx:                context.Background(),
 	vaultResourceName:  MaintenancePgVaultResourceName,
 	configResourceName: MaintenancePgConfigResourceName,
+	// the VACUUM (VERBOSE) summaries of db_maintenance_hot_vacuum.go
+	dispatchNotices: true,
 }
 
 // func maintenancePool() *pgxpool.Pool {
@@ -170,6 +172,8 @@ type safePgPool struct {
 	lifecycleLock      sync.Mutex
 	lifecycle          *pgPoolWrapperLifecycle
 	lifecycleDropped   atomic.Uint64
+	// deliver each notice to the handler its connection carries; see db_notice.go
+	dispatchNotices bool
 }
 
 // resolveResources returns the connection (vault) and pool-sizing (config)
@@ -294,7 +298,11 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
 		configurePgPoolStatementErrors(config)
+		if self.dispatchNotices {
+			configurePgPoolNotices(config)
+		}
 		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
+		configurePgPoolDirectSession(config, self.vaultResourceName == MaintenancePgVaultResourceName)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
@@ -625,8 +633,14 @@ func MaintenanceDb(ctx context.Context, callback func(PgConn), options ...any) {
 // PostgreSQL advisory lock guarding a task claim. The maintenance pool bypasses
 // transaction-pooled PgBouncer, where session locks would not be safe.
 func AcquireMaintenanceDbConn(ctx context.Context) (PgConn, error) {
+	return acquirePgPoolConn(ctx, safeMaintenancePool)
+}
+
+// Reserves one session of pool, validated within PgPingTimeout, until the
+// caller releases or discards it.
+func acquirePgPoolConn(ctx context.Context, pool *safePgPool) (PgConn, error) {
 	checkPostgresAllowed(ctx)
-	conn, err := safeMaintenancePool.open().Acquire(ctx)
+	conn, err := pool.open().Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}

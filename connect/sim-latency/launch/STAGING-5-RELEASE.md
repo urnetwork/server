@@ -1,5 +1,10 @@
 # Staging epoch 5 release
 
+Historical release record, not current deployment requirements. Its repository
+list and pins describe that release only. Current production and staging use
+the ten repositories listed in [RUN-MAIN.md](../RUN-MAIN.md); neither requires
+the deleted operator-proxy repository.
+
 Prepared on 2026-09-18; staging deployment verified on 2026-09-19. The
 shared-baseline, simulator-lifecycle, and timing-
 serialization fixes are built into the installed image below; independent Go,

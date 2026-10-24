@@ -5,11 +5,11 @@ Legacy `run`/`approve`/`reject` commands retain their v1 review pause. Explicit
 v2 competitions use `supervise` below; never mix these progression paths.
 It drives the continuously deployed main API and one-shot worker while keeping
 the production evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
-`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`—isolated
+`glog`, `goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`—isolated
 in temporary clones. Production source is pinned on `sim-latency`; explicit v2
 staging uses only `sim-latency-staging` and its separate ten-repository source
-manifest, excluding the retired `operator-proxy`. Production's eleven-repository
-protocol and all historical records remain unchanged.
+manifest. Both modes omit the deleted `operator-proxy`; no clone, placeholder,
+branch, or pin for it is required. All historical records remain unchanged.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
@@ -126,14 +126,33 @@ All six criteria and exact revision/digests must validate. Uncertainty blocks;
 it must not be fabricated as either approval or misconduct. The manager caches
 accepted response bytes for identical idempotent retries, retains the report in
 versioned COMPLIANCE MinIO storage, and alone posts to the scoped reviewer API.
+Completed broker output is retained separately before validation, including
+uncertain, empty, or malformed output. Supervisor retries replay that response;
+they must not resample until a model approves. Such a response remains blocked
+and requires operator investigation, not deletion of the response to force a
+different answer. Changed authenticated context also blocks. A transport failure
+with no completed broker output may retry within the original review deadline.
 The reviewer token is never sent to the model broker. Private attempt records
 and retention receipts remain in the mode-0700 state directory.
 
 Source construction reuses `stage-reviewed-source` automatically with the
 qualified isolated build broker. Tests retain independent Sol 6.1 low ownership.
-No model implementation, real provider access, build broker, or genuine
-qualification is established by a test receipt or by this runbook alone:
-provision and qualify those integrations before enabling the new season.
+The tool-free provider client is `sim-latency review-broker`; its scratch-image
+wrapper and deployment/qualification procedure are in
+[`evaluator/review/README.md`](evaluator/review/README.md). Implementation is not
+live provider access or genuine qualification. Provision the dedicated model
+key, build/install the contained broker and qualify it, and independently
+provision/qualify the build broker before enabling the new season. A test receipt
+or this runbook alone does not satisfy those requirements.
+
+The supervisor-facing offline build entry point is
+`sim-latency source-build-broker --build-settings=<private-json> --build-settings-sha256=<digest>`.
+Its immutable wrapper, private settings and independent qualifier contract are
+documented in [`evaluator/source-build/README.md`](evaluator/source-build/README.md). The broker
+builds artifacts first, then requires a pinned qualifier receipt for that exact
+image and attempt. A missing qualifier, changed pin, cancellation, or incomplete
+model/containment evidence returns no usable receipt. Do not substitute the
+synthetic offline pipeline probe for genuine winner review or qualification.
 
 The `automation_progression_blocked` metric/dashboard and
 `CompetitionAutomaticClosingBlocked` alert use the existing
@@ -175,6 +194,15 @@ sim-latency bootstrap-source --enable-automation \
   --owner-id=synthetic-season-supervisor --state-dir=/secure/automation/state \
   --manifest-commit=REPLACE_WITH_APPROVED_CONFIG_COMMIT
 ```
+
+For an announced initial launch, also pass `--opens-at=YYYY-MM-DDTHH:MM:SSZ`.
+The timestamp must be in the future when first staged and have at most
+microsecond precision. It is persisted in the immutable source intent. Recovery
+without the flag preserves that pin; a different flag cannot move it. Once
+qualified, the supervisor can create a `scheduled` round before that instant;
+admission remains start-inclusive/end-exclusive. The database independently
+requires the exact pinned opening and the full admission window. Later unpinned
+rounds still open after actual review/build/readiness, not on a guessed date.
 
 Bootstrap registers generation 1/source generation 0 for epoch 1 and persists
 recovery material. It does not activate a pointer, create a round, or invent a
@@ -287,8 +315,8 @@ source unchanged. Dedicated staging config publication preserves production
 manifest bytes, including unrelated production config advances. Mode, ref, or
 config-path mismatches fail closed on recovery before any push or adapter call.
 
-Publication uses private durable clones of the exact source set: ten for explicit
-staging, eleven for production. It freezes
+Publication uses private durable clones of the exact ten-repository source set
+for both modes. It freezes
 expected/new refs and exact manifest bytes, records intent before any push,
 publishes source first and config last, and requires runtime readiness. Ordinary
 fast-forward pushes only; no forced update. Lost replies and partial pushes
@@ -411,7 +439,7 @@ sim-latency stage-reviewed-source --review-id=REVIEW_ID \
   --build-sha256=REPLACE_WITH_REVIEWED_EXECUTABLE_SHA256
 ```
 
-This clones all mode-specific pinned repositories (ten staging, eleven production), applies the exact authenticated patch,
+This clones all ten pinned repositories, applies the exact authenticated patch,
 checks its tree and protected runner, and invokes a separately qualified isolated
 build/test broker. It pushes nothing. The broker receives only an allowlisted
 environment (no inherited main, database, vault, Git-push or seed credentials),
@@ -463,14 +491,14 @@ the worker is run from this host. Set an exact control-plane image identity in
 The following requirements describe production and the legacy staging-alias
 workflow, not explicit v2 staging. Every newly eligible production epoch
 checkpoint in `config/main/sim-latency.yml` must list exactly these
-eleven repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
-`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, `warp`, and `gvisor`. Each commit
+ten repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`. Each commit
 must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
 Before legacy staging, each repository must also expose a `sim-latency-staging` branch
-whose head exactly equals its epoch-zero commit. The harness verifies all eleven
+whose head exactly equals its epoch-zero commit. The harness verifies all ten
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
 the name used for pre-production coordination while retaining the exact frozen
@@ -478,11 +506,9 @@ baseline source content and evaluator protocol. A reviewed evaluator repair is
 a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
-The historical production protocol retains `operator-proxy`, `warp`, and
-`gvisor`; server's `go.mod` replaces `gvisor.dev/gvisor` with the `../gvisor`
-sibling. The current staging module graph no longer requires `operator-proxy`,
-so explicit v2 staging requires exactly the other ten repositories, never a
-retired placeholder pin. Current tools reject mode-mismatched, extra, or
+The active production and staging protocols require exactly ten repositories,
+never a retired placeholder pin. Server's `go.mod` replaces `gvisor.dev/gvisor`
+with the `../gvisor` sibling. Current tools reject mode-mismatched, extra, or
 incomplete checkpoints and source locks; they never infer a missing
 commit. Prepare a reviewed complete checkpoint, matching remote aliases, and a
 new evaluator image at the drained release boundary. Preserve old eight- and
@@ -495,8 +521,8 @@ the exact evaluated server commit's `go.mod`, never moving main. A newly frozen
 base that requires an unpinned local repository fails closed and requires a
 separately reviewed source-protocol/image expansion; it cannot borrow main's
 checkout. Current source loading, shell validators, image copies, and new epoch
-records require the exact mode-specific set, including Warp and gvisor:
-production eleven, explicit staging ten without `operator-proxy`. Historical
+records require the exact ten-repository set, including Warp and gvisor, in
+both modes. Historical
 ten-repository locks and images remain unchanged evidence; the local
 gVisor fork must not be inserted into their source identities. Those checkpoints
 fail closed for new activations until a separately frozen and qualified
@@ -581,7 +607,7 @@ on `main`. Pulling the API/worker cannot repair such an evaluator.
 
 For the approved epoch-5 repair, Sol 6.1 max owns the source pull/merge and release
 review; Sol 6.1 low owns independent regression and image validation. Require
-the relevant tests to exist and pass in the image build, review all eleven
+the relevant tests to exist and pass in the image build, review all ten
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
 while epoch 4 is open or draining. After it finalizes, verify the replacement
@@ -673,7 +699,7 @@ with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
-patch, clones all eleven locked repositories into a new temporary directory,
+patch, clones all ten locked repositories into a new temporary directory,
 checks out the frozen `sim-latency` branch heads, applies the winner to the
 evaluated server surface, verifies every dependency and the protected runner
 tree are unchanged, pushes changed source branches, and pushes the config ledger

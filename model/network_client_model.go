@@ -24,6 +24,7 @@ import (
 	"maps"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -969,25 +970,49 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				return
 			}
 
-			tag := server.RaisePgResult(tx.Exec(
+			// The device row is locked as the update would lock it, but its
+			// spec is rewritten only when it changed. A client re-auths with
+			// the same spec almost every time, and rewriting it anyway made a
+			// new row version per re-auth.
+			deviceFound := false
+			deviceSpecChanged := false
+			result, err = tx.Query(
 				clientSession.Ctx,
 				`
-					UPDATE device
-					SET
-						device_spec = $2
-					WHERE
-						device_id = $1
+					SELECT device_spec IS DISTINCT FROM $2 FROM device
+					WHERE device_id = $1
+					FOR NO KEY UPDATE
 				`,
 				deviceId,
 				authClient.DeviceSpec,
-			))
-			if tag.RowsAffected() == 0 {
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceSpecChanged))
+					deviceFound = true
+				}
+			})
+			if !deviceFound {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Device does not exist.",
 					},
 				}
 				return
+			}
+			if deviceSpecChanged {
+				server.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`
+						UPDATE device
+						SET
+							device_spec = $2
+						WHERE
+							device_id = $1
+					`,
+					deviceId,
+					authClient.DeviceSpec,
+				))
 			}
 
 			server.RaisePgResult(tx.Exec(
@@ -1280,6 +1305,8 @@ func deactivateOwnedNetworkClientInTx(
 }
 
 // The caller must hold FOR UPDATE on every client in this exact owned set.
+// The clients' provide keys go in the same transaction: an inactive client is
+// never a contract destination.
 func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (int64, error) {
 	if len(lockedClientIds) == 0 {
 		return 0, nil
@@ -1310,7 +1337,76 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 	if err != nil {
 		return 0, err
 	}
+	if err := removeDeactivatedProvideKeysInTx(ctx, tx, lockedClientIds); err != nil {
+		return 0, err
+	}
 	return tag.RowsAffected(), nil
+}
+
+// Deletes the provide keys of clients this transaction deactivates, and their
+// Redis mirrors after the commit, as the other removals do (see
+// `refillProvideMirror`). The row lock orders a racing provide: `SetProvide`
+// locks the client row before it writes, so it commits before this delete or
+// finds the client inactive. A mirror whose post is lost, or that a raw
+// transaction cannot post, stays until its ttl or the client's hard delete
+// (removeReapedClientRedisState).
+func removeDeactivatedProvideKeysInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
+	result, err := tx.Query(
+		ctx,
+		`
+			DELETE FROM provide_key
+			WHERE client_id = ANY($1)
+			RETURNING client_id
+		`,
+		clientIds,
+	)
+	if err != nil {
+		return err
+	}
+	removedClientIds := map[server.Id]bool{}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return err
+		}
+		removedClientIds[clientId] = true
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return err
+	}
+	if 0 < len(removedClientIds) {
+		mirrorClientIds := slices.Collect(maps.Keys(removedClientIds))
+		server.AddTxPostCommit(tx, "provide_mirror_deactivation/"+server.NewId().String(), func() any {
+			removeProvideMirrors(ctx, mirrorClientIds)
+			return nil
+		})
+	}
+	return nil
+}
+
+// Deletes every provide mirror key of the clients: the mode list and the
+// secret of each mode. Best effort and bounded on its own clock, so it also
+// runs after the caller canceled; a key it misses expires with its ttl.
+func removeProvideMirrors(ctx context.Context, clientIds []server.Id) {
+	mirrorCtx, mirrorCancel := context.WithTimeout(context.WithoutCancel(ctx), server.TxPostCommitTimeout)
+	defer mirrorCancel()
+	server.HandleError(func() {
+		forEachReapedClientRedisChunk(clientIds, func(chunk []server.Id) {
+			server.Redis(mirrorCtx, func(r server.RedisClient) {
+				// each client's keys share its {pm_<clientId>} hash tag, so one
+				// DEL per client stays in one slot
+				_, err := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
+					for _, clientId := range chunk {
+						pipe.Del(mirrorCtx, provideMirrorKeys(clientId)...)
+					}
+					return nil
+				})
+				server.Raise(err)
+			})
+		})
+	})
 }
 
 func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) {
@@ -2819,12 +2915,71 @@ func SetClientTlsCertificateWithSignature(
 	})
 }
 
+// The writes that take a client's stored provide keys to a provided key set.
+type provideKeyDifference struct {
+	// stored and not provided
+	removedProvideModes []ProvideMode
+	// provided and not stored, or stored with another secret
+	writeSecretKeys map[ProvideMode][]byte
+}
+
+func newProvideKeyDifference(storedSecretKeys map[ProvideMode][]byte, secretKeys map[ProvideMode][]byte) *provideKeyDifference {
+	difference := &provideKeyDifference{
+		writeSecretKeys: map[ProvideMode][]byte{},
+	}
+	for provideMode := range storedSecretKeys {
+		if _, ok := secretKeys[provideMode]; !ok {
+			difference.removedProvideModes = append(difference.removedProvideModes, provideMode)
+		}
+	}
+	slices.Sort(difference.removedProvideModes)
+	for provideMode, secretKey := range secretKeys {
+		if storedSecretKey, ok := storedSecretKeys[provideMode]; !ok || !bytes.Equal(storedSecretKey, secretKey) {
+			difference.writeSecretKeys[provideMode] = secretKey
+		}
+	}
+	return difference
+}
+
+func (self *provideKeyDifference) empty() bool {
+	return len(self.removedProvideModes) == 0 && len(self.writeSecretKeys) == 0
+}
+
+// Provides of an inactive client, refused because its deactivation deleted its
+// keys. The provide is the client's own message, so only V(1) logs one.
+var provideInactiveClientRefusals = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "provide",
+	Name:      "inactive_client_refusals_total",
+	Help:      "Provide messages refused because the client is inactive",
+})
+
+func init() {
+	prometheus.MustRegister(provideInactiveClientRefusals)
+}
+
+// Writes only the difference between the stored keys and the provided set, in
+// one read committed transaction. A client announces its keys again on every
+// connection, so most provides change nothing and write no provide_key row.
+//
+// Provides of one client take a transaction advisory lock first, so each reads
+// the keys the one before it committed, and the last to commit wins. A set
+// that changes locks the client row FOR KEY SHARE, which conflicts with the FOR
+// UPDATE of a deactivation, which deletes the keys: the provide commits first
+// and the deactivation deletes its keys, or it finds the client inactive and
+// writes nothing. A client without a row is written as before; the orphan
+// sweep removes its keys.
+//
+// Every applied provide still records a provide_key_change row, changed or
+// not: the announce loop counts each as a provide change for reliability
+// (connect/transport_announce.go), and that policy is not a key write.
 func SetProvide(
 	ctx context.Context,
 	clientId server.Id,
 	secretKeys map[ProvideMode][]byte,
 ) {
 	var removedProvideModes []ProvideMode
+	var inactive bool
 
 	// The mirror is written after the commit, and that write can fail (redis
 	// unavailable, or the caller canceled). Before the commit, hold the mirror
@@ -2852,44 +3007,92 @@ func SetProvide(
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx is retried on a transient error
 		removedProvideModes = nil
+		inactive = false
 
 		changeTime := server.NowUtc()
 
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('provide_key/' || $1::uuid::text, 0))`,
+			clientId,
+		))
+
+		// read committed: this read sees the keys of a provide that held the
+		// lock before this one
+		storedSecretKeys := map[ProvideMode][]byte{}
 		result, err := tx.Query(
 			ctx,
 			`
-			DELETE FROM provide_key
+			SELECT provide_mode, secret_key FROM provide_key
 			WHERE client_id = $1
-			RETURNING provide_key.provide_mode
 			`,
 			clientId,
 		)
-
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var provideMode ProvideMode
-				server.Raise(result.Scan(&provideMode))
-				removedProvideModes = append(removedProvideModes, provideMode)
+				var secretKey []byte
+				server.Raise(result.Scan(&provideMode, &secretKey))
+				storedSecretKeys[provideMode] = secretKey
 			}
 		})
 
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for provideMode, secretKey := range secretKeys {
-				batch.Queue(
+		difference := newProvideKeyDifference(storedSecretKeys, secretKeys)
+		if !difference.empty() {
+			var active bool
+			err := tx.QueryRow(
+				ctx,
+				`
+				SELECT active FROM network_client
+				WHERE client_id = $1
+				FOR KEY SHARE
+				`,
+				clientId,
+			).Scan(&active)
+			if errors.Is(err, pgx.ErrNoRows) {
+				active = true
+			} else {
+				server.Raise(err)
+			}
+			if !active {
+				inactive = true
+				return
+			}
+
+			if 0 < len(difference.removedProvideModes) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
 					`
-					INSERT INTO provide_key (
-						client_id,
-						provide_mode,
-						secret_key
-					)
-					VALUES ($1, $2, $3)
+					DELETE FROM provide_key
+					WHERE client_id = $1 AND provide_mode = ANY($2::int[])
 					`,
 					clientId,
-					provideMode,
-					secretKey,
-				)
+					difference.removedProvideModes,
+				))
 			}
-		})
+			if 0 < len(difference.writeSecretKeys) {
+				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+					for provideMode, secretKey := range difference.writeSecretKeys {
+						batch.Queue(
+							`
+							INSERT INTO provide_key (
+								client_id,
+								provide_mode,
+								secret_key
+							)
+							VALUES ($1, $2, $3)
+							ON CONFLICT (client_id, provide_mode) DO UPDATE
+							SET secret_key = EXCLUDED.secret_key
+							`,
+							clientId,
+							provideMode,
+							secretKey,
+						)
+					}
+				})
+			}
+		}
+		removedProvideModes = difference.removedProvideModes
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -2906,7 +3109,22 @@ func SetProvide(
 		// Public re-entry must not wait for the next fleet reliability rollup.
 		updateProviderUrlProbeEligibilityForClient(ctx, tx, clientId)
 
-	})
+	}, server.TxReadCommitted)
+
+	if inactive {
+		provideInactiveClientRefusals.Inc()
+		if glog.V(1) {
+			glog.Infof("[ncm][%s]provide refused: the client is inactive\n", clientId)
+		}
+		// the hold cleared the mirror, and a refill mirrors the keys the
+		// deactivation left: none
+		server.HandleError(func() {
+			server.Redis(ctx, func(r server.RedisClient) {
+				server.Raise(r.Eval(ctx, provideMirrorUnholdScriptSource, []string{provideMirrorHoldKey(clientId)}, holdToken).Err())
+			})
+		})
+		return
+	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
@@ -2997,6 +3215,15 @@ func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
 	})
 }
 
+// Whether an address has an open connection, read through
+// network_client_connection_connected_client_address_hash, which holds open
+// connections only.
+const networkClientAddressConnectedSql = `
+	SELECT true FROM network_client_connection
+	WHERE client_address_hash = $1 AND connected
+	LIMIT 1
+`
+
 func IsIpConnectedToNetwork(
 	ctx context.Context,
 	clientIp string,
@@ -3011,11 +3238,7 @@ func IsIpConnectedToNetwork(
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT true FROM network_client_connection
-				WHERE client_address_hash = $1 AND connected
-				LIMIT 1
-			`,
+			networkClientAddressConnectedSql,
 			addressHash[:],
 		)
 		server.WithPgResult(result, err, func() {
@@ -3480,6 +3703,36 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // (a large one-time pass).
 const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
+// One batch of closed connections older than $1, at most $2, with their
+// location, latency and speed rows. The candidates are read through
+// network_client_connection_closed_disconnect_time, which holds closed
+// connections only.
+const removeDisconnectedConnectionsSql = `
+	WITH candidate AS (
+		SELECT connection_id
+		FROM network_client_connection
+		WHERE
+			connected = false AND
+			disconnect_time < $1
+		LIMIT $2
+	), deleted_location AS (
+		DELETE FROM network_client_location
+		USING candidate
+		WHERE network_client_location.connection_id = candidate.connection_id
+	), deleted_latency AS (
+		DELETE FROM network_client_latency
+		USING candidate
+		WHERE network_client_latency.connection_id = candidate.connection_id
+	), deleted_speed AS (
+		DELETE FROM network_client_speed
+		USING candidate
+		WHERE network_client_speed.connection_id = candidate.connection_id
+	)
+	DELETE FROM network_client_connection
+	USING candidate
+	WHERE network_client_connection.connection_id = candidate.connection_id
+`
+
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
@@ -3495,31 +3748,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
-				`
-				WITH candidate AS (
-					SELECT connection_id
-					FROM network_client_connection
-					WHERE
-						connected = false AND
-						disconnect_time < $1
-					LIMIT $2
-				), deleted_location AS (
-					DELETE FROM network_client_location
-					USING candidate
-					WHERE network_client_location.connection_id = candidate.connection_id
-				), deleted_latency AS (
-					DELETE FROM network_client_latency
-					USING candidate
-					WHERE network_client_latency.connection_id = candidate.connection_id
-				), deleted_speed AS (
-					DELETE FROM network_client_speed
-					USING candidate
-					WHERE network_client_speed.connection_id = candidate.connection_id
-				)
-				DELETE FROM network_client_connection
-				USING candidate
-				WHERE network_client_connection.connection_id = candidate.connection_id
-				`,
+				removeDisconnectedConnectionsSql,
 				minConnectionTime.UTC(),
 				removeConnectionBatchCount,
 			))
@@ -3539,6 +3768,8 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// an attempt that does not commit marked nothing
+			batchCount = 0
 			clientIds := []server.Id{}
 			result, err := tx.Query(
 				ctx,
@@ -3606,6 +3837,8 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				clientIds,
 			))
 			batchCount = tag.RowsAffected()
+			// as every deactivation (deactivateLockedNetworkClientsInTx)
+			server.Raise(removeDeactivatedProvideKeysInTx(ctx, tx, clientIds))
 		}, server.TxReadCommitted)
 		if 0 < batchCount {
 			glog.Infof("[ncm]marked %d abandoned top level clients inactive\n", batchCount)
@@ -3774,6 +4007,14 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		}
 	}
 
+	removeReapedNetworkClientDependents(ctx, reapedClientIds, reapedDeviceIds)
+}
+
+// Removes the dependents of hard deleted clients after their delete commits:
+// per-client Redis state, then the tables keyed by the reaped ids, as
+// targeted deletes chunked to bound statement size. A device goes only once no
+// other client references it (a child shares its parent's device).
+func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []server.Id, reapedDeviceIds []server.Id) {
 	// Sweep per-client redis state outside the DB transaction. Plain pipelines
 	// auto-route these unrelated client hash slots, while bounded chunks avoid
 	// the old several-serialized-round-trips-per-id tail (which stretched a
@@ -3806,6 +4047,16 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				ctx,
 				`
 				DELETE FROM network_client_provider_intent
+				WHERE client_id = ANY($1::uuid[])
+				`,
+				idStrings(chunk),
+			))
+			// (cascade) and their roles, which a reaped client's identity
+			// lookup would otherwise still return
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_role
 				WHERE client_id = ANY($1::uuid[])
 				`,
 				idStrings(chunk),
@@ -3858,6 +4109,10 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
 					pipe.Del(ctx, clientPublicKeyRedisKey(clientId))
+					// the whole provide mirror, whatever its keys were: they are
+					// deleted at deactivation, and that post can be lost. One
+					// client's keys share a slot
+					pipe.Del(ctx, provideMirrorKeys(clientId)...)
 					for _, reverseKey := range verifyClientEgressKeys(clientId) {
 						reverseCmds[i] = append(reverseCmds[i], pipe.HGetAll(ctx, reverseKey))
 					}

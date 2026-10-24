@@ -21,6 +21,11 @@ const TransferDebitShardCount = 16
 
 var errTransferDebitPageDeadline = errors.New("transfer debit page deadline")
 
+// The age of a shard's oldest journal row in one applied state, 0 for none. It
+// reads transfer_debit_journal_shard_create_time oldest first and filters the
+// state, since no index keys applied: marking a row applied stays HOT.
+const transferDebitOldestAgeSql = `SELECT COALESCE((SELECT GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-create_time)))::double precision FROM transfer_debit_journal WHERE shard=$1 AND applied=$2 ORDER BY create_time LIMIT 1),0)`
+
 func transferDebitShard(balanceId server.Id) int { return int(balanceId[15]) % TransferDebitShardCount }
 
 var transferDebitResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -89,7 +94,7 @@ func FlushTransferDebits(ctx context.Context, shard int, after *server.Id, maxBa
 				applied bool
 			}{{"pending", false}, {"redis_release", true}} {
 				var age float64
-				server.Raise(conn.QueryRow(bounded, `SELECT COALESCE((SELECT GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-create_time)))::double precision FROM transfer_debit_journal WHERE shard=$1 AND applied=$2 ORDER BY create_time LIMIT 1),0)`, shard, state.applied).Scan(&age))
+				server.Raise(conn.QueryRow(bounded, transferDebitOldestAgeSql, shard, state.applied).Scan(&age))
 				transferDebitOldestAge.WithLabelValues(label, state.name).Set(age)
 			}
 			transferDebitSampleTime.WithLabelValues(label).SetToCurrentTime()

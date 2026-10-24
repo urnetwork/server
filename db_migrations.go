@@ -208,9 +208,7 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
-			MaintenanceDb(ctx, func(conn PgConn) {
-				Raise(executeOnlineSqlMigrationOnConn(ctx, conn, v))
-			}, OptReadWrite(), OptNoRetry())
+			runOnlineSqlMigration(ctx, v)
 		case *CodeMigration:
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]code = %v\n", i+1, len(migrations), v.callback)
@@ -3539,8 +3537,10 @@ var migrations = []any{
 	//     CREATE, measure-first (see STORAGE.md §3).
 	//   - pending_task: already tuned above.
 	// The existing bloat is not fixed by this (autovacuum only reclaims going
-	// forward): each of these tables needs a one-time manual
-	// VACUUM (VERBOSE, ANALYZE), and pg_repack to shrink the files.
+	// forward). A table shrinks only in a maintenance window, with VACUUM FULL,
+	// until PostgreSQL 19 brings online compaction (REPACK CONCURRENTLY,
+	// PARTITION-MAINTENANCE-PLAN.md A4); never pg_repack or another external
+	// tool (owner rule, 2026-10-23).
 	newSqlMigration(`
         ALTER TABLE contract_close SET (
             autovacuum_vacuum_cost_delay = 0,
@@ -10720,6 +10720,276 @@ var migrations = []any{
 	// admits deleting a row older than the 13-week contract horizon from a
 	// transaction that opts in. Update, truncate and newer rows stay refused.
 	newSqlMigration(contractCloseReportEvidenceRetentionGuardSql),
+
+	// Both production and staging use only the ten live source repositories.
+	newSqlMigration(competitionSourceRetirementMigration()),
+
+	// Preserve an explicitly scheduled source opening independently of the supervisor.
+	newSqlMigration(competitionScheduledOpeningMigration()),
+
+	// Raw bloat measurements (PARTITION-MAINTENANCE-PLAN.md A4; see
+	// dbBloatMeasurementTableSql): the weekly measurement records how much of
+	// each relation a rewrite would return, so the monitor's bloat signal and
+	// its thresholds can be checked against them. The measurement deletes rows
+	// after 90 days. A new table needs no lock_timeout.
+	newSqlMigration(dbBloatMeasurementTableSql),
+
+	// Close evidence partitions (PARTITION-MAINTENANCE-PLAN.md C5): the
+	// evidence guard also admits a move, the delete half of a row whose
+	// identical copy already sits in the partition it moves to (see
+	// contractCloseReportEvidenceMoveGuardSql). Retention keeps the 91-day
+	// rule; update and truncate stay refused.
+	newSqlMigration(contractCloseReportEvidenceMoveGuardSql),
+
+	// st_provider_usage_archive partitioned by contract week, so its one-year
+	// retention drops whole weeks (PARTITION-MAINTENANCE-PLAN.md C6). The
+	// archive guard refuses a row whose contract is gone, so this is not a
+	// plain copy: one transaction fences writers, copies into a staged table
+	// that gets its guard after the copy, checks the copy week by week and
+	// swaps the names (see providerUsageArchivePartitionSql).
+	providerUsageArchivePartitionMigration,
+
+	// Retired hosted identities are hard deleted a day after their
+	// deactivation (PARTITION-MAINTENANCE-PLAN.md Part D;
+	// db_identity_retention.go). The reap pages the retired children by
+	// deactivation time through this partial index, which holds only retired
+	// children. Building it reads the 455 GB heap twice and waits for older
+	// snapshots, without blocking writes. It is enrolled in completion
+	// recovery (db_identity_retention.go): a completed build is kept, so it may
+	// be pre-created out of band with the same statement, and an interrupted
+	// build's leftover is dropped and rebuilt.
+	newRestartableOnlineSqlMigration(
+		retiredChildNetworkClientIndexRecoverySql,
+		retiredChildNetworkClientIndexSql,
+		retiredChildNetworkClientIndexAuditSql,
+	),
+
+	// Key history retention for clients that are gone (Part D;
+	// db_identity_retention.go): a table of when each client with key history
+	// went, written by the network_client delete trigger, and a history guard
+	// that admits the retention task's deletes of clients gone more than 91
+	// days. Update and truncate stay refused. The truncate trigger is the only
+	// table lock, held briefly on st_client_key_history.
+	newSqlMigration(clientKeyHistoryRetentionSchemaSql),
+
+	// A running task's heartbeat now writes only claim_time between lease
+	// extensions (task.refreshTaskTimestampLeasesInTx). No index covers it, so
+	// the update is HOT when the row's page has room for the new version.
+	// Fillfactor 50 keeps half of each page for those versions. The queue holds
+	// a few thousand live rows, so halving the rows per page costs megabytes;
+	// a row keeps its args and JWT JSON inline up to the 2 kB TOAST threshold,
+	// and half a page fits two such versions where 70 would fit one. Every
+	// later insert honors the setting, so the table converges as its rows turn
+	// over, without a rewrite. See taskHeartbeatFillfactorSql.
+	newSqlMigration(taskHeartbeatFillfactorSql),
+
+	// provider_work_session_event moves to weekly observed_at partitions kept
+	// 13 weeks (PARTITION-MAINTENANCE-PLAN.md C4), cut over by an owner-run
+	// command (MigrateProviderWorkSessionEventsToPartitions). This publishes
+	// what is correct on the plain and the partitioned table alike: the retire
+	// lookup bounded below by its connection id's mint time, so it prunes to
+	// the weeks since; the receipt's reference to its event enforced by a
+	// trigger, which stays when the cutover drops the receipt foreign key; and
+	// the drop guard that only the retention task's guarded drop passes. It
+	// replaces functions and adds a trigger to the receipt table, so it takes
+	// no lock on the event table (db_provider_work_session_partition.go).
+	newSqlMigration(providerWorkSessionPartitionSchemaSql),
+
+	// finished_task moves to daily partitions by run end time
+	// (PARTITION-MAINTENANCE-PLAN.md C3), and a partitioned table's unique
+	// keys must include its partition key, so the primary key becomes
+	// (task_id, run_end_time). Build its index online first; a retry removes
+	// residue from an interrupted concurrent build.
+	finishedTaskIdentityIndexMigration,
+
+	// The primary key takes over that index, catalog work only. A task id
+	// stays unique without it: the completion move is the only writer and
+	// refuses an id that already finished (task/task_run_once.go). The
+	// lock_timeout keeps this change from queueing completions behind a long
+	// transaction.
+	finishedTaskPrimaryKeyMigration,
+
+	// The failed Posts that a Post retry may still run. Before a day's
+	// partition drops, they leave through their finished owners, and the
+	// drop's fence reads this index (task/finished_task_partition.go). Failed
+	// Posts are rare, so the index stays small; built online.
+	finishedTaskPostRetryIndexMigration,
+
+	// user_auth_attempt is retired (PARTITION-MAINTENANCE-PLAN.md Part B): auth
+	// attempts are counted in Redis (model/auth_model_attempt.go), and its last
+	// reader, the RemoveExpiredAuthAttempts drain, is deleted and reaped as a
+	// removed task target. No foreign key or view depends on the table. A
+	// taskworker built before this that still runs the drain fails that run
+	// until it is replaced; nothing else reads the table. The drop holds the
+	// unused table's exclusive lock only.
+	userAuthAttemptDropMigration,
+
+	// network_client_handler holds one row per connect handler process, a few
+	// dozen, and each heartbeats every 5 s. The heartbeat rewrites
+	// heartbeat_time, which this index keys, so every heartbeat was a non-HOT
+	// update that added an index entry. Its readers filter heartbeat_time over
+	// the whole table (the stale-handler scan and fresh count in
+	// network_client_handler_liveness.go, the provider liveness lease read and
+	// the monitor's handler counts), which a sequential scan of a few dozen
+	// rows answers; every other reader probes the primary key. Without the
+	// index the heartbeat is HOT.
+	handlerHeartbeatIndexDropMigration,
+
+	// transfer_balance is updated in place on the debit path: each transfer
+	// debit flush applies a balance's pending debits in one UPDATE of
+	// balance_byte_count (model/subscription_transfer_debit.go), as often as
+	// every 2 s for a busy balance. While a balance stays active that changes
+	// no indexed column, so the update is HOT when its page has room; on a
+	// full page it writes an entry in every index instead. 85 rather than 90:
+	// the daily grants are inserted together, so one page holds many balances
+	// debited at the same time, and their dead versions are pruned only once
+	// older snapshots end. It costs about 18% more pages, on the pages it
+	// applies to: those written from now on, and every page at the next
+	// compaction. Storage parameters take ShareUpdateExclusiveLock, which
+	// blocks no reader or writer.
+	transferBalanceFillfactorMigration,
+
+	// device rows are rewritten in place: a re-auth whose device_spec changed
+	// (authNetworkClientWithParentState, which no longer rewrites an unchanged
+	// spec), a rename, and the app version a connect reports
+	// (SetDeviceClientVersion). None of those columns is indexed, so each is a
+	// HOT update when its page has room. 90 is enough because a device is
+	// rewritten rarely once those writes skip unchanged values. It applies to
+	// pages written from now on, and to every page at the next compaction.
+	deviceFillfactorMigration,
+
+	// RollupSearchProviderStats rolls the open hour up every minute, so a row
+	// of a provider matched through the hour is rewritten up to 60 times.
+	// UpsertSearchProviderStats now skips a row whose count is unchanged, and
+	// the columns it rewrites (period_end, match_count) are not indexed, so a
+	// rewrite is HOT when the page has room. The hour's rows are inserted
+	// together, one page holds many of them, and each keeps rewriting through
+	// its hour, hence 70. It applies to pages written from now on, and to
+	// every page at the next compaction.
+	searchProviderStatsFillfactorMigration,
+
+	// A transfer debit journal row is inserted, marked applied once its debit
+	// commits, and deleted after its Redis release, seconds later
+	// (model/subscription_transfer_debit.go). transfer_debit_journal_age keyed
+	// applied, so marking a row applied was a non-HOT update. Its readers, the
+	// flush's oldest-age gauge and the monitor's per-shard ages, take the
+	// oldest row of a shard in one state: keyed (shard, create_time) they read
+	// that shard's rows oldest first until one matches. That is a few rows
+	// while the journal holds its usual few seconds of debits; during a
+	// backlog the applied age reads the shard's pending rows. The flush itself
+	// reads by balance (the primary key and transfer_debit_journal_shard).
+	// This builds the new index; the next migration drops the old one.
+	transferDebitJournalShardTimeIndexMigration,
+
+	// The age index keyed by applied, replaced by the one above, which the
+	// previous migration built before this drop runs. Without it no index of
+	// the journal keys applied, so marking a row applied is HOT.
+	transferDebitJournalAgeIndexDropMigration,
+
+	// Room on each page for the applied version of every row inserted there:
+	// a page holds the debits of a few seconds, and each is rewritten once as
+	// applied before it is deleted. The journal holds few live rows, so the
+	// space costs nothing that matters.
+	transferDebitJournalFillfactorMigration,
+
+	// provider_egress_probe_cycle_next_attempt (next_attempt_at, client_id)
+	// predates the eligible flag. Every reader that orders or bounds
+	// next_attempt_at also requires eligible: the URL due claim, its promotion,
+	// pending and renewal repair heads (provider_url_probe_due.go,
+	// provider_url_probe_completed_priority.go,
+	// provider_url_probe_renewal_compat.go) read the eligible partial index
+	// with one shard and the slot partial index with several, and the
+	// monitor's freshness sample reads the slot index. So no query reads this
+	// index, while every write of next_attempt_at, for eligible and retired
+	// providers alike, added an entry to it. The slot and non-slot partial
+	// pairs both stay, since one shard reads the non-slot indexes and several
+	// shards the slot ones. The completed-priority pair stays too: it is
+	// nearly empty outside priority mode, so it costs almost nothing.
+	probeCycleNextAttemptIndexDropMigration,
+
+	// Each reliability pass upserts every client score of each lookback with
+	// the pass's window (UpdateClientReliabilityScores), so max_block_number
+	// changes on every row every pass, and
+	// client_connection_reliability_score_lookback_max_block keyed it: every
+	// rewrite was non-HOT. Its readers all read whole lookbacks: the pass's
+	// stale-row delete (lookback_index = $1 AND max_block_number <> $2, which
+	// no btree condition serves), the monitor's drift and checks aggregates
+	// over lookback 2, and nothing narrower. A sequential scan of this small
+	// table serves them as well, and a three-valued (lookback_index) index
+	// would not, so the index is dropped rather than narrowed. Every other
+	// reader probes the primary key (client_id, lookback_index) or reads the
+	// whole table, as the provider count filter does.
+	clientScoreWindowIndexDropMigration,
+
+	// A pass rewrites every row in place, so each page needs room for a new
+	// version of every row on it: half the page, once the previous pass's
+	// versions are pruned. Applies to pages written from now on, and to every
+	// page at the next compaction.
+	clientScoreFillfactorMigration,
+
+	// network_client_location_reliability holds one row per client seen in
+	// the last 30 days (132 GB before the 2026-10-23 VACUUM FULL). The
+	// location pass now rewrites a client's row only when a value changed,
+	// and its indexed update_block_number once a day
+	// (UpdateClientLocationReliabilitiesInTx), so most rewrites change
+	// unindexed values (egress evidence, speed, latency, net type scores) and
+	// are HOT when the page has room. 85 leaves that room on each page for
+	// the rows of its clients that are still connecting. It applies to pages
+	// written from now on, and to every page at the next compaction.
+	locationReliabilityFillfactorMigration,
+
+	// network_client_connection holds about 90k open rows and 3.2M closed ones
+	// waiting out the 8 hours before the reaper deletes them. Every open-row
+	// reader filters a literal connected (or connected = true), yet four of
+	// its indexes keyed connected for every row, and the disconnect that flips
+	// it was a non-HOT update writing six index entries. Two partial indexes
+	// of open rows and one of closed rows replace them, all three built
+	// before the full indexes are dropped. A disconnect then writes three
+	// index entries, and the open-row indexes stay the size of the open set.
+	//
+	// Open rows by client, and their extenders: the contract insert's
+	// endpoint extenders (client_id = $1 AND connected AND extender_id IS NOT
+	// NULL), the provider work session and handler retirement reads by client,
+	// the eligibility, prober shard, reliability, sweep, auth and monitor
+	// joins and EXISTS probes on client_id AND connected, and the scans of all
+	// open rows in client order.
+	connectionOpenClientIndexMigration,
+
+	// Open rows by address: IsIpConnectedToNetwork, the ipinfo answer of
+	// whether the caller's address has an open connection
+	// (client_address_hash = $1 AND connected).
+	connectionOpenAddressIndexMigration,
+
+	// Closed rows by disconnect time: the reaper's oldest closed rows
+	// (connected = false AND disconnect_time < $1) and the location pass's
+	// recently closed connections (connected = false AND disconnect_time in a
+	// window, newest first). A disconnect adds the closed version here.
+	connectionClosedDisconnectIndexMigration,
+
+	// The full indexes the partial ones replace, dropped once those exist.
+	// (connected, client_id): its open-row reads by client are served by
+	// network_client_connection_connected_client_id_extender_id.
+	connectionConnectedClientIndexDropMigration,
+
+	// (client_id, connected, extender_id): the same reads, open rows only.
+	connectionClientExtenderIndexDropMigration,
+
+	// (client_address_hash, connected): served by
+	// network_client_connection_connected_client_address_hash.
+	connectionAddressIndexDropMigration,
+
+	// (connected, disconnect_time): its closed-row reads are served by
+	// network_client_connection_closed_disconnect_time. Reads of all a
+	// client's rows keep network_client_connection_client_id_connect_time,
+	// and handler reads network_client_connection_connected_handler_id.
+	connectionDisconnectTimeIndexDropMigration,
+
+	// Bound the cleanup horizon (PARTITION-MAINTENANCE-PLAN.md A6): every
+	// transaction of the application's sessions ends at 15 minutes, as a
+	// default of each pool's own role in this database. New sessions pick it
+	// up as the pools recycle; a maintenance operation that runs longer lifts
+	// it for its own session (WithoutTransactionTimeout).
+	newCodeMigration(ApplicationTransactionTimeoutMigrationId, migrationSetApplicationTransactionTimeout),
 
 	// Retire the legacy settlement queue (PARTITION-MAINTENANCE-PLAN.md, Part
 	// B): refuse while any intent remains, then drop the outcome guard on

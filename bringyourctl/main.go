@@ -133,6 +133,10 @@ Usage:
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate provider-egress-health-partition [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort] [--drop-old]
+    bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -166,10 +170,29 @@ Options:
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
     --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
-                   go to weekly partitions; prepare only.
+                   (or close reports, or provider work session events) go to
+                   weekly partitions; prepare only.
     --rollback     Undo the contract partition swap while no weekly
-                   partition holds a row.
-    --abort        Drop a prepared, unfinalized contract partition cutover.
+                   partition holds a row (the close evidence swap while few
+                   rows are outside its legacy partition; the finished_task
+                   swap, copying back the rows of its daily partitions); or
+                   the egress health history's swap while its old table
+                   exists, keeping the rows written since.
+    --abort        Drop a prepared, unfinalized contract, close evidence or
+                   finished_task partition cutover, or the egress health
+                   history's staged table and mirror.
+    --cutover-day=<date>  The day (YYYY-MM-DD, UTC) from which finished tasks
+                   go to daily partitions, at least 12 hours ahead; prepare only.
+    --max-copy-rows=<n>  With a finished_task --rollback, the most rows of the
+                   daily partitions it copies back under its exclusive lock;
+                   omitted uses 200000.
+    --copy-days=<n>  Days of egress health history the partitioned table
+                   takes: today and the days before it, at least 2
+                   [default: 2].
+    --swap         Swap the prepared, partitioned egress health history in.
+    --verify       Check the partitioned egress health history against the
+                   old table.
+    --drop-old     Drop the old egress health history once --verify passes.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -468,6 +491,14 @@ func main() {
 				modelMigrateClientReliabilityPartition(opts)
 			} else if contractPartition, _ := opts.Bool("contract-partition"); contractPartition {
 				modelMigrateContractPartition(opts)
+			} else if egressHealthPartition, _ := opts.Bool("provider-egress-health-partition"); egressHealthPartition {
+				modelMigrateProviderEgressHealthPartition(opts)
+			} else if closeEvidencePartition, _ := opts.Bool("close-evidence-partition"); closeEvidencePartition {
+				modelMigrateCloseEvidencePartition(opts)
+			} else if sessionPartition, _ := opts.Bool("provider-work-session-partition"); sessionPartition {
+				modelMigrateProviderWorkSessionPartition(opts)
+			} else if finishedTaskPartition, _ := opts.Bool("finished-task-partition"); finishedTaskPartition {
+				modelMigrateFinishedTaskPartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2742,6 +2773,144 @@ func modelMigrateContractPartition(opts docopt.Opts) {
 	if err := server.MigrateContractsToPartitions(context.Background(), options); err != nil {
 		panic(err)
 	}
+}
+
+// Partitions provider_work_session_event by observed_at week
+// (PARTITION-MAINTENANCE-PLAN.md C4; server.MigrateProviderWorkSessionEventsToPartitions):
+// prepare (with --cutover-week), then --finalize before that week; --rollback
+// and --abort undo. Each step can be rehearsed with --dry-run.
+func modelMigrateProviderWorkSessionPartition(opts docopt.Opts) {
+	options, err := providerWorkSessionPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateProviderWorkSessionEventsToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func providerWorkSessionPartitionMigrateOptions(opts docopt.Opts) (options server.ProviderWorkSessionPartitionMigrateOptions, err error) {
+	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
+		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	return
+}
+
+// Partitions finished_task daily by run end time (PARTITION-MAINTENANCE-PLAN.md
+// C3): prepare (with --cutover-day), then --finalize at least 2 hours before
+// that day; --rollback and --abort undo. Each step can be rehearsed with
+// --dry-run, and an interrupted step can be run again.
+func modelMigrateFinishedTaskPartition(opts docopt.Opts) {
+	options, err := finishedTaskPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateFinishedTasksToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func finishedTaskPartitionMigrateOptions(opts docopt.Opts) (options server.FinishedTaskPartitionMigrateOptions, err error) {
+	if cutoverDay, _ := opts.String("--cutover-day"); cutoverDay != "" {
+		options.CutoverDay, err = time.Parse(time.DateOnly, cutoverDay)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	options.Settings = server.DefaultFinishedTaskPartitionSettings()
+	if maxCopyRows, _ := opts.String("--max-copy-rows"); maxCopyRows != "" {
+		options.Settings.RollbackMaxCopyRows, err = strconv.ParseInt(maxCopyRows, 10, 64)
+		if err != nil {
+			return
+		}
+		if options.Settings.RollbackMaxCopyRows < 0 {
+			err = fmt.Errorf("--max-copy-rows must not be negative: %d", options.Settings.RollbackMaxCopyRows)
+			return
+		}
+	}
+	return
+}
+
+// Partitions the close evidence by report_id (PARTITION-MAINTENANCE-PLAN.md
+// C5; server.MigrateCloseEvidenceToPartitions): prepare (with
+// --cutover-week), then --finalize before that week; --rollback and --abort
+// undo. Each step can be rehearsed with --dry-run, and each resumes when run
+// again.
+func modelMigrateCloseEvidencePartition(opts docopt.Opts) {
+	options, err := closeEvidencePartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateCloseEvidenceToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func closeEvidencePartitionMigrateOptions(opts docopt.Opts) (options server.CloseEvidencePartitionMigrateOptions, err error) {
+	contractOptions, err := contractPartitionMigrateOptions(opts)
+	if err != nil {
+		return
+	}
+	return server.CloseEvidencePartitionMigrateOptions{
+		CutoverWeek: contractOptions.CutoverWeek,
+		DryRun:      contractOptions.DryRun,
+		Finalize:    contractOptions.Finalize,
+		Rollback:    contractOptions.Rollback,
+		Abort:       contractOptions.Abort,
+	}, nil
+}
+
+// Partitions provider_egress_health_history by day
+// (PARTITION-MAINTENANCE-PLAN.md C2): prepare, then --swap, --verify and
+// --drop-old; --rollback and --abort undo. Each step can be rehearsed with
+// --dry-run, and each is resumable.
+func modelMigrateProviderEgressHealthPartition(opts docopt.Opts) {
+	options, err := providerEgressHealthPartitionOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := model.MigrateProviderEgressHealthHistoryToPartitions(context.Background(), server.NowUtc(), options); err != nil {
+		panic(err)
+	}
+}
+
+func providerEgressHealthPartitionOptions(opts docopt.Opts) (options model.ProviderEgressHealthHistoryCutoverOptions, err error) {
+	if copyDays, _ := opts.String("--copy-days"); copyDays != "" {
+		options.CopyDays, err = strconv.Atoi(copyDays)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Swap, _ = opts.Bool("--swap")
+	options.Verify, _ = opts.Bool("--verify")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	options.DropOld, _ = opts.Bool("--drop-old")
+	return
 }
 
 func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractPartitionMigrateOptions, err error) {

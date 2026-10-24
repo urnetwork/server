@@ -51,10 +51,7 @@ func newCompetitionAutomationFixtureWithCapability(t testing.TB, staging bool, c
 	}
 	fixture.store = PostgresStore{now: func() time.Time { return fixture.now }}
 	commits := map[string]string{}
-	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp", "gvisor"} {
-		if staging && repository == "operator-proxy" {
-			continue
-		}
+	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		commits[repository] = fixture.settings.BaseSha
 	}
 	sourceLock, sourceErr := model.CompetitionSourceLockDigest(commits)

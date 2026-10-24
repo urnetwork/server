@@ -10,19 +10,16 @@ import (
 
 var competitionSourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// Accepts only either complete supported graph. Callers with an authenticated
-// execution mode must use the mode-bound variant rather than infer authority.
+// The complete active graph is identical in production and staging. Execution
+// mode remains separately authenticated by the source activation protocol.
 func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
-	return CompetitionSourceLockDigestForMode(commits, len(commits) == 10)
+	return CompetitionSourceLockDigestForMode(commits, false)
 }
 
-// Explicit staging retires operator-proxy; production retains its historical
-// eleven-repository contract. Canonical bytes stay identical for existing locks.
-func CompetitionSourceLockDigestForMode(commits map[string]string, staging bool) (string, error) {
+// Requires the ten live dependencies in either mode. Historical evidence is
+// retained unchanged; an obsolete extra repository cannot authorize new work.
+func CompetitionSourceLockDigestForMode(commits map[string]string, _ bool) (string, error) {
 	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
-	if !staging {
-		repositoryNames = append(repositoryNames, "operator-proxy")
-	}
 	if len(commits) != len(repositoryNames) {
 		return "", fmt.Errorf("source lock requires exactly %d frozen repositories", len(repositoryNames))
 	}

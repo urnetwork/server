@@ -18,15 +18,16 @@ func (self *transferDebitTaskTarget) TaskCompletionOwnershipKeys(_ *task.Task, _
 	return nil, nil
 }
 
+// The commit post keeps the partition's idle mark (transfer_debit_work.go).
 func NewTransferDebitTaskTarget() task.Target {
-	return &transferDebitTaskTarget{Target: task.NewTaskTargetWithPost(FlushTransferDebits, FlushTransferDebitsPost)}
+	return &transferDebitTaskTarget{Target: task.NewTaskTargetWithCommitPost(FlushTransferDebits, FlushTransferDebitsCommitPost)}
 }
 
 // Independent debit publication owns only the keys it can write.
 func transferDebitStartupOwnershipKeys() []server.PgOwnershipKey {
 	keys := make([]server.PgOwnershipKey, 0, model.TransferDebitShardCount)
 	for shard := range model.TransferDebitShardCount {
-		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce(fmt.Sprintf("flush_transfer_debits_%d", shard))))
+		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce(model.TransferDebitFlushRunOnceKey(shard))))
 	}
 	return keys
 }

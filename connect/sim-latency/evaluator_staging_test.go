@@ -187,6 +187,7 @@ func TestEvaluatorBaseRecordRequiresExplicitMatchingStagingMode(t *testing.T) {
 		wantSuccess    bool
 	}{
 		{name: "production", branch: "sim-latency", margin: 16.1, wantSuccess: true},
+		{name: "production-retired-repository", branch: "sim-latency", margin: 16.1, includeRetired: true},
 		{name: "staging", staging: true, recordStage: true, branch: stagingEvaluationSourceBranch, wantSuccess: true},
 		{name: "implicit-stage", staging: true, branch: stagingEvaluationSourceBranch},
 		{name: "stage-production-branch", staging: true, recordStage: true, branch: "sim-latency"},
@@ -197,8 +198,8 @@ func TestEvaluatorBaseRecordRequiresExplicitMatchingStagingMode(t *testing.T) {
 	} {
 		record := sourceRecord{Schema: 1, Staging: fixture.recordStage, Epoch: 0, Branch: fixture.branch,
 			SignificantImprovementPercent: fixture.margin, Repositories: sourceTestCommits(strings.Repeat("a", 40))}
-		if fixture.staging && !fixture.includeRetired {
-			delete(record.Repositories, "operator-proxy")
+		if fixture.includeRetired {
+			record.Repositories["operator-proxy"] = strings.Repeat("b", 40)
 		}
 		recordBytes, err := json.Marshal(record)
 		if err != nil {
@@ -248,7 +249,10 @@ func TestEvaluatorBaseGoPinSupportsFrozenServerModule(t *testing.T) {
 	if evaluatorGoPinSupportsModule(append(module, []byte("toolchain go1.27.3\n")...), newImage) {
 		t.Fatal("newer explicitly pinned toolchain was ignored")
 	}
-	repositoryRoot := filepath.Join("..", "..")
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
 	head, err := sourceGitText(context.Background(), repositoryRoot, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)

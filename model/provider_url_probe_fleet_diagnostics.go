@@ -4,6 +4,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -106,6 +107,9 @@ func providerUrlProbeMatureDeficitFailureSql(expression string) string {
 // All cohort gates and rolling counts were computed by the existing census.
 // Only maturity and measured deficit select the head. In particular, hints,
 // deadlines, failures, and issued/completed claims never restrict membership.
+// The receipt history of each head reaches back at most the history's
+// retention, so it prunes to the partitions retention keeps
+// (PARTITION-MAINTENANCE-PLAN.md C2); only its current receipts are checked.
 // Ids are ULIDs, so identifier order is creation order and a capped head in
 // that order describes only the oldest clients. The stable hash keeps the cap
 // deterministic while making the head independent of client age.
@@ -158,12 +162,14 @@ func providerUrlProbeMatureDeficitCtesSql(policy int) string {
 					SELECT measured_at,ok_count FROM provider_egress_health_history
 					WHERE client_id=head.client_id AND url_probe AND url_probe_policy_version=%d
 					AND total_count=1 AND (ok_count=0 OR ok_count=1) AND measured_at<=$1
+					AND measured_at>$1::timestamp-interval '%d seconds'
 					ORDER BY measured_at DESC LIMIT 10
 				) AS accepted
 			) AS history
 		)`, ProviderUrlProbeMatureDeficitSampleLimit,
 		providerUrlProbeMatureDeficitFailureSql("claim.probe_failure"),
-		providerUrlProbeMatureDeficitFailureSql("attempt.probe_failure"), policy)
+		providerUrlProbeMatureDeficitFailureSql("attempt.probe_failure"), policy,
+		int(DefaultProviderEgressHealthHistorySettings().Retention/time.Second))
 }
 
 func providerUrlProbeMatureDeficitRows(raw []byte) []providerUrlProbeMatureDeficitRow {

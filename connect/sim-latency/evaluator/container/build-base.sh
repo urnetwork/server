@@ -104,10 +104,7 @@ install -m 0555 "$SCRIPT_DIR/entrypoint.sh" "$build_context/evaluator/entrypoint
 install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_context/evaluator/official-run.sh"
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
-REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp gvisor)
-if [ "$staging" = true ]; then
-    REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
-fi
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 revision_args=()

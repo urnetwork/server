@@ -1,0 +1,101 @@
+{
+  "schema": 2,
+  "kind": "sim-latency-run",
+  "config_sha256": "c7ce283ff9dabd90057fad2d9867d04ec454ef23f857002d1311c54de5f47924",
+  "seed": 20261024,
+  "build_revision": "67c87445abe6725b25b3df2a13af7eb99cd4f8ed",
+  "hostname": "14a5363720e6",
+  "os": "linux",
+  "arch": "amd64",
+  "num_cpu": 10,
+  "flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "false",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "source_epoch": 0,
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-63atmxs5-p1800-off-handoff-fix",
+  "request_timeout_ms": 120000,
+  "stats_root": "/work/site/stats/local/sim-127.0.0.1-01a16e2d-5548-8368-1f54-4ca22354b6e7",
+  "stats_instance_id": "01a16e2d-5548-8368-1f54-4ca22354b6e7",
+  "results_csv_sha256": "d0a395cc17038f023e7e9e18b16739b47d3fa6069177d89b9fa0e3fc96ba33f3",
+  "results_csv_bytes": 298034,
+  "final_marker_path": "/artifacts/run.json.complete.json",
+  "completion_state": "complete",
+  "completed_unix_ms": 1792850242848,
+  "measure_start_ms": 1792850016836,
+  "measure_end_ms": 1792850196836,
+  "clients_pool": 200,
+  "clients_established": 200,
+  "rows": 2744,
+  "rows_in_window": 2445,
+  "failures": 1,
+  "block_count": 8,
+  "block_seconds": 22.5,
+  "metrics": {
+    "fail_rate": {
+      "value": 0.00040899795501022495,
+      "n": 2445,
+      "block_se": 0.000455444147135833
+    },
+    "goodput_bytes_per_s": {
+      "value": 17249467.26111111,
+      "n": 2445,
+      "block_se": 1543746.2603534716
+    },
+    "throughput_p05_bytes_per_s": {
+      "value": 102044.05596362473,
+      "n": 619,
+      "block_se": 6612.816970531188
+    },
+    "throughput_p50_bytes_per_s": {
+      "value": 522039.7628308285,
+      "n": 619,
+      "block_se": 59052.703082782726
+    },
+    "throughput_p95_bytes_per_s": {
+      "value": 22187560.50960487,
+      "n": 619,
+      "block_se": 4543439.889131963
+    },
+    "total_p50_ms": {
+      "value": 1284.7235,
+      "n": 2444,
+      "block_se": 137.16432150274167
+    },
+    "total_p95_ms": {
+      "value": 20529.983099999998,
+      "n": 2444,
+      "block_se": 2355.784806822418
+    },
+    "ttfb_p50_ms": {
+      "value": 184.79399999999998,
+      "n": 2444,
+      "block_se": 23.315642071396667
+    },
+    "ttfb_p95_ms": {
+      "value": 2176.5464999999976,
+      "n": 2444,
+      "block_se": 215.92153726385658
+    }
+  }
+}

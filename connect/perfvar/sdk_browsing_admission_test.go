@@ -663,13 +663,7 @@ func testSdkBrowsingPublicServiceRecovery(t *testing.T, acceptOwnedSpeed bool) {
 		}
 		observation := &nativeBrowsingObservation{NativeCapability: true, Baseline: nativeBrowsingMemoryNow(), Pressure: pressure}
 		observation.Peak = observation.Baseline
-		settings := nativeBrowsingRunSettings{maxLivePages: plan.maxLivePages, pressure: pressure, originServerTlsForTest: serverTls, originClientTlsForTest: clientTls, originListenerForTest: scenario.native.addOrigin, originDestinationForTest: scenario.native.destination, afterOriginsClosedForTest: scenario.native.clearOrigins, wrapOriginHandlerForTest: scenario.wrapHandler, applicationDeadlineForTest: plan.deadline, beforePageNavigationForTest: scenario.beforePage, requestTraceForTest: scenario.requestTrace, afterFetchForTest: scenario.afterFetch}
-		settings.wrapResponseReaderForTest = func(target string, reader io.Reader) io.Reader {
-			if sdkBrowsingRequestPath(target) == "/asset/0/0" {
-				return &sdkBrowsingCssReader{reader: reader, scenario: scenario}
-			}
-			return reader
-		}
+		settings := scenario.runSettings(pressure, serverTls, clientTls)
 		start := time.Now()
 		workloadErr := measureNativeBrowsing100WithSettings(fixture.ctx, scenario.native.path, observation, settings)
 		pressure.finish(start)

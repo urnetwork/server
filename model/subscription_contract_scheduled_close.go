@@ -253,6 +253,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	for _, escrow := range escrows {
 		redisDebits[escrow.balanceId] = escrow.redisReserved
 	}
+	journaledBalanceIds := []server.Id{}
 	for _, balanceId := range balanceIds {
 		payout, exists := payouts[balanceId]
 		if !exists {
@@ -269,6 +270,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
 					(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 					contractId, balanceId, payout.payoutByteCount, transferDebitShard(balanceId)))
+				journaledBalanceIds = append(journaledBalanceIds, balanceId)
 				result.Charged += payout.payoutByteCount
 			}
 		} else if payout.payoutByteCount > 0 {
@@ -277,6 +279,11 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout.payoutByteCount))
 			result.Charged += payout.payoutByteCount
 		}
+	}
+	if 0 < len(journaledBalanceIds) {
+		// After the commit, a backed-off flush chain of these partitions is
+		// kicked; an active one is not touched.
+		posts = append(posts, transferDebitWakePost(ctx, journaledBalanceIds))
 	}
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		queueEscrowSettlementUpdates(batch, contractId, deadline, payouts)

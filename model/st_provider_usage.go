@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -127,7 +128,7 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	}
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
-	server.Db(ctx, func(conn server.PgConn) {
+	read := func(conn server.PgCanQuery) {
 		query := stEpochProviderUsageSql
 		if census != nil {
 			query = stEpochProviderOriginalUsageSql
@@ -210,7 +211,45 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			}
 		}
 		returnErr = rows.Err()
-	})
+	}
+	// One statement reads the whole epoch in one snapshot, so the read cannot
+	// be paged, and a seven-day epoch outlasts the application role's
+	// 15-minute transaction bound (30-55 minutes projected at epoch 0's read
+	// rates). It runs on a direct maintenance session that lifts the bound for
+	// itself; the epoch close's MaxTime still bounds it, and its cancel reaches
+	// that session. A replica takes this read once one exists.
+	if census == nil {
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
+			server.WithoutTransactionTimeout(ctx, conn, func() {
+				read(conn)
+			})
+		})
+	} else {
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
+			server.WithoutTransactionTimeout(ctx, conn, func() {
+				// The census and the check for close evidence that a partition
+				// cutover holds outside the evidence table read one snapshot, so
+				// the census never misses a moved report: it waits for the swap.
+				tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+				if err != nil {
+					returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+					return
+				}
+				// read only, so a rollback ends it
+				defer tx.Rollback(context.WithoutCancel(ctx))
+				moved, err := server.CloseEvidenceMovedOutsideTableInTx(ctx, tx)
+				if err != nil {
+					returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+					return
+				}
+				if moved {
+					returnErr = server.ErrCloseEvidenceCutoverMoving
+					return
+				}
+				read(tx)
+			})
+		})
+	}
 	if returnErr != nil {
 		return nil, returnErr
 	}

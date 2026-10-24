@@ -300,19 +300,66 @@ func ensureClientReliabilityPartition(ctx context.Context, parent string, day in
 		return false
 	}
 	server.HandleError(func() {
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
-			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-				`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d)`,
-				name,
-				parent,
-				day*reliabilityBlocksPerDay,
-				(day+1)*reliabilityBlocksPerDay,
-			)))
-		}, server.OptNoRetry())
+		createClientReliabilityPartition(ctx, parent, day)
 		created = true
 	})
 	return
+}
+
+// Creates the day's partition under parent, and raises what fails.
+func createClientReliabilityPartition(ctx context.Context, parent string, day int64) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
+		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d)`,
+			reliabilityPartitionName(day),
+			parent,
+			day*reliabilityBlocksPerDay,
+			(day+1)*reliabilityBlocksPerDay,
+		)))
+	}, server.OptNoRetry())
+}
+
+// client_reliability's family in the partition registry
+// (PARTITION-MAINTENANCE-PLAN.md A7). Its own task,
+// remove_old_client_reliability_stats, creates and drops the days
+// (MaintainClientReliabilityPartitions) through its rules: the creation window
+// starts at the retention cutoff, so a late drain block always has its day,
+// and a day expires at the cutoff, which a payout behind holds back as far as
+// ClientExpiration. The registry's runway task also creates ahead, and its
+// retention task analyzes the parent, which autovacuum never does.
+var clientReliabilityPartitionFamily = server.RegisterPartitionFamily(&server.PartitionFamily{
+	Name:                "client_reliability",
+	Description:         "client_reliability, daily by block_number; remove_old_client_reliability_stats drops the days behind the retention cutoff",
+	Tables:              []string{clientReliabilityTable},
+	KeyColumn:           "block_number",
+	KeyKind:             server.PartitionKeyEpochMinute,
+	Granularity:         server.PartitionGranularityDaily,
+	AheadRanges:         int(reliabilityPartitionAheadDays),
+	Retention:           ClientExpiration,
+	RetireByOwnTask:     true,
+	ReindexExempt:       true,
+	MonitorRunwayRanges: 2,
+	CreateFrom: func(ctx context.Context, now time.Time) time.Time {
+		return reliabilityBlockTime(clientReliabilityRetentionCutoffBlock(ctx, now))
+	},
+	CreateLeaf: func(ctx context.Context, table string, r server.PartitionRange) error {
+		day := reliabilityPartitionDay(reliabilityBlockNumber(r.Lower))
+		if relkind, exists := pgRelkind(ctx, reliabilityPartitionName(day)); exists {
+			// a leftover the drop pass does not own; an operator decides
+			return fmt.Errorf("%s exists (relkind %s) but is not a partition of %s", reliabilityPartitionName(day), relkind, table)
+		}
+		createClientReliabilityPartition(ctx, table, day)
+		return nil
+	},
+	RangeExpired: func(ctx context.Context, now time.Time, r server.PartitionRange) bool {
+		return reliabilityBlockNumber(r.Upper) <= clientReliabilityRetentionCutoffBlock(ctx, now)
+	},
+})
+
+// The start of a block.
+func reliabilityBlockTime(blockNumber int64) time.Time {
+	return time.UnixMilli(blockNumber * int64(ReliabilityBlockDuration/time.Millisecond)).UTC()
 }
 
 func dropClientReliabilityPartition(ctx context.Context, name string) (dropped bool) {
@@ -337,13 +384,13 @@ func dropClientReliabilityPartition(ctx context.Context, name string) (dropped b
 // and retried on the next run.
 func MaintainClientReliabilityPartitions(ctx context.Context, now time.Time) (created []string, dropped []string) {
 	cutoffBlock := clientReliabilityRetentionCutoffBlock(ctx, now)
-	fromDay := reliabilityPartitionDay(cutoffBlock)
-	toDay := reliabilityPartitionDay(reliabilityBlockNumber(now)) + reliabilityPartitionAheadDays
 
-	for day := fromDay; day <= toDay; day += 1 {
-		if ensureClientReliabilityPartition(ctx, clientReliabilityTable, day) {
-			created = append(created, reliabilityPartitionName(day))
-		}
+	// the registry creates every day from the cutoff's through the days ahead
+	// that no partition covers (the family's CreateFrom and CreateLeaf)
+	runway := clientReliabilityPartitionFamily.EnsureRunway(ctx, now)
+	created = runway.Created
+	for _, runwayErr := range runway.Errors {
+		glog.Warningf("[crp]%s; the next run retries\n", runwayErr)
 	}
 
 	for _, name := range listClientReliabilityPartitions(ctx) {
@@ -503,6 +550,7 @@ func copyClientReliabilityParallel(
 					}()
 					server.MaintenanceTx(workCtx, func(tx server.PgTx) {
 						server.RaisePgResult(tx.Exec(workCtx, `SET LOCAL statement_timeout = 0`))
+						server.SetTransactionTimeoutInTx(workCtx, tx, 0)
 						tag, e := tx.Exec(workCtx, copySql, lo, hi)
 						server.Raise(e)
 						rows = tag.RowsAffected() // last attempt wins on retry
@@ -566,6 +614,7 @@ func copyClientReliabilityOneshot(
 	logf("oneshot: single sequential-scan copy of blocks >= %d (one pass, no source PK needed)", cutoffBlock)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		// parallelize the seq scan that feeds the insert
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL max_parallel_workers_per_gather = 8`))
 		tag, err := tx.Exec(
@@ -628,6 +677,7 @@ func buildClientReliabilitySecondaryIndex(ctx context.Context, logf func(string,
 	logf("building deferred secondary index %s (sorted one-shot build)", indexName)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL maintenance_work_mem = '2GB'`))
 		// INCLUDE (network_id, client_id) makes the window-score scans index-only:
 		// UpdateClientReliabilityScores / UpdateNetworkReliability(Window)Scores now
@@ -905,6 +955,7 @@ func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64, 
 
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`))
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
 			`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`,
 			clientReliabilityTable,
@@ -1281,15 +1332,18 @@ func UpgradeClientReliabilitySecondaryIndex(ctx context.Context, parallel int, l
 		} else {
 			logf("[%d/%d]%s: CREATE INDEX CONCURRENTLY %s %s", i+1, len(partitions), partition, childName, clientReliabilitySecondaryIndexShape)
 			// CONCURRENTLY cannot run inside a transaction block: run it as a
-			// single autocommit statement on a raw maintenance connection
+			// single autocommit statement on a raw maintenance connection, which
+			// lifts the application role's transaction bound for the build
 			server.MaintenanceDb(ctx, func(conn server.PgConn) {
-				server.RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
-				server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
-					`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s`,
-					childName,
-					partition,
-					clientReliabilitySecondaryIndexShape,
-				)))
+				server.WithoutTransactionTimeout(ctx, conn, func() {
+					server.RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
+					server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
+						`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s`,
+						childName,
+						partition,
+						clientReliabilitySecondaryIndexShape,
+					)))
+				})
 			}, server.OptReadWrite(), server.OptNoRetry())
 		}
 

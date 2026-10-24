@@ -1,0 +1,75 @@
+[env]glog not configured from command line. Using default configuration.
+I1024 12:50:24.555848 1977417 env.go:1202] [env]try /home/by/urnetwork/config, [settings.yml]
+I1024 12:50:24.556003 1977417 env.go:1202] [env]try /home/by/urnetwork/config/all, [settings.yml]
+I1024 12:50:24.556121 1977417 env.go:1202] [env]try /home/by/urnetwork/site, [settings.yml]
+I1024 12:50:24.556160 1977417 env.go:81] [env]settings loaded
+[sim-latency] wrote /home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/p7200-on/input/providers.yml: 7200 providers, 200 client pool, seed 20261024, quality window 2
+frontier providers=7200 clients=200 arrivals=80 exchange_hosts=4 impairment=on
+2026-10-24T12:50:27Z
+f0e880cb-c124-4ed6-9edb-43669191d84e
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Creating 
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Creating 
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Created 
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Created 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Creating 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Creating 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Created 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Created 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Starting 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Starting 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Started 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Started 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Waiting 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Waiting 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Healthy 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Healthy 
+ Container urnetwork-frontier-63atmxs5-p7200-on-migrate-run-8182cfd05428 Creating 
+ Container urnetwork-frontier-63atmxs5-p7200-on-migrate-run-8182cfd05428 Created 
+[env]glog not configured from command line. Using default configuration.
+I1024 12:50:33.577608       7 env.go:1202] [env]try /runtime/config, [settings.yml]
+I1024 12:50:33.577779       7 env.go:1202] [env]try /runtime/config/local, [settings.yml]
+I1024 12:50:33.577977       7 env.go:1202] [env]try /runtime/site, [settings.yml]
+I1024 12:50:33.578023       7 env.go:81] [env]settings loaded
+I1024 12:50:33.578677       7 env.go:1202] [env]try /runtime/vault, [pg.yml]
+I1024 12:50:33.579323       7 env.go:1202] [env]try /runtime/vault/local, [pg.yml]
+I1024 12:50:33.579528       7 env.go:1202] [env]try /runtime/vault, [pg_maintenance.yml]
+I1024 12:50:33.579609       7 env.go:1202] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I1024 12:50:33.580457       7 env.go:1202] [env]try /runtime/config, [db.yml]
+I1024 12:50:33.580511       7 env.go:1202] [env]try /runtime/config/local, [db.yml]
+I1024 12:50:33.580629       7 env.go:1202] [env]try /runtime/config, [db_maintenance.yml]
+I1024 12:50:33.580678       7 env.go:1202] [env]try /runtime/config/local, [db_maintenance.yml]
+I1024 12:50:33.580812       7 env.go:1088] [env]/runtime/config/local/db.yml[min_connections] = 4
+I1024 12:50:33.580826       7 env.go:1088] [env]/runtime/config/local/db.yml[max_connections] = 32
+I1024 12:50:33.580850       7 db.go:272] [db]options = map[connect_timeout:5 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I1024 12:50:33.581025       7 env.go:1104] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I1024 12:50:33.581040       7 env.go:1104] [env]/runtime/vault/local/pg.yml[password] = re***ue
+I1024 12:50:33.581048       7 env.go:1104] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I1024 12:50:33.581054       7 env.go:1104] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I1024 12:50:33.581186       7 db.go:293] [db]statement_tag = urn1/other/ef067a2a8137943c/f9473d3238b5b1bb1761c319
+I1024 12:50:33.904339       7 env.go:1202] [env]try /runtime/vault, [pg.yml]
+I1024 12:50:33.904457       7 env.go:1202] [env]try /runtime/vault/local, [pg.yml]
+I1024 12:50:33.904579       7 env.go:1202] [env]try /runtime/config, [db.yml]
+I1024 12:50:33.904635       7 env.go:1202] [env]try /runtime/config/local, [db.yml]
+I1024 12:50:33.904775       7 env.go:1088] [env]/runtime/config/local/db.yml[min_connections] = 4
+I1024 12:50:33.904792       7 env.go:1088] [env]/runtime/config/local/db.yml[max_connections] = 32
+I1024 12:50:33.904804       7 db.go:272] [db]options = map[connect_timeout:5 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I1024 12:50:33.904940       7 env.go:1104] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I1024 12:50:33.904956       7 env.go:1104] [env]/runtime/vault/local/pg.yml[password] = re***ue
+I1024 12:50:33.904964       7 env.go:1104] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I1024 12:50:33.904972       7 env.go:1104] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I1024 12:50:33.905064       7 db.go:293] [db]statement_tag = urn1/other/ef067a2a8137943c/f9473d3238b5b1bb1761c319
+{"schema":1,"database_version":858,"migration_count":858}
+ Container urnetwork-frontier-63atmxs5-p7200-on-runner-run-2504d84d512b Creating 
+ Container urnetwork-frontier-63atmxs5-p7200-on-runner-run-2504d84d512b Created 
+/input/measure.sh: line 13: EVALUATION_JOB_ID: unbound variable
+
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Stopping 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Stopping 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Stopped 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Removing 
+ Container urnetwork-frontier-63atmxs5-p7200-on-redis-1 Removed 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Stopped 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Removing 
+ Container urnetwork-frontier-63atmxs5-p7200-on-postgres-1 Removed 
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Removing 
+ Network urnetwork-frontier-63atmxs5-p7200-on_evaluation Removed 

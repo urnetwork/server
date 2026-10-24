@@ -148,29 +148,34 @@ func TestInitTasksReapsProviderEgressChainsWhileDisabled(t *testing.T) {
 // TestInitTasksReapsRemovedTargets is the integration test for the
 // removed-target reap wiring: a pending row carrying the exact production
 // function name of a removed target survives nothing but an InitTasks run.
-// The name is spelled out literally so a typo in removedTaskTargets — which
+// The names are spelled out literally so a typo in removedTaskTargets — which
 // would silently never match the production rows — fails here.
 func TestInitTasksReapsRemovedTargets(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		const removedTarget = "github.com/urnetwork/server/controller.RefreshTransferBalances"
+		removedTargets := []string{
+			"github.com/urnetwork/server/controller.RefreshTransferBalances",
+			// the user_auth_attempt drain, retired with its table
+			"github.com/urnetwork/server/taskworker/work.RemoveExpiredAuthAttempts",
+		}
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
 		// seed an orphan the way production got one: a normally scheduled
 		// task whose function later ceased to exist
-		var taskId server.Id
-		server.Tx(ctx, func(tx server.PgTx) {
-			taskId = task.ScheduleTaskInTx(tx, orphanSeedTask, &orphanSeedArgs{}, clientSession)
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE pending_task SET function_name = $2 WHERE task_id = $1`,
-				taskId,
-				removedTarget,
-			))
-		})
+		for _, removedTarget := range removedTargets {
+			server.Tx(ctx, func(tx server.PgTx) {
+				taskId := task.ScheduleTaskInTx(tx, orphanSeedTask, &orphanSeedArgs{}, clientSession)
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`UPDATE pending_task SET function_name = $2 WHERE task_id = $1`,
+					taskId,
+					removedTarget,
+				))
+			})
+		}
 
 		countForFunction := func(functionName string) (count int) {
 			server.Db(ctx, func(conn server.PgConn) {
@@ -186,12 +191,16 @@ func TestInitTasksReapsRemovedTargets(t *testing.T) {
 			})
 			return
 		}
-		connect.AssertEqual(t, countForFunction(removedTarget), 1)
+		for _, removedTarget := range removedTargets {
+			connect.AssertEqual(t, countForFunction(removedTarget), 1)
+		}
 
 		InitTasks(ctx)
 
-		// the orphan is reaped...
-		connect.AssertEqual(t, countForFunction(removedTarget), 0)
+		// the orphans are reaped...
+		for _, removedTarget := range removedTargets {
+			connect.AssertEqual(t, countForFunction(removedTarget), 0)
+		}
 
 		// ...while the normal seeding happened
 		var pendingCount int

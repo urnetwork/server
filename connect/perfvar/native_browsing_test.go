@@ -1,5 +1,5 @@
 // Rapid navigation crosses the real full-TUN/H1/provider path. The clean control
-// gates unfinished assets; the shaped pressure variant streams older bodies.
+// gates unfinished assets; revised pressure retains one image tail per tap.
 package perfvar
 
 import (
@@ -66,6 +66,7 @@ type nativeBrowsingPageState struct {
 	serverReceipts [nativeBrowsingAssetCount]*clientconnect.MonitorValue[nativeBrowsingServerReceipt]
 	clientDone     [nativeBrowsingAssetCount]chan nativeBrowsingAssetResult
 	assetCancel    [nativeBrowsingAssetCount]context.CancelFunc
+	nextNavigation *nativeBrowsingNextNavigationBody
 }
 
 func newNativeBrowsingPageState() *nativeBrowsingPageState {
@@ -262,15 +263,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			return []byte(text[:nativeBrowsingHTMLBytes])
 		}
 	}
-	var pages [nativeBrowsingPageCount]*nativeBrowsingPageState
-	for index := range pages {
-		pages[index] = newNativeBrowsingPageState()
-		if settings.pressure != nil {
-			for asset := range nativeBrowsingAssetCount {
-				settings.pressure.assets[index][asset].serverReceipt = pages[index].serverReceipts[asset]
-			}
-		}
-	}
+	pages := settings.newPages()
 	var liveHandlers, peakHandlers atomic.Int64
 	var liveAssets, peakAssets atomic.Int64
 	assetServer := &nativeBrowsingAssetServer{workCtx: workCtx, pages: &pages,
@@ -409,7 +402,10 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		}
 		if progress != nil {
 			progress.started.Store(true)
-			defer progress.finished.Store(true)
+			defer func() {
+				progress.finished.Store(true)
+				progress.nextNavigation.signalBodyProgress()
+			}()
 		}
 		var firstByte atomic.Int64
 		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, target, nil)
@@ -566,18 +562,10 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		}
 		var trace *nativeBrowsingHttpTrace
 		if settings.pressure != nil {
-			trace = settings.pressure.beginNavigation(page, settings.maxLivePages)
-			if settings.pressure.Navigations[page].UnfinishedPriorAssets != 0 {
-				observation.OverlapProofs++
-			}
-			// Abandon the chosen previous-page images at the next tap, not at
-			// retirement. Other older bodies keep flowing under the link shape.
-			if page != 0 && (page-1)%2 == 0 {
-				for asset := 2; asset < nativeBrowsingAssetCount; asset++ {
-					settings.pressure.assets[page-1][asset].cancelRequested.Store(true)
-					settings.pressure.CancellationAttempts++
-					pages[page-1].assetCancel[asset]()
-				}
+			var err error
+			trace, err = settings.startPressureNavigation(observation, &pages, page)
+			if err != nil {
+				return err
 			}
 		}
 		htmlResult := fetch(workCtx, navigation, browsingHTML(page), trace, nil)
@@ -636,6 +624,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 				held[asset] = true
 			case <-workCtx.Done():
 				return fmt.Errorf("page %d never established asset overlap: %w", page, workCtx.Err())
+			}
+		}
+		if state.nextNavigation != nil {
+			if err := state.nextNavigation.waitForBodyProgress(workCtx, &settings.pressure.assets[page][2]); err != nil {
+				return fmt.Errorf("page %d never established image body progress: %w", page, err)
 			}
 		}
 		observation.sampleMemory()
