@@ -1357,7 +1357,11 @@ func MaintainPartitionRetention(ctx context.Context, now time.Time, state Partit
 // ReindexExempt family owns it: one of its parents once partitioned, or one of
 // its own leaves.
 func PartitionRegistryReindexExempt(table string, partitioned bool) bool {
-	for _, family := range PartitionFamilies() {
+	return registeredPartitionFamilies.reindexExempt(table, partitioned)
+}
+
+func (self *partitionRegistry) reindexExempt(table string, partitioned bool) bool {
+	for _, family := range self.list() {
 		if !family.ReindexExempt {
 			continue
 		}

@@ -489,3 +489,59 @@ func TestPartitionRangeOverlapAndCover(t *testing.T) {
 		}
 	}
 }
+
+// A ReindexExempt family's leaves stay out of the REINDEX rotation, and its
+// parents once partitioned; a family that keeps its rotation place, a plain
+// parent and unrelated tables stay in. The contract tables' family registers
+// with the package.
+func TestPartitionRegistryReindexExemption(t *testing.T) {
+	registry := newPartitionRegistry()
+	exempt := testPartitionDailyFamily()
+	exempt.ReindexExempt = true
+	if err := registry.register(exempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.register(testPartitionWeeklyFamily()); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		table       string
+		partitioned bool
+		exempt      bool
+	}{
+		{"synthetic_daily_event", true, true},
+		{"synthetic_daily_event", false, false},
+		{"synthetic_daily_event_p20261024", false, true},
+		{"synthetic_daily_event_legacy", false, true},
+		// not a name the family gives its leaves
+		{"synthetic_daily_event_w20261026", false, false},
+		{"synthetic_daily_event_p2026102", false, false},
+		// a family that keeps its rotation place
+		{"synthetic_weekly_parent", true, false},
+		{"synthetic_weekly_parent_w20261026", false, false},
+		{"network_client", false, false},
+	} {
+		if exempt := registry.reindexExempt(test.table, test.partitioned); exempt != test.exempt {
+			t.Errorf("%s partitioned=%t exempt=%t, want %t", test.table, test.partitioned, exempt, test.exempt)
+		}
+	}
+	// through the package registry and the rotation's rule
+	if contract := GetPartitionFamily("contract"); contract == nil || !contract.ReindexExempt || !slices.Equal(contract.Tables, ContractPartitionTables) {
+		t.Fatalf("the contract family is not registered as declared: %+v", contract)
+	}
+	if !PartitionRegistryReindexExempt(ContractPartitionName("transfer_escrow", time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)), false) {
+		t.Error("a contract week left the exemption")
+	}
+	if PartitionRegistryReindexExempt("contract_close_report", false) {
+		t.Error("a plain contract table left the rotation before its cutover")
+	}
+	if dbMaintenanceShouldReindexRelation("contract_close_report", true) {
+		t.Error("a partitioned contract table joined the rotation")
+	}
+	if family := PartitionFamilyOfTable("transfer_contract_legacy"); family == nil || family.Name != "contract" {
+		t.Errorf("the legacy partition's family is %v", family)
+	}
+	if family := PartitionFamilyOfTable("network_client"); family != nil {
+		t.Errorf("network_client belongs to %s", family.Name)
+	}
+}
