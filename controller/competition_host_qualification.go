@@ -30,21 +30,23 @@ const competitionHostQualificationComment = "// competitionHostReadinessProbe ex
 // These independent root-provisioned pins are not accepted through the
 // supervisor request. The bomb report must belong to the current Linux boot.
 type CompetitionHostQualificationConfig struct {
-	Schema                      int    `json:"schema"`
-	Environment                 string `json:"environment"`
-	CompetitionId               string `json:"competition_id"`
-	SeasonId                    string `json:"season_id"`
-	Staging                     bool   `json:"staging"`
-	HostConfig                  string `json:"host_config"`
-	StateDirectory              string `json:"state_directory"`
-	PromotionCommand            string `json:"promotion_command"`
-	PromotionSha256             string `json:"promotion_sha256"`
-	ResourceBombReport          string `json:"resource_bomb_report"`
-	ResourceBombSha256          string `json:"resource_bomb_sha256"`
-	ResourceBombBootId          string `json:"resource_bomb_boot_id"`
-	WorkerCommand               string `json:"worker_command"`
-	WorkerSha256                string `json:"worker_sha256"`
-	WorkerImageDigest           string `json:"worker_image_digest"`
+	Schema             int    `json:"schema"`
+	Environment        string `json:"environment"`
+	CompetitionId      string `json:"competition_id"`
+	SeasonId           string `json:"season_id"`
+	Staging            bool   `json:"staging"`
+	HostConfig         string `json:"host_config"`
+	StateDirectory     string `json:"state_directory"`
+	PromotionCommand   string `json:"promotion_command"`
+	PromotionSha256    string `json:"promotion_sha256"`
+	ResourceBombReport string `json:"resource_bomb_report"`
+	ResourceBombSha256 string `json:"resource_bomb_sha256"`
+	ResourceBombBootId string `json:"resource_bomb_boot_id"`
+	WorkerCommand      string `json:"worker_command"`
+	WorkerSha256       string `json:"worker_sha256"`
+	WorkerImageDigest  string `json:"worker_image_digest"`
+	// Optional deployment restriction; retained evidence always records the
+	// independently observed API identity for this exact source intent.
 	ApiImageDigest              string `json:"api_image_digest"`
 	ReviewedBuildStateDirectory string `json:"reviewed_build_state_directory,omitempty"`
 }
@@ -143,23 +145,29 @@ func competitionHostQualificationSettings(settings *Settings) *Settings {
 	return &copy
 }
 
-// The API digest comes from the actual authenticated API role receipt. Pins
-// in trusted deployment config constrain it but are never evidence by themselves.
-func competitionQualificationApiReceipt(intent *model.CompetitionSourceActivation, expectedImage string, receipts []model.CompetitionSourceReadiness) error {
+// The authenticated durable receipt freezes identity for one intent. Main may
+// advance between intents without pretending that the evaluated source changed.
+// An optional deployment restriction still rejects any other API image.
+func competitionSourceApiRuntimeIdentity(intent *model.CompetitionSourceActivation, expectedImage string, receipts []model.CompetitionSourceReadiness) (string, error) {
+	if expectedImage != "" && !imageDigestPattern.MatchString(expectedImage) {
+		return "", errors.New("API runtime restriction is malformed")
+	}
 	count := 0
+	image := ""
 	for _, receipt := range receipts {
 		if receipt.Role != "api" {
 			continue
 		}
 		count++
-		if !sourcePreparationReceiptMatches(intent, receipt) || receipt.RuntimeImageDigest != expectedImage {
-			return errors.New("host qualification requires the exact genuine API readiness receipt")
+		if !sourcePreparationReceiptMatches(intent, receipt) || (expectedImage != "" && receipt.RuntimeImageDigest != expectedImage) {
+			return "", errors.New("host qualification requires the exact genuine API readiness receipt")
 		}
+		image = receipt.RuntimeImageDigest
 	}
 	if count != 1 {
-		return errors.New("host qualification requires exactly one durable API role receipt")
+		return "", errors.New("host qualification requires exactly one durable API role receipt")
 	}
-	return nil
+	return image, nil
 }
 
 // An existing singleton lease blocks every ordinary worker Claim. No public
@@ -214,7 +222,7 @@ func checkCompetitionQualificationSlot(ctx context.Context, owner string) error 
 func validateCompetitionQualificationConfig(settings *Settings, config CompetitionHostQualificationConfig, bootId, workerImage string) error {
 	if settings == nil || config.Schema != 1 || config.Environment != settings.AutomationPolicy.Environment || config.CompetitionId != settings.CompetitionId ||
 		config.SeasonId != settings.AutomationPolicy.SeasonId || config.Staging != settings.AutomationPolicy.Staging ||
-		!imageDigestPattern.MatchString(config.ApiImageDigest) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || workerImage != config.WorkerImageDigest ||
+		(config.ApiImageDigest != "" && !imageDigestPattern.MatchString(config.ApiImageDigest)) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || workerImage != config.WorkerImageDigest ||
 		len(bootId) != 36 || config.ResourceBombBootId != bootId || !sha256Pattern.MatchString(config.ResourceBombSha256) {
 		return errors.New("qualification scope, actual worker image or current-boot bomb evidence does not match")
 	}
@@ -688,9 +696,13 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err != nil {
 		return nil, err
 	}
-	if err := competitionQualificationApiReceipt(intent, config.ApiImageDigest, receipts); err != nil {
+	apiImage, err := competitionSourceApiRuntimeIdentity(intent, config.ApiImageDigest, receipts)
+	if err != nil {
 		return nil, err
 	}
+	// Retained qualification evidence records the observed release even when
+	// deployment configuration deliberately does not pin continuously moving main.
+	config.ApiImageDigest = apiImage
 	profileSettings := competitionHostQualificationSettings(settings)
 	profileBytes, err := json.Marshal(struct {
 		Kind            string                             `json:"kind"`

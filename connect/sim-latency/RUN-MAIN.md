@@ -417,6 +417,18 @@ the authenticated source-readiness endpoint. The adapter must obtain both; a
 successful exit without those exact durable receipts is retried, not cached as
 `preparation_ready`. Main competition configuration is not hand-edited per epoch.
 
+In the trusted preparation and host-qualification settings, `api_image_digest`
+is an optional deployment restriction, not a requirement to freeze main for a
+season. Leave it empty when main API deployments advance independently. The
+adapter still authenticates the HTTPS response against the separately read,
+immutable API readiness row, binds its actual runtime digest for this intent,
+and rejects a different identity at completion. Host qualification records that
+observed digest in its retained profile/result. An existing intent reuses its
+original valid acknowledgment without rewriting it after a rollout; a new intent
+can acknowledge the new main release. If an explicit digest is configured, it
+remains a strict restriction. Worker identity, pinned programs, exact source and
+both-role quorum requirements are unchanged.
+
 The repository now supplies that concrete worker stdin mode; point the worker
 setting at its independently qualified release binary and pin the binary digest.
 It still requires its normal production evaluator configuration and privileges.

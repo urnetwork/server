@@ -86,7 +86,7 @@ func TestCompetitionHostQualificationRequiresExactApiReceipt(t *testing.T) {
 	_, fixture, _, _ := newCompetitionRuntimeBlobFixture(t)
 	intent := fixture.intent
 	receipt := competitionPreparationTestReceipt(intent, "api", "synthetic-api", testApiImageDigest())
-	if err := competitionQualificationApiReceipt(intent, testApiImageDigest(), []model.CompetitionSourceReadiness{receipt}); err != nil {
+	if _, err := competitionSourceApiRuntimeIdentity(intent, testApiImageDigest(), []model.CompetitionSourceReadiness{receipt}); err != nil {
 		t.Fatal(err)
 	}
 	// Fixed placeholder digests can equal the fixture's current value. Change
@@ -126,12 +126,12 @@ func TestCompetitionHostQualificationRequiresExactApiReceipt(t *testing.T) {
 		if reflect.DeepEqual(changed, receipt) {
 			t.Fatalf("%s mutation left the synthetic receipt unchanged", sample.name)
 		}
-		if err := competitionQualificationApiReceipt(intent, testApiImageDigest(), []model.CompetitionSourceReadiness{changed}); err == nil {
+		if _, err := competitionSourceApiRuntimeIdentity(intent, testApiImageDigest(), []model.CompetitionSourceReadiness{changed}); err == nil {
 			t.Fatalf("mismatched %s API receipt accepted", sample.name)
 		}
 	}
 	for _, receipts := range [][]model.CompetitionSourceReadiness{nil, {receipt, receipt}, {competitionPreparationTestReceipt(intent, "worker", "synthetic-worker", testWorkerImageDigest())}} {
-		if err := competitionQualificationApiReceipt(intent, testApiImageDigest(), receipts); err == nil {
+		if _, err := competitionSourceApiRuntimeIdentity(intent, testApiImageDigest(), receipts); err == nil {
 			t.Fatal("missing or ambiguous API receipt accepted")
 		}
 	}
