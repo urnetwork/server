@@ -18,14 +18,15 @@ import (
 )
 
 // The bounded read comes from the contract's receipts in the same statement,
-// and the unbounded control keeps the plain lookup.
+// only once the evidence is partitioned and only for a live contract; a plain
+// table, an archived contract and the unbounded control read every report.
 func TestStCensusBoundsReportsByReceipts(t *testing.T) {
 	sql := strings.Join(strings.Fields(stEpochProviderOriginalUsageSql), " ")
 	for _, want := range []string{
-		"(SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id LIMIT 1) AS first_report_id",
-		"(SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id DESC LIMIT 1) AS last_report_id",
-		"EXISTS(SELECT 1 FROM transfer_contract live WHERE live.contract_id=usage.contract_id) AS live",
-		"FROM contract_close_report_evidence WHERE contract_id=usage.contract_id AND CASE WHEN report_range.live THEN report_range.first_report_id ELSE '00000000-0000-0000-0000-000000000000'::uuid END<=report_id AND report_id<=CASE WHEN report_range.live THEN report_range.last_report_id ELSE 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid END",
+		"SELECT COALESCE((SELECT evidence_table.relkind='p' FROM pg_class evidence_table WHERE evidence_table.oid=to_regclass('public.contract_close_report_evidence')),false) AND EXISTS(SELECT 1 FROM transfer_contract live WHERE live.contract_id=usage.contract_id) AS bounded",
+		"CASE WHEN report_scope.bounded THEN (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id LIMIT 1) ELSE '00000000-0000-0000-0000-000000000000'::uuid END AS first_report_id",
+		"CASE WHEN report_scope.bounded THEN (SELECT receipt.report_id FROM contract_close_report receipt WHERE receipt.contract_id=usage.contract_id ORDER BY receipt.report_id DESC LIMIT 1) ELSE 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid END AS last_report_id",
+		"FROM contract_close_report_evidence WHERE contract_id=usage.contract_id AND report_range.first_report_id<=report_id AND report_id<=report_range.last_report_id",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("census lacks %q", want)
