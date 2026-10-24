@@ -1,5 +1,38 @@
 # Inactive host-control release — October 24, 2026
 
+## Complete exact-Go bundle — 22:24 UTC
+
+A separate complete bundle is installed, **inactive**, at
+`/usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1`.
+It uses the exact four clean Go 1.27.3 native programs recorded below, plus the
+trusted evaluator helpers from the same clean main source and freshly pinned
+build/qualification wrappers. Existing release directories are untouched.
+
+All directories and executables are root:root 0555; other public helper files
+are 0444. The two private settings files are root:root 0400. Wrapper settings
+select only protected absolute paths and digests, never candidate-controlled
+commands. The active-host path remains `/etc/urnetwork/competition-host.json`;
+this installation does not rebaseline or replace that document.
+
+| Installed file | SHA-256 |
+| --- | --- |
+| `source-build` | `64646e05c297024bb67f59380cc7ba21c873544271e8ba8b1287b2727a1083eb` |
+| `source-build.json` | `59568777ec1fe8181555914efda8ca822776d0e07358f9e967493fe4724d2a89` |
+| `source-qualify` | `0b571892427ec78a4f24839ad8c893ea36867da221dff300f9a44940f3e6be03` |
+| `source-qualification.json` | `5ecac467446de2d0f8fdededdfffc6e767e8577d3c45aa208d73eff18abf17f2` |
+| `competition-host-self-check` | `c6db6d3b8a5c0214c82bc2d2258ccad93a236acf2ffa36e07584050799ab78a9` |
+| `evaluator/host-self-check.sh` | `5e47a21f8497145864c6cd2d3a47322d2567fae28f2499f193ec844b35a43618` |
+| `review-broker` | `4541194193bd9a44d9932c32fb7f59e7a03abc96474cd6e063eeca99c3a3fd3f` |
+
+Private preparation and minimal review-image context:
+`temp/control-complete-go1273-20261024.QwuC5l1E` relative to the mono root.
+The review image has not yet been built from this context. Dedicated model-key
+provisioning, genuine provider-backed review and qualification, prospective host
+qualification, actual API/worker readiness quorum and activation remain required.
+The independent installed-bundle readback/argument-rejection check is pending;
+static shell/JSON checks and installation hash readback passed. No main DB,
+runtime policy, global review settings, service or supervisor was modified.
+
 ## Exact-Go native control release — 21:47 UTC
 
 The latest four native control programs were built from clean main
