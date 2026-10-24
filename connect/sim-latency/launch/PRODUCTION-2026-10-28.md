@@ -191,7 +191,7 @@ remains unchecked until the live lease, artifact storage, API/worker readiness,
 and full calibration evidence are verified. Main API access still refused
 connections on the subsequent October 24 check during confirmed maintenance.
 
-## Exploratory calibration in progress
+## Completed exploratory calibration
 
 An isolated nine-replicate preparation run started October 24 using the exact
 image above, 1,800 providers, 200 clients, 80 arrivals/minute, quality window 2,
@@ -202,6 +202,16 @@ It runs with the production container ceilings on the ten evaluation cores.
 The services and local-leaf configuration are disposable synthetic fixtures;
 main/shared local stores are not inputs. Logs and artifacts are under the
 private preparation workspace's `calibration/` directory.
+
+All nine completed and their disposable services were removed. The Git-versioned
+copy is [`../baseline/prelaunch-2026-10-24/README.md`](../baseline/prelaunch-2026-10-24/README.md),
+published in server `4e59c98d9`. It preserves every run, including the slower
+seventh run: 21,849 measured requests, 34 failures, 18,206.59-ms median run-level
+p95, and 12.00% between-run p95 CV. The dataset explains both the hypothetical
+16.1% margin line and the variance-dependent significance fringe. The archive
+verifier and repeated race-tested metadata checks passed; historical `v1` data
+was not modified. This evidence does not complete the fresh official
+qualification/reference checks or finalize the initial margin.
 
 This is non-official noise-floor exploration, not an authenticated round
 control or a replacement for live qualification. No API/worker image identity
@@ -284,3 +294,12 @@ The future staging checkpoint/image must include this protected-runner fix
 before testing nonsignificant source promotion; do not hot-swap a frozen round.
 The prepared production checkpoint and image remain unchanged. The real isolated
 build/test/qualification broker and its deployment remain launch work.
+
+The next build components are in server `7e1b97af7`: fresh authenticated Git
+contexts exclude ignored files and credential-bearing origins, and fixed Docker
+check/compile phases have separate caches, no network, no writable host mounts,
+resource/output limits, and ownership-checked cleanup after cancellation or lost
+creation acknowledgment. Mocked-daemon and real local-Git tests passed three
+times under race detection. This is component evidence only: full broker wiring,
+real-container adversarial qualification, independent test-model provenance,
+image assembly, and live host/runtime readiness remain incomplete.
