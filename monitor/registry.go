@@ -72,6 +72,8 @@ func NewSignals() []Signal {
 		NewContractPartitionRunwaySignal(),
 		NewContractPartitionRetentionBlockedSignal(),
 		NewContractPartitionCutoverPendingSignal(),
+		NewPartitionRunwaySignal(),
+		NewPartitionRetentionBlockedSignal(),
 		NewTaskHealthSignal(),
 		NewTransferDebitsSignal(),
 		NewLegacySettlementsSignal(),
