@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 24, 21:45 UTC
+## Current preparation pointer — October 24, 22:32 UTC
 
 Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
 retains the chronological preparation journal below; its earlier checkpoint
@@ -18,6 +18,12 @@ The new evaluator image is built and its independent basic identity checks pass,
 but it is not fully qualified. Its exact evaluator/worker identities and retained
 qualification attempts are in
 [ARTIFACTS-GO1273-2026-10-24.md](ARTIFACTS-GO1273-2026-10-24.md).
+Its synthetic-local end-to-end smoke and malicious build-isolation checks have
+passed independently. A separate host CPU/72 GiB memory-bomb test passed, with
+575 ms management-core cleanup; that result is not image-bound host qualification.
+A fresh 15,000-provider impairment-on public-seed frontier point is running
+under `temp/provide-frontier-20261024.B0P1kUpz`, with fresh services and source.
+No previous checkpoint's measurements are being reused as the new baseline.
 Current source publication is
 explicitly `prepared_not_activated`; final scale/margin, fresh calibration,
 hidden epoch baseline and production runtime activation remain unproven.

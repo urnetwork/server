@@ -26,8 +26,17 @@ this installation does not rebaseline or replace that document.
 
 Private preparation and minimal review-image context:
 `temp/control-complete-go1273-20261024.QwuC5l1E` relative to the mono root.
-The review image has not yet been built from this context. Dedicated model-key
-provisioning, genuine provider-backed review and qualification, prospective host
+The review image is built from this minimal context:
+`sha256:4cd9b233df2d18cf1bed4256ca2580cf533114fe42e23a31807c735c4cfa5da1`
+(local tag `urnetwork/competition-review:control-c5f3e70d7-go1273`). Independent
+readback verified the executable SHA `98b9412e6c5f0161895864eeb0e9f645a54790bd68d62e57289b10fa806b2ebd`,
+Go 1.27.3 and clean C5 revision. The scratch filesystem contains only the binary
+and public CA bundle besides runtime pseudo-files. A constrained non-root,
+read-only, capability-dropped, networkless management-CPU `--help` startup
+passed with no mounts; its exact container was removed. Evidence is retained at
+`temp/review-artifact-independent-20261024.db1PKQeV`.
+This is not genuine provider review or permission to activate the broker.
+Dedicated model-key provisioning, genuine provider-backed review and qualification, prospective host
 qualification, actual API/worker readiness quorum and activation remain required.
 The independent installed-bundle readback/argument-rejection check passed:
 all four native hashes and clean Go 1.27.3 build identities matched; protected
