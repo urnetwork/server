@@ -17,6 +17,7 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+// A partition chain's pending row as the tests read it.
 type transferDebitChainRow struct {
 	taskId         server.Id
 	args           FlushTransferDebitsArgs
@@ -79,11 +80,22 @@ func journalTransferDebit(ctx context.Context, balanceId server.Id, shard int) {
 	}, server.TxReadCommitted, server.OptNoRetry())
 }
 
+// The partition's journal rows, pending or applied.
 func transferDebitJournalCount(ctx context.Context, shard int) (count int) {
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_debit_journal WHERE shard=$1`, shard).Scan(&count))
 	})
 	return
+}
+
+// A committed debit's wake of its partitions' chains, as the settlement post
+// sends it for the partitions it journaled.
+func wakeTransferDebitChain(ctx context.Context, shards ...int) ([]string, error) {
+	keys := make([]string, 0, len(shards))
+	for _, shard := range shards {
+		keys = append(keys, model.TransferDebitFlushRunOnceKey(shard))
+	}
+	return task.WakeIdleRunOnce(ctx, task.DefaultIdleWakeSettings(), keys...)
 }
 
 // Waits for the availability block of a row due now or at the active delay,
@@ -97,10 +109,8 @@ func waitForTransferDebitChainBlock(t testing.TB, ctx context.Context, row trans
 	if delay <= 0 {
 		return
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
 	select {
-	case <-timer.C:
+	case <-time.After(delay):
 	case <-ctx.Done():
 		t.Fatal("the due chain never became eligible")
 	}
@@ -191,7 +201,7 @@ func TestTransferDebitBackedOffChainFlushesKickedDebit(t *testing.T) {
 		balanceId, shard := newTransferDebitGrant(ctx)
 		backedOff := backOffTransferDebitChain(t, ctx, worker, shard)
 		journalTransferDebit(ctx, balanceId, shard)
-		kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId, balanceId})
+		kicked, err := wakeTransferDebitChain(ctx, shard, shard)
 		woke := server.NowUtc()
 		if err != nil || len(kicked) != 1 || kicked[0] != model.TransferDebitFlushRunOnceKey(shard) {
 			t.Fatal("the producer did not kick the backed-off chain", kicked, err)
@@ -208,7 +218,7 @@ func TestTransferDebitBackedOffChainFlushesKickedDebit(t *testing.T) {
 		if resumed.args.EmptyPasses != 0 {
 			t.Fatal("a run that flushed work counted an empty pass", resumed.args)
 		}
-		kicked, err = model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId})
+		kicked, err = wakeTransferDebitChain(ctx, shard)
 		if err != nil || len(kicked) != 0 || requireTransferDebitChain(t, ctx, shard).version != resumed.version {
 			t.Fatal("a producer kicked the resumed chain", kicked, err)
 		}
@@ -226,7 +236,7 @@ func TestTransferDebitActiveChainIsNotKicked(t *testing.T) {
 		scheduleTransferDebitChainDue(ctx, shard)
 		before := requireTransferDebitChain(t, ctx, shard)
 		journalTransferDebit(ctx, balanceId, shard)
-		kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId})
+		kicked, err := wakeTransferDebitChain(ctx, shard)
 		if err != nil || len(kicked) != 0 {
 			t.Fatal("a producer kicked an active chain", kicked, err)
 		}
@@ -257,7 +267,7 @@ func TestTransferDebitKickedChainRunsOnce(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId})
+				kicked, err := wakeTransferDebitChain(ctx, shard)
 				func() {
 					stateLock.Lock()
 					defer stateLock.Unlock()
@@ -327,7 +337,7 @@ func TestTransferDebitChainSurvivesTaskworkerRestart(t *testing.T) {
 				task.RunOnce(model.TransferDebitFlushRunOnceKey(shard)).String()))
 		}, server.TxReadCommitted, server.OptNoRetry())
 		journalTransferDebit(ctx, balanceId, shard)
-		kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId})
+		kicked, err := wakeTransferDebitChain(ctx, shard)
 		if err != nil || len(kicked) != 1 {
 			t.Fatal("the mark did not survive the restart", kicked, err)
 		}
@@ -359,7 +369,7 @@ func TestTransferDebitIdleRunWakesDebitCommittedBeforeItsMark(t *testing.T) {
 		}
 		// The producer commits here and finds no mark yet.
 		journalTransferDebit(ctx, balanceId, shard)
-		if kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId}); err != nil || len(kicked) != 0 {
+		if kicked, err := wakeTransferDebitChain(ctx, shard); err != nil || len(kicked) != 0 {
 			t.Fatal("a producer found a mark before the backing-off run set it", kicked, err)
 		}
 		var commitPosts []server.PostFunction
@@ -376,7 +386,7 @@ func TestTransferDebitIdleRunWakesDebitCommittedBeforeItsMark(t *testing.T) {
 		if row := requireTransferDebitChain(t, ctx, shard); row.runAt.After(server.NowUtc()) {
 			t.Fatal("the backing-off run's second look did not wake it for the committed debit", row.runAt)
 		}
-		if kicked, err := model.WakeTransferDebitFlushes(ctx, []server.Id{balanceId}); err != nil || len(kicked) != 0 {
+		if kicked, err := wakeTransferDebitChain(ctx, shard); err != nil || len(kicked) != 0 {
 			t.Fatal("the self-wake left its mark for another kick", kicked, err)
 		}
 	})

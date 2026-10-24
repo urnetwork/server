@@ -1080,13 +1080,8 @@ func ReleaseTask(ctx context.Context, taskId server.Id) (released bool) {
 // (e.g. "update_client_scores") and the exact stored json-encoded form.
 // A claimed task still waits out its release_time (use ReleaseTask).
 func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
-	// the stored key is the json-encoded RunOnce key list
-	jsonKey := RunOnce(runOnceKey).String()
+	jsonKey, keys := kickTaskOwnershipKeys(runOnceKey)
 	now := server.NowUtc()
-	keys := []server.PgOwnershipKey{PendingTaskOwnershipKey(server.Id{}, &jsonKey)}
-	if runOnceKey != "" {
-		keys = append(keys, PendingTaskOwnershipKey(server.Id{}, &runOnceKey))
-	}
 	server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1101,6 +1096,17 @@ func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
 		))
 		kickedCount = tag.RowsAffected()
 	}, server.TxReadCommitted, server.OptNoRetry())
+	return
+}
+
+// The stored form of a raw run-once key, its json-encoded RunOnce key list, and
+// the queue ownership keys of both forms a kick matches.
+func kickTaskOwnershipKeys(runOnceKey string) (jsonKey string, keys []server.PgOwnershipKey) {
+	jsonKey = RunOnce(runOnceKey).String()
+	keys = []server.PgOwnershipKey{PendingTaskOwnershipKey(server.Id{}, &jsonKey)}
+	if runOnceKey != "" {
+		keys = append(keys, PendingTaskOwnershipKey(server.Id{}, &runOnceKey))
+	}
 	return
 }
 

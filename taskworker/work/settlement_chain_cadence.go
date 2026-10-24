@@ -8,7 +8,7 @@
 //
 // The back-off goes straight to the idle delay rather than growing toward it.
 // A debit journaled while its chain is backed off kicks the chain
-// (model.WakeTransferDebitFlushes), so the back-off does not set a debit's
+// (model.transferDebitWakePost), so the back-off does not set a debit's
 // latency, and each step of a growing curve would only add an idle run to every
 // quiet spell. Without a kick (a lost Redis mark, a crash before the mark, a
 // producer from an older build) a debit waits at most the idle delay plus one

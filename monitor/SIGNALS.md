@@ -8398,10 +8398,12 @@ pass 30 s out instead of 2 s and leaves a Redis idle mark (`{task_idle_wake}`
 hash tag, two-minute TTL, renewed by each idle pass). A single empty pass between
 debits keeps the 2 s cadence and sets no mark. After its commit, a settlement or deadline close
 that journaled a debit deletes the mark of each partition it wrote, and the
-producer that deleted it kicks the chain (`task.KickTasks`), so the next pass
-is due at once. An active partition has no mark: its producers pay one Redis
-round trip and write nothing to the queue, and concurrent producers coalesce
-into one kick. The idle pass sets its mark only after its finishing commit and
+producer that deleted it kicks the chain, so the next pass is due at once. The
+kick is a pooled transaction that moves the chain's run_at only if its queue
+key is free; a held key means the chain is being claimed, finished or
+rescheduled, which covers the debit. An active partition has no mark: its
+producers pay one Redis round trip and write nothing to the queue, and
+concurrent producers coalesce into one kick. The idle pass sets its mark only after its finishing commit and
 then reads the journal again, so a debit committed in between still wakes it.
 Without a kick (Redis unavailable, a lost post, a producer from an older
 build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
@@ -8410,7 +8412,8 @@ build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
 observation age reads up to about 30 s while healthy.
 `urnetwork_task_idle_wake_total{outcome}` counts marks (`marked`), marks
 cleared by a resumed pass (`resumed`), kicks (`kicked`), producer wakes of
-active chains (`active`) and Redis or queue failures (`error`).
+active chains (`active`), cleared marks whose queue key was held (`busy`) or
+whose chain was already due (`due`), and Redis or queue failures (`error`).
 
 `urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
 `flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
@@ -34803,10 +34806,15 @@ Both registered consumers retain that unknown through their accept filters;
   unvisited work remains unknown, and missing findings do not clear under
   partial coverage. Restore complete observations before claiming recovery.
 
-Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence):
-claim with a future release_time whose keepalive (claim_time refresh every
-~10s while running) has been silent > 2 minutes = unhealthy timestamp refresh,
-not proof that its worker or session is gone.
+Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence): a
+held claim whose keepalive (claim_time refresh every ~10s while running) has
+been silent > 2 minutes, during the five minutes after that heartbeat or an
+older claim's longer lease = unhealthy timestamp refresh, not proof that its
+worker or session is gone. A claim or heartbeat leaves release_time at least
+2.5 minutes after claim_time and a handback sets it to the handback time, so
+the probe counts a row as held while the two are more than two minutes apart.
+Since 2026-10-24 a stalled claim's release_time can lapse before those five
+minutes end; the probe keeps watching it until they do.
 ```sql
 -- claims held with a future release: normal while a task RUNS; suspect when
 -- the claiming container is gone (correlate with deploys/restarts)

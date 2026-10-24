@@ -12,6 +12,7 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+// The stand-in chain's arguments and result carry nothing.
 type transferDebitWakeStandInArgs struct{}
 type transferDebitWakeStandInResult struct{}
 
@@ -20,7 +21,8 @@ func transferDebitWakeStandIn(*transferDebitWakeStandInArgs, *session.ClientSess
 	return &transferDebitWakeStandInResult{}, nil
 }
 
-// The raw key, its stored RunOnce form and the monitor's literal agree.
+// The raw key's stored RunOnce form is the literal the debit monitor's query and
+// the startup ownership keys build.
 func TestTransferDebitFlushRunOnceKeyMatchesTheStoredChainKey(t *testing.T) {
 	if key := TransferDebitFlushRunOnceKey(3); key != "flush_transfer_debits_3" || task.RunOnce(key).String() != `["flush_transfer_debits_3"]` {
 		t.Fatal("the debit chain key changed", key, task.RunOnce(key).String())
@@ -43,6 +45,7 @@ func backOffTransferDebitWakeStandIn(t testing.TB, ctx context.Context, shard in
 	}
 }
 
+// The stand-in row's run_at and row version.
 func readTransferDebitWakeStandIn(t testing.TB, ctx context.Context, shard int) (runAt time.Time, version string) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {

@@ -33,7 +33,7 @@ func TransferDebitShardPending(ctx context.Context, shard int) (pending bool) {
 // Kicks the backed-off flush chain of each partition the balances' journal
 // rows belong to. Call it after those rows committed. Returns the run-once
 // keys kicked; a chain that is not backed off is left alone.
-func WakeTransferDebitFlushes(ctx context.Context, balanceIds []server.Id) (kickedKeys []string, err error) {
+func wakeTransferDebitFlushes(ctx context.Context, balanceIds []server.Id) (kickedKeys []string, err error) {
 	keys := make([]string, 0, len(balanceIds))
 	for _, balanceId := range balanceIds {
 		keys = append(keys, TransferDebitFlushRunOnceKey(transferDebitShard(balanceId)))
@@ -49,7 +49,7 @@ func transferDebitWakePost(ctx context.Context, balanceIds []server.Id) server.P
 	balanceIds = slices.Clone(balanceIds)
 	return func() any {
 		// Failures are counted by the wake; the chain then runs at its idle delay.
-		_, _ = WakeTransferDebitFlushes(wakeCtx, balanceIds)
+		_, _ = wakeTransferDebitFlushes(wakeCtx, balanceIds)
 		return nil
 	}
 }

@@ -71,5 +71,53 @@ func TestIdleWakeKicksOnlyAMarkedChain(t *testing.T) {
 		if _, version := read(); version != kickedVersion {
 			t.Fatal("a wake without a mark wrote the kicked row")
 		}
+		// A marked chain whose row is already due needs no write.
+		server.Raise(MarkIdleRunOnce(ctx, rawKey, settings))
+		if kicked, err := WakeIdleRunOnce(ctx, settings, rawKey); err != nil || len(kicked) != 0 {
+			t.Fatal("a due chain was kicked again", kicked, err)
+		}
+		if _, version := read(); version != kickedVersion {
+			t.Fatal("a wake rewrote a due chain's row")
+		}
+	})
+}
+
+// A producer never waits for the chain's queue key and never needs a direct
+// session: while another writer holds the key, the wake consumes the mark and
+// writes nothing, leaving the chain to that holder.
+func TestIdleWakeLeavesAChainWithAHeldQueueKeyToItsHolder(t *testing.T) {
+	runOnceGenerationEnv(t, func(t testing.TB, ctx context.Context) {
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		rawKey := "synthetic_idle_wake_" + server.NewId().String()
+		taskId := ScheduleTask(runOnceGenerationWork, &runOnceGenerationArgs{Scope: server.NewId()}, owner,
+			RunOnce(rawKey), RunAt(server.NowUtc().Add(time.Hour)))
+		settings := DefaultIdleWakeSettings()
+		read := func() (version string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT xmin::text FROM pending_task WHERE task_id=$1`, taskId).Scan(&version))
+			})
+			return
+		}
+		before := read()
+		server.Raise(MarkIdleRunOnce(ctx, rawKey, settings))
+		held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			server.OwnedTx(ctx, []server.PgOwnershipKey{RunOnceOwnershipKey(RunOnce(rawKey))}, func(server.PgTx) {
+				close(held)
+				<-release
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}()
+		<-held
+		kicked, err := WakeIdleRunOnce(ctx, settings, rawKey)
+		close(release)
+		<-done
+		if err != nil || len(kicked) != 0 || read() != before {
+			t.Fatal("a wake wrote a chain whose queue key another writer held", kicked, err)
+		}
+		if kicked, err := WakeIdleRunOnce(ctx, settings, rawKey); err != nil || len(kicked) != 0 {
+			t.Fatal("the busy wake left its mark for another kick", kicked, err)
+		}
 	})
 }

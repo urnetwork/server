@@ -495,8 +495,10 @@ every few seconds keep the 2 s cadence instead of trading each run for a kick.
 After its commit, a settlement or deadline close that journaled a debit kicks
 its partition's chain only if the chain left a Redis idle mark, which it sets
 once its backed-off successor has committed and then rereads the journal
-(`task.WakeIdleRunOnce`, `KickTasks`). An active chain gets no queue write, and
-concurrent producers coalesce into one kick. Deviation: legacy enqueuers do not
+(`task.WakeIdleRunOnce`: `KickTasks`'s update in a pooled transaction that
+skips a held queue key, so producers need no direct maintenance session). An
+active chain gets no queue write, and concurrent producers coalesce into one
+kick. Deviation: legacy enqueuers do not
 kick, since current contracts no longer queue legacy intents and the scheduled
 close handoff and expiry recovery already wake the dispatcher through the
 RunOnce merge; the legacy pending warning moved from 60 s to 90 s (SIGNALS.md

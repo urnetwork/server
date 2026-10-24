@@ -10729,10 +10729,6 @@ var migrations = []any{
 	// a row keeps its args and JWT JSON inline up to the 2 kB TOAST threshold,
 	// and half a page fits two such versions where 70 would fit one. Every
 	// later insert honors the setting, so the table converges as its rows turn
-	// over, without a rewrite. The change takes SHARE UPDATE EXCLUSIVE; the
-	// lock_timeout keeps it from queueing behind a vacuum or index build.
-	newSqlMigration(`
-		SET LOCAL lock_timeout = '5s';
-		ALTER TABLE pending_task SET (fillfactor = 50);
-	`),
+	// over, without a rewrite. See taskHeartbeatFillfactorSql.
+	newSqlMigration(taskHeartbeatFillfactorSql),
 }

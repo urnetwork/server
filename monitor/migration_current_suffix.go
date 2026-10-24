@@ -5,6 +5,8 @@ package monitor
 import (
 	"fmt"
 	"strings"
+
+	"github.com/urnetwork/server"
 )
 
 // Keep previously published single predicates byte-for-byte; their owning
@@ -696,22 +698,16 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(856, "contract id floor", contractIdFloorArtifactQuery),
 	migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 		contractCloseEvidenceRetentionArtifactQuery),
-	migrationCurrentSuffix(pendingTaskHeartbeatFillfactorMigrationVersion, "task queue pages keep room for heartbeat versions",
-		migrationFillfactor("pending_task", 50)),
+	migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
+		pendingTaskFillfactorArtifactQuery),
 }
-
-// The migration that sets pending_task's fillfactor for HOT heartbeats. Its
-// position follows the migrations merged before it; this is the one place
-// that names it.
-const pendingTaskHeartbeatFillfactorMigrationVersion = 858
 
 // A fillfactor governs only later writes, so the published setting itself is
-// the artifact.
-func migrationFillfactor(table string, fillfactor int) string {
-	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class relation
-		WHERE relation.oid = to_regclass('public.%s')
-		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=%d']::text[])`, table, fillfactor)
-}
+// the artifact. The version is looked up by the migration's SQL and follows it
+// wherever a merge places it.
+const pendingTaskFillfactorArtifactQuery = `EXISTS (SELECT 1 FROM pg_class relation
+		WHERE relation.oid = to_regclass('public.pending_task')
+		AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY['fillfactor=50']::text[])`
 
 // Vacuum truncation holds AccessExclusiveLock while it drops the cut pages
 // from shared_buffers, which queues every statement on these tables.

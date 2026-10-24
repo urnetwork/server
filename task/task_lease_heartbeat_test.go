@@ -41,12 +41,14 @@ func leaseHeartbeat(t testing.TB, ctx context.Context, claimed *Task, now time.T
 	}
 }
 
+// A pending row's lease timestamps and the availability they generate.
 type taskLeaseState struct {
 	claimTime      time.Time
 	releaseTime    time.Time
 	availableBlock int64
 }
 
+// The committed lease state of one pending row.
 func readTaskLeaseState(t testing.TB, ctx context.Context, taskId server.Id) (state taskLeaseState) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
@@ -102,7 +104,9 @@ func TestTaskHeartbeatExtendsReleaseTimeAtHalfLease(t *testing.T) {
 
 // Between extensions a heartbeat changes no indexed column, so PostgreSQL
 // updates it HOT; an extension moves available_block, which both poll indexes
-// key on. Each heartbeat's own transaction reads its uncommitted table counters.
+// key on. The backend's pending table counters also hold earlier transactions
+// until it flushes them, at most once a second and only between transactions,
+// so each heartbeat transaction reads them before and after its update.
 func TestTaskHeartbeatBetweenExtensionsIsHot(t *testing.T) {
 	runOnceGenerationEnv(t, func(t testing.TB, ctx context.Context) {
 		server.Db(ctx, func(conn server.PgConn) {
@@ -138,9 +142,15 @@ func TestTaskHeartbeatBetweenExtensionsIsHot(t *testing.T) {
 			extend := state.releaseTime.Sub(now) < TaskLeaseTimeout/2
 			var refreshed, updated, hotUpdated int64
 			server.Tx(ctx, func(tx server.PgTx) {
+				counters := func() (updated int64, hotUpdated int64) {
+					server.Raise(tx.QueryRow(ctx, `SELECT pg_stat_get_xact_tuples_updated('pending_task'::regclass),
+						pg_stat_get_xact_tuples_hot_updated('pending_task'::regclass)`).Scan(&updated, &hotUpdated))
+					return
+				}
+				updatedBefore, hotBefore := counters()
 				refreshed = refreshTaskTimestampLeasesInTx(ctx, tx, map[server.Id]*Task{claimed.TaskId: claimed}, now)
-				server.Raise(tx.QueryRow(ctx, `SELECT pg_stat_get_xact_tuples_updated('pending_task'::regclass),
-					pg_stat_get_xact_tuples_hot_updated('pending_task'::regclass)`).Scan(&updated, &hotUpdated))
+				updatedAfter, hotAfter := counters()
+				updated, hotUpdated = updatedAfter-updatedBefore, hotAfter-hotBefore
 			}, server.TxReadCommitted, server.OptNoRetry())
 			after := readTaskLeaseState(t, ctx, claimed.TaskId)
 			switch {

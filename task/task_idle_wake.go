@@ -6,15 +6,23 @@
 // back-off costs at most one kick however many producers arrive, since only
 // one of them removes the mark.
 //
-// KickTasks moves only the run_at of a pending row. A claimed row keeps
-// waiting on its release_time, and its completion replaces it with whatever
-// successor its post schedules, so a kick that lands on a running chain is
-// lost. The mark is therefore set only after the idle run's finishing
+// A kick, like KickTasks, moves only the run_at of a pending row. A claimed row
+// keeps waiting on its release_time, and its completion replaces it with
+// whatever successor its post schedules, so a kick that lands on a running
+// chain is lost. The mark is therefore set only after the idle run's finishing
 // transaction has committed its backed-off successor, and the chain looks for
 // work again after setting it. A producer clears the mark only after its own
 // commit, so one of the two always sees the other: either the chain's second
 // look finds the work and wakes the chain itself, or the producer finds the
 // mark and kicks a successor that already exists and is not yet claimed.
+//
+// Producers run in request processes, so the kick is a pooled transaction that
+// takes the chain's queue key only if it is free, never a direct maintenance
+// session or a wait. A busy key kicks nothing and needs nothing: its holder is
+// claiming the successor, which then reads the producer's committed work, or
+// finishing or refreshing a run, which either reads that work or ends idle and
+// takes its own second look, or the startup scheduler, which pulls the chain
+// to its active cadence.
 //
 // Losing the mark (a failed Redis write, a crash after the commit, a producer
 // from an older build) loses only the kick: the chain still runs at its long
@@ -44,27 +52,28 @@ type IdleWakeSettings struct {
 	// not lapse before its next idle run sets it again. A lapsed mark loses
 	// only the kick; the chain still runs at its idle delay.
 	MarkTtl time.Duration
-	// Bounds one mark, clear or wake, including the kick's queue transaction
-	// and its wait for the queue key.
+	// Bounds one mark, clear or wake, including the kick's queue transaction.
 	Timeout time.Duration
 }
 
-// Four 30-second idle delays per mark; the kick waits at most the ownership
-// admission timeout.
+// Four 30-second idle delays per mark. A wake is a Redis round trip and at
+// most one short queue transaction per kicked chain.
 func DefaultIdleWakeSettings() *IdleWakeSettings {
 	return &IdleWakeSettings{
 		MarkTtl: 2 * time.Minute,
-		Timeout: server.PgOwnershipAdmissionTimeout,
+		Timeout: 5 * time.Second,
 	}
 }
 
-// Outcomes per run-once key. "active" is a wake that found no mark.
+// One count per run-once key and operation: "marked" and "resumed" for a
+// chain's own mark; for a producer's wake "active" (no mark), "kicked", "busy"
+// (its queue key held) or "due" (no future run_at to pull in); and "error".
 var taskIdleWakeCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "task",
 		Name:      "idle_wake_total",
-		Help:      "Idle run-once chain marks set and cleared, and producer wakes that kicked a backed-off chain or found it active",
+		Help:      "Idle run-once chain marks set and cleared, and producer wakes that kicked a backed-off chain or left it active, busy or already due",
 	},
 	[]string{"outcome"},
 )
@@ -97,18 +106,24 @@ func MarkIdleRunOnce(ctx context.Context, runOnceKey string, settings *IdleWakeS
 func ClearIdleRunOnce(ctx context.Context, runOnceKey string, settings *IdleWakeSettings) error {
 	bounded, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
+	cleared := false
 	err := server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
-		return r.Del(bounded, idleWakeMarkKey(runOnceKey)).Err()
+		removed, err := r.Del(bounded, idleWakeMarkKey(runOnceKey)).Result()
+		cleared = removed == 1
+		return err
 	}, server.OptRedisNoPreflight())
-	observeIdleWake("clear", "resumed", err)
+	if cleared || err != nil {
+		observeIdleWake("clear", "resumed", err)
+	}
 	return err
 }
 
 // Called after the producer's work committed. Clears the marks of the chains
 // under runOnceKeys and kicks each chain whose mark this call removed; a chain
-// without a mark is active and is not touched. Returns the keys kicked. A
-// Redis failure kicks nothing, so a Redis outage cannot turn every producer
-// into a queue write; those chains wait out their idle delay instead.
+// without a mark is active and is not touched, and a held queue key or a row
+// already due is left as it is. Returns the keys whose row moved. A Redis
+// failure kicks nothing, so a Redis outage cannot turn every producer into a
+// queue write; those chains wait out their idle delay instead.
 func WakeIdleRunOnce(ctx context.Context, settings *IdleWakeSettings, runOnceKeys ...string) (kickedKeys []string, returnErr error) {
 	if len(runOnceKeys) == 0 {
 		return nil, nil
@@ -118,7 +133,7 @@ func WakeIdleRunOnce(ctx context.Context, settings *IdleWakeSettings, runOnceKey
 	keys = slices.Compact(keys)
 	bounded, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
-	cleared := []string{}
+	clearedKeys := []string{}
 	returnErr = server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 		results := make([]*redis.IntCmd, len(keys))
 		_, err := r.Pipelined(bounded, func(pipe redis.Pipeliner) error {
@@ -132,7 +147,7 @@ func WakeIdleRunOnce(ctx context.Context, settings *IdleWakeSettings, runOnceKey
 		}
 		for i, result := range results {
 			if result.Val() == 1 {
-				cleared = append(cleared, keys[i])
+				clearedKeys = append(clearedKeys, keys[i])
 			}
 		}
 		return nil
@@ -141,19 +156,47 @@ func WakeIdleRunOnce(ctx context.Context, settings *IdleWakeSettings, runOnceKey
 		observeIdleWake("wake", "", returnErr)
 		return nil, returnErr
 	}
-	taskIdleWakeCounter.WithLabelValues("active").Add(float64(len(keys) - len(cleared)))
-	for _, key := range cleared {
+	taskIdleWakeCounter.WithLabelValues("active").Add(float64(len(keys) - len(clearedKeys)))
+	for _, key := range clearedKeys {
 		// The removed mark belonged to this call alone; a failed kick leaves
 		// the chain at its idle delay.
 		server.HandleError(func() {
-			KickTasks(bounded, key)
-			kickedKeys = append(kickedKeys, key)
-			observeIdleWake("kick", "kicked", nil)
+			kickedCount, admitted := tryKickTasks(bounded, key)
+			switch {
+			case !admitted:
+				observeIdleWake("kick", "busy", nil)
+			case kickedCount == 0:
+				observeIdleWake("kick", "due", nil)
+			default:
+				kickedKeys = append(kickedKeys, key)
+				observeIdleWake("kick", "kicked", nil)
+			}
 		}, func(err error) {
 			returnErr = errors.Join(returnErr, err)
-			observeIdleWake("kick", "kicked", err)
+			observeIdleWake("kick", "", err)
 		})
 	}
+	return
+}
+
+// Pulls a pending row under the raw run-once key to now, unless its run_at is
+// already due, in a pooled read committed transaction that takes the key's
+// queue ownership only if no other writer holds it. Returns the rows moved and
+// whether the key was free.
+func tryKickTasks(ctx context.Context, runOnceKey string) (kickedCount int64, admitted bool) {
+	jsonKey, keys := kickTaskOwnershipKeys(runOnceKey)
+	server.Tx(ctx, func(tx server.PgTx) {
+		kickedCount = 0
+		var err error
+		admitted, err = server.TryTxOwnership(ctx, tx, keys)
+		server.Raise(err)
+		if !admitted {
+			return
+		}
+		tag := server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2
+			WHERE run_once_key IN ($1,$3) AND $2<run_at`, runOnceKey, server.NowUtc(), jsonKey))
+		kickedCount = tag.RowsAffected()
+	}, server.TxReadCommitted, server.OptNoRetry())
 	return
 }
 

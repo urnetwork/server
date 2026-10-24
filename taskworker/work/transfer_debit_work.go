@@ -21,6 +21,8 @@ type FlushTransferDebitsArgs struct {
 }
 type FlushTransferDebitsResult struct{ model.TransferDebitFlushResult }
 
+// Publishes the partition's next run at runAt, in the caller's transaction that
+// owns the chain's queue key.
 func scheduleFlushTransferDebits(clientSession *session.ClientSession, tx server.PgTx, args *FlushTransferDebitsArgs, runAt time.Time, settings *SettlementChainSettings) {
 	task.ScheduleTaskInTx(tx, FlushTransferDebits, args, clientSession,
 		task.RunOnce(model.TransferDebitFlushRunOnceKey(args.Shard)), task.RunAt(runAt), task.MaxTime(settings.MaxTime), task.RequireQueueOwnership(tx))
@@ -66,41 +68,36 @@ func FlushTransferDebitsCommitPost(args *FlushTransferDebitsArgs, result *FlushT
 	settings := DefaultSettlementChainSettings()
 	// The post's session ends with the post; the mark keeps only its values.
 	ctx := context.WithoutCancel(clientSession.Ctx)
-	shard := args.Shard
+	key := model.TransferDebitFlushRunOnceKey(args.Shard)
 	switch {
 	case settings.backedOff(settings.nextEmptyPasses(args.EmptyPasses, transferDebitFlushEmpty(args, result))):
 		return []server.PostFunction{func() any {
-			markTransferDebitFlushIdle(ctx, shard, settings.Wake)
+			// Without the mark no producer kicks the chain and it keeps its
+			// idle delay. A failed second look wakes the chain rather than
+			// leave a debit that no producer will kick.
+			if task.MarkIdleRunOnce(ctx, key, settings.Wake) != nil {
+				return nil
+			}
+			pending := false
+			server.HandleError(func() {
+				bounded, cancel := context.WithTimeout(ctx, settings.Wake.Timeout)
+				defer cancel()
+				pending = model.TransferDebitShardPending(bounded, args.Shard)
+			}, func(error) {
+				pending = true
+			})
+			if pending {
+				_, _ = task.WakeIdleRunOnce(ctx, settings.Wake, key)
+			}
 			return nil
 		}}, nil
 	case settings.backedOff(args.EmptyPasses):
 		return []server.PostFunction{func() any {
-			// A failed clear leaves at most one needless kick.
-			_ = task.ClearIdleRunOnce(ctx, model.TransferDebitFlushRunOnceKey(shard), settings.Wake)
+			// A failed or late clear leaves at most one needless kick, or one
+			// lost kick if it lands after the next back-off's mark.
+			_ = task.ClearIdleRunOnce(ctx, key, settings.Wake)
 			return nil
 		}}, nil
 	}
 	return nil, nil
-}
-
-// Marks the backed-off chain of a partition, then wakes it if the partition
-// already holds a debit. Without the mark no producer kicks the chain and it
-// keeps its idle delay. A failed second look wakes the chain rather than leave
-// a debit that no producer will kick.
-func markTransferDebitFlushIdle(ctx context.Context, shard int, settings *task.IdleWakeSettings) {
-	key := model.TransferDebitFlushRunOnceKey(shard)
-	if task.MarkIdleRunOnce(ctx, key, settings) != nil {
-		return
-	}
-	pending := false
-	server.HandleError(func() {
-		bounded, cancel := context.WithTimeout(ctx, settings.Timeout)
-		defer cancel()
-		pending = model.TransferDebitShardPending(bounded, shard)
-	}, func(error) {
-		pending = true
-	})
-	if pending {
-		_, _ = task.WakeIdleRunOnce(ctx, settings, key)
-	}
 }
