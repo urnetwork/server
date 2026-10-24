@@ -863,6 +863,10 @@ Changes:
       after it.
   - Both migrations have monitor suffix contracts, which find their versions
     by migration content rather than by number.
+  - The index build on `network_client` outlasts A6's 15-minute
+    `transaction_timeout`, so the migration runner now runs every online
+    migration through `WithoutTransactionTimeout`. This branch carries a
+    minimal version of it; `feat/pm-horizon` owns the helper.
 
 ## Cutover requirements
 
