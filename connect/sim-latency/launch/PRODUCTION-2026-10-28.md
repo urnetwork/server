@@ -174,6 +174,46 @@ passed three repetitions (8.579 seconds). The measured checkpoint remains
 Read-only checks at 15:50 UTC still show API `503 source_not_ready` and refused
 TCP connections to sille's MinIO endpoint. Production has not been activated.
 
+### Reviewed-image host handoff — October 24, 16:43 UTC
+
+The automatic promotion path now installs the reviewed image's expected host
+fingerprint inside the existing fenced qualification operation, after genuine
+API acknowledgment and acquisition of the singleton evaluation slot. Previously
+the qualifier required the new image pin while the host document still held
+the incumbent pin. The new step authenticates the review-indexed reservation,
+matching broker/owner receipts, retained tests/containment and same-boot host
+profile; it reproduces the actual fingerprint through the pinned alternate-config
+checker before changing the active document. Only image/fingerprint pins change.
+The old markers do not become readiness for a new image or round: real runtime
+qualification, protected artifact retention and worker acknowledgment still run.
+
+The root qualification inventory now needs `reviewed_build_state_directory`,
+matching the build broker's private root-owned state. It is required for new
+elected-winner-policy deployment, not accepted from submissions. Existing exact
+root provisioning and carry-forward remain supported. Shared evidence types keep
+producer/consumer wire shapes identical instead of copying private CLI schemas.
+Restart tests also cover an interrupted exclusive publication leaving a private
+temporary hard link: trusted root records remain readable, while the untrusted
+submission-artifact hard-link restriction remains intact.
+
+Focused producer/consumer regressions passed three race repetitions. The expanded
+controller preparation suite, including actual disposable-DB qualification-slot
+tests, passed three race repetitions (24.374 seconds; log
+`a89ffc4155ee63c11add6521d18d8fba8ec8259bf67f1eb7b13ab447c4905495`).
+An earlier direct invocation correctly failed environment preflight before DB
+tests because it omitted the standard local test environment; that log remains
+retained. The corrected harness sources `test-env.sh` explicitly.
+Three consecutive full simulator-suite invocations then passed in 195, 124 and
+124 seconds, with owned fixture cleanup. Logs:
+
+- `1175349797a91059e0f92c7621fe81431114f404d2c83ab75e76d99d452d1ddf`
+- `637f07171946d47466e0b6cb8a2b5e48b981e4f209a3d6ecf9451355f12dfa75`
+- `3bc9e9d83e39d989b64ad7555a5b1b291f6d88a7fb27a7037126fee02068fb2f`
+
+These are implementation/test results, not a live main-DB preparation proof.
+No main writes, active host-document replacement or production activation occurred
+during maintenance. The frozen measured checkpoint and nine raw runs are unchanged.
+
 ### Restart/review-build validation — October 24, 13:38 UTC
 
 The build broker now durably binds one review to one image/owner and original

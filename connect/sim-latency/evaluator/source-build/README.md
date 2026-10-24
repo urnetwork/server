@@ -135,6 +135,28 @@ open. The existing fenced preparation still must install the exact intended
 runtime and pass its real host probe, artifact checks and API/worker readiness
 acknowledgments before activation.
 
+The qualification inventory on the evaluator host must additionally set
+`reviewed_build_state_directory` in `/etc/urnetwork/competition-qualification.json`
+to the same root-private state directory used by the build broker and qualifier.
+The automatic elected-winner policy refuses a missing or exposed inventory.
+No candidate request supplies this path.
+
+After genuine API acknowledgment, the host qualifier acquires the singleton
+evaluation slot before changing host configuration. For a reviewed promotion it
+resolves the original review reservation, authenticates matching broker/owner
+receipts plus retained model, containment and host evidence, and reproduces the
+new fingerprint through the pinned checker using `--json --config`. It rechecks
+the supervisor fence, slot and unchanged active document immediately before
+atomic replacement. Only `image_digest` and `qualification_sha256` change;
+unrelated root policy and current marker links are preserved. Carry-forward and
+already-provisioned exact identities do not replace unrelated host configuration.
+
+This installation is not readiness: the full real runtime probe, protected
+artifact retention and independent worker acknowledgment still follow it. Lease
+loss, changed source/boot/local leaves or a concurrent root edit stop progression.
+A partial transition is fail-closed, not a reason to revive old-image markers or
+silently carry a reviewed winner forward.
+
 The focused regressions passed three race repetitions. The actual-container
 probe passed the offline pipeline and all 33 prescribed correctness tests,
 including observed containment and journal replay. Three consecutive complete
