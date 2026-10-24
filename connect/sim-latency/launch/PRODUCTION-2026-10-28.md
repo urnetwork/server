@@ -256,3 +256,31 @@ Owned test services were removed successfully. These builds/tests ran during an
 intentional pause between calibration replicates 3 and 4, not concurrently with
 timed scoring. The current replicate finished normally before tests started;
 calibration orchestration resumed at 09:21 UTC after all three passes.
+
+## Reviewed-source build handoff and staging eligibility
+
+Control commit `b21ff9e66` adds the authenticated prospective image manifest to
+the build request. It preserves the active intent's exact history, appends only
+the separately reviewed source generation, and deliberately creates no future
+round, activation, or readiness claim. The later publication path uses the same
+generation constructor. This removes a missing input for the real build broker;
+it is not an implementation or qualification receipt for that broker.
+
+The same audit found a legacy production significance check in staging source
+promotion. It could refuse an honestly reviewed best-safe staging winner merely
+because its diagnostic improvement was zero/negative or nonsignificant. The
+staging-only correction preserves finite/valid statistics and zero effective
+margin without imposing production eligibility; production retains its positive
+improvement, significance and margin requirements.
+
+The new regression failed with the old guard, then focused source/promotion
+tests passed three times under race detection with the fix. Retained log hashes:
+
+- failing old guard: `73831297aa659ee3d6a0b3df7a0ff1ab9f34cd01822a067e40e0a4bb6a34361b`;
+- repeated passing fixed path: `261e037c696c151b7b57f6da319c0f997946d166ca797794674c2d97d0e5eb7f`.
+
+Those tests ran between calibration replicates 5 and 6, not during measurement.
+The future staging checkpoint/image must include this protected-runner fix
+before testing nonsignificant source promotion; do not hot-swap a frozen round.
+The prepared production checkpoint and image remain unchanged. The real isolated
+build/test/qualification broker and its deployment remain launch work.
