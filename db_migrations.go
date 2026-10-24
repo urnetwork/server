@@ -10866,4 +10866,18 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE client_connection_reliability_score SET (fillfactor = 50);
 	`),
+
+	// network_client_location_reliability holds one row per client seen in
+	// the last 30 days (132 GB before the 2026-10-23 VACUUM FULL). The
+	// location pass now rewrites a client's row only when a value changed,
+	// and its indexed update_block_number once a day
+	// (UpdateClientLocationReliabilitiesInTx), so most rewrites change
+	// unindexed values (egress evidence, speed, latency, net type scores) and
+	// are HOT when the page has room. 85 leaves that room on each page for
+	// the rows of its clients that are still connecting. It applies to pages
+	// written from now on, and to every page at the next compaction.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_client_location_reliability SET (fillfactor = 85);
+	`),
 }

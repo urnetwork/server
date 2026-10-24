@@ -81,6 +81,7 @@ func TestWritePathTableFillfactors(t *testing.T) {
 			{table: "search_provider_stats", fillfactor: "70"},
 			{table: "transfer_debit_journal", fillfactor: "70"},
 			{table: "client_connection_reliability_score", fillfactor: "50"},
+			{table: "network_client_location_reliability", fillfactor: "85"},
 		} {
 			var fillfactor *string
 			MaintenanceDb(ctx, func(conn PgConn) {

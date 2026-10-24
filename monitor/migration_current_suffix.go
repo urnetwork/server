@@ -720,6 +720,8 @@ var migrationCurrentSuffixContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block")),
 	migrationCurrentSuffix(868, "client score pages keep room for a full pass rewrite",
 		migrationFillfactor("client_connection_reliability_score", 50)),
+	migrationCurrentSuffix(869, "location reliability pages keep room for changed rows",
+		migrationFillfactor("network_client_location_reliability", 85)),
 }
 
 // Free space a table keeps on every page it writes, so an update of an

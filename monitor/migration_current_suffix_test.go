@@ -236,6 +236,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "probe queue identity missing", version: 866, sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
 		{name: "dropped client score window index rebuilt", version: 867, sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
 		{name: "client score pages filled", version: 868, sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
+		{name: "location reliability pages filled", version: 869, sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
