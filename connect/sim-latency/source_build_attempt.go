@@ -14,15 +14,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/urnetwork/server/controller"
 )
 
-type sourceBuildAttemptReservation struct {
-	Schema        int       `json:"schema"`
-	RequestSha256 string    `json:"request_sha256"`
-	Owner         string    `json:"owner"`
-	StartedAt     time.Time `json:"started_at"`
-	Deadline      time.Time `json:"deadline"`
-}
+type sourceBuildAttemptReservation = controller.CompetitionSourceBuildReservation
 
 type sourceBuildPipelineObservation struct {
 	Artifacts    *sourceBuildArtifacts `json:"artifacts"`

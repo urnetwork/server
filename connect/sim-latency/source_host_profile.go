@@ -65,43 +65,12 @@ func prospectiveSourceHostConfig(content []byte, request reviewedSourceBuildRequ
 // This deliberately contains no passed/readiness assertion. Its new-image
 // fingerprint may be pinned by a source intent only alongside real independent
 // build/test/containment evidence; the fenced runtime qualification comes later.
-type sourceProspectiveHostProfile struct {
-	Schema                  int                      `json:"schema"`
-	Kind                    string                   `json:"kind"`
-	RuntimeQualified        bool                     `json:"runtime_qualified"`
-	ImageId                 string                   `json:"image_id"`
-	BaseImageId             string                   `json:"base_image_id"`
-	SourceLockSha256        string                   `json:"source_lock_sha256"`
-	ReviewId                string                   `json:"review_id"`
-	QualificationSha256     string                   `json:"qualification_sha256"`
-	ProspectiveConfigSha256 string                   `json:"prospective_config_sha256"`
-	ConfigLocalSha256       string                   `json:"config_local_sha256"`
-	VaultLocalSha256        string                   `json:"vault_local_sha256"`
-	BootId                  string                   `json:"boot_id"`
-	Incumbent               controller.HostSelfCheck `json:"incumbent"`
-	Prospective             controller.HostSelfCheck `json:"prospective"`
-}
+type sourceProspectiveHostProfile = controller.CompetitionProspectiveHostProfile
 
 // Validate live physical controls without interpreting the incumbent's reset,
 // containment or storage markers as proof for a different prospective image.
 func sourceHostPhysicalControlsReady(report controller.HostSelfCheck, hardwareId string) bool {
-	if report.Schema != 1 || report.HostId == "" || report.HardwareId != hardwareId || report.KernelRelease == "" || report.MicrocodeRevision == "" ||
-		!validSha256(report.IrqAffinitySha256) || !validSha256(report.IrqPolicySha256) || report.LogicalCpuCount != 12 ||
-		!report.SMTDisabled || !report.GovernorPinned || !report.TurboPinned || !report.NumaPinned || !report.IrqPinned || !report.CgroupV2 ||
-		!report.ManagementCpuReserved || !report.ManagementMemoryReserved {
-		return false
-	}
-	for _, key := range []string{"config_secure", "cpu_count_exact", "worker_affinity_pinned", "kernel_microcode_pinned", "docker_runtime", "docker_user_namespace"} {
-		if !report.Checks[key] {
-			return false
-		}
-	}
-	for key, passed := range report.Checks {
-		if key != "qualification_match" && !passed {
-			return false
-		}
-	}
-	return true
+	return controller.CompetitionHostPhysicalControlsReady(report, hardwareId)
 }
 
 // Both reports come from the pinned root checker, not request JSON. A new

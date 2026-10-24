@@ -154,6 +154,22 @@ image and attempt. A missing qualifier, changed pin, cancellation, or incomplete
 model/containment evidence returns no usable receipt. Do not substitute the
 synthetic offline pipeline probe for genuine winner review or qualification.
 
+The evaluator host's private `/etc/urnetwork/competition-qualification.json`
+must bind `reviewed_build_state_directory` to that same mode-0700, root-owned
+build state. After the API acknowledges the exact prepared source, the updated
+host qualifier holds the global evaluation slot and authenticates the original
+review-indexed reservation, owner receipts, tests/containment and prospective
+host profile. It checks the actual new fingerprint using the pinned checker's
+root-only `--json --config` interface, rechecks the supervisor fence and unchanged
+active file, then atomically updates only the reviewed image/fingerprint pins.
+The old reset/readiness markers are not promoted into new-image proof. The real
+runtime qualification and independent worker acknowledgment must still pass
+before source activation or the next epoch opening. Missing inventory, stale
+approval, boot drift, lost authority or changed local leaves block and alert.
+Deploy the updated qualification executable and checker together; an older
+checker that lacks the protected alternate-config interface cannot prepare a
+promoted winner. Initial checkpoint provisioning remains an explicit root step.
+
 The `automation_progression_blocked` metric/dashboard and
 `CompetitionAutomaticClosingBlocked` alert use the existing
 `service=sim-latency` routing to support@ur.xyz. Deploy the accompanying

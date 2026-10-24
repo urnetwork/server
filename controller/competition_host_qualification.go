@@ -30,22 +30,23 @@ const competitionHostQualificationComment = "// competitionHostReadinessProbe ex
 // These independent root-provisioned pins are not accepted through the
 // supervisor request. The bomb report must belong to the current Linux boot.
 type CompetitionHostQualificationConfig struct {
-	Schema             int    `json:"schema"`
-	Environment        string `json:"environment"`
-	CompetitionId      string `json:"competition_id"`
-	SeasonId           string `json:"season_id"`
-	Staging            bool   `json:"staging"`
-	HostConfig         string `json:"host_config"`
-	StateDirectory     string `json:"state_directory"`
-	PromotionCommand   string `json:"promotion_command"`
-	PromotionSha256    string `json:"promotion_sha256"`
-	ResourceBombReport string `json:"resource_bomb_report"`
-	ResourceBombSha256 string `json:"resource_bomb_sha256"`
-	ResourceBombBootId string `json:"resource_bomb_boot_id"`
-	WorkerCommand      string `json:"worker_command"`
-	WorkerSha256       string `json:"worker_sha256"`
-	WorkerImageDigest  string `json:"worker_image_digest"`
-	ApiImageDigest     string `json:"api_image_digest"`
+	Schema                      int    `json:"schema"`
+	Environment                 string `json:"environment"`
+	CompetitionId               string `json:"competition_id"`
+	SeasonId                    string `json:"season_id"`
+	Staging                     bool   `json:"staging"`
+	HostConfig                  string `json:"host_config"`
+	StateDirectory              string `json:"state_directory"`
+	PromotionCommand            string `json:"promotion_command"`
+	PromotionSha256             string `json:"promotion_sha256"`
+	ResourceBombReport          string `json:"resource_bomb_report"`
+	ResourceBombSha256          string `json:"resource_bomb_sha256"`
+	ResourceBombBootId          string `json:"resource_bomb_boot_id"`
+	WorkerCommand               string `json:"worker_command"`
+	WorkerSha256                string `json:"worker_sha256"`
+	WorkerImageDigest           string `json:"worker_image_digest"`
+	ApiImageDigest              string `json:"api_image_digest"`
+	ReviewedBuildStateDirectory string `json:"reviewed_build_state_directory,omitempty"`
 }
 
 // A successful result identifies retained proof, not a worker readiness
@@ -217,6 +218,18 @@ func validateCompetitionQualificationConfig(settings *Settings, config Competiti
 		len(bootId) != 36 || config.ResourceBombBootId != bootId || !sha256Pattern.MatchString(config.ResourceBombSha256) {
 		return errors.New("qualification scope, actual worker image or current-boot bomb evidence does not match")
 	}
+	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy && config.ReviewedBuildStateDirectory == "" {
+		return errors.New("automatic winner-source preparation requires its private reviewed-build inventory")
+	}
+	if config.ReviewedBuildStateDirectory != "" {
+		if err := competitionQualificationRootPath(config.ReviewedBuildStateDirectory, true); err != nil {
+			return err
+		}
+		info, err := os.Lstat(config.ReviewedBuildStateDirectory)
+		if err != nil || info.Mode().Perm()&0o077 != 0 {
+			return errors.New("reviewed build inventory must remain root-private")
+		}
+	}
 	for _, command := range []struct{ path, digest string }{
 		{config.WorkerCommand, config.WorkerSha256}, {config.PromotionCommand, config.PromotionSha256},
 		{settings.EvaluatorCommand, settings.EvaluatorCommandSha256}, {settings.SelfCheckCommand, settings.SelfCheckCommandSha256},
@@ -258,7 +271,7 @@ func readCompetitionQualificationHostConfig(path string, settings *Settings) (*c
 	}
 	var raw map[string]json.RawMessage
 	var host competitionQualificationHostConfig
-	if json.Unmarshal(content, &raw) != nil || json.Unmarshal(content, &host) != nil || host.Schema != 1 ||
+	if decodeFailureEvidenceJson(content, &raw) != nil || json.Unmarshal(content, &host) != nil || host.Schema != 1 ||
 		host.HardwareId != settings.EvaluationPolicy.HardwareId || host.ImageDigest != settings.EvaluatorImageDigest ||
 		host.QualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
 		host.ConfigLocalDirectory != settings.ConfigLocalDirectory || host.VaultLocalDirectory != settings.VaultLocalDirectory ||
@@ -651,6 +664,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err != nil {
 		return nil, err
 	}
+	request.Intent = *intent
 	settings, err = sourceSettingsFromIntent(settings, intent)
 	if err != nil {
 		return nil, err
@@ -675,10 +689,6 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 		return nil, err
 	}
 	if err := competitionQualificationApiReceipt(intent, config.ApiImageDigest, receipts); err != nil {
-		return nil, err
-	}
-	hostConfig, _, err := readCompetitionQualificationHostConfig(config.HostConfig, settings)
-	if err != nil {
 		return nil, err
 	}
 	profileSettings := competitionHostQualificationSettings(settings)
@@ -727,6 +737,16 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	}()
 	defer func() { stop(nil); <-done }()
 	ctx = operationCtx
+	// Source construction pins the next image's expected hardware fingerprint,
+	// not its runtime readiness. Install only that reviewed transition after
+	// acquiring the singleton slot, then perform the full real qualification.
+	if err := ensureCompetitionReviewedHostConfig(ctx, settings, config, request, owner, bootId); err != nil {
+		return nil, err
+	}
+	hostConfig, _, err := readCompetitionQualificationHostConfig(config.HostConfig, settings)
+	if err != nil {
+		return nil, err
+	}
 	if markerBytes, readErr := readRegularFile(hostConfig.RebaselineManifest, 64*1024); readErr == nil && competitionQualificationRootPath(hostConfig.RebaselineManifest, false) == nil {
 		var marker competitionHostQualificationMarker
 		digest := sha256.Sum256(markerBytes)
