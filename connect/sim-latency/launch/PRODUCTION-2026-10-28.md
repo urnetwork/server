@@ -361,3 +361,25 @@ bind the approved generation. It contains no `RUN`, `ONBUILD`, `ADD`, external
 frontend or extra execution stage, and copies no config/vault inputs. This is
 an assembly-plan component, not a built reviewed-winner image or completed
 broker CLI; execution, installed qualification and live publication remain open.
+
+The next assembly components materialize only allowlisted inputs into Docker's
+context and execute a copy-only image build with pull/network disabled. The
+incumbent tag's actual image ID is checked, inherited `ONBUILD` hooks are
+rejected, logs/inspection output are bounded, and the returned image must bind
+the private build owner and evaluator-base kind. Alias substitution, inherited
+execution, ownership loss, wrong image kind and log overflow are exercised by
+deterministic fake-daemon tests, passing three race-enabled runs. This is not
+yet a real assembly/qualification receipt or a wired, deployable build broker.
+The control smoke after merging unrelated main maintenance changes also passed;
+the evaluated source checkpoint remains unchanged.
+
+The opt-in actual Docker copy-only assembly probe subsequently passed once,
+then three consecutive race-enabled runs (10.00, 9.56 and 9.55 seconds). This
+probe reuses the exact frozen binary without inventing a source approval or
+future generation. All four temporary probe images were removed successfully;
+the official evaluator image and source branches were untouched. Bounded build
+logs and result identities remain in private preparation artifacts. The
+three-run log SHA-256 is
+`0d9b7fab3de85c548b848acfa45dc6805c07bda21a6216c04f22db8c27339c32`.
+This establishes the real Docker execution boundary, not an approved-winner
+end-to-end build, independent test-model receipt, or installed host readiness.
