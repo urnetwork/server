@@ -70,15 +70,33 @@ func migrationFp2Constraint(table, kind, definition string) string {
 }
 
 // New evidence belongs in durable ordinary tables, not look-alike views. A
-// contract table may also be a partitioned parent of durable ordinary leaves
-// (see migrationContractTable).
+// contract table, or the egress health history once its cutover runs, may
+// also be a partitioned parent of durable ordinary leaves (see
+// migrationContractTable).
 func migrationFp2Table(table string) string {
-	if isMigrationContractTable(table) {
+	if isMigrationContractTable(table) || table == migrationEgressHealthHistoryTable {
 		return migrationContractTable(table)
 	}
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM pg_class WHERE oid=to_regclass('public.%s')
 		AND relkind='r' AND relpersistence='p')`, table)
 }
+
+const migrationEgressHealthHistoryTable = "provider_egress_health_history"
+
+// The history is partitioned by its operator cutover
+// (bringyourctl model migrate provider-egress-health-partition).
+const migrationEgressHealthHistoryPartitionedSql = `COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass('public.provider_egress_health_history')), false)`
+
+// The v723 receipt identity in either layout: run_id alone on the plain
+// table, and (run_id, measured_at) once the history is partitioned by day
+// (PARTITION-MAINTENANCE-PLAN.md C2), where a partitioned key must carry the
+// partition key and the writer looks run_id up across the partitions.
+var migrationEgressHealthHistoryKey = "((NOT " + migrationEgressHealthHistoryPartitionedSql + " AND " +
+	migrationFp2Constraint(migrationEgressHealthHistoryTable, "p", "PRIMARY KEY (run_id)") + " AND " +
+	migrationFp2Index(migrationEgressHealthHistoryTable, "provider_egress_health_history_pkey", "run_id", "", true) + ") OR (" +
+	migrationEgressHealthHistoryPartitionedSql + " AND " +
+	migrationFp2Constraint(migrationEgressHealthHistoryTable, "p", "PRIMARY KEY (run_id, measured_at)") + " AND " +
+	migrationFp2Index(migrationEgressHealthHistoryTable, "provider_egress_health_history_pkey", "run_id, measured_at", "", true) + "))"
 
 // The v729 replacement must retain the columns originally published at v726.
 var migrationFp2UrlColumns = migrationFp2Columns("provider_egress_health_history",
@@ -112,10 +130,9 @@ var migrationFp2ArtifactQueries = []string{
 			migrationFp2Column{name: "class_results", kind: "jsonb", notNull: true},
 			migrationFp2Column{name: "tls_authentication_failure", kind: "boolean", notNull: true},
 			migrationFp2Column{name: "cycle_started_at", kind: "timestamp without time zone"}) + " AND " +
-		migrationFp2Constraint("provider_egress_health_history", "p", "PRIMARY KEY (run_id)") + " AND " +
+		migrationEgressHealthHistoryKey + " AND " +
 		migrationFp2Constraint("provider_egress_health_history", "c", "CHECK ((ok_count >= 0))") + " AND " +
 		migrationFp2Constraint("provider_egress_health_history", "c", "CHECK ((total_count >= ok_count))") + " AND " +
-		migrationFp2Index("provider_egress_health_history", "provider_egress_health_history_pkey", "run_id", "", true) + " AND " +
 		migrationFp2Index("provider_egress_health_history", "provider_egress_health_history_client_time", "client_id, measured_at", "", false) + " AND " +
 		migrationFp2Index("provider_egress_health_history", "provider_egress_health_history_time", "measured_at", "", false) + " AND " +
 		migrationFp2Table("provider_egress_probe_cycle") + " AND " +

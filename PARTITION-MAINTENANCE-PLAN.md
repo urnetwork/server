@@ -554,6 +554,41 @@ table, not only contracts.
 **Decided (2026-10-24): build it now, including the contract family.** The
 contract-partition fixes are merged.
 
+**Implemented (2026-10-24):** `db_partition_registry.go` (package `server`),
+API documented in its file comment. A family registers one static
+declaration (`RegisterPartitionFamily`): tables, key and key kind (utc
+timestamp, uuid id through `contract_id_floor`, epoch minutes), daily or
+weekly granularity, ranges ahead, retention or never-drop, DEFAULT and
+legacy partitions (`KeepLegacyPartition` for never-dropped legacy), an
+opt-in GUC the drop transaction sets (`DropGuardSetting`), and hooks for its
+own rules (`CreateFrom` for late writes, `CreateLeaf`, `RangeExpired`,
+`DropFence`, `DropPrecondition`, `Archive`). The registry gives canonical
+bounds and names, create-ahead with catch-up in one pass (`EnsureRunway`,
+and `EnsureRangeFor` for a writer), parent `ANALYZE ONLY` once per range
+period and closed-leaf analyze, the guarded drop (guard, fence, every
+detach, the precondition again on the detached leaves, the drops, in one
+transaction) and the retirement pass, with resume state in the task
+arguments. Two chains drive every family: `maintain_partition_runway` every
+10 minutes, apart from archive work, and `maintain_partition_retention`
+every 15. Families moved in, keeping their tasks and rules: contract (its
+task creates, analyzes and drops through the registry; the archive, evidence
+deletes and cutover guard unchanged; `contractWeekBlocker` is the drop
+precondition, with the legacy settlement intent check still one block),
+`client_reliability` (runway from the retention cutoff; drops unchanged)
+and `network_ping` with its tallies (registered by the controller, which owns
+the keep timeout; its sweep unchanged). Added for all three, as planned:
+parent statistics and the separate runway cadence. db_maintenance skips the
+parents and leaves of `ReindexExempt` families (contract, client_reliability,
+the C2 history); network_ping keeps its rotation place as before. Monitor:
+§2.4p `partition-runway` and §2.4q `partition-retention-blocked` watch every
+family whose declaration names no dedicated probe (client_reliability and
+the C2 history); the contract family names §2.4h/§2.4i and network_ping
+§2.19c, and a test holds every family to exactly one probe of each.
+`CutoverTables` keeps a cutover's staged and old tables out of db audit.
+Deviation: the existing families keep their own drop code (the contract's
+goes through the registry's guarded drop); network_ping keeps its own
+planner, whose coverage counts only finite bounds.
+
 ## Part B: write paths
 
 The changes below stop row versions from being written in the first place.
@@ -658,6 +693,39 @@ partitioned, `maintain_contract_partitions` starts retiring weeks by itself
   - writes during the swap.
 - **Decided (2026-10-24): 7 days.** Daily partitions, each dropped once its
   upper bound is 7 days past.
+- **Implemented (2026-10-24):** the registry's first new family
+  (`model/provider_egress_health_history_partition.go`): daily by
+  `measured_at`, 7 days, three days ahead, created back to the ingest's oldest
+  day, out of the REINDEX rotation.
+  - **Submitters:** the taskworker URL pass and the standalone egress prober
+    both submit URL evidence, whose `measured_at` is the measurement time,
+    fixed on the result, and the run id is minted once onto the result; each
+    run is published once, and a resend of the same result repeats both. But
+    the ingest also takes reports without evidence, which the server times at
+    arrival, so their resend repeats a run id with a new time. So the writer
+    takes a lock per run, looks the run id up across the retained partitions,
+    and inserts with a targetless `ON CONFLICT DO NOTHING`, at read committed
+    (as the ping ingest does), on both layouts. An insert that finds no
+    partition creates the day, unless the measurement is older than the
+    ingest takes.
+  - **Ingest:** URL evidence measured more than a day ago is refused, so a
+    replay is refused or meets its row.
+  - **Readers:** the four bound `measured_at` to 8 hours or less; the fleet
+    diagnostic's receipt history now reaches back at most the retention.
+  - **Cutover:** `bringyourctl model migrate provider-egress-health-partition
+    [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort]
+    [--drop-old]`. Prepare stages the partitioned table and the days through a
+    week ahead, installs a mirror trigger (the change capture) and then copies
+    the window hour by hour; `--swap` checks each day's counts under the lock
+    and swaps the names; `--rollback` mirrors back, copies back and swaps back,
+    keeping later writes; `--drop-old` runs after `--verify` passes. The long
+    copies and checks are exempt from `transaction_timeout`. Deviations: the
+    rows written since prepare are captured by the mirror, not copied under the
+    lock, since the table has no insertion order; and the swap takes ACCESS
+    EXCLUSIVE, not EXCLUSIVE, because the writer reads its run id before it
+    inserts and an EXCLUSIVE lock upgraded at the rename would deadlock with it.
+  - **Monitor:** `monitor/migration_fp2.go` accepts the partitioned shape
+    (leaves, indexes read without ONLY, key `(run_id, measured_at)`).
 
 ### C3. `finished_task`: daily partitions kept 8 days (decided 2026-10-24)
 
