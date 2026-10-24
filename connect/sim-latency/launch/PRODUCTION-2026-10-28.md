@@ -383,3 +383,15 @@ three-run log SHA-256 is
 `0d9b7fab3de85c548b848acfa45dc6805c07bda21a6216c04f22db8c27339c32`.
 This establishes the real Docker execution boundary, not an approved-winner
 end-to-end build, independent test-model receipt, or installed host readiness.
+
+Offline build coordination now connects private authenticated source cloning,
+incumbent module-metadata export, independent metadata seeds, isolated checking,
+compilation, binary authentication and copy-only image assembly. Metadata export
+runs only trusted `tar` in the constrained incumbent container; a bounded Go
+reader rejects traversal, links, special files, duplicate entries and budget
+overflow before writing regular seed files. Deterministic fake-daemon pipeline
+tests force invalid metadata and failed checks, proving no later phase starts
+and cleanup completes. Metadata/sandbox/pipeline regressions passed three
+race-enabled runs. This integrated coordinator still needs its real full-path
+probe, deployable broker entry point, independent model-owned testing and host
+qualification before it may return a promotion-authorizing receipt.

@@ -26,6 +26,7 @@ type sourceBuildSandboxSettings struct {
 	WorkBytes      int64
 	TmpBytes       int64
 	MetadataBytes  int64
+	MetadataFiles  int
 	BinaryBytes    int
 	Pids           int
 	NoFile         int
@@ -39,7 +40,7 @@ type sourceBuildSandboxSettings struct {
 func defaultSourceBuildSandboxSettings() sourceBuildSandboxSettings {
 	return sourceBuildSandboxSettings{StateDirectory: "/var/lib/urnetwork/competition-reviewed-builds", CpuSet: "0,2,4,6,8,10,12,14,16,18", CgroupParent: "urnetwork-evaluation.slice",
 		MemoryBytes: 72 * 1024 * 1024 * 1024, WorkBytes: 8 * 1024 * 1024 * 1024, TmpBytes: 2 * 1024 * 1024 * 1024,
-		MetadataBytes: 16 * 1024 * 1024, BinaryBytes: 512 * 1024 * 1024,
+		MetadataBytes: 16 * 1024 * 1024, MetadataFiles: 4096, BinaryBytes: 512 * 1024 * 1024,
 		Pids: 65536, NoFile: 1048576, Timeout: 20 * time.Minute, CleanupTimeout: 30 * time.Second, OutputBytes: 4 * 1024 * 1024}
 }
 
@@ -57,10 +58,10 @@ type sourceBuildSandboxInput struct {
 // Builds fixed argv rather than interpolating paths, commits or code in shell
 // syntax. The only shell program is this trusted immutable Go-tool protocol.
 func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceBuildSandboxSettings) ([]string, error) {
-	if input.Phase != "check" && input.Phase != "compile" || !validSha256(input.Owner) || !sourceGitShaPattern.MatchString(input.Commit) ||
+	if input.Phase != "check" && input.Phase != "compile" && input.Phase != "metadata" || !validSha256(input.Owner) || !sourceGitShaPattern.MatchString(input.Commit) ||
 		!strings.HasPrefix(input.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(input.ImageId, "sha256:")) ||
 		settings.CpuSet == "" || settings.CgroupParent == "" || settings.MemoryBytes <= 0 || settings.WorkBytes <= 0 || settings.TmpBytes <= 0 ||
-		settings.MetadataBytes <= 0 || settings.BinaryBytes <= 0 || settings.Pids <= 0 || settings.NoFile <= 0 || settings.Timeout <= 0 || settings.CleanupTimeout <= 0 || settings.OutputBytes <= 0 {
+		settings.MetadataBytes <= 0 || settings.MetadataFiles <= 0 || settings.BinaryBytes <= 0 || settings.Pids <= 0 || settings.NoFile <= 0 || settings.Timeout <= 0 || settings.CleanupTimeout <= 0 || settings.OutputBytes <= 0 {
 		return nil, errors.New("source build sandbox identity or limits are invalid")
 	}
 	if !filepath.IsAbs(settings.StateDirectory) || filepath.Clean(settings.StateDirectory) != settings.StateDirectory || settings.StateDirectory == "/" {
@@ -92,13 +93,19 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 		"--label=com.urnetwork.review-build.owner=" + input.Owner, "--label=com.urnetwork.review-build.phase=" + input.Phase,
 		"--mount=type=bind,source=" + input.SourceDirectory + ",target=/workspace,readonly",
 		"--mount=type=bind,source=" + input.MetadataDirectory + ",target=/input/server-metadata,readonly",
-		"--tmpfs=/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size=" + strconv.FormatInt(settings.MetadataBytes, 10),
 		"--tmpfs=/work:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=" + strconv.FormatInt(settings.WorkBytes, 10),
 		"--tmpfs=/tmp:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=" + strconv.FormatInt(settings.TmpBytes, 10),
 		"--env=SOURCE_BUILD_COMMIT=" + input.Commit,
 		"--env=GOCACHE=/work/cache", "--env=GOTMPDIR=/work/tmp", "--env=TMPDIR=/tmp", "--env=GOFLAGS=-mod=readonly", "--env=GOPROXY=off", "--env=GOSUMDB=off", "--entrypoint=/bin/bash"}
+	if input.Phase != "metadata" {
+		args = append(args, "--tmpfs=/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.FormatInt(settings.MetadataBytes, 10))
+	}
 	script := "mkdir -p /work/cache /work/tmp; cp -R /opt/urnetwork/go/build-cache/. /work/cache/; cp -R /input/server-metadata/. /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/; test \"$(git -C /workspace/server rev-parse HEAD)\" = \"$SOURCE_BUILD_COMMIT\"; test -z \"$(git -C /workspace/server status --porcelain --untracked-files=all)\"; cd /workspace/server; "
-	if input.Phase == "check" {
+	if input.Phase == "metadata" {
+		// Export only the immutable incumbent's module metadata. In particular,
+		// do not shadow this path with the later phases' empty writable tmpfs.
+		script = "tar -C /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v -cf - ."
+	} else if input.Phase == "check" {
 		script += "go vet ./connect/...; go test -run '^$' ./connect/..."
 	} else {
 		args = append(args, "--tmpfs=/output:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.Itoa(settings.BinaryBytes))
@@ -178,6 +185,8 @@ func executeSourceBuildSandbox(ctx context.Context, input sourceBuildSandboxInpu
 	outputLimit := settings.OutputBytes
 	if input.Phase == "compile" {
 		outputLimit = settings.BinaryBytes
+	} else if input.Phase == "metadata" {
+		outputLimit = int(settings.MetadataBytes)
 	}
 	output, diagnostics = &sourceSupervisorOutput{limit: outputLimit}, &sourceSupervisorOutput{limit: settings.OutputBytes}
 	err = docker(ctx, []string{"start", "--attach", id}, output, diagnostics)
