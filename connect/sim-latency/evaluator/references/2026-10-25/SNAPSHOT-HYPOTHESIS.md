@@ -1,0 +1,70 @@
+# Immutable positive-cache snapshot: static research only
+
+No patch, build, correctness pass or performance result is claimed here. This
+is a separate hypothesis against the corrected frozen source, not a revision
+to the failed warm-reader pilot or authorization to change the baseline.
+The existing owner-admission-map draft is also unqualified.
+
+## Mechanism to investigate
+
+Warm first-half positive cache hits currently acquire the manager's mutex.
+The prior reader-lock pilot did not improve its measured workload; another
+reader lock is not assumed sufficient. An immutable, owner-published snapshot
+could let that specific path read without a shared lock, while cold admission,
+refresh, map sweeping and read-worker registration keep their existing owner
+lock. This is a mechanism hypothesis, not evidence that contention dominates
+the measured score or that the improvement exceeds noise.
+
+A possible implementation uses one `atomic.Pointer` to an immutable snapshot
+containing copied `activeContractEntry` values. Publication happens under the
+existing owner lock after authoritative updates/removals. No mutable map or
+entry pointer may be modified after publication. Cold and second-half requests
+fall back to the existing admission path; they do not acquire new queues or
+wait for a refresh owned by another flow.
+
+## Correctness constraints from the static review
+
+- **No extended authority:** both local freshness and returned Redis source
+  lease deadlines remain ceilings. A fast-path hit is limited to the first
+  half of their effective intersection, with current time/deadline checks and
+  no stale timestamp carried across a potentially blocking boundary.
+- **Close visibility:** snapshot readers cannot read the lock-owned plain
+  `readsClosed` field concurrently. A prospective atomic closed flag must be
+  the same authoritative state used by slow admission and Close, not a second
+  eventually synchronized shutdown decision. Closing invalidates the snapshot;
+  late completing reads cannot republish a usable snapshot after close.
+- **Registration and joins:** fast cache hits register no read worker. All new
+  cold/refresh reads still register under the owner lock before shutdown can
+  start its join. Retain the existing cancellation and panic handling.
+- **Invalidation:** negative refresh, source expiry, freshness expiry and sweep
+  removal must not leave a usable old snapshot. A read that linearizes before
+  an update still needs its own immutable deadline; no latest-result promise
+  should be invented that the existing cache never supplied.
+- **Bounded retention:** snapshots must not create unbounded histories. Do not
+  retain whole old maps across slow Redis operations or blocked callbacks.
+  Include map-copy allocation, retired snapshots and peak overlap in actual
+  memory accounting, rather than assuming lock removal is free.
+- **Owner settings:** touched legacy admission/sweep timing tunables must move
+  to per-owner settings with an explicit defaults constructor, preserving
+  current defaults and bounds. Do not repurpose the positive-cache freshness
+  setting as an unrelated admission interval or add process-global budgets.
+- **Same product behavior:** no measurement-aware branches, bypassed
+  authorization, relaxed limits, changed workload or test detection. The
+  candidate remains subject to protected-source and honesty checks.
+
+## Evidence needed before advancement
+
+Use fresh private checkouts of exact frozen source. First run the existing
+resident-contract and composed packet-path correctness screen on baseline and
+candidate. Add deterministic candidate tests for the actual lock-free entry
+path: valid warm progress while the slow lock is held; expired/negative results;
+half-window refresh ownership; independent pairs; close and in-flight read
+join ordering; bounded snapshot retention; and PostgreSQL acquisition tripwires.
+Use explicit barriers or state changes, not sleeps as the primary proof.
+
+Only after correctness succeeds, freeze a separate full R9 fresh-control pilot
+with exact patch/build identities before observing performance. Keep every
+outcome. Do not reuse formal calibration controls, retry an unfavorable result
+or call this a qualified better reference before an actual directional pass
+and the independently committed held-out screen. No builds, tests or probes
+may overlap the running calibration cohort.

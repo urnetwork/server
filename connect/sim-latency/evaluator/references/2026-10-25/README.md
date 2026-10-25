@@ -5,6 +5,11 @@ retained as an unfavorable result, not eligible for advancement as the faster
 reference. A separate owner-admission-map hypothesis is drafted at the end of
 this record and has not been applied or tested.
 
+A separate [immutable positive-cache snapshot design](SNAPSHOT-HYPOTHESIS.md)
+records a lock-free-hit hypothesis and its ownership/expiry/retention test
+requirements. It has no implementation or measured result and is not a
+qualified faster reference.
+
 ## Warm-reader candidate
 
 Prepared against exact frozen server
