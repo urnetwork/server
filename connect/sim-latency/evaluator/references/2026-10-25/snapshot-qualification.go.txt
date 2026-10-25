@@ -186,3 +186,69 @@ func TestResidentContractSnapshotOwnersCloseIndependently(t *testing.T) {
 		}
 	})
 }
+
+// Forces a selected warm hit to resume only after its source lease expires.
+func TestResidentContractSnapshotDelayedHitRechecksSourceDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		reads := 0
+		manager.readContract = func(context.Context, server.Id, server.Id) residentContractAllowance {
+			reads++
+			return residentContractAllowance{active: reads == 1, validUntil: deadline}
+		}
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial lease refused")
+		}
+		started, release := make(chan struct{}), make(chan struct{})
+		manager.beforeSnapshotReturnForTest = func() { close(started); <-release }
+		result := make(chan bool, 1)
+		go func() { result <- manager.HasActiveContract(source, destination) }()
+		<-started
+		time.Sleep(1500 * time.Millisecond)
+		close(release)
+		allowed := <-result
+		manager.beforeSnapshotReturnForTest = nil
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if allowed || reads != 2 {
+			t.Fatal("selected snapshot carried stale time across the barrier")
+		}
+	})
+}
+
+// Pauses cancellation itself, proving the closed flag protects an already
+// selected snapshot even while its context and signed lease remain live.
+func TestResidentContractSnapshotDelayedHitSeesCloseBeforeCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial allowance refused")
+		}
+		selected, returnRelease := make(chan struct{}), make(chan struct{})
+		manager.beforeSnapshotReturnForTest = func() { close(selected); <-returnRelease }
+		result := make(chan bool, 1)
+		go func() { result <- manager.HasActiveContract(source, destination) }()
+		<-selected
+		cancelStarted, cancelRelease, closeDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		originalCancel := manager.cancel
+		manager.cancel = func() { close(cancelStarted); <-cancelRelease; originalCancel() }
+		go func() { manager.Close(); close(closeDone) }()
+		<-cancelStarted
+		contextWasLive := manager.ctx.Err() == nil
+		close(returnRelease)
+		allowed := <-result
+		close(cancelRelease)
+		<-closeDone
+		manager.cancel = originalCancel
+		manager.beforeSnapshotReturnForTest = nil
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if !contextWasLive || allowed {
+			t.Fatal("selected snapshot bypassed closed-owner authority")
+		}
+	})
+}

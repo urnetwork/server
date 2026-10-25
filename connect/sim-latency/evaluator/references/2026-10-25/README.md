@@ -7,7 +7,7 @@ this record and has not been applied or tested.
 
 A separate [immutable positive-cache snapshot design](SNAPSHOT-HYPOTHESIS.md)
 records a lock-free-hit hypothesis and its ownership/expiry/retention test
-requirements. It includes an uncompiled draft patch and six candidate-only
+requirements. It includes an uncompiled draft patch and eight candidate-only
 test drafts, but no test pass or measured result. It is not a qualified faster
 reference and does not change the baseline.
 

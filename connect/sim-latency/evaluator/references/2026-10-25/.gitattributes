@@ -1,0 +1,2 @@
+# Unified-diff context prefixes are protocol bytes, not Go indentation.
+*.patch whitespace=-blank-at-eol,-space-before-tab

@@ -6,12 +6,12 @@ to the failed warm-reader pilot or authorization to change the baseline.
 The existing owner-admission-map draft is also unqualified.
 
 [`warm-snapshot.patch`](warm-snapshot.patch), SHA-256
-`36f2f0fe83d63bdc2336d57f4638915e539f7899b1abe344e99e73bea52bb904`,
+`46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924`,
 changes only `connect/resident_contract_manager.go` against frozen blob
-`ba3c09f7960f789b37a262b1542ee4dbdca93996`. Six candidate-only deterministic
+`ba3c09f7960f789b37a262b1542ee4dbdca93996`. Eight candidate-only deterministic
 test drafts are preserved as
 [`snapshot-qualification.go.txt`](snapshot-qualification.go.txt), SHA-256
-`b930f9f05df788388533be3e1ca68c42b07add6e9eb7ec1a32d44bbddd6ca37f`.
+`26c459d5bf580a94de34b45636847a6b6880d190681d66bd5df52d2ca36bd40f`.
 The `.txt` fixture is not compiled by the simulator suite or submitted patch.
 Preparation workspace: `temp/reference-snapshot-draft-20261025.BFH83oNJ/`.
 
@@ -96,10 +96,16 @@ path: valid warm progress while the slow lock is held; expired/negative results;
 half-window refresh ownership; independent pairs; close and in-flight read
 join ordering; bounded snapshot retention; and PostgreSQL acquisition tripwires.
 Use explicit barriers or state changes, not sleeps as the primary proof.
-The six drafted tests cover a held-lock/slow-path tripwire warm hit, exact
+The eight drafted tests cover a held-lock/slow-path tripwire warm hit, exact
 virtual-clock source expiry and immutable old contents, negative refresh,
 barrier-controlled late refresh after close, bounded recent provider cohorts
-and independent owner shutdown. They must actually compile and pass, together
+and independent owner shutdown. Two additional explicit-barrier cases pause
+an already selected warm hit across source expiry and across Close before
+context cancellation. A private nil-in-production hook enables these orderings
+without wall-clock sleeps. Before advancement, removing the final deadline
+check or closed-flag check must deterministically fail its respective test;
+retain those behavioral controls and the restored pass. These controls are
+planned, not executed evidence. Tests must actually compile and pass, together
 with the existing composed PostgreSQL-tripwire tests, before any pilot.
 
 Only after correctness succeeds, freeze a separate full R9 fresh-control pilot

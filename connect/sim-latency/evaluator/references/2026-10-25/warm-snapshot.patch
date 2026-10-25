@@ -1,8 +1,8 @@
 diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
-index ba3c09f..92f6c6a 100644
+index ba3c09f..8fb9fea 100644
 --- a/connect/resident_contract_manager.go
 +++ b/connect/resident_contract_manager.go
-@@ -5,29 +5,46 @@ package connect
+@@ -5,33 +5,52 @@ package connect
  import (
  	"context"
  	"sync"
@@ -54,7 +54,13 @@ index ba3c09f..92f6c6a 100644
  	readWorkers     sync.WaitGroup
  	// Nil in production. Tests pause after the first clock sample and before
  	// taking the map lock, without relying on scheduling of a blocked mutex.
-@@ -45,13 +62,14 @@ func newResidentContractManager(
+ 	beforeCheckLockForTest func()
++	// Nil in production; forces time/close ordering after snapshot selection.
++	beforeSnapshotReturnForTest func()
+ 
+ 	nextActiveContractSweepTime time.Time
+ }
+@@ -45,13 +64,14 @@ func newResidentContractManager(
  	settings *ExchangeSettings,
  ) *residentContractManager {
  	manager := &residentContractManager{
@@ -76,7 +82,7 @@ index ba3c09f..92f6c6a 100644
  	}
  	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
  		return readResidentContractAllowance(packetCtx, source, destination)
-@@ -76,6 +94,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+@@ -76,6 +96,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
  		return false
  	}
  	pair := model.NewUnorderedTransferPair(sourceId, destinationId)
@@ -86,7 +92,7 @@ index ba3c09f..92f6c6a 100644
  	now := time.Now()
  	cached, read := false, false
  	var cachedDeadline time.Time
-@@ -85,13 +106,15 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+@@ -85,13 +108,15 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
  	func() {
  		self.stateLock.Lock()
  		defer self.stateLock.Unlock()
@@ -103,7 +109,7 @@ index ba3c09f..92f6c6a 100644
  				}
  			}
  			for key, checkLimiter := range self.checkLimiters {
-@@ -99,7 +122,10 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+@@ -99,7 +124,10 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
  					delete(self.checkLimiters, key)
  				}
  			}
@@ -115,7 +121,7 @@ index ba3c09f..92f6c6a 100644
  		}
  		// Admission may have waited for a map sweep or another short owner
  		// operation; a timestamp from before taking the lock is not authority.
-@@ -115,6 +141,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+@@ -115,6 +143,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
  		if self.activeReads[pair] {
  			return
  		}
@@ -125,7 +131,7 @@ index ba3c09f..92f6c6a 100644
  		checkLimiter := self.checkLimiters[pair]
  		if checkLimiter == nil {
  			// Reuse the resident's destination budget for recent denied pairs
-@@ -122,7 +151,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+@@ -122,7 +153,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
  			if len(self.checkLimiters) >= max(0, self.settings.MaxConcurrentForwardsPerResident) {
  				return
  			}
@@ -134,7 +140,7 @@ index ba3c09f..92f6c6a 100644
  			self.checkLimiters[pair] = checkLimiter
  		}
  		if read = checkLimiter.allow(now); read {
-@@ -171,8 +200,10 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
+@@ -171,8 +202,10 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
  	if completed {
  		if active && self.settings.ContractManagerCheckTimeout > 0 {
  			self.activeContracts[pair] = &activeContractEntry{checkTime: now, validUntil: allowance.validUntil}
@@ -146,7 +152,7 @@ index ba3c09f..92f6c6a 100644
  		}
  	}
  	self.stateLock.Unlock()
-@@ -186,7 +217,8 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
+@@ -186,7 +219,8 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
  // cancellation interrupts Redis I/O; existing reads still belong to the join.
  func (self *residentContractManager) Close() {
  	self.stateLock.Lock()
@@ -156,7 +162,7 @@ index ba3c09f..92f6c6a 100644
  	self.stateLock.Unlock()
  	self.cancel()
  }
-@@ -197,6 +229,35 @@ func (self *residentContractManager) CloseAndWait(ctx context.Context) error {
+@@ -197,6 +231,40 @@ func (self *residentContractManager) CloseAndWait(ctx context.Context) error {
  	return waitForWorkerGroup(ctx, &self.readWorkers, "resident contract reads")
  }
  
@@ -172,8 +178,13 @@ index ba3c09f..92f6c6a 100644
 +	}
 +	deadline := entry.deadline(self.settings.ContractManagerCheckTimeout)
 +	now := time.Now()
-+	return now.Before(entry.checkTime.Add(deadline.Sub(entry.checkTime)/2)) &&
-+		!self.readsClosed.Load() && self.ctx.Err() == nil && time.Now().Before(deadline)
++	if !now.Before(entry.checkTime.Add(deadline.Sub(entry.checkTime) / 2)) {
++		return false
++	}
++	if self.beforeSnapshotReturnForTest != nil {
++		self.beforeSnapshotReturnForTest()
++	}
++	return !self.readsClosed.Load() && self.ctx.Err() == nil && time.Now().Before(deadline)
 +}
 +
 +// Owner-locked replacement retains one bounded immutable map, not a history.
