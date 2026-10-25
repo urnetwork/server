@@ -1,0 +1,43 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+index ba3c09f..08f7c5c 100644
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -22,7 +22,7 @@ type residentContractManager struct {
+ 	clientId server.Id
+ 	settings *ExchangeSettings
+ 
+-	stateLock       sync.Mutex
++	stateLock       sync.RWMutex
+ 	activeContracts map[model.TransferPair]*activeContractEntry
+ 	activeReads     map[model.TransferPair]bool
+ 	checkLimiters   map[model.TransferPair]*limiter
+@@ -82,6 +82,29 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 	if self.beforeCheckLockForTest != nil {
+ 		self.beforeCheckLockForTest()
+ 	}
++	// Fresh positive hits only read shared state. Admission, refresh and sweep
++	// still take exclusive ownership; no lease or cache deadline is extended.
++	var sharedDeadline time.Time
++	shared := func() bool {
++		self.stateLock.RLock()
++		defer self.stateLock.RUnlock()
++		if self.readsClosed || self.ctx.Err() != nil || self.settings.ContractManagerCheckTimeout <= 0 {
++			return false
++		}
++		cacheNow := time.Now()
++		if !cacheNow.Before(self.nextActiveContractSweepTime) {
++			return false
++		}
++		entry := self.activeContracts[pair]
++		if entry == nil {
++			return false
++		}
++		sharedDeadline = entry.deadline(self.settings.ContractManagerCheckTimeout)
++		return cacheNow.Before(sharedDeadline) && cacheNow.Before(entry.checkTime.Add(sharedDeadline.Sub(entry.checkTime)/2))
++	}()
++	if shared {
++		return time.Now().Before(sharedDeadline)
++	}
+ 	func() {
+ 		self.stateLock.Lock()
+ 		defer self.stateLock.Unlock()
