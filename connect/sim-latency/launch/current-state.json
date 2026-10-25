@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T22:46:16Z",
+  "observed_at": "2026-10-25T23:18:30Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "snapshot_directional_pilot_passed_preserved_formal_calibration_pending",
+  "status": "snapshot_pilot_preserved_negative_build_qualified_formal_calibration_pending",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
     "status": "first_cohort_complete_passed_preserved",
@@ -30,11 +30,11 @@
     "next_action": "Position1 passed and preserved phase3d6c35d29 pushed. Separatepilot89533 completed0/directionalpass/allgates/cleanup; alloriginals preserved. Publish that phase then continue formalpositions2-5 and independent reference qualification. Pilot samples never enter Stage A. No activation during main maintenance."
   },
   "latest_external_read_only_probe": {
-    "observed_at": "2026-10-25T19:40:42Z",
+    "observed_at": "2026-10-25T23:18:30Z",
     "competition_info_http": 503,
     "competition_info_code": "source_not_ready",
     "competition_info_message": "the exact runtime source envelope is unavailable",
-    "competition_info_observed_at": "2026-10-25T19:40:42Z",
+    "competition_info_observed_at": "2026-10-25T23:18:30Z",
     "minio_ready_connection": "HTTP 200 at currently configured172.28.208.176:23900",
     "minio_ready_http": 200,
     "minio_probe_correction": "Previous hardcoded172.28.208.177 probe targeted the old endpoint, not current Sille MinIO. Host config/main/settings.yml selects .176. No config or service changed; readiness alone is not locking/versioning/replication/capacity proof.",
@@ -543,6 +543,30 @@
     "next_action": "Screen6f5e43982 and predata dd49b991f published. Pilot89533 ended0 at22:39:47 withbothdirectionslower andallgates/cleanup. Preserve/publish completeoutcome then continue fixed calibration and held-out qualification. No statistical/takeover or held-out claim."
   },
   "queued_idle_slot_preparations": {
+    "negative_control_qualification": {
+      "status": "current_source_correctness_and_offline_build_passed_preserved",
+      "session_id": 46603,
+      "controller_pid": 422210,
+      "terminal": true,
+      "cleanup_verified": true,
+      "source_root": "/home/by/urnetwork/temp/warm-readers-negative-qualification-20261025.15cNHvs8",
+      "patch_sha256": "2957ef507f7edc9dadcb09abd6425664e88748612917959a9a65243a0365ebe4",
+      "new_passing_race_test_executions": 156,
+      "new_performance_measurements": 0,
+      "candidate_commit": "e445ffb75fc3305df6c1ccd5d99e768e45e1142e",
+      "candidate_image_digest": "sha256:c675a2158dc3a3a0238a4421c8486d51051e09b40698c1fc92aff843150c355c",
+      "candidate_binary_sha256": "fc3709dc5dcd2448f903902d801d0e5dff6ce0274142b012fd5c029892dc9b83",
+      "patch_policy_file_sha256": "0a1cb9032ee630042f1a1fe585493fba6f7b3fc10b71b697de39cebe43e00a1e",
+      "composite_builder_sha256": "0c0dff0ad9176986c26d3413b0ef8259859039b6648d6ec3a776354bedf3dd81",
+      "build_metadata_sha256": "f856d61a134173378ebf48e2870e995b4883208cff4b918fd7d99b81a6cdfb8c",
+      "preserved_archive_sha256": "f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b",
+      "archive_verification_log_sha256": "dda295d3c7f7c16e3d3b5ed25054302757040c4c05b6e79d0633a2754c79d6cb",
+      "publication_manifest_check_log_sha256": "761d9a2a894442ab1f0061eebfd5ad5f2f6f7aabb85c705e638abd22f151f3d2",
+      "publication_document_check_log_sha256": "c667a9e6a4e531dfb361e1eb611c5ef897472a5f0f8d8740951ec3d85f0e47be",
+      "qualification_record": "server/connect/sim-latency/evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md",
+      "current_release_negative_performance_established": false,
+      "next_action": "Publish phase, then continue predeclared Stage A position2. Freeze this proposedworse patch/build before held-out screen; oldrelease17.8%regression is planningonly, never newcontrol data."
+    },
     "snapshot_pilot_protocol": "server/connect/sim-latency/launch/SNAPSHOT-PILOT-2026-10-25.md",
     "snapshot_pilot_generator": "server/connect/sim-latency/launch/snapshot-pilot-preparation.go.txt",
     "snapshot_pilot_generator_sha256": "e34654793e45bc1aff96cb8ce171db9b14351e8c068b3b372a73e49246499eb5",
@@ -578,9 +602,9 @@
   },
   "external_holds": {
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
-    "last_check_at": "2026-10-25T19:40:42Z",
+    "last_check_at": "2026-10-25T23:18:30Z",
     "api_info_http": 503,
-    "api_info_observation": "Read-only GET19:40UTC returns typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. API is responding; this is not proof of DB outage or MinIO transport failure. Underlying envelope/protection prerequisite is deliberately not disclosed publicly. Qualify/install the exact intended envelope and readiness acknowledgments after maintenance clearance; do not bypass guards or restart from this response alone.",
+    "api_info_observation": "Read-only GET23:18UTC returns typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. API is responding; this is not proof of DB outage or MinIO transport failure. Underlying envelope/protection prerequisite is deliberately not disclosed publicly. Qualify/install the exact intended envelope and readiness acknowledgments after maintenance clearance; do not bypass guards or restart from this response alone.",
     "minio_health": "Configured172.28.208.176:23900 returned200. Old .177 probe was stale, not proof current MinIO unavailable. Authenticated durability/retention/capacity/replication acceptance remains pending.",
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },

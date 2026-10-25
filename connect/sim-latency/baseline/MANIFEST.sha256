@@ -1,5 +1,5 @@
-6499cb1b08eb1780cf3576e9eb24d78fb6e3ad07ab0cfad1ed14052bcc61b633  .gitattributes
-304ced73c3a5dc2aa5ba84e287c512fd21e2229a8c4926ca89bfebd9f47cdd58  INDEX.json
+eaae4eda9e5bcdc7b447133b277eb163e97d170735ed30b4dff1853fe9882927  .gitattributes
+2aed5ca55f7f792343eb7b571fa974636031004f3c9693e7f0d82de25e838a96  INDEX.json
 cc145d9445f25ccecc5bbdad4fc7d4397e1c7b8602b494950e611f5ca6805b86  README.md
 cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9  final-baseline.html
 d6ffb4df797535c1143db4fcbb8e36d7941dbb3c88b1c8c7314e467852ffa258  final-preview.html
@@ -365,6 +365,13 @@ dee9b189c109d7990f258ef813dad7ee26f90f73cd19074579b133b71a8dc985  prelaunch-snap
 9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90  prelaunch-snapshot-screen-2026-10-25/cohort.tar.gz.part-00
 3083aa22897db3013b39944e929a51bf7f052347b5338fb39059626ffc6268b7  prelaunch-snapshot-screen-2026-10-25/selected-original-inventory.json
 57ddd4fd90777238a63357805860bc60d60cb7967ebb7009db2a449cf909e991  prelaunch-snapshot-screen-2026-10-25/summary.json
+e011a925724d3131913660fbab3b05a0da10ce69c54105831edae6944097a2ff  prelaunch-warm-reader-negative-build-2026-10-25/INDEX.json
+d44866425f528dbdefe4d3d72092dce49ae72856f44e92cd829960bfa24cf2c7  prelaunch-warm-reader-negative-build-2026-10-25/README.md
+f856d61a134173378ebf48e2870e995b4883208cff4b918fd7d99b81a6cdfb8c  prelaunch-warm-reader-negative-build-2026-10-25/build-metadata.json
+f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b  prelaunch-warm-reader-negative-build-2026-10-25/cohort.tar.gz.part-00
+98e266f6d9b2a212519eb56fcdab2a671c2630eb90420075b6205b89446499c5  prelaunch-warm-reader-negative-build-2026-10-25/image-readback.log
+0ee1ed42c699248f0c75b327aeb61aec308170202ea1dac9ed772675a58c9d11  prelaunch-warm-reader-negative-build-2026-10-25/selected-original-inventory.json
+1713afb11bbc4378f669c9b3d830ab74c3677cc6c36931948462d550c3ae4b46  prelaunch-warm-reader-negative-build-2026-10-25/summary.json
 4204ded319ab40e10085e6687a8b105f348fb63232b61bd3df50b67eddae89f2  prelaunch-warm-reader-pilot-2026-10-25/INDEX.json
 dadf19cde521e68474c78e08e5fdef96f7c8ccd882dda3036ca0b9b76f12c841  prelaunch-warm-reader-pilot-2026-10-25/completed/README.md
 07730ca6e4c9c6ae4acae0e87728104dcfffc32631e342566e1c1e07cdb78f31  prelaunch-warm-reader-pilot-2026-10-25/completed/archive-verification.log

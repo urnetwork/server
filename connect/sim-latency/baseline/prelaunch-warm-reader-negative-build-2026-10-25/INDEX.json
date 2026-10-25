@@ -1,0 +1,19 @@
+{
+  "chunks": [
+    {
+      "bytes": 76599,
+      "path": "cohort.tar.gz.part-00",
+      "sha256": "f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b"
+    }
+  ],
+  "gzip_sha256": "f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b",
+  "inventory_sha256": "0ee1ed42c699248f0c75b327aeb61aec308170202ea1dac9ed772675a58c9d11",
+  "kind": "prelaunch-warm-reader-negative-build",
+  "new_passing_tests": 156,
+  "official": false,
+  "schema": 1,
+  "scoring_executions": 0,
+  "selected_original_files": 13,
+  "status": "correctness_and_offline_build_only",
+  "summary_sha256": "1713afb11bbc4378f669c9b3d830ab74c3677cc6c36931948462d550c3ae4b46"
+}

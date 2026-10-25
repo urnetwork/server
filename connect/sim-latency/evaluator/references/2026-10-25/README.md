@@ -5,6 +5,13 @@ retained as an unfavorable result, not eligible for advancement as the faster
 reference. A separate owner-admission-map hypothesis is drafted at the end of
 this record and has not been applied or tested.
 
+The unchanged warm-reader patch is now proposed as the held-out **negative**
+control, based on its retained earlier-release regression. A
+[fresh corrected-source correctness/offline-build qualification](NEGATIVE-QUALIFICATION.md)
+passed; it does not establish corrected-source performance or reuse any old
+timing/control samples. The future fixed held-out comparison must validate its
+ordering. The historical artificial-delay control is not substituted silently.
+
 A separate [immutable positive-cache snapshot design](SNAPSHOT-HYPOTHESIS.md)
 records a lock-free-hit hypothesis and its ownership/expiry/retention test
 requirements. Its independent race-enabled correctness screen has passed three
