@@ -1,9 +1,19 @@
 # Immutable positive-cache snapshot: static research only
 
-No patch, build, correctness pass or performance result is claimed here. This
+A draft patch exists, but **has not been compiled, tested or measured**. This
 is a separate hypothesis against the corrected frozen source, not a revision
 to the failed warm-reader pilot or authorization to change the baseline.
 The existing owner-admission-map draft is also unqualified.
+
+[`warm-snapshot.patch`](warm-snapshot.patch), SHA-256
+`36f2f0fe83d63bdc2336d57f4638915e539f7899b1abe344e99e73bea52bb904`,
+changes only `connect/resident_contract_manager.go` against frozen blob
+`ba3c09f7960f789b37a262b1542ee4dbdca93996`. Six candidate-only deterministic
+test drafts are preserved as
+[`snapshot-qualification.go.txt`](snapshot-qualification.go.txt), SHA-256
+`b930f9f05df788388533be3e1ca68c42b07add6e9eb7ec1a32d44bbddd6ca37f`.
+The `.txt` fixture is not compiled by the simulator suite or submitted patch.
+Preparation workspace: `temp/reference-snapshot-draft-20261025.BFH83oNJ/`.
 
 ## Mechanism to investigate
 
@@ -15,12 +25,18 @@ refresh, map sweeping and read-worker registration keep their existing owner
 lock. This is a mechanism hypothesis, not evidence that contention dominates
 the measured score or that the improvement exceeds noise.
 
-A possible implementation uses one `atomic.Pointer` to an immutable snapshot
+The uncompiled draft uses one `atomic.Pointer` to an immutable snapshot
 containing copied `activeContractEntry` values. Publication happens under the
 existing owner lock after authoritative updates/removals. No mutable map or
 entry pointer may be modified after publication. Cold and second-half requests
 fall back to the existing admission path; they do not acquire new queues or
 wait for a refresh owned by another flow.
+
+The draft changes the existing close flag to one atomic authority, clears the
+snapshot on close, refuses late publication, avoids copying for an absent
+negative result and moves the touched admission/sweep interval to private
+per-owner settings with the same one-second default. Actual equivalence is not
+established by this description; the correctness screen remains mandatory.
 
 ## Correctness constraints from the static review
 
@@ -61,6 +77,11 @@ path: valid warm progress while the slow lock is held; expired/negative results;
 half-window refresh ownership; independent pairs; close and in-flight read
 join ordering; bounded snapshot retention; and PostgreSQL acquisition tripwires.
 Use explicit barriers or state changes, not sleeps as the primary proof.
+The six drafted tests cover a held-lock/slow-path tripwire warm hit, exact
+virtual-clock source expiry and immutable old contents, negative refresh,
+barrier-controlled late refresh after close, bounded recent provider cohorts
+and independent owner shutdown. They must actually compile and pass, together
+with the existing composed PostgreSQL-tripwire tests, before any pilot.
 
 Only after correctness succeeds, freeze a separate full R9 fresh-control pilot
 with exact patch/build identities before observing performance. Keep every

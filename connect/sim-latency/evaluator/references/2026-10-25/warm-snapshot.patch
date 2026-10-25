@@ -1,0 +1,194 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+index ba3c09f..92f6c6a 100644
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -5,29 +5,46 @@ package connect
+ import (
+ 	"context"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/urnetwork/server"
+ 	"github.com/urnetwork/server/model"
+ )
+ 
+-const residentContractCheckMinTimeout = time.Second
++// Per-owner admission and sweep pacing; non-positive disables new reads.
++type residentContractAdmissionSettings struct {
++	CheckMinTimeout time.Duration
++}
++
++// Preserves one-second admission pacing without sharing mutable settings.
++func defaultResidentContractAdmissionSettings() *residentContractAdmissionSettings {
++	return &residentContractAdmissionSettings{CheckMinTimeout: time.Second}
++}
++
++// Published maps and their copied entries are immutable after Store.
++type residentContractSnapshot struct {
++	activeContracts map[model.TransferPair]activeContractEntry
++}
+ 
+ // Owns recent positive results and per-pair admission. All maps are guarded by
+-// stateLock; Redis reads run outside it. No waiter or retry queue is retained.
++// stateLock; immutable snapshots are read atomically. Redis reads run outside
++// the lock. No waiter or retry queue is retained.
+ type residentContractManager struct {
+ 	ctx    context.Context
+ 	cancel context.CancelFunc
+ 
+-	clientId server.Id
+-	settings *ExchangeSettings
++	clientId          server.Id
++	settings          *ExchangeSettings
++	admissionSettings *residentContractAdmissionSettings
++	activeSnapshot    atomic.Pointer[residentContractSnapshot]
+ 
+ 	stateLock       sync.Mutex
+ 	activeContracts map[model.TransferPair]*activeContractEntry
+ 	activeReads     map[model.TransferPair]bool
+ 	checkLimiters   map[model.TransferPair]*limiter
+ 	readContract    func(context.Context, server.Id, server.Id) residentContractAllowance
+-	readsClosed     bool
++	readsClosed     atomic.Bool
+ 	readWorkers     sync.WaitGroup
+ 	// Nil in production. Tests pause after the first clock sample and before
+ 	// taking the map lock, without relying on scheduling of a blocked mutex.
+@@ -45,13 +62,14 @@ func newResidentContractManager(
+ 	settings *ExchangeSettings,
+ ) *residentContractManager {
+ 	manager := &residentContractManager{
+-		ctx:             server.WithoutPostgres(ctx),
+-		cancel:          cancel,
+-		clientId:        clientId,
+-		settings:        settings,
+-		activeContracts: map[model.TransferPair]*activeContractEntry{},
+-		activeReads:     map[model.TransferPair]bool{},
+-		checkLimiters:   map[model.TransferPair]*limiter{},
++		ctx:               server.WithoutPostgres(ctx),
++		cancel:            cancel,
++		clientId:          clientId,
++		settings:          settings,
++		admissionSettings: defaultResidentContractAdmissionSettings(),
++		activeContracts:   map[model.TransferPair]*activeContractEntry{},
++		activeReads:       map[model.TransferPair]bool{},
++		checkLimiters:     map[model.TransferPair]*limiter{},
+ 	}
+ 	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
+ 		return readResidentContractAllowance(packetCtx, source, destination)
+@@ -76,6 +94,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 		return false
+ 	}
+ 	pair := model.NewUnorderedTransferPair(sourceId, destinationId)
++	if self.hasWarmSnapshotContract(pair) {
++		return true
++	}
+ 	now := time.Now()
+ 	cached, read := false, false
+ 	var cachedDeadline time.Time
+@@ -85,13 +106,15 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 	func() {
+ 		self.stateLock.Lock()
+ 		defer self.stateLock.Unlock()
+-		if self.readsClosed || self.ctx.Err() != nil {
++		if self.readsClosed.Load() || self.ctx.Err() != nil {
+ 			return
+ 		}
+ 		if !now.Before(self.nextActiveContractSweepTime) {
++			snapshotChanged := false
+ 			for key, entry := range self.activeContracts {
+ 				if self.settings.ContractManagerCheckTimeout <= 0 || !now.Before(entry.deadline(self.settings.ContractManagerCheckTimeout)) {
+ 					delete(self.activeContracts, key)
++					snapshotChanged = true
+ 				}
+ 			}
+ 			for key, checkLimiter := range self.checkLimiters {
+@@ -99,7 +122,10 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 					delete(self.checkLimiters, key)
+ 				}
+ 			}
+-			self.nextActiveContractSweepTime = now.Add(residentContractCheckMinTimeout)
++			self.nextActiveContractSweepTime = now.Add(self.admissionSettings.CheckMinTimeout)
++			if snapshotChanged {
++				self.publishActiveSnapshotWithLock()
++			}
+ 		}
+ 		// Admission may have waited for a map sweep or another short owner
+ 		// operation; a timestamp from before taking the lock is not authority.
+@@ -115,6 +141,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 		if self.activeReads[pair] {
+ 			return
+ 		}
++		if self.admissionSettings.CheckMinTimeout <= 0 {
++			return
++		}
+ 		checkLimiter := self.checkLimiters[pair]
+ 		if checkLimiter == nil {
+ 			// Reuse the resident's destination budget for recent denied pairs
+@@ -122,7 +151,7 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 			if len(self.checkLimiters) >= max(0, self.settings.MaxConcurrentForwardsPerResident) {
+ 				return
+ 			}
+-			checkLimiter = newLimiter(self.ctx, residentContractCheckMinTimeout)
++			checkLimiter = newLimiter(self.ctx, self.admissionSettings.CheckMinTimeout)
+ 			self.checkLimiters[pair] = checkLimiter
+ 		}
+ 		if read = checkLimiter.allow(now); read {
+@@ -171,8 +200,10 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
+ 	if completed {
+ 		if active && self.settings.ContractManagerCheckTimeout > 0 {
+ 			self.activeContracts[pair] = &activeContractEntry{checkTime: now, validUntil: allowance.validUntil}
+-		} else {
++			self.publishActiveSnapshotWithLock()
++		} else if self.activeContracts[pair] != nil {
+ 			delete(self.activeContracts, pair)
++			self.publishActiveSnapshotWithLock()
+ 		}
+ 	}
+ 	self.stateLock.Unlock()
+@@ -186,7 +217,8 @@ func (self *residentContractManager) performActiveContractRead(pair model.Transf
+ // cancellation interrupts Redis I/O; existing reads still belong to the join.
+ func (self *residentContractManager) Close() {
+ 	self.stateLock.Lock()
+-	self.readsClosed = true
++	self.readsClosed.Store(true)
++	self.activeSnapshot.Store(nil)
+ 	self.stateLock.Unlock()
+ 	self.cancel()
+ }
+@@ -197,6 +229,35 @@ func (self *residentContractManager) CloseAndWait(ctx context.Context) error {
+ 	return waitForWorkerGroup(ctx, &self.readWorkers, "resident contract reads")
+ }
+ 
++// Only first-half positives avoid admission. No snapshot survives into slow I/O.
++func (self *residentContractManager) hasWarmSnapshotContract(pair model.TransferPair) bool {
++	snapshot := self.activeSnapshot.Load()
++	if snapshot == nil || self.settings.ContractManagerCheckTimeout <= 0 {
++		return false
++	}
++	entry, ok := snapshot.activeContracts[pair]
++	if !ok {
++		return false
++	}
++	deadline := entry.deadline(self.settings.ContractManagerCheckTimeout)
++	now := time.Now()
++	return now.Before(entry.checkTime.Add(deadline.Sub(entry.checkTime)/2)) &&
++		!self.readsClosed.Load() && self.ctx.Err() == nil && time.Now().Before(deadline)
++}
++
++// Owner-locked replacement retains one bounded immutable map, not a history.
++func (self *residentContractManager) publishActiveSnapshotWithLock() {
++	if self.readsClosed.Load() || len(self.activeContracts) == 0 {
++		self.activeSnapshot.Store(nil)
++		return
++	}
++	activeTransferPairEntries := make(map[model.TransferPair]activeContractEntry, len(self.activeContracts))
++	for pair, entry := range self.activeContracts {
++		activeTransferPairEntries[pair] = *entry
++	}
++	self.activeSnapshot.Store(&residentContractSnapshot{activeContracts: activeTransferPairEntries})
++}
++
+ // Records only successful reads; denied reads retain admission state, not an
+ // authorization result.
+ type activeContractEntry struct {

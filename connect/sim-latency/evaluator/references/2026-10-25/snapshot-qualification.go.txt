@@ -1,0 +1,188 @@
+// Candidate-only research qualification; not part of the submitted patch.
+package connect
+
+import (
+	"context"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+)
+
+// A slow-path tripwire and held owner lock prove the actual warm entry path.
+func TestResidentContractSnapshotWarmHitAvoidsOwnerLock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
+		if !manager.HasActiveContract(source, destination) || manager.activeSnapshot.Load() == nil {
+			t.Fatal("positive read did not publish a snapshot")
+		}
+		manager.beforeCheckLockForTest = func() { t.Fatal("warm hit entered slow admission") }
+		func() {
+			manager.stateLock.Lock()
+			defer manager.stateLock.Unlock()
+			if !manager.HasActiveContract(source, destination) {
+				t.Fatal("healthy snapshot was refused")
+			}
+		}()
+		manager.beforeCheckLockForTest = nil
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// Virtual time reaches the exact source deadline; neither cache may extend it.
+func TestResidentContractSnapshotCannotExtendSourceLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		calls := 0
+		manager.readContract = func(context.Context, server.Id, server.Id) residentContractAllowance {
+			calls++
+			if calls == 1 {
+				return residentContractAllowance{active: true, validUntil: deadline}
+			}
+			return residentContractAllowance{}
+		}
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial lease refused")
+		}
+		previous := manager.activeSnapshot.Load()
+		if previous == nil {
+			t.Fatal("missing initial snapshot")
+		}
+		time.Sleep(1500 * time.Millisecond)
+		if manager.HasActiveContract(source, destination) || manager.activeSnapshot.Load() != nil {
+			t.Fatal("expired authority survived invalidation")
+		}
+		pair := model.NewUnorderedTransferPair(source, destination)
+		if entry := previous.activeContracts[pair]; !entry.validUntil.Equal(deadline) {
+			t.Fatal("published snapshot was mutated")
+		}
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// A completed negative refresh invalidates future warm lookups, not just maps.
+func TestResidentContractSnapshotNegativeRefreshInvalidatesHit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		calls := 0
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls++; return calls == 1 })
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial allowance refused")
+		}
+		time.Sleep(manager.settings.ContractManagerCheckTimeout / 2)
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("admitted refresh discarded still-valid cached lease")
+		}
+		synctest.Wait()
+		if calls != 2 || manager.activeSnapshot.Load() != nil || manager.HasActiveContract(source, destination) {
+			t.Fatal("negative refresh left usable authority")
+		}
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// Explicit barriers force Close before a late positive refresh completes.
+func TestResidentContractSnapshotClosePreventsLateRepublish(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, destination := residentReadControl(t)
+		started, release := make(chan struct{}), make(chan struct{})
+		calls := 0
+		manager.readContract = func(context.Context, server.Id, server.Id) residentContractAllowance {
+			calls++
+			if calls == 2 {
+				close(started)
+				<-release
+			}
+			return residentContractAllowance{active: true, validUntil: time.Now().Add(time.Hour)}
+		}
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("initial allowance refused")
+		}
+		time.Sleep(manager.settings.ContractManagerCheckTimeout / 2)
+		if !manager.HasActiveContract(source, destination) {
+			t.Fatal("refresh admission lost live lease")
+		}
+		<-started
+		manager.Close()
+		if manager.activeSnapshot.Load() != nil || manager.HasActiveContract(source, destination) {
+			t.Fatal("closed owner retained snapshot authority")
+		}
+		close(release)
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if manager.activeSnapshot.Load() != nil || calls != 2 {
+			t.Fatal("late read republished or registered new work")
+		}
+	})
+}
+
+// Repeated provider cohorts cannot accumulate snapshots beyond recent entries.
+func TestResidentContractSnapshotRetainsOnlyRecentProviderCohort(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, _, source, _ := residentReadControl(t)
+		manager.settings.MaxConcurrentForwardsPerResident = 4
+		manager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
+		for cohort := range 8 {
+			if cohort > 0 {
+				time.Sleep(manager.settings.ContractManagerCheckTimeout + time.Nanosecond)
+			}
+			for range 4 {
+				if !manager.HasActiveContract(source, server.NewId()) {
+					t.Fatal("bounded healthy cohort refused")
+				}
+			}
+			snapshot := manager.activeSnapshot.Load()
+			if snapshot == nil || len(snapshot.activeContracts) != 4 || len(manager.activeContracts) != 4 {
+				t.Fatal("expired provider history retained")
+			}
+		}
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if manager.activeSnapshot.Load() != nil {
+			t.Fatal("closed owner retained its snapshot")
+		}
+	})
+}
+
+// Retiring one owner must not invalidate or lock the healthy sibling's cache.
+func TestResidentContractSnapshotOwnersCloseIndependently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first, _, firstSource, firstDestination := residentReadControl(t)
+		second, _, secondSource, secondDestination := residentReadControl(t)
+		first.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
+		second.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { return true })
+		if !first.HasActiveContract(firstSource, firstDestination) || !second.HasActiveContract(secondSource, secondDestination) {
+			t.Fatal("independent allowances were not admitted")
+		}
+		if err := first.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if first.activeSnapshot.Load() != nil || first.HasActiveContract(firstSource, firstDestination) {
+			t.Fatal("closed first owner retained authority")
+		}
+		second.beforeCheckLockForTest = func() { t.Fatal("healthy sibling lost independent snapshot") }
+		func() {
+			second.stateLock.Lock()
+			defer second.stateLock.Unlock()
+			if !second.HasActiveContract(secondSource, secondDestination) {
+				t.Fatal("sibling close revoked healthy lease")
+			}
+		}()
+		second.beforeCheckLockForTest = nil
+		if err := second.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
