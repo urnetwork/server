@@ -8682,15 +8682,19 @@ pass 30 s out instead of 2 s and leaves a Redis idle mark (`{task_idle_wake}`
 hash tag, two-minute TTL, renewed by each idle pass). A single empty pass between
 debits keeps the 2 s cadence and sets no mark. After its commit, a settlement or deadline close
 that journaled a debit deletes the mark of each partition it wrote, and the
-producer that deleted it kicks the chain, so the next pass is due at once. The
+producer that deleted it kicks the chain, so the next pass is due at once. A
+scoped expiry repair (`RepairRedisContractExpiry`) does not wake: its contracts
+share one deadline, which a stalled wake could spend. The
 kick is a pooled transaction that moves the chain's run_at only if its queue
 key is free; a held key means the chain is being claimed, finished or
 rescheduled, which covers the debit. An active partition has no mark: its
 producers pay one Redis round trip and write nothing to the queue, and
-concurrent producers coalesce into one kick. The idle pass sets its mark only after its finishing commit and
+concurrent producers coalesce into one kick. A wake, kick included, waits at
+most one second, the bound of the contract-hole delta that every terminal claim
+already publishes. The idle pass sets its mark only after its finishing commit and
 then reads the journal again, so a debit committed in between still wakes it.
-Without a kick (Redis unavailable, a lost post, a producer from an older
-build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
+Without a kick (Redis unavailable, a lost post, a scoped expiry repair, a
+producer from an older build) a debit waits at most the 30 s back-off plus one 15 s page, inside the
 60 s WARN; the bands are unchanged. An empty partition samples
 `urnetwork_transfer_debit_oldest_seconds` only every 30 s, so its dashboard
 observation age reads up to about 30 s while healthy.

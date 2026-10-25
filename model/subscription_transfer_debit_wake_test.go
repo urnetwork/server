@@ -1,12 +1,19 @@
 // Both settlement paths that journal a debit wake their partition's backed-off
-// flush chain after the commit, and leave an active chain's queue row alone.
+// flush chain after the commit, and leave an active chain's queue row alone. A
+// scoped expiry repair does not wake (subscription_contract_redis_expiry_projection_test.go).
 package model
 
 import (
 	"context"
+	"errors"
+	"math"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -87,6 +94,32 @@ func TestAsyncDebitSettlementWakesOnlyABackedOffFlushChain(t *testing.T) {
 	})
 }
 
+// An ordinary bilateral close settles through the foreground owner without an
+// expiry scope, and its committed debit kicks the backed-off chain as the
+// deferred settlement's does. Only a scoped repair leaves the chain alone.
+func TestAsyncDebitBilateralCloseWakesABackedOffFlushChain(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		shard := transferDebitShard(f.balanceId)
+		backOffTransferDebitWakeStandIn(t, ctx, shard, true)
+		contract := createRedisAdmissionTest(ctx, f, 100)
+		server.Raise(CloseContract(ctx, contract.ContractId, f.sourceId, 11, false))
+		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.Before(server.NowUtc().Add(10 * time.Second)) {
+			t.Fatal("one party's close moved the chain", runAt)
+		}
+		server.Raise(CloseContract(ctx, contract.ContractId, f.destinationId, 11, false))
+		if _, pending, applied := asyncDebitTestState(t, ctx, f.balanceId); pending+applied != 1 {
+			t.Fatal("the bilateral close did not journal its debit", pending, applied)
+		}
+		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.After(server.NowUtc()) {
+			t.Fatal("the bilateral close's debit did not kick its backed-off chain", runAt)
+		}
+	})
+}
+
 // A deadline close of a Redis contract journals its debit too, and its
 // committed posts kick the partition's backed-off chain.
 func TestDeadlineCloseWakesABackedOffFlushChain(t *testing.T) {
@@ -113,6 +146,84 @@ func TestDeadlineCloseWakesABackedOffFlushChain(t *testing.T) {
 		server.RunPosts(ctx, posts...)
 		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.After(server.NowUtc()) {
 			t.Fatal("the deadline close's debit did not kick its backed-off chain", runAt)
+		}
+	})
+}
+
+// Fails a producer wake's idle-mark deletion on the deadline pool at once,
+// recording how long its caller would have waited for a stalled Redis.
+type transferDebitWakeBoundHook struct {
+	enabled   atomic.Bool
+	stateLock sync.Mutex
+	remaining []time.Duration
+}
+
+func (self *transferDebitWakeBoundHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (self *transferDebitWakeBoundHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return next
+}
+
+func (self *transferDebitWakeBoundHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, commands []redis.Cmder) error {
+		if !self.enabled.Load() || len(commands) == 0 || commands[0].Name() != "del" || len(commands[0].Args()) < 2 {
+			return next(ctx, commands)
+		}
+		key, ok := commands[0].Args()[1].(string)
+		if !ok || !strings.Contains(key, "{task_idle_wake}") {
+			return next(ctx, commands)
+		}
+		remaining := time.Duration(math.MaxInt64)
+		if deadline, bounded := ctx.Deadline(); bounded {
+			remaining = time.Until(deadline)
+		}
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.remaining = append(self.remaining, remaining)
+		}()
+		return errors.New("synthetic idle mark unavailable")
+	}
+}
+
+// The remaining wait of every intercepted wake.
+func (self *transferDebitWakeBoundHook) snapshot() []time.Duration {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]time.Duration(nil), self.remaining...)
+}
+
+// A producer's wake is optional work its caller waits for after the commit. With
+// Redis stalled, it must cost a settlement no more than the contract-hole delta
+// that every terminal claim already spends, and a failed wake moves nothing.
+func TestAsyncDebitSettlementWakeWaitsNoLongerThanTheLifecycleDelta(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		shard := transferDebitShard(f.balanceId)
+		backOffTransferDebitWakeStandIn(t, ctx, shard, true)
+		contract := createRedisAdmissionTest(ctx, f, 100)
+		hook := &transferDebitWakeBoundHook{}
+		install, cancelInstall := context.WithTimeout(ctx, time.Second)
+		server.Raise(server.RedisWithDeadline(install, func(client server.RedisClient) error {
+			client.AddHook(hook)
+			return nil
+		}))
+		cancelInstall()
+		hook.enabled.Store(true)
+		defer hook.enabled.Store(false)
+		server.RunPosts(ctx, asyncDebitTestSettle(ctx, contract.ContractId, 11)...)
+		hook.enabled.Store(false)
+		remaining := hook.snapshot()
+		if len(remaining) != 1 || remaining[0] <= 0 || contractHoleRedisTimeout < remaining[0] {
+			t.Fatal("the settlement's wake could wait longer than the lifecycle delta's bound", remaining)
+		}
+		if runAt, _ := readTransferDebitWakeStandIn(t, ctx, shard); runAt.Before(server.NowUtc().Add(10 * time.Second)) {
+			t.Fatal("a failed wake moved the backed-off chain", runAt)
 		}
 	})
 }

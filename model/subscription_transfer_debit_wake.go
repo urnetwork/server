@@ -2,7 +2,8 @@
 // (taskworker/work/transfer_debit_work.go). Each settlement that journals a
 // debit wakes the chains of the partitions it wrote once its commit returns,
 // through the idle marks of task.WakeIdleRunOnce: an active chain costs the
-// settlement one Redis round trip and no queue write.
+// settlement one Redis round trip and no queue write. A scoped expiry repair
+// does not wake; its debits wait for the chain's own pass.
 package model
 
 import (
