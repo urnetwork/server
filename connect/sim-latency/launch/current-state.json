@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T15:23:30Z",
+  "observed_at": "2026-10-25T15:28:30Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "isolated_release_three_full_suites_passed_fresh_campaign_inputs_pending",
+  "status": "published_corrected_release_stage_a_cohort_01_running",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
-    "status": "five_fresh_inputs_independently_verified_freeze_pending_publication",
+    "status": "freeze_pushed_first_cohort_running",
     "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
     "protocol": "server/connect/sim-latency/launch/CALIBRATION-RESTART-2026-10-25.md",
     "server_commit": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
@@ -15,7 +15,9 @@
     "installed_bundle": "/usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container",
     "installed_evaluator_sha256": "263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e",
     "old_campaign_resumed": false,
-    "measurements_started": 0,
+    "invocations_started": 1,
+    "cohorts_completed": 0,
+    "freeze_commit": "2844161a9",
     "plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
     "evaluation_policy_sha256": "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
     "independent_preparation_log_sha256": "9a7f122d3f8869c92f81aa1b716a388bba3e1e7f98520c0ede59af0a18ed7173",
@@ -24,7 +26,7 @@
     "freeze_record": "server/connect/sim-latency/launch/CALIBRATION-RESTART-FREEZE-2026-10-25.md",
     "first_cohort_also_functional_qualification": true,
     "policy_identity_update_required": "Bind both simulator/scorer digests to new pristine binary6c8587be; all other policy fields stay identical. Canonical policy hash must therefore be regenerated, not copied from old image.",
-    "next_action": "Three full suites passed and fresh inputs independently verified with zero measurements. Verify preserved baseline manifest, commit/pull/push freeze and exact inputs, then run only declared positions serially under canonical slot. Stop on any execution/gate/integrity/budget/cleanup failure; no old-campaign resume. No activation during main maintenance."
+    "next_action": "Observe same live position1 handle. No overlapping tests/builds/simulations/pressure work. Stop on any execution/gate/integrity/budget/cleanup failure; no retry, old-campaign resume or nextposition without phase review/publication. No activation during main maintenance."
   },
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-25T15:22:17Z",
@@ -45,6 +47,27 @@
     "operator_proxy_retired": true
   },
   "active_attempt": {
+    "kind": "corrected-release-formal-offline-aa-cohort",
+    "owner_agent": "/root/provide_serialization_test",
+    "exec_session_id": 4660,
+    "manager_pid": 875431,
+    "runner_pid": 875441,
+    "evaluator_pid": 875570,
+    "manager_uid": 0,
+    "phase": "running",
+    "cohort_position": 1,
+    "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
+    "cohort_root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01",
+    "job_id": "eb5458d2-27bc-4c10-9233-b7c8be1692b5",
+    "round_id": "c8193705-e5e7-415f-988b-bc0c9d2978ac",
+    "started_at": "2026-10-25T15:28:07Z",
+    "execution_deadline": "2026-10-25T18:28:07Z",
+    "request_sha256": "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d",
+    "protocol_commit": "2844161a9",
+    "first_cohort_also_functional_qualification": true,
+    "next_action": "Poll SAME session/process; retain every outcome. Only position1 authorized. No overlap, retry or replacement. On terminal verify9+9, all gates, complete artifacts, statistics and exact cleanup; publish phase before further scoring."
+  },
+  "previous_failed_attempt": {
     "kind": "formal-offline-five-cohort-same-seed-calibration",
     "owner_agent": "/root/provide_serialization_test",
     "exec_session_id": 71080,
