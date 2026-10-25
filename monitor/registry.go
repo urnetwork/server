@@ -132,6 +132,8 @@ func NewSignals() []Signal {
 		NewRedisNonexpiringSignal(),
 		NewRedisProcessSignal(),
 		NewRedisConnectionsSignal(),
+		NewRedisRefusalsSignal(),
+		NewRedisPoolSignal(),
 		NewRedisTopologySignal(),
 		NewRedisShardSubscriptionsSignal(),
 		NewReliabilityPipelineSignal(),

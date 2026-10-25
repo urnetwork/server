@@ -242,8 +242,8 @@ func (h *nativeFirstTransport) execute(ctx context.Context, cmd redis.Cmder, dir
 			pageCount := (len(values) - 3) / 2
 			h.work.MaxNativePages = max(h.work.MaxNativePages, pageCount)
 			h.work.MaxNativePageBytes = max(h.work.MaxNativePageBytes, pageBytes)
-			if pageCount > clientScoreExportBatchSize || (pageBytes > clientScoreExportBatchBytes && pageCount != 1) {
-				return fmt.Errorf("native PAGE batch exceeded existing count/byte guard")
+			if pageCount > clientScoreNativePageBatchSize || (pageBytes > clientScoreNativePageBatchBytes && pageCount != 1) {
+				return fmt.Errorf("native PAGE batch exceeded its count/byte guard")
 			}
 			for i := 3; i < len(values); i += 2 {
 				field, value := fmt.Sprint(values[i]), nativeFirstBytes(values[i+1])
@@ -687,8 +687,11 @@ func TestNativeFirstPageSnapshotShapes(t *testing.T) {
 		{name: "one", pages: 1, batches: 1},
 		{name: "exact_count_bound", pages: 512, batches: 1},
 		{name: "multiple_count_batches", pages: 513, batches: 2},
-		{name: "multiple_byte_batches", pages: 3, padding: clientScoreExportBatchBytes/2 + 1024, batches: 3},
-		{name: "oversized_single_value", pages: 1, padding: clientScoreExportBatchBytes + 4096, batches: 1},
+		{name: "multiple_byte_batches", pages: 3, padding: clientScoreNativePageBatchBytes/2 + 1024, batches: 3},
+		// absolute sizes: one atomic page script carries at most 1 MiB, so
+		// three 400 KiB pages take two batches; at 8 MiB they took one
+		{name: "one_mebibyte_batches", pages: 3, padding: 400 << 10, batches: 2},
+		{name: "oversized_single_value", pages: 1, padding: clientScoreNativePageBatchBytes + 4096, batches: 1},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			r, h := newNativeFirstTransport(t, "")
@@ -704,7 +707,10 @@ func TestNativeFirstPageSnapshotShapes(t *testing.T) {
 			if h.work.Begins != 1 || h.work.Commits != 1 || h.work.PageBatches != shape.batches || h.work.Pages != shape.pages || h.work.NativePipelines != wantPipeline || h.work.DirectCalls != wantDirect {
 				t.Fatalf("snapshot shape changed: %+v", h.work)
 			}
-			if shape.name == "oversized_single_value" && (h.work.MaxNativePages != 1 || h.work.MaxNativePageBytes <= clientScoreExportBatchBytes) {
+			if shape.name == "one_mebibyte_batches" && 1<<20 < h.work.MaxNativePageBytes {
+				t.Fatalf("a native page batch carried %d bytes, bound %d", h.work.MaxNativePageBytes, 1<<20)
+			}
+			if shape.name == "oversized_single_value" && (h.work.MaxNativePages != 1 || h.work.MaxNativePageBytes <= clientScoreNativePageBatchBytes) {
 				t.Fatal("oversized value control did not exercise the existing exception")
 			}
 			pointer, err := parseClientScoreNativePointer(h.pointers[key])

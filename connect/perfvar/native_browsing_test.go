@@ -263,6 +263,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			return []byte(text[:nativeBrowsingHTMLBytes])
 		}
 	}
+	if settings.coldLinkForTest {
+		originalURL, originalHTML := browsingURL, browsingHTML
+		browsingURL = func(page, asset int) string { return nativeBrowsingColdLinkURL(originalURL, page, asset) }
+		browsingHTML = func(page int) []byte { return nativeBrowsingColdLinkHTML(originalURL, originalHTML, page) }
+	}
 	pages := settings.newPages()
 	var liveHandlers, peakHandlers atomic.Int64
 	var liveAssets, peakAssets atomic.Int64
@@ -299,8 +304,12 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	if settings.wrapOriginHandlerForTest != nil {
 		handler = settings.wrapOriginHandlerForTest(handler)
 	}
-	var listeners [nativeBrowsingOriginCount]net.Listener
-	var servers [nativeBrowsingOriginCount]*http.Server
+	originCount := nativeBrowsingOriginCount
+	if settings.coldLinkForTest {
+		originCount++
+	}
+	listeners := make([]net.Listener, originCount)
+	servers := make([]*http.Server, originCount)
 	var serverWorkers sync.WaitGroup
 	var assetWorkers sync.WaitGroup
 	dialOrigin := func(dialCtx context.Context, network, address string) (net.Conn, error) {
@@ -424,7 +433,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			request = request.WithContext(httptrace.WithClientTrace(request.Context(), progress.retryTrace()))
 		}
 		if settings.requestTraceForTest != nil {
-			if observer := settings.requestTraceForTest(target); observer != nil {
+			if observer := settings.requestTraceForTest(request.Context(), target); observer != nil {
 				request = request.WithContext(httptrace.WithClientTrace(request.Context(), observer))
 			}
 		}
@@ -442,8 +451,8 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 				progress.bodyClosed.Store(true)
 			}
 		}()
-		if settings.originClientTlsForTest != nil && (response.ProtoMajor != 1 || response.TLS == nil || len(response.TLS.VerifiedChains) == 0) {
-			return nativeBrowsingAssetResult{status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: errors.New("synthetic HTTPS origin did not verify TLS and HTTP/1.1")}
+		if err := nativeBrowsingVerifyTlsResponse(response, settings); err != nil {
+			return nativeBrowsingAssetResult{status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
 		}
 		if progress != nil {
 			progress.responseStatus.Store(int64(response.StatusCode))
@@ -451,6 +460,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		var reader io.Reader = response.Body
 		if settings.wrapResponseReaderForTest != nil {
 			reader = settings.wrapResponseReaderForTest(target, reader)
+		}
+		if settings.wrapResponseReaderContextForTest != nil {
+			reader = settings.wrapResponseReaderContextForTest(requestCtx, target, reader)
 		}
 		if settings.pressure != nil {
 			reader = &nativeBrowsingProgressReader{reader: reader, pressure: settings.pressure, progress: progress}

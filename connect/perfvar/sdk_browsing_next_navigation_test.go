@@ -26,7 +26,7 @@ func (self *sdkBrowsingScenario) runSettings(pressure *nativeBrowsingPressureObs
 	settings.wrapOriginHandlerForTest = self.wrapHandler
 	settings.applicationDeadlineForTest = self.plan.deadline
 	settings.beforePageNavigationForTest = self.beforePage
-	settings.requestTraceForTest = self.requestTrace
+	settings.requestTraceForTest = func(_ context.Context, target string) *httptrace.ClientTrace { return self.requestTrace(target) }
 	settings.afterFetchForTest = self.afterFetch
 	settings.wrapResponseReaderForTest = func(target string, reader io.Reader) io.Reader {
 		if sdkBrowsingRequestPath(target) == "/asset/0/0" {
@@ -88,8 +88,8 @@ func TestSdkBrowsingSettingsRetainRevisedImageOverlapAndOriginalHooks(t *testing
 	clientConnection, serverConnection := net.Pipe()
 	defer clientConnection.Close()
 	defer serverConnection.Close()
-	trace := settings.requestTraceForTest(nativeBrowsingURL(0, 0))
-	if trace == nil || trace.GotConn == nil || settings.requestTraceForTest(nativeBrowsingURL(1, 2)) != nil {
+	trace := settings.requestTraceForTest(ctx, nativeBrowsingURL(0, 0))
+	if trace == nil || trace.GotConn == nil || settings.requestTraceForTest(ctx, nativeBrowsingURL(1, 2)) != nil {
 		t.Fatal("shared SDK settings changed selected CSS trace scope")
 	}
 	trace.GotConn(httptrace.GotConnInfo{Conn: clientConnection})

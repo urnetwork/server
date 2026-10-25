@@ -346,8 +346,13 @@ func TestReconcileFailureReceiptBoundAndAmbiguousPrivacy(t *testing.T) {
 	}
 	probe := &logTailProbe{tailers: tailers}
 	healthy := probe.reconcileReceipt(fixedReconcileReceiptClock(now))
-	if len(encodeLogReconcileReceipt(healthy)) == 0 || healthy.Fresh != 10 || healthy.ConsecutiveTwo != 10 {
-		t.Fatal("additive null fields exceeded the unchanged ten-collector receipt bound")
+	healthyEncoded := encodeLogReconcileReceipt(healthy)
+	if len(healthyEncoded) == 0 || len(healthyEncoded)+len(logReconcileReceiptPrefix)+2 > logReconcileReceiptMaxBytes {
+		t.Fatal("eleven-collector null failure fields exceeded the unchanged receipt bound")
+	}
+	if healthy.Collectors != 11 || len(healthy.CollectorScopes) != 11 || !healthy.ScopeProjectionComplete ||
+		healthy.Fresh != 11 || healthy.ConsecutiveTwo != 11 {
+		t.Fatal("eleven-service fixture lost collector identity or aggregate coverage")
 	}
 	for _, tailer := range tailers {
 		tailer.recordReconcile(now.Add(-logReconcileLookback), errors.New("synthetic-rejection"))
@@ -369,7 +374,11 @@ func TestReconcileFailureReceiptBoundAndAmbiguousPrivacy(t *testing.T) {
 		scope.CoverageState != "ambiguous" || scope.LastFailurePresent != nil {
 		t.Fatal("duplicate service selected one failure snapshot")
 	}
-	encoded := string(encodeLogReconcileReceipt(ambiguous))
+	ambiguousEncoded := encodeLogReconcileReceipt(ambiguous)
+	if len(ambiguousEncoded) == 0 || len(ambiguousEncoded)+len(logReconcileReceiptPrefix)+2 > logReconcileReceiptMaxBytes {
+		t.Fatal("ambiguous eleven-service receipt was absent or exceeded the unchanged bound")
+	}
+	encoded := string(ambiguousEncoded)
 	for _, forbidden := range []string{"synthetic-private-service", "synthetic-private-response", "synthetic-rejection", "http-429"} {
 		if strings.Contains(encoded, forbidden) {
 			t.Fatal("failure timing exposed private values or invented an HTTP cause")

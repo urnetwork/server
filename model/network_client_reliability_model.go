@@ -394,6 +394,12 @@ func clientReliabilityRollupBlockNumbers(currentBlockNumber, maxDrainedBlock int
 	return blockNumbers
 }
 
+// The fields one HSCAN step of a drain returns; the reliability and data usage
+// drains page their closed hashes with it. A step of 5000 held the owning node
+// for 15-26 ms on 2026-10-25. A step of 1000 holds it for a few, at the cost
+// of more round trips.
+const redisDrainScanCount = 1000
+
 // RollupClientReliabilityStats drains closed per-block redis counters into
 // `client_reliability` with bulk upserts, and advances the drain high-water
 // mark (`client_reliability_rollup`) that the score computations clamp their
@@ -417,7 +423,7 @@ func RollupClientReliabilityStats(ctx context.Context, now time.Time) {
 	hscanAll := func(r server.RedisClient, key string, fields map[string]string) {
 		var cursor uint64
 		for {
-			kvs, nextCursor, err := r.HScan(ctx, key, cursor, "", 5000).Result()
+			kvs, nextCursor, err := r.HScan(ctx, key, cursor, "", redisDrainScanCount).Result()
 			server.Raise(err)
 			for i := 0; i+1 < len(kvs); i += 2 {
 				fields[kvs[i]] = kvs[i+1]

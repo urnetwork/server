@@ -624,8 +624,8 @@ func TestReconcileReceiptScopeEncodingBoundAndAggregateParity(t *testing.T) {
 		tailers = append(tailers, syntheticScopePair(now, key))
 	}
 	receipt := (&logTailProbe{tailers: tailers}).reconcileReceipt(fixedReconcileReceiptClock(now))
-	if len(receipt.CollectorScopes) != 10 || !receipt.ScopeProjectionComplete || receipt.Fresh != 10 || receipt.ConsecutiveTwo != 10 {
-		t.Fatal("ten-service projection changed aggregate authority")
+	if len(receipt.CollectorScopes) != 11 || !receipt.ScopeProjectionComplete || receipt.Fresh != 11 || receipt.ConsecutiveTwo != 11 {
+		t.Fatal("eleven-service projection changed aggregate authority")
 	}
 	encoded := encodeLogReconcileReceipt(receipt)
 	if len(encoded) == 0 || len(encoded)+len(logReconcileReceiptPrefix)+2 > logReconcileReceiptMaxBytes {

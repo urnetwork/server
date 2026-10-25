@@ -102,9 +102,46 @@ var contentionRecoveredCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Contention refusals, such as a held balance owner, recovered by HandleError without an unexpected-error report",
 })
 
-// Registers the contention counter with the default registry.
+// A lock wait that its bound ended (55P03, PgLockTimeout): the resource was
+// busy, and the caller's own retry decides. Every concrete leaf is such a lock
+// timeout or a shutdown, and at least one is a lock timeout; the statement
+// stop that follows a lock timeout joins context cancellations to it.
+// Incomplete or malformed cause graphs do not classify.
+func IsLockTimeoutRefusal(r any) bool {
+	err, ok := r.(error)
+	if !ok || err == nil {
+		return false
+	}
+	causes := InspectErrorCauseBatch(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
+	}
+	found := false
+	for _, cause := range causes.Nodes {
+		if !cause.Leaf {
+			continue
+		}
+		if IsLockTimeout(cause.Err) {
+			found = true
+		} else if !IsDoneError(cause.Err) {
+			return false
+		}
+	}
+	return found
+}
+
+// Lock timeouts are counted rather than reported: their rate, not each stack,
+// shows a lock queue forming behind a busy holder.
+var lockTimeoutRecoveredCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Name:      "lock_timeout_refusals_recovered_total",
+	Help:      "Lock waits ended by their bound (55P03) and recovered by HandleError without an unexpected-error report",
+})
+
+// Registers the refusal counters with the default registry.
 func init() {
 	prometheus.MustRegister(contentionRecoveredCounter)
+	prometheus.MustRegister(lockTimeoutRecoveredCounter)
 }
 
 // The unexpected-error report; a test observes it.
@@ -117,8 +154,8 @@ func unsupportedRescueHandlerError(handler any, supported string) error {
 	return fmt.Errorf("rescue handler of type %v was not run: rescue handlers here are %s", reflect.TypeOf(handler), supported)
 }
 
-// Recovers a raise, reports it unless it is a shutdown or a contention
-// refusal, and runs each rescue handler in order. A handler is a func(), a
+// Recovers a raise, reports it unless it is a shutdown, a contention refusal
+// or a lock timeout, and runs each rescue handler in order. A handler is a func(), a
 // func(error) given the raise as an error, a context.CancelFunc, or a
 // context.CancelCauseFunc given the raise as its cause. A value keeps its
 // named type in an any, so the two context cancels have cases of their own;
@@ -141,6 +178,12 @@ func HandleError(do func(), handlers ...any) (r any) {
 			} else if IsContentionError(r) {
 				// expected backpressure: count it, without a stack
 				contentionRecoveredCounter.Inc()
+			} else if IsLockTimeoutRefusal(r) {
+				// a bounded lock wait ended: count it, with the detail at V(1)
+				lockTimeoutRecoveredCounter.Inc()
+				if glog.V(1) {
+					glog.Infof("[trace]lock wait bound ended: %s\n", ErrorJsonNoStack(r))
+				}
 			} else {
 				unexpectedErrorLogf("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
 			}

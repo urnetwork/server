@@ -29,20 +29,23 @@ const nativeBrowsingPressureReportByteLimit = 128 * 1024
 
 // Page capacity is a workload setting, not additional production queue space.
 type nativeBrowsingRunSettings struct {
-	maxLivePages                int
-	pressure                    *nativeBrowsingPressureObservation
-	nextNavigationOverlap       bool
-	originListenerForTest       func(net.Listener)
-	originServerTlsForTest      *tls.Config
-	originClientTlsForTest      *tls.Config
-	originDestinationForTest    func(int, net.Listener) string
-	afterOriginsClosedForTest   func()
-	wrapOriginHandlerForTest    func(http.Handler) http.Handler
-	applicationDeadlineForTest  time.Duration
-	beforePageNavigationForTest func(context.Context, int, func()) error
-	requestTraceForTest         func(string) *httptrace.ClientTrace
-	wrapResponseReaderForTest   func(string, io.Reader) io.Reader
-	afterFetchForTest           func(string, nativeBrowsingAssetResult)
+	maxLivePages                     int
+	pressure                         *nativeBrowsingPressureObservation
+	nextNavigationOverlap            bool
+	originListenerForTest            func(net.Listener)
+	originServerTlsForTest           *tls.Config
+	originClientTlsForTest           *tls.Config
+	innerHttp2ForTest                bool
+	coldLinkForTest                  bool
+	originDestinationForTest         func(int, net.Listener) string
+	afterOriginsClosedForTest        func()
+	wrapOriginHandlerForTest         func(http.Handler) http.Handler
+	applicationDeadlineForTest       time.Duration
+	beforePageNavigationForTest      func(context.Context, int, func()) error
+	requestTraceForTest              func(context.Context, string) *httptrace.ClientTrace
+	wrapResponseReaderForTest        func(string, io.Reader) io.Reader
+	wrapResponseReaderContextForTest func(context.Context, string, io.Reader) io.Reader
+	afterFetchForTest                func(string, nativeBrowsingAssetResult)
 }
 
 // Four origins with four HTTP connections each leave a navigation connection
@@ -50,6 +53,12 @@ type nativeBrowsingRunSettings struct {
 func (self nativeBrowsingRunSettings) validate() error {
 	if (self.originServerTlsForTest == nil) != (self.originClientTlsForTest == nil) {
 		return errors.New("browsing TLS requires both verified client and server configurations")
+	}
+	if self.coldLinkForTest && (self.originServerTlsForTest == nil || !self.nextNavigationOverlap || self.maxLivePages != nativeBrowsingOriginCount) {
+		return errors.New("cold-link browsing requires verified TLS and original four-page pressure")
+	}
+	if self.innerHttp2ForTest && self.originServerTlsForTest == nil {
+		return errors.New("browsing HTTP/2 requires verified TLS")
 	}
 	if self.maxLivePages < 2 || nativeBrowsingOriginCount < self.maxLivePages {
 		return errors.New("native browsing live-page window must be between two and four")

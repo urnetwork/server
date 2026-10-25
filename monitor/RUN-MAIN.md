@@ -705,6 +705,40 @@ watchers: use one of the explicit promotion procedures below and record its
 overlap or collection gap separately.
 Do not claim a delayed candidate's active coverage before its first observation.
 
+A separately admitted future launch may set `-invocation-witness-output` to a
+new distinct private file; this is continuous-only and does not alter the
+authoritative launch command above or authorize a replacement watcher. Startup
+path/identity/open failure refuses before that candidate starts. Runtime witness
+failures are observational only. Close the owner after scheduler workers join;
+never reset a file to manufacture contiguous coverage. Root must bind the exact
+source/artifact, private launch selection and collector custody before drawing
+runtime conclusions.
+
+Optional scheduler invocation evidence is a monitor utility, not an implemented
+health probe. `-invocation-witness-output` opts a future continuous CLI launch
+into a new private 0600 sidecar under a private directory, using validated
+same-process startup identity and the selected key/number/cadence digest. A
+settings-witness identity already present at startup is reused. Disabled default
+performs no witness I/O or discovery. One record is at most 4096 bytes; each
+launch permits at most 512 MiB and 1,000,000 records. The first write, bound,
+identity-association or close error disables only the witness and emits one fixed
+safe diagnostic; it must not cancel the monitor, skip a Run/handler, change a
+source error/panic/cadence, retry, rotate or truncate. Regular-file writes have no
+wall-clock or fsync-durability guarantee.
+
+`dispatch_begin` is the post-admission wrapper's pre-call boundary, not proof the
+callee or Check body entered. A matching `run_return` proves only that exact
+Signal.Run returned; returned-nil is not healthy, target/source completeness,
+child/backend completion, or scheduler due/enablement evidence. Empty and
+held-only results also receive invocation records; gate state is not persisted.
+A canceled parent's nil return is explicitly nonaffirmative. Missing, torn,
+unpaired or refused records leave coverage UNKNOWN, never stalled. Process/run
+and selected-key binding is not a full custody attestation or proof all171
+registered keys were selected, enabled, due or contacted. Native and effective
+configured cadence fields are policy context; elapsed dispatch time includes
+witness overhead. Preserve standing-drain exemption and post-handler waits.
+
+
 Continuous mode limits ordinary probe concurrency, applies each alert's sustain
 count, and replaces the bounded log
 probe with one standing `warpctl logs ... -f` stream per active service. Confirm
@@ -1058,7 +1092,7 @@ partial-scope receipts leave completion unknown; alert absence alone is
 insufficient. This diagnostic does not change alert-only JSONL or invent
 healthy Alerts. Schema 1 is aggregate-only; it cannot identify deficient
 collectors. Schema 2 uses `collector_scopes` with fixed public service keys
-alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+alt/api/app/connect/gossip/grafana/mcp/mmm/proxy/taskworker/web and
 `scope_projection_complete`; this is identity completeness, not healthy
 coverage. Unsupported or duplicate services leave the scope map incomplete.
 Null, partial and future timestamps retain their authority qualifiers.
@@ -1506,6 +1540,40 @@ An outer timeout with zero observed roots establishes missing verification,
 not a code failure, cold cache, or a particular compilation/startup cause.
 Separate diagnostic compile, list and body evidence can locate that boundary;
 compile/list success is not a test PASS and changes no required gate or budget.
+
+Interpret a native package timeout as a deadline for the whole package, not
+proof that the test named at the alarm hung. Preserve the original STOP and
+compare RUN, PAUSE and CONT events: parallel tests paused at their parent's
+barrier are unfinished but may not yet be executing their bodies. A short
+running-test duration at the alarm does not explain the preceding package
+wall time. Keep root and nested timings separate; do not add overlapping or
+parent/child durations or extrapolate completion time from a root-count
+fraction. A bounded stack excerpt is not a complete inventory of blockers.
+
+Distinguish measured aggregate verification cost from a demonstrated source
+performance defect. Compare an exact-source healthy control and completed
+root costs with the owning fixture's actual work before changing code. Retain
+native exit, exact completed and missing root sets, race warnings, the native
+fail-fast observation, source/input PREPOST checks, direct wait and EOF, and
+recorded process retirement with its limits; none alone proves all descendants
+have exited. An unchanged-suite budget proposal must state its measured sizing
+basis and uncertainty. The primary agent adjudicates a fixed new profile under
+the existing gate ownership, preserving whole-suite coverage, assertions,
+fixture exclusions and native-child controls. It is not a product fix, an
+automatic retry, or grounds to split, skip or weaken the race gate.
+
+Account for deadline propagation before sizing that profile. The retry wrapper
+forwards the underlying test's Deadline; the migration fixture derives its
+context from t.Deadline minus thirty seconds, with its existing fallback when
+no deadline is available. A larger package timeout therefore extends that
+derived fixture horizon. It does not automatically bound setup that starts
+from context.Background, and it does not change the independent fixed rollback
+cleanup limit. Preserve those distinctions and their source contracts. Bind
+the outer owner/driver to finite preflight, compilation, native work,
+postchecks, cancellation, cleanup and direct-wait/EOF limits, allowing the
+existing cleanup margin without leaving the driver unbounded. Any changed
+derived horizon or wrapper limit must be explicit in the proposed profile;
+there is no universal package duration or permission to change a running gate.
 
 Apply the declared native-exit, exact-root, race-warning and source-identity
 checks rather than adding an unstated empty-stderr requirement. The same

@@ -128,6 +128,8 @@ type SignalExecutionHandler func(ctx context.Context, signal Signal, execution S
 // immediate active startup. Standing log streams and their drains are exempt.
 type RunLoopOptions struct {
 	MinimumProbeCadence time.Duration
+	// Optional process-owned observer; failure never changes scheduling or results.
+	InvocationWitness *RunInvocationWitness
 }
 
 // RunSignal executes a registered signal by its short key or SIGNALS.md
@@ -330,9 +332,17 @@ func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOption
 					// This check only drains mutex-protected in-memory counters.
 					// Giving it a remote-command slot lets slow unrelated probes
 					// distort the very rate window it is meant to measure.
-					alerts, err = signal.Run(runCtx, self.settings)
+					if options.InvocationWitness == nil {
+						alerts, err = signal.Run(runCtx, self.settings)
+					} else {
+						alerts, err = runSignalWithWitness(runCtx, signal, self.settings, options.InvocationWitness, "standing", options.MinimumProbeCadence)
+					}
 				} else {
-					alerts, err = runSignalInSlot(runCtx, runSlots, signal, self.settings)
+					if options.InvocationWitness == nil {
+						alerts, err = runSignalInSlot(runCtx, runSlots, signal, self.settings)
+					} else {
+						alerts, err = runSignalInSlotWithWitness(runCtx, runSlots, signal, self.settings, options.InvocationWitness, options.MinimumProbeCadence)
+					}
 				}
 				if startupSample {
 					close(startupSampleDone)
@@ -412,4 +422,28 @@ func runSignalInSlot(ctx context.Context, slots *runSlotPool, signal Signal, set
 		return nil, &runSlotAdmissionError{cause: err}
 	}
 	return signal.Run(ctx, settings)
+}
+
+// The opt-in path mirrors admission without changing the disabled call stack.
+func runSignalInSlotWithWitness(ctx context.Context, slots *runSlotPool, signal Signal, settings SignalSettings, witness *RunInvocationWitness, floor time.Duration) (Alerts, error) {
+	priority := false
+	if bounded, ok := signal.(interface{ runBudget() time.Duration }); ok && bounded.runBudget() > 0 {
+		priority = true
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bounded.runBudget())
+		defer cancel()
+	}
+	if signal.ID() == "pg/query-sample" {
+		ctx = observePgSampleRunSlot(ctx)
+	}
+	ctx = context.WithValue(ctx, runSlotSignalContextKey{}, signal.Key())
+	release, err := slots.acquire(ctx, priority)
+	if err != nil {
+		return nil, &runSlotAdmissionError{cause: err}
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, &runSlotAdmissionError{cause: err}
+	}
+	return runSignalWithWitness(ctx, signal, settings, witness, "active", floor)
 }

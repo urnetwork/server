@@ -39,6 +39,9 @@ type sdkBrowsingScenario struct {
 	stopErr                                                                      error
 	lateStarted, lateReady, lateJoined                                           bool
 	rejectNew                                                                    atomic.Bool
+	coldLinkForTest                                                              bool
+	coldLinkConstructorCtxForTest                                                context.Context
+	coldLinkClosingForTest                                                       bool
 	cssServerStarted, cssServerFinished                                          atomic.Bool
 	cssGotConn                                                                   atomic.Int64
 	cssClientBytes                                                               atomic.Int64
@@ -114,10 +117,27 @@ func (self *sdkBrowsingScenario) cssOwnerSnapshot(expected *sdk.Id) (*sdk.Id, in
 	return nil, 0, errors.New("CSS local quality owner no longer live with a flow")
 }
 
+// The callback must register ownership before it can escape Stop's sample.
+// The same stateLock seals registration before teardown joins existing owners.
+func (self *sdkBrowsingScenario) registerColdLinkConstructorWithLock() (context.Context, bool) {
+	if !self.coldLinkForTest || self.coldLinkClosingForTest || self.lateStarted {
+		return nil, false
+	}
+	ctx := self.coldLinkConstructorCtxForTest
+	if ctx == nil {
+		if self.firstErr == nil {
+			self.firstErr = errors.New("cold-link refusal preceded its bounded work owner")
+		}
+		return nil, false
+	}
+	self.lateStarted = true
+	return ctx, true
+}
+
 // Only the actual old-provider origin1 TCP dial is refused. All other traffic,
 // including the established origin0 CSS socket, keeps its ordinary lifetime.
 func (self *sdkBrowsingScenario) rejectNavigationDial(ordinal int, address string) bool {
-	if !self.rejectNew.Load() || ordinal < 0 || ordinal >= 4 || address != "203.0.113.11:443" {
+	if !sdkBrowsingNavigationDialRefused(self.coldLinkForTest, self.rejectNew.Load(), ordinal, address) {
 		return false
 	}
 	self.stateLock.Lock()
@@ -125,8 +145,14 @@ func (self *sdkBrowsingScenario) rejectNavigationDial(ordinal int, address strin
 	if self.refusalNs[ordinal] == 0 && !self.tapStarted.IsZero() {
 		self.refusalNs[ordinal] = int64(time.Since(self.tapStarted))
 	}
+	constructorCtx, start := self.registerColdLinkConstructorWithLock()
 	self.stateLock.Unlock()
 	self.refusalOnce.Do(func() { close(self.firstRefusal) })
+	if start {
+		// Construction stays off the NAT dial callback stack. Even if Stop
+		// seals now, it sees this registered owner and joins lateDone first.
+		go self.buildLate(constructorCtx)
+	}
 	return true
 }
 
@@ -239,6 +265,23 @@ func (self *sdkBrowsingScenario) beforePage(ctx context.Context, page int, close
 	return nil
 }
 
+// The cold constructor shares the exact application deadline through real
+// fixture cancellation, including work that uses fixture/setup contexts inside
+// buildProvider. Its cancellation callback only invokes those CancelFuncs.
+func (self *sdkBrowsingScenario) linkColdLinkConstructorCancellation(ctx context.Context) func() {
+	joined := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(joined)
+		self.fixture.cancelSetup()
+		self.fixture.cancel()
+	})
+	return func() {
+		if !stop() {
+			<-joined
+		}
+	}
+}
+
 // The followup view is taken off the provider dial callback stack, after the
 // first actual refusal. It is explicitly a followup, not an atomic SYN snapshot.
 func (self *sdkBrowsingScenario) buildLate(ctx context.Context) {
@@ -248,6 +291,10 @@ func (self *sdkBrowsingScenario) buildLate(ctx context.Context) {
 		}
 		close(self.lateDone)
 	}()
+	if self.coldLinkForTest {
+		// This defer runs before lateDone closes, including error/panic paths.
+		defer self.linkColdLinkConstructorCancellation(ctx)()
+	}
 	select {
 	case <-self.firstRefusal:
 	case <-ctx.Done():
@@ -441,6 +488,11 @@ func (self *sdkBrowsingScenario) stop() error {
 	self.stopOnce.Do(func() {
 		self.rejectNew.Store(false)
 		self.releaseOnce.Do(func() { close(self.release) })
+		if self.coldLinkForTest {
+			self.stateLock.Lock()
+			self.coldLinkClosingForTest = true
+			self.stateLock.Unlock()
+		}
 		self.fixture.cancelSetup()
 		self.stateLock.Lock()
 		started := self.lateStarted

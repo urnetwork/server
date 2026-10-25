@@ -1,5 +1,5 @@
-// Authenticated synthetic origins use ordinary HTTP/1.1 over the same TUN dial.
-// Nil TLS settings preserve every existing plain HTTP workload.
+// Authenticated synthetic origins default to HTTP/1.1 over the same TUN dial.
+// Only the explicit inner-H2 row changes ALPN; nil TLS keeps plain workloads.
 package perfvar
 
 import (
@@ -24,6 +24,14 @@ import (
 
 // Certificates and keys belong only to this synthetic fixture lifetime.
 func nativeBrowsingTlsConfigs() (*tls.Config, *tls.Config, error) {
+	return nativeBrowsingTlsConfigsForOrigins(nativeBrowsingOriginCount)
+}
+
+// The cold-link comparison alone owns one additional verified origin name.
+func nativeBrowsingTlsConfigsForOrigins(origins int) (*tls.Config, *tls.Config, error) {
+	if origins != nativeBrowsingOriginCount && origins != nativeBrowsingOriginCount+1 {
+		return nil, nil, errors.New("unowned synthetic origin count")
+	}
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -42,7 +50,7 @@ func nativeBrowsingTlsConfigs() (*tls.Config, *tls.Config, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	names := make([]string, nativeBrowsingOriginCount)
+	names := make([]string, origins)
 	for index := range names {
 		names[index] = fmt.Sprintf("origin%d.test", index)
 	}
@@ -62,8 +70,14 @@ func newNativeBrowsingInnerTransport(dial func(context.Context, string, string) 
 	transport := &http.Transport{MaxConnsPerHost: nativeBrowsingConnectionsPerOrigin, MaxIdleConns: nativeBrowsingOriginCount * nativeBrowsingConnectionsPerOrigin, MaxIdleConnsPerHost: nativeBrowsingConnectionsPerOrigin, DialContext: dial}
 	if settings.originClientTlsForTest != nil {
 		transport.TLSClientConfig = settings.originClientTlsForTest.Clone()
-		transport.ForceAttemptHTTP2 = false
-		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		if settings.innerHttp2ForTest {
+			transport.Protocols = new(http.Protocols)
+			transport.Protocols.SetHTTP2(true)
+			transport.TLSClientConfig.NextProtos = []string{"h2"}
+		} else {
+			transport.ForceAttemptHTTP2 = false
+			transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		}
 	}
 	return transport
 }
@@ -74,7 +88,30 @@ func newNativeBrowsingInnerServer(handler http.Handler, listener net.Listener, s
 	if settings.originServerTlsForTest == nil {
 		return server, listener
 	}
-	return server, tls.NewListener(listener, settings.originServerTlsForTest.Clone())
+	serverTls := settings.originServerTlsForTest.Clone()
+	if settings.innerHttp2ForTest {
+		server.Protocols = new(http.Protocols)
+		server.Protocols.SetHTTP2(true)
+		serverTls.NextProtos = []string{"h2"}
+		server.TLSConfig = serverTls
+	}
+	return server, tls.NewListener(listener, serverTls)
+}
+
+// Every actual HTTPS response proves its selected protocol and certificate.
+func nativeBrowsingVerifyTlsResponse(response *http.Response, settings nativeBrowsingRunSettings) error {
+	if settings.originClientTlsForTest == nil {
+		return nil
+	}
+	wantProtocol := 1
+	if settings.innerHttp2ForTest {
+		wantProtocol = 2
+	}
+	if response.TLS == nil || len(response.TLS.VerifiedChains) == 0 || response.ProtoMajor != wantProtocol ||
+		settings.innerHttp2ForTest && response.TLS.NegotiatedProtocol != "h2" {
+		return errors.New("synthetic HTTPS origin did not verify TLS and the selected HTTP protocol")
+	}
+	return nil
 }
 
 // Successful verification and two independent failures use real TLS handshakes.
