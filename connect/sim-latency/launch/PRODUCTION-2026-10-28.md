@@ -34,7 +34,14 @@ production nor a new staging round is activated. Final scale/margin, fresh
 calibration, hidden epoch baseline, genuine provider-backed qualification and
 live production readiness remain incomplete; 16.1% is still a provisional floor.
 
-## Earlier preparation pointer — October 24, 23:02 UTC
+## Historical preparation journal — superseded status entries
+
+The dated entries below preserve the investigation and implementation sequence.
+Statements that a component was not yet implemented describe their entry's
+time, not the current launch checklist. Current remaining gates are in the
+preparation pointer above and its linked exact-artifact records.
+
+### Earlier preparation pointer — October 24, 23:02 UTC
 
 Public admission remains fixed at **2026-10-28 00:00 UTC**. This file also
 retains the chronological preparation journal below; its earlier checkpoint

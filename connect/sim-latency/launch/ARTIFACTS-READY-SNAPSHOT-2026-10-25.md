@@ -1,9 +1,9 @@
 # Corrected Go 1.27.3 evaluator — October 25, 2026
 
 Status: **built, not activated or fully qualified**. Independent exact-image
-checks, Docker lifecycle smoke, malicious build isolation and host resource
-cleanup are in progress. No official epoch baseline, final scale or calibrated
-margin is claimed.
+checks and Docker lifecycle smoke passed; malicious build isolation is running,
+with host resource cleanup next. No official epoch baseline, final scale or
+calibrated margin is claimed.
 
 | Identity | Value |
 | --- | --- |
@@ -56,3 +56,29 @@ attestation, database row or staging round was changed. Image-bound containment,
 host rebaseline, genuine provider-backed review/build qualification, fresh
 frontier and reference calibration, hidden baseline, immutable MinIO retention
 and live production readiness remain incomplete.
+
+## Independent basic and full-smoke evidence
+
+Evidence root: `temp/ready-snapshot-independent-20261025.KlIwmzeC`.
+Non-root, read-only, capability-dropped, networkless basic checks verified the
+exact image, compiler, clean revision, simulator/config/lock hashes, complete
+ten-repository tree and absence of main/all configuration or vault directories.
+
+| Basic evidence | SHA-256 |
+| --- | --- |
+| `identity.json` | `2d82fffb2ea5f5c4b95b3b97c406017fef2e268f3195ec60bcf6cfe98ee0d4d4` |
+| `filesystem-buildinfo.txt` | `53c5d9115c3f060d78f0703a37d2caaa7e157fcaa07cd718e490f68c77d5fe8d` |
+| `go-version.txt` | `5707bf75dd54b4fdd5ac209444d48c9c4179ebf8510f80e2f7293dfbedc1012b` |
+
+The full synthetic-local Docker smoke passed in **390 seconds**, including
+offline comment-only candidate build, fresh PostgreSQL/Redis and migrations,
+real 32-provider / 8-client simulation, accounting, authenticated resource
+report, baseline/scoring entrypoints, inspected containment and cleanup.
+The base tag remained bound to the exact image; only original persistent
+services and networks remained. `smoke.log` SHA-256:
+`46420c3763b5a7b7ae6b89e35a44bf342fa8df903d4cfbd2ef65eb1ca11f4fcb`.
+The full smoke artifact tree is `urnetwork-container-smoke.5acZdRWN` in that root.
+
+This short smoke uses a 2 GiB runner and calibration fixture. It is not the
+production scale, a nine-run epoch control, a statistical-significance estimate
+or image-bound host qualification. No new frontier measurement has started.
