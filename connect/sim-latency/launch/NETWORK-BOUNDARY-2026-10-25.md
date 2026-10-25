@@ -92,3 +92,25 @@ the smoke-qualified changes before larger validation, install a new immutable
 script bundle including `network-boundary.sh`, and bind its exact identities in
 the prospective fresh measurement protocol. Main maintenance remains a hold on
 production activation and main database/service mutations.
+
+## Additive local release installation
+
+The exact published source `737dd237129671921a2f19b21d2d90cc9d4e0e95`
+was archived into the new root-owned, non-writable release directory
+`/usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/`.
+No previous release, config pin, running worker or main service was changed.
+Readback identities:
+
+- `container/evaluator.sh`:
+  `263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e`
+- `container/network-boundary.sh`:
+  `9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7`
+- `container/compose.yml`:
+  `f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464`
+
+The installed evaluator passes Bash syntax validation. No release entry is
+group/world writable. Installation is preparation, not activation or formal
+calibration acceptance. Three consecutive full suites remain the release gate;
+the first has passed 514 top-level tests and the second is running under the
+existing validation handle. A new campaign must bind this bundle rather than
+resuming the failed campaign pinned to the previous script.
