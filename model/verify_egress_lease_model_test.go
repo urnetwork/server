@@ -275,32 +275,129 @@ func testVerifyForwardEgress(ctx context.Context, ip netip.Addr, settings *Verif
 	return
 }
 
-// Counts the seeded owners whose recorded deadline is unchanged.
-func testVerifyKeptOwnerCount(leases map[string]string, ownerDeadlines map[string]string) int {
-	kept := 0
+// Counts the seeded owners still recorded with their seeded deadline, live and
+// expired apart.
+func testVerifyKeptOwnerCounts(leases map[string]string, ownerDeadlines map[string]string, now time.Time) (live int, expired int) {
 	for owner, deadline := range ownerDeadlines {
-		if leases[owner] == deadline {
-			kept += 1
+		if leases[owner] != deadline {
+			continue
+		}
+		deadlineMillis, err := strconv.ParseInt(deadline, 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		if now.UnixMilli() < deadlineMillis {
+			live += 1
+		} else {
+			expired += 1
 		}
 	}
-	return kept
+	return
+}
+
+// The expired owners one update may prune: its own bounded step and the first
+// pages of a scan that stops at another client's live owner. A whole-hash pass
+// prunes every expired owner at once.
+const testVerifyLeasePruneBound = 128
+
+// Runs one owner's forward update directly, without the reverse index or the
+// eligibility refresh.
+func testVerifyForwardLeaseUpdate(ctx context.Context, ip netip.Addr, settings *VerifySettings, clientId server.Id, owner string, now, expires time.Time) {
+	hash := VerifyEgressIndexHashWithSettings(ip, settings)
+	keys, args := verifyForwardEgressLeaseCall(clientId, hex.EncodeToString(hash[:]), owner, now, expires)
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.Eval(ctx, verifyForwardEgressLeaseScript, keys, args...).Err())
+	})
+}
+
+// One update to a shared address reads a bounded step of its owners however
+// many there are. On 2026-10-25 each proxy host's address held about 35k
+// owners, and the whole-hash pass after each marker lapse held its node for up
+// to 110 ms. A feed after the lapse, and a feed while another client is
+// attributed, each keep every live owner, prune at most a bounded step of the
+// expired ones and mark the address. The marked updates that follow still
+// sweep every expired owner out within a few update cycles.
+func TestVerifyEgressSharedAddressUpdatesReadABoundedStep(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultVerifySettings()
+		settings.EgressHashKey = []byte("bounded-step-egress-test")
+		ip := netip.MustParseAddr("198.51.100.23")
+		hash := VerifyEgressIndexHashWithSettings(ip, settings)
+		const ownerCount = 2000
+		ownerDeadlines, liveOwners := testVerifySeedMarkedEgress(ctx, settings, ip, ownerCount)
+		expiredSeeded := ownerCount - len(liveOwners)
+
+		feed := func(name string, prepare func(r server.RedisClient), keptExpiredBefore int) int {
+			server.Redis(ctx, prepare)
+			clientId := server.NewId()
+			now := server.NowUtc()
+			testVerifyForwardLeaseUpdate(ctx, ip, settings, clientId, server.NewId().String(), now, now.Add(settings.EgressTtl))
+			leases, marker, markerTtl := testVerifyForwardEgress(ctx, ip, settings)
+			keptLive, keptExpired := testVerifyKeptOwnerCounts(leases, ownerDeadlines, server.NowUtc())
+			if keptLive != len(liveOwners) {
+				t.Fatalf("%s rewrote live owners: kept %d of %d", name, keptLive, len(liveOwners))
+			}
+			if keptExpired < keptExpiredBefore-testVerifyLeasePruneBound {
+				t.Fatalf("%s read the whole shared address: pruned %d expired owners in one update, bound %d", name, keptExpiredBefore-keptExpired, testVerifyLeasePruneBound)
+			}
+			if marker != verifyEgressAmbiguous || markerTtl <= 0 || settings.EgressTtl < markerTtl {
+				t.Fatalf("%s did not mark the shared address: %q ttl=%s", name, marker, markerTtl)
+			}
+			if ResolveVerifyEgress(ctx, ip, settings) != nil {
+				t.Fatalf("%s attributed a shared address to one client", name)
+			}
+			return keptExpired
+		}
+		keptExpired := feed("a feed after the marker lapsed", func(r server.RedisClient) {
+			server.Raise(r.Del(ctx, verifyEgressKey(hash)).Err())
+		}, expiredSeeded)
+		feed("a feed while another client is attributed", func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, verifyEgressKey(hash), server.NewId().String(), settings.EgressTtl).Err())
+		}, keptExpired)
+
+		// refresh cycles of the live owners, as their transports refresh
+		for cycle := 1; ; cycle++ {
+			for _, owner := range liveOwners {
+				now := server.NowUtc()
+				testVerifyForwardLeaseUpdate(ctx, ip, settings, owner.clientId, owner.connectionId.String(), now, now.Add(settings.EgressTtl))
+			}
+			leases, marker, _ := testVerifyForwardEgress(ctx, ip, settings)
+			remaining := 0
+			for owner := range ownerDeadlines {
+				if _, recorded := leases[owner]; recorded {
+					remaining += 1
+				}
+			}
+			if remaining < len(liveOwners) || marker != verifyEgressAmbiguous {
+				t.Fatalf("refresh cycle %d lost live owners or the marker: %d recorded, marker %q", cycle, remaining, marker)
+			}
+			if remaining == len(liveOwners) {
+				break
+			}
+			if 8 <= cycle {
+				t.Fatalf("expired owners outlived %d refresh cycles: %d remain", cycle, remaining-len(liveOwners))
+			}
+		}
+	})
 }
 
 // Every client behind a shared address updates its forward lease on connect,
 // on each refresh and on close. Once the address is marked ambiguous an update
-// must touch only its own owner. Rescanning every owner per update makes the
-// address's work quadratic in its owners, all on the address's one cluster
-// slot: one shared address with thousands of churning clients saturated a
-// Redis node. The expired seeded owners make such a rescan observable, since
-// the whole-hash pass deletes them.
+// may touch only its own owner and a bounded step of expired ones. Rescanning
+// every owner per update makes the address's work quadratic in its owners,
+// all on the address's one cluster slot: one shared address with thousands of
+// churning clients saturated a Redis node. The expired seeded owners make such
+// a rescan observable, since the whole-hash pass deletes them all.
 func TestVerifyEgressMarkedAddressUpdateTouchesOnlyItsOwner(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := DefaultVerifySettings()
 		settings.EgressHashKey = []byte("marked-address-egress-test")
 		ip := netip.MustParseAddr("198.51.100.20")
-		ownerDeadlines, _ := testVerifySeedMarkedEgress(ctx, settings, ip, 256)
+		ownerDeadlines, liveOwners := testVerifySeedMarkedEgress(ctx, settings, ip, 256)
 		_, _, seededMarkerTtl := testVerifyForwardEgress(ctx, ip, settings)
+		keptExpired := len(ownerDeadlines) - len(liveOwners)
 
 		clientId, connectionId := server.NewId(), server.NewId()
 		owner := clientId.String() + "/" + connectionId.String()
@@ -317,9 +414,11 @@ func TestVerifyEgressMarkedAddressUpdateTouchesOnlyItsOwner(t *testing.T) {
 		for _, step := range steps {
 			step.update()
 			leases, marker, markerTtl := testVerifyForwardEgress(ctx, ip, settings)
-			if kept := testVerifyKeptOwnerCount(leases, ownerDeadlines); kept != len(ownerDeadlines) {
-				t.Fatalf("%s on a marked address rewrote other owners: kept %d of %d", step.name, kept, len(ownerDeadlines))
+			keptLive, stepKeptExpired := testVerifyKeptOwnerCounts(leases, ownerDeadlines, server.NowUtc())
+			if keptLive != len(liveOwners) || stepKeptExpired < keptExpired-testVerifyLeasePruneBound {
+				t.Fatalf("%s on a marked address rewrote other owners: kept %d of %d live, pruned %d expired", step.name, keptLive, len(liveOwners), keptExpired-stepKeptExpired)
 			}
+			keptExpired = stepKeptExpired
 			if _, recorded := leases[owner]; recorded != step.live {
 				t.Fatalf("%s on a marked address left its own owner recorded=%t", step.name, recorded)
 			}
@@ -335,8 +434,8 @@ func TestVerifyEgressMarkedAddressUpdateTouchesOnlyItsOwner(t *testing.T) {
 
 // Once the marker lapses nobody is attributed, so no close can change the
 // forward entry. Closes then, as when a shared address's clients disconnect
-// together, must each withdraw only their own owner instead of rescanning
-// every remaining one.
+// together, must each withdraw only their own owner and prune at most a
+// bounded step of expired ones, instead of rescanning every remaining owner.
 func TestVerifyEgressUnattributedCloseTouchesOnlyItsOwner(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -349,13 +448,16 @@ func TestVerifyEgressUnattributedCloseTouchesOnlyItsOwner(t *testing.T) {
 			server.Raise(r.Del(ctx, verifyEgressKey(hash)).Err())
 		})
 
-		for _, closing := range liveOwners[:2] {
+		keptExpired := len(ownerDeadlines) - len(liveOwners)
+		for index, closing := range liveOwners[:2] {
 			ClearVerifyConnectionEgress(ctx, closing.clientId, closing.connectionId, ip, settings)
 			delete(ownerDeadlines, closing.clientId.String()+"/"+closing.connectionId.String())
 			leases, forward, _ := testVerifyForwardEgress(ctx, ip, settings)
-			if kept := testVerifyKeptOwnerCount(leases, ownerDeadlines); kept != len(ownerDeadlines) || len(leases) != len(ownerDeadlines) {
-				t.Fatalf("close on an unattributed address rewrote other owners: kept %d of %d, %d recorded", kept, len(ownerDeadlines), len(leases))
+			keptLive, closeKeptExpired := testVerifyKeptOwnerCounts(leases, ownerDeadlines, server.NowUtc())
+			if keptLive != len(liveOwners)-index-1 || closeKeptExpired < keptExpired-testVerifyLeasePruneBound || len(leases) != keptLive+closeKeptExpired {
+				t.Fatalf("close on an unattributed address rewrote other owners: kept %d of %d live, pruned %d expired, %d recorded", keptLive, len(liveOwners)-index-1, keptExpired-closeKeptExpired, len(leases))
 			}
+			keptExpired = closeKeptExpired
 			if forward != "" {
 				t.Fatalf("close on an unattributed address set the forward entry to %q", forward)
 			}
@@ -367,10 +469,11 @@ func TestVerifyEgressUnattributedCloseTouchesOnlyItsOwner(t *testing.T) {
 }
 
 // Deferring cleanup while marked must not strand the address. The marker's
-// lapse is forced by deleting it. The first feed afterward prunes the expired
-// owners and re-marks the address while other clients stay live; after they
-// have all closed and the marker lapses again, the remaining client is
-// attributed.
+// lapse is forced by deleting it. The first feed afterward keeps every live
+// owner and re-marks the address while other clients stay live; after they
+// have all closed and the marker lapses again, the remaining client's feed
+// scans the whole address, which only it shares, prunes every expired owner
+// and is attributed.
 func TestVerifyEgressLapsedMarkerPrunesAndHeals(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -387,11 +490,13 @@ func TestVerifyEgressLapsedMarkerPrunesAndHeals(t *testing.T) {
 		clientId, connectionId := server.NewId(), server.NewId()
 		testVerifySetProvideModes(ctx, clientId)
 
+		owner := clientId.String() + "/" + connectionId.String()
 		lapseMarker()
 		FeedVerifyConnectionEgress(ctx, clientId, connectionId, ip, settings)
 		leases, marker, markerTtl := testVerifyForwardEgress(ctx, ip, settings)
-		if kept := testVerifyKeptOwnerCount(leases, ownerDeadlines); kept != len(liveOwners) || len(leases) != len(liveOwners)+1 {
-			t.Fatalf("first feed after the lapse did not prune exactly the expired owners: kept %d of %d live, %d recorded", kept, len(liveOwners), len(leases))
+		keptLive, keptExpired := testVerifyKeptOwnerCounts(leases, ownerDeadlines, server.NowUtc())
+		if _, recorded := leases[owner]; keptLive != len(liveOwners) || !recorded || len(leases) != keptLive+keptExpired+1 {
+			t.Fatalf("first feed after the lapse rewrote other owners: kept %d of %d live, %d expired, %d recorded", keptLive, len(liveOwners), keptExpired, len(leases))
 		}
 		if marker != verifyEgressAmbiguous || markerTtl <= 0 || settings.EgressTtl < markerTtl {
 			t.Fatalf("first feed after the lapse did not re-mark a shared address: %q ttl=%s", marker, markerTtl)
@@ -404,8 +509,9 @@ func TestVerifyEgressLapsedMarkerPrunesAndHeals(t *testing.T) {
 			ClearVerifyConnectionEgress(ctx, liveOwner.clientId, liveOwner.connectionId, ip, settings)
 		}
 		leases, marker, _ = testVerifyForwardEgress(ctx, ip, settings)
-		if len(leases) != 1 || marker != verifyEgressAmbiguous {
-			t.Fatalf("closes on a marked address: %d owners recorded, marker %q", len(leases), marker)
+		keptLive, keptExpired = testVerifyKeptOwnerCounts(leases, ownerDeadlines, server.NowUtc())
+		if _, recorded := leases[owner]; keptLive != 0 || !recorded || len(leases) != keptExpired+1 || marker != verifyEgressAmbiguous {
+			t.Fatalf("closes on a marked address: %d live and %d expired other owners recorded, own recorded=%t, marker %q", keptLive, keptExpired, recorded, marker)
 		}
 		if ResolveVerifyEgress(ctx, ip, settings) != nil {
 			t.Fatal("closes shortened the ambiguity window")
@@ -413,6 +519,10 @@ func TestVerifyEgressLapsedMarkerPrunesAndHeals(t *testing.T) {
 
 		lapseMarker()
 		FeedVerifyConnectionEgress(ctx, clientId, connectionId, ip, settings)
+		leases, _, _ = testVerifyForwardEgress(ctx, ip, settings)
+		if _, recorded := leases[owner]; len(leases) != 1 || !recorded {
+			t.Fatalf("the only remaining client's feed did not prune every expired owner: %d recorded", len(leases))
+		}
 		requireVerifyEgressLeaseOwner(t, ctx, ip, clientId, settings)
 		ClearVerifyConnectionEgress(ctx, clientId, connectionId, ip, settings)
 		if ResolveVerifyEgress(ctx, ip, settings) != nil || testVerifyEligible(ctx, clientId) {

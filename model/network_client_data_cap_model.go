@@ -981,7 +981,7 @@ func drainClientDataUsageShard(ctx context.Context, blockNumber int64, shard int
 	server.Redis(ctx, func(r server.RedisClient) {
 		var cursor uint64
 		for {
-			kvs, nextCursor, err := r.HScan(ctx, key, cursor, "", 5000).Result()
+			kvs, nextCursor, err := r.HScan(ctx, key, cursor, "", redisDrainScanCount).Result()
 			server.Raise(err)
 			for i := 0; i+1 < len(kvs); i += 2 {
 				fields[kvs[i]] = kvs[i+1]
