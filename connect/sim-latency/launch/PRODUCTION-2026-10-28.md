@@ -1,6 +1,51 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 06:12 UTC
+## Current preparation pointer — October 25, 15:31 UTC
+
+The authoritative acceptance index is [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md).
+The [current-state.json](current-state.json) handoff binds the current process;
+verify that process and its actual artifacts before acting. Production has not
+been activated, and user-confirmed main maintenance remains an activation hold.
+
+The corrected evaluated server is
+`c1f9dda603d6279666fca5d92b99c5663306c5f7`, with canonical ten-repository source
+digest `5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e`.
+The other nine pins are unchanged; operator-proxy is retired. Config preparation
+commit `0c6dcaa1da2a680696f53c043291df7860c8136f` records the source ledger.
+Its actual Go 1.27.3 evaluator image is
+`sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3`;
+see [exact image evidence](ARTIFACTS-CANCELED-STOP-2026-10-25.md).
+The separate trusted host release corrects demonstrated host-gateway exposure,
+with [network proofs and three full 514-test passes](NETWORK-BOUNDARY-2026-10-25.md).
+
+The old formal campaign stopped at its first cohort after a canceled socket
+write was incorrectly classified as unexpected recovery. Its complete failure
+is preserved and its other positions remain unstarted. The minimal correction
+passed deterministic pre-fix/fixed proofs and three full evaluated-source suites;
+neither the stability gate nor the statistical margin was weakened.
+
+The [replacement protocol](CALIBRATION-RESTART-2026-10-25.md) and
+[all five frozen input sets](CALIBRATION-RESTART-FREEZE-2026-10-25.md) were pushed
+as `2844161a9` before measurement. Fresh position 1 started at 15:28:07 UTC with
+an 18:28:07 UTC deadline. It also serves corrected-release full-window functional
+qualification, without counting as an additional observation. Only this position
+is currently authorized. No tests, builds or other scoring may overlap it.
+No accepted new baseline, calibrated margin or completed cohort is claimed yet.
+
+The warm-reader pilot completed but was slower; it failed its directional
+screen and is not a qualified faster reference. The owner-admission-map draft
+is a separate **untested** hypothesis, not a source change or accepted reference.
+Reference qualification and held-out seeds remain required.
+
+At the latest read-only check, API returned 503, MinIO refused connection and
+the dedicated review-provider key was absent. Live provider/host/readiness,
+artifact durability, monitoring and partner release deltas remain open. The
+opening remains fixed at **2026-10-28T00:00:00Z**, not postponed or redefined.
+
+## Earlier preparation pointer — October 25, 06:12 UTC
+
+The following section is historical. Its release and pending-action statements
+describe 06:12 UTC, not the current corrected-release state above.
 
 The compact [current-state.json](current-state.json) records the current
 preparation handle, immutable source/image identities, completed evidence,
