@@ -1429,6 +1429,28 @@ preflight remains diagnostic evidence, not a formal gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 
+A separately compiled test binary runs from its package directory, matching
+Go's `runTestActor` (`cmd.Dir = a.Package.Dir`), even when compilation starts in
+the module directory. Relative catalogs and test resources depend on that
+binding. The credentials control
+`TestCredentialsCatalogNamesEveryLiteralClassAndSummaryBoundary` exposed this:
+the first direct race run had 18 RUN, 17 PASS and nine nested PASS, with its
+sole failure reading relative `SIGNALS.md` from the module directory. Changing
+only the working directory to the package directory then gave 18 PASS and nine
+nested PASS with the same ELF, source, profile, selector and budgets. Preserve
+the earlier setup STOP; this is existing regression evidence, not a new test.
+An outer timeout with zero observed roots establishes missing verification,
+not a code failure, cold cache, or a particular compilation/startup cause.
+Separate diagnostic compile, list and body evidence can locate that boundary;
+compile/list success is not a test PASS and changes no required gate or budget.
+
+Apply the declared native-exit, exact-root, race-warning and source-identity
+checks rather than adding an unstated empty-stderr requirement. The same
+credentials list retained source-backed fixed startup/settings notices in its
+synthetic profile and was accepted under its original contract. Keep stderr
+private and retain its source classification; such notices do not override a
+failed test, race warning or named gate failure.
+
 Batch ready gates by causal boundary. Reuse a successful result only for an
 exact fingerprint covering repository bases, dependency locks, toolchain,
 command/arguments, relevant environment and harness/config, and a consistent
