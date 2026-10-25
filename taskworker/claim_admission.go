@@ -5,14 +5,23 @@ package taskworker
 import (
 	"maps"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Ordinary queue turns per provider totals lane turn: a quarter of all claims
+// Ordinary queue turns per provider totals lane turn: an eighth of all claims
 // while totals are due.
-const legacyProviderTotalsClaimSharePeriod = 2
+const legacyProviderTotalsClaimSharePeriod = 4
+
+// The debit flush and the payment sender each own one run-once chain per shard
+// or payment, and behind the totals backlog each waited over a minute per
+// claim, one rotation turn in about two hundred. Each now takes one of every
+// eight ordinary turns, a sixteenth of all claims, while it is due. The three
+// shares spend exactly the half of the ordinary turns the scheduler allows;
+// the other half stays oldest first.
+const financialOwnerClaimSharePeriod = 8
 
 // Provider-probe shard passes per instance follow the configured URL geometry,
 // so co-located tunnel pools stay within one instance's URL concurrency while
@@ -46,6 +55,8 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimShares = map[string]int{}
 	}
 	ownerSettings.TargetClaimShares[task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName()] = legacyProviderTotalsClaimSharePeriod
+	ownerSettings.TargetClaimShares[task.NewTaskTarget(work.FlushTransferDebits).TargetFunctionName()] = financialOwnerClaimSharePeriod
+	ownerSettings.TargetClaimShares[task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName()] = financialOwnerClaimSharePeriod
 	if profile == WorkloadProfileProduction {
 		name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 		ownerSettings.TargetClaimLimits[name] = work.ProviderEgressProbeInstancePassLimit()
