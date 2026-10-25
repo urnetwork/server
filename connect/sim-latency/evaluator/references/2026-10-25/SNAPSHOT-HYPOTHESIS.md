@@ -17,7 +17,7 @@ Preparation workspace: `temp/reference-snapshot-draft-20261025.BFH83oNJ/`.
 
 An additional unexecuted
 [`snapshot-benchmark.go.txt`](snapshot-benchmark.go.txt), SHA-256
-`7c501a76dfe99ab336a3e796d38ab42a1151639ec9ac731b933c1e74177ed536`,
+`f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060`,
 uses the actual constructor/default freshness policy and identical code on
 baseline/candidate. For an idle-slot supporting screen, use five observations
 per source at `-benchtime=100ms`, management CPUs 20,22 and GOMAXPROCS=2.
@@ -27,6 +27,12 @@ output, ns/op and allocation result. Do not reroll an unfavorable result.
 Median candidate time must improve before spending a full directional pilot.
 These deliberately narrow two-CPU mechanism observations are not the real
 ten-core workload, confidence proof, calibrated margin or end-to-end acceptance.
+The same fixture separately benchmarks publication with 128 live pairs using
+the actual registered read-worker seam. Retain its allocation and owner-lock
+cost beside the warm-hit result; that direct seam deliberately excludes Redis
+and admission latency. A faster warm lookup alone does not establish that the
+tradeoff pays at the real refresh rate. Full-window memory/resource and score
+qualification remain mandatory, even if the supporting hit benchmark improves.
 
 ## Mechanism to investigate
 
