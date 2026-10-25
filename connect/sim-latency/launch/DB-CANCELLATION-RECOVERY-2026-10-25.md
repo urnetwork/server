@@ -93,10 +93,25 @@ Exact corrected source SHA-256:
 - The first evaluated-source invocation then required the expected sibling
   `sn` path for its exact private suite generator. The private checkout layout
   was corrected using the frozen dependency tree, without disabling the guard.
+- On clean committed successor `c1f9dda60`, the repeated targeted race scope
+  passed all 17 tests (116 seconds, package 3.863 seconds); log SHA-256:
+  `e359961b19ee55fe1f1ff6f13c4cefa035666d2c577ab25115cd631f9ad475fa`.
+  The first full simulator suite then stopped with 302 passes and 38 failures:
+  the isolated root launcher omitted the global Git identity explicitly
+  required by existing synthetic Git fixtures. No source defect is inferred
+  from that setup failure. Exit 1, 315 seconds, cleanup 0, clean source and
+  original-only resources; log SHA-256:
+  `e72530fc8449ed90a1295229818b726e93a3a479377cf206a1aed072054970fc`.
+  A private synthetic `GIT_CONFIG_GLOBAL` file corrects the launcher context;
+  no host-global settings, repository-local identity or author override is
+  changed. The existing identity guard remains enabled. The next sequence
+  starts at full suite 1, not suite 2; this failed invocation remains retained.
 
 The private evidence root is
 `temp/db-stop-prefix-20261025.ZUKuHMwu/`. No operator checkout, frozen evaluated
 source, original failed evidence or main database was modified by test setup.
+The clean-commit targeted and initial full-suite setup evidence is separately
+retained under `temp/canceled-stop-full-three-20261025.7M6m9d9r/`.
 
 ## Next release boundary
 
@@ -110,9 +125,34 @@ onto frozen `0d58d0d9`. Clean successor
 The other nine evaluated repository pins are unchanged. Main control-program
 changes are not included in this evaluated-source successor.
 
-Three consecutive full simulator suites and a clean-commit targeted root smoke
-have been requested; acceptance is pending their terminal receipts. A corrected
-evaluated release then needs its own committed source ledger, exact source lock,
+The clean-commit targeted root smoke and **three consecutive full simulator
+suites passed**. Every suite ran all 340 top-level tests (one non-race lifecycle
+and 339 race-enabled tests); whole walls were 117/116/116 seconds, race-package
+times 109.230/108.563/108.777 seconds. All used exact Go 1.27.3 and clean `c1f9dda60`
+with the nine unchanged frozen dependencies. The private synthetic global Git
+identity was verified before invocation; no host-global file was changed.
+
+| Suite | Full log SHA-256 |
+| --- | --- |
+| 1 | `916a86ba79f3c1b6b8c92d399c7bbcdabd676ba3d31b5e03de5b38ecce5e4dfd` |
+| 2 | `d8147e00c0267dd15b647b21a3585d55214da09ce3326574a1a6df26a8df4a8e` |
+| 3 | `680f6df9a327045a720b3ec19c314acb9345092662760782f278dae70eadad94` |
+
+Evidence root: `temp/canceled-stop-three-corrected-20261025.3wbLy9aM/`.
+Its launch log SHA-256 is
+`588b3dff1bcd2c7bbf7483f29afa69c30214471747e2319eb545f0a64fda71e0`.
+Final cleanup was 0; source remained clean, only the original three containers
+and four networks remained, and the canonical singleton lock was free.
+
+The proposed source ledger binds canonical ten-repository digest
+`5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e`.
+The previous manifest is preserved byte-for-byte (including its final blank
+line) at `config/history/sim-latency-2026-10-24-232720.yml`, SHA-256
+`156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f`.
+The retained blank line can produce a Git whitespace warning; changing it would
+invalidate exact preservation. This is not an executable-code formatting change.
+
+The corrected evaluated release still needs its own exact image,
 Go 1.27.3 image, cold evaluation and predeclared fresh calibration. The previous
 release's controls are historical evidence, not measurements of the correction.
 Main remains under the user-confirmed maintenance hold; no production activation

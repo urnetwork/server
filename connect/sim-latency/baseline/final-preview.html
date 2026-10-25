@@ -9,10 +9,10 @@
 </style>
 <main>
 <header>
-<div class="eyebrow">Preparation preview · calibration stop October 25, 2026, 11:44 UTC</div>
+<div class="eyebrow">Preparation preview · source qualification October 25, 2026, 12:31 UTC</div>
 <h1>A dedicated competition environment.<br>A fixed October 28 opening.</h1>
 <p class="muted">Public admission target: <strong>2026-10-28 00:00 UTC</strong>. This is a dated preview, not launch approval or a final baseline report.</p>
-<p class="banner">The prior release passed its 3,600-provider cold check in 2h56m48s. Formal calibration then stopped at cohort 1: a canceled database write was reported as unexpected recovery. All nine controls completed; no candidate or later cohort ran. The failure is preserved, correction qualification is underway, and no official baseline or final margin is accepted.</p>
+<p class="banner">The prior release passed its 3,600-provider cold check in 2h56m48s. Formal calibration then stopped at cohort 1: a canceled database write was reported as unexpected recovery. The failure is preserved. The correction passed 17 targeted race tests and three full simulator suites; its new image and fresh measurements are still pending. No official baseline or final margin is accepted.</p>
 </header>
 
 <section aria-labelledby="environment">
@@ -49,7 +49,7 @@
 <h2 id="qualification">Progress is observable; acceptance is still pending</h2>
 <div class="cards">
 <div class="card"><span class="big">18 / 18</span>cold runs complete<div class="progress" role="progressbar" aria-label="Cold runs complete" aria-valuemin="0" aria-valuemax="18" aria-valuenow="18"><span style="width:100%"></span></div><small>9 controls + 9 candidates; all gates passed</small></div>
-<div class="card"><span class="big">3 × 501</span>passing control-suite tests<br><small>At recorded revision 30f340a27; not correction or live readiness proof</small></div>
+<div class="card"><span class="big">3 × 340</span>passing corrected-source tests<br><small>Clean c1f9dda60; not new-image qualification or live readiness proof</small></div>
 <div class="card"><span class="big">0.614 s</span>host bomb cleanup observed<br><small>Local host test, not new-image host attestation</small></div>
 <div class="card"><span class="big" style="color:var(--red)">Not faster</span>warm-reader reference pilot<br><small>18/18 runs and all gates passed, but mean score was 17.8% worse; faster reference remains unqualified</small></div>
 <div class="card"><span class="big" style="color:var(--red)">Stopped</span>formal Stage A, cohort 1<br><small>9 controls · 0 candidates; no retry or replacement sample</small></div>
@@ -65,7 +65,7 @@
 <section aria-labelledby="launch">
 <div class="eyebrow">04 · Launch path</div>
 <h2 id="launch">Fixed opening. Evidence-driven release.</h2>
-<div class="steps"><div class="step">Preserve cold success and failed calibration; qualify cancellation correction</div><div class="step">Freeze corrected release; calibrate fresh variance, margin and independent references</div><div class="step">Qualify real review providers, host, MinIO and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
+<div class="steps"><div class="step">Source correction passed; build and qualify its new image</div><div class="step">Calibrate fresh variance, margin and independent references</div><div class="step">Qualify real review providers, host, MinIO and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
 <p><span class="pill">Main maintenance hold</span> At the last endpoint check (11:54 UTC), API timed out without a response and MinIO refused the connection. No production activation or main mutation is authorized during the maintenance hold.</p>
 <p>Season intent: six weekly admission epochs, $20 per submission, no submission-count ceiling and immediate FIFO evaluation. Scoring drains after close. The provisional winner undergoes automatic Sol 6.1 max review; rejection advances to the next eligible candidate. An approved winner must build and qualify before becoming the next source. Exhaustion carries the incumbent forward; uncertainty pauses and alerts.</p>
 <p><a href="../launch/LAUNCH-ACCEPTANCE.md">Current acceptance matrix</a> · <a href="../launch/current-state.json">Dated state and live handle</a> · <a href="../launch/COLD-R9-PROTOCOL-2026-10-25.md">Cold qualification protocol</a> · <a href="../launch/CONTROL-VALIDATION-2026-10-25.md">Full-suite evidence</a></p>
