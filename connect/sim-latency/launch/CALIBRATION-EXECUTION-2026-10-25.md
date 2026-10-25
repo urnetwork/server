@@ -1,6 +1,19 @@
 # Calibration analyzer execution handoff
 
-**Qualification in progress; no formal measurements yet.** The warm-reader
+**Stage A stopped at its first cohort; it is not accepted.** The first cohort
+ended at 2026-10-25T11:44:08Z with exit 1 after 5,223 seconds. All nine controls
+completed, but the baseline scorer rejected control 1 for `unexpected_recovery`.
+No candidate build, candidate measurement or later cohort started. Terminal
+cleanup was verified. The original failed evidence and all five frozen positions
+must be retained; do not retry or substitute a favorable draw. Diagnosis of the
+canceled database operation's joined error is in progress; no gate is relaxed.
+
+Its first cohort
+started at 2026-10-25T10:17:05Z, after
+[protocol publication](CALIBRATION-FREEZE-2026-10-25.md) in commit `72046d145`.
+The analyzer at `30f340a27` passed all qualification steps below, including
+three complete 501-pass suites; do not rerun those steps while scoring is live.
+This is not an accepted calibration or production activation. The warm-reader
 pilot completed with cleanup and failed its directional screen; see
 [its preserved outcome](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md).
 The first analyzer snapshot passed 52 named race-enabled tests, six behavioral
@@ -8,14 +21,16 @@ pre-fix/fixed regressions and real frozen-image control/candidate replay.
 The latest merged-main draft passed 55 named tests, all nine pre-fix/fixed
 regressions and another real-image replay; see
 [the exact smoke receipts](CALIBRATION-QUALIFICATION-2026-10-25.md).
-Publication and three full suites remain required. Check
+The exact completed qualification and full-suite receipts are recorded there.
+For the current cohort and next action, check
 [current-state.json](current-state.json), then verify the actual live handle.
 Do not overlap tests/builds/replay with scoring. Actual Go 1.27.3 is mandatory;
 use Sol 6.1 low for independent test execution and Sol 6.1 max for diagnosis,
-code evaluation and merges. The order below remains the full acceptance path;
-the earlier partial passes are not final release acceptance.
+code evaluation and merges. The sequence below is retained as the completed
+qualification procedure, not an instruction to overlap another validation with
+the live campaign. Formal results and later launch gates still need acceptance.
 
-## Qualification order
+## Completed qualification sequence
 
 1. Inspect the same live pilot handle. At terminal verify all artifacts, exact
    cleanup, elapsed time and the predeclared directional decision. Preserve all

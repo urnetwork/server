@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T10:12:13Z",
+  "observed_at": "2026-10-25T11:54:09Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "stage_a_frozen_publish_before_first_formal_measurement",
+  "status": "formal_stage_a_stopped_baseline_unexpected_recovery",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "evaluated_source": {
     "server_commit": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
@@ -18,25 +18,39 @@
     "operator_proxy_retired": true
   },
   "active_attempt": {
-    "kind": "independent-three-complete-suite-validation",
+    "kind": "formal-offline-five-cohort-same-seed-calibration",
     "owner_agent": "/root/provide_serialization_test",
-    "exec_session_id": 20206,
-    "root": "/home/by/urnetwork/temp/calibration-full-three-20261025.MOcUSwBx",
-    "source_commit": "30f340a2779699225ab40ec7f3c5d978525276d2",
-    "phase": "complete",
-    "complete_suites_passed": 3,
-    "exit_code": 0,
+    "exec_session_id": 71080,
+    "manager_pid": 3632703,
+    "manager_uid": 0,
+    "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy",
+    "cohort_position": 1,
+    "cohort_root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-01",
+    "phase": "failed",
+    "baseline_completed": 9,
+    "candidate_completed": 0,
+    "started_at": "2026-10-25T10:17:05Z",
+    "execution_deadline": "2026-10-25T13:17:05Z",
+    "request_sha256": "263eca1bdb583f3f3e08bbcbfc1bd260aaba089bf2deeeea95a7fe8caab57c9f",
+    "protocol_commit": "72046d14581306754529960f37a6c1ba6c3253ae",
+    "command_scope": "Only the five predeclared positions, serially under canonical shared slot and immutable runner. Each gets nine fresh controls, offline no-op build and nine fresh candidates within three hours plus bounded safety cleanup. Stop on execution/gate/integrity/budget/cleanup failure; no automatic retry or substitution.",
+    "ended_at": "2026-10-25T11:44:08Z",
+    "exit_code": 1,
+    "duration_seconds": 5223,
     "cleanup_verified": true,
-    "wall_seconds": [321, 163, 162],
-    "log_sha256": ["d79466cbb51cff2362071417a2a5b24be3501a80d466678372841ca309667148", "678cabcc93825a3a92acffd267d9ef893239f1a355562fc229ed94555b1485ad", "b220db4de046a97983cdfd0040477a7f9ca6f9e5df555c9ce1b810c78aa007bf"],
-    "top_level_passes_per_completed_suite": 501,
-    "command_scope": "Three separate complete tests.sh -count=1 invocations, actual Go 1.27.3/local, management CPUs 20,22, synthetic attested disposable services, shared slot held through cleanup. All explicit retained-helper environment variables unset. No formal scoring.",
-    "next_action": "Full validation and input/native preflight complete. Publish freeze record and all five ordered request bindings, then run Stage A serially with no automatic retries."
+    "preserved_failure_path": "server/connect/sim-latency/baseline/prelaunch-same-seed-r9-2026-10-25/failed-cohort-01",
+    "archive_sha256": "e76abdad43d682c066c4b09ba37be2ff53e26f54c6ccbdfda1b1fbe03ac05e0d",
+    "archive_original_files_verified": 125,
+    "archive_verification_log_sha256": "6bb3602a5c1ee2025239366d3546c9c6dcbf0403631d7354badea30cb3139cea",
+    "failure": "Baseline scorer rejected control 1 for unexpected_recovery. A canceled announce database write retained a socket timeout in its joined stop cause; IsDoneError classifies that physical timeout as unexpected. Root-cause investigation is in progress; no stability gate has been weakened.",
+    "next_action": "Preserve the failed position and original evidence. Diagnose cancellation/error classification and add deterministic regressions. Do not retry this cohort, substitute a successful draw, or start positions 2-5. A correction requires a new immutable release and protocol."
   },
   "prepared_formal_campaign": {
     "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy",
-    "phase": "prepared_not_executed",
-    "measurements_started": 0,
+    "phase": "stopped_at_failed_cohort_01",
+    "invocations_started": 1,
+    "cohorts_completed": 0,
+    "protocol_commit": "72046d14581306754529960f37a6c1ba6c3253ae",
     "plan_sha256": "94eb6f7b6ef670187ab7c173ddf0351817cda4b58e3205e1d7407bb1e19ec4f8",
     "evaluation_policy_sha256": "8918df4980ea63b937410683fd17d530cebfbff1b38724e5bac44b0ce1e46ead",
     "analyzer_command": "/usr/local/libexec/urnetwork/competition-calibration-30f340a27-ac60524d/sim-latency",
@@ -48,7 +62,7 @@
     "fresh_noop_runs": 45,
     "freeze_record": "server/connect/sim-latency/launch/CALIBRATION-FREEZE-2026-10-25.md",
     "native_input_verification_log_sha256": "76627d80b0e6e302cc4917f27e286d310bf4c6e8dbea2342ad0a86c1d58b74bc",
-    "next_action": "After commit/pull/push of freeze record, execute only the declared five positions in order; no overlap, substitution, cached baseline or favorable-draw retry."
+    "next_action": "The first position failed and stops this campaign. Positions 2-5 remain unstarted. Retain the failure and frozen plan; no analyzer acceptance, automatic retry or continuation is authorized by this protocol."
   },
   "last_reference_pilot": {
     "kind": "offline-warm-reader-reference-pilot",
@@ -133,7 +147,7 @@
     "control_plane_identities": "Explicit offline synthetic fixtures; not live API/worker/host/provider receipts.",
     "request_sha256": "6f2f2ee76c6ed08c4e798b4e14371e591830caa1b0728fb275a940a1237ac363",
     "evaluator_sha256": "d55eac73bebd5a3be1ef01c0ad024633a3c71d01b481350386b06810e64feed2",
-    "next_action": "Finish independent archival verification and commit/pull/push the phase. Predeclare fresh statistical/reference calibration before starting another measurement; do not reuse these controls as a different round baseline."
+    "next_action": "Cold archive verification and publication are complete. Retain this historical release check; do not reuse its controls as a different round baseline or as measurements of a corrected release."
   },
   "evidence": {
     "frontier": "server/connect/sim-latency/baseline/prelaunch-ready-snapshot-frontier-2026-10-25/INDEX.json",
@@ -147,7 +161,8 @@
     "first_cold_admission_failure_and_principal_regressions": "server/connect/sim-latency/baseline/prelaunch-cold-r9-2026-10-25/README.md",
     "cold_protocol": "server/connect/sim-latency/launch/COLD-R9-PROTOCOL-2026-10-25.md",
     "calibration_protocol_draft": "server/connect/sim-latency/launch/CALIBRATION-PROTOCOL-2026-10-25.md",
-    "calibration_analyzer_status": "Latest merged-main draft passed all 55 named race tests (54 regression tests plus one default-noop retained helper), nine behavioral old-body/fixed-body proofs and genuine frozen-image retained-cold baseline/candidate replay. Operator files independently match the source receipt. Earlier fixture failures are retained; production guards unchanged. See CALIBRATION-QUALIFICATION-2026-10-25.md. Publish this phase before three full suites and a frozen formal protocol.",
+    "calibration_analyzer_status": "Published source30f340a2 passed all55 named race tests (54regressions plus default-noop retained helper), nine behavioral old-body/fixed-body proofs, genuine frozen-image retained-cold replay and three complete501-pass suites. Native Go1.27.3 analyzer ac60524d… is installed; StageA protocol72046d145 was pushed before first observation. Earlier fixture failures retained; production guards unchanged. See CALIBRATION-QUALIFICATION-2026-10-25.md and CALIBRATION-FREEZE-2026-10-25.md.",
+    "calibration_three_full_pass_proof": "server/connect/sim-latency/launch/CALIBRATION-QUALIFICATION-2026-10-25.md",
     "calibration_null_regression_prefix": "temp/calibration-null-prefix-20261025.RxHZ8Jpd/calibration_files.go.txt; SHA256 45dc93e58f780e8554aa8c8d03d6519ddf208c71aa7a27df4aaaa8f16c8a8f19; behavioral failure and fixed pass proven.",
     "calibration_cleanup_regression_prefix": "temp/calibration-null-prefix-20261025.RxHZ8Jpd/calibration_replay.go.txt; SHA256 cef389ba24b0df6ec5601dbac5ee70a55d30e1e361d58f7bf47f5ec73e6bea0c. Compatible body-only cleanup and umask failures, followed by fixed passes, proven.",
     "calibration_counting_regression_prefix": "temp/calibration-null-prefix-20261025.RxHZ8Jpd/calibration_analysis.go.txt; SHA256 3c8b50c1325354f9e63199e0a6aa13c83556504c7c5770f3d045eea7f264563c. Reconstructed old logic reproduced counting/validation failures and three control-identity failures; exact fixed restoration passed.",
@@ -157,10 +172,18 @@
     "reference_candidate": "server/connect/sim-latency/evaluator/references/2026-10-25/README.md",
     "reference_status": "312 selected race executions passed; full bounded 9+9 pilot completed with all gates and cleanup, but both candidate mean and median were worse. Faster reference remains unqualified."
   },
+  "next_reference_research": {
+    "path": "server/connect/sim-latency/evaluator/references/2026-10-25/owner-admission-map.patch",
+    "sha256": "decaf56673e0690a1bd87df13b820db60d9d01bcf28618e9cefd3439d5a0fbb9",
+    "status": "draft_only_not_applied_compiled_tested_or_performance_qualified",
+    "scope": "Only frozen server/connect/resident_contract_manager.go; replace redundant owner-locked limiter objects with timestamps, preserving admission/cache/deadline/ownership rules by design intent, not yet proven.",
+    "next_action": "Read-only review may continue. No build, tests or pilot while formal scoring is live. Requires independent baseline/candidate correctness screens, a separate predeclared fresh-control pilot and held-out qualification; never reuse Stage A measurements."
+  },
   "external_holds": {
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
-    "last_check_at": "2026-10-25T09:28:03Z",
-    "api_info_http": 503,
+    "last_check_at": "2026-10-25T11:42:16Z",
+    "api_info_http": 0,
+    "api_info_observation": "Read-only GET timed out after eight seconds without a response; not evidence of a terminal service failure or authorization to restart during maintenance.",
     "minio_health": "172.28.208.177:23900 connection refused",
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },

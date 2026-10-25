@@ -5,7 +5,13 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-Observation: **2026-10-25T06:12:28Z**. The cold qualification is terminal,
+Observation: **2026-10-25T11:54:09Z**. Stage A stopped at its first cohort:
+nine controls completed, but control 1 failed baseline stability for
+`unexpected_recovery`. No candidate build or later cohort started; exact
+cleanup was verified. Preserve this failed position, diagnose and qualify the
+correction, then publish a new immutable release/protocol before new scoring.
+See [the retained failure](../baseline/prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md).
+The cold qualification is terminal,
 exit 0, 9+9 complete, all gates passed and exact cleanup verified. Independent
 archive verification also passed. See [the complete cold evidence](../baseline/prelaunch-cold-r9-2026-10-25/completed/README.md)
 and [current-state.json](current-state.json). This local acceptance does not
