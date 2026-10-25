@@ -28,23 +28,27 @@ type sdkBrowsingOriginTuple struct {
 // Origin mappings belong to upstream socket lifetimes, not provider identities.
 // Only short map snapshots hold stateLock; API and socket I/O run outside it.
 type sdkBrowsingNative struct {
-	fixture         *sdkBrowsingSetupFixture
-	scenario        *sdkBrowsingScenario
-	path            *fullTunPath
-	stateLock       sync.Mutex
-	ports           [nativeBrowsingOriginCount]int
-	originCount     int
-	upstreamConns   map[sdkBrowsingOriginTuple]*sdkBrowsingOriginConn
-	bridgeDone      chan struct{}
-	receiveUnsub    func()
-	bridgeStarted   atomic.Uint64
-	bridgeCompleted atomic.Uint64
-	bridgeAccepted  atomic.Uint64
-	bridgeRefused   atomic.Uint64
-	bridgeMaximum   atomic.Int64
-	bridgeInvalid   atomic.Bool
-	originDials     [6]atomic.Uint64
-	originCloses    [6]atomic.Uint64
+	fixture               *sdkBrowsingSetupFixture
+	scenario              *sdkBrowsingScenario
+	path                  *fullTunPath
+	stateLock             sync.Mutex
+	ports                 [nativeBrowsingOriginCount]int
+	originCount           int
+	coldLinkOriginForTest bool
+	coldLinkPortForTest   int
+	upstreamConns         map[sdkBrowsingOriginTuple]*sdkBrowsingOriginConn
+	bridgeDone            chan struct{}
+	receiveUnsub          func()
+	bridgeStarted         atomic.Uint64
+	bridgeCompleted       atomic.Uint64
+	bridgeAccepted        atomic.Uint64
+	bridgeRefused         atomic.Uint64
+	bridgeMaximum         atomic.Int64
+	bridgeInvalid         atomic.Bool
+	originDials           [6]atomic.Uint64
+	originCloses          [6]atomic.Uint64
+	// Explicit body-consumer fixtures leave encrypted socket reads unheld.
+	suppressOriginReadHoldForTest atomic.Bool
 }
 
 // The constructor creates no host interface or route; CreateTun uses gVisor.
@@ -137,6 +141,9 @@ func (self *sdkBrowsingNative) addOrigin(listener net.Listener) {
 	if self.originCount < len(self.ports) {
 		self.ports[self.originCount] = listener.Addr().(*net.TCPAddr).Port
 		self.originCount++
+	} else if self.coldLinkOriginForTest && self.originCount == nativeBrowsingOriginCount {
+		self.coldLinkPortForTest = listener.Addr().(*net.TCPAddr).Port
+		self.originCount++
 	}
 }
 
@@ -144,6 +151,7 @@ func (self *sdkBrowsingNative) addOrigin(listener net.Listener) {
 func (self *sdkBrowsingNative) clearOrigins() {
 	self.stateLock.Lock()
 	self.ports, self.originCount = [nativeBrowsingOriginCount]int{}, 0
+	self.coldLinkPortForTest, self.coldLinkOriginForTest = 0, false
 	self.stateLock.Unlock()
 }
 
@@ -180,7 +188,9 @@ type sdkBrowsingOriginConn struct {
 // The exact positive CSS read is held before NAT can forward its bytes.
 func (self *sdkBrowsingOriginConn) Read(buffer []byte) (int, error) {
 	count, err := self.Conn.Read(buffer)
-	self.native.scenario.holdOriginRead(self, count)
+	if !self.native.suppressOriginReadHoldForTest.Load() {
+		self.native.scenario.holdOriginRead(self, count)
+	}
 	return count, err
 }
 
@@ -219,7 +229,11 @@ func (self *sdkBrowsingNative) dialProvider(ordinal int, ctx context.Context, ne
 	destination := ""
 	for origin := 0; origin < self.originCount; origin++ {
 		if ip == netip.AddrFrom4([4]byte{203, 0, 113, byte(10 + origin)}) && port == "443" {
-			destination = net.JoinHostPort("127.0.0.1", fmt.Sprint(self.ports[origin]))
+			originPort := self.coldLinkPortForTest
+			if origin < nativeBrowsingOriginCount {
+				originPort = self.ports[origin]
+			}
+			destination = net.JoinHostPort("127.0.0.1", fmt.Sprint(originPort))
 			break
 		}
 	}
