@@ -60,6 +60,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/robots.txt", router.RobotsTxt),
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/clock", handlers.Clock),
+		router.NewRoute("GET", "/health", handlers.Health),
 		// The sim-latency competition is a separate, fail-closed security
 		// domain served by this API process. Its health and published policy
 		// are public; round control and scoring use role-scoped opaque tokens.
