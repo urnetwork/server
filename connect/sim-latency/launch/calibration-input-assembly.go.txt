@@ -1,0 +1,130 @@
+// Draft preparation helper: copy into an isolated analyzer-source checkout as
+// a _test.go file and explicitly select it only after all five cohorts finish.
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+// Uses the qualified retained-input loader; never scores, filters or rewrites
+// original observations. Unset opt-in environment makes this helper inert.
+func TestCalibrationAssembleFrozenCampaignHelper(t *testing.T) {
+	root := os.Getenv("SIM_LATENCY_ASSEMBLE_CAMPAIGN_ROOT")
+	if root == "" {
+		return
+	}
+	expectedPlan := os.Getenv("SIM_LATENCY_ASSEMBLE_PLAN_SHA256")
+	if os.Geteuid() != 0 || !validSha256(expectedPlan) || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		t.Fatal("explicit root principal, canonical campaign root and pinned plan required")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != root {
+		t.Fatal("campaign root unavailable or redirected")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		t.Fatal("campaign root must be private")
+	}
+	planBytes, err := readBoundedFile(filepath.Join(root, "plan.json"), "frozen campaign plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planDigest := sha256.Sum256(planBytes)
+	if hex.EncodeToString(planDigest[:]) != expectedPlan {
+		t.Fatal("frozen plan identity mismatch")
+	}
+	var plan map[string]json.RawMessage
+	if err := decodeStrictJSONBytes(planBytes, &plan, "frozen plan"); err != nil {
+		t.Fatal(err)
+	}
+	var positions []struct {
+		Position         int    `json:"position"`
+		Root             string `json:"root"`
+		JobId            string `json:"job_id"`
+		RoundId          string `json:"round_id"`
+		RequestSha256    string `json:"request_sha256"`
+		ProvenanceSha256 string `json:"provenance_sha256"`
+	}
+	if err := decodeStrictJSONBytes(plan["ordered_cohorts"], &positions, "frozen positions"); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultCalibrationAnalysisSettings()
+	if len(positions) != settings.Cohorts {
+		t.Fatal("exact predeclared cohort count required")
+	}
+	var common calibrationFileManifest
+	var cohorts []calibrationFileCohort
+	seenIds := map[string]bool{}
+	for i, position := range positions {
+		expectedRoot := filepath.Join(root, fmt.Sprintf("cohort-%02d", i+1))
+		if position.Position != i+1 || position.Root != expectedRoot || position.JobId == "" || position.RoundId == "" || seenIds[position.JobId] || seenIds[position.RoundId] {
+			t.Fatal("frozen order, root or identity mismatch")
+		}
+		seenIds[position.JobId], seenIds[position.RoundId] = true, true
+		manifest, cohort := retainedCalibrationQualificationInputs(t, expectedRoot)
+		if cohort.JobId != position.JobId || cohort.RoundId != position.RoundId || cohort.RequestSha256 != position.RequestSha256 {
+			t.Fatal("cohort differs from frozen identity")
+		}
+		if _, err := readCalibrationArtifact(expectedRoot, "fixture-provenance.json", position.ProvenanceSha256); err != nil {
+			t.Fatal(err)
+		}
+		terminal, err := readCalibrationArtifact(expectedRoot, "manager-terminal.log", cohort.TerminalSha256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateCalibrationTerminal(terminal, settings.ExecutionLimitSeconds); err != nil {
+			t.Fatal(err)
+		}
+		if len(cohort.Inputs.Runs) != settings.Replicates || len(cohort.BaselineInputs.Runs) != settings.Replicates {
+			t.Fatal("complete fresh R9 pair required")
+		}
+		manifest.Cohorts = nil
+		if i == 0 {
+			common = manifest
+		} else if !reflect.DeepEqual(common, manifest) {
+			t.Fatal("shared source/workload/policy differs between fixed cohorts")
+		}
+		cohorts = append(cohorts, cohort)
+	}
+	for key, expected := range map[string]string{
+		"base_sha":                 common.BaseSha,
+		"evaluator_image_digest":   common.EvaluatorImageDigest,
+		"evaluation_policy_sha256": common.EvaluationPolicySha256,
+	} {
+		var planned string
+		if err := json.Unmarshal(plan[key], &planned); err != nil || planned != expected {
+			t.Fatalf("assembled header differs from frozen plan: %s", key)
+		}
+	}
+	common.Cohorts = cohorts
+	content, err := json.MarshalIndent(common, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = append(content, '\n')
+	path := filepath.Join(root, "analysis-inputs.json")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	t.Logf("assembled all %d frozen cohorts; manifest_sha256=%x; no scoring or acceptance performed", len(cohorts), digest)
+}
