@@ -1,10 +1,12 @@
-# Fresh release calibration — preparation draft
+# Fresh release calibration — Stage A frozen
 
-**Not executed or accepted.** Freeze this protocol and a tested, digest-bound
-Go analyzer before the first formal observation. No formal campaign may start
-from an untested analyzer or this draft alone. The separate warm-reader pilot
-is running under its [own protocol](REFERENCE-PILOT-2026-10-25.md); its results
-and the completed cold check are excluded from the formal sample.
+**Stage A frozen before execution; not an accepted calibration.** The
+[freeze record](CALIBRATION-FREEZE-2026-10-25.md) binds the qualified analyzer,
+runner and all five ordered cohort requests before the first formal observation.
+Stage B still requires exact reference patches and seed/order commitments before
+its first result. The separate warm-reader pilot completed under its
+[own protocol](REFERENCE-PILOT-2026-10-25.md) and failed its directional screen;
+its results and the completed cold check are excluded from the formal sample.
 
 Opening remains **2026-10-28T00:00:00Z**. This uses the previously authorized
 launch-compromise independent screen of five seeds / four correctly ordered

@@ -1,10 +1,9 @@
 # Calibration analyzer smoke qualification
 
-**Passed smoke qualification, not formal calibration or launch acceptance.**
+**Passed smoke and three full suites, not formal calibration or launch acceptance.**
 The file-only analyzer authenticates retained evidence and reuses the production
 reducers. It does not modify live scoring policy, evaluated source or the frozen
-evaluator image. Three complete suites at the published code revision and the
-predeclared fresh measurement campaign remain required.
+evaluator image. The predeclared fresh measurement campaign remains required.
 
 ## Exact tested snapshot
 
@@ -70,7 +69,30 @@ The earlier snapshot's independent replay also passed (54 seconds), log SHA-256
 These are replay qualification receipts, not new measurements, provider/host
 attestations, an official baseline, or production activation.
 
-Next: publish the smoke-qualified code, complete three full suites, bind the
-actual analyzer executable and freeze the statistical protocol before collecting
-any formal observation. The warm-reader pilot remains a failed faster-reference
-screen and is excluded from the formal sample.
+## Three complete suites after publication
+
+Smoke-qualified code was committed, pulled (already up to date) and pushed as
+server main `30f340a2779699225ab40ec7f3c5d978525276d2` **before** larger validation.
+A fresh clean private checkout of that exact revision then passed three separate
+complete `connect/sim-latency/tests.sh -count=1` invocations. Each ran the explicit
+non-race six-epoch lifecycle and the full race suite: **501 top-level passes per
+invocation** (one lifecycle plus 500 race), including the default-no-op helper.
+These are repeated executions of the same suite, not 1,503 distinct test cases.
+
+| Invocation | Whole managed duration | Exit | Full log SHA-256 |
+| --- | ---: | ---: | --- |
+| 1 | 321 s, including initial compilation | 0 | `d79466cbb51cff2362071417a2a5b24be3501a80d466678372841ca309667148` |
+| 2 | 163 s | 0 | `678cabcc93825a3a92acffd267d9ef893239f1a355562fc229ed94555b1485ad` |
+| 3 | 162 s | 0 | `b220db4de046a97983cdfd0040477a7f9ca6f9e5df555c9ce1b810c78aa007bf` |
+
+Actual Go 1.27.3/local, management CPUs 20,22, GOMAXPROCS=2 and `-p=2` were
+retained. All explicit retained-helper environment variables were unset.
+Synthetic attested disposable services and the shared scoring slot enclosed
+each invocation through successful cleanup; final census contained only the
+original persistent containers/networks. The private checkout remained clean.
+Evidence root: `temp/calibration-full-three-20261025.MOcUSwBx/`.
+
+Next: bind the actual analyzer executable and freeze the statistical protocol
+and all five ordered fresh cohort identities before collecting any formal
+observation. The warm-reader pilot remains a failed faster-reference screen
+and is excluded from the formal sample.

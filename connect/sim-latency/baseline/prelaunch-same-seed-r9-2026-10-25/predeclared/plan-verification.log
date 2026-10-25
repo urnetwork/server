@@ -1,0 +1,10 @@
+[env]glog not configured from command line. Using default configuration.
+I1025 10:05:44.627464 3619684 env.go:1202] [env]try /home/by/urnetwork/temp/calibration-final-preflight-20261025.Uts1EQl9/empty-config, [settings.yml]
+I1025 10:05:44.627589 3619684 env.go:1202] [env]try /home/by/urnetwork/temp/calibration-final-preflight-20261025.Uts1EQl9/empty-site, [settings.yml]
+I1025 10:05:44.627628 3619684 env.go:81] [env]settings loaded
+PASS position=1 job=beef4079-93ec-401d-8d72-c3080fee4046 round=8aca1c17-7760-4f82-b603-c30aad175691 request=263eca1bdb583f3f3e08bbcbfc1bd260aaba089bf2deeeea95a7fe8caab57c9f provenance=4be00565d2319525d9f752ddb1efc5297dad6e762775430ec1e1889bf6d14121
+PASS position=2 job=590c6171-1947-481a-b276-d2c1b0f07d20 round=fca14146-73e1-42b6-b198-c16add370c27 request=84bf8aec81bda9bbe14ea0fce198fd61088fcd7b6c21b8683416e95db6e7b33c provenance=ab8e8c02aca242f99ec7d18a5ab7ee2c0b8f4acee1acf5d213d60b73a15e237c
+PASS position=3 job=c01514e1-5b2a-4e8e-96e4-3310d398dada round=ebb95dc4-8ef0-4d6c-8f39-04b96bd7d8e9 request=451d7927b48242beed55a351dc01f06f730b06a8dd864486e02f5695596f7196 provenance=8bea8da38d7a3bc984072219dcf9c00bed9cc5c7b5b9e4d29fc46f22de3e3882
+PASS position=4 job=466078eb-281c-481f-a141-12a3a8955600 round=0a6d26b3-291f-4aeb-8335-753fb4074629 request=c5c9443cb19a4b32d8958a5267750ec0e396dd29e6c823c4646c321255f45b7d provenance=19fa83f9ca07d943db7b8133813ce1ea4070bb40cede659f66edb82d715cf925
+PASS position=5 job=3389e58c-7483-4f30-bece-cee5ba0eec7d round=52359912-64e0-46b1-aae3-a9b101151a67 request=b3a9504edf0010eb5b9d406735fdeeb5702457bda23e58dd24011e4e40696888 provenance=aa87fe6661b61567e9c2df8f01cc8f64e86960fdab5be1fd1d7b2c3d0cd8ca21
+PASS exact plan/policy/pins/nonce/modes/field changes; zero measurements
