@@ -47,11 +47,19 @@ func (self *TaskWorker) finalizeTaskWithGuard(r *taskExecutionResult, guard *tas
 		commitPosts, postRescheduled = self.finalizeTaskInTx(finalizeCtx, tx, r, observation)
 	}
 	if owned {
-		guard.finalizeOwnedTx(finalizeCtx, keys, finish, &observation.db)
+		guard.finalizeOwnedTx(finalizeCtx, keys, finish, &observation.db, self.finalizeLockTimeout())
 	} else {
-		server.Tx(finalizeCtx, finish, &observation.db)
+		server.Tx(finalizeCtx, finish, &observation.db, self.finalizeLockTimeout())
 	}
 	return
+}
+
+// The lock bound of a completion's transaction (FinalizeLockTimeout).
+func (self *TaskWorker) finalizeLockTimeout() server.TxLockTimeout {
+	if 0 < self.settings.FinalizeLockTimeout {
+		return server.TxLockTimeout(self.settings.FinalizeLockTimeout)
+	}
+	return server.TxLockTimeout(DefaultTaskFinalizeLockTimeout)
 }
 
 // The caller owns one finite handback deadline and transaction. A certified

@@ -873,11 +873,18 @@ var paymentPlanSweepOwnerGuardArtifactQuery = `EXISTS(SELECT 1 FROM pg_trigger t
 // PARTITION-MAINTENANCE-PLAN.md A6) is a default of each pool's role in this
 // database. The migration skips a superuser role, so an ordinary role carries
 // it; a lost default is drift, as the 2026-08-13 database-level idle timeout
-// went missing on main. Only a boolean leaves the database, never a role name.
-const transactionTimeoutRoleDefaultArtifactQuery = `EXISTS (SELECT 1
+// went missing on main. The monitor reads as the main pool's role (pg.yml): when
+// that role is a superuser, as on main, the migration set nothing for it and
+// there is no default to lose. Only a boolean leaves the database, never a role
+// name.
+const transactionTimeoutRoleDefaultArtifactQuery = `(` + transactionTimeoutPoolRoleSuperuserQuery + ` OR EXISTS (SELECT 1
 		FROM pg_db_role_setting setting_row
 		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
 		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
 		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
 		AND NOT role_row.rolsuper
-		AND setting = 'transaction_timeout=15min')`
+		AND setting = 'transaction_timeout=15min'))`
+
+// Whether the role the monitor reads as -- the main pool's -- is a superuser,
+// which the transaction bound's migration leaves unbounded.
+const transactionTimeoutPoolRoleSuperuserQuery = `coalesce((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)`

@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strconv"
 	// "strings"
-	// "sync"
+	"sync"
 
 	"bytes"
 	"fmt"
@@ -589,6 +589,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		} else {
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
+		// one registration per network per process waits for the network's
+		// allocation lock; the rest wait here, holding no pooled connection
+		// (network_client_registration_gate.go). The gate opens when the
+		// transaction ends, before the cache writes below.
+		leaveRegistrationGate := func() {}
+		if registration != nil {
+			leave, err := networkClientRegistrations.enter(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			if err != nil {
+				authClientError = err
+				return
+			}
+			leaveRegistrationGate = sync.OnceFunc(leave)
+			defer leaveRegistrationGate()
+		}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
 			if !validateParent {
@@ -865,6 +879,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				}
 			}
 		}, registrationTxOptions...)
+		leaveRegistrationGate()
 
 		if validateParent && authClientError == nil && authClientResult != nil && authClientResult.Error == nil {
 			// Optional cache refresh cannot turn a committed identity into a
@@ -1439,9 +1454,15 @@ func RemoveNetworkClientsBatch(
 ) (*RemoveNetworkClientsBatchResult, error) {
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		removeNetworkClientsBatchExec(clientSession.Ctx, tx, removeClients.ClientIds, clientSession.ByJwt.NetworkId)
-	}, server.TxReadCommitted)
+	}, server.TxReadCommitted, server.TxLockTimeout(removeNetworkClientsBatchLockTimeout))
 	return &RemoveNetworkClientsBatchResult{}, nil
 }
+
+// A batch locks up to thousands of client rows in one transaction, any of
+// which an in-flight contract may share-lock, so the main pool's 2 s bound
+// per wait would fail most large batches on a busy network. One caller's
+// batch is one transaction, so the longer wait pins at most one server.
+const removeNetworkClientsBatchLockTimeout = 10 * time.Second
 
 // outer sanity bound on a single request's payload, not a realistic
 // operating limit (the known real-world case is ~400k-1M): guards against an
