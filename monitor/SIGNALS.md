@@ -45545,6 +45545,22 @@ non-finite value or a repeated series rejects the answer. Only inventory host
 and block names, fixed label values and counts reach an alert; process
 instance nonces, control values and response bodies do not.
 
+`drain-moves` requires the producer's initialized refusal children, both
+drain-move children, drain gauge and compulsory-close counter when judging a
+process known to run that code. Missing eager companions emit
+`drain-moves-telemetry-incomplete`; they cannot become healthy zeros or clear
+retained incidents. A partial process does not erase independent positive
+findings. Both absent drain-move children retain the legacy-build interpretation;
+the mover's lazy compulsory-send child can be absent without inventing a source
+failure when drain-code companions are complete.
+
+Historical drain ranges can outlive process-start series. Their host/block
+labels must still match desired inventory slots. An out-of-inventory range is
+withheld and makes the observation incomplete, while valid positive siblings
+remain visible. Only fixed missing/invalid counts are exported; instance nonces
+and unrecognized labels stay private. These source controls do not establish
+full movement qualification, deployed adoption or historical incident recovery.
+
 A fleet without the move code, or a rule with nothing to judge because the
 mover is off, in dry run or not sending, is a standing state of its own:
 `mover-not-deployed`, `mover-off`, `mover-dry-run`, `mover-warming`,

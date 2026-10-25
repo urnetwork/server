@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -158,11 +159,30 @@ func (self drainMovesProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if invalid != "" {
 		return []finding{drainMovesTelemetryIncomplete(target, "visibility_reason="+invalid)}, nil
 	}
+	// Historical ranges can outlive their process-start series. Validate their
+	// slots too, before any source label reaches a public finding.
+	desiredSlots := map[string]bool{}
+	for _, hostName := range scope.hosts {
+		for _, block := range scope.blocks {
+			desiredSlots[connectMoveSlot(hostName, block)] = true
+		}
+	}
+	invalidProcessSeries := 0
+	for _, tag := range []string{"refusal_series", "refusals", "drain_recent", "drained", "closes", "drain_moves", "mover_compulsory"} {
+		frame.each(tag, func(values []string, _ float64) {
+			if !desiredSlots[connectMoveSlot(values[0], values[1])] {
+				delete(frame.tagSeries[tag], connectMoveKey(values...))
+				invalidProcessSeries++
+			}
+		})
+	}
 	findings := []finding{}
-	complete := census.complete()
 	deployedProcesses, legacyProcesses := []*connectMoveProcess{}, []*connectMoveProcess{}
 	for _, process := range census.processes() {
-		if _, deployed := frame.value("refusal_series", process.values()...); deployed {
+		_, gatesKnown := frame.value("refusal_series", process.values()...)
+		_, capableKnown := frame.value("drain_moves", process.values("true")...)
+		_, legacyKnown := frame.value("drain_moves", process.values("false")...)
+		if gatesKnown || capableKnown || legacyKnown {
 			deployedProcesses = append(deployedProcesses, process)
 		} else {
 			legacyProcesses = append(legacyProcesses, process)
@@ -170,42 +190,33 @@ func (self drainMovesProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	observed := census.coverage() + fmt.Sprintf(" drain_gate_processes=%d legacy_processes=%d refusal_window=%s drain_window=%s",
 		len(deployedProcesses), len(legacyProcesses), connectMoveDuration(settings.RefusalWindow), connectMoveDuration(settings.DrainWindow))
-	if complete {
-		findings = append(findings, healthyFinding(self.id(), tierWarn, "drain-moves-telemetry-incomplete", target))
-	} else {
-		findings = append(findings, drainMovesTelemetryIncomplete(target, observed))
-	}
-	if len(deployedProcesses) == 0 {
-		if complete {
-			state := drainMovesFinding(target, "drain-moves-not-deployed")
-			state.sustain, state.configuredOff = 1, true
-			state.symptom = "No current connect process runs the drain gates and drain moves"
-			state.mechanism = "A process without urnetwork_connect_drain_refusals_total runs a build from before the drain gates (connect/MOVE.md phase 0); its drains use the legacy migrate and refuse nothing. The drain rules have nothing to judge, which is not health."
-			state.observed = observed
-			state.action = "None while the build is not deployed. After its rollout, every current process exports the drain refusal counters."
-			state.verify = "Every current process exports urnetwork_connect_drain_refusals_total."
-			findings = append(findings, state)
-		}
-		return findings, nil
-	}
 
 	// §24.7: refusals while the drain gauge stayed at zero
+	missingRefusalProcesses := 0
 	for _, process := range deployedProcesses {
 		slotTarget := target + "/" + process.host + "/" + process.block
 		carrierRefusals, refusals := []string{}, 0.0
+		carrierCount, countKnown := frame.value("refusal_series", process.values()...)
+		refusalsKnown := countKnown && carrierCount == float64(len(drainRefusalCarriers))
 		for _, carrier := range drainRefusalCarriers {
-			value, _ := frame.value("refusals", process.values(carrier)...)
+			value, known := frame.value("refusals", process.values(carrier)...)
+			refusalsKnown = refusalsKnown && known
 			refusals += value
 			if 0 < value {
 				carrierRefusals = append(carrierRefusals, carrier+":"+connectMoveNumber(math.Round(value)))
 			}
 		}
 		draining, drainKnown := frame.value("drain_recent", process.values()...)
+		if !refusalsKnown || !drainKnown {
+			missingRefusalProcesses++
+		}
 		if !drainKnown {
 			continue
 		}
 		if refusals <= 0 || 0 < draining {
-			findings = append(findings, healthyFinding(self.id(), tierWarn, "drain-refusals-outside-drain", slotTarget))
+			if refusalsKnown {
+				findings = append(findings, healthyFinding(self.id(), tierWarn, "drain-refusals-outside-drain", slotTarget))
+			}
 			continue
 		}
 		stuck := drainMovesFinding(slotTarget, "drain-refusals-outside-drain")
@@ -219,19 +230,38 @@ func (self drainMovesProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	// §24.3: closes per drained process against its legacy residents
+	// Both drain-move children and the close counter are eager. Include their
+	// process keys even if the drain gauge's range is missing.
+	drainProcessValues := map[string][]string{}
+	for _, tag := range []string{"drained", "drain_moves", "closes"} {
+		frame.each(tag, func(values []string, _ float64) {
+			drainProcessValues[connectMoveKey(values[:3]...)] = values[:3]
+		})
+	}
 	judgedDrains, legacyOnlyDrains, excessDrains := 0, 0, []string{}
-	frame.each("drained", func(values []string, drainedMax float64) {
+	missingDrainProcesses := 0
+	for _, values := range drainProcessValues {
 		capable, capableKnown := frame.value("drain_moves", values[0], values[1], values[2], "true")
 		legacy, legacyKnown := frame.value("drain_moves", values[0], values[1], values[2], "false")
-		closes, _ := frame.value("closes", values...)
+		drainedMax, drainedKnown := frame.value("drained", values...)
+		closes, closesKnown := frame.value("closes", values...)
+		// The mover's compulsory-send children are lazy; their absent maximum
+		// is zero only for a process with the initialized drain-code series.
 		moverCompulsory, _ := frame.value("mover_compulsory", values...)
 		// a build from before drain moves has neither series; its drains are not judged
-		if !capableKnown || !legacyKnown || (drainedMax <= 0 && capable+legacy <= 0) {
-			return
+		if !capableKnown && !legacyKnown {
+			continue
+		}
+		if !capableKnown || !legacyKnown || !drainedKnown || !closesKnown {
+			missingDrainProcesses++
+			continue
+		}
+		if drainedMax <= 0 && capable+legacy <= 0 {
+			continue
 		}
 		if capable+legacy <= 0 {
 			legacyOnlyDrains++
-			return
+			continue
 		}
 		judgedDrains++
 		excess := closes - moverCompulsory - legacy
@@ -239,7 +269,25 @@ func (self drainMovesProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			excessDrains = append(excessDrains, fmt.Sprintf("%s/%s:closes=%s,legacy=%s,capable=%s,mover_compulsory=%s",
 				values[0], values[1], connectMoveNumber(closes), connectMoveNumber(legacy), connectMoveNumber(capable), connectMoveNumber(moverCompulsory)))
 		}
-	})
+	}
+	sort.Strings(excessDrains)
+	complete := census.complete() && missingRefusalProcesses == 0 && missingDrainProcesses == 0 && invalidProcessSeries == 0
+	if complete {
+		findings = append(findings, healthyFinding(self.id(), tierWarn, "drain-moves-telemetry-incomplete", target))
+	} else {
+		incompleteObserved := observed + fmt.Sprintf(" missing_refusal_processes=%d missing_drain_processes=%d invalid_process_series=%d", missingRefusalProcesses, missingDrainProcesses, invalidProcessSeries)
+		findings = append(findings, drainMovesTelemetryIncomplete(target, incompleteObserved))
+	}
+	if len(deployedProcesses) == 0 && complete {
+		state := drainMovesFinding(target, "drain-moves-not-deployed")
+		state.sustain, state.configuredOff = 1, true
+		state.symptom = "No current connect process runs the drain gates and drain moves"
+		state.mechanism = "A process without urnetwork_connect_drain_refusals_total or initialized drain-move children runs a build from before the drain gates (connect/MOVE.md phase 0); its drains use the legacy migrate and refuse nothing. The drain rules have nothing to judge, which is not health."
+		state.observed = observed
+		state.action = "None while the build is not deployed. After its rollout, every current process exports the drain refusal counters."
+		state.verify = "Every current process exports urnetwork_connect_drain_refusals_total."
+		findings = append(findings, state)
+	}
 	drainObserved := fmt.Sprintf("judged_drains=%d drains_without_drain_moves=%d excess_drains=%d", judgedDrains, legacyOnlyDrains, len(excessDrains))
 	if 0 < len(excessDrains) {
 		excess := drainMovesFinding(target, "drain-closes-excess")
