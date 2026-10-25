@@ -18,12 +18,14 @@ func (self *recordingPaymentPlanTransaction) Exec(_ context.Context, sql string,
 
 // Retain the temporary-relation buffer guard without disabling idle protection.
 // Reliability now runs on this owner and cannot leave an outer transaction idle.
+// The plan lifts the role's transaction bound for its own transaction only.
 func TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards(t *testing.T) {
 	ctx := context.Background()
 	recorder := &recordingPaymentPlanTransaction{}
 	configurePaymentPlanTransaction(ctx, recorder)
 	wantStatements := []string{
 		"SET LOCAL effective_io_concurrency = 32",
+		"SET LOCAL transaction_timeout = 0",
 	}
 	if len(recorder.statements) != len(wantStatements) {
 		t.Fatalf("payment-plan transaction configuration = %q, want %q", recorder.statements, wantStatements)
