@@ -54,7 +54,7 @@ const logReconcileReceiptMaxBytes = 8 * 1024
 // Only these public service keys may leave the collector snapshot. An unknown
 // name contributes a count, never an arbitrary identifier or a synthetic key.
 var logReconcileServiceKeys = [...]string{
-	"alt", "api", "app", "connect", "gossip", "grafana", "mcp", "proxy", "taskworker", "web",
+	"alt", "api", "app", "connect", "gossip", "grafana", "mcp", "mmm", "proxy", "taskworker", "web",
 }
 
 // A row describes coverage, not request progress, a failure cause, or service

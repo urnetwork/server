@@ -426,6 +426,32 @@ lifecycle event, not loss of production visibility, and must not emit a
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
 
+#### Optional invocation witness (shared scheduler utility)
+
+Optional scheduler invocation evidence is a monitor utility, not an implemented
+health probe. `-invocation-witness-output` opts a future continuous CLI launch
+into a new private 0600 sidecar under a private directory, using validated
+same-process startup identity and the selected key/number/cadence digest. A
+settings-witness identity already present at startup is reused. Disabled default
+performs no witness I/O or discovery. One record is at most 4096 bytes; each
+launch permits at most 512 MiB and 1,000,000 records. The first write, bound,
+identity-association or close error disables only the witness and emits one fixed
+safe diagnostic; it must not cancel the monitor, skip a Run/handler, change a
+source error/panic/cadence, retry, rotate or truncate. Regular-file writes have no
+wall-clock or fsync-durability guarantee.
+
+`dispatch_begin` is the post-admission wrapper's pre-call boundary, not proof the
+callee or Check body entered. A matching `run_return` proves only that exact
+Signal.Run returned; returned-nil is not healthy, target/source completeness,
+child/backend completion, or scheduler due/enablement evidence. Empty and
+held-only results also receive invocation records; gate state is not persisted.
+A canceled parent's nil return is explicitly nonaffirmative. Missing, torn,
+unpaired or refused records leave coverage UNKNOWN, never stalled. Process/run
+and selected-key binding is not a full custody attestation or proof all171
+registered keys were selected, enabled, due or contacted. Native and effective
+configured cadence fields are policy context; elapsed dispatch time includes
+witness overhead. Preserve standing-drain exemption and post-handler waits.
+
 An empty gated tick is therefore not evidence of absence. After a one-tick
 dip the gate holds a returning alert for `Sustain - 1` more ticks, and it
 holds a failed run's two-cadence `cannot-observe` alert on its first failure,
@@ -4090,7 +4116,7 @@ and time ranges cannot identify missing collectors, and older retained Alerts
 are not a same-cycle scope map.
 
 Schema 2 preserves every aggregate value and adds `collector_scopes`, sorted by
-the fixed public keys alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web.
+the fixed public keys alt/api/app/connect/gossip/grafana/mcp/mmm/proxy/taskworker/web.
 Each row contains `service_key`, `collector_count`, `enabled`,
 `collector_started_at`, `last_success_at`, the four previous/latest query
 start/completion timestamps, `fresh`, `consecutive_two`, `coverage_state`, and
