@@ -15,6 +15,19 @@ test drafts are preserved as
 The `.txt` fixture is not compiled by the simulator suite or submitted patch.
 Preparation workspace: `temp/reference-snapshot-draft-20261025.BFH83oNJ/`.
 
+An additional unexecuted
+[`snapshot-benchmark.go.txt`](snapshot-benchmark.go.txt), SHA-256
+`7c501a76dfe99ab336a3e796d38ab42a1151639ec9ac731b933c1e74177ed536`,
+uses the actual constructor/default freshness policy and identical code on
+baseline/candidate. For an idle-slot supporting screen, use five observations
+per source at `-benchtime=100ms`, management CPUs 20,22 and GOMAXPROCS=2.
+Its 32 parallel callers exercise one warm pair; source reads other than the
+single initial read or any refused hit invalidate that observation. Keep every
+output, ns/op and allocation result. Do not reroll an unfavorable result.
+Median candidate time must improve before spending a full directional pilot.
+These deliberately narrow two-CPU mechanism observations are not the real
+ten-core workload, confidence proof, calibrated margin or end-to-end acceptance.
+
 ## Mechanism to investigate
 
 Warm first-half positive cache hits currently acquire the manager's mutex.
