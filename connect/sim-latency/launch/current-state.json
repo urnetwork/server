@@ -432,7 +432,14 @@
       {"session_id": 64204, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "Fixture launcher used old SN directory outside exact frozen Go workspace"},
       {"session_id": 69912, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "New workspace assertion assumed repository name equals module path; SN actually declares github.com/urfoundation/sn"}
     ],
-    "screen_status": "source_preparation_running_under_exclusive_slot",
+    "screen_status": "baseline_three_race_passes_candidate_screen_running",
+    "baseline_screen_tests_per_pass": 52,
+    "baseline_screen_passes": 3,
+    "baseline_screen_log_sha256": [
+      "e43c0b365ef4ce8ca7e24534c9a95227f990110a6ca8651d24f4b0d0cd9e4a48",
+      "c70a41ddc886c2cc6ea4bf478996d763672ac01b23a3271bd2ee4cb4c18068c4",
+      "e226ef7121c6c05a102eb10de8a3cd9849a0643454512dfb6b346d67f802b466"
+    ],
     "status": "uncompiled_untested_unmeasured_draft_only",
     "path": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-HYPOTHESIS.md",
     "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
@@ -444,6 +451,8 @@
     "next_action": "Observe session42566/controller2723749 through fresh frozen-source baseline/candidate race tests, eight candidate tests and deterministic delayed-hit guard controls; five supporting warm-hit/refresh-cost benchmarks per source under canonical exclusive slot. Correct module-path preflight passed after retained setup-only failures. No pilot or source qualification claimed. Stop on failure and retain evidence; Max agent diagnoses fixes."
   },
   "queued_idle_slot_preparations": {
+    "held_out_input_checklist": "server/connect/sim-latency/launch/HELD-OUT-INPUT-PREPARATION.md",
+    "held_out_input_status": "Future Stage B generator must bind native derived workload seed/provider bytes, not only request seed labels. Exact same-round baseline digest is deliberately late-bound from first R9 control. No generator or held-out inputs qualified yet; Stage A and reference screens remain required.",
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
     "assembly_helper_sha256": "618a6e00a2545e404b275547c656cd888d892f444e5cac393ddc9eb32030f250",
     "assembly_status": "Draft only; synthetic qualification required before use, final assembly only after all five frozen positions complete. Native analyzer remains unchanged.",

@@ -82,6 +82,10 @@ This is calibration, not held-out validation of the margin's false-positive rate
 
 ## B. Held-out independent-seed reference screen
 
+The [input preparation checklist](HELD-OUT-INPUT-PREPARATION.md) explains native
+seed-to-workload binding and the first-job baseline dependency. It does not
+change the sampling, order, margin or acceptance rules below.
+
 Before the first result, freeze exact patch/build digests for no-op, a qualified
 directionally faster reference and a worse reference. A failed pilot does not
 qualify the warm-reader patch. Require valid builds and preserved correctness
