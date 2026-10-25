@@ -26,7 +26,8 @@
     "freeze_record": "server/connect/sim-latency/launch/CALIBRATION-RESTART-FREEZE-2026-10-25.md",
     "first_cohort_also_functional_qualification": true,
     "policy_identity_update_required": "Bind both simulator/scorer digests to new pristine binary6c8587be; all other policy fields stay identical. Canonical policy hash must therefore be regenerated, not copied from old image.",
-    "next_action": "Position1 ended0 with9+9/allgates/cleanup; all481 originals plus4 companions independently archived and verified. Validate updated preview and baseline manifest, publish phase before further scoring. Positions2-5 remain unstarted pending phase handoff. No activation during main maintenance."
+    "preserved_phase_commit": "3d6c35d29",
+    "next_action": "Position1 passed and preserved phase3d6c35d29 pushed. Sol6.1low authorized isolated snapshot reference correctness/benchmark screen before position2; no scoring may overlap. Positions2-5 remain unstarted. No activation during main maintenance."
   },
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-25T15:50:18Z",
@@ -116,7 +117,7 @@
     "request_sha256": "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d",
     "protocol_commit": "2844161a9",
     "first_cohort_also_functional_qualification": true,
-    "next_action": "Session4660/PIDs terminal; do not restart. Preservation and independent archive verification passed. Validate updated reports and publish preserved phase before further scoring or qualification."
+    "next_action": "Session4660/PIDs terminal; do not restart. Preservation and independent archive/report verification passed; phase3d6c35d29 pushed. Separate reference screen authorized, not another scoring invocation."
   },
   "previous_failed_attempt": {
     "kind": "formal-offline-five-cohort-same-seed-calibration",
@@ -423,6 +424,10 @@
     "next_action": "Read-only review may continue. No build, tests or pilot while formal scoring is live. Requires independent baseline/candidate correctness screens, a separate predeclared fresh-control pilot and held-out qualification; never reuse Stage A measurements."
   },
   "snapshot_reference_research": {
+    "screen_session_id": 64204,
+    "screen_controller_pid": 2718330,
+    "screen_root": "/home/by/urnetwork/temp/snapshot-screen-independent-20261025.BxTAR1o5",
+    "screen_status": "source_preparation_running_under_exclusive_slot",
     "status": "uncompiled_untested_unmeasured_draft_only",
     "path": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-HYPOTHESIS.md",
     "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
@@ -431,7 +436,7 @@
     "benchmark_fixture_sha256": "f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060",
     "private_workspace": "/home/by/urnetwork/temp/reference-snapshot-draft-20261025.BFH83oNJ",
     "evaluated_source_changed": false,
-    "next_action": "Only after a clean scoring intermission: baseline/candidate frozen-source correctness screens, eight candidate tests and deterministic delayed-hit guard controls; supporting warm-hit/refresh-cost benchmarks; then separately freeze a fresh full R9 directional pilot if warranted. No reference is qualified yet."
+    "next_action": "Observe session64204/controller2718330 through fresh frozen-source baseline/candidate race tests, eight candidate tests and deterministic delayed-hit guard controls; five supporting warm-hit/refresh-cost benchmarks per source under canonical exclusive slot. No pilot or source qualification claimed. Stop on failure and retain evidence; Max agent diagnoses fixes."
   },
   "queued_idle_slot_preparations": {
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
@@ -446,7 +451,7 @@
     "preview_validation_log_sha256": "824d87ca4e63c936286e6a7ba95c64c815ea88c854799d4ac61158ba78121cc2",
     "baseline_validation_log_sha256": "666147fbd4c21b178f34da3d15fbcd70dd2c1a341e0cd1f389d9fd7e4163bec4",
     "preview_validation_helper_sha256": "b719e3f29e7ab9f8830bbda09e53d96e96a96bf66ced75d26eb88e74b44fd43a",
-    "priority": "First cohort passed and originals preserved. Finish independent report/manifest checks and publish phase, then run remaining predeclared work serially. No parallel tests/builds/probes during scoring."
+    "priority": "First cohort passed and originals/report independently verified; phase3d6c35d29 published. Reference screen authorized during scoring intermission; then continue remaining predeclared work serially. No parallel tests/builds/probes during scoring."
   },
   "external_holds": {
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
