@@ -23900,6 +23900,93 @@ Probe: `redis-connections`
   routes on this signature alone. Complete native controls and comparable
   source coverage remain required to verify recovery.
 
+### 3.5a Refused Redis connections
+Probe: `redis-refusals`
+
+- Redis increments `rejected_connections` when it accepts a socket and closes
+  it at once because its client table (connected clients plus cluster bus
+  links) has reached `maxclients`. Every process that needs a new connection
+  to that node then fails its dial: pools cannot replace a closed or timed-out
+  connection, and commands for the node's slots fail. The counter is
+  cumulative since the node started; it is zero on every healthy main node,
+  which runs with `maxclients` 65536 and 1,000-5,000 clients.
+- `redis-connection-refusals` pages, sustain 1, when a node's counter grows
+  between two reads of the same generation. One bounded command per Redis
+  host reads every configured node twice, three seconds apart, with
+  `INFO server clients stats`, and only `run_id`, uptime, connected clients,
+  `maxclients`, rejected connections and connections received leave the host.
+  The second read is also compared with this probe's previous observation of
+  the same `run_id`, so a drip between runs that the window misses still
+  raises once and then clears. A past refusal never raises by itself.
+- A restart (new `run_id`) or `CONFIG RESETSTAT` (a falling counter) inside the
+  window starts a new baseline and leaves that node unknown for the run; a
+  restart between runs rebaselines without raising. An unreachable, missing,
+  duplicate, foreign or malformed row is unknown. Unknown nodes report one
+  `cannot-observe` finding per Redis host with stable frame `refusal-census`,
+  naming the ports and fixed reasons; valid sibling nodes stay judged and an
+  unknown node keeps its previous verdict. An unreachable Redis host is that
+  host's `cannot-observe`; with no host readable the probe fails. Run ids stay
+  in process memory and never reach an alert. The baselines live only in the
+  watcher process: a new watcher's first run judges the window alone.
+- The probe does not identify who holds the clients. Pair it with §3.5
+  `clients-spike` and with the clients' own socket tables (`ss` on the client
+  hosts, counted per destination port and process), which cost the node
+  nothing. Do not run `CLIENT LIST` on a node holding tens of thousands of
+  clients: on 2026-10-25 it took 400 ms of node 6396's event loop.
+- 2026-10-25: a client library leaked the socket of every failed handshake
+  (redis/go-redis#3982, fixed in v9.23.0; server `d9ee7faf8`). Once node 6396
+  slowed, its handshakes timed out and the leaked sockets accumulated: about
+  47,000 clients, 38,000 of them with HELLO as their last command, 2.3 million
+  refused connections, and proxy hosts out of ephemeral ports to the node.
+  When the fixed proxies relieved it, node 6394 took 62,000 connections,
+  41,000 of them from the still-unfixed API processes on one edge. Nothing
+  paged; the refusals were found by hand nearly two hours in. Kernel listen-queue overflows
+  (`TcpExtListenOverflows`) rose with them on the Redis host; the monitor does
+  not read kernel netstat, so they are context, not part of this probe.
+- Action: find the processes holding the node's clients and repair or restart
+  them. Do not raise `maxclients` or kill clients to stop the counter: the
+  clients reconnect, and a larger table only defers the refusals.
+
+### 3.5b Service Redis pool distress
+Probe: `redis-pool`
+
+- Every service process exports its go-redis pools' cumulative
+  `urnetwork_redis_pool_timeouts_total` (a caller waited the pool timeout
+  without a connection) and `urnetwork_redis_pool_misses_total` (a caller found
+  no idle connection and dialed), summed over its pools and every Redis node,
+  with the scrape labels `env`, `service`, `block`, `host`, `instance` and
+  `job`. One loopback Mimir evaluation through the service gateway takes, per
+  service, the five-minute rates now, their minimum over the last ten minutes
+  at one-minute steps (the floor), and the per-host current rates. The floor
+  carries the sustain, so a deploy's pool refill burst or one bad minute does
+  not count, and both distress classes use sustain 1.
+- `redis-pool-distress-critical` pages when a service's timeout floor reaches
+  1,000/s or its miss floor 10,000/s. `redis-pool-distress` warns at 50/s or
+  1,000/s. Below both the service is healthy and both clear; while a page is
+  open in the warning band only the warning is reported, so the page stays
+  open until the service is fully healthy.
+- Calibration (Mimir, five-minute rates by service). The pre-incident week
+  2026-10-18..25 06:00Z: every service's median timeout rate was zero, its
+  median miss rate at most 16/s (Connect) and under 6/s elsewhere; proxy,
+  API and taskworker never exceeded 100 timeouts/s. Connect's CPU-saturated
+  2026-10-21/22 stretch held timeout floors near 190/s and miss floors near
+  900/s for about 36 hours: a warning, not a page. 2026-10-25 15:20Z: the
+  proxies' floors were 8,139 timeouts/s and 13,727 misses/s, and at 16:30Z
+  still 1,780 and 9,653: a page from about 15:13Z, more than an hour before
+  the hot node was found by hand. A brief API burst of 1,384 timeouts/s with a
+  zero floor stays quiet.
+- A service is judged only from one fresh (five minutes), valid,
+  nonnegative sample of each of its four series. Missing, duplicate, stale,
+  invalid or unlabeled series report `redis-pool-unobservable` on stable target
+  `<env>/redis-pool` with fixed reasons and the incomplete services' names;
+  an independently proven sibling still reports. An unsuccessful or
+  non-vector response fails the probe.
+- The counters do not say which Redis node the timeouts and dials belong to.
+  Find the node first (§3.5a refusals, §3.5 client spikes, node latency and
+  slow log), then count the service hosts' established sockets per Redis node
+  port. Do not raise pool sizes or timeouts: they add connections to the same
+  slow or full node.
+
 ### 3.6 Cluster topology hygiene
 Probe: `redis-topology`
 
@@ -26682,6 +26769,8 @@ Tier-0 (page):
 | cluster-state | redis | cluster_state / slots_fail | != ok / > 0 for 60s | failing node list |
 | selection-empty | pg+redis | 2.9 eligible Public providers vs decoded normal score-cache count | eligible > 1,000 AND exported == 0 for 2 probes | ForceMinimum count; egress-test config; health/location row counts; last score completion |
 | node-mem-critical | redis | used/maxmemory | > 92% for 2 min | dataset vs clients split; top families |
+| redis-connection-refusals | Redis INFO server/clients/stats | §3.5a `rejected_connections` growth within one generation: a three-second two-read census, and since the previous observation | any growth; immediate | connected clients vs maxclients, window and since-previous growth; run ids never rendered |
+| redis-pool-distress-critical | Mimir service pool counters | §3.5b ten-minute floor of each service's five-minute pool timeout and miss rates | timeouts >= 1,000/s or misses >= 10,000/s; immediate | floors, current rates, three busiest hosts |
 | oom-writes | pg+logs | OOM class in task errors or logs | any sustained 2 min | node attribution from error text |
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
@@ -26726,6 +26815,7 @@ Tier-1 (warn):
 | score-byte-dominance | redis | 3.3b bounded `MEMORY USAGE SAMPLES 1` family share on fullest node | node ≥85% AND score ≥50% / ≥128KiB sampled bytes |
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
 | clients-spike | Redis INFO + raw Mimir Redis exporter history | connected_clients own-node step with exact source times/run_id, and complete current fleet shape; trip battery groups `CLIENT LIST` cohorts and samples HGET command rate | +50% in 10 min or >3× fleet median for 2 probes; missing temporal authority is `cannot-observe` with frame `clients-history` |
+| redis-pool-distress | Mimir service pool counters | §3.5b ten-minute floors of each service's five-minute pool timeout and miss rates; incomplete evidence is `redis-pool-unobservable` | timeouts >= 50/s or misses >= 1,000/s; immediate |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |
 | connect-tls-disabled | logs | exact legacy Connect TLS-loader fallback that binds transport with no usable identity | any |
 | tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |
