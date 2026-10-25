@@ -12,6 +12,12 @@ suites with Go 1.27.3. The later host-only preflight correction passed 63 focuse
 race executions and actual ten-repository remote verification in 9 seconds;
 see [SOURCE-PREFLIGHT-2026-10-24.md](SOURCE-PREFLIGHT-2026-10-24.md).
 
+Current main `ec02f4e5b` subsequently passed three consecutive complete
+sim-latency suites with actual Go 1.27.3: 446 top-level passes per invocation,
+including 445 race tests, disposable local services and verified cleanup.
+Exact source, commands, durations and log hashes are recorded in
+[CONTROL-VALIDATION-2026-10-25.md](CONTROL-VALIDATION-2026-10-25.md).
+
 Manifest file SHA-256:
 `156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f`.
 Preparation-descriptor SHA-256:
