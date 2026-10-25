@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -14,6 +15,10 @@ const deviceClientVersionMaxLen = 64
 // the process remembers this many clients' last written version before it
 // forgets them all and starts again
 const deviceClientVersionCacheMax = 1 << 16
+
+// The version write is best effort on the connect path, so it waits for a
+// busy device row only briefly.
+const deviceClientVersionLockTimeout = 500 * time.Millisecond
 
 var deviceClientVersionCache = struct {
 	lock     sync.Mutex
@@ -42,26 +47,44 @@ func SetDeviceClientVersion(ctx context.Context, clientId server.Id, clientVersi
 		return
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		_, err := conn.Exec(
-			ctx,
-			`
-				UPDATE device
-				SET
-					client_version = $2,
-					client_version_time = $3
-				FROM network_client
-				WHERE
-					network_client.client_id = $1 AND
-					device.device_id = network_client.device_id AND
-					device.client_version IS DISTINCT FROM $2
-			`,
-			clientId,
-			clientVersion,
-			server.NowUtc(),
-		)
-		server.Raise(err)
-	})
+	// a bounded wait, so the write never pins a pooled server behind the
+	// device row's lockers (an auth or registration of the device's clients);
+	// a write they hold off is not remembered, so a later connection retries
+	timedOut := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); ok && server.IsLockTimeout(err) {
+					timedOut = true
+					return
+				}
+				panic(r)
+			}
+		}()
+		server.Tx(ctx, func(tx server.PgTx) {
+			_, err := tx.Exec(
+				ctx,
+				`
+					UPDATE device
+					SET
+						client_version = $2,
+						client_version_time = $3
+					FROM network_client
+					WHERE
+						network_client.client_id = $1 AND
+						device.device_id = network_client.device_id AND
+						device.client_version IS DISTINCT FROM $2
+				`,
+				clientId,
+				clientVersion,
+				server.NowUtc(),
+			)
+			server.Raise(err)
+		}, server.TxReadCommitted, server.TxLockTimeout(deviceClientVersionLockTimeout))
+	}()
+	if timedOut {
+		return
+	}
 
 	deviceClientVersionCache.lock.Lock()
 	defer deviceClientVersionCache.lock.Unlock()

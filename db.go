@@ -91,6 +91,13 @@ const PgLockTimeout = 2 * time.Second
 // unbounded. A later option replaces an earlier one.
 type TxLockTimeout time.Duration
 
+// Whether err is a lock wait that a lock bound ended (55P03): a busy resource
+// the caller may retry, not a failure of its request.
+func IsLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.LockNotAvailable
+}
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx

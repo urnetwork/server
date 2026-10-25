@@ -532,6 +532,18 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 		return true
 	}
 
+	// A lock wait the transaction's bound ended (server.PgLockTimeout) is a
+	// busy resource, not a failure of the request: the caller may retry, as
+	// soon as the lock's holder finishes. The cause stays in the log.
+	if server.IsLockTimeout(err) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("{\"error\":\"Temporarily busy. Retry shortly.\"}\n"))
+		return true
+	}
+
 	statusCode := http.StatusInternalServerError
 	message := UnexpectedErrorMessage
 
