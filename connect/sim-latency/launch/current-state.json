@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T19:40:42Z",
+  "observed_at": "2026-10-25T19:43:45Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "first_corrected_release_aa_cohort_passed_preserved",
+  "status": "snapshot_directional_pilot_running_first_aa_cohort_preserved",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
     "status": "first_cohort_complete_passed_preserved",
@@ -27,7 +27,7 @@
     "first_cohort_also_functional_qualification": true,
     "policy_identity_update_required": "Bind both simulator/scorer digests to new pristine binary6c8587be; all other policy fields stay identical. Canonical policy hash must therefore be regenerated, not copied from old image.",
     "preserved_phase_commit": "3d6c35d29",
-    "next_action": "Position1 passed and preserved phase3d6c35d29 pushed. Sol6.1low authorized isolated snapshot reference correctness/benchmark screen before position2; no scoring may overlap. Positions2-5 remain unstarted. No activation during main maintenance."
+    "next_action": "Position1 passed and preserved phase3d6c35d29 pushed. Snapshot screen6f5e43982 and pilot predata dd49b991f published; separate pilot89533 is running. Positions2-5 remain unstarted; pilot samples never enter Stage A. No overlap or activation during main maintenance."
   },
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-25T19:40:42Z",
@@ -65,6 +65,28 @@
     "operator_proxy_retired": true
   },
   "active_attempt": {
+    "kind": "offline-snapshot-reference-directional-pilot",
+    "owner_agent": "/root/provide_serialization_test",
+    "exec_session_id": 89533,
+    "manager_pid": 2784881,
+    "runner_pid": 2784894,
+    "evaluator_pid": 2785024,
+    "manager_uid": 0,
+    "phase": "started_fresh_control_phase",
+    "terminal": false,
+    "root": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa",
+    "job_id": "e1e0c202-188b-4758-9e4a-5741ced4d7bf",
+    "round_id": "b05de240-9374-456b-bcb0-50b7a6ed8fe5",
+    "started_at": "2026-10-25T19:43:45Z",
+    "execution_deadline": "2026-10-25T22:43:45Z",
+    "request_sha256": "55f1f4428d2e2d1ca8bdd50ffe39de81dbbd405b77cc8f609a065fd7f0bb4b0e",
+    "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+    "protocol_commit": "dd49b991f",
+    "official_epoch_baseline": false,
+    "included_in_stage_a": false,
+    "next_action": "Observe same session/PIDs through9freshcontrols/offlinecandidatebuild/9candidates. No tests/builds/probes/scoring overlap. Onterminal verify all artifacts/gates/whole-job bound/cleanup and mean+median directions, preserve every outcome and publish before any next workload. No automatic retry/substitution."
+  },
+  "last_completed_aa_cohort": {
     "kind": "corrected-release-formal-offline-aa-cohort",
     "owner_agent": "/root/provide_serialization_test",
     "exec_session_id": 4660,
@@ -485,7 +507,7 @@
     "benchmark_fixture_sha256": "f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060",
     "private_workspace": "/home/by/urnetwork/temp/reference-snapshot-draft-20261025.BFH83oNJ",
     "evaluated_source_changed": false,
-    "next_action": "Screen terminal0/cleanup0; do not restart. Publish correctness and all benchmark observations, including40x publication cost. Prepare and independently verify one separate fresh-control full R9 directional pilot before any scoring invocation. No end-to-end improvement or faster-reference qualification claimed."
+    "next_action": "Screen terminal0/cleanup0 and phase6f5e43982 published; do not restart. Pilot predata dd49b991f published and exact pilot89533 started19:43:45UTC. Observe that attempt without overlap/retry; no end-to-end improvement or faster-reference qualification claimed."
   },
   "queued_idle_slot_preparations": {
     "snapshot_pilot_protocol": "server/connect/sim-latency/launch/SNAPSHOT-PILOT-2026-10-25.md",
@@ -493,7 +515,7 @@
     "snapshot_pilot_generator_sha256": "e34654793e45bc1aff96cb8ce171db9b14351e8c068b3b372a73e49246499eb5",
     "snapshot_screen_baseline_publication_verifier_sha256": "1126fe20cd173a0eafb6743e50e7acc4bd2c6781343093e347ee3028ffb989c2",
     "snapshot_screen_document_check_sha256": "2a369631aa46a95acd99372cb2cc4ccc04e8fa3fd0b33c5b44497efc0ab35faa",
-    "snapshot_pilot_preparation_status": "Actual Go1.27.3 generator and independent typed-input verification passed; eight exact payloads preserved. Publish complete pre-data freeze before one invocation. No evaluator/candidate build or scoring started.",
+    "snapshot_pilot_preparation_status": "Actual Go1.27.3 generator/independent verification and eight-payload preservation passed; complete predata freeze dd49b991f pushed before pilot89533 started19:43:45UTC. No input changes after freeze.",
     "snapshot_pilot_input_root": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa",
     "snapshot_pilot_job_id": "e1e0c202-188b-4758-9e4a-5741ced4d7bf",
     "snapshot_pilot_round_id": "b05de240-9374-456b-bcb0-50b7a6ed8fe5",
