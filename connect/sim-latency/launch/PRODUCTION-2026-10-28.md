@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 02:20 UTC
+## Current preparation pointer — October 25, 03:11 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -53,6 +53,17 @@ failures at 1,800/3,600/7,200 and 22 at 15,000. Actual four-child off-mode
 arguments, complete markers and cleanup were verified. Eight exact outcomes
 are retained; no official baseline or final scale is accepted. The largest
 tested completed on point, 3,600, is the leading full-qualification candidate.
+
+The first cold R9 invocation stopped before any replicate at caller admission:
+privileged precheck reads did not match the unprivileged manager invocation.
+Leaf permissions and policy remain unchanged. The corrected whole-root context
+matches the configured manager, passed direct reads/hashes and three passes of
+deterministic Go principal regressions; the next full invocation is pending.
+Exact failed/prechecked records are in
+[the cold-admission archive](../baseline/prelaunch-cold-r9-2026-10-25/README.md).
+The separate warm-reader research patch passed 312 selected race-enabled
+correctness executions but has no offline image or measured improvement yet;
+it is not an accepted better reference or a frozen product change.
 Further frontier/diagnostic work must preserve the correctness gates.
 Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).

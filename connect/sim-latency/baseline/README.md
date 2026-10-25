@@ -1,5 +1,10 @@
 # Sim-latency baseline preservation
 
+The first cold R9 attempt's zero-replicate caller-admission failure, deterministic
+Go principal regressions and corrected root-context precheck are retained in
+[`prelaunch-cold-r9-2026-10-25/`](prelaunch-cold-r9-2026-10-25/README.md).
+No scored baseline or live readiness is claimed from that preparation.
+
 The corrected Go 1.27.3 readiness/snapshot source's first 15,000-provider
 impairment-on attempt is preserved in
 [`prelaunch-ready-snapshot-frontier-2026-10-25/`](prelaunch-ready-snapshot-frontier-2026-10-25/README.md).

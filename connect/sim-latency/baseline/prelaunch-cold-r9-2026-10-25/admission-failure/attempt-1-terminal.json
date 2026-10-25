@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "offline-cold-r9-attempt-terminal",
+  "start_utc": "2026-10-25T02:58:15Z",
+  "end_utc": "2026-10-25T02:58:15Z",
+  "wall_seconds": 0,
+  "exit_code": 1,
+  "phase": "local-mount-admission",
+  "error": "local mount root must be an absolute canonical directory; direct config/local content does not match the frozen digest",
+  "replicates_started": 0,
+  "containers_started": 0,
+  "typed_result_present": false,
+  "cleanup_verified_original_objects_only": true,
+  "external_retries": 0,
+  "official": false
+}

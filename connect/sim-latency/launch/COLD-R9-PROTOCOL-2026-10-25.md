@@ -37,6 +37,12 @@ config/local and vault/local leaves are available to candidate execution.
    identities, idle evaluation slot, inactive staging supervisor, original
    persistent containers/networks and sufficient evidence capacity. No other
    tests, builds, scoring or resource-pressure work may overlap.
+   Preflight and evaluator must inherit the **same actual manager credentials**.
+   This deployment's configured manager is UID 0. Run the whole preflight under
+   that identity and directly open/hash the private local leaves there; using
+   sudo for individual probes cannot validate an unprivileged manager. Preserve
+   the zero-replicate admission failure and deterministic principal tests in
+   [the cold-admission record](../baseline/prelaunch-cold-r9-2026-10-25/README.md).
 2. Use the real trusted worker-to-Compose evaluator, not the short development
    smoke or a loop around the direct frontier controller. Use fresh exact
    temporary source checkouts, offline candidate build and the normal resource,

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "kind": "offline-cold-r9-qualification-fixture",
+  "status": "prepared_not_executed",
+  "official": false,
+  "production_admission": false,
+  "live_api_or_worker": false,
+  "api_image_digest_is_synthetic": true,
+  "worker_image_digest_is_synthetic": true,
+  "hardware_qualification_identity_is_synthetic": true,
+  "synthetic_identity_purpose": "Protocol fixture labels only; never a live image/host/provider/readiness receipt.",
+  "public_workload_seed": 20261024,
+  "round_seed_hex_purpose": "Public fixture nonce only, not a production hidden-seed commitment.",
+  "source_of_provider_bytes": "Unchanged image-generated public workload from complete-p3600-on; no measurements are copied or reused.",
+  "prior_baseline_reused": false,
+  "request_path": "/home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts/worker-request.json",
+  "result_path": "/home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts/worker-result.json",
+  "evaluator_command": "/usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/evaluator.sh",
+  "evaluator_command_sha256": "d55eac73bebd5a3be1ef01c0ad024633a3c71d01b481350386b06810e64feed2",
+  "protocol": "server/connect/sim-latency/launch/COLD-R9-PROTOCOL-2026-10-25.md",
+  "control_replicates": 9,
+  "candidate_replicates": 9,
+  "execution_budget_seconds": 10800,
+  "claims_excluded": [
+    "official epoch baseline",
+    "live API/worker/MinIO proof",
+    "host readiness attestation",
+    "provider-backed model receipt",
+    "variance or independent-seed qualification"
+  ]
+}

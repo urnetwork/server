@@ -1,0 +1,2 @@
+local mount root must be an absolute canonical directory
+[competition-evaluator] ERROR: direct config/local content does not match the frozen digest

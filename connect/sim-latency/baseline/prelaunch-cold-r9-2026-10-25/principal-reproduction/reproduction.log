@@ -1,0 +1,19 @@
+=== RUN   TestCalibrationPrivateLeafRequiresMatchingCaller
+--- PASS: TestCalibrationPrivateLeafRequiresMatchingCaller (1.04s)
+=== RUN   TestCalibrationVisibleMetadataDoesNotProveReadAccess
+--- PASS: TestCalibrationVisibleMetadataDoesNotProveReadAccess (1.03s)
+=== RUN   TestCalibrationPrincipalReadChild
+--- PASS: TestCalibrationPrincipalReadChild (0.00s)
+=== RUN   TestCalibrationPrivateLeafRequiresMatchingCaller
+--- PASS: TestCalibrationPrivateLeafRequiresMatchingCaller (1.03s)
+=== RUN   TestCalibrationVisibleMetadataDoesNotProveReadAccess
+--- PASS: TestCalibrationVisibleMetadataDoesNotProveReadAccess (1.03s)
+=== RUN   TestCalibrationPrincipalReadChild
+--- PASS: TestCalibrationPrincipalReadChild (0.00s)
+=== RUN   TestCalibrationPrivateLeafRequiresMatchingCaller
+--- PASS: TestCalibrationPrivateLeafRequiresMatchingCaller (1.03s)
+=== RUN   TestCalibrationVisibleMetadataDoesNotProveReadAccess
+--- PASS: TestCalibrationVisibleMetadataDoesNotProveReadAccess (1.03s)
+=== RUN   TestCalibrationPrincipalReadChild
+--- PASS: TestCalibrationPrincipalReadChild (0.00s)
+PASS

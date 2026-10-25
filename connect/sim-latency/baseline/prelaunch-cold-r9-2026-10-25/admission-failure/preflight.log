@@ -1,0 +1,37 @@
+PASS exact keysets, typed policy fields, all protocol timers/R9/10800s, cold artifacts, hashes, YAML counts, explicit synthetic labels; no execution authorized
+d55eac73bebd5a3be1ef01c0ad024633a3c71d01b481350386b06810e64feed2  /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/evaluator.sh
+sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793 {"com.urnetwork.competition.base-sha":"0d58d0d91b069c62bcfb39cd72166c26925b786a","com.urnetwork.competition.development-snapshot":"false","com.urnetwork.competition.image-kind":"evaluator-base","com.urnetwork.competition.source-config-sha256":"156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f","com.urnetwork.competition.source-epoch":"0","com.urnetwork.competition.source-lock-sha256":"2cb2ff2a9b1f64a61e165a194e72ad9ee07aae0d76cf43dddf47a3e3dce952ed","com.urnetwork.competition.staging":"false","org.opencontainers.image.revision":"0d58d0d91b069c62bcfb39cd72166c26925b786a","org.opencontainers.image.title":"URnetwork sim-latency evaluator base","org.opencontainers.image.version":"24.04"}
+buildx_buildkit_warp-multiarch0
+urnetwork-local-pg
+urnetwork-local-redis
+bridge
+host
+none
+urnetwork-local
+inactive
+               total        used        free      shared  buff/cache   available
+Mem:     135037386752  3605159936 58194046976    44638208 74574565376 131432226816
+Swap:     8589930496     3932160  8585998336
+Filesystem                           1B-blocks         Used    Available Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv 980468039680 812589707264 117997785088  88% /
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/evaluator.sh
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/compose.yml
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/build-submission.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/prepare-evaluation-source.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/resource-boundary.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/docker-id-map.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/hash-local-mount.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/retain-failure-evidence.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/postgres-init.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/timeout-budget.sh
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/Dockerfile.submission
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/job.env.example
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container
+700 by:by /home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN
+700 by:by /home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts
+400 by:by /home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts/worker-request.json
+400 by:by /home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts/providers.yml
+400 by:by /home/by/urnetwork/temp/cold-r9-20261025.yng0oMXN/artifacts/canonical.patch
+b8a0996c29195cad1839fa6f7e32933f01f812d573df6e3bb5f9e7b6276430b7
+a68c0e07eaa6d831c9a562128950237e76b0cd0f942afd1fec3d7a32b3aed7c7
+helper_comparisons_and_mount_hash_readbacks_complete

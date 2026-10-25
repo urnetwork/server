@@ -1,0 +1,34 @@
+effective_uid=0
+PASS root EUID 0 direct reads; request exact except attempt 2/new paths; prior verified keysets/types/protocol/payloads unchanged; 0700 roots/0400 inputs; no cached baseline/result
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/evaluator.sh
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/compose.yml
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/build-submission.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/prepare-evaluation-source.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/resource-boundary.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/docker-id-map.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/hash-local-mount.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/retain-failure-evidence.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/postgres-init.sh
+555 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/timeout-budget.sh
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/Dockerfile.submission
+444 root:root /usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/evaluator/container/job.env.example
+sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793 {"com.urnetwork.competition.base-sha":"0d58d0d91b069c62bcfb39cd72166c26925b786a","com.urnetwork.competition.development-snapshot":"false","com.urnetwork.competition.image-kind":"evaluator-base","com.urnetwork.competition.source-config-sha256":"156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f","com.urnetwork.competition.source-epoch":"0","com.urnetwork.competition.source-lock-sha256":"2cb2ff2a9b1f64a61e165a194e72ad9ee07aae0d76cf43dddf47a3e3dce952ed","com.urnetwork.competition.staging":"false","org.opencontainers.image.revision":"0d58d0d91b069c62bcfb39cd72166c26925b786a","org.opencontainers.image.title":"URnetwork sim-latency evaluator base","org.opencontainers.image.version":"24.04"}
+buildx_buildkit_warp-multiarch0
+urnetwork-local-pg
+urnetwork-local-redis
+bridge
+host
+none
+urnetwork-local
+inactive
+700 root:root /home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB
+700 root:root /home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB/artifacts
+400 root:root /home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB/artifacts/worker-request.json
+400 root:root /home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB/artifacts/providers.yml
+400 root:root /home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB/artifacts/canonical.patch
+               total        used        free      shared  buff/cache   available
+Mem:     135037386752  3576614912 58208620544    44638208 74588532736 131460771840
+Swap:     8589930496     3932160  8585998336
+Filesystem                           1B-blocks         Used    Available Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv 980468039680 812603183104 117984309248  88% /
+root_context_preflight_passed_no_execution
