@@ -923,6 +923,24 @@ Process each new alert identity and each material update in this order:
 
 1. **Freeze the claim.** Record alert identity, class, target, frame, observed
    time, baseline, observed value, evidence, active artifact, and monitor hash.
+   For retained panic Markdown, use the section-aware helper before claiming
+   observed functions, error types or SQLSTATE:
+   `python3 -I -B monitor/alert_evidence_projection.py <one-private-alert.md>`.
+   Keep its fixed projection and section/field/byte provenance in private output.
+   Only an explicit producer `sample:` inside Evidence supplies these fields;
+   generated `meaning:` text is guidance even when it is inside Evidence.
+   Action, Verify and other recommendations are not observations. Preserve
+   explicit `unknown`; unavailable or ambiguous Evidence stays CannotObserve,
+   without a whole-alert search fallback. Malformed, oversized or unreadable
+   input must produce fixed CannotObserve JSON and a nonzero exit, without raw
+   input, exception text, paths or traceback output. Keep functions separate and never
+   infer shared cause or incident counts from repeated guidance. This helper is
+   limited to fixed panic projections. Keep signal ID, target name, native
+   class, observed fields and producer sample separate: a target named for an
+   overrun is not an observed duration or overrun. A CannotObserve/timeout with
+   no producer evidence does not prove the condition named by its target.
+   Other new classes still require their
+   own explicit producer/tool-field provenance; it is not an all-class parser.
 2. **Prove visibility.** Confirm the probe reached the intended source and
    parsed the current identity. `cannot-observe` is unknown state and may itself
    be an incident; it is never evidence that the underlying service is healthy.
