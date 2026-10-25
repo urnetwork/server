@@ -21,8 +21,9 @@ Explicit opt-ins:
 
 Select only `TestCalibrationAssembleFrozenCampaignHelper`. The helper reuses
 the existing retained-artifact loader, verifies the fixed plan digest/order,
-request/provenance identities, shared source/image/policy, complete R9 counts
-and bounded terminal receipts, then exclusively creates root-only
+request/provenance identities, shared source/image/policy, complete R9 counts,
+typed successful/placeable worker completion, cleanup and bounded terminal
+receipts, then exclusively creates root-only
 `analysis-inputs.json`. It does not choose successful positions from a larger
 sample, follow request-supplied original paths, rewrite observations, start
 Docker or perform bootstrap analysis. A missing, failed or partial position
@@ -30,8 +31,9 @@ must prevent normal assembly; retain that failure instead of substituting data.
 
 Qualify the helper with synthetic positive and refusal fixtures before using
 real results: incomplete/failing terminal, wrong ordered identity/request hash,
-changed shared policy, redirected root, missing replicate and attempted output
-overwrite. This qualification is still pending. Preserve its exact source and
+changed shared policy, redirected root, typed failure or nonplaceable score
+despite process exit 0, missing replicate and attempted output overwrite.
+This qualification is still pending. Preserve its exact source and
 test logs; an unset-environment no-op or compile pass alone is insufficient.
 
 Pin and preserve the generated manifest's digest, then release the assembly

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -19,6 +21,9 @@ func TestCalibrationAssembleFrozenCampaignHelper(t *testing.T) {
 	root := os.Getenv("SIM_LATENCY_ASSEMBLE_CAMPAIGN_ROOT")
 	if root == "" {
 		return
+	}
+	if runtime.Version() != "go1.27.3" {
+		t.Fatal("competition assembly requires actual Go 1.27.3")
 	}
 	expectedPlan := os.Getenv("SIM_LATENCY_ASSEMBLE_PLAN_SHA256")
 	if os.Geteuid() != 0 || !validSha256(expectedPlan) || !filepath.IsAbs(root) || filepath.Clean(root) != root {
@@ -81,6 +86,30 @@ func TestCalibrationAssembleFrozenCampaignHelper(t *testing.T) {
 		}
 		if err := validateCalibrationTerminal(terminal, settings.ExecutionLimitSeconds); err != nil {
 			t.Fatal(err)
+		}
+		workerBytes, err := readCalibrationArtifact(cohort.ArtifactDirectory, "worker-result.json", cohort.WorkerResultSha256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var worker map[string]json.RawMessage
+		if err := decodeStrictJSONBytes(workerBytes, &worker, "worker completion"); err != nil {
+			t.Fatal(err)
+		}
+		var workerJobId string
+		if err := json.Unmarshal(worker["job_id"], &workerJobId); err != nil || workerJobId != position.JobId || !bytes.Equal(bytes.TrimSpace(worker["eval_error"]), []byte("null")) {
+			t.Fatal("typed worker failure or mismatched job cannot enter accepted assembly")
+		}
+		var score struct {
+			Placeable bool `json:"placeable"`
+		}
+		if err := json.Unmarshal(worker["score"], &score); err != nil || !score.Placeable {
+			t.Fatal("nonplaceable completion cannot enter accepted assembly")
+		}
+		var security struct {
+			CleanupComplete bool `json:"cleanup_complete"`
+		}
+		if err := json.Unmarshal(worker["security"], &security); err != nil || !security.CleanupComplete {
+			t.Fatal("worker cleanup is not complete")
 		}
 		if len(cohort.Inputs.Runs) != settings.Replicates || len(cohort.BaselineInputs.Runs) != settings.Replicates {
 			t.Fatal("complete fresh R9 pair required")
