@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T15:28:30Z",
+  "observed_at": "2026-10-25T15:50:18Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
   "status": "published_corrected_release_stage_a_cohort_01_running",
@@ -29,9 +29,12 @@
     "next_action": "Observe same live position1 handle. No overlapping tests/builds/simulations/pressure work. Stop on any execution/gate/integrity/budget/cleanup failure; no retry, old-campaign resume or nextposition without phase review/publication. No activation during main maintenance."
   },
   "latest_external_read_only_probe": {
-    "observed_at": "2026-10-25T15:22:17Z",
+    "observed_at": "2026-10-25T15:50:18Z",
     "competition_info_http": 503,
-    "minio_ready_connection": "refused",
+    "competition_info_observed_at": "2026-10-25T15:48:58Z",
+    "minio_ready_connection": "HTTP 200 at currently configured172.28.208.176:23900",
+    "minio_ready_http": 200,
+    "minio_probe_correction": "Previous hardcoded172.28.208.177 probe targeted the old endpoint, not current Sille MinIO. Host config/main/settings.yml selects .176. No config or service changed; readiness alone is not locking/versioning/replication/capacity proof.",
     "dedicated_review_provider_key_present": false,
     "main_maintenance_hold": true
   },
@@ -385,10 +388,10 @@
   },
   "external_holds": {
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
-    "last_check_at": "2026-10-25T11:42:16Z",
-    "api_info_http": 0,
-    "api_info_observation": "Read-only GET timed out after eight seconds without a response; not evidence of a terminal service failure or authorization to restart during maintenance.",
-    "minio_health": "172.28.208.177:23900 connection refused",
+    "last_check_at": "2026-10-25T15:50:18Z",
+    "api_info_http": 503,
+    "api_info_observation": "Read-only GET at15:48:58UTC returned503. Main maintenance hold still requires user clearance; no restart authorized.",
+    "minio_health": "Configured172.28.208.176:23900 returned200. Old .177 probe was stale, not proof current MinIO unavailable. Authenticated durability/retention/capacity/replication acceptance remains pending.",
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },
   "pending": [

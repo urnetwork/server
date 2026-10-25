@@ -37,7 +37,11 @@ screen and is not a qualified faster reference. The owner-admission-map draft
 is a separate **untested** hypothesis, not a source change or accepted reference.
 Reference qualification and held-out seeds remain required.
 
-At the latest read-only check, API returned 503, MinIO refused connection and
+Read-only correction at **15:50 UTC**: current Sille config routes MinIO to
+`172.28.208.176:23900`, which returns HTTP 200 at its health/ready endpoint.
+Earlier `.177` refusals were a stale probe target, not current MinIO readiness.
+No service or config was changed. This does not prove authenticated locking,
+versioning, replication or capacity. API still returned 503 at 15:48 UTC and
 the dedicated review-provider key was absent. Live provider/host/readiness,
 artifact durability, monitoring and partner release deltas remain open. The
 opening remains fixed at **2026-10-28T00:00:00Z**, not postponed or redefined.
