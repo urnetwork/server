@@ -10,6 +10,9 @@
 //     space separated.
 //   - `drainMoves`: whether drains send compulsory moves with intents (D13);
 //     true or false.
+//   - `placement`: whether platform-hosted clients dial the edge the load
+//     model chooses (server edgeplacement, MOVE.md §13); true or false. Read
+//     by the processes that place, not by the mover.
 //
 // The control can only narrow the code settings, never widen them:
 //   - the mode never goes above what `EnableMove` allows. `MoveDefaultMode` is
@@ -19,9 +22,11 @@
 //   - `tolerance` is at least the code's band, since a narrower band moves
 //     more clients.
 //   - `drainMoves` can turn drain moves off, never on past `EnableDrainMoves`.
+//   - `placement` can turn placement off, never on past `EnablePlacement`.
 //
 // A field that does not parse narrows as far as it can: mode off,
-// maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off.
+// maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
+// placement off.
 // An absent key or field leaves the code default. A reader that cannot read
 // the control acts as if the mode were off (the mover does).
 package model
@@ -45,6 +50,7 @@ const (
 	ConnectMoveControlFieldTolerance     = "tolerance"
 	ConnectMoveControlFieldEvacuateHosts = "evacuateHosts"
 	ConnectMoveControlFieldDrainMoves    = "drainMoves"
+	ConnectMoveControlFieldPlacement     = "placement"
 )
 
 // The mover's mode, ordered from narrowest to widest.
@@ -100,6 +106,9 @@ type ConnectMoveControlCeiling struct {
 	MaxPerMinute int
 	// `MoveBalanceTolerance`.
 	Tolerance float64
+	// The placing process's switch for edge placement. The mover leaves it
+	// false and ignores the control's placement.
+	EnablePlacement bool
 }
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -116,6 +125,8 @@ type ConnectMoveControl struct {
 	EvacuateHosts map[string]bool
 	// Drains send compulsory moves with intents.
 	DrainMoves bool
+	// Platform-hosted clients dial the edge the load model chooses.
+	Placement bool
 }
 
 // The control the fields narrow the ceiling to. Pure: fields is the control
@@ -127,6 +138,7 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 		Tolerance:     ceiling.Tolerance,
 		EvacuateHosts: map[string]bool{},
 		DrainMoves:    ceiling.EnableDrainMoves,
+		Placement:     ceiling.EnablePlacement,
 	}
 
 	modeValue, modeSet := fields[ConnectMoveControlFieldMode]
@@ -164,6 +176,11 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 	if value, ok := fields[ConnectMoveControlFieldDrainMoves]; ok {
 		drainMoves, parsed := parseConnectMoveControlBool(value)
 		control.DrainMoves = ceiling.EnableDrainMoves && parsed && drainMoves
+	}
+
+	if value, ok := fields[ConnectMoveControlFieldPlacement]; ok {
+		placement, parsed := parseConnectMoveControlBool(value)
+		control.Placement = ceiling.EnablePlacement && parsed && placement
 	}
 
 	if !ceiling.EnableMove {

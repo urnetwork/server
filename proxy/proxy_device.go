@@ -104,6 +104,12 @@ type ProxyDeviceManagerSettings struct {
 	// Integration tests use this to point proxy devices at local api/connect
 	// servers (see sdk.Testing_NewNetworkSpaceWithUrls).
 	NetworkSpace *sdk.NetworkSpace
+
+	// Chooses the edge every window of every device dials from the platform's
+	// load model (server edgeplacement, connect/MOVE.md §13), so the hosted
+	// windows do not pile onto whichever edge DNS caches answer. The process
+	// owns it; nil resolves the platform host.
+	PlatformPlacement connect.PlatformPlacement
 }
 
 type ProxyDeviceManager struct {
@@ -402,18 +408,25 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 		return nil, fmt.Errorf("Proxy device manager closed.")
 	}
 
-	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
-	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
-	settings.MemoryTargetByteCount = self.settings.DeviceMemoryTargetByteCount
-	settings.HostedEvaluationPoolMultiple = self.settings.HostedEvaluationPoolMultiple
-	settings.windowIdentityGate = self.windowIdentityGate
-	settings.mintAdmission = self.mintAdmission
-	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
+	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, self.proxyDeviceSettings())
 	if err != nil {
 		return nil, err
 	}
 
 	return pd, nil
+}
+
+// The settings this manager opens each device with: the manager's device
+// policy and the bounds and placement every device of the manager shares.
+func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
+	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
+	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
+	settings.MemoryTargetByteCount = self.settings.DeviceMemoryTargetByteCount
+	settings.HostedEvaluationPoolMultiple = self.settings.HostedEvaluationPoolMultiple
+	settings.PlatformPlacement = self.settings.PlatformPlacement
+	settings.windowIdentityGate = self.windowIdentityGate
+	settings.mintAdmission = self.mintAdmission
+	return settings
 }
 
 // Runs the externally managed device lifecycle and its idle watcher. The
@@ -724,7 +737,10 @@ type ProxyDeviceSettings struct {
 	// window the device builds (connect ReliabilitySettings
 	// EvaluationPoolMultiple). Nonpositive keeps the connect default.
 	HostedEvaluationPoolMultiple int
-	windowIdentityGate           *windowIdentityRestoreGate
+	// Chooses the edge each of the device's windows dials (see
+	// ProxyDeviceManagerSettings). Nil resolves the platform host.
+	PlatformPlacement  connect.PlatformPlacement
+	windowIdentityGate *windowIdentityRestoreGate
 	// the owning manager's registration bound; nil is unbounded
 	mintAdmission *localclient.MintAdmission
 }
@@ -1021,6 +1037,8 @@ func newProxyDeviceLocalSettings(
 	// a direct connection would leak that the client is hosted, and where it is
 	// hosted, via the host addresses in the direct connection setup.
 	deviceLocalSettings.HostedIncompatible = true
+	// the windows dial the edge the platform's load model chooses
+	deviceLocalSettings.PlatformPlacement = proxyDeviceSettings.PlatformPlacement
 	return deviceLocalSettings
 }
 

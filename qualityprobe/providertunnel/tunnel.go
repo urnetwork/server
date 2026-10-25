@@ -61,6 +61,12 @@ type Config struct {
 	ClientCredentials connect.NetworkClientCredentials
 	// Explicit platform-owned local control; nil preserves standalone HTTP.
 	ClientControl connect.NetworkClientControl
+	// Chooses the edge the tunnel's platform transports dial from the
+	// platform's load model (server edgeplacement, connect/MOVE.md §13).
+	// Placement happens as the tunnel connects, so a probe still measures
+	// through one edge and never follows a move (D15). Nil resolves the
+	// platform host.
+	PlatformPlacement connect.PlatformPlacement
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -536,6 +542,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		// (connect/MOVE.md D15). Without the capability it gets no advisory
 		// move, and a drain migrates it by name.
 		settings.EnableMove = false
+		// the edge it lands on is the one the load model chooses (MOVE.md §13)
+		settings.Placement = cfg.PlatformPlacement
 		return settings
 	}
 

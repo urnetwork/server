@@ -2062,6 +2062,8 @@ func runProviderEgressProbe(
 			return nil, err
 		}
 		return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
+			placement := newProbeEdgePlacement(ctx)
+			defer placement.Close()
 			tunnelConfig := providertunnel.Config{
 				ApiUrl:                  args.APIURL,
 				PlatformUrl:             args.PlatformURL,
@@ -2075,6 +2077,7 @@ func runProviderEgressProbe(
 				InitialPingObservations: &egressProbeInitialPing.observations,
 				ClientCredentials:       credentials,
 				ClientControl:           localControl,
+				PlatformPlacement:       placement,
 			}
 
 			pass := newProviderUrlProbePass(args, operator, tunnelConfig, *identity.NetworkId)

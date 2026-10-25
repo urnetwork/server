@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -62,13 +63,46 @@ func TestResizeProxyMessagePoolsCapsAllClassesAtEightGiB(t *testing.T) {
 func TestProxyMainHoldsIdentityRestoreForDeploymentHandoff(t *testing.T) {
 	settings := proxy.DefaultProxySettings()
 	settings.EnableWgHandoff = true
-	if !newProxyDeviceManagerSettings(settings).HoldWindowIdentityRestore {
+	if !newProxyDeviceManagerSettings(settings, nil).HoldWindowIdentityRestore {
 		t.Fatal("wg handoff did not hold replacement window identity restoration")
 	}
 
 	settings.EnableWgHandoff = false
-	if newProxyDeviceManagerSettings(settings).HoldWindowIdentityRestore {
+	if newProxyDeviceManagerSettings(settings, nil).HoldWindowIdentityRestore {
 		t.Fatal("disabled wg handoff left window identity restoration held forever")
+	}
+}
+
+// A placement that offers nothing; the test compares its identity only.
+type testProxyMainPlacement struct{}
+
+func (self *testProxyMainPlacement) PlatformPlacementTargets(host string) []netip.Addr {
+	return nil
+}
+
+func (self *testProxyMainPlacement) PlatformPlacementFailed(host string, targetIps []netip.Addr) {
+}
+
+// The production entry point places every hosted window from the platform's
+// load model (connect/MOVE.md §13): main builds one placement for the process
+// and the device manager hands it to every device.
+func TestProxyMainPlacesHostedWindows(t *testing.T) {
+	placement := &testProxyMainPlacement{}
+	if got := newProxyDeviceManagerSettings(proxy.DefaultProxySettings(), placement).PlatformPlacement; got != connect.PlatformPlacement(placement) {
+		t.Fatalf("manager placement = %v, want the process placement", got)
+	}
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainStart := strings.Index(string(source), "func main()")
+	if mainStart < 0 {
+		t.Fatal("main function not found")
+	}
+	mainSource := string(source[mainStart:])
+	if !strings.Contains(mainSource, "edgeplacement.NewEdgePlacement(ctx, edgeplacement.DefaultEdgePlacementSettings())") ||
+		!strings.Contains(mainSource, "newProxyDeviceManagerSettings(settings, edgePlacement)") {
+		t.Fatal("production main does not place the hosted windows")
 	}
 }
 
