@@ -1,0 +1,7 @@
+[env]glog not configured from command line. Using default configuration.
+I1025 19:37:04.188168 2776392 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1025 19:37:04.188315 2776392 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1025 19:37:04.188346 2776392 env.go:81] [env]settings loaded
+PASS allowed_request_fields=8 all_other_fields_unchanged=true fresh_UUIDs_vs_both_prior_plans=true root_modes=true artifacts0400=true controls=9 candidates=9 budget=10800 cached_baseline=false measurements=0 typed_policy_sha256=d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7
+request_sha256=55f1f4428d2e2d1ca8bdd50ffe39de81dbbd405b77cc8f609a065fd7f0bb4b0e
+provenance_sha256=27ce4ee3cbd4480787fcd283d7093c48521e48fbba7acd2f13a233f6acf25782

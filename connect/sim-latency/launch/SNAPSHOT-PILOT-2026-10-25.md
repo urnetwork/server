@@ -1,6 +1,8 @@
 # Snapshot reference pilot — prospective execution
 
-Status: preparation only; no pilot request generated or execution started.
+Status at pre-data freeze: inputs prepared and independently verified; no execution started.
+The [complete pre-data freeze](SNAPSHOT-PILOT-FREEZE-2026-10-25.md) records their
+identities and preservation receipts; publish it before the single invocation.
 This is a separate hypothesis from the failed warm-reader pilot, not a retry
 of that patch. It is not production activation or a formal calibration cohort.
 The October 28 00:00 UTC opening is unchanged.
@@ -39,8 +41,9 @@ vault/local leaves. Synthetic API/worker/host labels are not live receipts.
 
 1. Publish the completed correctness/benchmark phase before this larger run.
 2. Generate new offline job/round IDs in a fresh root-owned mode-0700 directory.
-   The [preparation helper](snapshot-pilot-preparation.go.txt) is a draft until
-   compiled and independently verified; do not treat this document as that proof.
+   The [preparation helper](snapshot-pilot-preparation.go.txt) has now run with
+   actual Go 1.27.3, and its exact outputs passed independent typed verification;
+   the freeze records that proof rather than treating this document as evidence.
    Pin the complete request/provenance/patch/provider digests and preserve them
    with the generator and runner identities before execution. Independently
    compare all unchanged request fields against the frozen template.

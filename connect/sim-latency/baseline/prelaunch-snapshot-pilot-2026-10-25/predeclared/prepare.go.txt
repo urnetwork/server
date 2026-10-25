@@ -1,0 +1,123 @@
+// Generate a fresh offline pilot handoff; never invoke or modify an evaluator.
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+)
+
+// Bind exact published template/patch bytes and change only fresh job identity
+// and artifact paths. All workload, source, policy and synthetic labels remain.
+func main() {
+	must := func(err error) {
+		if err != nil {
+			panic(err)
+		}
+	}
+	check := func(ok bool, message string) {
+		if !ok {
+			panic(message)
+		}
+	}
+	check(os.Geteuid() == 0 && runtime.Version() == "go1.27.3", "root and actual Go 1.27.3 required")
+	check(len(os.Args) == 4, "require private output root, frozen template directory and patch path")
+	root, templateDirectory, patchPath := os.Args[1], os.Args[2], os.Args[3]
+	for _, path := range []string{root, templateDirectory, patchPath} {
+		resolved, err := filepath.EvalSymlinks(path)
+		must(err)
+		check(filepath.IsAbs(path) && filepath.Clean(path) == path && resolved == path, "canonical explicit paths required")
+	}
+	info, err := os.Lstat(root)
+	must(err)
+	check(info.IsDir() && info.Mode().Perm() == 0700, "private output directory required")
+	read := func(path string) []byte {
+		content, err := os.ReadFile(path)
+		must(err)
+		return content
+	}
+	hash := func(content []byte) string { return fmt.Sprintf("%x", sha256.Sum256(content)) }
+	write := func(path string, content []byte) {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
+		must(err)
+		_, err = file.Write(content)
+		if err != nil {
+			_ = file.Close()
+			must(err)
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			must(err)
+		}
+		must(file.Close())
+	}
+	encode := func(value any) []byte {
+		content, err := json.MarshalIndent(value, "", "  ")
+		must(err)
+		return append(content, '\n')
+	}
+	uuid := func() string {
+		content := make([]byte, 16)
+		_, err := rand.Read(content)
+		must(err)
+		content[6], content[8] = (content[6]&15)|64, (content[8]&63)|128
+		return fmt.Sprintf("%x-%x-%x-%x-%x", content[:4], content[4:6], content[6:8], content[8:10], content[10:])
+	}
+	template := read(filepath.Join(templateDirectory, "worker-request.json"))
+	check(hash(template) == "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d", "frozen request identity mismatch")
+	providers := read(filepath.Join(templateDirectory, "providers.yml"))
+	check(hash(providers) == "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac", "public workload identity mismatch")
+	patch := read(patchPath)
+	check(hash(patch) == "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924", "snapshot patch identity mismatch")
+	var request, frozen map[string]any
+	must(json.Unmarshal(template, &request))
+	must(json.Unmarshal(template, &frozen))
+	check(request["base_sha"] == "c1f9dda603d6279666fca5d92b99c5663306c5f7", "corrected source required")
+	check(request["evaluator_image_digest"] == "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3", "qualified image required")
+	check(request["round_baseline_path"] == "" && request["round_baseline_sha256"] == "", "cached baseline refused")
+	jobId, roundId := uuid(), uuid()
+	check(jobId != roundId && jobId != frozen["job_id"] && roundId != frozen["round_id"], "fresh distinct identities required")
+	artifacts := filepath.Join(root, "artifacts")
+	must(os.Mkdir(artifacts, 0700))
+	write(filepath.Join(artifacts, "providers.yml"), providers)
+	write(filepath.Join(artifacts, "canonical.patch"), patch)
+	request["job_id"], request["round_id"] = jobId, roundId
+	request["competition_id"], request["attempt"] = "offline-reference-pilot-warm-snapshot", float64(1)
+	request["artifact_directory"] = artifacts
+	request["providers_path"], request["patch_path"] = filepath.Join(artifacts, "providers.yml"), filepath.Join(artifacts, "canonical.patch")
+	request["patch_sha256"] = hash(patch)
+	for key, value := range frozen {
+		switch key {
+		case "job_id", "round_id", "competition_id", "attempt", "artifact_directory", "providers_path", "patch_path", "patch_sha256":
+		default:
+			check(reflect.DeepEqual(value, request[key]), "unexpected request change: "+key)
+		}
+	}
+	requestBytes := encode(request)
+	write(filepath.Join(artifacts, "worker-request.json"), requestBytes)
+	provenance := map[string]any{
+		"schema": 1, "kind": "offline-snapshot-directional-pilot", "status": "prepared_not_executed",
+		"official": false, "production_admission": false, "live_api_or_worker": false,
+		"api_image_digest_is_synthetic": true, "worker_image_digest_is_synthetic": true,
+		"hardware_qualification_identity_is_synthetic": true, "execution_principal_uid": 0,
+		"job_id": jobId, "round_id": roundId, "request_sha256": hash(requestBytes),
+		"candidate_patch_sha256": hash(patch), "providers_sha256": hash(providers),
+		"go_version":               runtime.Version(),
+		"evaluator_command":        "/usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container/evaluator.sh",
+		"evaluator_command_sha256": "263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e",
+		"runner_sha256":            "76ffb7087ba19097e5ec0291c3d2780cceb9404fb51ba44efe8ad8462f102304",
+		"prior_baseline_reused":    false, "public_workload_seed": 20261024,
+		"control_replicates": 9, "candidate_replicates": 9, "execution_budget_seconds": 10800,
+		"protocol":               "server/connect/sim-latency/launch/SNAPSHOT-PILOT-2026-10-25.md",
+		"directional_acceptance": "all gates, placement, integrity, budget and cleanup pass; candidate median AND mean raw score lower than fresh control",
+		"claims_excluded":        []string{"official baseline", "accepted calibration", "qualified better reference", "hidden-seed evidence", "live API/worker/provider/MinIO receipts"},
+	}
+	provenanceBytes := encode(provenance)
+	write(filepath.Join(root, "fixture-provenance.json"), provenanceBytes)
+	fmt.Printf("prepared job=%s round=%s; no evaluation executed\nrequest_sha256=%s\nprovenance_sha256=%s\n", jobId, roundId, hash(requestBytes), hash(provenanceBytes))
+}
