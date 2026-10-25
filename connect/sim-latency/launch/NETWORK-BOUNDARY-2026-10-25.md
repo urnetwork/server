@@ -128,3 +128,40 @@ The original manager terminated with `final_cleanup_exit=0`; the private source
 is clean, the original three containers/four networks are restored and the
 canonical scoring lock is free. No scoring workload overlapped these suites.
 This closes the three-suite release gate, not calibration or live readiness.
+
+## External DNS follow-up: exact engine source review
+
+Read-only `docker version` identifies the installed engine as **29.9.0**, build
+`a5b58c9`. Its exact upstream
+[resolver initialization](https://github.com/moby/moby/blob/a5b58c9/daemon/libnetwork/sandbox_dns_unix.go#L55)
+sets external-proxy eligibility from sandbox external access. Its
+[forwarding implementation](https://github.com/moby/moby/blob/a5b58c9/daemon/libnetwork/resolver.go#L476)
+skips host-namespace loopback forwarding when that eligibility is false;
+non-loopback upstream dialing runs in the container namespace. This supports
+the intended containment reasoning, but is **source evidence, not runtime
+qualification**. Internal alias resolution alone still does not prove blocked
+external queries.
+
+At a clean scoring intermission, qualify DNS without changing this running
+campaign or host resolver/firewall settings:
+
+1. Use an owned, bounded UDP DNS listener and a generated non-sensitive nonce
+   under `.invalid`; answer only that nonce with an RFC-reserved test address.
+   Bind no existing service and never reuse main credentials or private names.
+2. Prove an ordinary private bridge control can reach the live owned resolver
+   through Docker's embedded resolver using an explicit upstream setting.
+3. Use the same live listener and upstream on a separate exact-policy isolated
+   bridge. Require refusal/unreachability and no successful answer; retain
+   server-side query counts alongside the positive control. Keep a working
+   Docker peer-alias query as a separate internal-resolution control.
+4. Record actual engine/network/container/resolver settings and bounded
+   deadlines; distinguish explicit-upstream coverage from default host resolver
+   behavior. Do not claim a non-loopback upstream test proves the separate
+   host-loopback forwarding branch.
+5. Join all listeners/processes and remove only owned test resources. Require
+   original inventory and free canonical slot before the next cohort.
+
+Do not create probe containers, compile helpers or run this test during the
+current full-window cohort. A demonstrated new defect would require its own
+deterministic regression, immutable correction and explicit protocol review;
+do not swap an instrument into an active measurement.
