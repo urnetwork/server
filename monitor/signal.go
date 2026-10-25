@@ -103,6 +103,9 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alert
 		}
 	}()
 	findings, err := s.probe.check(ctx, env)
+	if overflowFindings, overflow := mimirShellOverflowFindings(err, s.ID()); overflow && ctx.Err() == nil {
+		findings, err = overflowFindings, nil
+	}
 	if (enteredLive || scoped) && ctx.Err() != nil {
 		return nil, err
 	}

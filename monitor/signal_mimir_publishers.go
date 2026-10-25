@@ -546,7 +546,7 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				results <- mimirPublisherResult{target: target, err: ctx.Err()}
 				return
 			}
-			output, commandErr := env.runner.shell(ctx, target.host, command)
+			output, commandErr := mimirShellParsed(ctx, env.runner, target.host, command, 4096)
 			if commandErr != nil {
 				results <- mimirPublisherResult{target: target, err: commandErr}
 				return

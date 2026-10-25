@@ -414,8 +414,8 @@ func (pgbouncerPoolStarvationProbe) check(ctx context.Context, env *probeEnv) ([
 		return nil, fmt.Errorf("pgbouncer pool starvation: no services host in inventory for the loopback Mimir query")
 	}
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(pgbouncerPoolStarvationQuery(env.cfg.env))
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryUrl+"'")
+	output, gateway, err := mimirShellFirstServiceGateway(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryUrl+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("pgbouncer pool starvation: query Mimir: %w", err)
 	}

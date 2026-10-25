@@ -159,7 +159,15 @@ func (p providerPickerProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		return findings, resultErr
 	}
 	evidence := parseProviderPicker(out, env.cfg.env, now, scope)
-	return providerPickerFindings(evidence), nil
+	findings := providerPickerFindings(evidence)
+	// Match the exact integer POST time, independently of later rendering.
+	// This is the requested window, not proof of backend/sample wall clocks.
+	requestedEvaluationUnix := now.Unix()
+	queryClock := fmt.Sprintf(" mimir_requested_eval_unix=%d mimir_requested_window_start_unix=%d mimir_requested_window_end_unix=%d", requestedEvaluationUnix, requestedEvaluationUnix-int64(providerPickerWindow/time.Second), requestedEvaluationUnix)
+	for findingIndex := range findings {
+		findings[findingIndex].observed += queryClock
+	}
+	return findings, nil
 }
 
 // Reject an invalid envelope without echoing its labels, errors or body.

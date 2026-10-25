@@ -191,13 +191,12 @@ func observeSubscriptionMetricsSnapshot(ctx context.Context, env *probeEnv) (sub
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(subscriptionMetricsSnapshotQuery(env.cfg.env))
-	output, _, err := shellFirstServiceGateway(
+	output, _, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return subscriptionMetricsSnapshotObservation{}, fmt.Errorf("query Mimir through service gateways: %w", err)
 	}

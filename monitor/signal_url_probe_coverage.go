@@ -153,7 +153,7 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 	command := "curl -fsS --max-time 15 --max-filesize 2097152 --data-urlencode " +
 		shellSingleQuote("query="+urlProbeCoverageQuery(env.cfg.env)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, urlProbeCoverageResponseMax)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

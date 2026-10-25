@@ -619,13 +619,12 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(backupArchivesQuery(env.cfg.env, backupHosts))
-	out, metricHost, err := shellFirstServiceGateway(
+	out, metricHost, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("backup archives: query Mimir through service gateways: %w", err)
 	}

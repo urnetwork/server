@@ -143,8 +143,8 @@ func (connectionLiveFailuresProbe) check(ctx context.Context, env *probeEnv) ([]
 		return nil, fmt.Errorf("connection live failures: no services host in inventory for the loopback Mimir query")
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(connectionLiveFailuresQuery(env.cfg.env))
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'")
+	output, gateway, err := mimirShellFirstServiceGateway(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("connection live failures: query Mimir: %w", err)
 	}

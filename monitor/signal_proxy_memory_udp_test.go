@@ -319,12 +319,11 @@ func runProxyMemoryUdpInterval(t *testing.T, elapsed time.Duration, delivered, d
 	sample.bootID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	sample.udpInDatagrams = 1_000_000
 	sample.udpRcvbufErrors = 10_000
-	sample.oomLine = "synthetic-private-journal"
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "proxy-1" || !strings.Contains(command, proxyMemoryMarker) {
 			t.Fatal("UDP fixture reached an unexpected host or command")
 		}
-		return proxyMemoryFixture(sample) + "ignored_detail synthetic-private-source\n", nil
+		return proxyMemoryFixture(sample) + "ignored_detail synthetic-private-source synthetic-private-journal\n", nil
 	}}
 	settings := proxyMemorySyntheticSettings(source)
 	settings.Now = func() time.Time { return now }

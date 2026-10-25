@@ -125,8 +125,8 @@ func (originWaitProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		return nil, fmt.Errorf("origin wait: no services host in inventory")
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(originWaitQuery(env.cfg.env))
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'")
+	output, gateway, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("origin wait: query Mimir: %w", err)
 	}

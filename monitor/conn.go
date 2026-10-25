@@ -366,6 +366,16 @@ func (e *sshCommandError) Unwrap() error { return e.err }
 // Start followed by exactly one Wait preserves Run's lifecycle while allowing
 // the optional PG observer to distinguish an attempted start from a child.
 func runSSHCommand(ctx context.Context, args []string, stdin string) (string, string, error) {
+	if limit, _ := ctx.Value(mimirShellContextKey{}).(int); limit > 0 {
+		if pgSampleTransportFromContext(ctx) != nil {
+			return "", "", errors.New("Mimir observation cannot share the PG transport contract")
+		}
+		boundedArgs, marker, err := mimirShellBudgetArgs(args, limit)
+		if err != nil {
+			return "", "", err
+		}
+		return runMimirShellCommand(ctx, "ssh", boundedArgs, stdin, limit, marker)
+	}
 	observation := pgSampleTransportFromContext(ctx)
 	observation.beginLocalPhase(pgLocalNativeSetup)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
@@ -520,6 +530,10 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	}
 	if err != nil {
 		stderr := strings.TrimSpace(errOut)
+		var boundedFailure *mimirShellNativeError
+		if errors.As(err, &boundedFailure) {
+			stderr = strings.TrimSpace(boundedFailure.stderr)
+		}
 		connectTimeoutDiagnostic := false
 		if out == "" {
 			// Keep only a fixed marker for a complete native diagnostic naming
@@ -530,6 +544,9 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 				portNumber, portErr := strconv.Atoi(port)
 				connectTimeoutDiagnostic = portErr == nil && 0 < portNumber && portNumber <= 65535 && strconv.Itoa(portNumber) == port
 			}
+		}
+		if boundedFailure != nil {
+			stderr = ""
 		}
 		// Retain native SSH status for the fixed error classifier. Neither 255
 		// nor stderr alone proves a local VPN, network, or remote-host cause.

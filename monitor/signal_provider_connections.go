@@ -481,7 +481,7 @@ func (self *providerConnectionsProbe) check(ctx context.Context, env *probeEnv) 
 		return self.unknownFindings(target, "query_bound", now), nil
 	}
 	command := "curl -fsS --max-time 20 --max-filesize " + strconv.Itoa(providerConnectionsMaxBytes) + " --data-urlencode " + shellSingleQuote("query="+query) + " --data-urlencode " + shellSingleQuote("time="+strconv.FormatFloat(float64(now.UnixMilli())/1000, 'f', 3, 64)) + " 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	output, err := env.runner.shell(ctx, gateways[0], command)
+	output, err := mimirShellParsed(ctx, env.runner, gateways[0], command, providerConnectionsMaxBytes)
 	sourceCause = err
 	if contextErr := ctx.Err(); contextErr != nil {
 		self.resetNative()

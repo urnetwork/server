@@ -60,7 +60,22 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return nil, fmt.Errorf("provider count: no services host is configured for the loopback Mimir query")
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(providerCountQuery(env.cfg.env))
-	out, metricHost, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil, "curl -fsS --max-time 15 '"+queryURL+"'")
+	out, metricHost, err := mimirShellFirstServiceGatewayWithRejection(ctx, env.runner, metricHosts, nil, "curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes, func(body string) error {
+		_, sourceErr := parseProviderCountCohorts(body, env.now())
+		return sourceErr
+	})
+	if contextErr := ctx.Err(); contextErr != nil {
+		// A retirement after a completed read still retains only a safe
+		// parser failure; successful cohorts never become findings.
+		if err == nil {
+			_, sourceErr := parseProviderCountCohorts(out, env.now())
+			return nil, mimirShellParentError(contextErr, sourceErr)
+		}
+		return nil, err
+	}
+	if findings, overflow := mimirShellOverflowFindings(err, "mimir/provider-count"); overflow && ctx.Err() == nil {
+		return findings, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("provider count: query Mimir through service gateways: %w", err)
 	}

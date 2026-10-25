@@ -164,13 +164,7 @@ func (paymentReconciliationProbe) check(ctx context.Context, env *probeEnv) ([]f
 		{
 			target: "payment-reconciliation/unfulfillable",
 			query:  paymentReconciliationUnfulfillableQuery,
-			reduce: func(rows []pgRow) ([]finding, error) {
-				terminal, err := paymentReconciliationUnfulfillableFinding(rows)
-				if err != nil || terminal == nil {
-					return nil, err
-				}
-				return []finding{*terminal}, nil
-			},
+			reduce: paymentReconciliationUnfulfillableFindings,
 		},
 	} {
 		if err := ctx.Err(); err != nil {
@@ -420,6 +414,38 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 	return findings, nil
 }
 
+// Preserve independent valid and invalid terminal incidents from one validated aggregate.
+// Only the valid observation count is separable in a mixed cohort; evidence/run counts
+// and latest age remain cohort-wide and do not identify distinct valid payments.
+func paymentReconciliationUnfulfillableFindings(rows []pgRow) ([]finding, error) {
+	terminal, err := paymentReconciliationUnfulfillableFinding(rows)
+	if err != nil || terminal == nil {
+		return nil, err
+	}
+	findings := []finding{*terminal}
+	if terminal.class != "payment-reconciliation-credit-unfulfillable-invalid" {
+		return findings, nil
+	}
+	distinctEvidence, _ := parseStrictInt64(rows[0].str(0))
+	observations, _ := parseStrictInt64(rows[0].str(1))
+	distinctRuns, _ := parseStrictInt64(rows[0].str(2))
+	invalid, _ := parseStrictInt64(rows[0].str(3))
+	latestAge, _ := parseStrictInt64(rows[0].str(4))
+	validObservations := observations - invalid
+	if validObservations == 0 {
+		return findings, nil
+	}
+	if distinctEvidence == 0 || distinctRuns == 0 {
+		return nil, fmt.Errorf("payment reconciliation unfulfillable returned a contradictory mixed aggregate")
+	}
+	valid := paymentReconciliationCreditFinding(distinctEvidence, observations, distinctRuns, latestAge)
+	valid.symptom = "Stripe reconciliation recorded valid credit-unfulfillable observations alongside invalid terminal records"
+	valid.observed = fmt.Sprintf("store=stripe action=credit_unfulfillable valid_observations_24h=%d invalid_observations_24h=%d cohort_distinct_evidence_24h=%d cohort_observations_24h=%d cohort_distinct_runs_24h=%d cohort_latest_age_seconds=%d", validObservations, invalid, distinctEvidence, observations, distinctRuns, latestAge)
+	valid.evidence = "The SQL invalid predicate partitions the cohort: observations minus invalid observations counts valid credit-leg terminal records. Distinct evidence, run counts, and latest age cover the entire mixed cohort, not the valid subset. Exact valid payment cardinality, identities, and ages remain in the restricted audit store."
+	return append(findings, *valid), nil
+}
+
+// Validate the complete aggregate before selecting its primary terminal finding.
 func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 	if len(rows) != 1 || len(rows[0]) != 5 {
 		return nil, fmt.Errorf("payment reconciliation unfulfillable returned %d rows with an invalid shape", len(rows))
@@ -458,6 +484,11 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid > observations || latestAge < 0 {
 		return nil, fmt.Errorf("payment reconciliation unfulfillable returned an invalid nonempty aggregate")
 	}
+	return paymentReconciliationCreditFinding(distinctEvidence, observations, distinctRuns, latestAge), nil
+}
+
+// Build the valid terminal incident with its stable identity and finance safeguards.
+func paymentReconciliationCreditFinding(distinctEvidence, observations, distinctRuns, latestAge int64) *finding {
 	return &finding{
 		probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
 		symptom:   fmt.Sprintf("Stripe reconciliation found %d paid invoice destination(s) that can no longer be credited", distinctEvidence),
@@ -468,7 +499,7 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 		action:    "Have authorized finance and operations staff disposition each exact provider payment from the restricted audit trail and its destination_deleted or destination_unresolved reason. Do not recreate or retarget the deleted network, guess an unresolved recipient, credit another owner, insert a stripe_invoice row, consume the payment evidence, or force the Stripe watermark.",
 		verify:    "The provider payment has an explicit authorized disposition and no compensating credit was assigned to another network. A later watermark advance, repeated overlap audit, or alert aging out is not disposition proof.",
 		playbook:  "SIGNALS.md §2.21",
-	}, nil
+	}
 }
 
 func parseStrictInt64(value string) (int64, error) {

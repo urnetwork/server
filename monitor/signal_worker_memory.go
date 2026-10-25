@@ -114,13 +114,12 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) (result []fin
 	}
 	query := strings.Join(queries, " or ")
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(query)
-	out, metricHost, err := shellFirstServiceGateway(
+	out, metricHost, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if ctx.Err() != nil {
 		return nil, err
 	}
@@ -208,13 +207,12 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) (result []fin
 	// base heap alert when an older Mimir front cannot evaluate the rate query.
 	rateQuery := workerRatesQuery(env.cfg.env, "5m", true)
 	rateURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(rateQuery)
-	rateOut, _, rateErr := shellFirstServiceGateway(
+	rateOut, _, rateErr := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		metricHost,
-		"curl -fsS --max-time 15 '"+rateURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+rateURL+"'", mimirShellResponseMaxBytes)
 	if ctx.Err() != nil {
 		return nil, rateErr
 	}

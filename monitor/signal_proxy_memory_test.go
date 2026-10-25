@@ -317,6 +317,32 @@ func proxyMemoryFixture(sample proxyMemorySample) string {
 	if sample.warpctlRolloutGuard == "" {
 		sample.warpctlRolloutGuard = proxyRolloutGuardFull
 	}
+	// Existing count-only fixtures now declare the complete stdout witness
+	// required by the bounded collector, rather than bypassing record authority.
+	if sample.kernelJournalReason == "" {
+		sample.kernelJournalComplete = sample.kernelJournalStatus == 0
+		sample.kernelJournalReason = "complete"
+		if sample.kernelJournalStatus != 0 {
+			sample.kernelJournalReason = "source-failed"
+			sample.recentProxyOOMKills, sample.oomProxyProcesses, sample.oomLine = 0, 0, ""
+		} else if sample.recentProxyOOMKills > 0 {
+			if sample.oomLine == "" {
+				sample.oomLine = "Out of memory: Killed process 101 (bringyour-proxy) synthetic complete stdout record"
+			}
+			sample.kernelJournalPositiveQualified = true
+			sample.kernelJournalBytes = int64(len(sample.oomLine) + 1)
+		}
+	}
+	complete, positive, stderr := 0, 0, 0
+	if sample.kernelJournalComplete {
+		complete = 1
+	}
+	if sample.kernelJournalPositiveQualified {
+		positive = 1
+	}
+	if sample.kernelJournalStderr {
+		stderr = 1
+	}
 	return fmt.Sprintf(`proxy_host 1
 boot_id %s
 warpctl_rollout_guard %s
@@ -334,12 +360,18 @@ proxy_memory_unknown %d
 udp_in_datagrams %d
 udp_rcvbuf_errors %d
 kernel_journal_status %d
+kernel_journal_schema 1
+kernel_journal_complete %d
+kernel_journal_bytes %d
+kernel_journal_reason %s
+kernel_journal_positive_qualified %d
+kernel_journal_stderr %d
 recent_proxy_oom_kills %d
 oom_proxy_processes %d
 oom_line %s
 `, sample.bootID, sample.warpctlRolloutGuard, sample.memTotalKiB, sample.memAvailableKiB, sample.swapTotalKiB, sample.swapFreeKiB,
 		sample.runningUnits, sample.proxyProcesses, sample.proxyRSSKiB, sample.proxyMaxRSSKiB,
 		sample.proxyMemoryBounded, sample.proxyMemoryUnbounded, sample.proxyMemoryUnknown,
-		sample.udpInDatagrams, sample.udpRcvbufErrors, sample.kernelJournalStatus, sample.recentProxyOOMKills,
+		sample.udpInDatagrams, sample.udpRcvbufErrors, sample.kernelJournalStatus, complete, sample.kernelJournalBytes, sample.kernelJournalReason, positive, stderr, sample.recentProxyOOMKills,
 		sample.oomProxyProcesses, sample.oomLine)
 }

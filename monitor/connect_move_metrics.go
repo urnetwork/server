@@ -360,7 +360,7 @@ func readConnectMoveFrame(
 		" --data-urlencode " + shellSingleQuote("query="+query) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(at.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	output, err := env.runner.shell(ctx, scope.gateway, command)
+	output, err := mimirShellParsed(ctx, env.runner, scope.gateway, command, settings.MaxResponseBytes)
 	select {
 	case <-ctx.Done():
 		if err != nil {

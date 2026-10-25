@@ -62,10 +62,9 @@ func (sourceAttributionProbe) check(ctx context.Context, env *probeEnv) ([]findi
 			actual, observationClass = sourceAddressFromResponse(out)
 		}
 
-		target := strings.TrimSpace(test.url)
-		if target == "" {
-			target = test.family
-		}
+		// The configured endpoint is private; one fixed inventory slot owns
+		// each family while the request keeps its exact configured URL.
+		target := "source-attribution/" + test.family
 		if observationClass != "complete" {
 			findings = append(findings, finding{
 				probeId: "synthetic/source-attribution", tier: tierWarn,

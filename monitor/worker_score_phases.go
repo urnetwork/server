@@ -83,13 +83,12 @@ func loadWorkerScorePhaseObservations(
 		))
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(strings.Join(queries, " or "))
-	out, _, err := shellFirstServiceGateway(
+	out, _, err := mimirShellFirstServiceGatewayParsed(
 		ctx,
 		env.runner,
 		metricHosts,
 		preferred,
-		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(workerScorePhaseResponseMax)+" '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(workerScorePhaseResponseMax)+" '"+queryURL+"'", workerScorePhaseResponseMax)
 	if len(out) > workerScorePhaseResponseMax {
 		return nil, fmt.Errorf("phase metrics response exceeds byte limit")
 	}

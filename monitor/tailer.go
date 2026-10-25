@@ -1016,13 +1016,16 @@ var logClasses = []logClass{
 		action:    "Identify the emitting service, host, and generation, then correlate its drain duration, in-flight count, request route, handler stack, dependency waits, and configured read/write/shutdown timeouts. Repair the handler or timeout-ordering cause. Do not merely lengthen the drain ceiling, restart the same artifact, or assume every cut request was safely replayed.",
 		verify:    "Through two controlled drain cadences, every retiring process logs a clean drain, max_over_time(urnetwork_http_server_drain_cut_connections[15m]) remains zero, no http-drain-cut line recurs, and route outcomes show no unresolved or ambiguously replayed non-idempotent request.",
 	},
-	// taskworker drain outcome (§12.1): the drain phases log exactly one
-	// outcome line; "finished cleanly" / "finished after cancel" are healthy
-	// and not classified — only "gave up" means a ctx-ignoring task rode to
-	// SIGKILL and stuck leases follow (pg/task-lease-stranded confirms which)
+	// SIGNALS.md §12.1: gave-up is a drain outcome, not a process terminal
+	// or claim result. Later final handback cannot erase the observed warning.
 	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
-		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
+		meaning:   "a taskworker logged that its bounded drain gave up; use the available sample for elapsed time and in-flight count. Later final handback, process termination and claim outcomes remain unknown",
+		mechanism: "In current source, Drain waits through finish and cancel timeouts for run loops and their batches, then logs gave-up and returns. WaitFinalHandback provides an additional bounded grace before serving-context cancellation. The line alone does not distinguish a task still executing from pending finalization or handback, or establish the emitting artifact's lifecycle behavior.",
+		context:   "A task may complete and hand back ownership after this warning. Asynchronous logging and a missing or truncated sample do not establish the later lifecycle outcome or the full affected population. False-positive qualifier: gave-up alone proves neither SIGKILL, ignored cancellation nor stranded claims. False-negative qualifier: missing, stale, partial or unavailable lifecycle evidence leaves later completion, termination and claim state unknown.",
+		action:    "Correlate the same process and generation's artifact and configured drain bounds with its drain start, cancel and gave-up records, final handback, terminal result and private task execution/finalization/claim ownership. Preserve the warning while those facts are unavailable. Do not release claims or restart a worker from this line alone.",
+		verify:    "For the same process and task cohort, establish durable completion or intentional rescheduling and ownership handback, or independently confirm the terminal process and remaining claim state. A later handback does not erase the earlier drain give-up; a quiet or incomplete log window does not prove lifecycle recovery.",
+	},
 	{name: "provider-tunnel-read-done", re: regexp.MustCompile(`providertunnel: tun read error: Done[[:space:]]*$`),
 		sample:        providerTunnelReadDoneLogSample,
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,

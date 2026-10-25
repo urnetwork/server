@@ -240,7 +240,7 @@ func (minioStorageProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		" --data-urlencode " + shellSingleQuote("query="+minioStorageQuery(env.cfg.env)) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, gateway, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command)
+	out, gateway, err := mimirShellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command, minioStorageResponseLimit)
 	if err != nil {
 		return nil, fmt.Errorf("minio storage: query Mimir through service gateways: %w", err)
 	}

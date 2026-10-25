@@ -560,7 +560,7 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 				resultValues <- mimirAdmissionHostResult{host: target, err: err}
 				return
 			}
-			output, err := env.runner.shell(ctx, target, command)
+			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
 				resultValues <- mimirAdmissionHostResult{host: target, err: err}
 				return

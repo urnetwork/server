@@ -100,7 +100,7 @@ func TestSourceAttributionSignalPrivateFailuresRemainUnknown(t *testing.T) {
 		requireSourceAttributionPrivacy(t, alerts, privateValues...)
 		alert := alerts[0]
 		if alert.Class != "cannot-observe" || !alert.unobservable || alert.Frame != "ipv4" ||
-			alert.Target != settings.SourceAttribution.IPv4URL || alert.SignalID != "synthetic/source-attribution" ||
+			alert.Target != "source-attribution/ipv4" || alert.SignalID != "synthetic/source-attribution" ||
 			alert.SignalKey != "source-attribution" || alert.SignalNumber != "8.8" ||
 			alert.Sustain != 2 || alert.Severity != SeverityWarn || !alert.ObservedAt.Equal(settings.Now()) ||
 			alert.Observed != "family=ipv4 expected=203.0.113.10 observation="+test.want {
@@ -204,11 +204,11 @@ func TestSourceAttributionSignalNormalizedMismatch(t *testing.T) {
 		{name: "wrong family", family: "ipv6", expected: "2001:db8::10", body: `{"ip":"203.0.113.10"}`, actual: "203.0.113.10"},
 	} {
 		settings := sourceAttributionTestSettings(test.body, nil)
-		target := settings.SourceAttribution.IPv4URL
+		target := "source-attribution/ipv4"
 		if test.family == "ipv6" {
 			settings.SourceAttribution.ExpectedIPv4 = ""
 			settings.SourceAttribution.ExpectedIPv6 = test.expected
-			target = settings.SourceAttribution.IPv6URL
+			target = "source-attribution/ipv6"
 		}
 		alerts, err := NewSourceAttributionSignal().Run(context.Background(), settings)
 		if err != nil || len(alerts) != 1 {
@@ -257,9 +257,9 @@ func TestSourceAttributionSignalExactScopeAndPositiveHealth(t *testing.T) {
 		t.Fatal("complete dual-stack source did not produce two independent findings")
 	}
 	for i, observed := range findings {
-		wantFrame, wantTarget := "ipv4", settings.SourceAttribution.IPv4URL
+		wantFrame, wantTarget := "ipv4", "source-attribution/ipv4"
 		if i == 1 {
-			wantFrame, wantTarget = "ipv6", settings.SourceAttribution.IPv6URL
+			wantFrame, wantTarget = "ipv6", "source-attribution/ipv6"
 		}
 		if !observed.healthy || observed.isUnobservable() || observed.class != "source-attribution" ||
 			observed.frame != wantFrame || observed.target != wantTarget {
@@ -430,6 +430,129 @@ fi
 		} else if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !alerts[0].unobservable ||
 			!strings.Contains(alerts[0].Observed, "observation="+test.want) {
 			t.Errorf("%s: native failure or status was mistaken for attribution authority", test.name)
+		}
+	}
+}
+
+// Configured endpoint components are private even when acquisition fails or
+// produces a genuine mismatch; public rendering must use only the family slot.
+func TestSourceAttributionSignalConfiguredUrlsStayPrivate(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		url    string
+		secret string
+	}{
+		{name: "userinfo", url: "https://synthetic-user:synthetic-url-password@fixture.example/my-ip-info", secret: "synthetic-url-password"},
+		{name: "query", url: "https://fixture.example/my-ip-info?token=synthetic-url-query", secret: "synthetic-url-query"},
+		{name: "fragment", url: "https://fixture.example/my-ip-info#synthetic-url-fragment", secret: "synthetic-url-fragment"},
+		{name: "capability-path", url: "https://fixture.example/synthetic-url-capability/my-ip-info", secret: "synthetic-url-capability"},
+	} {
+		for _, family := range []string{"ipv4", "ipv6"} {
+			for _, outcome := range []string{"unknown", "mismatch", "healthy"} {
+				t.Run(test.name+"/"+family+"/"+outcome, func(t *testing.T) {
+					settings := sourceAttributionTestSettings("", nil)
+					settings.SourceAttribution.ExpectedIPv4 = ""
+					body := `{"info":{"ip":"198.51.100.20"}}`
+					if family == "ipv4" {
+						settings.SourceAttribution.IPv4URL = test.url
+						settings.SourceAttribution.ExpectedIPv4 = "203.0.113.10"
+						if outcome == "healthy" {
+							body = `{"info":{"ip":"203.0.113.10"}}`
+						}
+					} else {
+						settings.SourceAttribution.IPv6URL = test.url
+						settings.SourceAttribution.ExpectedIPv6 = "2001:db8::10"
+						body = `{"info":{"ip":"2001:db8::20"}}`
+						if outcome == "healthy" {
+							body = `{"info":{"ip":"2001:db8::10"}}`
+						}
+					}
+					calls := 0
+					settings.Source.(*syntheticSource).localFn = func(name string, args ...string) (string, error) {
+						calls++
+						if name != "curl" || len(args) < 2 || args[len(args)-2] != "--"+family || args[len(args)-1] != test.url {
+							t.Fatal("public projection changed the private request binding")
+						}
+						if outcome == "unknown" {
+							return sourceAttributionTestResponse(args, body, "200"), errors.New(test.url)
+						}
+						return sourceAttributionTestResponse(args, body, "200"), nil
+					}
+					alerts, err := NewSourceAttributionSignal().Run(context.Background(), settings)
+					if err != nil || calls != 1 {
+						t.Fatal("configured family did not make exactly one synthetic observation")
+					}
+					requireSourceAttributionPrivacy(t, alerts, test.url, test.secret, "synthetic-user")
+					if outcome == "healthy" {
+						if len(alerts) != 0 {
+							t.Fatal("matching private endpoint observation raised an alert")
+						}
+						return
+					}
+					if len(alerts) != 1 {
+						t.Fatal("failed observation lost its public family finding")
+					}
+					alert := alerts[0]
+					wantClass := "source-attribution"
+					if outcome == "unknown" {
+						wantClass = "cannot-observe"
+					}
+					if alert.Target != "source-attribution/"+family || alert.Frame != family || alert.Class != wantClass ||
+						alert.unobservable != (outcome == "unknown") || alert.Sustain != 2 || alert.Severity != SeverityWarn {
+						t.Fatal("private endpoint projection changed family or outcome semantics")
+					}
+					if strings.Contains(alert.Identity(), test.url) || strings.Contains(alert.Identity(), test.secret) {
+						t.Fatal("private endpoint entered the public incident identity")
+					}
+				})
+			}
+		}
+	}
+}
+
+// The two configured slots remain distinct and stable while exact private
+// URLs change; neither URL nor a derived endpoint hash is an incident key.
+func TestSourceAttributionSignalPrivateSlotsPreserveFamilyIdentity(t *testing.T) {
+	settings := sourceAttributionTestSettings("", nil)
+	settings.SourceAttribution.ExpectedIPv6 = "2001:db8::10"
+	prior := map[string]string{}
+	for sample := 0; sample < 2; sample++ {
+		settings.SourceAttribution.IPv4URL = "https://fixture.example/private-v4-" + strconv.Itoa(sample)
+		settings.SourceAttribution.IPv6URL = "https://fixture.example/private-v6-" + strconv.Itoa(sample)
+		calls := map[string]int{}
+		settings.Source.(*syntheticSource).localFn = func(name string, args ...string) (string, error) {
+			if name != "curl" || len(args) < 2 {
+				t.Fatal("source attribution lost its private native request")
+			}
+			family := args[len(args)-2]
+			target, body := settings.SourceAttribution.IPv4URL, `{"ip":"198.51.100.20"}`
+			if family == "--ipv6" {
+				target, body = settings.SourceAttribution.IPv6URL, `{"ip":"2001:db8::20"}`
+			} else if family != "--ipv4" {
+				t.Fatal("source attribution introduced an unconfigured family")
+			}
+			calls[family]++
+			if args[len(args)-1] != target {
+				t.Fatal("family slot selected the wrong private endpoint")
+			}
+			return sourceAttributionTestResponse(args, body, "200"), nil
+		}
+		alerts, err := NewSourceAttributionSignal().Run(context.Background(), settings)
+		if err != nil || len(alerts) != 2 || calls["--ipv4"] != 1 || calls["--ipv6"] != 1 {
+			t.Fatal("dual-stack slots lost exact independent observations")
+		}
+		requireSourceAttributionPrivacy(t, alerts, settings.SourceAttribution.IPv4URL, settings.SourceAttribution.IPv6URL, "private-v4-", "private-v6-")
+		seen := map[string]bool{}
+		for _, alert := range alerts {
+			wantIdentity := "synthetic/source-attribution|source-attribution|source-attribution/" + alert.Frame + "|" + alert.Frame
+			if alert.Identity() != wantIdentity || seen[alert.Identity()] {
+				t.Fatal("family slot lost its exact distinct public identity")
+			}
+			seen[alert.Identity()] = true
+			if previous, ok := prior[alert.Frame]; ok && previous != alert.Identity() {
+				t.Fatal("private URL rotation changed the public inventory slot")
+			}
+			prior[alert.Frame] = alert.Identity()
 		}
 	}
 }
