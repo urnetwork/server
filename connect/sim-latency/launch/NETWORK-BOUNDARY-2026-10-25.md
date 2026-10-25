@@ -110,7 +110,21 @@ Readback identities:
 
 The installed evaluator passes Bash syntax validation. No release entry is
 group/world writable. Installation is preparation, not activation or formal
-calibration acceptance. Three consecutive full suites remain the release gate;
-the first has passed 514 top-level tests and the second is running under the
-existing validation handle. A new campaign must bind this bundle rather than
+calibration acceptance. A new campaign must bind this bundle rather than
 resuming the failed campaign pinned to the previous script.
+
+## Complete script/control validation
+
+Three consecutive full suites on exact published source `737dd2371` passed
+**514 top-level tests each**, exit 0, with Go 1.27.3/local and management CPUs
+20,22. Whole-suite durations were 321, 163 and 162 seconds. Original evidence:
+`temp/network-boundary-full-three-20261025.CnXzer9z/`.
+
+- Pass 1: `702c99625305054c9871f412172e789a5beda5fe45ee2ee893d4288747c6ac84`.
+- Pass 2: `287364682fdf69317176cfb1739421b5a74b2eb92c7653a571f822bb2dd7c63e`.
+- Pass 3: `523a60927d3919fbec5c182ac695c5e632615ada610db76cc3316524caeb9616`.
+
+The original manager terminated with `final_cleanup_exit=0`; the private source
+is clean, the original three containers/four networks are restored and the
+canonical scoring lock is free. No scoring workload overlapped these suites.
+This closes the three-suite release gate, not calibration or live readiness.

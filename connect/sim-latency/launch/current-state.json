@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T15:22:17Z",
+  "observed_at": "2026-10-25T15:23:30Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "host_gateway_fix_smoke_pushed_full_validation_running",
+  "status": "isolated_release_three_full_suites_passed_fresh_campaign_inputs_pending",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
     "status": "inputs_generator_and_runner_staged_not_executed",
@@ -178,7 +178,7 @@
     "next_action": "All3fullmaincontrolsuites passed509top-levelexecutions each, sourceclean/cleanup0/original3containers4networks/lockfree. Do not restart. Laternetworkboundary changes require independent qualification before prospective new full-window campaign."
   },
   "pending_containment_negative_probe": {
-    "status": "gateway_fix_targeted_smoke_and_ipv6_nonce_passed_full_validation_running",
+    "status": "gateway_fix_targeted_smoke_ipv6_nonce_and_three_full_suites_passed",
     "scope": "Normalinternalbridge hostnoncegap confirmed. Isolatedbothgatewaymodes blockedIPv4host; mandatoryjobIPv6all/default1 blockedownedhostIPv6nonce andpreservedIPv4DockerDNSpeerpositive. Correctedguard rejectsIPv4/globalIPv6, acceptsautomaticLLAonlywithmandatorynamespaceIPv6disable; failedstrictguardretained. Targeted74race andupdated183sDocker32p8clifecycle passed; no hostfw/sysctl or evalc1/image002c changes. ExternalDNSrecursion stillnotdirectlyproven.",
     "original_gap_evidence": "/home/by/urnetwork/temp/network-negative-independent-20261025.ytP5xUGQ",
     "isolated_gateway_evidence": "/home/by/urnetwork/temp/network-isolated-independent-20261025.I4PVsVEz",
@@ -196,7 +196,17 @@
     "full_validation_root": "/home/by/urnetwork/temp/network-boundary-full-three-20261025.CnXzer9z",
     "exec_session_id": 2383,
     "manager_pid": 818285,
-    "next_action": "Observe samefullsuitehandle, exact737publishedbeforevalidation(nooriginchase). Require3consecutivefullpasses/cleanup; stopanyfailure. No overlappingworkload. Then installnewimmutabletrustedhostbundle INCLUDINGnetwork-boundary.sh andCompose, predeclarefreshcorrectedreleasecampaign beforefull-windowmeasurements. Existingoldfailedcohorts remainstopped."
+    "full_validation_terminal": true,
+    "full_suites_passed": 3,
+    "top_level_passes_per_suite": 514,
+    "full_suite_log_sha256": [
+      "702c99625305054c9871f412172e789a5beda5fe45ee2ee893d4288747c6ac84",
+      "287364682fdf69317176cfb1739421b5a74b2eb92c7653a571f822bb2dd7c63e",
+      "523a60927d3919fbec5c182ac695c5e632615ada610db76cc3316524caeb9616"
+    ],
+    "full_validation_launch_sha256": "15dfd584a7cb61f3d62b0c4f8bbba98ea3a98298b154887f61142615b8fec603",
+    "cleanup_verified": true,
+    "next_action": "Three full suites terminal PASS; do not restart. New immutable root-owned bundle installed without activation. Generate and independently verify fresh corrected-release campaign inputs, freeze and publish exact bindings before any full-window measurement. Old failed cohorts remain stopped; external DNS negative proof still pending."
   },
   "prepared_formal_campaign": {
     "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy",
