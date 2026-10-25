@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 24, 23:58 UTC
+## Current preparation pointer — October 25, 00:14 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -20,12 +20,16 @@ The exact prior ledger is archived at
 `config/history/sim-latency-2026-10-24-213002.yml` with SHA-256
 `838b132d2c19112e50fefaabfabda81e22127638e8ba281f0c0141ab82d30612`.
 
-A fresh evaluator build is active under mono-root-relative
+A fresh evaluator build completed under mono-root-relative
 `temp/ready-snapshot-evaluator-build-20261024.MCorfDyJ`, using the clean main
 `9a3b7970a` builder scripts and immutable corrected source tool, with fresh exact
 checkouts of all ten frozen repositories in the build context. Its local tag is
-`urnetwork/sim-latency-evaluator-base:ready-snapshot-0d58d0d9`. No immutable image
-ID, qualification or performance result is claimed before it finishes. Neither
+`urnetwork/sim-latency-evaluator-base:ready-snapshot-0d58d0d9`, image ID
+`sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793`.
+Actual compiler/recovery/source gates passed; independent exact-image lifecycle
+and containment qualification is underway, not claimed complete. See
+[ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).
+No new performance result is claimed. Neither
 production nor a new staging round is activated. Final scale/margin, fresh
 calibration, hidden epoch baseline, genuine provider-backed qualification and
 live production readiness remain incomplete; 16.1% is still a provisional floor.
