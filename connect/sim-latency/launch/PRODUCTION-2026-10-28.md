@@ -26,8 +26,11 @@ A fresh evaluator build completed under mono-root-relative
 checkouts of all ten frozen repositories in the build context. Its local tag is
 `urnetwork/sim-latency-evaluator-base:ready-snapshot-0d58d0d9`, image ID
 `sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793`.
-Actual compiler/recovery/source gates passed; independent exact-image lifecycle
-and containment qualification is underway, not claimed complete. See
+Actual compiler/recovery/source gates and independent local image lifecycle,
+build-isolation and host adversarial-cleanup phases passed. The first fresh
+15,000-provider impairment-on point is active in
+`temp/ready-snapshot-frontier-20261025.oPXXTOEe`; it is not yet an accepted
+capacity point or baseline. Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).
 No new performance result is claimed. Neither
 production nor a new staging round is activated. Final scale/margin, fresh

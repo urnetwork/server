@@ -1,9 +1,10 @@
 # Corrected Go 1.27.3 evaluator — October 25, 2026
 
-Status: **built, not activated or fully qualified**. Independent exact-image
-checks and Docker lifecycle smoke passed; malicious build isolation is running,
-with host resource cleanup next. No official epoch baseline, final scale or
-calibrated margin is claimed.
+Status: **built; local qualification phases passed; not activated or fully
+production-qualified**. Independent exact-image checks, Docker lifecycle smoke,
+malicious build isolation and host resource cleanup passed. Fresh frontier work
+is underway. No official epoch baseline, final scale or calibrated margin is
+claimed.
 
 | Identity | Value |
 | --- | --- |
@@ -81,4 +82,29 @@ The full smoke artifact tree is `urnetwork-container-smoke.5acZdRWN` in that roo
 
 This short smoke uses a 2 GiB runner and calibration fixture. It is not the
 production scale, a nine-run epoch control, a statistical-significance estimate
-or image-bound host qualification. No new frontier measurement has started.
+or image-bound host qualification.
+
+## Isolation and adversarial cleanup
+
+Malicious build isolation passed in **250 seconds** on the same exact base.
+The protected simulator tree and six protected paths remained intact; tests ran
+unprivileged and their writable check/build stages were discarded. The base tag
+was unchanged. `isolation.log` in the same evidence root has SHA-256
+`2f687581b4bfbc7669e3657061a753cde6dc8fdcd4b672bbe0ea0765cc9f5a58`.
+
+The separate host-boundary resource test passed in **53 seconds**: CPU pressure
+exercised all ten evaluation CPUs; the 72 GiB memory bomb was OOM-killed with
+exit 137; management-core cleanup took **614 ms** against a 10-second ceiling.
+No test containers or networks remained. This is a host resource-boundary proof,
+not an image-bound host attestation. Boot ID:
+`f0e880cb-c124-4ed6-9edb-43669191d84e`. `bomb.json` SHA-256:
+`f1330f3c47856135823221fa153b6253d432d46be368baac9ea3a008bc781bfe`.
+It used the proven immutable C5 fixture with its explicit matching module/workspace
+and actual Go 1.27.3; no scoring overlapped any qualification phase.
+
+The first fresh 15,000-provider impairment-on public-seed capacity point started
+after all phases and cleanup completed. Its separate root is
+`temp/ready-snapshot-frontier-20261025.oPXXTOEe`. It uses fresh services, all four
+fleet shards, 200 clients and the exact new image to generate its workload.
+The earlier failed source's rows are not reused. The point is exploratory and
+has no accepted result until terminal completion and artifact checks.
