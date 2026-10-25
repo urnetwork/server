@@ -4,7 +4,7 @@
   "observed_at": "2026-10-25T06:12:28Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "cold_r9_passed_calibration_pending",
+  "status": "cold_r9_published_reference_pilot_prepared",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "evaluated_source": {
     "server_commit": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
@@ -89,7 +89,7 @@
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },
   "pending": [
-    "Publish the independently verified cold-evidence archive and updated preparation documents",
+    "Execute the predeclared warm-reader pilot with fresh controls; no automatic retry",
     "Final scale, predeclared fresh same-seed/reference calibration and initial margin",
     "Genuine provider-backed review/test-client qualification",
     "Exact-image host rebaseline and independent runtime readiness",
