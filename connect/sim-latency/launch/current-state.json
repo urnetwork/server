@@ -424,9 +424,14 @@
     "next_action": "Read-only review may continue. No build, tests or pilot while formal scoring is live. Requires independent baseline/candidate correctness screens, a separate predeclared fresh-control pilot and held-out qualification; never reuse Stage A measurements."
   },
   "snapshot_reference_research": {
-    "screen_session_id": 64204,
-    "screen_controller_pid": 2718330,
-    "screen_root": "/home/by/urnetwork/temp/snapshot-screen-independent-20261025.BxTAR1o5",
+    "screen_session_id": 42566,
+    "screen_controller_pid": 2723749,
+    "screen_root": "/home/by/urnetwork/temp/snapshot-screen-qualified-setup-20261025.Eqyjghne",
+    "screen_controller_sha256": "8a94fdb30ae638c21597e9ba8adb5ce9541a9b7150c31cbfc13e081808b1857f",
+    "prior_setup_failures": [
+      {"session_id": 64204, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "Fixture launcher used old SN directory outside exact frozen Go workspace"},
+      {"session_id": 69912, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "New workspace assertion assumed repository name equals module path; SN actually declares github.com/urfoundation/sn"}
+    ],
     "screen_status": "source_preparation_running_under_exclusive_slot",
     "status": "uncompiled_untested_unmeasured_draft_only",
     "path": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-HYPOTHESIS.md",
@@ -436,7 +441,7 @@
     "benchmark_fixture_sha256": "f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060",
     "private_workspace": "/home/by/urnetwork/temp/reference-snapshot-draft-20261025.BFH83oNJ",
     "evaluated_source_changed": false,
-    "next_action": "Observe session64204/controller2718330 through fresh frozen-source baseline/candidate race tests, eight candidate tests and deterministic delayed-hit guard controls; five supporting warm-hit/refresh-cost benchmarks per source under canonical exclusive slot. No pilot or source qualification claimed. Stop on failure and retain evidence; Max agent diagnoses fixes."
+    "next_action": "Observe session42566/controller2723749 through fresh frozen-source baseline/candidate race tests, eight candidate tests and deterministic delayed-hit guard controls; five supporting warm-hit/refresh-cost benchmarks per source under canonical exclusive slot. Correct module-path preflight passed after retained setup-only failures. No pilot or source qualification claimed. Stop on failure and retain evidence; Max agent diagnoses fixes."
   },
   "queued_idle_slot_preparations": {
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
