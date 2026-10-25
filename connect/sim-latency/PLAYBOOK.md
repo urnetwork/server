@@ -5,6 +5,9 @@
 Public opening is fixed at **October 28, 2026, 00:00 UTC**. The current launch
 checklist and exact prepared source/image identities are maintained in
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md).
+Use [`launch/LAUNCH-ACCEPTANCE.md`](launch/LAUNCH-ACCEPTANCE.md) for the current
+release's evidence-by-evidence acceptance gates. The checked v1 checklist below
+is historical and must not be treated as approval of the new release.
 Use [`RUN-MAIN.md`](RUN-MAIN.md) for the adopted v2 supervisor workflow.
 Do not use the legacy v1 round-creation/review commands below to bootstrap the
 new production season or reinterpret a staging round as production.

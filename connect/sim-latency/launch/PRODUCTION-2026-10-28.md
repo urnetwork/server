@@ -1,6 +1,11 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 03:11 UTC
+## Current preparation pointer — October 25, 06:12 UTC
+
+The compact [current-state.json](current-state.json) records the current
+preparation handle, immutable source/image identities, completed evidence,
+external holds and next safe action. It is a dated snapshot; confirm the live
+handle and artifacts rather than treating it as runtime authority.
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -47,7 +52,7 @@ completion, not a qualified scale or epoch baseline. The 3,600-provider on point
 also completed (568 seconds, 2,482 measured rows, two failed rows, authenticated
 marker and clean teardown), with retained SQL serialization/cancellation events.
 Neither direct-controller point has a final resource report. Full gate
-qualification and cold R9 timing remain pending. The off-mode phase completed
+qualification required the full cold R9 check recorded below. The off-mode phase completed
 at all four counts (430/447/505/793 seconds, respectively), with no measured
 failures at 1,800/3,600/7,200 and 22 at 15,000. Actual four-child off-mode
 arguments, complete markers and cleanup were verified. Eight exact outcomes
@@ -58,7 +63,15 @@ The first cold R9 invocation stopped before any replicate at caller admission:
 privileged precheck reads did not match the unprivileged manager invocation.
 Leaf permissions and policy remain unchanged. The corrected whole-root context
 matches the configured manager, passed direct reads/hashes and three passes of
-deterministic Go principal regressions; the next full invocation is pending.
+deterministic Go principal regressions. The corrected invocation started at
+03:15:24 UTC and completed at 06:12:12 UTC, exit 0, in 10,608 seconds—192 seconds
+inside the three-hour limit. All nine fresh controls, offline no-op build and
+nine candidates completed; G1–G6 passed and exact cleanup was verified. The no-op
+was placeable but neither significant nor takeover-eligible (Welch p=0.532133).
+The [complete archive](../baseline/prelaunch-cold-r9-2026-10-25/completed/README.md)
+preserves all 440 original files, with independent verification of the original
+bytes, 429 manifest bindings and seven typed result bindings. It is an offline
+fixture, not a production job, formal noise campaign or accepted epoch baseline.
 Exact failed/prechecked records are in
 [the cold-admission archive](../baseline/prelaunch-cold-r9-2026-10-25/README.md).
 The separate warm-reader research patch passed 312 selected race-enabled

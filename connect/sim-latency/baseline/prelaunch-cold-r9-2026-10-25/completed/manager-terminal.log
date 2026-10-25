@@ -1,0 +1,11 @@
+start_utc=2026-10-25T03:15:24Z
+evaluator_exit=0 duration_seconds=10608
+end_utc=2026-10-25T06:12:12Z
+buildx_buildkit_warp-multiarch0
+urnetwork-local-pg
+urnetwork-local-redis
+bridge
+host
+none
+urnetwork-local
+terminal_cleanup_verified

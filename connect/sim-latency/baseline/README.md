@@ -1,9 +1,16 @@
 # Sim-latency baseline preservation
 
-The first cold R9 attempt's zero-replicate caller-admission failure, deterministic
-Go principal regressions and corrected root-context precheck are retained in
+The dated four-section [production environment preview](final-preview.html)
+summarizes the proposed environment, all eight exploratory frontier points and
+the remaining acceptance gates. It is not a final baseline or launch approval;
+its live-run progress is explicitly a timestamped snapshot.
+
+The corrected cold R9 check passed in 10,608 seconds, with nine fresh controls,
+nine no-op candidates, all G1–G6 and exact cleanup. Its complete 440-file archive
+and independent byte/binding verification, first attempt's zero-replicate
+caller-admission failure, deterministic Go principal regressions and root-context precheck are retained in
 [`prelaunch-cold-r9-2026-10-25/`](prelaunch-cold-r9-2026-10-25/README.md).
-No scored baseline or live readiness is claimed from that preparation.
+No official epoch baseline or live production readiness is claimed from that preparation.
 
 The corrected Go 1.27.3 readiness/snapshot source's first 15,000-provider
 impairment-on attempt is preserved in
@@ -15,8 +22,7 @@ matchmaking probe after 10m6s, with zero measured rows and clean teardown.
 Both complete artifact sets are retained. The next 1,800-provider on point
 completed in 8m45s with an authenticated completion marker, 2,441 measured rows,
 two failed rows and no SQL errors. It is one exploratory point, not the new
-epoch baseline or final production scale. Capacity bracketing and impairment-off
-measurements remain necessary. The subsequent 3,600-provider on point also
+epoch baseline or final production scale. The subsequent 3,600-provider on point also
 completed (9m28s, 2,482 measured rows, two failed rows), with retained SQL
 serialization/cancellation events and no direct-controller resource report.
 Neither exploratory completion is a formal scoring-gate qualification.

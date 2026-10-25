@@ -28,6 +28,18 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-cold-r9-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-cold-r9-2026-10-25/INDEX.json",
+      "index_sha256": "b2f77c73eafc755e6585b5ddfac94302ee42508664ce33daf1db107e096a371d"
+    },
+    {
+      "id": "prelaunch-ready-snapshot-frontier-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-ready-snapshot-frontier-2026-10-25/INDEX.json",
+      "index_sha256": "b66190f5ce5681fd50f77e99fb4f111a28c20f8683e534f98775392c53bc8d77"
+    },
+    {
       "id": "prelaunch-four-exchange-2026-10-24",
       "official": false,
       "index_path": "prelaunch-four-exchange-2026-10-24/INDEX.json",

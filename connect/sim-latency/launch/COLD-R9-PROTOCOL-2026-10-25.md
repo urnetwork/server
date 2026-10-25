@@ -1,6 +1,12 @@
 # Cold R9 evaluator qualification — predeclared protocol
 
-Status: prepared protocol, **not executed or passed**. This checks the leading
+Status: **completed locally, exit 0, 2026-10-25T06:12:12Z**. All nine controls
+and nine candidates, offline build, G1–G6 and exact cleanup passed in 10,608
+seconds, 192 seconds inside the cap. The no-op was placeable but not significant
+or takeover-eligible. [Complete retained evidence](../baseline/prelaunch-cold-r9-2026-10-25/completed/README.md)
+includes independent original-byte/binding verification. The last attempt and
+exact request are recorded in [current-state.json](current-state.json).
+This checks the leading
 frontier candidate before a production scale is frozen. It is not the official
 epoch control, a variance estimate, independent-seed qualification, API/MinIO
 retention proof or provider-backed honesty-review qualification.

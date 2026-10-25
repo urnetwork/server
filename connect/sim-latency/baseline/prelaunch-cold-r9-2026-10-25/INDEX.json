@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-offline-cold-qualification",
+  "official_epoch_baseline": false,
+  "production_activated": false,
+  "public_seed": 20261024,
+  "providers": 3600,
+  "clients": 200,
+  "impairment": true,
+  "go_version": "go1.27.3",
+  "server_commit": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
+  "source_lock_sha256": "37555f58bbf1235f10600f8c1de7dafeef356985f719f5e029fdb8c2e69c9b4a",
+  "evaluator_image_id": "sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793",
+  "attempts": [
+    {"path": "admission-failure", "exit_code": 1, "baseline_completed": 0, "candidate_completed": 0, "cause": "precheck_manager_principal_mismatch"},
+    {"path": "completed", "exit_code": 0, "baseline_completed": 9, "candidate_completed": 9, "started_at": "2026-10-25T03:15:24Z", "ended_at": "2026-10-25T06:12:12Z", "duration_seconds": 10608, "execution_limit_seconds": 10800, "headroom_seconds": 192, "all_gates_passed": true, "placeable": true, "takeover_eligible": false, "cleanup_verified": true}
+  ],
+  "archive": {
+    "path_prefix": "completed/artifacts.tar.gz.part-",
+    "parts": 4,
+    "part_order": ["00", "01", "02", "03"],
+    "maximum_part_bytes": 33554432,
+    "concatenated_sha256": "edbd5340afe6facfc6b92bfb1a933e3ceac84bbf7e280249874ceaf9a388f8aa",
+    "original_regular_files": 440,
+    "evidence_manifest_bindings": 429,
+    "worker_result_bindings": 7,
+    "independent_verification": "passed",
+    "verification_log": "completed/archive-verification.log",
+    "verification_log_sha256": "0fe0bcb6d7ebb68e1c8b7c96d1d39f2b0670298ff3d39ab1d60bb3de8375bf89"
+  },
+  "limits": ["Synthetic offline control-plane identities, not live readiness", "One public-seed cold execution, not a fresh statistical calibration", "No production image-bound host rebaseline or provider receipt", "No source promotion, upload or activation"]
+}
