@@ -104,6 +104,38 @@ func TestConnectMoveControlNarrows(t *testing.T) {
 	}
 }
 
+// The control's placement switch (MOVE.md §13): absent keeps the placing
+// process's switch, the operator can turn placement off, never on past that
+// switch, a value that does not parse is off, and the mover's own switches do
+// not touch it.
+func TestConnectMoveControlNarrowsPlacement(t *testing.T) {
+	placing := connectMoveTestCeiling()
+	placing.EnablePlacement = true
+	placingWithoutMoves := placing
+	placingWithoutMoves.EnableMove = false
+	cases := []struct {
+		name      string
+		fields    map[string]string
+		ceiling   ConnectMoveControlCeiling
+		placement bool
+	}{
+		{name: "absent: the placing switch", fields: nil, ceiling: placing, placement: true},
+		{name: "absent for the mover's ceiling", fields: nil, ceiling: connectMoveTestCeiling(), placement: false},
+		{name: "other fields keep placement", fields: map[string]string{"mode": "on"}, ceiling: placing, placement: true},
+		{name: "the operator turns placement off", fields: map[string]string{"placement": "off"}, ceiling: placing, placement: false},
+		{name: "false", fields: map[string]string{"placement": "false"}, ceiling: placing, placement: false},
+		{name: "on keeps placement on", fields: map[string]string{"placement": "on"}, ceiling: placing, placement: true},
+		{name: "on cannot widen past the placing switch", fields: map[string]string{"placement": "on"}, ceiling: connectMoveTestCeiling(), placement: false},
+		{name: "a value that does not parse is off", fields: map[string]string{"placement": "yes please"}, ceiling: placing, placement: false},
+		{name: "moves off leave placement on", fields: map[string]string{"mode": "on"}, ceiling: placingWithoutMoves, placement: true},
+	}
+	for _, c := range cases {
+		if control := NarrowConnectMoveControl(c.fields, c.ceiling); control.Placement != c.placement {
+			t.Errorf("%s: placement = %t, want %t", c.name, control.Placement, c.placement)
+		}
+	}
+}
+
 // Whatever the control holds, the effective control is never wider than the
 // code: no mode past EnableMove, no rate above the code cap, no band narrower
 // than the code band, no drain moves past EnableDrainMoves.
