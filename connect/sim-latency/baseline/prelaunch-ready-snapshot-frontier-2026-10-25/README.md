@@ -96,6 +96,15 @@ executed scripts, including private paths for provenance rather than deployment.
 Only the complete 1,800-provider point includes a completion marker; no absent
 artifact is synthesized for an incomplete point.
 
+`controller/run-case.sh` is unchanged and authenticates the three points above.
+It accepts 1,800/7,200/15,000/48,000/100,000 providers but not 3,600. Admission
+inspection caught that omission before any 3,600-provider point started.
+The separately retained `run-case-v2.sh` adds **only 3,600** to this count
+allowlist; simulator arguments, seed, source/image hashes, resource/cleanup
+checks and all gates are unchanged. Its SHA-256 is
+`f95655f7d957bfa7b41969cfb54f218d3fd6e6f2f5b4328ba8697b5d6fe1bad9`.
+It is prepared for the next bracketing point, not evidence of its completion.
+
 All regular files are covered by the enclosing `baseline/MANIFEST.sha256`.
 Older datasets and their outcomes remain unchanged. Local source evidence and
 qualification boundaries are described in
