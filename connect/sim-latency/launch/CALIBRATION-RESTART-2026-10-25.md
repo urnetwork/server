@@ -82,8 +82,9 @@ of five, not a claim of nineteen out of twenty.
 
 ## Outstanding publication and launch gates
 
-The new five-position plan and runner hashes are not yet frozen. Do not execute
-this preparation document as authorization without that freeze record.
+The new five-position plan and runner hashes are recorded in the
+[replacement freeze](CALIBRATION-RESTART-FREEZE-2026-10-25.md). Do not execute
+until that record and its preserved inputs are published to origin.
 Full-window qualification, accepted calibration, exact-image host rebaseline,
 live API/worker acknowledgments, review-provider qualification, artifact-storage
 durability and monitoring delivery remain launch gates. Passing local tests or

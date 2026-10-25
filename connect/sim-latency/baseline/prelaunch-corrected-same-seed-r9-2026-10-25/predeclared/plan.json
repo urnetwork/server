@@ -1,0 +1,58 @@
+{
+  "base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "canonical_source_lock_sha256": "5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e",
+  "evaluation_policy_sha256": "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
+  "evaluator_image_digest": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "first_cohort_also_functional_qualification": true,
+  "generator_sha256": "4ec1d1e24e43e9f37acbcc76212e5350758891759409b751a1a24bf5fcc23b21",
+  "kind": "prepared-corrected-release-five-cohort-aa-plan",
+  "measurements_started": 0,
+  "official": false,
+  "old_failed_campaign_resumed": false,
+  "ordered_cohorts": [
+    {
+      "job_id": "eb5458d2-27bc-4c10-9233-b7c8be1692b5",
+      "position": 1,
+      "provenance_sha256": "69afca2e874893d648f87d3b13f30116df15758507fa5cf56052ac639aa2e2f7",
+      "request_sha256": "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d",
+      "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01",
+      "round_id": "c8193705-e5e7-415f-988b-bc0c9d2978ac"
+    },
+    {
+      "job_id": "8cd8edae-c30c-407f-b611-bda14dfe2764",
+      "position": 2,
+      "provenance_sha256": "035cc0e89e482eb55db1dad76cace9ae1a242f4db54b96d3f926377fa2e8a668",
+      "request_sha256": "457b783eff0eb584cf283809ef9bc3d8223f37525259ded700a721c31a001ea0",
+      "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-02",
+      "round_id": "9dfa6395-6c81-4a74-94bc-d8538fabb169"
+    },
+    {
+      "job_id": "0f2f95e7-abd1-4d30-9f3e-133eab0e5781",
+      "position": 3,
+      "provenance_sha256": "a1008834d3934c93487f620cd296423cf13a763b3b373aa35de55b2407352412",
+      "request_sha256": "b33d0e3589494a2d75dc2aac3f52bf6aecf165d181ab283fafc9f838705d6283",
+      "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03",
+      "round_id": "d3ee1e9e-fd82-46ce-83f3-8d61acb007ee"
+    },
+    {
+      "job_id": "586107b8-a7bd-407d-b545-3da1615d6428",
+      "position": 4,
+      "provenance_sha256": "46e89bd08c054154c78bc6b78d4738f627fe150ab1e05c96dc547fd2c6813c93",
+      "request_sha256": "64538d71c8739387adb30c3a3c3095327b25ba7e962e0ca416949443540a3edb",
+      "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-04",
+      "round_id": "030cf71b-63dc-4cb3-8a34-eed819af4907"
+    },
+    {
+      "job_id": "d4df22e9-5ed5-4c08-8470-02eedeb9e2fe",
+      "position": 5,
+      "provenance_sha256": "8880589bd26a7a569a8ddd8b0c97a57c94b81079ecb9b034096994e660b23d23",
+      "request_sha256": "0fc87bd83ff96408e7e5cd320fe64229b2ce83d52f171438627597a770b55c50",
+      "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-05",
+      "round_id": "22b1a1d8-fa93-40f9-a895-351cf15a005e"
+    }
+  ],
+  "public_seed": 20261024,
+  "schema": 1,
+  "status": "prepared_not_executed",
+  "template_request_sha256": "6f2f2ee76c6ed08c4e798b4e14371e591830caa1b0728fb275a940a1237ac363"
+}

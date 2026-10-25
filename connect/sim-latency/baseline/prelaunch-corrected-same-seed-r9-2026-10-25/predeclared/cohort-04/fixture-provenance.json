@@ -1,0 +1,20 @@
+{
+  "api_worker_hardware_identities_are_synthetic": true,
+  "attempt": 1,
+  "attempt_normalization": "Each newly identified cohort starts at attempt one; no prior measurement is reused",
+  "candidate_replicates": 9,
+  "control_replicates": 9,
+  "evaluation_policy_sha256": "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
+  "first_cohort_also_functional_qualification": false,
+  "kind": "offline-corrected-release-aa-fixture",
+  "live_api_or_worker": false,
+  "measurements_started": 0,
+  "official": false,
+  "position": 4,
+  "prior_baseline_reused": false,
+  "production_admission": false,
+  "public_workload_seed": 20261024,
+  "request_sha256": "64538d71c8739387adb30c3a3c3095327b25ba7e962e0ca416949443540a3edb",
+  "schema": 1,
+  "template_attempt_was": 2
+}

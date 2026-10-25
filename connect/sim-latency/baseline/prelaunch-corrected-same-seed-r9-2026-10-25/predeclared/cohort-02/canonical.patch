@@ -1,0 +1,8 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -1,3 +1,3 @@
+-// Forward authorization checks only the Redis contract projection. Missing or
++// Forward authorization consults only the Redis contract projection. Missing or
+ // unavailable leases refuse; pair admission never waits or retains retries.
+ package connect

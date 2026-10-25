@@ -5,13 +5,24 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-Observation: **2026-10-25T11:54:09Z**. Stage A stopped at its first cohort:
+Observation: **2026-10-25T15:24:00Z**. The corrected source/image and isolated
+trusted script bundle are prepared. Three consecutive complete control suites
+passed 514 tests each, with cleanup verified. See
+[network release qualification](NETWORK-BOUNDARY-2026-10-25.md) and the
+[prospective replacement protocol](CALIBRATION-RESTART-2026-10-25.md).
+No corrected-release formal cohort has started; inputs are being generated and
+independently verified before their freeze/publication. The latest read-only
+API probe returned HTTP 503, MinIO refused its connection and the dedicated
+review-provider key remains absent. User-confirmed main maintenance remains
+an activation hold.
+
+The previous Stage A stopped at its first cohort:
 nine controls completed, but control 1 failed baseline stability for
 `unexpected_recovery`. No candidate build or later cohort started; exact
 cleanup was verified. Preserve this failed position, diagnose and qualify the
 correction, then publish a new immutable release/protocol before new scoring.
 See [the retained failure](../baseline/prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md).
-The cold qualification is terminal,
+The previous release's cold qualification is terminal,
 exit 0, 9+9 complete, all gates passed and exact cleanup verified. Independent
 archive verification also passed. See [the complete cold evidence](../baseline/prelaunch-cold-r9-2026-10-25/completed/README.md)
 and [current-state.json](current-state.json). This local acceptance does not
@@ -21,8 +32,8 @@ substitute for formal calibration or live readiness.
 
 | Gate | Evidence required for acceptance | Current evidence / remaining action |
 | --- | --- | --- |
-| Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | [Source preflight](SOURCE-PREFLIGHT-2026-10-24.md) and [image record](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md) identify the prepared release. Preserve these exact identities through subsequent qualification. |
-| Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Passed locally under the [predeclared protocol](COLD-R9-PROTOCOL-2026-10-25.md): 10,608 seconds, 192 seconds headroom; no-op placeable/non-takeover. Every original byte and binding is independently verified. One public-seed execution is not proof that every seed fits. |
+| Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Corrected evaluated server `c1f9dda60`, image `002c3904…`, actual Go 1.27.3 and canonical lock `5e00bf5e…` are recorded in [the corrected image qualification](ARTIFACTS-CANCELED-STOP-2026-10-25.md). Preserve these exact identities through subsequent qualification. |
+| Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Pending for the corrected release. Prospectively, the first new formal A/A cohort also serves full-window functional qualification, without double-counting observations. The previous release's 10,608-second cold pass is planning evidence only, not acceptance of corrected bytes. |
 | Statistical calibration | Predeclared fresh run/seed counts and algorithm, retained failures, measured variance, no-op placement, reference ordering and initial margin supported by this source/image | Not complete. Frontier points and the cold compatibility check are not substitutes. Historical 16.1% is provisional, not a newly measured estimate. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | [Warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) completed 9+9 with all gates and cleanup, but both candidate mean and median were worse. It failed its predeclared directional screen; no faster reference is qualified, and no retry for a favorable draw is permitted. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Local isolation and host bomb evidence exists in the image record. New image-bound host rebaseline and live readiness remain unverified. |

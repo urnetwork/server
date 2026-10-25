@@ -1,0 +1,110 @@
+// Generates immutable offline campaign inputs; never invokes the evaluator.
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"reflect"
+
+	"github.com/urnetwork/server/model"
+)
+
+func main() {
+	must := func(err error) {
+		if err != nil {
+			panic(err)
+		}
+	}
+	check := func(ok bool, message string) {
+		if !ok {
+			panic(message)
+		}
+	}
+	read := func(path string) []byte { b, err := os.ReadFile(path); must(err); return b }
+	hash := func(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
+	encode := func(value any) []byte {
+		b, err := json.MarshalIndent(value, "", "  ")
+		must(err)
+		return append(b, '\n')
+	}
+	write := func(path string, b []byte) {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
+		must(err)
+		_, err = f.Write(b)
+		must(err)
+		must(f.Close())
+	}
+	uuid := func() string {
+		b := make([]byte, 16)
+		_, err := rand.Read(b)
+		must(err)
+		b[6] = (b[6] & 15) | 64
+		b[8] = (b[8] & 63) | 128
+		return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:])
+	}
+	check(os.Geteuid() == 0, "root principal required")
+	check(len(os.Args) == 2, "require output root")
+	root := os.Args[1]
+	old := "/home/by/urnetwork/temp/cold-r9-root-20261025.RIeFJiVB/artifacts"
+	template := read(old + "/worker-request.json")
+	check(hash(template) == "6f2f2ee76c6ed08c4e798b4e14371e591830caa1b0728fb275a940a1237ac363", "template hash")
+	providers, patch := read(old+"/providers.yml"), read(old+"/canonical.patch")
+	check(hash(providers) == "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac", "provider hash")
+	check(hash(patch) == "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1", "patch hash")
+	var typed struct {
+		Policy model.CompetitionEvaluationPolicy `json:"evaluation_policy"`
+	}
+	must(json.Unmarshal(template, &typed))
+	canonical, err := json.Marshal(typed.Policy)
+	must(err)
+	check(hash(canonical) == "8918df4980ea63b937410683fd17d530cebfbff1b38724e5bac44b0ce1e46ead", "policy changed")
+	typed.Policy.SimulatorSha256 = "6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3"
+	typed.Policy.ScorerSha256 = typed.Policy.SimulatorSha256
+	canonical, err = json.Marshal(typed.Policy)
+	must(err)
+	var original map[string]any
+	must(json.Unmarshal(template, &original))
+	var cohorts []any
+	for i := 1; i <= 5; i++ {
+		dir := fmt.Sprintf("%s/cohort-%02d", root, i)
+		must(os.Mkdir(dir, 0700))
+		must(os.Mkdir(dir+"/artifacts", 0700))
+		var r map[string]any
+		must(json.Unmarshal(template, &r))
+		r["job_id"], r["round_id"] = uuid(), uuid()
+		r["competition_id"], r["attempt"] = "offline-corrected-release-aa-calibration", 1
+		r["artifact_directory"], r["providers_path"], r["patch_path"] = dir+"/artifacts", dir+"/artifacts/providers.yml", dir+"/artifacts/canonical.patch"
+		r["base_sha"] = "c1f9dda603d6279666fca5d92b99c5663306c5f7"
+		r["evaluator_image_digest"] = "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3"
+		policy := r["evaluation_policy"].(map[string]any)
+		oldPolicy := original["evaluation_policy"].(map[string]any)
+		policy["simulator_sha256"], policy["scorer_sha256"] = typed.Policy.SimulatorSha256, typed.Policy.ScorerSha256
+		for key, value := range oldPolicy {
+			if key != "simulator_sha256" && key != "scorer_sha256" {
+				check(reflect.DeepEqual(value, policy[key]), "workload policy changed: "+key)
+			}
+		}
+		for k, value := range original {
+			switch k {
+			case "job_id", "round_id", "competition_id", "attempt", "artifact_directory", "providers_path", "patch_path", "base_sha", "evaluator_image_digest", "evaluation_policy":
+			default:
+				check(reflect.DeepEqual(value, r[k]), "unauthorized change: "+k)
+			}
+		}
+		check(r["round_baseline_path"] == "" && r["round_baseline_sha256"] == "", "cached baseline")
+		request := encode(r)
+		write(dir+"/artifacts/providers.yml", providers)
+		write(dir+"/artifacts/canonical.patch", patch)
+		write(dir+"/artifacts/worker-request.json", request)
+		provenance := encode(map[string]any{"schema": 1, "kind": "offline-corrected-release-aa-fixture", "position": i, "official": false, "production_admission": false, "live_api_or_worker": false, "api_worker_hardware_identities_are_synthetic": true, "request_sha256": hash(request), "evaluation_policy_sha256": hash(canonical), "control_replicates": 9, "candidate_replicates": 9, "public_workload_seed": 20261024, "prior_baseline_reused": false, "attempt": 1, "template_attempt_was": original["attempt"], "attempt_normalization": "Each newly identified cohort starts at attempt one; no prior measurement is reused", "measurements_started": 0, "first_cohort_also_functional_qualification": i == 1})
+		write(dir+"/fixture-provenance.json", provenance)
+		cohorts = append(cohorts, map[string]any{"position": i, "root": dir, "job_id": r["job_id"], "round_id": r["round_id"], "request_sha256": hash(request), "provenance_sha256": hash(provenance)})
+	}
+	plan := map[string]any{"schema": 1, "kind": "prepared-corrected-release-five-cohort-aa-plan", "status": "prepared_not_executed", "ordered_cohorts": cohorts, "base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7", "evaluator_image_digest": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3", "canonical_source_lock_sha256": "5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e", "template_request_sha256": hash(template), "evaluation_policy_sha256": hash(canonical), "generator_sha256": hash(read(root + "/prepare.go")), "public_seed": 20261024, "official": false, "measurements_started": 0, "first_cohort_also_functional_qualification": true, "old_failed_campaign_resumed": false}
+	write(root+"/plan.json", encode(plan))
+	write(root+"/evaluation-policy-canonical.json", canonical)
+	fmt.Printf("PASS prepared five fresh cohorts; no evaluation executed; plan_sha256=%s\n", hash(read(root+"/plan.json")))
+}
