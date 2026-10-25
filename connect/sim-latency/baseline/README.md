@@ -11,7 +11,10 @@ Both complete artifact sets are retained. The next 1,800-provider on point
 completed in 8m45s with an authenticated completion marker, 2,441 measured rows,
 two failed rows and no SQL errors. It is one exploratory point, not the new
 epoch baseline or final production scale. Capacity bracketing and impairment-off
-measurements remain necessary.
+measurements remain necessary. The subsequent 3,600-provider on point also
+completed (9m28s, 2,482 measured rows, two failed rows), with retained SQL
+serialization/cancellation events and no direct-controller resource report.
+Neither exploratory completion is a formal scoring-gate qualification.
 
 The later Go 1.27.3, provide-lock 15,000-provider impairment-on attempt is in
 [`prelaunch-provide-frontier-2026-10-24/`](prelaunch-provide-frontier-2026-10-24/README.md).

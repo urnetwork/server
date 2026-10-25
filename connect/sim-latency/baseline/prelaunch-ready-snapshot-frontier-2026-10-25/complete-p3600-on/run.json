@@ -1,0 +1,101 @@
+{
+  "schema": 2,
+  "kind": "sim-latency-run",
+  "config_sha256": "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac",
+  "seed": 20261024,
+  "build_revision": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
+  "hostname": "3604b53e9a85",
+  "os": "linux",
+  "arch": "amd64",
+  "num_cpu": 10,
+  "flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "true",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "source_epoch": 0,
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-effe-p3600-on-initial",
+  "request_timeout_ms": 120000,
+  "stats_root": "/work/site/stats/local/sim-127.0.0.1-01a170a5-ee5c-2f91-a56e-08846095b3b2",
+  "stats_instance_id": "01a170a5-ee5c-2f91-a56e-08846095b3b2",
+  "results_csv_sha256": "47425cd2109466aeaca3038df8f3a219c1c9516a6fc0a18ad78d8df2fab9be36",
+  "results_csv_bytes": 297895,
+  "final_marker_path": "/artifacts/run.json.complete.json",
+  "completion_state": "complete",
+  "completed_unix_ms": 1792891802352,
+  "measure_start_ms": 1792891580025,
+  "measure_end_ms": 1792891760025,
+  "clients_pool": 200,
+  "clients_established": 200,
+  "rows": 2744,
+  "rows_in_window": 2482,
+  "failures": 2,
+  "block_count": 8,
+  "block_seconds": 22.5,
+  "metrics": {
+    "fail_rate": {
+      "value": 0.0008058017727639,
+      "n": 2482,
+      "block_se": 0.0007156591574402467
+    },
+    "goodput_bytes_per_s": {
+      "value": 17515346.161111113,
+      "n": 2482,
+      "block_se": 1238544.0244085707
+    },
+    "throughput_p05_bytes_per_s": {
+      "value": 117574.58290780926,
+      "n": 628,
+      "block_se": 13453.231081666512
+    },
+    "throughput_p50_bytes_per_s": {
+      "value": 565792.9559057255,
+      "n": 628,
+      "block_se": 81300.58387233205
+    },
+    "throughput_p95_bytes_per_s": {
+      "value": 21484950.960351944,
+      "n": 628,
+      "block_se": 3654696.7981134183
+    },
+    "total_p50_ms": {
+      "value": 948.2574999999999,
+      "n": 2480,
+      "block_se": 109.18723374169949
+    },
+    "total_p95_ms": {
+      "value": 17567.0925,
+      "n": 2480,
+      "block_se": 2058.6043553240506
+    },
+    "ttfb_p50_ms": {
+      "value": 168.9975,
+      "n": 2480,
+      "block_se": 16.807203601769437
+    },
+    "ttfb_p95_ms": {
+      "value": 1526.5780999999988,
+      "n": 2480,
+      "block_se": 174.1258394654988
+    }
+  }
+}

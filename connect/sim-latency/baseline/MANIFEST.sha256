@@ -1,6 +1,6 @@
 6499cb1b08eb1780cf3576e9eb24d78fb6e3ad07ab0cfad1ed14052bcc61b633  .gitattributes
 65462807ceb9d025a234a7042bf4cc84565321c38a6dbca17d8f811d511e590e  INDEX.json
-671996c59c8b1eede41b5e381719a21f3978ee10cbdaddcf821b09db3eb7264b  README.md
+6e81e0ba0d95e3da7579e558f0518f0d8d0de79afb3bea8a5d5e060f10f525f6  README.md
 cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9  final-baseline.html
 768c57b3d341eeb31861ba848a595b94f9e6f0b71d0364e29205968bc3aedf1e  go.mod
 3f62dd3ea030590f151af902131765b2358084402e4dd0f2929d2dcced0545e7  prelaunch-2026-10-24/INDEX.json
@@ -173,7 +173,7 @@ bbefdcd22156ef49998fc5deb56eb5efb51cd87a5694ee647e78c3d5c6b73f26  prelaunch-prov
 c93b332f211a874a07c23eed418eb219949579f2b571864d8c3defaa4bc167a6  prelaunch-provide-frontier-2026-10-24/failed-p15000-on/runner.log.gz
 1858af95c59ba0048c9843b2d18338d515150e7f2d8acfd45bb279358c11ef35  prelaunch-provide-frontier-2026-10-24/failed-p15000-on/services.log.gz
 e675916516c355fcf770fc73f0e15e1b170b99e69ab42c2142eb9ef48f352fdf  prelaunch-provide-frontier-2026-10-24/image-record.json
-7c3878cc58d70accdb98cd041282d8e1e949e556b09469979bbc9dab2b1a218c  prelaunch-ready-snapshot-frontier-2026-10-25/README.md
+965fa1fc423f76cce35f628c4ae7ed8d002094893d038327c93636090f994f6d  prelaunch-ready-snapshot-frontier-2026-10-25/README.md
 f0b428bb8373b667ff81c1952a447434e6f4cdc1562b247f2900f164a65494ab  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/docker-id-map.json
 01853adb49b3e3044308f0f14ea24b157137c71584213373e1015f24449fce07  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/providers.yml.gz
 d5e5378cac1c2980047118496188476f5a2748282efc918b97458b42b97a85d9  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/results.csv
@@ -181,6 +181,13 @@ e2068ccc598d6f5f6a3210adee349ec6dfb22d5c360c02dd65a21ba22224f1f2  prelaunch-read
 bfda927194da8d9fb756d7a364b505713e92b4aaee8379caf72dd6e0c6266a74  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/run.json.complete.json
 db5a5d70af16f2259ea2c2635746a804bd8f4547d67f56feed69fbe744a4c384  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/runner.log.gz
 280225cb4b1b864e452554556f2a82b813376040c1fa0bc3ef95daf0a103cf07  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p1800-on/services.log.gz
+f0b428bb8373b667ff81c1952a447434e6f4cdc1562b247f2900f164a65494ab  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/docker-id-map.json
+06d8a5a24da962387cabcc6b08d2da730aa03bb6b3d937676e0db930b799af40  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/providers.yml.gz
+47425cd2109466aeaca3038df8f3a219c1c9516a6fc0a18ad78d8df2fab9be36  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/results.csv
+e55bc00ac7e690290d8c298dbb3b9098c9a3d59a091865df394621d331b2f6f4  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/run.json
+ea283278a467bb72d184672af3abd655e1421235374df87ac52935c537874281  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/run.json.complete.json
+50f576c6db5745eebf38bda5fd00e0d2b5951bdf0cbe875ab3197bca7d8d2fe7  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/runner.log.gz
+791933dfbdaa5c0fb0d2d70b3ed97c21341674cc0cdc78464c7d517f57443d37  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p3600-on/services.log.gz
 faeb77e394d2abacbb5c69d5355346457676076b63b925430e535e21f3031d5f  prelaunch-ready-snapshot-frontier-2026-10-25/controller/measure.sh
 f95655f7d957bfa7b41969cfb54f218d3fd6e6f2f5b4328ba8697b5d6fe1bad9  prelaunch-ready-snapshot-frontier-2026-10-25/controller/run-case-v2.sh
 9f6e7ea3b65f237f545c9702573acc6b04db0fdd7427e17896805a3ea648ce8e  prelaunch-ready-snapshot-frontier-2026-10-25/controller/run-case.sh

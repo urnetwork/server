@@ -134,9 +134,15 @@ completion marker and no PostgreSQL ERROR/FATAL/PANIC lines. Cleanup passed.
 Its exact artifacts are retained in the same baseline archive. The direct
 controller emits no final resource report. This is the first clean exploratory
 completion for this image, not acceptance of scale, official scoring gates,
-full cold R9 duration, variance, significance or an epoch control. A 3,600-provider
-point will bracket the gap to the incomplete 7,200-provider point; impairment-off
-frontier work is still required.
+full cold R9 duration, variance, significance or an epoch control.
+
+The 3,600-provider on point completed in 568 seconds with all 200 clients,
+2,482 measured rows, two failed rows, an authenticated marker and clean teardown.
+Its services logged two serialization errors on speed upserts and two
+cancellations, with no provide-key duplicates. The separately authenticated v2
+private controller adds only 3,600 to its count allowlist; previous controller
+bytes are unchanged. Full gate validation, cold R9 timing and impairment-off
+frontier work remain necessary; this is not yet a qualified production scale.
 
 Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
 from the public `/competition/info` endpoint and connection refusal from

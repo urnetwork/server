@@ -85,16 +85,36 @@ accepted production scale. The single point is **not an epoch baseline**.
 The next frontier work must bracket capacity and test impairment off without
 weakening the existing correctness or timeout gates.
 
+## 3,600-provider impairment-on result
+
+The next point used `run-case-v2.sh`, changing only provider count to **3,600**.
+It completed with **exit 0 after 568 seconds (9m28s)**: 200 clients, 2,744
+total rows, 2,482 measured-window rows and two failed measured rows. The final
+marker authenticates the exact sidecar and CSV. Measurement began at
+`2026-10-25T01:26:20.025Z` and completed its full 180-second window. Teardown
+and exact container/network cleanup passed.
+
+The service log records two serialization errors on monotonic
+`network_client_speed` upserts and two user-request statement cancellations;
+there are zero provide-key duplicate errors. No unexpected-recovery or runtime
+panic marker was found by the initial runner-log inspection. This is not a
+formal G1–G6 scoring result: no final resource report is emitted by the direct
+controller, and all official gate inputs still require independent validation.
+Keep the SQL events visible rather than describing the run as error-free or
+loosening the stability gate. The observed duration alone also does not prove
+that a cold R9 baseline-plus-candidate job fits three hours.
+
 ## Preserved bytes
 
-`failed-p15000-on/`, `failed-p7200-on/` and `complete-p1800-on/` retain each
+`failed-p15000-on/`, `failed-p7200-on/`, `complete-p1800-on/` and
+`complete-p3600-on/` retain each
 final sidecar, CSV, ID-map receipt, generated
 workload and complete runner/service logs. Deterministic gzip headers (`-n`)
 permit exact decompressed-byte verification. `controller/` contains the actual
 executed scripts, including private paths for provenance rather than deployment.
 `image-record.json` is the original image build receipt.
-Only the complete 1,800-provider point includes a completion marker; no absent
-artifact is synthesized for an incomplete point.
+Only complete points include completion markers; no absent artifact is
+synthesized for an incomplete point.
 
 `controller/run-case.sh` is unchanged and authenticates the three points above.
 It accepts 1,800/7,200/15,000/48,000/100,000 providers but not 3,600. Admission
@@ -103,7 +123,8 @@ The separately retained `run-case-v2.sh` adds **only 3,600** to this count
 allowlist; simulator arguments, seed, source/image hashes, resource/cleanup
 checks and all gates are unchanged. Its SHA-256 is
 `f95655f7d957bfa7b41969cfb54f218d3fd6e6f2f5b4328ba8697b5d6fe1bad9`.
-It is prepared for the next bracketing point, not evidence of its completion.
+It was used for the 3,600-provider point above. No simulator or scoring code
+changed for that count admission.
 
 All regular files are covered by the enclosing `baseline/MANIFEST.sha256`.
 Older datasets and their outcomes remain unchanged. Local source evidence and

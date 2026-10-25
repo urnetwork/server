@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 01:17 UTC
+## Current preparation pointer — October 25, 01:30 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -37,8 +37,11 @@ failed after 606 seconds at the initial matchmaking probe, with zero measured
 rows and clean teardown. Both outcomes are retained. The next 1,800-provider on
 point completed in 525 seconds with an authenticated marker, 2,441 measured
 rows, two failed rows, no SQL errors and clean teardown. It is one exploratory
-completion, not a qualified scale or epoch baseline; a 3,600-provider point and
-impairment-off frontier work remain to bracket capacity.
+completion, not a qualified scale or epoch baseline. The 3,600-provider on point
+also completed (568 seconds, 2,482 measured rows, two failed rows, authenticated
+marker and clean teardown), with retained SQL serialization/cancellation events.
+Neither direct-controller point has a final resource report. Full gate
+qualification, cold R9 timing and impairment-off frontier work remain pending.
 Further frontier/diagnostic work must preserve the correctness gates.
 Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).
