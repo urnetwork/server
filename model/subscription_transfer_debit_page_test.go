@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -220,4 +221,130 @@ func TestAsyncDebitPageDeadlineResumesCommittedAccounting(t *testing.T) {
 			t.Fatal("completed page replay invented new consumption", replay, err)
 		}
 	})
+}
+
+// Serves one scripted batch per flush of each balance, then ends the shard.
+type transferDebitPageScript struct {
+	t       testing.TB
+	order   []server.Id
+	batches map[server.Id][]transferDebitPageBatch
+	flushes map[server.Id]int
+}
+
+type transferDebitPageBatch struct {
+	released int
+	busy     bool
+	err      error
+}
+
+func (self *transferDebitPageScript) operations() transferDebitPageOperations {
+	return transferDebitPageOperations{
+		nextBalance: func(_ context.Context, _ int, after *server.Id) *server.Id {
+			if after == nil {
+				return &self.order[0]
+			}
+			for i, id := range self.order {
+				if id == *after && i+1 < len(self.order) {
+					return &self.order[i+1]
+				}
+			}
+			return nil
+		},
+		flushBalance: func(_ context.Context, id server.Id) (int, int, bool, error) {
+			batches := self.batches[id]
+			n := self.flushes[id]
+			self.flushes[id] = n + 1
+			if len(batches) == 0 {
+				self.t.Fatal("page flushed an unscripted balance")
+			}
+			if len(batches) <= n {
+				n = len(batches) - 1
+			}
+			batch := batches[n]
+			return batch.released, batch.released, batch.busy, batch.err
+		},
+	}
+}
+
+func newTransferDebitPageScript(t testing.TB, batches ...[]transferDebitPageBatch) *transferDebitPageScript {
+	script := &transferDebitPageScript{t: t, batches: map[server.Id][]transferDebitPageBatch{}, flushes: map[server.Id]int{}}
+	for _, b := range batches {
+		id := server.NewId()
+		script.order = append(script.order, id)
+		script.batches[id] = b
+	}
+	return script
+}
+
+// A hot balance drains its full batches in one page until a partial batch,
+// then the page continues to the next balance with the summed accounting.
+func TestAsyncDebitPageRepeatsFullBatchesForOneBalance(t *testing.T) {
+	full := transferDebitPageBatch{released: transferDebitBatchSize}
+	script := newTransferDebitPageScript(t,
+		[]transferDebitPageBatch{full, full, full, {released: 100}},
+		[]transferDebitPageBatch{{released: 7}},
+	)
+	bounded, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	result, err := flushTransferDebitPage(t.Context(), bounded, 0, nil, 64, script.operations())
+	hot, next := script.order[0], script.order[1]
+	if err != nil || script.flushes[hot] != 4 || script.flushes[next] != 1 || result.Balances != 2 ||
+		result.Released != 3*transferDebitBatchSize+107 || result.Applied != result.Released ||
+		result.Failed != 0 || result.More || result.LastBalanceId != nil {
+		t.Fatalf("hot balance did not drain its full batches in one page: result=%+v flushes=%v err=%v", result, script.flushes, err)
+	}
+}
+
+// The per-balance cap keeps the page's later balances; a capped full batch
+// still asks the task to continue at once.
+func TestAsyncDebitPageCapsRepeatedBatchesPerBalance(t *testing.T) {
+	script := newTransferDebitPageScript(t,
+		[]transferDebitPageBatch{{released: transferDebitBatchSize}},
+		[]transferDebitPageBatch{{released: 9}},
+	)
+	bounded, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	result, err := flushTransferDebitPage(t.Context(), bounded, 0, nil, 64, script.operations())
+	hot, next := script.order[0], script.order[1]
+	if err != nil || script.flushes[hot] != transferDebitBatchesPerBalance || script.flushes[next] != 1 ||
+		result.Released != transferDebitBatchesPerBalance*transferDebitBatchSize+9 || !result.More || result.Balances != 2 {
+		t.Fatalf("repeated batches were not capped per balance: result=%+v flushes=%v err=%v", result, script.flushes, err)
+	}
+}
+
+// Within the margin of the page deadline a full batch is not repeated, and
+// the task is still asked to continue.
+func TestAsyncDebitPageStopsRepeatingNearDeadline(t *testing.T) {
+	script := newTransferDebitPageScript(t, []transferDebitPageBatch{{released: transferDebitBatchSize}})
+	bounded, cancel := context.WithTimeout(t.Context(), transferDebitRepeatMargin/2)
+	defer cancel()
+	result, err := flushTransferDebitPage(t.Context(), bounded, 0, nil, 64, script.operations())
+	if err != nil || script.flushes[script.order[0]] != 1 || result.Released != transferDebitBatchSize || !result.More {
+		t.Fatalf("a full batch repeated inside the deadline margin: result=%+v flushes=%v err=%v", result, script.flushes, err)
+	}
+}
+
+// A busy batch is never repeated. A repeated batch that fails keeps the
+// earlier batches' accounting and stops the page at that balance's cursor.
+func TestAsyncDebitPageRepeatStopsOnBusyOrFailure(t *testing.T) {
+	full := transferDebitPageBatch{released: transferDebitBatchSize}
+	bounded, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+
+	busy := newTransferDebitPageScript(t, []transferDebitPageBatch{{released: transferDebitBatchSize, busy: true}})
+	result, err := flushTransferDebitPage(t.Context(), bounded, 0, nil, 64, busy.operations())
+	if err != nil || busy.flushes[busy.order[0]] != 1 || result.Busy != 1 {
+		t.Fatalf("a busy balance was flushed again: result=%+v flushes=%v err=%v", result, busy.flushes, err)
+	}
+
+	failing := newTransferDebitPageScript(t,
+		[]transferDebitPageBatch{full, {err: errors.New("synthetic release failure")}},
+		[]transferDebitPageBatch{{released: 1}},
+	)
+	result, err = flushTransferDebitPage(t.Context(), bounded, 0, nil, 64, failing.operations())
+	hot, next := failing.order[0], failing.order[1]
+	if err != nil || failing.flushes[hot] != 2 || failing.flushes[next] != 0 || result.Failed != 1 ||
+		result.Released != transferDebitBatchSize || result.LastBalanceId == nil || *result.LastBalanceId != hot {
+		t.Fatalf("a failed repeat lost accounting or its cursor: result=%+v flushes=%v err=%v", result, failing.flushes, err)
+	}
 }
