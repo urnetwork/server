@@ -7,9 +7,12 @@ this record and has not been applied or tested.
 
 A separate [immutable positive-cache snapshot design](SNAPSHOT-HYPOTHESIS.md)
 records a lock-free-hit hypothesis and its ownership/expiry/retention test
-requirements. It includes an uncompiled draft patch and eight candidate-only
-test drafts, but no test pass or measured result. It is not a qualified faster
-reference and does not change the baseline.
+requirements. Its independent race-enabled correctness screen has passed three
+baseline and three candidate suites; targeted guard-removal controls reproduce
+the intended failures. Three restored suites also passed. The warm benchmark
+improved while publication became more expensive; all observations and costs
+are in [the qualification record](SNAPSHOT-QUALIFICATION.md). No end-to-end pilot
+or faster-reference qualification is claimed, and the baseline is unchanged.
 
 ## Warm-reader candidate
 

@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-snapshot-screen-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-snapshot-screen-2026-10-25/INDEX.json",
+      "index_sha256": "72aad3348586819b74eed36e78840bc71a7ffda62048167712d753a1bb0b75ae"
+    },
+    {
       "id": "prelaunch-corrected-same-seed-r9-2026-10-25",
       "official": false,
       "index_path": "prelaunch-corrected-same-seed-r9-2026-10-25/INDEX.json",

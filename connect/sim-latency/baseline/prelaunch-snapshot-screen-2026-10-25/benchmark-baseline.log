@@ -1,0 +1,20 @@
+[env]glog not configured from command line. Using default configuration.
+I1025 19:26:46.404731 2763773 env.go:1202] [env]try /home/by/urnetwork/temp/snapshot-screen-qualified-setup-20261025.Eqyjghne/services/server-fixture-707479028/config, [settings.yml]
+I1025 19:26:46.405087 2763773 env.go:1202] [env]try /home/by/urnetwork/temp/snapshot-screen-qualified-setup-20261025.Eqyjghne/services/server-fixture-707479028/site, [settings.yml]
+I1025 19:26:46.405139 2763773 env.go:81] [env]settings loaded
+goos: linux
+goarch: amd64
+pkg: github.com/urnetwork/server/connect
+cpu: Intel(R) Xeon(R) CPU E5-2697 v2 @ 2.70GHz
+BenchmarkResidentContractWarmCacheParallel-2    	  268395	       390.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResidentContractWarmCacheParallel-2    	  299238	       339.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResidentContractWarmCacheParallel-2    	  269941	       393.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResidentContractWarmCacheParallel-2    	  307714	       333.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResidentContractWarmCacheParallel-2    	  273140	       410.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkResidentContractRefreshPublication-2   	  270266	       472.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkResidentContractRefreshPublication-2   	  271188	       459.2 ns/op	      48 B/op	       1 allocs/op
+BenchmarkResidentContractRefreshPublication-2   	  272308	       465.6 ns/op	      48 B/op	       1 allocs/op
+BenchmarkResidentContractRefreshPublication-2   	  273688	       459.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkResidentContractRefreshPublication-2   	  270542	       472.4 ns/op	      48 B/op	       1 allocs/op
+PASS
+ok  	github.com/urnetwork/server/connect	1.462s

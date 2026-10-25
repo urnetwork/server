@@ -1,9 +1,21 @@
-# Immutable positive-cache snapshot: static research only
+# Immutable positive-cache snapshot: local screen passed, pilot pending
 
-A draft patch exists, but **has not been compiled, tested or measured**. This
+A draft patch passed its isolated correctness/supporting benchmark screen; it is **not a
+qualified faster reference or a measured end-to-end improvement**. This
 is a separate hypothesis against the corrected frozen source, not a revision
 to the failed warm-reader pilot or authorization to change the baseline.
 The existing owner-admission-map draft is also unqualified.
+
+The independent screen uses fresh source from exact image `002c3904…` and
+Go 1.27.3. The baseline passed 52 race-enabled tests three times; the candidate
+passed 60 tests three times, including all eight new tests below. Removing
+only the final expiry check and, separately, only the final closed-owner check
+made their respective barrier tests fail at the intended assertions. The
+candidate was restored byte-for-byte and passed three more 60-test suites.
+The warm-hit benchmark improved, but publication became more expensive; the
+[complete screen evidence](SNAPSHOT-QUALIFICATION.md) retains every observation,
+allocation cost, negative control and cleanup receipt. No scoring pilot has run
+for this hypothesis and the frozen baseline source is unchanged.
 
 [`warm-snapshot.patch`](warm-snapshot.patch), SHA-256
 `46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924`,
@@ -15,11 +27,11 @@ test drafts are preserved as
 The `.txt` fixture is not compiled by the simulator suite or submitted patch.
 Preparation workspace: `temp/reference-snapshot-draft-20261025.BFH83oNJ/`.
 
-An additional unexecuted
+The supporting
 [`snapshot-benchmark.go.txt`](snapshot-benchmark.go.txt), SHA-256
 `f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060`,
 uses the actual constructor/default freshness policy and identical code on
-baseline/candidate. For an idle-slot supporting screen, use five observations
+baseline/candidate. The completed idle-slot screen used five observations
 per source at `-benchtime=100ms`, management CPUs 20,22 and GOMAXPROCS=2.
 Its 32 parallel callers exercise one warm pair; source reads other than the
 single initial read or any refused hit invalidate that observation. Keep every
@@ -104,9 +116,9 @@ an already selected warm hit across source expiry and across Close before
 context cancellation. A private nil-in-production hook enables these orderings
 without wall-clock sleeps. Before advancement, removing the final deadline
 check or closed-flag check must deterministically fail its respective test;
-retain those behavioral controls and the restored pass. These controls are
-planned, not executed evidence. Tests must actually compile and pass, together
-with the existing composed PostgreSQL-tripwire tests, before any pilot.
+retain those behavioral controls and the restored pass. These controls and
+the three restored suites have now passed as recorded in the qualification
+record; the existing composed PostgreSQL-tripwire tests passed alongside them.
 
 Only after correctness succeeds, freeze a separate full R9 fresh-control pilot
 with exact patch/build identities before observing performance. Keep every

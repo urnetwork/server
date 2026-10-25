@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T18:47:43Z",
+  "observed_at": "2026-10-25T19:34:23Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
   "status": "first_corrected_release_aa_cohort_passed_preserved",
@@ -432,7 +432,39 @@
       {"session_id": 64204, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "Fixture launcher used old SN directory outside exact frozen Go workspace"},
       {"session_id": 69912, "exit_code": 1, "cleanup_exit": 0, "tests_executed": 0, "reason": "New workspace assertion assumed repository name equals module path; SN actually declares github.com/urfoundation/sn"}
     ],
-    "screen_status": "baseline_three_race_passes_candidate_screen_running",
+    "screen_status": "completed_passed_cleanup_verified",
+    "screen_terminal": true,
+    "screen_exit_code": 0,
+    "screen_cleanup_exit_code": 0,
+    "restored_screen_passes": 3,
+    "restored_screen_log_sha256": [
+      "d13ea385281c921250c8e1812b0202f2a4621799f6c980d47ad3603139f7100c",
+      "3c75f1aabd789b46456877f1059235bd421d119172e6ba91a21364bdff1f3468",
+      "20d323a24553ba5018dd7f29a4007253f4afc5b874d646392eeb0f33b41b0c49"
+    ],
+    "total_passing_race_test_executions": 516,
+    "supporting_benchmark": {
+      "observations_per_source_per_benchmark": 5,
+      "warm_hit_median_ns": {"baseline": 390.4, "candidate": 103.5},
+      "publication_128_pairs_median_ns": {"baseline": 465.6, "candidate": 18772},
+      "publication_bytes_per_op": {"baseline": 48, "candidate": 21904},
+      "publication_allocations_per_op": {"baseline": 1, "candidate": 6},
+      "baseline_log_sha256": "67e9336ed04e7a22fc3c95c7063de93e59447d8b623ad6187edeb400b6b6b993",
+      "candidate_log_sha256": "dee9b189c109d7990f258ef813dad7ee26f90f73cd19074579b133b71a8dc985",
+      "launch_log_sha256": "94ea4b7e429ff6ffed212a2059634ac78ba2ca49e69d11f6e1fed8584591644d",
+      "end_to_end_improvement_established": false
+    },
+    "deadline_guard_negative_control_log_sha256": "7b10347efccfc1d22d4cd9a48045c819159470349b6e4a586570432a068c2886",
+    "closed_guard_negative_control_log_sha256": "fc9f549d9f4ef11218737385d9f9f606f975ede1c73f67c0fdebcea6c88f9554",
+    "candidate_restored_byte_for_byte": true,
+    "candidate_source_file_sha256": "3f4914ff712f9fb99a34fd38fd3eb30d4f3a28c0629e91813adc7d3691a80358",
+    "candidate_screen_tests_per_pass": 60,
+    "candidate_screen_passes": 3,
+    "candidate_screen_log_sha256": [
+      "4722fd4e172672e8e2f0f21d7e42cad930ca6c05f03444bec36ae8102831741f",
+      "b2770d4f150d18824c7bd97514ca683c94fce3a1b2974c2591118562dd031376",
+      "658b377d5a8bfd73e83f93f7a77f15f61d4db4b8843a4a0d86cecfd91c5bef9d"
+    ],
     "baseline_screen_tests_per_pass": 52,
     "baseline_screen_passes": 3,
     "baseline_screen_log_sha256": [
@@ -440,7 +472,12 @@
       "c70a41ddc886c2cc6ea4bf478996d763672ac01b23a3271bd2ee4cb4c18068c4",
       "e226ef7121c6c05a102eb10de8a3cd9849a0643454512dfb6b346d67f802b466"
     ],
-    "status": "uncompiled_untested_unmeasured_draft_only",
+    "status": "correctness_and_supporting_benchmark_screen_passed_full_pilot_pending",
+    "qualification_record": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-QUALIFICATION.md",
+    "preserved_dataset": "server/connect/sim-latency/baseline/prelaunch-snapshot-screen-2026-10-25",
+    "selected_original_evidence_files": 30,
+    "preserved_archive_sha256": "9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90",
+    "archive_verification_log_sha256": "e5c22d1f00244c1825ed82bc67d53075499d77eb0e1ea5cf02bac02cbc327e82",
     "path": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-HYPOTHESIS.md",
     "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
     "candidate_test_fixture_sha256": "26c459d5bf580a94de34b45636847a6b6880d190681d66bd5df52d2ca36bd40f",
@@ -448,9 +485,15 @@
     "benchmark_fixture_sha256": "f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060",
     "private_workspace": "/home/by/urnetwork/temp/reference-snapshot-draft-20261025.BFH83oNJ",
     "evaluated_source_changed": false,
-    "next_action": "Observe session42566/controller2723749 through fresh frozen-source baseline/candidate race tests, eight candidate tests and deterministic delayed-hit guard controls; five supporting warm-hit/refresh-cost benchmarks per source under canonical exclusive slot. Correct module-path preflight passed after retained setup-only failures. No pilot or source qualification claimed. Stop on failure and retain evidence; Max agent diagnoses fixes."
+    "next_action": "Screen terminal0/cleanup0; do not restart. Publish correctness and all benchmark observations, including40x publication cost. Prepare and independently verify one separate fresh-control full R9 directional pilot before any scoring invocation. No end-to-end improvement or faster-reference qualification claimed."
   },
   "queued_idle_slot_preparations": {
+    "snapshot_pilot_protocol": "server/connect/sim-latency/launch/SNAPSHOT-PILOT-2026-10-25.md",
+    "snapshot_pilot_generator": "server/connect/sim-latency/launch/snapshot-pilot-preparation.go.txt",
+    "snapshot_pilot_generator_sha256": "e34654793e45bc1aff96cb8ce171db9b14351e8c068b3b372a73e49246499eb5",
+    "snapshot_screen_baseline_publication_verifier_sha256": "1126fe20cd173a0eafb6743e50e7acc4bd2c6781343093e347ee3028ffb989c2",
+    "snapshot_screen_document_check_sha256": "2a369631aa46a95acd99372cb2cc4ccc04e8fa3fd0b33c5b44497efc0ab35faa",
+    "snapshot_pilot_preparation_status": "Draft generator only; no compile, request generation or scoring. Publish completed screen, then generate/independently verify and freeze fresh pilot before one invocation.",
     "held_out_input_checklist": "server/connect/sim-latency/launch/HELD-OUT-INPUT-PREPARATION.md",
     "held_out_input_status": "Future Stage B generator must bind native derived workload seed/provider bytes, not only request seed labels. Exact same-round baseline digest is deliberately late-bound from first R9 control. No generator or held-out inputs qualified yet; Stage A and reference screens remain required.",
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
