@@ -1,0 +1,13 @@
+start_utc=2026-10-25T06:25:17Z
+deadline_utc=2026-10-25T09:25:17Z
+e8705f9e365ac5c11e67f17aecfc6a7c78a433765159b9dfc80fd8be4ef71e71  /home/by/urnetwork/temp/reference-pilot-20261025.xmVUYqFL/artifacts/worker-request.json
+evaluator_exit=0 duration_seconds=10521
+end_utc=2026-10-25T09:20:38Z
+buildx_buildkit_warp-multiarch0
+urnetwork-local-pg
+urnetwork-local-redis
+bridge
+host
+none
+urnetwork-local
+terminal_cleanup_verified

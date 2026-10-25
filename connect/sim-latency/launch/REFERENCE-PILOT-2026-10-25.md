@@ -5,6 +5,13 @@ This is research qualification, not an eligible submission, official epoch
 baseline, hidden-seed campaign or source promotion. The production opening
 remains 2026-10-28T00:00:00Z.
 
+**Recorded outcome:** completed 2026-10-25T09:20:38Z, exit 0, 9+9 runs,
+all gates and cleanup passed in 10,521 seconds. The predeclared directional
+screen **failed**: candidate mean and median were both worse. Do not advance
+this patch as the faster reference or retry for a favorable draw. See the
+[retained result](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md).
+The execution and decision rules below are the unchanged pre-result protocol.
+
 ## Immutable scope
 
 Use the exact image/source, scale, resources, timers and public seed from the

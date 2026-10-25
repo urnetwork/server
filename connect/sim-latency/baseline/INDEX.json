@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-warm-reader-pilot-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-warm-reader-pilot-2026-10-25/INDEX.json",
+      "index_sha256": "4204ded319ab40e10085e6687a8b105f348fb63232b61bd3df50b67eddae89f2"
+    },
+    {
       "id": "prelaunch-cold-r9-2026-10-25",
       "official": false,
       "index_path": "prelaunch-cold-r9-2026-10-25/INDEX.json",
