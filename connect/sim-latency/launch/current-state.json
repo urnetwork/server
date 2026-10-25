@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T23:18:30Z",
+  "observed_at": "2026-10-25T23:26:08Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "snapshot_pilot_preserved_negative_build_qualified_formal_calibration_pending",
+  "status": "formal_stage_a_cohort02_running_one_of_five_completed",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
-    "status": "first_cohort_complete_passed_preserved",
+    "status": "second_cohort_running_first_completed_preserved",
     "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
     "protocol": "server/connect/sim-latency/launch/CALIBRATION-RESTART-2026-10-25.md",
     "server_commit": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
@@ -15,7 +15,7 @@
     "installed_bundle": "/usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container",
     "installed_evaluator_sha256": "263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e",
     "old_campaign_resumed": false,
-    "invocations_started": 1,
+    "invocations_started": 2,
     "cohorts_completed": 1,
     "freeze_commit": "2844161a9",
     "plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
@@ -27,7 +27,7 @@
     "first_cohort_also_functional_qualification": true,
     "policy_identity_update_required": "Bind both simulator/scorer digests to new pristine binary6c8587be; all other policy fields stay identical. Canonical policy hash must therefore be regenerated, not copied from old image.",
     "preserved_phase_commit": "3d6c35d29",
-    "next_action": "Position1 passed and preserved phase3d6c35d29 pushed. Separatepilot89533 completed0/directionalpass/allgates/cleanup; alloriginals preserved. Publish that phase then continue formalpositions2-5 and independent reference qualification. Pilot samples never enter Stage A. No activation during main maintenance."
+    "next_action": "Pilotphase55865d541 andnegativequalification79e25f5b6 pushed. Originalpredeclaredposition2/session79133 nowrunning; positions3-5 remainunstarted. No workload overlap or automaticretry. Pilot measurements never enter Stage A. No activation during main maintenance."
   },
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-25T23:18:30Z",
@@ -65,6 +65,32 @@
     "operator_proxy_retired": true
   },
   "active_attempt": {
+    "kind": "corrected-release-formal-offline-aa-cohort",
+    "owner_agent": "/root/provide_serialization_test",
+    "exec_session_id": 79133,
+    "manager_pid": 493671,
+    "runner_pid": 493698,
+    "evaluator_pid": 493827,
+    "manager_uid": 0,
+    "phase": "preparing_fresh_cohort",
+    "baseline_completed": 0,
+    "candidate_completed": 0,
+    "progress_observed_at": "2026-10-25T23:26:08Z",
+    "terminal": false,
+    "cohort_position": 2,
+    "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
+    "cohort_root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-02",
+    "job_id": "8cd8edae-c30c-407f-b611-bda14dfe2764",
+    "round_id": "9dfa6395-6c81-4a74-94bc-d8538fabb169",
+    "started_at": "2026-10-25T23:23:57Z",
+    "execution_deadline": "2026-10-26T02:23:57Z",
+    "request_sha256": "457b783eff0eb584cf283809ef9bc3d8223f37525259ded700a721c31a001ea0",
+    "protocol_commit": "2844161a9",
+    "no_cached_baseline": true,
+    "official_epoch_baseline": false,
+    "next_action": "Observe SAME79133/PIDs toterminal; no tests/builds/probes/other scoring. Verify actualeval_errornull/scoreplaceable/exact6gates/9+9/7worker+evidence+5completionbindings/budget/cleanup. Preservealloutcomes andpublishbeforeposition3. Do notstop merelyonNoOp direction/pvalue/takeover; finalunchangedanalyzerusesallfivefixedpairs. No automaticretry/substitution."
+  },
+  "last_completed_snapshot_pilot": {
     "kind": "offline-snapshot-reference-directional-pilot",
     "owner_agent": "/root/provide_serialization_test",
     "exec_session_id": 89533,
