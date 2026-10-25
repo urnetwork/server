@@ -71,6 +71,26 @@ const PgRollbackTimeout = 30 * time.Second
 // wait a new connection's validation Ping is given.
 const PgBeginTimeout = PgPingTimeout
 
+// PgLockTimeout bounds how long a statement of a main-pool transaction waits
+// for a lock: PostgreSQL's `lock_timeout`, set by the transaction's own BEGIN
+// (`Tx`). Under transaction pooling every waiter holds a pooler server, so an
+// unbounded queue on one hot lock takes the whole pool. Worse, a waiter whose
+// caller stops is interrupted only `PgStatementStopTimeout` later, and pgx's
+// cancel then waits for a pooler slot of its own, so a lock granted in that
+// window is held by an abandoned transaction for many seconds; the next
+// abandoned waiter inherits it the same way (2026-10-25, a network's
+// registration lock queued 590 waiters and every pooled caller timed out). A
+// wait past the bound fails at once with 55P03, which rolls back and returns
+// the server. It is not rerun: a rerun would queue the attempt again while
+// still holding a server, so the caller's own retry decides. Two seconds is
+// far above an ordinary lock wait and below every caller's stop.
+const PgLockTimeout = 2 * time.Second
+
+// Bounds how long the transaction's statements wait for a lock, in place of
+// `PgLockTimeout`. Non-positive leaves lock waits to the server's default,
+// unbounded. A later option replaces an earlier one.
+type TxLockTimeout time.Duration
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
@@ -924,6 +944,9 @@ func MaintenanceTx(ctx context.Context, callback func(PgTx), options ...any) {
 }
 
 func Tx(ctx context.Context, callback func(PgTx), options ...any) {
+	// a main-pool transaction bounds its lock waits (`PgLockTimeout`); the
+	// caller's own `TxLockTimeout`, later in the options, replaces the bound
+	options = append([]any{TxLockTimeout(PgLockTimeout)}, options...)
 	c := func() {
 		txWithPool(ctx, safePool, callback, options...)
 	}
@@ -984,6 +1007,29 @@ func beginTx(ctx context.Context, conn PgConn, txOptions pgx.TxOptions, timeout 
 	return conn.BeginTx(beginCtx, txOptions)
 }
 
+// The BEGIN of `txOptions` followed by the transaction's lock bound, as one
+// simple-protocol round trip (pgx sends a statement without arguments that
+// way). The BEGIN is pgx's own form of the options, or the caller's
+// `BeginQuery`. `SET LOCAL` ends with the transaction, so the bound never
+// reaches another client of the pooler's server.
+func beginSqlWithLockTimeout(txOptions pgx.TxOptions, lockTimeout time.Duration) string {
+	begin := txOptions.BeginQuery
+	if begin == "" {
+		parts := []string{"begin"}
+		if txOptions.IsoLevel != "" {
+			parts = append(parts, "isolation level", string(txOptions.IsoLevel))
+		}
+		if txOptions.AccessMode != "" {
+			parts = append(parts, string(txOptions.AccessMode))
+		}
+		if txOptions.DeferrableMode != "" {
+			parts = append(parts, string(txOptions.DeferrableMode))
+		}
+		begin = strings.Join(parts, " ")
+	}
+	return fmt.Sprintf("%s; set local lock_timeout = %d", begin, max(int64(1), lockTimeout.Milliseconds()))
+}
+
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	txWithConnection(ctx, func(body func(PgConn)) {
 		dbWithPool(ctx, pool, body, options...)
@@ -1003,6 +1049,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 	}
 	beginTimeout := PgBeginTimeout
 	statementStopTimeout := PgStatementStopTimeout
+	// unbounded unless the entry point or the caller bounds it (see `Tx`)
+	lockTimeout := time.Duration(0)
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -1014,6 +1062,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			beginTimeout = time.Duration(v)
 		case txStatementStopTimeout:
 			statementStopTimeout = time.Duration(v)
+		case TxLockTimeout:
+			lockTimeout = time.Duration(v)
 		case pgx.TxOptions:
 			txOptions = v
 		case pgx.TxIsoLevel:
@@ -1029,6 +1079,10 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 	if pgReadOnly.Load() {
 		// an explicit read-write BEGIN would override the session default
 		txOptions.AccessMode = pgx.ReadOnly
+	}
+	if 0 < lockTimeout {
+		// in the BEGIN round trip itself, so the bound costs no statement
+		txOptions.BeginQuery = beginSqlWithLockTimeout(txOptions, lockTimeout)
 	}
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)

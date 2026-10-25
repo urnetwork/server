@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strconv"
 	// "strings"
-	// "sync"
+	"sync"
 
 	"bytes"
 	"fmt"
@@ -589,6 +589,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		} else {
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
+		// one registration per network per process waits for the network's
+		// allocation lock; the rest wait here, holding no pooled connection
+		// (network_client_registration_gate.go). The gate opens when the
+		// transaction ends, before the cache writes below.
+		leaveRegistrationGate := func() {}
+		if registration != nil {
+			leave, err := networkClientRegistrations.enter(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			if err != nil {
+				authClientError = err
+				return
+			}
+			leaveRegistrationGate = sync.OnceFunc(leave)
+			defer leaveRegistrationGate()
+		}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
 			if !validateParent {
@@ -865,6 +879,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				}
 			}
 		}, registrationTxOptions...)
+		leaveRegistrationGate()
 
 		if validateParent && authClientError == nil && authClientResult != nil && authClientResult.Error == nil {
 			// Optional cache refresh cannot turn a committed identity into a
