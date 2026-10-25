@@ -176,7 +176,7 @@ func readFleetMimir(ctx context.Context, env *probeEnv, query string, at time.Ti
 		" --data-urlencode " + shellSingleQuote("query="+query) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(at.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	return shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	return mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, read.MaxResponseBytes)
 }
 
 // A bounded range read: the same tagged instant expression evaluated at every
@@ -193,7 +193,7 @@ func readFleetMimirRange(ctx context.Context, env *probeEnv, query string, start
 		" --data-urlencode " + shellSingleQuote("end="+strconv.FormatInt(end.Unix(), 10)) +
 		" --data-urlencode " + shellSingleQuote("step="+strconv.FormatInt(int64(step/time.Second), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query_range'"
-	return shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	return mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, read.MaxResponseBytes)
 }
 
 // One tagged series of a range read, by evaluation step in Unix seconds.

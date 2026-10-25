@@ -1,0 +1,86 @@
+// Supporting mechanism screen only; never an end-to-end scoring substitute.
+package connect
+
+import (
+	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+)
+
+// Uses the actual constructor/default cache policy with one immutable lease.
+// Every measured access must remain a hit; refresh/cold work invalidates this run.
+func BenchmarkResidentContractWarmCacheParallel(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newResidentContractManager(ctx, cancel, server.NewId(), DefaultExchangeSettings())
+	source, destination := server.NewId(), server.NewId()
+	var reads, refusals atomic.Int64
+	manager.readContract = func(context.Context, server.Id, server.Id) residentContractAllowance {
+		reads.Add(1)
+		return residentContractAllowance{active: true, validUntil: time.Now().Add(time.Hour)}
+	}
+	if !manager.HasActiveContract(source, destination) {
+		b.Fatal("initial positive read refused")
+	}
+	b.SetParallelism(16)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if !manager.HasActiveContract(source, destination) {
+				refusals.Add(1)
+			}
+		}
+	})
+	b.StopTimer()
+	if got := reads.Load(); got != 1 {
+		b.Fatalf("not a pure warm-hit observation: source reads=%d", got)
+	}
+	if got := refusals.Load(); got != 0 {
+		b.Fatalf("healthy cache hits refused=%d", got)
+	}
+	if err := manager.CloseAndWait(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+}
+
+// Separately exposes map-publication cost with 128 live pairs. The explicit
+// read-worker registration seam excludes Redis/admission latency, so this is
+// an allocation/owner-lock cost screen, not a production request benchmark.
+func BenchmarkResidentContractRefreshPublication(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newResidentContractManager(ctx, cancel, server.NewId(), DefaultExchangeSettings())
+	source := server.NewId()
+	destinations := make([]server.Id, 128)
+	manager.readContract = func(context.Context, server.Id, server.Id) residentContractAllowance {
+		return residentContractAllowance{active: true, validUntil: time.Now().Add(time.Hour)}
+	}
+	for i := range destinations {
+		destinations[i] = server.NewId()
+		if !manager.HasActiveContract(source, destinations[i]) {
+			b.Fatal("initial live pair refused")
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		destination := destinations[i%len(destinations)]
+		pair := model.NewUnorderedTransferPair(source, destination)
+		manager.stateLock.Lock()
+		manager.activeReads[pair] = true
+		manager.readWorkers.Add(1)
+		manager.stateLock.Unlock()
+		if !manager.performActiveContractRead(pair, source, destination) {
+			b.Fatal("registered positive refresh refused")
+		}
+	}
+	b.StopTimer()
+	if err := manager.CloseAndWait(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+}

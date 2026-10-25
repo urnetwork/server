@@ -377,6 +377,8 @@ func runCapabilityProbeShard(
 				return capabilityProbeOutcome{}, err
 			}
 			finished = true
+			placement := newProbeEdgePlacement(ctx)
+			defer placement.Close()
 			next, pass, err := finish(providertunnel.Config{
 				ApiUrl:            urlProbeSettings.APIURL,
 				PlatformUrl:       urlProbeSettings.PlatformURL,
@@ -387,6 +389,7 @@ func runCapabilityProbeShard(
 				Version:           server.RequireVersion(),
 				ClientCredentials: credentials,
 				ClientControl:     localControl,
+				PlatformPlacement: placement,
 			})
 			finishErr = err
 			return capabilityProbeOutcome{sweep: next, pass: pass}, err

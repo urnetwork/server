@@ -177,8 +177,8 @@ func (self capabilityProbeProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		return []finding{cannotObserveFinding("capability-probe/metrics", errors.New("no services host is configured for the loopback Mimir query"))}, nil
 	}
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(capabilityProbeQuery(env.cfg.env))
-	output, _, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil,
-		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(capabilityProbeResponseMax)+" '"+queryUrl+"'")
+	output, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, metricHosts, nil,
+		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(capabilityProbeResponseMax)+" '"+queryUrl+"'", capabilityProbeResponseMax)
 	if err != nil {
 		return []finding{cannotObserveFinding("capability-probe/metrics", fmt.Errorf("query Mimir through service gateways: %w", err))}, nil
 	}

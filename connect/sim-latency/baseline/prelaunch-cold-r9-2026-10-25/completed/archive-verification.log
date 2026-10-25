@@ -1,0 +1,3 @@
+evidence-manifest.json verified bindings=429
+worker-result.json verified bindings=7
+PASS reconstructed_gzip_sha256=edbd5340afe6facfc6b92bfb1a933e3ceac84bbf7e280249874ceaf9a388f8aa regular_files=440 original_files=440 top_level_copies=7 gates=6 controls=9 candidates=9

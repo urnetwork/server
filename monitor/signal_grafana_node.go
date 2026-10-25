@@ -127,7 +127,7 @@ func (grafanaNodeProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				"scheduler_check_allowed=" + shellSingleQuote(schedulerCheckAllowed) + "\n" +
 				"grafana_unit_pattern=" + shellSingleQuote("warp-"+env.cfg.env+"-grafana-*-g1.service") + "\n" +
 				grafanaNodeScript
-			output, err := env.runner.shell(ctx, target, command)
+			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
 				results <- grafanaNodeResult{host: target, err: err}
 				return

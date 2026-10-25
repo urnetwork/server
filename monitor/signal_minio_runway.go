@@ -315,7 +315,7 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	}
 	grid := settings.Estimator.grid(now)
 	command := storageRunwayRangeCommand("monitor-minio-runway", minioRunwayQuery(env.cfg.env, hostNames, settings), grid, settings.Estimator)
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	output, gateway, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, settings.Estimator.MaxResponseBytes)
 	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 		return nil, lifecycleErr
 	}

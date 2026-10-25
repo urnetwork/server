@@ -1,6 +1,60 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 03:11 UTC
+## Current preparation pointer — October 25, 15:31 UTC
+
+The authoritative acceptance index is [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md).
+The [current-state.json](current-state.json) handoff binds the current process;
+verify that process and its actual artifacts before acting. Production has not
+been activated, and user-confirmed main maintenance remains an activation hold.
+
+The corrected evaluated server is
+`c1f9dda603d6279666fca5d92b99c5663306c5f7`, with canonical ten-repository source
+digest `5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e`.
+The other nine pins are unchanged; operator-proxy is retired. Config preparation
+commit `0c6dcaa1da2a680696f53c043291df7860c8136f` records the source ledger.
+Its actual Go 1.27.3 evaluator image is
+`sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3`;
+see [exact image evidence](ARTIFACTS-CANCELED-STOP-2026-10-25.md).
+The separate trusted host release corrects demonstrated host-gateway exposure,
+with [network proofs and three full 514-test passes](NETWORK-BOUNDARY-2026-10-25.md).
+
+The old formal campaign stopped at its first cohort after a canceled socket
+write was incorrectly classified as unexpected recovery. Its complete failure
+is preserved and its other positions remain unstarted. The minimal correction
+passed deterministic pre-fix/fixed proofs and three full evaluated-source suites;
+neither the stability gate nor the statistical margin was weakened.
+
+The [replacement protocol](CALIBRATION-RESTART-2026-10-25.md) and
+[all five frozen input sets](CALIBRATION-RESTART-FREEZE-2026-10-25.md) were pushed
+as `2844161a9` before measurement. Fresh position 1 started at 15:28:07 UTC with
+an 18:28:07 UTC deadline. It also serves corrected-release full-window functional
+qualification, without counting as an additional observation. Only this position
+is currently authorized. No tests, builds or other scoring may overlap it.
+No accepted new baseline, calibrated margin or completed cohort is claimed yet.
+
+The warm-reader pilot completed but was slower; it failed its directional
+screen and is not a qualified faster reference. The owner-admission-map draft
+is a separate **untested** hypothesis, not a source change or accepted reference.
+Reference qualification and held-out seeds remain required.
+
+Read-only correction at **15:50 UTC**: current Sille config routes MinIO to
+`172.28.208.176:23900`, which returns HTTP 200 at its health/ready endpoint.
+Earlier `.177` refusals were a stale probe target, not current MinIO readiness.
+No service or config was changed. This does not prove authenticated locking,
+versioning, replication or capacity. API still returned 503 at 15:48 UTC and
+the dedicated review-provider key was absent. Live provider/host/readiness,
+artifact durability, monitoring and partner release deltas remain open. The
+opening remains fixed at **2026-10-28T00:00:00Z**, not postponed or redefined.
+
+## Earlier preparation pointer — October 25, 06:12 UTC
+
+The following section is historical. Its release and pending-action statements
+describe 06:12 UTC, not the current corrected-release state above.
+
+The compact [current-state.json](current-state.json) records the current
+preparation handle, immutable source/image identities, completed evidence,
+external holds and next safe action. It is a dated snapshot; confirm the live
+handle and artifacts rather than treating it as runtime authority.
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -47,7 +101,7 @@ completion, not a qualified scale or epoch baseline. The 3,600-provider on point
 also completed (568 seconds, 2,482 measured rows, two failed rows, authenticated
 marker and clean teardown), with retained SQL serialization/cancellation events.
 Neither direct-controller point has a final resource report. Full gate
-qualification and cold R9 timing remain pending. The off-mode phase completed
+qualification required the full cold R9 check recorded below. The off-mode phase completed
 at all four counts (430/447/505/793 seconds, respectively), with no measured
 failures at 1,800/3,600/7,200 and 22 at 15,000. Actual four-child off-mode
 arguments, complete markers and cleanup were verified. Eight exact outcomes
@@ -58,7 +112,15 @@ The first cold R9 invocation stopped before any replicate at caller admission:
 privileged precheck reads did not match the unprivileged manager invocation.
 Leaf permissions and policy remain unchanged. The corrected whole-root context
 matches the configured manager, passed direct reads/hashes and three passes of
-deterministic Go principal regressions; the next full invocation is pending.
+deterministic Go principal regressions. The corrected invocation started at
+03:15:24 UTC and completed at 06:12:12 UTC, exit 0, in 10,608 seconds—192 seconds
+inside the three-hour limit. All nine fresh controls, offline no-op build and
+nine candidates completed; G1–G6 passed and exact cleanup was verified. The no-op
+was placeable but neither significant nor takeover-eligible (Welch p=0.532133).
+The [complete archive](../baseline/prelaunch-cold-r9-2026-10-25/completed/README.md)
+preserves all 440 original files, with independent verification of the original
+bytes, 429 manifest bindings and seven typed result bindings. It is an offline
+fixture, not a production job, formal noise campaign or accepted epoch baseline.
 Exact failed/prechecked records are in
 [the cold-admission archive](../baseline/prelaunch-cold-r9-2026-10-25/README.md).
 The separate warm-reader research patch passed 312 selected race-enabled

@@ -150,8 +150,8 @@ func (self *egressAdmissionProbe) check(ctx context.Context, env *probeEnv) (res
 		}
 	}()
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(egressAdmissionQuery(env.cfg.env))
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
-		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(egressAdmissionResponseMax)+" '"+queryUrl+"'")
+	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
+		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(egressAdmissionResponseMax)+" '"+queryUrl+"'", egressAdmissionResponseMax)
 	// A returned body cannot outlive the owner, even when the source ignores
 	// cancellation. Preserve a returned source cause without rendering it.
 	if ctx.Err() != nil {

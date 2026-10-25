@@ -1107,3 +1107,104 @@ why.
 - The sdk's `SetAppBackgrounded` and `SetNetworkMetered` exist on
   `DeviceLocal`. Until the android and apple apps call them, no device
   declines for that reason.
+
+## 13. Placement of platform-hosted clients (2026-10-25)
+
+**Problem.** On 2026-10-25 edge-3 and edge-4 ran at 92–96% CPU with 157k and
+124k residents. edge-0 held 48k at 49% CPU on 96 cores, and edge-1 held 44k at
+72%. Contract creation took 1.4–2.5 s per reply as saturated connect processes
+held Postgres transactions open. Counting the lb's established connections by
+source showed that the two hosted proxy hosts alone held 33.3k of edge-3's
+92.6k connections and 28.1k of edge-4's 80.3k, against about 7k each on edge-0
+and edge-1. The proxies resolve the platform name through DoH, route53 answers
+one weighted record per query, and a large resolver caches that answer for the
+60 s TTL. So each proxy host's windows land on whichever edge the cache held,
+and the identity churn (about 226 new window identities a second) refills the
+same edges. The mover could move these clients afterwards, but a client that
+runs on the platform can read the load model itself and be placed right the
+first time.
+
+**Design (owner, 2026-10-25).** A client the platform hosts consults the load
+model and dials the least-loaded edge. The proxy's hosted windows do, and so do
+the provider quality and capability probes.
+
+- **Client (connect `platform_placement.go`):** `PlatformTransportSettings.
+  Placement` is a `PlatformPlacement`: `PlatformPlacementTargets(host)` answers
+  at most one address per family, and `PlatformPlacementFailed(host, ips)`
+  reports a failed dial.
+  - **Precedence:** with no move target or move preference, every H1 and plain
+    H3 dial attempt asks the placement. The answer stands in for the platform
+    host exactly like a move target: the literal is dialed while TLS SNI and
+    the HTTP host keep the name. A move outranks a placement.
+  - **Without moves:** placement works with or without `EnableMove`, so
+    probes, which keep moves off (D15), are placed as they connect.
+  - **Stickiness:** the client's `ResidentMoveTracker` keeps the answer per
+    family for `PlacementPreferDuration` (6h), apart from move preferences, so
+    reconnects return to the edge that holds the resident.
+  - **Failure:** a failed dial drops the kept answer, holds those addresses on
+    the client for `PlacementFailHold` (10 min) and reports them, so the next
+    attempt asks again. With every address offered held, the name resolves.
+  - **Alt:** alt-redirected carriers are never placed, as with moves.
+- **Server (`server/edgeplacement`):** an `EdgePlacement` reads `{connect_move}control`
+  and the `{connect_load}` table every 10 s, and the `services.yml` inventory
+  every 5 min. Its first read happens in the constructor.
+  - **Fleet:** the fleet is computed as the mover computes it: fresh,
+    non-draining records; capacity = cores × `move_weight`; the mean over the
+    capacity of hosts that are not evacuating.
+  - **Choice:** an arrival goes to a host whose load is below the band edge,
+    mean × 1.1, in proportion to its headroom in residents. Hosts at ≥ 0.8 CPU
+    (or with CPU unknown) yield while another host with headroom is below
+    0.8. With no headroom anywhere, capacity decides.
+  - **Address:** one address per family is weighted by `dns_weight`.
+  - **No answer:** it answers only for `connect.<services domain>`. It gives
+    none before the first read, once its snapshot is older than 2 min, or
+    while the control sets `placement` to off.
+  - **Holds:** an address whose dial failed is held process-wide for 2 min.
+  - **Metrics:** `urnetwork_edge_placement_{placements,misses,dial_failures,model_reads}_total`
+    and `urnetwork_edge_placement_hosts`.
+- **Control:** `{connect_move}control` gains `placement` (true/false, on/off).
+  It can turn placement off fleet-wide at once and never on past the code
+  switch (`EnablePlacement`, default on). The mover ignores it.
+- **Wiring:**
+  - The proxy main builds one `EdgePlacement` per process.
+    `ProxyDeviceManagerSettings` hands it to every device, and
+    `DeviceLocalSettings.PlatformPlacement` passes it to each window's
+    transport settings. A platform device has no provider, so only windows are
+    placed. The proxy forces IPv4 for platform traffic, so its windows dial the
+    placed IPv4 address.
+  - Each taskworker capability and URL probe pass builds its own
+    `EdgePlacement` for its tunnels (`providertunnel.Config.PlatformPlacement`)
+    and closes it when the pass ends.
+
+**Tests.**
+- **connect `platform_placement_test.go`:** placed dial keeps the hostname;
+  stickiness; placement without moves; failure → report, hold, name; a move
+  preference outranks placement; pinned family; alt never redirected; tracker
+  separation.
+- **sdk `device_local_placement_test.go`:** window settings carry the device's
+  placement.
+- **server:**
+  - `edgeplacement/*_test.go`: fleet as the mover reads it; headroom
+    proportionality; balanced fleet by capacity; CPU ceiling; held addresses;
+    DNS weights; platform-host match; freshness and aging; control off and
+    code switch; failed read keeps the snapshot; evacuation; process-wide
+    hold; inventory reload interval.
+  - `model/connect_move_control_test.go`: placement narrowing.
+  - `proxy/proxy_device_placement_test.go` and `cli/proxy/main_test.go`: the
+    process placement reaches every device and window.
+  - `qualityprobe/providertunnel`: probe windows carry the placement with
+    moves off.
+  - `taskworker/work/probe_edge_placement_test.go`: every probe pass's
+    tunnel config is placed.
+
+**Rollout.** Deploy proxy and taskworker; connect needs nothing new. The kill
+switch is `HSET {connect_move}control placement off`. Measure:
+- per-host `urnetwork_connect_resident_clients` and the lb's connections from
+  the proxy hosts;
+- `urnetwork_edge_placement_placements_total` by `edge_host`;
+- misses by reason;
+- edge CPU;
+- contract reply latency.
+
+The proxies' windows rotate every few minutes, so placement should move most
+of their 61k edge-3/4 connections within tens of minutes, without moves.

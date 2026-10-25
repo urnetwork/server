@@ -1,0 +1,148 @@
+{
+  "archive_regular_files": 30,
+  "benchmark_medians_ns_per_op": {
+    "baseline/BenchmarkResidentContractRefreshPublication": 465.6,
+    "baseline/BenchmarkResidentContractWarmCacheParallel": 390.4,
+    "candidate/BenchmarkResidentContractRefreshPublication": 18772,
+    "candidate/BenchmarkResidentContractWarmCacheParallel": 103.5
+  },
+  "benchmark_observations": {
+    "baseline": {
+      "BenchmarkResidentContractRefreshPublication": [
+        {
+          "allocs_per_op": 1,
+          "bytes_per_op": 48,
+          "ns_per_op": 472
+        },
+        {
+          "allocs_per_op": 1,
+          "bytes_per_op": 48,
+          "ns_per_op": 459.2
+        },
+        {
+          "allocs_per_op": 1,
+          "bytes_per_op": 48,
+          "ns_per_op": 465.6
+        },
+        {
+          "allocs_per_op": 1,
+          "bytes_per_op": 48,
+          "ns_per_op": 459.9
+        },
+        {
+          "allocs_per_op": 1,
+          "bytes_per_op": 48,
+          "ns_per_op": 472.4
+        }
+      ],
+      "BenchmarkResidentContractWarmCacheParallel": [
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 390.4
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 339.4
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 393
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 333.2
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 410.1
+        }
+      ]
+    },
+    "candidate": {
+      "BenchmarkResidentContractRefreshPublication": [
+        {
+          "allocs_per_op": 6,
+          "bytes_per_op": 21904,
+          "ns_per_op": 19720
+        },
+        {
+          "allocs_per_op": 6,
+          "bytes_per_op": 21904,
+          "ns_per_op": 18811
+        },
+        {
+          "allocs_per_op": 6,
+          "bytes_per_op": 21904,
+          "ns_per_op": 18672
+        },
+        {
+          "allocs_per_op": 6,
+          "bytes_per_op": 21904,
+          "ns_per_op": 18772
+        },
+        {
+          "allocs_per_op": 6,
+          "bytes_per_op": 21904,
+          "ns_per_op": 18746
+        }
+      ],
+      "BenchmarkResidentContractWarmCacheParallel": [
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 102.8
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 103.3
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 103.5
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 104
+        },
+        {
+          "allocs_per_op": 0,
+          "bytes_per_op": 0,
+          "ns_per_op": 104.3
+        }
+      ]
+    }
+  },
+  "chunks": [
+    {
+      "bytes": 198503,
+      "path": "cohort.tar.gz.part-00",
+      "sha256": "9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90"
+    }
+  ],
+  "end_to_end_faster_reference_qualified": false,
+  "exclusions": [
+    "full source repositories (reproducible from ten pins and exact patch)",
+    "services directories and credentials",
+    "Go/build caches"
+  ],
+  "expected_behavioral_failures": 2,
+  "gzip_sha256": "9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90",
+  "kind": "supporting_snapshot_correctness_benchmark_screen",
+  "official": false,
+  "passing_race_test_executions": 516,
+  "publication_median_cost_ratio": 40.31786941580756,
+  "schema": 1,
+  "scoring_executions": 0,
+  "selected_original_files": 30,
+  "setup_failures_zero_tests": 2,
+  "setup_receipt_limits": "The module-name typo terminal is retained in tool transcript; no standalone original terminal file existed. The archived setup-module run script and this explicit description preserve its cause without inventing a raw log.",
+  "warm_hit_median_improvement_percent": 73.48872950819671
+}

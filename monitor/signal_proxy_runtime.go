@@ -143,13 +143,15 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(proxyRuntimeQuery(env.cfg.env))
-	out, metricHost, err := shellFirstServiceGateway(
+	out, metricHost, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
+	if findings, overflow := mimirShellOverflowFindings(err, "runtime/proxy-live-set"); overflow && ctx.Err() == nil {
+		return findings, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("proxy runtime: query Mimir through service gateways: %w", err)
 	}

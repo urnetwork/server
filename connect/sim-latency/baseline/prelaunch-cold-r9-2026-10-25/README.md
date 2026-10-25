@@ -1,8 +1,13 @@
 # Cold R9 preparation — caller admission correction
 
-Status: **no cold R9 result or accepted baseline yet**. The first attempt failed
-before any replicate, build or container. Its unchanged input and failed
-precheck evidence remain here; a second fixture is only prechecked, not scored.
+Status: **the corrected cold R9 invocation passed in 10,608 seconds**
+(03:15:24–06:12:12 UTC), 192 seconds inside the three-hour cap. All nine controls,
+the offline no-op build and nine candidates completed; G1–G6 passed, the no-op
+was placeable and was not statistically significant or takeover-eligible.
+Exact cleanup was verified. [Completed evidence](completed/README.md) retains
+the full artifact tree and typed result. No official epoch baseline is accepted.
+The first attempt failed before any replicate, build or container; its unchanged
+input and failed precheck evidence remain here alongside the completed fixture.
 Both are explicitly offline, with synthetic API/worker/hardware labels, never
 live jobs, provider receipts or host-readiness attestations.
 
@@ -19,7 +24,7 @@ identity, not a claim that production has already been activated.
 
 The corrected fixture keeps every source/image/input hash, timer, R9 count,
 margin, resource gate and leaf permission unchanged. Its artifact paths and
-attempt number differ, and **the entire preflight and future evaluator use the
+attempt number differ, and **the entire preflight and evaluator used the
 same UID-0 context**. Direct leaf reads and hashes now pass without elevating
 only individual probes. No main API, database, MinIO, vault or service changed.
 There was no measurement to discard or reuse from the failed admission.
@@ -67,7 +72,7 @@ the test's completion criterion.
   known to be insufficient; do not use its privileged hash as an admission pass.
 
 The enclosing manifest authenticates all files. No completion marker, resource
-score or baseline is invented for the failed admission. A real full evaluator
-run, unchanged G1–G6, three-hour budget, variance/reference qualification,
-live readiness and genuine review/test-provider receipts remain necessary;
+score or baseline is invented for the failed admission. The corrected full
+evaluator passed unchanged G1–G6 and the three-hour budget. Fresh statistical
+and reference calibration, live readiness and genuine review/test-provider receipts remain necessary;
 see [the predeclared protocol](../../launch/COLD-R9-PROTOCOL-2026-10-25.md).

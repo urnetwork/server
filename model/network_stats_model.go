@@ -247,8 +247,21 @@ func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.I
 	contractTimeStampGate.Store(payerClientId, now)
 
 	server.HandleError(func() {
-		server.Db(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); ok && server.IsLockTimeout(err) {
+					// the row's lockers held it past the bound: a later
+					// contract stamps it after the retry interval, not the hour
+					contractTimeStampGate.Store(payerClientId, now.Add(contractTimeStampRetryInterval-clientAuthTimeRefreshMinInterval))
+					return
+				}
+				panic(r)
+			}
+		}()
+		// a bounded wait, so the stamp never pins a pooled server behind the
+		// row's lockers (every contract creation share-locks client rows)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 	                UPDATE network_client AS top
@@ -263,9 +276,17 @@ func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.I
 				now,
 				now.Add(-clientAuthTimeRefreshMinInterval),
 			))
-		}, server.OptReadWrite())
+		}, server.TxReadCommitted, server.TxLockTimeout(contractTimeStampLockTimeout))
 	})
 }
+
+// The stamp is best effort and trails a committed contract, so it waits for a
+// busy row only briefly.
+const contractTimeStampLockTimeout = 500 * time.Millisecond
+
+// After a stamp the row's lockers refused, a later contract retries this soon
+// rather than after the full refresh interval.
+const contractTimeStampRetryInterval = time.Minute
 
 // Testing_ResetContractTimeStampGate clears the process-local stamp
 // throttle so a test can observe consecutive stamps.

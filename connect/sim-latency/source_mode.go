@@ -46,7 +46,7 @@ func validateSourceActivationMode(intent *model.CompetitionSourceActivation, set
 		return errors.New("source activation manifest digest does not match")
 	}
 	generation, err := manifest.generation(intent.SourceGeneration)
-	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || generation.SignificantImprovementPercent != intent.Threshold*100 {
+	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || !sourceMarginMatches(generation.SignificantImprovementPercent, intent.Threshold) {
 		return errors.New("source activation differs from its manifest generation and margin")
 	}
 	return nil

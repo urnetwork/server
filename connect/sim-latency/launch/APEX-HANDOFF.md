@@ -32,6 +32,38 @@ do not treat a provisional recipient as source approval or proof of payment.
 The sections explicitly marked historical below describe the old v1 contract
 and September staging records, not instructions for new v2 admissions.
 
+### Partner draft release deltas — October 25
+
+The exact [change-667 Markdown draft](https://docs.macrocosmos.ai/~/changes/667/subnets/subnet-1-apex/subnet-1-current-competitions/urnetwork-latency-competition.md)
+was retrieved read-only on October 25. SHA-256
+`17450afaa0b9b7e4f76761e9937b2b399ba61cd4d198544a3347eeb48e5f8844`
+matches the October 23 review snapshot; do not assume later UR changes are
+already reflected there.
+
+Read-only recheck at **2026-10-25T11:32:17Z** returned the same exact Markdown
+digest. It still names Go 1.27.2 in both the environment table and offline-build
+rules, and describes manual post-election review with separate next-source
+approval. These are confirmed pending partner release deltas, not evidence that
+the new Go 1.27.3/automatic-review release is published. No external document was
+modified. Private capture: `temp/partner-doc-readonly-20261025.Pbgom9nY/draft.md`.
+
+Before production publication, update:
+
+- Compiler/runtime: prospective production requires exact Go **1.27.3**,
+  evidenced by the new evaluator artifact, not the historical staging version.
+- Closing: qualified automatic Sol 6.1 max review follows provisional reward
+  publication. Pending review does not start a new epoch on the incumbent;
+  approved-winner build/readiness gates progression, and only exhausted eligible
+  ranking permits carry-forward. Existing historical seasons stay unchanged.
+- Scale/margin: new-checkpoint qualification is still pending; historical
+  1,800-provider/16.1% values are not a new final release confirmation.
+- Local example: keep generated workload/CSV/metadata/markers outside the clean
+  checkout; distinguish an unchanged-baseline run from isolated candidate
+  evaluation. The prior RC reviews contain the detailed reproduction.
+
+These are release-delta notes, not another independent model review, partner
+approval, live deployment confirmation or authorization to change a serving round.
+
 ## Historical v1 competition contract
 
 The competition is a six-epoch season. Each epoch accepts submissions for

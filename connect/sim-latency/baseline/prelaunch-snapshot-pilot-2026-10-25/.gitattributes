@@ -1,0 +1,3 @@
+# Unified-diff context markers precede Go tabs and blank lines by design.
+# Preserve artifact bytes; this does not relax whitespace checks on Go sources.
+predeclared/*.patch whitespace=-blank-at-eol,-space-before-tab

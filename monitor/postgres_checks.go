@@ -6,6 +6,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -887,6 +888,30 @@ func (self pgVacuumProbe) id() string             { return "pg/dead-tuples" }
 func (self pgVacuumProbe) tier() string           { return tierWarn }
 func (self pgVacuumProbe) cadence() time.Duration { return 5 * time.Minute }
 
+// Only the debt decision's required fields are parsed here. The current query
+// has 25 cells; the supported legacy plain-table projection has 21. Optional
+// progress/horizon text and the legacy absent grouping tail remain unchanged.
+type vacuumHealthObservation struct {
+	deadTuples          int64
+	configuredThreshold int64
+}
+
+// Validates the debt decision without including source cells in errors.
+func parseVacuumHealthObservation(row pgRow) (vacuumHealthObservation, error) {
+	if (len(row) != 21 && len(row) != 25) || row.str(0) == "" {
+		return vacuumHealthObservation{}, fmt.Errorf("invalid response: vacuum-health observation shape")
+	}
+	dead, err := strconv.ParseInt(row.str(1), 10, 64)
+	if err != nil || dead < 0 {
+		return vacuumHealthObservation{}, fmt.Errorf("invalid response: vacuum-health dead count")
+	}
+	threshold, err := strconv.ParseInt(row.str(3), 10, 64)
+	if err != nil || threshold < -1 {
+		return vacuumHealthObservation{}, fmt.Errorf("invalid response: vacuum-health fixed threshold")
+	}
+	return vacuumHealthObservation{deadTuples: dead, configuredThreshold: threshold}, nil
+}
+
 func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
@@ -897,10 +922,21 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		return nil, err
 	}
 	findings := []finding{}
+	unknownSource := false
 	for _, r := range rows {
-		configuredThreshold := int64(atoiRow(r, 3))
+		observation, err := parseVacuumHealthObservation(r)
+		if err != nil {
+			if !unknownSource {
+				unknown := cannotObserveFinding(target, err)
+				unknown.frame = "vacuum-health-required-fields"
+				findings = append(findings, unknown)
+				unknownSource = true
+			}
+			continue
+		}
+		configuredThreshold := observation.configuredThreshold
 		alertThreshold := vacuumDeadTupleAlertThreshold(configuredThreshold)
-		if int64(atoiRow(r, 1)) <= alertThreshold {
+		if observation.deadTuples <= alertThreshold {
 			// Some pure cascade victims deliberately tolerate more dead space
 			// than query-critical tables. An explicit larger fixed threshold is
 			// policy, not an overdue vacuum.
@@ -1088,6 +1124,61 @@ func (self pgStatsLandmineProbe) id() string             { return "pg/stats-land
 func (self pgStatsLandmineProbe) tier() string           { return tierWarn }
 func (self pgStatsLandmineProbe) cadence() time.Duration { return 24 * time.Hour }
 
+// One authoritative aggregate includes plain-table zero counts as well as partition evidence.
+// The SQL's missing sentinels are values; absent cells or malformed counts are not.
+type pgStatsLandmineObservation struct {
+	nDistinct                string
+	zeroLegacyPartialIndexes int64
+	structuralIndexShapes    int64
+	statisticsTarget         string
+	leaves                   int64
+	leafTargetMismatches     int64
+	firstLeafTargetMismatch  string
+}
+
+// Validate the native seven-cell contract before choosing any structural verdict.
+// Errors retain no source values; the caller reports unavailable evidence.
+func parsePgStatsLandmineRows(rows []pgRow) (pgStatsLandmineObservation, error) {
+	row, err := pgAggregateRow(rows, 7)
+	if err != nil {
+		return pgStatsLandmineObservation{}, err
+	}
+	var counts [4]int64
+	for i, column := range []int{1, 2, 4, 5} {
+		value, err := parseStrictInt64(row.str(column))
+		if err != nil || value < 0 {
+			return pgStatsLandmineObservation{}, fmt.Errorf("invalid PostgreSQL planner aggregate: expected nonnegative integer counts")
+		}
+		counts[i] = value
+	}
+	if counts[1] > 3 || counts[3] > counts[2] {
+		return pgStatsLandmineObservation{}, fmt.Errorf("invalid PostgreSQL planner aggregate: inconsistent structural or partition counts")
+	}
+	nDistinct := row.str(0)
+	if nDistinct != "missing" {
+		value, err := strconv.ParseFloat(nDistinct, 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < -1 {
+			return pgStatsLandmineObservation{}, fmt.Errorf("invalid PostgreSQL planner aggregate: invalid legacy statistic")
+		}
+	}
+	statisticsTarget := row.str(3)
+	if statisticsTarget != "missing" {
+		value, err := parseStrictInt64(statisticsTarget)
+		if err != nil || value < -1 {
+			return pgStatsLandmineObservation{}, fmt.Errorf("invalid PostgreSQL planner aggregate: invalid statistics target")
+		}
+	}
+	firstMismatch := row.str(6)
+	if (counts[3] == 0) != (firstMismatch == "") {
+		return pgStatsLandmineObservation{}, fmt.Errorf("invalid PostgreSQL planner aggregate: inconsistent partition witness")
+	}
+	return pgStatsLandmineObservation{
+		nDistinct: nDistinct, zeroLegacyPartialIndexes: counts[0], structuralIndexShapes: counts[1],
+		statisticsTarget: statisticsTarget, leaves: counts[2], leafTargetMismatches: counts[3],
+		firstLeafTargetMismatch: firstMismatch,
+	}, nil
+}
+
 func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
@@ -1097,22 +1188,17 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	if err != nil {
 		return nil, err
 	}
-	nDistinct := ""
-	zeroLegacyPartialIndexes := 0
-	structuralIndexShapes := 0
-	statisticsTarget := ""
-	// once transfer_contract is partitioned: its leaf partitions, how many keep
-	// an open-column target other than the parent's, and the first of them
-	leaves, leafTargetMismatches, firstLeafTargetMismatch := 0, 0, ""
-	if len(rows) > 0 {
-		nDistinct = rows[0].str(0)
-		zeroLegacyPartialIndexes = atoiRow(rows[0], 1)
-		structuralIndexShapes = atoiRow(rows[0], 2)
-		statisticsTarget = rows[0].str(3)
-		leaves = atoiRow(rows[0], 4)
-		leafTargetMismatches = atoiRow(rows[0], 5)
-		firstLeafTargetMismatch = rows[0].str(6)
+	observation, err := parsePgStatsLandmineRows(rows)
+	if err != nil {
+		return nil, err
 	}
+	nDistinct := observation.nDistinct
+	zeroLegacyPartialIndexes := observation.zeroLegacyPartialIndexes
+	structuralIndexShapes := observation.structuralIndexShapes
+	statisticsTarget := observation.statisticsTarget
+	leaves := observation.leaves
+	leafTargetMismatches := observation.leafTargetMismatches
+	firstLeafTargetMismatch := observation.firstLeafTargetMismatch
 	leafTargetsDiffer := 0 < leaves && 0 < leafTargetMismatches
 	if structuralIndexShapes != 3 || statisticsTarget != "300" || leafTargetsDiffer {
 		action := "Apply the pending database migrations before deploying the rewritten API and Connect readers. They build all three isolated indexes online, then cap the open-column statistics target at 300; do not put an unbounded large-table ANALYZE ahead of them."

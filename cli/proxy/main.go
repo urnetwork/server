@@ -13,6 +13,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/edgeplacement"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy"
 	"github.com/urnetwork/server/router"
@@ -52,10 +53,15 @@ func configureProxyControlFamily() {
 
 // Couples the identity-restoration hold to the deployment handoff feature.
 // A plain manager used by tests remains immediately restorable; production
-// releases this hold through wg.CompleteDeploymentHandoff.
-func newProxyDeviceManagerSettings(settings *proxy.ProxySettings) *proxy.ProxyDeviceManagerSettings {
+// releases this hold through wg.CompleteDeploymentHandoff. Every hosted window
+// dials the edge `platformPlacement` chooses.
+func newProxyDeviceManagerSettings(
+	settings *proxy.ProxySettings,
+	platformPlacement connect.PlatformPlacement,
+) *proxy.ProxyDeviceManagerSettings {
 	managerSettings := proxy.DefaultProxyDeviceManagerSettings()
 	managerSettings.HoldWindowIdentityRestore = settings.EnableWgHandoff
+	managerSettings.PlatformPlacement = platformPlacement
 	return managerSettings
 }
 
@@ -130,7 +136,13 @@ Options:
 	providerAppearances := model.NewProviderAppearances(ctx, model.DefaultProviderAppearanceSettings())
 	defer providerAppearances.Close()
 
-	proxyDeviceManager := proxy.NewProxyDeviceManager(model.WithProviderAppearances(ctx, providerAppearances), newProxyDeviceManagerSettings(settings))
+	// hosted windows dial the edge the platform's load model chooses, not the
+	// one DNS caches hand this host (connect/MOVE.md §13). Closed after the
+	// device manager, so no window is left to ask it.
+	edgePlacement := edgeplacement.NewEdgePlacement(ctx, edgeplacement.DefaultEdgePlacementSettings())
+	defer edgePlacement.Close()
+
+	proxyDeviceManager := proxy.NewProxyDeviceManager(model.WithProviderAppearances(ctx, providerAppearances), newProxyDeviceManagerSettings(settings, edgePlacement))
 	defer func() {
 		_ = proxyDeviceManager.CloseAndWait(context.Background())
 	}()

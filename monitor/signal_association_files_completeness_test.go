@@ -179,14 +179,17 @@ func TestAssociationFilesPartialMetadataFailureRemainsPositive(t *testing.T) {
 	})
 	alerts, err := NewAssociationFilesSignal().Run(context.Background(), settings)
 	if err != nil || len(alerts) != 2 {
-		t.Fatalf("partial positive = %+v error=%v", alerts, err)
+		t.Fatal("partial metadata observation lost its positive or unknown finding")
 	}
 	positive := requireAlertClass(t, alerts, "web-association-files")
 	unknown := requireAlertClass(t, alerts, "cannot-observe")
 	if isVisibilityAlert(positive) || !isVisibilityAlert(unknown) ||
 		!strings.Contains(positive.Observed, "other_response_failures=1") ||
-		!strings.Contains(positive.Evidence, "synthetic-public-refusal") {
-		t.Fatalf("independent response contract changed: positive=%+v unknown=%+v", positive, unknown)
+		unknown.Observed != "expected=2 checked=1 unobserved=1" ||
+		!strings.Contains(positive.Evidence, "path=/.well-known/assetlinks.json") ||
+		!strings.Contains(positive.Evidence, "http=429 exit=0 content_type=html problem=unexpected-http-status") ||
+		strings.Contains(positive.Evidence, "synthetic-public-refusal") {
+		t.Fatal("partial metadata failure lost its fixed diagnostics or unknown coverage contract")
 	}
 }
 

@@ -188,7 +188,7 @@ func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]find
 				resultValues <- mimirBalanceHostResult{host: target, err: ctx.Err()}
 				return
 			}
-			output, err := env.runner.shell(ctx, target, command)
+			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
 				resultValues <- mimirBalanceHostResult{host: target, err: err}
 				return

@@ -1,0 +1,60 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+index ba3c09f79..48ea62538 100644
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -25,7 +25,7 @@ type residentContractManager struct {
+ 	stateLock       sync.Mutex
+ 	activeContracts map[model.TransferPair]*activeContractEntry
+ 	activeReads     map[model.TransferPair]bool
+-	checkLimiters   map[model.TransferPair]*limiter
++	checkLimiters   map[model.TransferPair]time.Time
+ 	readContract    func(context.Context, server.Id, server.Id) residentContractAllowance
+ 	readsClosed     bool
+ 	readWorkers     sync.WaitGroup
+@@ -51,7 +51,7 @@ func newResidentContractManager(
+ 		settings:        settings,
+ 		activeContracts: map[model.TransferPair]*activeContractEntry{},
+ 		activeReads:     map[model.TransferPair]bool{},
+-		checkLimiters:   map[model.TransferPair]*limiter{},
++		checkLimiters:   map[model.TransferPair]time.Time{},
+ 	}
+ 	manager.readContract = func(packetCtx context.Context, source, destination server.Id) residentContractAllowance {
+ 		return readResidentContractAllowance(packetCtx, source, destination)
+@@ -94,8 +94,9 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 					delete(self.activeContracts, key)
+ 				}
+ 			}
+-			for key, checkLimiter := range self.checkLimiters {
+-				if !self.activeReads[key] && self.activeContracts[key] == nil && checkLimiter.expired(now) {
++			for key, lastCheckTime := range self.checkLimiters {
++				if !self.activeReads[key] && self.activeContracts[key] == nil &&
++					(lastCheckTime.IsZero() || !now.Before(lastCheckTime.Add(residentContractCheckMinTimeout))) {
+ 					delete(self.checkLimiters, key)
+ 				}
+ 			}
+@@ -115,17 +116,20 @@ func (self *residentContractManager) HasActiveContract(sourceId, destinationId s
+ 		if self.activeReads[pair] {
+ 			return
+ 		}
+-		checkLimiter := self.checkLimiters[pair]
+-		if checkLimiter == nil {
++		lastCheckTime, knownPair := self.checkLimiters[pair]
++		if !knownPair {
+ 			// Reuse the resident's destination budget for recent denied pairs
+ 			// too; rotating unknown ids must not allocate unbounded history.
+ 			if len(self.checkLimiters) >= max(0, self.settings.MaxConcurrentForwardsPerResident) {
+ 				return
+ 			}
+-			checkLimiter = newLimiter(self.ctx, residentContractCheckMinTimeout)
+-			self.checkLimiters[pair] = checkLimiter
++			self.checkLimiters[pair] = time.Time{}
+ 		}
+-		if read = checkLimiter.allow(now); read {
++		// Admission timestamps have the same owner lock as the pair maps;
++		// a second mutex and heap object add no independent synchronization.
++		if read = self.ctx.Err() == nil &&
++			(lastCheckTime.IsZero() || !now.Before(lastCheckTime.Add(residentContractCheckMinTimeout))); read {
++			self.checkLimiters[pair] = now
+ 			self.activeReads[pair] = true
+ 			self.readWorkers.Add(1)
+ 		}

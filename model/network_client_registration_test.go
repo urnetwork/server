@@ -123,15 +123,20 @@ FOR EACH ROW EXECUTE FUNCTION synthetic_registration_count_allocation();`, clien
 				results <- value
 			})
 		}
-		// Observe both actual PostgreSQL lock waits before release. Under
-		// repeatable-read both retain the same pre-allocation view. Its failed
-		// insert can recover through server.Tx retry, so identity equality alone
-		// cannot prove the post-lock lookup avoided repeating allocation work.
+		// Observe both registrations at the barrier before release: one waits
+		// for the actual PostgreSQL lock and the other in the process's gate,
+		// holding no connection (network_client_registration_gate.go). Its
+		// failed insert can recover through server.Tx retry, so identity
+		// equality alone cannot prove the post-lock lookup avoided repeating
+		// allocation work.
 		for {
 			var blocked int
 			server.Raise(lock.QueryRow(t.Context(), `SELECT count(DISTINCT pid) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND $1::int=ANY(pg_blocking_pids(pid))`, blockerPid).Scan(&blocked))
-			if blocked == 2 {
+			if blocked == 1 && networkClientRegistrations.refCountFor(clientSession.ByJwt.NetworkId) == 2 {
 				break
+			}
+			if 1 < blocked {
+				t.Fatalf("%d registrations of one network waited in PostgreSQL, want one per process", blocked)
 			}
 			select {
 			case result := <-results:
@@ -161,6 +166,131 @@ FOR EACH ROW EXECUTE FUNCTION synthetic_registration_count_allocation();`, clien
 			}
 		})
 	})
+}
+
+// A burst of one network's registrations queues in the process, not in
+// PostgreSQL. While another process holds the network's allocation lock, one
+// of this process's registrations waits on it and the rest wait in the gate,
+// holding no pooled connection; once the lock is released every one of them
+// is allocated, and the gate forgets the network (2026-10-25, 590 waiters on
+// one network's lock took the pool).
+func TestNetworkClientRegistrationBurstWaitsOutsideThePool(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		clientSession, request := newNetworkClientRegistrationTest(t, t.Context())
+		networkId := clientSession.ByJwt.NetworkId
+		connection, err := server.AcquireMaintenanceDbConn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Release()
+		lock, err := connection.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.RaisePgResult(lock.Exec(t.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "network-client-registration/v1:"+networkId.String()))
+		var blockerPid int32
+		server.Raise(lock.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&blockerPid))
+
+		const burst = 12
+		type outcome struct {
+			result     *RegisterNetworkClientResult
+			err        error
+			panicValue any
+		}
+		results := make(chan outcome, burst)
+		var joined sync.WaitGroup
+		defer func() {
+			cleanup, cancelCleanup := context.WithTimeout(context.Background(), time.Minute)
+			defer cancelCleanup()
+			_ = lock.Rollback(cleanup)
+			joined.Wait()
+		}()
+		requests := make([]RegisterNetworkClientArgs, burst)
+		for i := range burst {
+			requests[i] = request
+			requests[i].RegistrationId = fmt.Sprintf("%064x", i+1)
+			requests[i].ScopeSha256 = fmt.Sprintf("%064x", i+1001)
+			burstRequest := requests[i]
+			joined.Go(func() {
+				var value outcome
+				value.panicValue = server.HandleError(func() { value.result, value.err = RegisterNetworkClient(&burstRequest, clientSession) })
+				results <- value
+			})
+		}
+		// the whole burst reaches the barrier: one in PostgreSQL, the rest in
+		// the gate. The lock bound is far longer than this wait.
+		for {
+			var blocked int
+			server.Raise(lock.QueryRow(t.Context(), `SELECT count(DISTINCT pid) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND $1::int=ANY(pg_blocking_pids(pid))`, blockerPid).Scan(&blocked))
+			if 1 < blocked {
+				t.Fatalf("%d registrations of one network waited in PostgreSQL, want one per process", blocked)
+			}
+			if blocked == 1 && networkClientRegistrations.refCountFor(networkId) == burst {
+				break
+			}
+			select {
+			case result := <-results:
+				t.Fatalf("registration escaped the allocation barrier: %v %v", result.err, result.panicValue)
+			case <-t.Context().Done():
+				t.Fatal(t.Context().Err())
+			default:
+				runtime.Gosched()
+			}
+		}
+		server.Raise(lock.Rollback(t.Context()))
+		joined.Wait()
+		clientIds := map[server.Id]bool{}
+		for range burst {
+			value := <-results
+			if value.panicValue != nil || value.err != nil || value.result == nil || value.result.Error != nil || value.result.ClientId == nil {
+				t.Fatalf("a queued registration was not allocated: %v %v %+v", value.panicValue, value.err, value.result)
+			}
+			clientIds[*value.result.ClientId] = true
+		}
+		if len(clientIds) != burst {
+			t.Fatalf("the burst allocated %d identities, want %d", len(clientIds), burst)
+		}
+		if count := networkClientRegistrations.refCountFor(networkId); count != 0 {
+			t.Fatalf("the gate still holds %d registrations of the network", count)
+		}
+	})
+}
+
+// A registration whose caller stops while it waits in the gate leaves without
+// opening a transaction, and the gate forgets it.
+func TestNetworkClientRegistrationGateReleasesAStoppedWaiter(t *testing.T) {
+	gate := newNetworkClientRegistrationGate()
+	networkId := server.NewId()
+	leave, err := gate.enter(context.Background(), networkId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	entered := make(chan error, 1)
+	go func() {
+		_, err := gate.enter(stopped, networkId)
+		entered <- err
+	}()
+	for gate.refCountFor(networkId) != 2 {
+		runtime.Gosched()
+	}
+	stop()
+	if err := <-entered; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a stopped waiter entered with %v, want its caller's stop", err)
+	}
+	if count := gate.refCountFor(networkId); count != 1 {
+		t.Fatalf("the stopped waiter is still counted: %d", count)
+	}
+	leave()
+	if count := gate.networkCount(); count != 0 {
+		t.Fatalf("the gate still holds %d networks after every registration left", count)
+	}
+	// another network is never held by this one
+	otherLeave, err := gate.enter(context.Background(), server.NewId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherLeave()
 }
 
 // Changes to payload, scope or stable authenticated principal cannot consume

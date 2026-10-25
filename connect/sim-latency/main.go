@@ -24,6 +24,7 @@ package main
 //   score-progress
 //             compare completed candidate live metrics to the frozen control
 //   score     validate and score a complete candidate artifact bundle
+//   calibrate replay pinned offline cohorts and analyze the release noise floor
 //   source-check
 //             verify one frozen source epoch against the measured repositories
 //   source-record
@@ -71,6 +72,7 @@ Usage:
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
+  sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus>
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
@@ -99,6 +101,10 @@ Usage:
   sim-latency --version
 
 Options:
+  --calibration-inputs=<path>  Private pinned same-seed calibration manifest.
+  --calibration-inputs-sha256=<digest>  Exact SHA-256 of that manifest.
+  --calibration-lock=<path>  Existing canonical singleton scoring lock; never created by analysis.
+  --calibration-cpuset=<cpus>  Approved management CPU affinity for offline scorer replay.
   --qualification-settings=<path> Private deployment settings for exact-image independent qualification.
   --qualification-settings-sha256=<digest> Immutable installed qualification-settings digest.
   --build-settings=<path> Private deployment settings for the isolated source build broker.
@@ -251,6 +257,8 @@ func main() {
 		runScoreProgress(opts)
 	case optBool(opts, "score"):
 		runScore(opts)
+	case optBool(opts, "calibrate"):
+		runCalibrationAnalysis(opts)
 	case optBool(opts, "source-check"):
 		runSourceCheck(opts)
 	case optBool(opts, "source-record"):

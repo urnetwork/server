@@ -28,6 +28,48 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-snapshot-pilot-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-snapshot-pilot-2026-10-25/INDEX.json",
+      "index_sha256": "686177465640886a7b99e277d675ebc8fd78b297e951c1579e7711dabaa52615"
+    },
+    {
+      "id": "prelaunch-snapshot-screen-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-snapshot-screen-2026-10-25/INDEX.json",
+      "index_sha256": "72aad3348586819b74eed36e78840bc71a7ffda62048167712d753a1bb0b75ae"
+    },
+    {
+      "id": "prelaunch-corrected-same-seed-r9-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-corrected-same-seed-r9-2026-10-25/INDEX.json",
+      "index_sha256": "0ee76d53cb9bdbc4f378c76f7dd6b6245e30be36ef802178a35e5aad271485e7"
+    },
+    {
+      "id": "prelaunch-same-seed-r9-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-same-seed-r9-2026-10-25/INDEX.json",
+      "index_sha256": "177ea22ae9f64491c3c4549b0137382113428721a406013ddb9b57027d1756c0"
+    },
+    {
+      "id": "prelaunch-warm-reader-pilot-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-warm-reader-pilot-2026-10-25/INDEX.json",
+      "index_sha256": "4204ded319ab40e10085e6687a8b105f348fb63232b61bd3df50b67eddae89f2"
+    },
+    {
+      "id": "prelaunch-cold-r9-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-cold-r9-2026-10-25/INDEX.json",
+      "index_sha256": "b2f77c73eafc755e6585b5ddfac94302ee42508664ce33daf1db107e096a371d"
+    },
+    {
+      "id": "prelaunch-ready-snapshot-frontier-2026-10-25",
+      "official": false,
+      "index_path": "prelaunch-ready-snapshot-frontier-2026-10-25/INDEX.json",
+      "index_sha256": "b66190f5ce5681fd50f77e99fb4f111a28c20f8683e534f98775392c53bc8d77"
+    },
+    {
       "id": "prelaunch-four-exchange-2026-10-24",
       "official": false,
       "index_path": "prelaunch-four-exchange-2026-10-24/INDEX.json",

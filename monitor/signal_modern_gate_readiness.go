@@ -198,7 +198,7 @@ func (modernGateReadinessProbe) observe(ctx context.Context, env *probeEnv) ([]f
 			" --data-urlencode " + shellSingleQuote("query="+expression) +
 			" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(at.Unix(), 10)) +
 			" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-		out, _, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command)
+		out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, metricHosts, nil, command, modernGateReadinessMaxResponseBytes)
 		if err != nil {
 			return nil, fmt.Errorf("modern gate readiness: query Mimir through service gateways: %w", err)
 		}

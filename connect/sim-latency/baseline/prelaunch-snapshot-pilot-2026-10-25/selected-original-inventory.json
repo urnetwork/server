@@ -1,0 +1,50 @@
+[
+  {
+    "bytes": 8308,
+    "path": "predeclared/canonical.patch",
+    "sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/canonical.patch"
+  },
+  {
+    "bytes": 4076,
+    "path": "predeclared/cohort-runner.sh",
+    "sha256": "76ffb7087ba19097e5ec0291c3d2780cceb9404fb51ba44efe8ad8462f102304",
+    "source": "/usr/local/libexec/urnetwork/competition-calibration-c1f9dda60-isolated-v1/cohort-runner.sh"
+  },
+  {
+    "bytes": 1655,
+    "path": "predeclared/fixture-provenance.json",
+    "sha256": "27ce4ee3cbd4480787fcd283d7093c48521e48fbba7acd2f13a233f6acf25782",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/fixture-provenance.json"
+  },
+  {
+    "bytes": 280,
+    "path": "predeclared/generation.log",
+    "sha256": "9a896f69fb99d5515b5dc8e69ec2a1439ac78109778bede08e0bedeb842030b5",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/generation.log"
+  },
+  {
+    "bytes": 759,
+    "path": "predeclared/independent-verification.log",
+    "sha256": "884f577c727ebc2fb5b53b0353b5042d937ff330bfec9fdb6328ce6e6e55626d",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/independent-verification.log"
+  },
+  {
+    "bytes": 6030,
+    "path": "predeclared/prepare.go.txt",
+    "sha256": "e34654793e45bc1aff96cb8ce171db9b14351e8c068b3b372a73e49246499eb5",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/prepare.go"
+  },
+  {
+    "bytes": 2758585,
+    "path": "predeclared/providers.yml",
+    "sha256": "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/providers.yml"
+  },
+  {
+    "bytes": 3031,
+    "path": "predeclared/worker-request.json",
+    "sha256": "55f1f4428d2e2d1ca8bdd50ffe39de81dbbd405b77cc8f609a065fd7f0bb4b0e",
+    "source": "/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/worker-request.json"
+  }
+]

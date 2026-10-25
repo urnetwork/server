@@ -103,7 +103,7 @@ func (proxyDeviceTargetProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		" --data-urlencode " + shellSingleQuote("query="+proxyDeviceTargetQuery(env.cfg.env)) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) +
 		" " + shellSingleQuote(proxyDeviceTargetEndpoint)
-	out, gateway, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	out, gateway, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, proxyDeviceTargetMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("proxy device target: query Mimir: %w", err)
 	}

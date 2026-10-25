@@ -12,6 +12,13 @@ manifest. Both modes omit the deleted `operator-proxy`; no clone, placeholder,
 branch, or pin for it is required. All historical records remain unchanged.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
+Before production activation, start with
+[`launch/current-state.json`](launch/current-state.json), the compact preparation
+checkpoint, then verify its live process/session and linked evidence. It is a
+dated operator snapshot, not score/runtime authority or permission to restart an
+active qualification. Live season state remains authoritative in the API,
+database and the supervisor's state directory described below.
+
 ## Agent model roles
 
 Go 1.27.3 is mandatory for competition builds and tests. Select the actual

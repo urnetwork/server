@@ -4,6 +4,7 @@ package providertunnel
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync"
 	"testing"
 
@@ -173,6 +174,41 @@ func TestProviderProbesOwnIndependentDohCaches(t *testing.T) {
 	}
 	if second.tun.DohCache() != secondDoh {
 		t.Fatal("closing one probe changed another probe's DoH ownership")
+	}
+}
+
+// A placement that offers nothing; the test compares its identity only.
+type testProbePlatformPlacement struct{}
+
+func (self *testProbePlatformPlacement) PlatformPlacementTargets(host string) []netip.Addr {
+	return nil
+}
+
+func (self *testProbePlatformPlacement) PlatformPlacementFailed(host string, targetIps []netip.Addr) {
+}
+
+// A probe's platform transports dial the edge its placement chooses
+// (connect/MOVE.md §13), with moves still off, and a probe without one
+// resolves the platform host.
+func TestProbeTransportsCarryThePlatformPlacement(t *testing.T) {
+	placement := &testProbePlatformPlacement{}
+	placed := probeTransportBudgetTestConfig()
+	placed.PlatformPlacement = placement
+	captured := captureProbeTransportSettings(t, []Config{placed, probeTransportBudgetTestConfig()})
+	for index, want := range []connect.PlatformPlacement{placement, nil} {
+		settings := captured[index]
+		if settings == nil || settings.PlatformTransportSettingsGenerator == nil {
+			t.Fatalf("Open %d bypassed the probe's platform settings generator", index)
+		}
+		for range 2 {
+			transportSettings := settings.PlatformTransportSettingsGenerator()
+			if transportSettings.Placement != want {
+				t.Errorf("Open %d window placement = %v, want %v", index, transportSettings.Placement, want)
+			}
+			if transportSettings.EnableMove {
+				t.Errorf("Open %d gave a placed probe window the move capability", index)
+			}
+		}
 	}
 }
 

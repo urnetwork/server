@@ -203,8 +203,8 @@ func (connectionReconcileProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		return nil, fmt.Errorf("connection reconcile: no services host in inventory for the loopback Mimir query")
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(connectionReconcileQuery(env.cfg.env))
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'")
+	output, gateway, err := mimirShellFirstServiceGateway(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 4194304 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("connection reconcile: query Mimir: %w", err)
 	}

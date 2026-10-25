@@ -1,0 +1,22 @@
+{
+  "chunks": [
+    {
+      "bytes": 198503,
+      "path": "cohort.tar.gz.part-00",
+      "sha256": "9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90"
+    }
+  ],
+  "expected_mutant_failures": 2,
+  "gzip_sha256": "9115aeb65fcdd5bfa94adc32bd6d9701106c96c4b7461d2199a1e49939712b90",
+  "inventory_path": "selected-original-inventory.json",
+  "inventory_sha256": "3083aa22897db3013b39944e929a51bf7f052347b5338fb39059626ffc6268b7",
+  "kind": "prelaunch-snapshot-screen",
+  "official": false,
+  "passing_test_executions": 516,
+  "schema": 1,
+  "selected_original_files": 30,
+  "setup_only_failures": 2,
+  "status": "correctness_and_supporting_mechanism_screen_only",
+  "summary_path": "summary.json",
+  "summary_sha256": "57ddd4fd90777238a63357805860bc60d60cb7967ebb7009db2a449cf909e991"
+}

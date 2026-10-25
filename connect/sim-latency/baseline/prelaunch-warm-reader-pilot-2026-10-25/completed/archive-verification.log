@@ -1,0 +1,4 @@
+evidence-manifest.json verified bindings=429
+worker-result.json verified bindings=7
+Pilot unfavorable median baseline=17213.7406 candidate=20742.37215 mean baseline=17514.04907777776 candidate=20637.617316666652
+PASS reconstructed_gzip_sha256=4f828987b3d835aeb0c1f39bb0f0b01186b7c960e8c2ebb885672e50cc39db86 regular_files=440 original_files=440 top_level_copies=7 gates=6 controls=9 candidates=9

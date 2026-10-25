@@ -1,0 +1,68 @@
+{
+  "base_sha": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
+  "evaluation_policy_canonicalization": "json.Marshal(model.CompetitionEvaluationPolicy)",
+  "evaluation_policy_sha256": "8918df4980ea63b937410683fd17d530cebfbff1b38724e5bac44b0ce1e46ead",
+  "evaluator_image_digest": "sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793",
+  "generator_sha256": "c882f7db3c4d38cae2723291fe6433ec0c753acf3ff62e664c0d46549c2a3e6d",
+  "hidden_seed_claim": false,
+  "kind": "prepared-offline-five-cohort-same-seed-aa-plan",
+  "live_receipt_claim": false,
+  "measurements_started": 0,
+  "official": false,
+  "ordered_cohorts": [
+    {
+      "attempt": 1,
+      "job_id": "beef4079-93ec-401d-8d72-c3080fee4046",
+      "position": 1,
+      "provenance_sha256": "4be00565d2319525d9f752ddb1efc5297dad6e762775430ec1e1889bf6d14121",
+      "request_sha256": "263eca1bdb583f3f3e08bbcbfc1bd260aaba089bf2deeeea95a7fe8caab57c9f",
+      "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-01",
+      "round_id": "8aca1c17-7760-4f82-b603-c30aad175691"
+    },
+    {
+      "attempt": 1,
+      "job_id": "590c6171-1947-481a-b276-d2c1b0f07d20",
+      "position": 2,
+      "provenance_sha256": "ab8e8c02aca242f99ec7d18a5ab7ee2c0b8f4acee1acf5d213d60b73a15e237c",
+      "request_sha256": "84bf8aec81bda9bbe14ea0fce198fd61088fcd7b6c21b8683416e95db6e7b33c",
+      "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-02",
+      "round_id": "fca14146-73e1-42b6-b198-c16add370c27"
+    },
+    {
+      "attempt": 1,
+      "job_id": "c01514e1-5b2a-4e8e-96e4-3310d398dada",
+      "position": 3,
+      "provenance_sha256": "8bea8da38d7a3bc984072219dcf9c00bed9cc5c7b5b9e4d29fc46f22de3e3882",
+      "request_sha256": "451d7927b48242beed55a351dc01f06f730b06a8dd864486e02f5695596f7196",
+      "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-03",
+      "round_id": "ebb95dc4-8ef0-4d6c-8f39-04b96bd7d8e9"
+    },
+    {
+      "attempt": 1,
+      "job_id": "466078eb-281c-481f-a141-12a3a8955600",
+      "position": 4,
+      "provenance_sha256": "19fa83f9ca07d943db7b8133813ce1ea4070bb40cede659f66edb82d715cf925",
+      "request_sha256": "c5c9443cb19a4b32d8958a5267750ec0e396dd29e6c823c4646c321255f45b7d",
+      "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-04",
+      "round_id": "0a6d26b3-291f-4aeb-8335-753fb4074629"
+    },
+    {
+      "attempt": 1,
+      "job_id": "3389e58c-7483-4f30-bece-cee5ba0eec7d",
+      "position": 5,
+      "provenance_sha256": "aa87fe6661b61567e9c2df8f01cc8f64e86960fdab5be1fd1d7b2c3d0cd8ca21",
+      "request_sha256": "b3a9504edf0010eb5b9d406735fdeeb5702457bda23e58dd24011e4e40696888",
+      "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy/cohort-05",
+      "round_id": "52359912-64e0-46b1-aae3-a9b101151a67"
+    }
+  ],
+  "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+  "policy_exactly_unchanged": true,
+  "providers_sha256": "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac",
+  "public_seed": 20261024,
+  "round_seed_hex": "00000000000000000000000000000000000000000000000000000000013528a0",
+  "schema": 1,
+  "source_epoch": 0,
+  "status": "prepared_not_executed",
+  "template_request_sha256": "6f2f2ee76c6ed08c4e798b4e14371e591830caa1b0728fb275a940a1237ac363"
+}

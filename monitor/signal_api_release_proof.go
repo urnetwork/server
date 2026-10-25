@@ -454,7 +454,7 @@ func (apiReleaseProofProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		} else {
 			// Exactly one selected gateway, no retry/failover after contact.
 			command := "[ \"$(hostname -s)\" = " + shellSingleQuote(gateway.name) + " ] || exit 74; exec timeout 20s python3 -"
-			out, err := env.runner.sshTimeout(ctx, gateway, command, apiReleaseProofProgram(apiReleaseProofQuery(env.cfg.env, scope), now), 20*time.Second)
+			out, err := mimirShellStdinParsed(ctx, env.runner, gateway, command, apiReleaseProofProgram(apiReleaseProofQuery(env.cfg.env, scope), now), 20*time.Second, apiReleaseProofMaxBytes)
 			if err != nil {
 				r.Reason = "bounded-source-unavailable"
 			} else {

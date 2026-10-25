@@ -250,13 +250,12 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(serviceLoadQuery(env.cfg.env, env.cfg.logServices))
-	out, gateway, err := shellFirstServiceGateway(
+	out, gateway, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(serviceLoadResponseMaxBytes)+" '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(serviceLoadResponseMaxBytes)+" '"+queryURL+"'", serviceLoadResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("service load: query Mimir through service gateways: %w", err)
 	}

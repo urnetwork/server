@@ -1,0 +1,15 @@
+{
+  "kind": "sim-latency-calibration-analysis",
+  "cohorts": 0,
+  "validated_observed_replicates": 0,
+  "bootstrap_draws": 0,
+  "bootstrap_placeability": 0,
+  "bootstrap_gate_pass_rates": null,
+  "margin_terms": null,
+  "recommended_margin": 0,
+  "accepted": false,
+  "reasons": [
+    "calibration_input_or_replay_rejected"
+  ],
+  "input_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

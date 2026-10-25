@@ -1498,10 +1498,17 @@ func DefaultTaskWorkerSettings() *TaskWorkerSettings {
 		DrainFinishTimeout:     60 * time.Second,
 		DrainCancelTimeout:     30 * time.Second,
 		FinalizeTimeout:        DefaultTaskFinalizeTimeout,
+		FinalizeLockTimeout:    DefaultTaskFinalizeLockTimeout,
 	}
 }
 
 const DefaultTaskFinalizeTimeout = 30 * time.Second
+
+// Inside DefaultTaskFinalizeTimeout, and above the main pool's 2 s bound
+// (`server.PgLockTimeout`): a failed completion reruns its task and interrupts
+// its batch siblings, so a completion queued behind a partition cutover or a
+// run-once owner waits, and worker slots cap how many can wait at once.
+const DefaultTaskFinalizeLockTimeout = 20 * time.Second
 
 type TaskWorkerSettings struct {
 	BatchSize              int
@@ -1537,6 +1544,10 @@ type TaskWorkerSettings struct {
 	// completion/reschedule. It deliberately outlives the serving root context
 	// during shutdown; batch advisory ownership stays until all tasks join.
 	FinalizeTimeout time.Duration
+	// bounds each lock wait of a completion's transaction, in place of the
+	// main pool's bound (see DefaultTaskFinalizeLockTimeout). Non-positive
+	// uses the default.
+	FinalizeLockTimeout time.Duration
 }
 
 type TaskWorker struct {

@@ -13,6 +13,7 @@ readonly COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 readonly BUILD_SUBMISSION="$SCRIPT_DIR/build-submission.sh"
 readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
+readonly NETWORK_BOUNDARY="$SCRIPT_DIR/network-boundary.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly RETAIN_FAILURE_EVIDENCE="$SCRIPT_DIR/retain-failure-evidence.sh"
@@ -239,6 +240,7 @@ sudo -n docker info >/dev/null
 [ -x "$BUILD_SUBMISSION" ] || die "trusted submission builder is not executable"
 [ -x "$PREPARE_EVALUATION_SOURCE" ] || die "trusted evaluation source preparer is not executable"
 [ -x "$RESOURCE_BOUNDARY" ] || die "trusted resource boundary is not executable"
+[ -x "$NETWORK_BOUNDARY" ] || die "trusted network boundary is not executable"
 [ -x "$DOCKER_ID_MAP" ] || die "trusted Docker id-map resolver is not executable"
 [ -x "$HASH_LOCAL_MOUNT" ] || die "trusted local-mount digest helper is not executable"
 [ -x "$RETAIN_FAILURE_EVIDENCE" ] || die "trusted failure evidence retainer is not executable"
@@ -951,7 +953,9 @@ write_container_inspection() {
             memory:.HostConfig.Memory,memory_swap:.HostConfig.MemorySwap,
             pids_limit:.HostConfig.PidsLimit,cgroup_parent:.HostConfig.CgroupParent,
             cpuset_cpus:.HostConfig.CpusetCpus,cap_drop:.HostConfig.CapDrop,
-            security_opt:.HostConfig.SecurityOpt,network_mode:.HostConfig.NetworkMode},
+            security_opt:.HostConfig.SecurityOpt,network_mode:.HostConfig.NetworkMode,
+            ipv6_all_disabled:.HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"],
+            ipv6_default_disabled:.HostConfig.Sysctls["net.ipv6.conf.default.disable_ipv6"]},
           mounts:[.Mounts[]? | {type:.Type,destination:.Destination,rw:.RW}],
           state:{status:.State.Status,exit_code:.State.ExitCode,
             oom_killed:.State.OOMKilled,started_at:.State.StartedAt,
@@ -1151,6 +1155,10 @@ run_stage() {
     active_compose_env="$compose_env"
     compose_with "$project" "$compose_env" --profile run config >/dev/null
     compose_with "$project" "$compose_env" --profile run up --detach --wait postgres redis >&2
+    # Only trusted backing images have started. Reject a host-addressed bridge
+    # before migration, preflight or candidate package initialization can run.
+    "$NETWORK_BOUNDARY" "${project}_evaluation" > "$stage_root/network-boundary.json" ||
+        die "$stage_token network boundary failed before runner admission"
     local migration_json migration_path migration_sha
     migration_json="$(compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty migrate)"
     jq -e '.schema == 1 and .database_version > 0 and .database_version == .migration_count' \
@@ -1274,6 +1282,8 @@ run_stage() {
           .State.Health.Status == "healthy" and .State.Health.FailingStreak == 0) and
          ([.[] | .HostConfig.CgroupParent == $parent and .HostConfig.ReadonlyRootfs == true and
            .HostConfig.CpusetCpus == $cpuset and
+           .HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"] == "1" and
+           .HostConfig.Sysctls["net.ipv6.conf.default.disable_ipv6"] == "1" and
            .RestartCount == 0 and .HostConfig.RestartPolicy.Name == "no" and
            .State.Dead == false and .State.Paused == false and
            .State.Restarting == false and .State.Error == "" and
@@ -1285,8 +1295,8 @@ run_stage() {
            ((.HostConfig.SecurityOpt // []) | index("no-new-privileges:true") != null)] | all)' \
         <<<"$inspect_json" >/dev/null || die "$stage_token live container policy mismatch"
     local network_id="${project}_evaluation"
-    sudo -n docker network inspect "$network_id" | jq -e '.[0].Internal == true' >/dev/null ||
-        die "$stage_token network is not internal"
+    "$NETWORK_BOUNDARY" "$network_id" > "$stage_root/network-boundary.post.json" ||
+        die "$stage_token network is not isolated"
 
     [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] &&
         [ "${postgres_cgroup%/*}" = "${redis_cgroup%/*}" ] || die "$stage_token service cgroup membership unavailable"
