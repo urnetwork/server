@@ -215,6 +215,14 @@ func SetUserAuthAttemptSuccess(
 var removeExpiredAuthAttemptsBatchSize = 50000
 
 func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) (databaseRowsRemoved int64) {
+	// migration 870 drops the legacy table; then there is nothing left to drain
+	var present bool
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('public.user_auth_attempt') IS NOT NULL`).Scan(&present))
+	})
+	if !present {
+		return
+	}
 	// LIMIT-batched legacy-table drain: each pass deletes at most one batch in
 	// its own transaction until the older-than-window backlog is empty.
 	for {

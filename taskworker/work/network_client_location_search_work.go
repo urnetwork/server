@@ -42,6 +42,10 @@ func IndexSearchLocations(
 	// order, once it has committed
 	var posts []server.PostFunction
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		// a full re-index (a changed search format) rewrites every value in
+		// this one transaction and can outlast the application role's
+		// 15-minute transaction_timeout (migration 889)
+		server.SetTransactionTimeoutInTx(clientSession.Ctx, tx, 0)
 		posts = model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
 	})
 	server.RunPosts(clientSession.Ctx, server.SequencePosts(posts...))

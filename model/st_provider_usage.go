@@ -127,12 +127,18 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	}
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
-	server.Db(ctx, func(conn server.PgConn) {
+	// One statement reads the whole epoch in one snapshot, so the read cannot
+	// be paged, and a seven-day epoch outlasts the application role's
+	// 15-minute transaction_timeout (migration 889; 30-55 minutes projected).
+	// The statement runs alone in a read-committed transaction that lifts the
+	// bound, which reads the same single snapshot as the autocommit statement.
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		query := stEpochProviderUsageSql
 		if census != nil {
 			query = stEpochProviderOriginalUsageSql
 		}
-		rows, err := conn.Query(ctx, query, queryStart, queryEnd)
+		rows, err := tx.Query(ctx, query, queryStart, queryEnd)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
@@ -210,7 +216,7 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			}
 		}
 		returnErr = rows.Err()
-	})
+	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return nil, returnErr
 	}

@@ -390,6 +390,11 @@ type paymentPlanTransactionConfigurer interface {
 
 func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransactionConfigurer) {
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL effective_io_concurrency = 32`))
+	// The plan's single transaction can outlast the application role's
+	// 15-minute transaction_timeout (migration 889), and a plan the bound
+	// ended would end every weekly payout the same way. The Payout task's
+	// MaxTime still bounds it.
+	server.SetTransactionTimeoutInTx(ctx, tx, 0)
 }
 
 // computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts

@@ -1128,6 +1128,12 @@ func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement st
 	if _, err = conn.Exec(ctx, "SET max_parallel_maintenance_workers = 0"); err != nil {
 		return
 	}
+	// each of the rebuild's own transactions can outlast the application
+	// role's 15-minute transaction_timeout (migration 889); this session is
+	// discarded after the statement, so the setting never returns to the pool
+	if _, err = conn.Exec(ctx, "SET transaction_timeout = 0"); err != nil {
+		return
+	}
 	var backendPid int32
 	if err = conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPid); err != nil {
 		return

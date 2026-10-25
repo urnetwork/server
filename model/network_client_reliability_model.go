@@ -1134,6 +1134,14 @@ const reliabilityRunningMaintenanceDeferralAfter = 5 * time.Minute
 // later pooled sessions unchanged.
 const reliabilityRunningCheckpointStatementTimeout = 2 * time.Hour
 
+// The reliability aggregation transactions can outlast the application role's
+// 15-minute transaction_timeout (migration 889), which would end each run the
+// same way while every retry reads a wider window. Each carries the
+// checkpoints' two-hour ceiling instead, so the server still ends an orphan.
+func boundReliabilityTransactionInTx(ctx context.Context, tx server.PgCanExec) {
+	server.SetTransactionTimeoutInTx(ctx, tx, reliabilityRunningCheckpointStatementTimeout)
+}
+
 type reliabilityRunningCheckpointConfigurer interface {
 	Exec(context.Context, string, ...any) (server.PgTag, error)
 }
@@ -1681,6 +1689,7 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		if complete {
 			maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
 			minTime := maxTime.Add(-maxLookback)
@@ -2290,6 +2299,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 		liveStaleHandlerIds = readLiveStaleNetworkClientHandlerIds(ctx)
 	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete, liveStaleHandlerIds)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -2899,6 +2909,7 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 	// judged before the transaction: the judgement reads Redis
 	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		boundReliabilityTransactionInTx(ctx, tx)
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
 	}, server.TxReadCommitted)
 }

@@ -1269,6 +1269,20 @@ func TestRemoveExpiredAuthAttempts(t *testing.T) {
 	})
 }
 
+// Migration 870 drops the legacy table while this release still schedules its
+// cleanup. With the table gone the cleanup has nothing to drain and returns
+// cleanly instead of failing every run.
+func TestRemoveExpiredAuthAttemptsAfterTableDropped(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TABLE user_auth_attempt`))
+		})
+		removed := RemoveExpiredAuthAttempts(ctx, server.NowUtc())
+		connect.AssertEqual(t, removed, int64(0))
+	})
+}
+
 // RemoveExpiredAuthCodes drains expired/inactive codes (and their auth_code_role
 // rows) across batches, keeping live codes. A small batch size forces iteration.
 func TestRemoveExpiredAuthCodesBatched(t *testing.T) {
