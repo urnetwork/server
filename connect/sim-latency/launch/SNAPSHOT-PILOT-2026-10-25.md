@@ -7,6 +7,16 @@ This is a separate hypothesis from the failed warm-reader pilot, not a retry
 of that patch. It is not production activation or a formal calibration cohort.
 The October 28 00:00 UTC opening is unchanged.
 
+**Recorded outcome:** the single invocation completed at 22:39:47 UTC in
+10,562 seconds, with all nine controls/nine candidates, G1–G6, placement,
+integrity and exact cleanup passing. Candidate mean raw score was 4.4471%
+lower and median about 3.27% lower: the predeclared directional screen passed.
+Welch p=0.2407 was not significant; takeover remained false under the unchanged
+16.1% provisional floor. This is not held-out qualification or an official
+baseline. The [complete preserved outcome](../baseline/prelaunch-snapshot-pilot-2026-10-25/completed/README.md)
+retains every original record. The protocol below is the unchanged pre-result
+experiment; no retry or favorable-draw replacement follows it.
+
 The [correctness/supporting screen](../evaluator/references/2026-10-25/SNAPSHOT-QUALIFICATION.md)
 passed 516 race-enabled test executions and two deterministic negative controls.
 Warm-hit median improved 73.4887%, but 128-pair publication cost rose 40.3179×

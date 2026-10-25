@@ -1,0 +1,34 @@
+#!/bin/bash
+set -Eeuo pipefail
+cohort=/home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa
+root=$cohort/artifacts
+exec 9<>/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock
+flock -n 9
+jq -e 'has("eval_error") and .eval_error==null and .score.placeable==true and (.score.gates|length==6) and ([.score.gates[].passed]|all) and ([.security[]|select(type=="boolean")]|all) and .score.significance.candidate_mean_raw_score < .score.significance.baseline_mean_raw_score and .score.raw_score < .score.diagnostics.baseline.raw_score' "$root/worker-result.json" >/dev/null
+jq -e '.phase=="complete" and .baseline_completed==9 and .candidate_completed==9' "$root/evaluation-progress.json" >/dev/null
+for manifest in worker-result.json evidence-manifest.json; do
+ count=0
+ while IFS=$'\t' read -r path digest bytes; do
+  [[ $path != /* && $path != *'..'* && $path != *\\* ]]
+  [[ -f "$root/$path" && ! -L "$root/$path" ]]
+  [[ $(sha256sum "$root/$path" | cut -d' ' -f1) == "$digest" ]]
+  [[ $(stat -c %s "$root/$path") == "$bytes" ]]
+  count=$((count+1))
+ done < <(jq -r '.artifacts[]|[.path,.sha256,.bytes]|@tsv' "$root/$manifest")
+ echo manifest=$manifest verified_bindings=$count
+done
+count=0
+while IFS=$'\t' read -r key digest; do
+ path=${key//_/-}.json
+ [[ $(sha256sum "$root/$path" | cut -d' ' -f1) == "$digest" ]]
+ count=$((count+1))
+done < <(jq -r '.artifacts|to_entries[]|[.key,.value]|@tsv' "$root/evaluation.complete.json")
+[[ $count == 5 ]]
+echo manifest=evaluation.complete.json verified_bindings=$count
+jq -n --slurpfile b "$root/baseline.json" --slurpfile s "$root/score.json" '{baseline_replicates:($b[0].replicates|length),candidate_replicates:($s[0].diagnostics.replicates|length),baseline_median:($b[0].replicates|map(.raw_score)|sort|.[4]),candidate_median:$s[0].raw_score,baseline_mean:$s[0].significance.baseline_mean_raw_score,candidate_mean:$s[0].significance.candidate_mean_raw_score,significance:$s[0].significance}'
+[[ $(docker ps -a --format '{{.Names}}' | sort) == $(printf '%s\n' buildx_buildkit_warp-multiarch0 urnetwork-local-pg urnetwork-local-redis | sort) ]]
+[[ $(docker network ls --format '{{.Name}}' | sort) == $(printf '%s\n' bridge host none urnetwork-local | sort) ]]
+! findmnt -rn -o TARGET | grep -Fx "$root/.evidence-runtime"
+[[ $(docker image inspect urnetwork/sim-latency-evaluator-base:canceled-stop-c1f9dda6-go1273 --format '{{.Id}}') == sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3 ]]
+sha256sum "$cohort/manager-terminal.log" "$cohort/evaluator.stdout" "$cohort/evaluator.stderr" "$root/worker-result.json" "$root/evidence-manifest.json" "$root/evaluation.complete.json"
+echo PASS terminal_bindings_gates_cleanup

@@ -11,8 +11,11 @@ requirements. Its independent race-enabled correctness screen has passed three
 baseline and three candidate suites; targeted guard-removal controls reproduce
 the intended failures. Three restored suites also passed. The warm benchmark
 improved while publication became more expensive; all observations and costs
-are in [the qualification record](SNAPSHOT-QUALIFICATION.md). No end-to-end pilot
-or faster-reference qualification is claimed, and the baseline is unchanged.
+are in [the qualification record](SNAPSHOT-QUALIFICATION.md). Its subsequent
+[single directional pilot](../../../baseline/prelaunch-snapshot-pilot-2026-10-25/completed/README.md)
+also passed: mean/median raw scores were 4.4471%/about 3.27% lower, but p=0.2407
+was not significant or takeover-eligible. Held-out qualification remains open,
+and the frozen baseline is unchanged. No unfavorable pilot was rerolled.
 
 ## Warm-reader candidate
 

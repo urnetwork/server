@@ -1,7 +1,8 @@
-# Immutable positive-cache snapshot: local screen passed, pilot pending
+# Immutable positive-cache snapshot: directional pilot passed, held-out pending
 
-A draft patch passed its isolated correctness/supporting benchmark screen; it is **not a
-qualified faster reference or a measured end-to-end improvement**. This
+A draft patch passed its isolated correctness/supporting benchmark screen and
+one directional end-to-end pilot. It is **not a qualified held-out faster
+reference or a statistically established improvement**. This
 is a separate hypothesis against the corrected frozen source, not a revision
 to the failed warm-reader pilot or authorization to change the baseline.
 The existing owner-admission-map draft is also unqualified.
@@ -14,8 +15,12 @@ made their respective barrier tests fail at the intended assertions. The
 candidate was restored byte-for-byte and passed three more 60-test suites.
 The warm-hit benchmark improved, but publication became more expensive; the
 [complete screen evidence](SNAPSHOT-QUALIFICATION.md) retains every observation,
-allocation cost, negative control and cleanup receipt. No scoring pilot has run
-for this hypothesis and the frozen baseline source is unchanged.
+allocation cost, negative control and cleanup receipt. The subsequent
+[single fresh-control pilot](../../../baseline/prelaunch-snapshot-pilot-2026-10-25/completed/README.md)
+passed all 9+9/gates/cleanup in 10,562 seconds. Mean and median raw scores were
+4.4471% and about 3.27% lower, respectively, but p=0.2407 was not significant
+and takeover remained false. The frozen baseline source is unchanged; these
+pilot observations do not enter formal Stage A calibration.
 
 [`warm-snapshot.patch`](warm-snapshot.patch), SHA-256
 `46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924`,
