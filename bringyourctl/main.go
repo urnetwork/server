@@ -71,6 +71,9 @@ Usage:
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
+    bringyourctl health status
+    bringyourctl health degrade --reason=<reason> [--level=<level>]
+    bringyourctl health recover
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -201,6 +204,8 @@ Options:
     --disable      Disable Embed for the network and return it to the default
                    limits. Caps and ACL groups already set stay enforced, and
                    the network's client tokens stay refused on admin routes.
+    --level=<level>  The public health level: degraded (the default), partial,
+                   major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
     --apply          Apply the scoped expiry request; omission is a read-only preview.
@@ -316,6 +321,8 @@ func main() {
 		} else if embed, _ := opts.Bool("embed"); embed {
 			networkEmbed(opts)
 		}
+	} else if health, _ := opts.Bool("health"); health {
+		os.Exit(healthCommand(opts, os.Stdout))
 	} else if network, _ := opts.Bool("balance-code"); network {
 		if create, _ := opts.Bool("create"); create {
 			balanceCodeCreate(opts)

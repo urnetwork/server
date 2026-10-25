@@ -111,7 +111,9 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
 - Monitoring and diagnosis are read-only in production. Do not deploy, push,
   restart a service, change a router, alter Vault, apply a migration, mutate
   PostgreSQL or Redis, cancel work, fund an account, or correct a payout unless
-  the operator explicitly authorizes that production mutation.
+  the operator explicitly authorizes that production mutation. The one
+  standing exception is the public network status (see "Public network
+  status" below).
 - `vault/<env>/monitor.yml` is authoritative for operator-disabled hosts. Never
   contact a host whose current inventory entry has `disabled: true`. A user's
   live pause or offline declaration is stronger than stale repository state;
@@ -173,6 +175,67 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
   RAM, CPU, host slots, liquidity, routable addresses, or per-proxy active-client
   slots. Keep software, operator, finance, network, and hardware closure gates
   distinct.
+
+## Public network status
+
+ur.io shows the network's health to everyone who opens it: a status pill in
+every page's footer and, while the network is degraded, a banner at the top of
+every page that links to the outage history. Both read `GET /health`
+([model/network_health_model.go](../model/network_health_model.go)). This
+agent keeps that status true during an incident. Setting, changing and
+clearing it is a standing authorized production mutation (owner decision
+2026-10-25): it writes one Redis key, changes nothing but what `/health`
+reports, and is the only production write this harness allows without a fresh
+operator authorization. It is not the contract degradation valve
+(`network_degradation_model.go`): setting the status never changes how
+contracts are funded.
+
+```sh
+cd bringyourctl
+./run-main.sh health status
+./run-main.sh health degrade --level=partial --reason="Some connections fail to start. We're working on a fix."
+./run-main.sh health recover
+```
+
+**When to set it.** As soon as a corroborated finding shows that users are
+affected: connections failing or stalling, sign-in or payments failing, or the
+network carrying markedly less than usual. A probe, monitor or internal fault
+that users cannot notice leaves the status alone. Do not wait for the root
+cause: the status says what users see, not why.
+
+**The level** is the outage pages' scale. Judge it against the usual level by
+the worst of providers connected, connections that succeed and traffic carried:
+
+| Level | Rule of thumb |
+|---|---|
+| `degraded` (the default) | More than 90% working: slower, or sporadic errors |
+| `partial` | 50–90% working, or one major function fails |
+| `major` | 10–50% working. A function that fails for every user is at least major |
+| `full` | Under 10% working |
+
+Change the level as the evidence changes. The status keeps the time the
+network first left healthy, which the site shows and the outage write-up
+starts from.
+
+**The reason** is public text, shown verbatim on every page: one line of at
+most 160 characters, in English, saying what users may notice and that we are
+working on it. Never name a host, tool, person, agent, alert, ledger entry,
+file, address, identifier, credential, amount, customer or provider earnings.
+Never state a cause that is not yet established, and never promise a time.
+The command refuses text with the shapes of those, but it cannot recognize
+everything, so write the reason as if nothing checked it. For example:
+
+- `Some connections are slow or fail to start. We're working on a fix.`
+- `Most new connections fail. We're working on a fix.`
+- `Sign-in is failing. Apps that are already connected keep working.`
+- `A fix is rolling out. Some connections may still be slow.`
+
+**Recover** only when the production verification of the fix (see
+"Deployment and production verification") shows the affected boundary healthy
+by direct observation through its window. Silence is not recovery. While a
+status is set, run `health status` at every checkpoint so a stale banner never
+outlives its incident. Record each set, change and recovery in the run ledger
+with its evidence and the command's output.
 
 ## Bootstrap and preflight
 
@@ -1546,8 +1609,10 @@ Before each checkpoint:
    guidance;
 3. pass the required deterministic and release-relevant tests;
 4. commit each repository separately with a root-cause-oriented message;
-5. record commit hashes and remaining deploy/operation gates; and
-6. if the server monitor changed, perform the safe watcher promotion above.
+5. record commit hashes and remaining deploy/operation gates;
+6. if a public network status is set, confirm with `health status` that it
+   still matches the evidence; and
+7. if the server monitor changed, perform the safe watcher promotion above.
 
 Do not push or deploy merely because a checkpoint exists.
 
@@ -1569,7 +1634,9 @@ state:
 - tested commits and exact services or non-software actions required;
 - deployments/migrations/configurations actually verified by provenance;
 - observation windows still running and their deadlines;
-- disabled or deferred targets and why; and
+- disabled or deferred targets and why;
+- the public network status, if one is set: its level, reason and since time;
+  and
 - authoritative watcher hash, process/session, and alert path when ownership is
   handed to another agent.
 
