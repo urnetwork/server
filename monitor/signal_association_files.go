@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -288,38 +289,37 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 		problem := ""
 		switch {
 		case result.public.parseErr != nil:
-			problem = result.public.parseErr.Error()
+			problem = "response-metadata-invalid"
 			responseFailures++
 		case result.public.err != nil:
-			problem = result.public.err.Error()
+			problem = "request-failed"
 			responseFailures++
 		case exitCode != "0":
-			problem = "curl exit " + exitCode
+			problem = "curl-exit-nonzero"
 			responseFailures++
 		case code == "404":
-			problem = "required file returned HTTP 404"
+			problem = "required-file-not-found"
 			missing++
 		case code != "200":
-			problem = "required file returned HTTP " + code
+			problem = "unexpected-http-status"
 			responseFailures++
 		case result.validation != nil:
-			problem = result.validation.Error()
+			problem = associationPublicDocumentProblem(result)
 			invalid++
 		}
 		if problem == "" {
 			continue
 		}
 		failures = append(failures, fmt.Sprintf(
-			"edge=%s interface=%s address=%s path=%s http=%s exit=%s content_type=%q problem=%s body_prefix=%q",
+			"edge=%s interface=%s address=%s path=%s http=%s exit=%s content_type=%s problem=%s",
 			result.host.name,
 			result.configured.Interface,
 			result.configured.Address,
 			result.document.path,
-			code,
-			exitCode,
-			result.public.values["monitor_content_type"],
+			associationPublicNumber(code, 100, 599),
+			associationPublicNumber(exitCode, 0, 255),
+			associationPublicContentType(result.public.values["monitor_content_type"]),
 			problem,
-			associationBodyPrefix(result.public.body),
 		))
 	}
 	findings := []finding{}
@@ -362,11 +362,50 @@ func associationFilesFindings(hostname string, results []associationProbeResult)
 	})
 }
 
-func associationBodyPrefix(body string) string {
-	prefix := strings.Join(strings.Fields(body), " ")
-	const maxBytes = 240
-	if len(prefix) > maxBytes {
-		return prefix[:maxBytes] + "..."
+// Only canonical bounded protocol numbers are public; malformed metadata
+// must not become arbitrary text in a diagnostic field.
+func associationPublicNumber(raw string, minimum, maximum int) string {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || maximum < value || strconv.Itoa(value) != raw {
+		return "unknown"
 	}
-	return prefix
+	return strconv.Itoa(value)
+}
+
+// Retain a useful media-type category without exposing header parameters or
+// arbitrary server-provided strings.
+func associationPublicContentType(raw string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	switch {
+	case mediaType == "":
+		return "missing"
+	case mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"):
+		return "json"
+	case mediaType == "text/html":
+		return "html"
+	default:
+		return "other"
+	}
+}
+
+// Project an already-failed private validator into closed diagnostic reasons.
+// Validation and failure counting still use the original private result.
+func associationPublicDocumentProblem(result associationProbeResult) string {
+	if associationPublicContentType(result.public.values["monitor_content_type"]) != "json" {
+		return "content-type-not-json"
+	}
+	if result.public.body == "" {
+		return "document-empty"
+	}
+	if !json.Valid([]byte(result.public.body)) {
+		return "document-json-invalid"
+	}
+	switch result.document.kind {
+	case "android":
+		return "android-contract-invalid"
+	case "apple":
+		return "apple-contract-invalid"
+	default:
+		return "document-contract-invalid"
+	}
 }

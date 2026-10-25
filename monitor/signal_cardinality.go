@@ -63,10 +63,9 @@ func (metricCardinalityProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(metricCardinalityQuery(env.cfg.env))
-	output, host, err := shellFirstServiceGateway(
+	output, host, err := mimirShellFirstServiceGateway(
 		ctx, env.runner, hosts, nil,
-		"# "+metricCardinalityMarker+"\ncurl -fsS --max-time 20 '"+queryURL+"'",
-	)
+		"# "+metricCardinalityMarker+"\ncurl -fsS --max-time 20 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("query Mimir through service gateways: %w", err)
 	}

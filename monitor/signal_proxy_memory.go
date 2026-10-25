@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	proxyMemoryMarker        = "monitor-signal-14.7-proxy-memory"
-	proxyMemoryReserveKiB    = int64(8 * 1024 * 1024)
-	proxyMemoryReserveFactor = 0.05
+	proxyMemoryMarker          = "monitor-signal-14.7-proxy-memory"
+	proxyMemoryReserveKiB      = int64(8 * 1024 * 1024)
+	proxyMemoryReserveFactor   = 0.05
+	proxyKernelJournalMaxBytes = int64(4 * 1024 * 1024)
 
 	proxyRolloutGuardFull      = rolloutGuardFull
 	proxyRolloutGuardDrainOnly = rolloutGuardDrainOnly
@@ -186,13 +187,79 @@ awk '$1=="Udp:" {
   if (error_column>0) print "udp_rcvbuf_errors", $error_column
 }' /proc/net/snmp
 
-kernel_log=$(journalctl -k --utc --since=-60min -o cat 2>&1)
-kernel_journal_status=$?
-printf 'kernel_journal_status %s\n' "$kernel_journal_status"
-printf '%s\n' "$kernel_log" | awk '
-  /Out of memory: Killed process [0-9]+ [(]bringyour-proxy[)]/ {
+# Bound stdout before materialization; retain only stderr presence, never its body.
+# timeout owns and joins journalctl; this shell joins both its reader and owner.
+umask 077
+journal_dir=$(mktemp -d) || exit 1
+journal_reader_pid=
+journal_error_pid=
+journal_pid=
+proxy_journal_cleanup() {
+  trap '' HUP INT TERM
+  if [ -n "$journal_reader_pid" ]; then kill "$journal_reader_pid" 2>/dev/null || :; fi
+  if [ -n "$journal_error_pid" ]; then kill "$journal_error_pid" 2>/dev/null || :; fi
+  if [ -n "$journal_pid" ]; then kill "$journal_pid" 2>/dev/null || :; fi
+  if [ -n "$journal_reader_pid" ]; then wait "$journal_reader_pid" 2>/dev/null || :; fi
+  if [ -n "$journal_error_pid" ]; then wait "$journal_error_pid" 2>/dev/null || :; fi
+  if [ -n "$journal_pid" ]; then wait "$journal_pid" 2>/dev/null || :; fi
+  rm -rf -- "$journal_dir"
+}
+trap proxy_journal_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkfifo "$journal_dir/stdout" "$journal_dir/stderr" || exit 1
+# A short reader closes the pipe at N+1; timeout also bounds a stalled producer.
+timeout --kill-after=2s 10s journalctl -k --utc --since=-60min --reverse -o cat \
+  >"$journal_dir/stdout" 2>"$journal_dir/stderr" &
+journal_pid=$!
+head -c 4194305 <"$journal_dir/stdout" >"$journal_dir/raw" &
+journal_reader_pid=$!
+head -c 1 <"$journal_dir/stderr" >"$journal_dir/stderr-presence" &
+journal_error_pid=$!
+if wait "$journal_reader_pid"; then journal_reader_status=0; else journal_reader_status=$?; fi
+journal_reader_pid=
+if wait "$journal_error_pid"; then journal_error_status=0; else journal_error_status=$?; fi
+journal_error_pid=
+if wait "$journal_pid"; then kernel_journal_status=0; else kernel_journal_status=$?; fi
+journal_pid=
+journal_bytes=$(wc -c <"$journal_dir/raw" | tr -d '[:space:]')
+journal_stderr=$(wc -c <"$journal_dir/stderr-presence" | tr -d '[:space:]')
+case "$journal_stderr" in 0|1) ;; *) exit 1 ;; esac
+case "$journal_bytes" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$journal_bytes" -le 4194305 ] || exit 1
+journal_complete=1
+journal_reason=complete
+journal_records=1
+if [ "$journal_reader_status" -ne 0 ] || [ "$journal_error_status" -ne 0 ] || \
+   { [ "$kernel_journal_status" -ne 0 ] && \
+     { [ "$kernel_journal_status" -ne 141 ] || [ "$journal_bytes" -ne 4194305 ] || [ "$journal_stderr" -ne 0 ]; }; }; then
+  journal_complete=0
+  journal_reason=source-failed
+  journal_records=0
+elif [ "$journal_bytes" -gt 4194304 ]; then
+  journal_complete=0
+  journal_reason=byte-bound
+elif [ "$journal_stderr" -ne 0 ]; then
+  journal_complete=0
+  journal_reason=stderr-observed
+elif [ "$journal_bytes" -gt 0 ]; then
+  journal_last_byte=$(tail -c 1 "$journal_dir/raw" | od -An -tu1 | tr -d '[:space:]')
+  if [ "$journal_last_byte" != 10 ]; then
+    journal_complete=0
+    journal_reason=incomplete-record
+  fi
+fi
+printf 'kernel_journal_schema 1\nkernel_journal_status %s\nkernel_journal_complete %s\nkernel_journal_bytes %s\nkernel_journal_reason %s\nkernel_journal_stderr %s\n' \
+  "$kernel_journal_status" "$journal_complete" "$journal_bytes" "$journal_reason" "$journal_stderr"
+# LC_ALL=C makes length byte-counted. Only newline-terminated stdout lines
+# wholly within N are eligible; a split/oversized final record cannot qualify.
+LC_ALL=C awk -v bytes="$journal_bytes" -v records="$journal_records" '
+  {
+    end += length($0)+1
+    if (records!=1 || end>bytes || end>4194304) next
+  }
+  /^Out of memory: Killed process [0-9]+ [(]bringyour-proxy[)]([[:space:]].*)?$/ {
     kills++
-    latest=$0
+    if (latest=="") latest=$0
   }
   /^\[[[:space:]]*[0-9]+\].*[[:space:]]bringyour-proxy$/ {
     pid=$1
@@ -200,35 +267,43 @@ printf '%s\n' "$kernel_log" | awk '
     if (pid!="" && !seen_pid[pid]++) process_count++
   }
   END {
+    print "kernel_journal_positive_qualified", (kills>0 ? 1 : 0)
     print "recent_proxy_oom_kills", kills+0
     print "oom_proxy_processes", process_count+0
     if (latest!="") print "oom_line", latest
   }
-'
+' "$journal_dir/raw"
 `
 
+var proxyKernelOOMLinePattern = regexp.MustCompile(`^Out of memory: Killed process [0-9]+ [(]bringyour-proxy[)]([[:space:]].*)?$`)
+
 type proxyMemorySample struct {
-	proxyHost            bool
-	bootID               string
-	warpctlRolloutGuard  string
-	memTotalKiB          int64
-	memAvailableKiB      int64
-	swapTotalKiB         int64
-	swapFreeKiB          int64
-	runningUnits         int64
-	runningUnitsUnknown  bool
-	proxyProcesses       int64
-	proxyRSSKiB          int64
-	proxyMaxRSSKiB       int64
-	proxyMemoryBounded   int64
-	proxyMemoryUnbounded int64
-	proxyMemoryUnknown   int64
-	udpInDatagrams       int64
-	udpRcvbufErrors      int64
-	kernelJournalStatus  int64
-	recentProxyOOMKills  int64
-	oomProxyProcesses    int64
-	oomLine              string
+	proxyHost                      bool
+	bootID                         string
+	warpctlRolloutGuard            string
+	memTotalKiB                    int64
+	memAvailableKiB                int64
+	swapTotalKiB                   int64
+	swapFreeKiB                    int64
+	runningUnits                   int64
+	runningUnitsUnknown            bool
+	proxyProcesses                 int64
+	proxyRSSKiB                    int64
+	proxyMaxRSSKiB                 int64
+	proxyMemoryBounded             int64
+	proxyMemoryUnbounded           int64
+	proxyMemoryUnknown             int64
+	udpInDatagrams                 int64
+	udpRcvbufErrors                int64
+	kernelJournalStatus            int64
+	kernelJournalComplete          bool
+	kernelJournalBytes             int64
+	kernelJournalStderr            bool
+	kernelJournalReason            string
+	kernelJournalPositiveQualified bool
+	recentProxyOOMKills            int64
+	oomProxyProcesses              int64
+	oomLine                        string
 }
 
 type proxyUDPCounterSample struct {
@@ -304,25 +379,31 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 	sample := proxyMemorySample{}
 	proxyHostValue := int64(-1)
 	runningUnitsUnknownValue := int64(0)
+	journalSchema, journalComplete, journalPositive, journalStderr := int64(0), int64(0), int64(0), int64(0)
 	values := map[string]*int64{
-		"proxy_host":             &proxyHostValue,
-		"mem_total_kib":          &sample.memTotalKiB,
-		"mem_available_kib":      &sample.memAvailableKiB,
-		"swap_total_kib":         &sample.swapTotalKiB,
-		"swap_free_kib":          &sample.swapFreeKiB,
-		"running_units":          &sample.runningUnits,
-		"running_units_unknown":  &runningUnitsUnknownValue,
-		"proxy_processes":        &sample.proxyProcesses,
-		"proxy_rss_kib":          &sample.proxyRSSKiB,
-		"proxy_max_rss_kib":      &sample.proxyMaxRSSKiB,
-		"proxy_memory_bounded":   &sample.proxyMemoryBounded,
-		"proxy_memory_unbounded": &sample.proxyMemoryUnbounded,
-		"proxy_memory_unknown":   &sample.proxyMemoryUnknown,
-		"udp_in_datagrams":       &sample.udpInDatagrams,
-		"udp_rcvbuf_errors":      &sample.udpRcvbufErrors,
-		"kernel_journal_status":  &sample.kernelJournalStatus,
-		"recent_proxy_oom_kills": &sample.recentProxyOOMKills,
-		"oom_proxy_processes":    &sample.oomProxyProcesses,
+		"proxy_host":                        &proxyHostValue,
+		"mem_total_kib":                     &sample.memTotalKiB,
+		"mem_available_kib":                 &sample.memAvailableKiB,
+		"swap_total_kib":                    &sample.swapTotalKiB,
+		"swap_free_kib":                     &sample.swapFreeKiB,
+		"running_units":                     &sample.runningUnits,
+		"running_units_unknown":             &runningUnitsUnknownValue,
+		"proxy_processes":                   &sample.proxyProcesses,
+		"proxy_rss_kib":                     &sample.proxyRSSKiB,
+		"proxy_max_rss_kib":                 &sample.proxyMaxRSSKiB,
+		"proxy_memory_bounded":              &sample.proxyMemoryBounded,
+		"proxy_memory_unbounded":            &sample.proxyMemoryUnbounded,
+		"proxy_memory_unknown":              &sample.proxyMemoryUnknown,
+		"udp_in_datagrams":                  &sample.udpInDatagrams,
+		"udp_rcvbuf_errors":                 &sample.udpRcvbufErrors,
+		"kernel_journal_status":             &sample.kernelJournalStatus,
+		"kernel_journal_schema":             &journalSchema,
+		"kernel_journal_complete":           &journalComplete,
+		"kernel_journal_bytes":              &sample.kernelJournalBytes,
+		"kernel_journal_stderr":             &journalStderr,
+		"kernel_journal_positive_qualified": &journalPositive,
+		"recent_proxy_oom_kills":            &sample.recentProxyOOMKills,
+		"oom_proxy_processes":               &sample.oomProxyProcesses,
 	}
 	seen := map[string]bool{}
 	bootIdRows := 0
@@ -348,8 +429,20 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		if !ok {
 			continue
 		}
+		if key == "kernel_journal_reason" {
+			if seen[key] || (value != "complete" && value != "byte-bound" && value != "incomplete-record" && value != "source-failed" && value != "stderr-observed") {
+				return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid journal reason")
+			}
+			sample.kernelJournalReason = value
+			seen[key] = true
+			continue
+		}
 		if key == "oom_line" {
+			if seen[key] {
+				return proxyMemorySample{}, fmt.Errorf("proxy memory: duplicate kernel OOM record")
+			}
 			sample.oomLine = value
+			seen[key] = true
 			continue
 		}
 		if key == "warpctl_rollout_guard" {
@@ -369,6 +462,9 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		}
 		if key == "running_units_unknown" && (seen[key] || (value != "0" && value != "1")) {
 			return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid unit census qualifier")
+		}
+		if (strings.HasPrefix(key, "kernel_journal_") || key == "recent_proxy_oom_kills" || key == "oom_proxy_processes") && seen[key] {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: duplicate journal qualifier")
 		}
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || parsed < 0 {
@@ -394,10 +490,44 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		"running_units", "proxy_processes", "proxy_rss_kib", "proxy_max_rss_kib",
 		"proxy_memory_bounded", "proxy_memory_unbounded", "proxy_memory_unknown",
 		"udp_in_datagrams", "udp_rcvbuf_errors", "kernel_journal_status", "recent_proxy_oom_kills", "oom_proxy_processes",
+		"kernel_journal_schema", "kernel_journal_complete", "kernel_journal_bytes", "kernel_journal_reason", "kernel_journal_positive_qualified", "kernel_journal_stderr",
 	} {
 		if !seen[key] {
 			return proxyMemorySample{}, fmt.Errorf("proxy memory: observation omitted %s", key)
 		}
+	}
+	sample.kernelJournalComplete = journalComplete == 1
+	sample.kernelJournalPositiveQualified = journalPositive == 1
+	sample.kernelJournalStderr = journalStderr == 1
+	if journalSchema != 1 || journalComplete > 1 || journalPositive > 1 || journalStderr > 1 || sample.kernelJournalBytes > proxyKernelJournalMaxBytes+1 {
+		return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid journal qualifier")
+	}
+	switch sample.kernelJournalReason {
+	case "complete":
+		if !sample.kernelJournalComplete || sample.kernelJournalStatus != 0 || sample.kernelJournalStderr || sample.kernelJournalBytes > proxyKernelJournalMaxBytes {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent complete journal")
+		}
+	case "byte-bound":
+		if sample.kernelJournalComplete || sample.kernelJournalBytes != proxyKernelJournalMaxBytes+1 || (sample.kernelJournalStatus != 0 && (sample.kernelJournalStatus != 141 || sample.kernelJournalStderr)) {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent journal byte boundary")
+		}
+	case "incomplete-record":
+		if sample.kernelJournalComplete || sample.kernelJournalStatus != 0 || sample.kernelJournalStderr || sample.kernelJournalBytes == 0 || sample.kernelJournalBytes > proxyKernelJournalMaxBytes {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent journal framing")
+		}
+	case "stderr-observed":
+		if sample.kernelJournalComplete || sample.kernelJournalStatus != 0 || !sample.kernelJournalStderr || sample.kernelJournalBytes > proxyKernelJournalMaxBytes {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent journal diagnostic qualifier")
+		}
+	case "source-failed":
+		if sample.kernelJournalComplete || sample.kernelJournalPositiveQualified || sample.recentProxyOOMKills != 0 || sample.oomProxyProcesses != 0 || sample.oomLine != "" {
+			return proxyMemorySample{}, fmt.Errorf("proxy memory: failed journal claimed positive evidence")
+		}
+	}
+	if sample.kernelJournalPositiveQualified != (sample.recentProxyOOMKills > 0) ||
+		(sample.kernelJournalPositiveQualified && (!proxyKernelOOMLinePattern.MatchString(sample.oomLine) || int64(len(sample.oomLine))+1 > min(sample.kernelJournalBytes, proxyKernelJournalMaxBytes))) ||
+		(!sample.kernelJournalPositiveQualified && sample.oomLine != "") {
+		return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid qualified kernel OOM record")
 	}
 	if sample.memTotalKiB == 0 || sample.memAvailableKiB > sample.memTotalKiB || sample.swapFreeKiB > sample.swapTotalKiB {
 		return proxyMemorySample{}, fmt.Errorf("proxy memory: inconsistent host memory observation")
@@ -468,12 +598,19 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 		findings = append(findings, cannotObserveFinding(host+"/proxy-running-units", fmt.Errorf("proxy memory: running unit census unavailable")))
 	}
 
-	if sample.kernelJournalStatus != 0 {
-		findings = append(findings, cannotObserveFinding(host+"/proxy-kernel-oom", fmt.Errorf("kernel journal exited with status %d", sample.kernelJournalStatus)))
-	} else if sample.recentProxyOOMKills > 0 {
+	if !sample.kernelJournalComplete {
+		unknown := cannotObserveFinding(host+"/proxy-kernel-oom", &observationStateUnavailableError{})
+		unknown.observed += fmt.Sprintf(" journal_complete=false reason=%s observed_bytes=%d observation_budget_bytes=%d positive_record_qualified=%t stderr_present=%t", sample.kernelJournalReason, sample.kernelJournalBytes, proxyKernelJournalMaxBytes, sample.kernelJournalPositiveQualified, sample.kernelJournalStderr)
+		unknown.mechanism = "The bounded kernel journal observation is incomplete. Only independently complete validated stdout records can retain positive OOM evidence; missing history is not a healthy absence."
+		findings = append(findings, unknown)
+	}
+	if sample.kernelJournalPositiveQualified {
 		mechanism := "A global host OOM selected a proxy process. Proxy cgroups have no effective memory ceiling, so overlapping old and candidate processes compete with the kernel and every other service for physical RAM."
-		if !sample.runningUnitsUnknown && sample.runningUnits > 0 && sample.oomProxyProcesses > sample.runningUnits {
+		if sample.kernelJournalComplete && !sample.runningUnitsUnknown && sample.runningUnits > 0 && sample.oomProxyProcesses > sample.runningUnits {
 			mechanism = fmt.Sprintf("The kernel OOM task table contained %d proxy processes for %d running block units, proving old and candidate fleets overlapped. Their aggregate resident memory exhausted host RAM and swap before the old fleet drained.", sample.oomProxyProcesses, sample.runningUnits)
+		}
+		if !sample.kernelJournalComplete {
+			mechanism = "An independently complete newline-terminated kernel stdout OOM record selected a proxy process. The rest of the journal window is unobserved; observed task rows are not a complete process cohort or proof of the current cause."
 		}
 		action := "The full-overlap host guard is installed; preserve the incident processes and validate why more than one replacement entered. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below the measured steady process size."
 		if sample.warpctlRolloutGuard == proxyRolloutGuardDrainOnly || sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
@@ -490,7 +627,7 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 			observed: fmt.Sprintf("%s recent_proxy_oom_kills=%d oom_task_table_proxy_processes=%d running_block_units=%s current_proxy_processes=%d current_proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f udp_rcvbuf_errors_since_boot=%d unbounded_proxy_cgroups=%d",
 				guardObservation, sample.recentProxyOOMKills, sample.oomProxyProcesses, runningUnitsObservation, sample.proxyProcesses,
 				kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memAvailableKiB), kiBToGiB(sample.swapFreeKiB),
-				sample.udpRcvbufErrors, sample.proxyMemoryUnbounded),
+				sample.udpRcvbufErrors, sample.proxyMemoryUnbounded) + fmt.Sprintf(" journal_complete=%t journal_reason=%s positive_record_qualified=true", sample.kernelJournalComplete, sample.kernelJournalReason),
 			evidence: sample.oomLine,
 			context:  "UdpRcvbufErrors is cumulative since boot, not a current rate. A large incident-correlated increase supports host receive starvation, but the kernel OOM and excess proxy-process count are the causal memory evidence; changing WireGuard peers or only enlarging UDP buffers does not restore rollout capacity.",
 			action:   action,

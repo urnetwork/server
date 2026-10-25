@@ -4949,6 +4949,58 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 `signal_settings_freshness.go` and `signal_settings_freshness_test.go`.
 
 ### 1.7 Shared observation failures and observer-overlay route coverage
+
+Mimir SSH query and Mimir-specific reduced-source intake is byte-bounded before
+native stdout/stderr buffering. Each query retains its existing explicit response
+limit; previously uncapped query responses receive a 4 MiB local observation
+limit. Mimir build-info/config/metrics curl bodies also have a 4 MiB bound while
+retaining their original 2s/10s deadlines and failed-prefix refusal. Native stderr
+is limited to 64 KiB. Exceeding either stream cancels and joins the child,
+discards both streams and retains a typed output-bound failure; an ordinary
+probe error becomes cannot-observe with fixed `source_phase=output-bound` and
+`stream`. Owning composite probes may instead retain their narrower explicit
+unknown finding. No prefix is parsed as health and no sibling gateway replay
+follows intake overflow. A scoped native callback also wraps curl with a
+fresh private receipt token and explicit no-PTY SSH mode. Only curl returning63 emits its exact budget
+receipt through a reserved FD9 diagnostic channel, surviving command substitution,
+pipelines and redirected stderr. Native stderr recognizes that receipt promptly,
+cancels and joins the child, then rejects all stdout even if the script later
+succeeds. One exact current-token line yields `stream=remote-body`; damaged or
+duplicate or foreign framing yields unqualified `stream=receipt`, without a
+remote-budget diagnosis. Both refuse observation without gateway replay. A numeric
+exit63 alone supplies no budget authority and retains ordinary failure
+fallback. A stale/foreign marker refuses observation without a budget diagnosis. Receipt tokens and diagnostic bytes are never public.
+Query deadlines, admission, host exclusions, cadence,
+thresholds and the separate PG sampler remain unchanged. Fixed SSH timeout
+classification uses private bounded diagnostics without rendering their bytes.
+
+These are local observation acceptance policies, not service capacity limits or
+proof that every legitimate response fits. Oversized data remains unknown.
+Caller-specific 64 KiB/1 MiB/2 MiB and configurable bounds are not raised to the
+new default. Newly required curl response caps are inserted only by the owned
+native callback; injected source commands keep their original query/argv form.
+Existing explicit curl caps are preserved, and the Grafana-node discard-only
+write-out keeps its separate body contract. Native stdout/stderr intake and
+owned remote-refusal receipts remain enforced for every selected Mimir read.
+A returned successful fixture body is distinct from a failed native command:
+callers with existing first-step byte guards retain their own parser-bound
+classification. Other callers retain the shared post-return acceptance guard.
+Oversized fixture data never certifies healthy state. Parent cancellation keeps
+independently returned source causes in the private error chain and prevents
+sibling contact or publication; no source bytes enter lifecycle error text. A provider-count
+read may retain the existing safe rejected-envelope classification after its
+owner retires: only a within-bound, successful transport body reaches the pure
+owner parser, all cohorts are discarded, and only its fixed failure is retained
+privately. This does not authorize a canceled sample, finding, history advance
+or sibling read. Oversized or transport-failed bodies are never reclassified. The native HTTPS query reader retains its existing bounded header
+and body contract; the Grafana-node query discards the response body and retains
+only validated finite write-out within bounded composite output. Injected
+SignalSource implementations own allocation of returned strings; the adapter
+still rejects oversized returned data before parsing. Source-attribution echo,
+Loki, Redis, router and other non-Mimir subprocess policies remain separate.
+Recovery requires complete within-bound evidence under each owning signal's
+criteria; absence and a healthy sibling cannot clear earlier pressure or loss.
+
 Probe: `observer-route`
 
 The shared SSH transport retains its execution source and native process exit
@@ -7165,6 +7217,16 @@ continuity, qualified baselines, cohort policy, deployment comparability, and
 threshold/severity/sustain policy. Missing hourly evidence remains unknown,
 while static WARNs retain their existing meaning.
 
+The daily structural guard requires exactly one complete seven-field aggregate,
+including zero partition counts for a plain table. Counts must be canonical
+nonnegative integers; the three structural families and partition mismatch
+counts must agree with their bounds and witness. Missing rows/cells, duplicate
+rows, malformed fields or inconsistent counts are unavailable evidence, not a
+healthy result or a structural migration finding. The SQL's explicit `missing`
+legacy-statistic sentinel remains valid: complete structural protection does
+not depend on legacy estimates. This guard still does not implement hourly
+query-regression observation.
+
 2026-07-17 variant — the rare-value stats landmine (incident playbook: 5.8).
 Stats can be systematically wrong, not just stale: a value rarer than
 ~1/sample (30k rows at default_statistics_target=100) can vanish from the
@@ -7316,6 +7378,16 @@ statistics and source-clock limits. Require consecutive covered below-floor
 samples after completion; honor any configured cadence floor rather than
 adding five-minute readers. This qualification changes no probe, caller cap,
 threshold or production setting; §2.4a's discarded-pass reader stays independent.
+
+Required decision fields are typed evidence, not permissive zero defaults.
+A malformed or missing dead-tuple count, configured fixed threshold, or required
+row shape emits `cannot-observe` with fixed error fields. The current 25-cell
+projection and supported 21-cell plain-table form retain optional coalesced
+progress/horizon values and the -1/default threshold floor. A malformed row does
+not erase independently proven debt in another valid row; neither invalid-only
+nor mixed evidence is a healthy complete observation. Raw malformed cells and
+source diagnostics are not rendered. This validation does not certify every
+optional attribution field or establish a production corruption incident.
 
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
@@ -11833,6 +11905,23 @@ below-threshold direct-only observation from emitting discovery health.
 
 ### 2.9b App location-picker availability — initial and search results
 Probe: `provider-picker`
+
+Findings after a successful native response-body read retain `mimir_requested_eval_unix`,
+`mimir_requested_window_start_unix` and `mimir_requested_window_end_unix`: the exact integer `time`
+argument submitted by the owned Mimir POST and its requested five-minute window.
+The request clock is independent of Alert `ObservedAt`, which remains the later
+render clock. These scalars attest neither backend honoring of the argument nor
+actual scrape timestamps, full ingestion, serving artifact or request delivery.
+Native preflight, transport, HTTP-status or body-read failures return before
+these requested-clock fields. A native200 response with malformed, stale or
+partial semantic evidence may retain the submitted argument fields while its
+producer window remains unknown; those fields do not qualify the data. No raw vector,
+instance, endpoint, credential or additional request is retained. Clock fields do
+not alter thresholds, source guards, alert identity, cadence or recovery rules.
+`provider_picker_query_clock_test.go` uses an actual fake-HTTP callback and a
+clock that advances before rendering to bind the fields to the serialized POST,
+including its integer-second rounding; a failed source cannot certify a window.
+This prospective metadata does not reconstruct any earlier Alert's query time.
 
 The initial GET `/network/provider-locations` and search POST
 `/network/find-provider-locations` are app list surfaces independent of
@@ -21134,6 +21223,15 @@ Missing/blank evidence, missing/unknown reasons or legs, and
 webhook writer does not produce that deleted-destination tuple. Valid
 `leg=credit` records retain their existing reconciliation PAGE. No heartbeat
 join is used to hide an incomplete or malformed audit record.
+When a consistent mixed aggregate has `observations_24h > invalid_observations_24h`,
+both terminal PAGE classes remain present with their existing independent identities.
+The difference counts valid credit-leg observations, not distinct valid payments;
+evidence/run cardinalities and latest age are cohort-wide in a mixed aggregate.
+Invalid-only observations do not establish a valid terminal incident. Malformed,
+contradictory, unavailable, or canceled observations remain unknown; an invalid
+sibling must not mask a known valid incident or grant it complete-absence recovery.
+This monitor classification change does not authorize payment disposition, change
+the S11 webhook exclusion, or establish finance recovery by aging out.
 **False-positive qualifier:** this aggregate cannot identify a current Stripe
 provider failure, a destination, or whether the invalid record predates the
 current writer. A monitor that predates the S11 webhook contract incorrectly
@@ -27610,6 +27708,20 @@ permission to kill or restart a generation and changes no alert threshold.
 ### 8.7 Required credential and lazy-vault readiness — green startup, missing work
 Probe: `credentials`
 
+Lifecycle acceptance follows §1.7 for this metadata-only custom signal: a
+public `Run` that entered with a live parent withholds its readiness findings
+when that owner ends before return, retaining the canonical context error and
+any already-returned validation cause without rendering its text. Live required
+missing credentials, partial optional credentials and unknown activation keep
+their existing independent classifications. Already-canceled local evaluation
+preserves its historical compatibility contract; it is not a newly qualified
+live observation or current consumer-health proof. No source contact or state
+write is added, and cancellation after the final acceptance check is not atomic.
+`RunSignal` delegates directly; one-shot `Monitor.Run` retains its visibility
+error contract. The standing loop already suppresses an ended outer monitor
+before its handler, so this repair establishes no production notification
+incident and changes no credential owner, operator hold or readiness threshold.
+
 The proactive credential inventory runs before a customer discovers a lazy
 resource. It retains only a semantic requirement key, the Vault resource name,
 whether that resource exists and parses, and sorted missing field names. Secret
@@ -27845,9 +27957,18 @@ is limited to the family, normalized expected source, and a fixed
 `request-failed`, `http-non-2xx`, or `invalid-response` class. Raw response
 strings, parser errors, command diagnostics, and any credentials, customer
 identifiers, or signed URLs carried by them must never enter alert JSON, JSONL,
-or Markdown. Both outcomes retain the `synthetic/source-attribution` probe
-identity, configured endpoint target, and family frame; unknown acquisition
-cannot clear a prior mismatch.
+or Markdown. Configured endpoint URLs are private too: userinfo, hostnames,
+queries, fragments, and capability-bearing paths never enter public fields,
+identities, or renderings, including through a URL-derived hash. Both outcomes
+retain the `synthetic/source-attribution` probe identity and family frame;
+public targets are the fixed configured inventory slots
+`source-attribution/ipv4` and `source-attribution/ipv6`. There is exactly one
+configured endpoint per family. The request still uses that family's exact
+private URL; resolve a slot through the exact loaded settings generation under
+operator access, never by adding an endpoint to public evidence. URL rotation
+within a slot does not create a new public cohort. This intentionally replaces
+the former URL-derived target namespace; historical artifacts remain unchanged.
+Unknown acquisition cannot clear a prior mismatch.
 
 False-positive qualifiers: an unavailable source does not establish endpoint
 reachability, lost forwarding, or client collapse. Even a normalized mismatch
@@ -29278,6 +29399,27 @@ because it changes the safe OOM/UDP response, but it does not emit duplicate
 guard alerts. Hosts without any enabled or running environment-scoped Warp
 unit are not managed by this signal; availability and inventory probes own the
 absence. Disabled inventory entries are never contacted.
+
+
+**Observation completeness:** only successful completion of both environment-scoped
+unit-discovery commands can establish a genuinely unmanaged zero-unit host.
+A failed command, including a partial prefix followed by failure, is
+`cannot-observe`; it must never become an empty successful census. For a
+managed host, an unavailable unit `Environment` read also remains unknown.
+Preserve independent known legacy/disabled guard or stale/unverifiable worker
+findings alongside that visibility gap; missing override evidence is not proof
+that every unit enables serialization. A complete zero-unit census remains
+legitimately unmanaged. No service restart or deployment-policy change follows
+from this monitor correction.
+
+Producer controls execute the actual generated command through the public
+signal with private fake tools. They distinguish native source failure from
+successful empty discovery, preserve known unsafe and worker-freshness controls,
+and check narration against the supported startup/promotion lease with
+retirement outside it. These local controls do not prove any current host's
+unit census, mapped worker artifact, lease lifetime or actual overlap. Exact
+resident source and separately authorized runtime evidence remain prerequisites;
+source/clock gaps remain unknown and cannot establish recovery.
 
 **Live deployment audit (2026-08-31):** edge-0, edge-1, edge-3, edge-4, Crisp,
 and Fireside were the six enabled managed-services hosts. Every installed
@@ -32605,6 +32747,15 @@ discovery-dependent missing-writer incident. The existing whole-host failure
 guard still suppresses aggregate judgment; mixed ready/unreadable children
 retain their existing visibility warning. The per-tenant writer GaugeVec is
 conditional on compactor ownership and is not mandatory on every child.
+
+An identified child whose metrics cannot be read also withholds fleet writer
+absence authority, even when a ready sibling supplies complete gateway
+gauges. That unreadable child may own a fresh compactor writer series.
+Require complete metrics authority from all identified children before
+emitting a discovery-dependent missing-writer or empty/healthy writer
+judgment. Preserve independently observed stale writer timestamps and
+gateway or tenant positives alongside the visibility warning; this does
+not change their thresholds or the whole-host observation-loss guard.
 Visibility reaches the public Alert and completeness consumer, so absence of an
 incident during observation loss cannot advance recovery accounting.
 
@@ -35016,13 +35167,26 @@ The drain logs one start line and exactly one outcome line per SIGTERM:
   (the canceled tasks were rescheduled with claims released — re-run within
   seconds elsewhere; their reschedule_error starts with `Drained:` and does
   NOT advance reschedule_error_count).
-- BROKEN: "drain gave up" = a ctx-ignoring task rode to SIGKILL. Its claim
-  (and EVERY claim of that container) remains leased for at most five minutes
-  after its final heartbeat — find them with 12.3 and normally let them
-  self-release. Use `bringyourctl task release` only for verified-dead workers
-  when immediate recovery matters. Also broken: no outcome line within
-  DrainFinishTimeout+DrainCancelTimeout+30s of the start line (process hung
-  outside task work).
+- WARN: "drain gave up" reports that the finish and cancel waits expired;
+  retain its available elapsed time and in-flight count. It does not establish
+  SIGKILL, a context-ignoring task, stranded claims or every claim's fate.
+  In current source, `Drain` returns and `WaitFinalHandback` allows a further
+  bounded finalization grace before serving-context cancellation. The wait
+  includes run loops and batches, so the line cannot distinguish execution
+  from pending finalization/handback or attest the emitting artifact.
+- Discriminator: join the same process/generation's artifact and configured
+  bounds, drain start/cancel/give-up, final handback, process terminal result
+  and private task execution/finalization/claim ownership. Healthy control:
+  durable completion or intentional rescheduling with ownership handback after
+  cancellation. Such a later handback does not erase the drain warning.
+  Check 12.3 independently; never release claims or restart from this line alone.
+- False-positive qualifier: asynchronous logging and a bounded sample are not
+  process-kill or stranded-claim evidence. False-negative qualifier: missing,
+  stale, partial or unavailable lifecycle evidence leaves later handback,
+  termination, claim state and the full affected population unknown. No outcome
+  line within DrainFinishTimeout+DrainCancelTimeout+30s of the start is a drain
+  observation failure; qualify source completeness before attributing a hang.
+  A quiet/incomplete window does not prove recovery.
 - Metrics mirror: `urnetwork_taskworker_drain_inflight`, `_drain_seconds`,
   `_drain_canceled` (push-based; the series goes stale when the process
   exits, so the log lines are the durable record).
@@ -38062,6 +38226,53 @@ capacity owners while those joins remain open.
 
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
+
+**Kernel-journal observation budget and record authority:** the sixty-minute
+kernel read is newest-first and caps retained stdout at 4 MiB plus one byte
+of overflow evidence before any shell-variable conversion. This is an observer
+cost budget, not a host journal, logging, service or workload policy. A private
+FIFO and bounded reader keep the raw temporary file within that envelope.
+A separate one-byte stderr-presence witness detects diagnostic uncertainty
+without retaining its body; total raw temporary storage is at most 4 MiB plus
+two bytes, with small fixed metadata. These are raw capture bounds, not a
+claim about whole-process RSS, AWK allocation, journalctl working set or disk
+read/write amplification. The owned journal process has a ten-second deadline
+and two-second forced-stop grace. The collector joins both readers and the
+owning timeout process on success, cutoff, failure and caught cancellation;
+that owner waits for journalctl. Private temporary files are removed afterward.
+
+The emitted schema records native status, complete/incomplete state, retained
+stdout bytes, stderr presence, a fixed reason and positive-record qualification.
+An exact-budget successful terminated stream is complete. N+1 bytes,
+unterminated final text, diagnostic stderr, timeout or source failure supply
+visibility and never healthy journal absence or recovery credit. No separate
+line-size threshold is imposed. A partial last line or a line whose terminator
+lies beyond the observation budget cannot qualify as an OOM witness.
+
+Ordinary nonzero journal failures retain the existing unknown/discard-journal-
+positive policy. Intentional byte cutoff is distinct: a newline-terminated,
+anchored OOM line wholly within the retained stdout prefix can independently
+retain `proxy-host-oom` PAGE/Sustain1 alongside visibility. The producer reads
+kernel stdout only; stderr text cannot forge a kernel record. A valid prefix
+also survives an unterminated later line or a native-success diagnostic, but
+never supplies full-window or complete-process-cohort authority. Reverse order
+retains the first matching line as the latest OOM evidence. Expected SIGPIPE
+141 is accepted only with an observed stdout N+1 cutoff and no stderr witness;
+other native failures do not acquire prefix-positive authority. This is source
+record qualification, not authentication of arbitrary journal-entry payloads
+or a proof of the current operational cause.
+
+False-positive boundary: exceeding the observation budget is not a host OOM,
+leak, production outage or reason to change logging. False-negative boundary:
+recent-first cutoff can omit an older true OOM, so an incomplete observation
+cannot clear an existing incident. Complete retained positives and independent
+memory, unit-census and UDP evidence remain visible when the rest of the host
+frame completes; whole-source failures keep their ordinary failure policy. Operator rollout stops,
+physical capacity and source provenance remain separate requirements. Local
+fake-journal controls exercise the actual emitted suffix, exact N/N+1, complete
+healthy and latest OOM evidence, incomplete framing, failed native status,
+stderr forgery, retained prefix positives and owned-producer cancellation.
+They establish no Main condition or production resource measurement.
 
 **Applicability census authority:** a quiet `proxy_host 0` requires a successful
 complete unit census and a successful whole-process census (`ps -e` with
@@ -42596,8 +42807,18 @@ observed HTTP/status or content failures remain present beside that marker.
 Only complete semantic observations on all enabled exact edge/path checks supply
 ordinary absence credit under the shared notifier policy. An unconfigured website
 or empty enabled target set remains a separate applicability case. Unknown error,
-body and endpoint bytes are not copied into the metadata availability finding;
-the existing bounded evidence policy for an observed product failure is unchanged.
+body and endpoint bytes are not copied into the metadata availability finding.
+Observed product failures also use a closed public diagnostic projection:
+canonical HTTP status (100–599) and curl exit (0–255), fixed JSON/HTML/other/
+missing content-type categories, and fixed request/metadata/document-contract
+failure reasons. A malformed protocol number renders as `unknown`; it is not
+an arbitrary server string. Response bodies, raw transport/parser/validation
+errors, header parameters and unvalidated metadata never enter any Alert field,
+identity, JSON, JSONL or Markdown. Whitespace normalization, quoting and a
+240-byte body prefix are not redaction. Exact edge/path request bindings,
+404/429/invalid-200 failure counts, family transport exclusions, target identity,
+severity and sustain remain unchanged. Private source details require separately
+qualified operator evidence; public diagnostics must not echo them.
 A valid sibling does not prove the skipped contract, and this local completeness
 repair does not establish canonical CDN recovery, responder identity, deployed
 artifact adoption or the separate ten-minute ENOENT verification below.

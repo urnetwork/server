@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// Fixtures use the native seven-column aggregate, including plain-table zero partition counts.
 // A false-only generated-column sample must retain the structural migration
 // and bounded sampling target as the durable correction.
 func TestPlannerFlipsSignalSyntheticStatsLandmine(t *testing.T) {
@@ -27,7 +28,7 @@ func TestPlannerFlipsSignalSyntheticStatsLandmine(t *testing.T) {
 				t.Fatalf("stats-landmine query omits structural check %q:\n%s", want, query)
 			}
 		}
-		return []Row{{"1", "0", "0", "10000"}}, nil
+		return []Row{{"1", "0", "0", "10000", "0", "0", ""}}, nil
 	}}
 	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -45,7 +46,7 @@ func TestPlannerFlipsSignalSyntheticStatsLandmine(t *testing.T) {
 // Once all three structural families exist, false-zero legacy estimates are no
 // longer an availability boundary.
 func TestPlannerFlipsSignalSyntheticStructuralBoundaryToleratesEmptyLegacyStats(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"1", "2", "3", "300"}}, nil }}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"1", "2", "3", "300", "0", "0", ""}}, nil }}
 	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +59,7 @@ func TestPlannerFlipsSignalSyntheticStructuralBoundaryToleratesEmptyLegacyStats(
 // Healthy statistics without all three access families are not a durable
 // state; a later false-only sample would re-expose deployed pair readers.
 func TestPlannerFlipsSignalSyntheticMissingStructuralIndex(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "2", "300"}}, nil }}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "2", "300", "0", "0", ""}}, nil }}
 	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +69,7 @@ func TestPlannerFlipsSignalSyntheticMissingStructuralIndex(t *testing.T) {
 
 // Both catalog visibility and the structural access families must clear.
 func TestPlannerFlipsSignalSyntheticHealthyStructuralPlan(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "3", "300"}}, nil }}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "3", "300", "0", "0", ""}}, nil }}
 	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +80,7 @@ func TestPlannerFlipsSignalSyntheticHealthyStructuralPlan(t *testing.T) {
 }
 
 func TestPlannerFlipsSignalSyntheticRejectsUnboundedAnalyzeTarget(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "3", "10000"}}, nil }}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"2", "0", "3", "10000", "0", "0", ""}}, nil }}
 	alerts, err := NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)

@@ -233,8 +233,8 @@ func (accountMessagesProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	now := env.now().UTC()
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(accountMessagesQuery(env.cfg.env)) +
 		"&time=" + strconv.FormatInt(now.Unix(), 10)
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 1048576 '"+queryURL+"'")
+	output, gateway, err := mimirShellFirstServiceGateway(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 1048576 '"+queryURL+"'", 1048576)
 	if err != nil {
 		return nil, &accountMessagesQueryError{cause: err}
 	}

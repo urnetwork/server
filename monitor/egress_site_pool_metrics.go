@@ -180,7 +180,7 @@ func readEgressSitePoolMetrics(ctx context.Context, env *probeEnv, settings *Egr
 		" --data-urlencode " + shellSingleQuote("query="+query) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, err := env.runner.shell(ctx, gateway, command)
+	out, err := mimirShellParsed(ctx, env.runner, gateway, command, settings.MaxResponseBytes)
 	if err != nil || out == "" || len(out) > settings.MaxResponseBytes {
 		return unavailableEgressSitePoolMetrics("bounded-source-unavailable")
 	}

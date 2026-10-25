@@ -924,6 +924,17 @@ Decided (2026-07-17):
   directly from vault/<env> and config/<env> — monitor.yml never duplicates
   a fact that has a source of truth elsewhere.
 
+Decided (2026-10-25):
+
+- **Public network status** (`GET /health`, model/network_health_model.go):
+  the status ur.io shows in its footer pill and degraded banner. The
+  root-cause agent sets and clears it with `bringyourctl health` (RUN-MAIN.md,
+  "Public network status"); the monitor does not write it. The monitor may
+  write it later. That needs an exception to principle 3 for that one key,
+  fixed public reasons per alert class (alert text names hosts, tables and
+  keys, and must never reach the site), and never replacing or clearing a
+  status an operator set (the record keeps its source for this).
+
 Open:
 
 - **monitor pg role**: probes currently need pg_stat_* and catalog reads;

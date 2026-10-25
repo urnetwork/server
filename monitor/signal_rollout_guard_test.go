@@ -218,6 +218,7 @@ func rolloutGuardFixture(sample rolloutGuardSample) string {
 			"running_units %d\n"+
 			"rollout_guard %s\n"+
 			"guard_disabled_units %d\n"+
+			"environment_unobserved_units %d\n"+
 			"guard_disabled_worker_names %s\n"+
 			"binary_change_epoch %d\n"+
 			"oldest_worker_start_epoch %d\n"+
@@ -230,6 +231,7 @@ func rolloutGuardFixture(sample rolloutGuardSample) string {
 		sample.runningUnits,
 		sample.guard,
 		sample.guardDisabledUnits,
+		sample.environmentUnobservedUnits,
 		stringValue(sample.guardDisabledWorkerNames),
 		sample.binaryChangeEpoch,
 		sample.oldestWorkerStartEpoch,
@@ -239,4 +241,28 @@ func rolloutGuardFixture(sample rolloutGuardSample) string {
 		stringValue(sample.staleWorkerNames),
 		stringValue(sample.unverifiableWorkerNames),
 	)
+}
+
+// Unknown unit Environment cannot erase independently known guard/worker facts.
+func TestRolloutGuardEnvironmentUnknownRetainsKnownPositive(t *testing.T) {
+	tests := []struct {
+		name    string
+		control rolloutProducerControl
+		class   string
+	}{
+		{"legacy", rolloutProducerControl{filesRows: true, runningRows: true, environmentStatus: 19, guard: rolloutGuardDrainOnly}, "rollout-guard-stale"},
+		{"stale-worker", rolloutProducerControl{filesRows: true, runningRows: true, environmentStatus: 19, guard: rolloutGuardFull, stale: true}, "rollout-guard-workers-stale"},
+		{"unverifiable-worker", rolloutProducerControl{filesRows: true, runningRows: true, environmentStatus: 19, guard: rolloutGuardFull, startUnavailable: true}, "rollout-guard-workers-stale"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			settings := rolloutProducerSettings(t, map[string]rolloutProducerControl{"synthetic-service": test.control})
+			alerts, err := NewRolloutGuardSignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireAlertClass(t, alerts, test.class)
+			requireAlertClass(t, alerts, "cannot-observe")
+		})
+	}
 }

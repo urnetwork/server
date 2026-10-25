@@ -199,7 +199,7 @@ func (self pgDiskSpaceProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		return []finding{pgDiskSpaceUnknown(target, "service-gateway-unavailable", nil)}, nil
 	}
 	requestedAt := env.now().UTC().Truncate(time.Second)
-	output, _, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, pgDiskSpaceCommand(env.cfg.env, primary.name, requestedAt))
+	output, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, pgDiskSpaceCommand(env.cfg.env, primary.name, requestedAt), pgDiskSpaceMaxBytes)
 	if ctx.Err() != nil {
 		if err != nil {
 			return nil, &signalContextError{contextErr: ctx.Err(), sourceErr: err}

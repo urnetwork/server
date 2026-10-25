@@ -381,8 +381,13 @@ func TestPaymentReconciliationKeepsInvalidUnfulfillableDispositionObservable(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 1 {
-		t.Fatalf("invalid disposition alerts = %d, want 1: %+v", len(alerts), alerts)
+	if len(alerts) != 2 {
+		t.Fatal("mixed terminal observations must retain both incident classes")
+	}
+	valid := requireAlertClass(t, alerts, "payment-reconciliation-credit-unfulfillable")
+	if valid.Target != "stripe" || valid.Severity != SeverityPage ||
+		!strings.Contains(valid.Markdown(), "valid_observations_24h=2") {
+		t.Fatal("mixed terminal valid sibling must retain its identity and valid observation count")
 	}
 	alert := requireAlertClass(t, alerts, "payment-reconciliation-credit-unfulfillable-invalid")
 	if alert.Target != "stripe" || alert.Severity != SeverityPage ||

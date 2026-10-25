@@ -141,9 +141,8 @@ func TestProxyMemorySignalUdpBootKnownSameGeneration(t *testing.T) {
 	sample := proxyMemoryDeltaFixtureSample()
 	sample.udpInDatagrams = 10_000
 	sample.udpRcvbufErrors = 500
-	sample.oomLine = "synthetic-private-journal"
 	source := &syntheticSource{hostFn: func(_ HostSettings, _ string) (string, error) {
-		return proxyMemoryFixture(sample), nil
+		return proxyMemoryFixture(sample) + "ignored_detail synthetic-private-journal\n", nil
 	}}
 	settings := proxyMemorySyntheticSettings(source)
 	settings.Now = func() time.Time { return now }

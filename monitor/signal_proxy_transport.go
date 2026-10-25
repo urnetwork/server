@@ -200,14 +200,13 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 
 	query := proxyTransportQuery(env.cfg.env)
-	out, metricHost, err := shellFirstServiceGateway(
+	out, metricHost, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
 		"curl -fsS --max-time 15 --data-urlencode "+shellSingleQuote("query="+query)+" "+
-			shellSingleQuote(proxyTransportMimirEndpoint),
-	)
+			shellSingleQuote(proxyTransportMimirEndpoint), mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("proxy transport: query Mimir through service gateways: %w", err)
 	}

@@ -192,7 +192,7 @@ func (self *storageRunwayProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	}
 	grid := settings.Estimator.grid(now)
 	command := storageRunwayRangeCommand("monitor-storage-runway", storageRunwayQuery(env.cfg.env, hostNames, mountpoints), grid, settings.Estimator)
-	output, gateway, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
+	output, gateway, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, settings.Estimator.MaxResponseBytes)
 	if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 		return nil, lifecycleErr
 	}

@@ -198,6 +198,8 @@ func TestProxyMemoryCensusQualifierSchema(t *testing.T) {
 	expected := proxyMemoryDeltaFixtureSample()
 	base := proxyMemoryFixture(expected)
 	expected.proxyHost = true
+	expected.kernelJournalComplete = true
+	expected.kernelJournalReason = "complete"
 	legacy, err := parseProxyMemorySample(base)
 	if err != nil || legacy != expected {
 		t.Fatal("legacy complete frame lost its known unit-count contract")

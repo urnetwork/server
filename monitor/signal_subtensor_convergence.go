@@ -340,13 +340,12 @@ func (self subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(subtensorConvergenceQuery(env.cfg.env, targets)) +
 		"&time=" + url.QueryEscape(pinnedTime.Format(time.RFC3339Nano))
-	out, metricHost, err := shellFirstServiceGateway(
+	out, metricHost, err := mimirShellFirstServiceGateway(
 		qualificationCtx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

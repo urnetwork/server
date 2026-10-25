@@ -131,7 +131,7 @@ func (p *mimirContinuityProbe) check(ctx context.Context, env *probeEnv) ([]find
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query_range?" + queryValues.Encode()
 	command := "# " + mimirContinuityMarker + "\n" +
 		"curl -fsS --max-time 20 '" + queryURL + "'"
-	out, metricHost, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command)
+	out, metricHost, err := mimirShellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command, mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("mimir continuity: query Mimir through service gateways: %w", err)
 	}

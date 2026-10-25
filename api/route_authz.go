@@ -73,6 +73,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /robots.txt":                               routeAccessPublic, // keeps crawlers out of /lag/ (lag.dev/PLAN.md amendment 11)
 	"GET /status":                                   routeAccessPublic,
 	"GET /clock":                                    routeAccessPublic,
+	"GET /health":                                   routeAccessPublic,
 	"GET /competition/healthz":                      routeAccessPublic,
 	"GET /competition/readyz":                       routeAccessPublic,
 	"GET /competition/info":                         routeAccessPublic,

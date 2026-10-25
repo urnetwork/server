@@ -120,8 +120,8 @@ func observeSignupMetrics(ctx context.Context, env *probeEnv, at time.Time, dema
 		return nil, fmt.Errorf("signup metrics have no configured service gateway")
 	}
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(signupMetricQuery(env.cfg.env, demand)) + "&time=" + strconv.FormatInt(at.Unix(), 10)
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, hosts, nil,
-		"curl -fsS --max-time 15 --max-filesize 65536 "+shellSingleQuote(queryUrl))
+	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, hosts, nil,
+		"curl -fsS --max-time 15 --max-filesize 65536 "+shellSingleQuote(queryUrl), 65536)
 	if err != nil {
 		return nil, err
 	}

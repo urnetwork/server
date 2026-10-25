@@ -86,7 +86,7 @@ func (mimirIndexProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 				return
 			}
 
-			output, err := env.runner.shell(ctx, target, command)
+			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
 				results <- mimirIndexHostResult{host: target, err: err}
 				return
@@ -138,6 +138,7 @@ func (mimirIndexProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			}
 			frame := mimirInstanceFrame(instanceIndex, instance)
 			if !instance.metricsReady {
+				aggregateComplete = false
 				findings = append(findings, mimirMetricsUnavailableFinding(target, frame, instance.version))
 				continue
 			}

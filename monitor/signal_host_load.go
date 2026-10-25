@@ -91,13 +91,12 @@ func (hostLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, error
 	}
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
 		url.QueryEscape(hostLoadQuery(env.cfg.env))
-	out, gateway, err := shellFirstServiceGateway(
+	out, gateway, err := mimirShellFirstServiceGateway(
 		ctx,
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
-	)
+		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("host load: query Mimir through service gateways: %w", err)
 	}

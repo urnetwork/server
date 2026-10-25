@@ -38,19 +38,20 @@ func (rolloutGuardProbe) tier() string           { return tierWarn }
 func (rolloutGuardProbe) cadence() time.Duration { return 5 * time.Minute }
 
 type rolloutGuardSample struct {
-	managedHost              bool
-	enabledUnits             int64
-	runningUnits             int64
-	guard                    string
-	binaryChangeEpoch        int64
-	oldestWorkerStartEpoch   int64
-	newestWorkerStartEpoch   int64
-	staleWorkerUnits         int64
-	unverifiableWorkerUnits  int64
-	guardDisabledUnits       int64
-	staleWorkerNames         string
-	unverifiableWorkerNames  string
-	guardDisabledWorkerNames string
+	managedHost                bool
+	enabledUnits               int64
+	runningUnits               int64
+	guard                      string
+	binaryChangeEpoch          int64
+	oldestWorkerStartEpoch     int64
+	newestWorkerStartEpoch     int64
+	staleWorkerUnits           int64
+	unverifiableWorkerUnits    int64
+	guardDisabledUnits         int64
+	environmentUnobservedUnits int64
+	staleWorkerNames           string
+	unverifiableWorkerNames    string
+	guardDisabledWorkerNames   string
 }
 
 type rolloutGuardHostResult struct {
@@ -110,31 +111,46 @@ func (rolloutGuardProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		if !result.sample.managedHost {
 			continue
 		}
+		if result.sample.environmentUnobservedUnits > 0 {
+			findings = append(findings, cannotObserveFinding(result.host.name+"/rollout-guard", fmt.Errorf("rollout guard: %d unit Environment read(s) unavailable", result.sample.environmentUnobservedUnits)))
+		}
 		findings = append(findings, evaluateRolloutGuard(result.host.name, result.sample)...)
 	}
 	return findings, nil
 }
 
 const rolloutGuardScript = `set -u
-unit_file_rows=$(systemctl list-unit-files --type=service --no-legend --no-pager "$rollout_unit_pattern" 2>/dev/null || true)
-running_unit_names=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$rollout_unit_pattern" 2>/dev/null |
-  awk '$1 ~ /[.]service$/ {print $1}')
-enabled_units=$(printf '%s\n' "$unit_file_rows" | awk '$2 ~ /^enabled/ {n++} END {print n+0}')
-running_units=$(printf '%s\n' "$running_unit_names" | awk 'NF {n++} END {print n+0}')
+# A successful empty census is unmanaged; a failed producer is unknown.
+if ! unit_file_rows=$(systemctl list-unit-files --type=service --no-legend --no-pager "$rollout_unit_pattern" 2>/dev/null); then
+  exit 1
+fi
+if ! running_unit_rows=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$rollout_unit_pattern" 2>/dev/null); then
+  exit 1
+fi
+running_unit_names=$(printf '%s\n' "$running_unit_rows" | awk '$1 ~ /[.]service$/ {print $1}') || exit 1
+enabled_units=$(printf '%s\n' "$unit_file_rows" | awk '$2 ~ /^enabled/ {n++} END {print n+0}') || exit 1
+running_units=$(printf '%s\n' "$running_unit_names" | awk 'NF {n++} END {print n+0}') || exit 1
 if [ "$enabled_units" -eq 0 ] && [ "$running_units" -eq 0 ]; then
   printf 'managed_host 0\n'
   exit 0
 fi
 printf 'managed_host 1\nenabled_units %s\nrunning_units %s\n' "$enabled_units" "$running_units"
 
-unit_file_names=$(printf '%s\n' "$unit_file_rows" | awk '$1 ~ /[.]service$/ {print $1}')
-known_unit_names=$(printf '%s\n%s\n' "$unit_file_names" "$running_unit_names" | awk 'NF && !seen[$1]++ {print $1}')
+unit_file_names=$(printf '%s\n' "$unit_file_rows" | awk '$1 ~ /[.]service$/ {print $1}') || exit 1
+known_unit_names=$(printf '%s\n%s\n' "$unit_file_names" "$running_unit_names" | awk 'NF && !seen[$1]++ {print $1}') || exit 1
 guard_disabled_units=0
+environment_unobserved_units=0
 guard_disabled_names=
 for unit in $known_unit_names; do
-  if systemctl show "$unit" -p Environment --value 2>/dev/null | grep -Fq 'WARPCTL_STAGGER_HOST_DRAIN=0'; then
-    guard_disabled_units=$((guard_disabled_units+1))
-    guard_disabled_names="${guard_disabled_names}${guard_disabled_names:+,}${unit}"
+  if unit_environment=$(systemctl show "$unit" -p Environment --value 2>/dev/null); then
+    case "$unit_environment" in
+      *WARPCTL_STAGGER_HOST_DRAIN=0*)
+        guard_disabled_units=$((guard_disabled_units+1))
+        guard_disabled_names="${guard_disabled_names}${guard_disabled_names:+,}${unit}"
+        ;;
+    esac
+  else
+    environment_unobserved_units=$((environment_unobserved_units+1))
   fi
 done
 
@@ -151,8 +167,8 @@ elif [ -r "$warpctl_path" ]; then
     rollout_guard=unknown
   fi
 fi
-printf 'rollout_guard %s\nguard_disabled_units %s\nguard_disabled_worker_names %s\n' \
-  "$rollout_guard" "$guard_disabled_units" "${guard_disabled_names:--}"
+printf 'rollout_guard %s\nguard_disabled_units %s\nguard_disabled_worker_names %s\nenvironment_unobserved_units %s\n' \
+  "$rollout_guard" "$guard_disabled_units" "${guard_disabled_names:--}" "$environment_unobserved_units"
 
 binary_change_epoch=$(stat -Lc %Z "$warpctl_path" 2>/dev/null || true)
 case "$binary_change_epoch" in
@@ -203,15 +219,16 @@ func parseRolloutGuardSample(output string) (rolloutGuardSample, error) {
 	sample := rolloutGuardSample{}
 	managedHostValue := int64(-1)
 	values := map[string]*int64{
-		"managed_host":              &managedHostValue,
-		"enabled_units":             &sample.enabledUnits,
-		"running_units":             &sample.runningUnits,
-		"binary_change_epoch":       &sample.binaryChangeEpoch,
-		"oldest_worker_start_epoch": &sample.oldestWorkerStartEpoch,
-		"newest_worker_start_epoch": &sample.newestWorkerStartEpoch,
-		"stale_worker_units":        &sample.staleWorkerUnits,
-		"unverifiable_worker_units": &sample.unverifiableWorkerUnits,
-		"guard_disabled_units":      &sample.guardDisabledUnits,
+		"managed_host":                 &managedHostValue,
+		"enabled_units":                &sample.enabledUnits,
+		"running_units":                &sample.runningUnits,
+		"binary_change_epoch":          &sample.binaryChangeEpoch,
+		"oldest_worker_start_epoch":    &sample.oldestWorkerStartEpoch,
+		"newest_worker_start_epoch":    &sample.newestWorkerStartEpoch,
+		"stale_worker_units":           &sample.staleWorkerUnits,
+		"unverifiable_worker_units":    &sample.unverifiableWorkerUnits,
+		"guard_disabled_units":         &sample.guardDisabledUnits,
+		"environment_unobserved_units": &sample.environmentUnobservedUnits,
 	}
 	stringsByKey := map[string]*string{
 		"stale_worker_names":          &sample.staleWorkerNames,
@@ -268,7 +285,7 @@ func parseRolloutGuardSample(output string) (rolloutGuardSample, error) {
 	for _, key := range []string{
 		"enabled_units", "running_units", "rollout_guard", "guard_disabled_units",
 		"binary_change_epoch", "oldest_worker_start_epoch", "newest_worker_start_epoch",
-		"stale_worker_units", "unverifiable_worker_units", "stale_worker_names",
+		"stale_worker_units", "unverifiable_worker_units", "environment_unobserved_units", "stale_worker_names",
 		"unverifiable_worker_names", "guard_disabled_worker_names",
 	} {
 		if !seen[key] {
@@ -305,7 +322,7 @@ func evaluateRolloutGuard(host string, sample rolloutGuardSample) []finding {
 			class: "rollout-guard-stale", target: host, frame: sample.guard, sustain: 1,
 			symptom:   fmt.Sprintf("%s runs the legacy drain-only Warp rollout guard", host),
 			mechanism: "The installed Warp binary acquires its host lease only around old-container drain. Independent service workers can all start candidates before any worker takes that lease, permitting almost a complete duplicate fleet to coexist and exhaust a constrained host.",
-			baseline:  "The host lease begins before candidate start, remains held through synchronous old-container drain, and refuses replacement when lock acquisition times out.",
+			baseline:  "The supported environment-and-service lease covers candidate startup, readiness, redirect and settle; old-container retirement follows outside the lease. Acquisition timeout refuses candidate startup.",
 			observed:  observed,
 			context:   commonContext,
 			action:    fmt.Sprintf("Deploy validated Warp commit %s (which contains rollout root fix %s) or later, then restart every running Warp service worker on this host before any service release. Do not test the fix with a full proxy rollout.", rolloutGuardValidatedCommit, rolloutGuardCommit),
@@ -318,7 +335,7 @@ func evaluateRolloutGuard(host string, sample rolloutGuardSample) []finding {
 			class: "rollout-guard-disabled", target: host, frame: sample.guard, sustain: 1,
 			symptom:   fmt.Sprintf("%s explicitly disables the full-overlap Warp rollout guard", host),
 			mechanism: "One or more Warp service units set WARPCTL_STAGGER_HOST_DRAIN=0. That override bypasses the host lease, so workers may start candidates concurrently even if the installed binary contains the complete-overlap fix.",
-			baseline:  "No managed service unit disables host serialization, and candidate start through old-container drain is covered by one host lease.",
+			baseline:  "No managed service unit disables the supported candidate startup and promotion lease; old-container retirement follows outside the lease. The exact resident worker source defines the release boundary.",
 			observed:  observed,
 			context:   commonContext,
 			action:    fmt.Sprintf("Remove WARPCTL_STAGGER_HOST_DRAIN=0 from every named unit, deploy validated Warp commit %s (containing %s) or later if needed, reload systemd, and restart every running Warp service worker before any service release. Do not test with a full proxy rollout.", rolloutGuardValidatedCommit, rolloutGuardCommit),
@@ -331,7 +348,7 @@ func evaluateRolloutGuard(host string, sample rolloutGuardSample) []finding {
 			class: "rollout-guard-unverified", target: host, frame: sample.guard, sustain: 1,
 			symptom:   fmt.Sprintf("%s rollout serialization cannot be verified", host),
 			mechanism: "The services host has no readable /usr/local/sbin/warpctl or the installed executable exposes neither the complete-overlap nor known legacy signature. The monitor therefore cannot prove what code long-running workers will execute for the next deployment.",
-			baseline:  "The installed Warp executable exposes the full-overlap host-lock signature and no managed unit disables it.",
+			baseline:  "The installed executable exposes the candidate-start host-lock signature and no managed unit disables it. Join the exact resident source: supported promotion releases before old-container retirement, outside the lease.",
 			observed:  observed,
 			context:   commonContext,
 			action:    fmt.Sprintf("Resolve the executable used by the units, deploy validated Warp commit %s (containing %s) or later, and restart every running Warp service worker. Do not begin a service rollout or use a full proxy rollout as the discovery test.", rolloutGuardValidatedCommit, rolloutGuardCommit),
@@ -340,6 +357,9 @@ func evaluateRolloutGuard(host string, sample rolloutGuardSample) []finding {
 		}}
 	case rolloutGuardFull:
 		if sample.staleWorkerUnits == 0 && sample.unverifiableWorkerUnits == 0 {
+			if sample.environmentUnobservedUnits > 0 {
+				return nil
+			}
 			return []finding{healthyFinding("deploy/rollout-guard", tierWarn, "rollout-guard-workers-stale", host)}
 		}
 		return []finding{{

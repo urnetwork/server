@@ -135,11 +135,11 @@ func (self h1PlusProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	// POST follows the existing Mimir transport: the bounded multi-field
 	// expression must not depend on an HTTP request-line size limit. Exactly
 	// one gateway attempt; no retry that changes the source window or budget.
-	out, err := env.runner.shell(ctx, gateway,
+	out, err := mimirShellParsed(ctx, env.runner, gateway,
 		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(budget.bytes)+
 			" --data-urlencode "+shellSingleQuote("query="+h1PlusQuery(env.cfg.env, self))+
 			" --data-urlencode "+shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10))+
-			" 'http://127.0.0.1:3100/prometheus/api/v1/query'")
+			" 'http://127.0.0.1:3100/prometheus/api/v1/query'", budget.bytes)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

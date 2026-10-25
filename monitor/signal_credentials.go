@@ -21,14 +21,26 @@ func (*credentialsSignal) ID() string             { return "deployment/credentia
 func (*credentialsSignal) Name() string           { return "Required credential completeness" }
 func (*credentialsSignal) Cadence() time.Duration { return 5 * time.Minute }
 
-func (s *credentialsSignal) Run(_ context.Context, settings SignalSettings) (Alerts, error) {
+// Loaded readiness metadata cannot attest a live evaluation after its owner ends.
+func (s *credentialsSignal) Run(ctx context.Context, settings SignalSettings) (alerts Alerts, resultErr error) {
+	enteredLive := ctx.Err() == nil
+	defer func() {
+		if ended := ctx.Err(); enteredLive && ended != nil {
+			alerts = nil
+			if resultErr == nil || resultErr == ended {
+				resultErr = ended
+			} else {
+				resultErr = &signalContextError{contextErr: ended, sourceErr: resultErr}
+			}
+		}
+	}()
 	settings = settings.withDefaults()
 	if err := settings.validate(); err != nil {
 		return nil, err
 	}
 	requirements := append([]CredentialRequirement(nil), settings.Credentials...)
 	sort.Slice(requirements, func(i, j int) bool { return requirements[i].Key < requirements[j].Key })
-	alerts := make(Alerts, 0)
+	alerts = make(Alerts, 0)
 	for _, requirement := range requirements {
 		if requirement.ActivationUnknown {
 			alerts = append(alerts, Alert{

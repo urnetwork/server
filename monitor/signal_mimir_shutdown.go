@@ -81,7 +81,7 @@ func (mimirShutdownProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 				return
 			}
 
-			output, err := env.runner.shell(ctx, target, command)
+			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
 				results <- mimirShutdownHostResult{host: target, err: err}
 				return

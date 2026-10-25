@@ -100,7 +100,7 @@ func observeRedisClientsHistory(ctx context.Context, env *probeEnv, targets map[
 		" --data-urlencode " + shellSingleQuote("query="+redisClientsHistoryQuery(env.cfg.env, targets)) +
 		" --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(at.Unix(), 10)) +
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, metricHosts, nil, command)
+	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, metricHosts, nil, command, redisClientsHistoryMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("Redis client history query unavailable")
 	}
