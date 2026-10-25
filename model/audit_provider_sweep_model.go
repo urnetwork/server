@@ -690,9 +690,14 @@ func BackfillDeviceAuditEvents(
 			}
 		})
 		eventCount = 2 * len(deviceDays)
-	})
+	}, server.TxLockTimeout(auditBackfillLockTimeout))
 	return
 }
+
+// An operator backfill is one transaction over the retained window, so a
+// single row wait past the main pool's 2 s bound would discard the whole run.
+// One operator runs it at a time.
+const auditBackfillLockTimeout = 30 * time.Second
 
 // upsertProviderAuditStatesInTx writes emitted state. overwrite=false is the
 // backfill path: it must never clobber fresher live sweep state
@@ -996,7 +1001,7 @@ func BackfillProviderAuditEvents(
 		insertProviderAuditEventsInTx(ctx, tx, events)
 		upsertProviderAuditStatesInTx(ctx, tx, stateSeeds, false)
 		eventCount = len(events)
-	})
+	}, server.TxLockTimeout(auditBackfillLockTimeout))
 	return
 }
 

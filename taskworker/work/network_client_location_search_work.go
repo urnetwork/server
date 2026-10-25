@@ -47,10 +47,15 @@ func IndexSearchLocations(
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		server.SetTransactionTimeoutInTx(clientSession.Ctx, tx, 0)
 		posts = model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
-	})
+	}, server.TxLockTimeout(indexSearchLocationsLockTimeout))
 	server.RunPosts(clientSession.Ctx, server.SequencePosts(posts...))
 	return &IndexSearchLocationsResult{}, nil
 }
+
+// One re-index is one transaction of up to hours, so a single row wait past
+// the main pool's 2 s bound would discard the whole run. Few transactions
+// contend with it, and one task waits at a time.
+const indexSearchLocationsLockTimeout = 30 * time.Second
 
 func IndexSearchLocationsPost(
 	indexSearchLocations *IndexSearchLocationsArgs,

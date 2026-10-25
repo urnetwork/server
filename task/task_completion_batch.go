@@ -174,9 +174,9 @@ func (self *TaskWorker) finalizeTaskBatchWithGuard(results []*taskExecutionResul
 			bodyComplete = true
 		}
 		if owned {
-			guard.finalizeOwnedTx(ctx, keys, finish, &observation.db)
+			guard.finalizeOwnedTx(ctx, keys, finish, &observation.db, self.finalizeLockTimeout())
 		} else {
-			server.Tx(ctx, finish, server.OptNoRetry(), &observation.db)
+			server.Tx(ctx, finish, server.OptNoRetry(), &observation.db, self.finalizeLockTimeout())
 		}
 		observation.acknowledged = true
 		if self.completionBatchCommitReturned != nil {
