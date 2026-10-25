@@ -5,6 +5,16 @@ image build and all four independent local qualification phases passed.
 This is not production acceptance, calibration,
 runtime approval or production activation.
 
+Update at **18:23:05 UTC**: the prospectively frozen first corrected-release
+full-window A/A cohort passed 9 controls + 9 no-op candidates, all G1–G6,
+placement and exact cleanup in **10,498 seconds**, with 302 seconds headroom.
+It is one public-seed functional qualification and one of five planned
+calibration observations, not final calibration or production activation.
+[All originals and threshold evidence are preserved](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md).
+The trusted host scripts used the separately qualified isolated-gateway release
+`737dd2371`; see [network qualification](NETWORK-BOUNDARY-2026-10-25.md).
+Image/source/Go identities in the table below are unchanged.
+
 ## Qualified inputs
 
 | Input | Exact identity |

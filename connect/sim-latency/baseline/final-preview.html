@@ -9,20 +9,20 @@
 </style>
 <main>
 <header>
-<div class="eyebrow">Preparation preview · source qualification October 25, 2026, 12:31 UTC</div>
+<div class="eyebrow">Production preparation preview · October 25, 2026, 18:23 UTC</div>
 <h1>A dedicated competition environment.<br>A fixed October 28 opening.</h1>
 <p class="muted">Public admission target: <strong>2026-10-28 00:00 UTC</strong>. This is a dated preview, not launch approval or a final baseline report.</p>
-<p class="banner">The prior release passed its 3,600-provider cold check in 2h56m48s. Formal calibration then stopped at cohort 1: a canceled database write was reported as unexpected recovery. The failure is preserved. The correction passed 17 targeted race tests and three full simulator suites; its new image and fresh measurements are still pending. No official baseline or final margin is accepted.</p>
+<p class="banner">The corrected Go 1.27.3 release passed its first fresh full A/A cohort: nine controls, nine no-op candidates, all six gates and cleanup. It finished in 2h54m58s, with 5m02s headroom. The no-op was not significant or takeover-eligible. One pair is provisional evidence—not accepted five-cohort calibration, a final margin or a hidden production baseline.</p>
 </header>
 
 <section aria-labelledby="environment">
 <div class="eyebrow">01 · Proposed evaluation environment</div>
 <h2 id="environment">One dedicated host, ten locked repositories</h2>
 <div class="cards">
-<div class="card"><span class="big">3,600</span>providers passed local cold check<br><small>200 clients · impairment on</small></div>
+<div class="card"><span class="big">3,600</span>providers passed one full-window pair<br><small>200 clients · impairment on; final scale acceptance pending</small></div>
 <div class="card"><span class="big">Go 1.27.3</span>actual compiler required<br><small>Not merely a version label</small></div>
 <div class="card"><span class="big">9 + 9</span>cold control + candidate runs<br><small>Later jobs share the epoch control</small></div>
-<div class="card"><span class="big">3 hours</span>maximum per-submission execution<br><small>Cold check passed with 192 s headroom</small></div>
+<div class="card"><span class="big">3 hours</span>maximum per-submission execution<br><small>Corrected-release pair: 10,498 s; 302 s headroom</small></div>
 </div>
 <h3>CPU boundary: 12 physical cores</h3>
 <div class="resource" role="img" aria-label="Ten evaluation cores, two management cores"><span class="eval" style="flex:10">10 evaluation cores</span><span class="reserve" style="flex:2">2 management</span></div>
@@ -34,7 +34,7 @@
 <section aria-labelledby="frontier">
 <div class="eyebrow">02 · Measured exploratory frontier</div>
 <h2 id="frontier">Impairment materially changes the feasible frontier</h2>
-<p>Bars show actual whole-run wall seconds, on a common 1,100-second scale—not latency, score or baseline samples. Each point is one exploratory execution.</p>
+<p>Bars show prior-release whole-run wall seconds, on a common 1,100-second scale—not latency, score or baseline samples. Each point is one exploratory execution, not qualification of the corrected image.</p>
 <div class="row"><strong>Providers</strong><strong>Impairment OFF</strong><strong>Impairment ON</strong></div>
 <div class="row"><strong>1,800</strong><div class="bar"><b style="width:39.1%"></b><span>430 s · complete</span></div><div class="bar on"><b style="width:47.7%"></b><span>525 s · complete</span></div></div>
 <div class="row"><strong>3,600</strong><div class="bar"><b style="width:40.6%"></b><span>447 s · complete</span></div><div class="bar on"><b style="width:51.6%"></b><span>568 s · complete</span></div></div>
@@ -48,28 +48,60 @@
 <div class="eyebrow">03 · Qualification and significance</div>
 <h2 id="qualification">Progress is observable; acceptance is still pending</h2>
 <div class="cards">
-<div class="card"><span class="big">18 / 18</span>cold runs complete<div class="progress" role="progressbar" aria-label="Cold runs complete" aria-valuemin="0" aria-valuemax="18" aria-valuenow="18"><span style="width:100%"></span></div><small>9 controls + 9 candidates; all gates passed</small></div>
-<div class="card"><span class="big">3 × 340</span>passing corrected-source tests<br><small>Clean c1f9dda60; not new-image qualification or live readiness proof</small></div>
-<div class="card"><span class="big">0.614 s</span>host bomb cleanup observed<br><small>Local host test, not new-image host attestation</small></div>
+<div class="card"><span class="big">1 / 5</span>fresh A/A cohorts complete<div class="progress" role="progressbar" aria-label="Fresh A/A cohorts completed" aria-valuemin="0" aria-valuemax="5" aria-valuenow="1"><span style="width:20%"></span></div><small>9 fresh controls + 9 fresh candidates; other four not started</small></div>
+<div class="card"><span class="big">3 × 514</span>passing full control suites<br><small>Plus 3 × 340 full evaluated-source tests; neither substitutes for live readiness</small></div>
+<div class="card"><span class="big">0.958 s</span>new-image host bomb cleanup<br><small>Local qualification, not final host attestation or a scoring result</small></div>
 <div class="card"><span class="big" style="color:var(--red)">Not faster</span>warm-reader reference pilot<br><small>18/18 runs and all gates passed, but mean score was 17.8% worse; faster reference remains unqualified</small></div>
-<div class="card"><span class="big" style="color:var(--red)">Stopped</span>formal Stage A, cohort 1<br><small>9 controls · 0 candidates; no retry or replacement sample</small></div>
+<div class="card"><span class="big" style="color:var(--green)">All 6 gates</span>replacement cohort 1 passed<br><small>15:28–18:23 UTC; exact cleanup verified. Old failed campaign remains stopped.</small></div>
 </div>
+<h3>First fresh pair: two different statistics, two required conditions</h3>
+<p>The ranking/practical-margin check uses the canonical median raw score; the one-sided Welch test uses replicate means and variances. Both conditions must pass. Lower raw score is better. These are not separate TTFB or Mbps measurements.</p>
+<div class="cards">
+<div class="card">
+<h3>Median score and practical boundary</h3>
+<svg viewBox="0 0 420 210" role="img" aria-label="Median baseline 19410.10, no-op 18612.13, required practical boundary 16285.08 at the provisional 16.1 percent margin" style="width:100%;height:auto">
+<g fill="currentColor" font-family="system-ui,sans-serif" font-size="12">
+<path d="M65 40V145H365M215 40V145M365 40V145" fill="none" stroke="#43536b"/>
+<text x="4" y="73">Control</text><rect x="65" y="56" width="264.68" height="24" rx="4" fill="#75baff"/><text x="72" y="73" fill="#101722">19,410.10</text>
+<text x="4" y="117">No-op</text><rect x="65" y="100" width="253.80" height="24" rx="4" fill="#9fb0c7"/><text x="72" y="117" fill="#101722">18,612.13</text>
+<path d="M287.07 40V145" stroke="#78dfad" stroke-width="3" stroke-dasharray="5 4"/>
+<text x="65" y="161">0</text><text x="205" y="161">11,000</text><text x="345" y="161">22,000</text>
+<text x="65" y="184" fill="#78dfad">Practical target: ≤16,285.08 (−16.1%)</text>
+</g></svg>
+<small>The no-op median was 4.11% lower, short of the provisional 16.1% floor. The mean-based significance gate on the right must also pass.</small>
+</div>
+<div class="card">
+<h3>Means and the statistical fringe</h3>
+<svg viewBox="0 0 420 210" role="img" aria-label="Mean baseline 19688.24, no-op 19136.31, comparison-specific significance boundary 17912.76 using the observed variances" style="width:100%;height:auto">
+<g fill="currentColor" font-family="system-ui,sans-serif" font-size="12">
+<path d="M65 40V145H365M215 40V145M365 40V145" fill="none" stroke="#43536b"/>
+<text x="4" y="73">Control</text><rect x="65" y="56" width="268.48" height="24" rx="4" fill="#75baff"/><text x="72" y="73" fill="#101722">19,688.24</text>
+<text x="4" y="117">No-op</text><rect x="65" y="100" width="260.95" height="24" rx="4" fill="#9fb0c7"/><text x="72" y="117" fill="#101722">19,136.31</text>
+<path d="M309.26 40V145" stroke="#caafff" stroke-width="3" stroke-dasharray="5 4"/>
+<text x="65" y="161">0</text><text x="205" y="161">11,000</text><text x="345" y="161">22,000</text>
+<text x="65" y="184" fill="#caafff">Welch fringe: 17,912.76 (−9.018%)</text>
+</g></svg>
+<small>This pair's mean improved 2.80%; p=0.297, not significant at α=0.05. The fringe is comparison-specific: a future candidate's variance changes it.</small>
+</div>
+</div>
+<p class="muted">Sample variances: control 3,576,675.27; no-op 5,672,516.85 (raw-score squared units). Raw replicate CVs are 9.61% and 12.45%; these are not the bootstrap aggregate-score CV used for final calibration. Required improvement reported for this comparison is 16.1%, the larger of the provisional practical floor and its 9.018% significance fringe. Plots and labels are rounded; the scorer uses unrounded values and its exact p≤0.05 check.</p>
 <h3>How a production improvement will qualify</h3>
 <div class="steps"><div class="step">All correctness, containment and integrity gates</div><div class="step">Beat the epoch’s calibrated practical improvement margin</div><div class="step">Pass the statistical test using recorded variance</div><div class="step">Honesty review, then source build and qualification</div></div>
-<p class="banner">No fresh baseline is plotted because none is accepted. Wherever the final report plots a baseline, it must also plot its significant-improvement fringe. For latency, the practical line is B × (1 − m); the variance-dependent significance requirement must also pass. Historical m = 16.1% is provisional and is not a newly calibrated threshold.</p>
-<p class="muted">The cold check uses public seed 20261024 and explicit offline control-plane fixtures. It is not a hidden production baseline, live API job, MinIO readiness receipt or provider-backed review.</p>
+<p class="banner">The plotted control is the first preserved public-seed pair, not an accepted official epoch baseline. Its median practical line is B × (1 − m); its separate mean-based Welch fringe uses the observed variances. Historical m = 16.1% remains provisional. Five-cohort reduction and independent-seed reference qualification must finish before a new final margin is accepted.</p>
+<p class="muted">The fresh campaign uses public seed 20261024 and explicit offline control-plane fixtures. Its first cohort also serves full-window functional qualification, without double-counting observations. It is not a hidden production baseline, live API job, MinIO durability receipt or provider-backed review.</p>
 <p><a href="prelaunch-warm-reader-pilot-2026-10-25/completed/README.md">Preserved unfavorable pilot, comparison thresholds and independently verified evidence</a>. No favorable-draw retry or source promotion follows it.</p>
 <p><a href="prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md">Preserved calibration failure</a>: all 125 original files and three readable companions independently verified. A corrected release requires fresh qualification and measurements.</p>
+<p><a href="prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md">Fresh corrected-release pair and thresholds</a>: all 481 original files plus four companions preserved; 7 worker, 465 evidence and 5 completion bindings independently checked. No unfavorable observation was dropped.</p>
 </section>
 
 <section aria-labelledby="launch">
 <div class="eyebrow">04 · Launch path</div>
 <h2 id="launch">Fixed opening. Evidence-driven release.</h2>
-<div class="steps"><div class="step">Source correction passed; build and qualify its new image</div><div class="step">Calibrate fresh variance, margin and independent references</div><div class="step">Qualify real review providers, host, MinIO and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
-<p><span class="pill">Main maintenance hold</span> At the last endpoint check (11:54 UTC), API timed out without a response and MinIO refused the connection. No production activation or main mutation is authorized during the maintenance hold.</p>
+<div class="steps"><div class="step">First full-window pair passed and preserved</div><div class="step">Finish four fresh pairs; calibrate margin and independent references</div><div class="step">Qualify real review providers, host, MinIO durability and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
+<p><span class="pill">Main maintenance hold</span> The configured MinIO endpoint returns HTTP 200; earlier refusals used an obsolete address. API returns typed <code>source_not_ready</code>, and the dedicated review-provider key is absent. Health checks do not prove immutable retention, replication or capacity. No production activation or main mutation is authorized during maintenance.</p>
 <p>Season intent: six weekly admission epochs, $20 per submission, no submission-count ceiling and immediate FIFO evaluation. Scoring drains after close. The provisional winner undergoes automatic Sol 6.1 max review; rejection advances to the next eligible candidate. An approved winner must build and qualify before becoming the next source. Exhaustion carries the incumbent forward; uncertainty pauses and alerts.</p>
 <p><a href="../launch/LAUNCH-ACCEPTANCE.md">Current acceptance matrix</a> · <a href="../launch/current-state.json">Dated state and live handle</a> · <a href="../launch/COLD-R9-PROTOCOL-2026-10-25.md">Cold qualification protocol</a> · <a href="../launch/CONTROL-VALIDATION-2026-10-25.md">Full-suite evidence</a></p>
 </section>
-<footer>Measured prior source: server 0d58d0d91b069c62bcfb39cd72166c26925b786a.<br>Measured evaluator: <code>sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793</code>.<br>Static, dependency-free preview. No third-party scripts, tracking or embedded secrets. Historical reports and archived measurements are unchanged.</footer>
+<footer>Current evaluated source: server <code>c1f9dda603d6279666fca5d92b99c5663306c5f7</code>.<br>Current evaluator: <code>sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3</code>.<br>Historical frontier/cold/pilot evidence used server 0d58d0d9 / image effe9ba5; those observations are not relabeled as new-release results.<br>Static, dependency-free preview. No third-party scripts, tracking or embedded secrets. Historical reports and archived measurements are unchanged.</footer>
 </main>
 </html>

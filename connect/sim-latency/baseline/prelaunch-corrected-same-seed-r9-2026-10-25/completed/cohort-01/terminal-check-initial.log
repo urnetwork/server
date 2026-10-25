@@ -1,0 +1,39 @@
+manifest=worker-result.json verified_bindings=7
+manifest=evidence-manifest.json verified_bindings=465
+jq: error (at /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/artifacts/evaluation.complete.json:19): Cannot index string with string "path"
+manifest=evaluation.complete.json verified_bindings=0
+{
+  "baseline_replicates": 9,
+  "candidate_replicates": 9,
+  "baseline_median": 19410.1045,
+  "candidate_median": 18612.129599999975,
+  "baseline_mean": 19688.243216666662,
+  "candidate_mean": 19136.306394444404,
+  "significance": {
+    "method": "one-sided-welch-t",
+    "alpha": 0.05,
+    "replicate_count": 9,
+    "baseline_mean_raw_score": 19688.243216666662,
+    "candidate_mean_raw_score": 19136.306394444404,
+    "baseline_sample_variance": 3576675.2698730268,
+    "candidate_sample_variance": 5672516.848963349,
+    "observed_improvement_percent": 2.8033827911828517,
+    "takeover_margin_percent": 16.1,
+    "minimum_significant_improvement_percent": 9.017966861783291,
+    "required_improvement_percent": 16.1,
+    "one_sided_p_value": 0.2970098480834252,
+    "welch_t": 0.5444509040621942,
+    "welch_degrees_of_freedom": 15.21858186171044,
+    "statistically_significant": false,
+    "next_epoch_minimum_improvement_percent": 10.91015514455265,
+    "recommended_next_epoch_takeover_margin_percent": 16.1,
+    "recommended_next_epoch_takeover_margin_supported": true
+  }
+}
+232b488535f05367bbe77ba21c85b72274bb1e7e79e9e26f8c8e2f10cac69842  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/manager-terminal.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/evaluator.stdout
+abde4a220caa1f1635ac6de5268279d821acd3d59c742021f564778d1e37981e  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/evaluator.stderr
+4549273f2b7c065ff6152274cf7150d2efbd8afb04bff49f0aab2e4fd5a54ea2  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/artifacts/worker-result.json
+87c028b071510c1dbc00b3fca2a07347e35305f5b42ca4c8b9c34a0763f5af06  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/artifacts/evidence-manifest.json
+f0f0ada7154cbea4d8258d47d227a593a4dc5cd50ab085f096c2b936d65fb6e8  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/artifacts/evaluation.complete.json
+PASS terminal_bindings_gates_cleanup

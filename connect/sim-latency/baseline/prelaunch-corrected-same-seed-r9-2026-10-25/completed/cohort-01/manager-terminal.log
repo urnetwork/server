@@ -1,0 +1,8 @@
+start_utc=2026-10-25T15:28:07Z
+deadline_utc=2026-10-25T18:28:07Z
+request_sha256=515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d
+execution_budget_seconds=10800
+kill_grace_seconds=45
+terminal_cleanup_verified
+evaluator_exit=0 duration_seconds=10498
+end_utc=2026-10-25T18:23:05Z

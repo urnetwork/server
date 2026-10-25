@@ -1,8 +1,12 @@
 # Corrected-release calibration: prospective restart
 
-Status: preparation only; no new campaign measurements have started. Opening
+Status at prospective publication: preparation only; no new campaign measurements had started. Opening
 remains **2026-10-28T00:00:00Z**. Main maintenance still prohibits production
 activation and main database/service mutations.
+
+Current progress is recorded separately in [the acceptance matrix](LAUNCH-ACCEPTANCE.md)
+and [the preserved first cohort](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md).
+The prospective sampling and acceptance rules below remain unchanged.
 
 ## Why this is a new campaign
 

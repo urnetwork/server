@@ -1,0 +1,281 @@
+{
+  "accepted_five_cohort_calibration": false,
+  "additional_companions": 4,
+  "all_six_gates_passed": true,
+  "archived_regular_files": 485,
+  "candidates": 9,
+  "chunks": 4,
+  "controls": 9,
+  "duration_seconds": 10498,
+  "evidence_bindings": 465,
+  "gzip_sha256": "c66a507e775b57ef514eec336919a450728ac5c97a63ab04886bf6e3cbad96c5",
+  "initial_terminal_checker": "diagnostic_setup_map_vs_array_mistake_not_failed_evaluation",
+  "marker_bindings": 5,
+  "official_epoch_baseline": false,
+  "original_cohort_regular_files": 481,
+  "placeable": true,
+  "production_activated": false,
+  "readable_copies": 11,
+  "schema": 1,
+  "score": {
+    "diagnostics": {
+      "baseline": {
+        "findproviders_load_p95_ms": 32.4188720703125,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.93985,
+        "raw_score": 19410.1045,
+        "received_bytes": 3088919126,
+        "request_count": 2431,
+        "success_rate": 0.998365345320801
+      },
+      "baseline_sha256": "fcb1909bba75e920333eaac2ab6c7265310841e7825a16e607b54f8798f2d7cb",
+      "baseline_takeover_eligible": false,
+      "baseline_takeover_raw_max": 16285.0776755,
+      "candidate": {
+        "accounting_coverage": 1.1461275106672129,
+        "findproviders_load_p95_ms": 32.17671918869013,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.9399166666666666,
+        "raw_score": 18612.129599999975,
+        "received_bytes": 3110413730,
+        "request_count": 2453,
+        "success_rate": 0.999597747385358
+      },
+      "replicate_count": 9,
+      "replicates": [
+        {
+          "accounting_coverage": 1.185673871180777,
+          "evaluation_id": "candidate-01-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 29.79984455108642,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9415944444444444,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3672540479,
+          "raw_score": 17796.336149999996,
+          "received_bytes": 3097428870,
+          "request_count": 2430,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.2205030948710212,
+          "evaluation_id": "candidate-02-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 31.37369174957271,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9399166666666666,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3672928242,
+          "raw_score": 18612.129599999975,
+          "received_bytes": 3009355943,
+          "request_count": 2367,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.1461275106672129,
+          "evaluation_id": "candidate-03-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 30.756822776794415,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.94015,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3674145636,
+          "raw_score": 17769.27545000001,
+          "received_bytes": 3205704079,
+          "request_count": 2508,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9996012759170654
+        },
+        {
+          "accounting_coverage": 1.2073532361003232,
+          "evaluation_id": "candidate-04-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 32.17671918869013,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9403166666666667,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3639038904,
+          "raw_score": 20100.20799999979,
+          "received_bytes": 3014063155,
+          "request_count": 2405,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9966735966735967
+        },
+        {
+          "accounting_coverage": 1.2008829614181995,
+          "evaluation_id": "candidate-05-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.4891538619995,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.94055,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3611574358,
+          "raw_score": 24784.454549999922,
+          "received_bytes": 3007432426,
+          "request_count": 2412,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9954394693200663
+        },
+        {
+          "accounting_coverage": 1.1805776979385953,
+          "evaluation_id": "candidate-06-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.34013862609862,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401388888888889,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3672085081,
+          "raw_score": 18211.833699999916,
+          "received_bytes": 3110413730,
+          "request_count": 2455,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9991853360488798
+        },
+        {
+          "accounting_coverage": 1.1644457707449756,
+          "evaluation_id": "candidate-07-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.84239921569824,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9403555555555555,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3673570472,
+          "raw_score": 16467.40775,
+          "received_bytes": 3154780209,
+          "request_count": 2486,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.999597747385358
+        },
+        {
+          "accounting_coverage": 1.1708010150819628,
+          "evaluation_id": "candidate-08-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 31.207236671447703,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9402388888888888,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3675694006,
+          "raw_score": 19794.891200000002,
+          "received_bytes": 3139469439,
+          "request_count": 2453,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9995923359152059
+        },
+        {
+          "accounting_coverage": 1.1667610511041702,
+          "evaluation_id": "candidate-09-eb5458d2",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 38.077309989929184,
+          "findproviders_pool_p05": 2520,
+          "findproviders_sample_span_fraction": 0.9407055555555556,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3675915671,
+          "raw_score": 18690.22115000001,
+          "received_bytes": 3150529980,
+          "request_count": 2498,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        }
+      ],
+      "request_timeout_ms": 120000,
+      "round_id": "c8193705-e5e7-415f-988b-bc0c9d2978ac",
+      "takeover_margin": 0.161
+    },
+    "gates": {
+      "G1_success": {
+        "details": {
+          "absolute_min_inclusive": 0.97,
+          "baseline": 0.998365345320801,
+          "baseline_minus_max": 0.988365345320801,
+          "candidate": 0.999597747385358
+        },
+        "passed": true
+      },
+      "G2_volume": {
+        "details": {
+          "bytes_max": 3243365082.3,
+          "bytes_min": 2934473169.7,
+          "candidate_bytes": 3110413730,
+          "candidate_requests": 2453,
+          "request_max": 2552.55,
+          "request_min": 2309.45
+        },
+        "passed": true
+      },
+      "G3_path_integrity": {
+        "details": {
+          "minimum_inclusive": 0.95,
+          "minimum_replicate_coverage": 1.1461275106672129
+        },
+        "passed": true
+      },
+      "G4_matchmaking": {
+        "details": {
+          "all_pools_nonempty": true,
+          "all_replicates_have_samples": true,
+          "all_replicates_span_at_least_minimum": true,
+          "baseline_load_p95_ms": 32.4188720703125,
+          "baseline_minimum_replicate_sample_span_fraction": 0.93985,
+          "baseline_pool_p05": 2518,
+          "candidate_load_p95_ms": 32.17671918869013,
+          "candidate_pool_p05": 2518,
+          "maximum_inclusive_ms": 40.523590087890625,
+          "minimum_replicate_sample_span_fraction": 0.9399166666666666,
+          "pool_minimum_inclusive": 2266.2000000000003,
+          "sample_span_minimum_inclusive": 0.9
+        },
+        "passed": true
+      },
+      "G5_stability": {
+        "details": {
+          "all_replicates_clean": true
+        },
+        "passed": true
+      },
+      "G6_resources": {
+        "details": {
+          "all_replicates_within_limits": true
+        },
+        "passed": true
+      }
+    },
+    "normalized_score": 104.28739170180734,
+    "placeable": true,
+    "raw_score": 18612.129599999975,
+    "score_schema": 1,
+    "significance": {
+      "alpha": 0.05,
+      "baseline_mean_raw_score": 19688.243216666662,
+      "baseline_sample_variance": 3576675.2698730268,
+      "candidate_mean_raw_score": 19136.306394444404,
+      "candidate_sample_variance": 5672516.848963349,
+      "method": "one-sided-welch-t",
+      "minimum_significant_improvement_percent": 9.017966861783291,
+      "next_epoch_minimum_improvement_percent": 10.91015514455265,
+      "observed_improvement_percent": 2.8033827911828517,
+      "one_sided_p_value": 0.2970098480834252,
+      "recommended_next_epoch_takeover_margin_percent": 16.1,
+      "recommended_next_epoch_takeover_margin_supported": true,
+      "replicate_count": 9,
+      "required_improvement_percent": 16.1,
+      "statistically_significant": false,
+      "takeover_margin_percent": 16.1,
+      "welch_degrees_of_freedom": 15.21858186171044,
+      "welch_t": 0.5444509040621942
+    },
+    "takeover_eligible": false
+  },
+  "status": "completed_provisional_first_pair",
+  "worker_bindings": 7
+}
