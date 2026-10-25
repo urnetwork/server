@@ -119,6 +119,15 @@ accepted scale or baseline. Exact logs, workload, sidecar, CSV, image receipt
 and controllers are versioned in
 [`baseline/prelaunch-ready-snapshot-frontier-2026-10-25/`](../baseline/prelaunch-ready-snapshot-frontier-2026-10-25/README.md).
 
+The subsequent fresh 7,200-provider impairment-on point also failed: exit 1
+after 606 seconds, with the initial matchmaking probe failing during setup.
+All 200 clients were built and validated, but there are zero measured rows.
+There was no shard TERM failure. The service log has no provide-key duplicates,
+two serialization errors and six user-request cancellations. Exact artifacts
+are retained alongside the 15,000-provider point. Neither point passes capacity;
+the remaining discovery failure is not established as caused by either of the
+earlier corrected defects.
+
 Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
 from the public `/competition/info` endpoint and connection refusal from
 `172.28.208.177:23900/minio/health/live`. The dedicated

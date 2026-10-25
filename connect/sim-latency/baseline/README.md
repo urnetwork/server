@@ -5,7 +5,10 @@ impairment-on attempt is preserved in
 [`prelaunch-ready-snapshot-frontier-2026-10-25/`](prelaunch-ready-snapshot-frontier-2026-10-25/README.md).
 It failed after 18m10s at matchmaking probe 2 and is not a baseline or accepted
 scale. Its startup barrier held and no provide-key duplicate errors were found;
-the remaining failure still needs diagnosis and lower-scale measurement.
+the subsequent 7,200-provider impairment-on point also failed its initial
+matchmaking probe after 10m6s, with zero measured rows and clean teardown.
+Both complete artifact sets are retained. The remaining discovery failure
+still needs diagnosis and further frontier measurement.
 
 The later Go 1.27.3, provide-lock 15,000-provider impairment-on attempt is in
 [`prelaunch-provide-frontier-2026-10-24/`](prelaunch-provide-frontier-2026-10-24/README.md).
