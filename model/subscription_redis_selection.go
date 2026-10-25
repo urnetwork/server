@@ -1,5 +1,6 @@
-// Grant selection retains the payer's financial order and internal-prober
-// spread. Only Redis reserves bytes; discovery never locks shared SQL grants.
+// Grant selection retains the payer's financial order and spreads the internal
+// prober and multi-grant payers across their large free grants. Only Redis
+// reserves bytes; discovery never locks shared SQL grants.
 // Selection precedes the contract transaction: each discovery read is one
 // autocommit statement on a pooled connection, released before the Redis
 // reservations it informs.
@@ -19,6 +20,48 @@ import (
 )
 
 const redisGrantPageRows = 64
+
+// Redis admission's first discovery window. An internal prober, or a payer
+// holding at least two large free grants, spreads its allocations across those
+// grants by the payer client's hash. Each grant is its own Redis escrow slot
+// and its own debit shard, so one very large network cannot saturate a single
+// Redis node with every admission and release. A payer with fewer than two
+// such grants reads no candidates and keeps the earliest-expiry order; the
+// LIMIT 2 count bounds the eligibility read. The legacy allocator keeps
+// proberGrantSelectionSql unchanged.
+const redisGrantSpreadSelectionSql = `
+	WITH allocation AS MATERIALIZED (
+		SELECT EXISTS (
+			SELECT 1 FROM prober_identity WHERE singleton AND network_id = $1
+			UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $1
+		) AS internal_prober,
+		(SELECT count(*) FROM (
+			SELECT 1 FROM transfer_balance
+			WHERE network_id = $1 AND active AND start_time <= $2 AND $2 < end_time
+				AND NOT paid AND NOT pro
+				AND net_revenue_nano_cents = 0
+				AND subsidy_net_revenue_nano_cents = 0
+				AND start_balance_byte_count >= $4
+			LIMIT 2
+		) AS large_free) = 2 AS multi_grant
+	)
+	SELECT selected.balance_id, selected.paid, selected.balance_byte_count,
+		selected.start_time, selected.end_time, allocation.internal_prober,
+		NOT selected.paid AND NOT selected.pro
+			AND selected.net_revenue_nano_cents = 0
+			AND selected.subsidy_net_revenue_nano_cents = 0
+			AND selected.start_balance_byte_count >= $4 AS preferred
+	FROM allocation
+	CROSS JOIN LATERAL (
+		SELECT balance_id, paid, balance_byte_count, start_time, end_time,
+			pro, net_revenue_nano_cents, subsidy_net_revenue_nano_cents,
+			start_balance_byte_count
+		FROM transfer_balance
+		WHERE network_id = $1 AND active AND start_time <= $2 AND $2 < end_time
+		ORDER BY start_time DESC, end_time DESC
+		LIMIT CASE WHEN allocation.internal_prober OR allocation.multi_grant THEN $3::bigint ELSE 0 END
+	) AS selected
+`
 
 var errRedisGrantSelectionCapacity = errors.New("Redis grant selection capacity reached; remaining funding is unknown")
 
@@ -197,7 +240,10 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 
 	// Reuse the independently scoped free-grant policy. Each small window
 	// preserves discovery order before the payer client's hash chooses a start.
+	// The first window returns rows only for a spreading payer: the internal
+	// prober, or a payer with at least two large free grants.
 	internal := false
+	spread := false
 	// An internal prober records one finite selection outcome, as the legacy
 	// allocator does; ordinary payers record none. A failure after the first
 	// window identified the prober, including a raised query, remains "error".
@@ -209,7 +255,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 	}()
 	for window := 0; window < 2; window++ {
 		var candidates []*escrowTransferBalance
-		sql := proberGrantSelectionSql
+		sql := redisGrantSpreadSelectionSql
 		args := []any{payerNetworkId, now, proberGrantFirstCount, ProberTransferBalanceTopUp}
 		count := proberGrantFirstCount
 		if window == 1 {
@@ -230,6 +276,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 					values := []any{&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime}
 					if window == 0 {
 						values = append(values, &internal)
+						spread = true
 					}
 					values = append(values, &preferred)
 					server.Raise(rows.Scan(values...))
@@ -243,10 +290,10 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			})
 		})
 		warn()
-		if !internal {
+		if !spread {
 			break
 		}
-		if proberOutcome == "" {
+		if internal && proberOutcome == "" {
 			proberOutcome = "error"
 		}
 		if len(candidates) != 0 {
@@ -263,9 +310,11 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 					return nil, 0, err
 				}
 				if done {
-					proberOutcome = "selected_first"
-					if window == 1 {
-						proberOutcome = "selected_extended"
+					if internal {
+						proberOutcome = "selected_first"
+						if window == 1 {
+							proberOutcome = "selected_extended"
+						}
 					}
 					return selected, priority, nil
 				}
