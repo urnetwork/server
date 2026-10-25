@@ -1,4 +1,11 @@
-# Warm-reader research reference — not performance-qualified
+# Research references — no faster reference qualified
+
+The warm-reader candidate below completed its pilot but was slower; it is
+retained as an unfavorable result, not eligible for advancement as the faster
+reference. A separate owner-admission-map hypothesis is drafted at the end of
+this record and has not been applied or tested.
+
+## Warm-reader candidate
 
 Prepared against exact frozen server
 `0d58d0d91b069c62bcfb39cd72166c26925b786a`, not moving main.
@@ -45,16 +52,47 @@ overlapped. Full local evidence and selected-test census are retained under
 mono-root-relative `temp/reference-correctness-independent-20261025.mRfZRDTh/`.
 This is not a claim of immutable MinIO retention.
 
-## Required next evidence
+## Measured warm-reader outcome
 
-No benchmark, isolated offline candidate image build, end-to-end pilot,
-independent-seed result, significant improvement or production acceptance is
-claimed. Qualify the real build, then retain measured pilot results—including
-failures—before calling this reference better. Discard it if measurements do not
-support that label. Do not use these unit-test timings as performance results,
-reuse historical reference results or weaken any scoring/containment gate.
+The [predeclared full pilot](../../../launch/REFERENCE-PILOT-2026-10-25.md)
+completed at 2026-10-25T09:20:38Z: nine fresh controls, offline candidate build,
+nine candidates, all G1–G6, placement and exact cleanup passed in 10,521 seconds.
+However, both candidate mean and median raw score were worse; mean regression
+was 17.8346%. The directional screen failed, so the patch must not advance as
+the faster reference or be rerun for a favorable draw. The complete
+[retained evidence and comparison thresholds](../../../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md)
+are independently verified and versioned. No independent-seed qualification,
+significant improvement or production acceptance is claimed. Unit-test timings
+above are not performance evidence.
 
 Neither operator product source, the evaluated branch, the source ledger nor
 the evaluator image was changed. The separate cold R9 budget check uses the
 comment-only no-op, not this candidate; see
 [COLD-R9-PROTOCOL-2026-10-25.md](../../../launch/COLD-R9-PROTOCOL-2026-10-25.md).
+
+## Owner-admission-map hypothesis — draft, untested
+
+[`owner-admission-map.patch`](owner-admission-map.patch), SHA-256
+`decaf56673e0690a1bd87df13b820db60d9d01bcf28618e9cefd3439d5a0fbb9`,
+is a separate single-file proposal against the same frozen source/blob. It is
+not a revision to the warm-reader measurement or an applied baseline change.
+
+Existing per-pair `limiter` instances are accessed only while the manager's
+`stateLock` is held, yet each has another mutex, repeated context reference and
+heap allocation. The draft stores the last admitted timestamp directly in the
+same owner-locked map. Admission, sweeping and the cold-read ownership protocol
+keep their existing manager lock. The one-second boundary, cancellation recheck,
+capacity ceiling, positive/cache/source deadlines, in-flight protection and
+shutdown joins are intended to remain identical. No new I/O, goroutine, global
+cache or measurement-aware branch is introduced.
+
+This reasoning is **not proof** of correctness, lower allocations or an
+end-to-end improvement. Before any performance pilot, use fresh temporary
+checkouts of the exact frozen release and run the full resident-contract and
+composed packet-path correctness screen on baseline and candidate, including
+race detection, exact admission/expiry boundaries, cancellation and bounded
+retention. Any additional tests must be deterministic and use synthetic data.
+Then predeclare a separate fresh-control R9 pilot and retain every outcome;
+the existing pilot and Stage A controls cannot be reused. No testing, build or
+pilot may overlap the running formal calibration. Neither this patch nor a
+better-reference label is approved for promotion by this draft.

@@ -38,7 +38,16 @@ The exact [change-667 Markdown draft](https://docs.macrocosmos.ai/~/changes/667/
 was retrieved read-only on October 25. SHA-256
 `17450afaa0b9b7e4f76761e9937b2b399ba61cd4d198544a3347eeb48e5f8844`
 matches the October 23 review snapshot; do not assume later UR changes are
-already reflected there. Before production publication, update:
+already reflected there.
+
+Read-only recheck at **2026-10-25T11:32:17Z** returned the same exact Markdown
+digest. It still names Go 1.27.2 in both the environment table and offline-build
+rules, and describes manual post-election review with separate next-source
+approval. These are confirmed pending partner release deltas, not evidence that
+the new Go 1.27.3/automatic-review release is published. No external document was
+modified. Private capture: `temp/partner-doc-readonly-20261025.Pbgom9nY/draft.md`.
+
+Before production publication, update:
 
 - Compiler/runtime: prospective production requires exact Go **1.27.3**,
   evidenced by the new evaluator artifact, not the historical staging version.
