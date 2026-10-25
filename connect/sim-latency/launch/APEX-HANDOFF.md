@@ -1,10 +1,38 @@
 # Apex external-evaluator handoff
 
-Status: integration contract approved, 2026-08-29. Macrocosmos has approved the
-non-standard external-evaluator design; concrete integration ownership, staging
-evidence, release identities, and registry activation remain to be recorded.
+The non-standard external-evaluator design is approved by Macrocosmos. Approval
+does not itself prove a newly built release's live readiness.
 
-## Competition contract
+## Current v2 production handoff — October 25, 2026
+
+Public opening is **2026-10-28 00:00 UTC**. Current qualification and exact
+artifact evidence are in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
+The new Go 1.27.3 checkpoint has no accepted official baseline or final scale
+yet. Historical release identities and throughput figures below are not its
+qualification evidence.
+
+Use discovery's exact `decision_mode` and `required_api_capability`. For an
+advertised v2 round, preflight and submit through `/competition/v2/score/...`,
+preserve the returned job status URL, and finalize through
+`/competition/v2/rounds/{roundId}/result` (or `/decisions`). V2 rounds do **not**
+appear in `/competition/leaderboard`, even with `include_staging=true`.
+The exact endpoint/value sets are in the
+[current README contract](../README.md#macrocosmos-integration-v2-contract)
+and [OpenAPI](../../../../sn/api/competition.yml).
+
+The adopted production policy is `elected_winner_sol61max_v1`: close and drain,
+seal and reveal, publish the provisional reward winner, automatically review
+with qualified Sol 6.1 max, revoke/re-elect with reasons if rejected, then build,
+qualify and promote the approved winner before opening the next epoch. Only no
+eligible winner permits incumbent carry-forward. Missing review or failed
+qualification blocks and alerts instead of silently substituting source.
+Reward revision, integrity review, source approval and settlement are distinct;
+do not treat a provisional recipient as source approval or proof of payment.
+
+The sections explicitly marked historical below describe the old v1 contract
+and September staging records, not instructions for new v2 admissions.
+
+## Historical v1 competition contract
 
 The competition is a six-epoch season. Each epoch accepts submissions for
 exactly seven days. Each admitted canonical patch enters the dedicated
@@ -55,7 +83,7 @@ ends the era and atomically cancels queued staging work; it refuses to race a
 running evaluation. The adapter must prefer `active_round` once present and
 persist the returned `staging` boolean.
 
-## Adapter mapping
+## Historical v1 adapter mapping
 
 The Apex-facing adapter has no evaluator privileges and never receives the
 hidden seed, MinIO credentials, Docker socket, host resource reports, operator
@@ -102,7 +130,7 @@ only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private
 review report.
 
-Staging epoch 5 is open, verified at `2026-09-19T09:57:30Z`:
+Historical staging epoch 5 was open when verified at `2026-09-19T09:57:30Z`:
 `round_id=01a0b913-c344-27f3-cb64-338dbddc8b07`,
 `opens_at=2026-09-19T09:57:00Z`, `closes_at=2026-09-21T09:57:00Z`.
 API version `2026.9.18+1049819730` repeatedly advertises source

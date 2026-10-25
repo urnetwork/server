@@ -1,9 +1,34 @@
 # Sim-latency submitter onboarding draft
 
-Status: technically complete draft; commercial and Apex publication fields
-called out below still require partner approval.
+Status: integration draft; live qualification and the publication records
+called out below must be bound to the production release before public use.
 
-## Competition shape
+## Current production preparation — October 25, 2026
+
+The public opening is fixed at **2026-10-28 00:00 UTC**. The planned production
+contract is explicitly v2, with winner-review policy
+`elected_winner_sol61max_v1`: drain and seal, publish the provisional reward
+winner after the reveal gate, automatically review it with qualified Sol 6.1
+max, revoke/re-elect on substantiated rejection, then build, qualify and promote
+the approved winner before the next epoch. Only an exhausted eligible ranking
+carries the incumbent forward. Missing review or failed qualification pauses
+and alerts; it does not silently approve or substitute source. Six full weekly
+admission windows remain the policy; post-close grading is not time-bounded.
+
+Select endpoints from the round's advertised immutable decision mode and
+capability, not from this document's legacy examples or the word staging.
+V2 uses `/competition/v2/score/preflight`, `/competition/v2/score`, the exact
+returned status URL, and `/competition/v2/rounds/{roundId}/result`; it never
+publishes through the legacy leaderboard. See the
+[current protocol](../README.md#macrocosmos-integration-v2-contract) and
+[automation policy](../AUTOMATION.md).
+
+Go **1.27.3** is mandatory for the new evaluator. Scale, margin and the new
+official baseline remain under qualification; September capacity estimates
+below are historical, not throughput promises for this checkpoint. Current
+release evidence is in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
+
+## Historical v1 competition shape
 
 The competition runs through the main UR API at `https://api.bringyour.com`.
 There are six sequential epochs. Each epoch accepts submissions for exactly
@@ -59,7 +84,7 @@ prefer an open `active_round` once production exists. Creating production
 epoch 1 ends the staging era and cancels queued staging work; it refuses to
 race a running evaluation.
 
-## Authentication and API flow
+## Historical v1 authentication and API flow
 
 Apex receives a submitter bearer token through the approved out-of-band secret
 channel. Never put a token in a URL, patch, log, issue, or public artifact.
@@ -127,8 +152,10 @@ For an enabled v2 competition:
    full drain, seal, and reveal. Both return the immutable evaluation seal,
    complete reward revisions, and separately identified `integrity_review`,
    `source_approval`, `source_decision`, and `settlement_status`. A provisional
-   winner can remain `not_reviewed`; a safe next epoch may carry the reviewed
-   incumbent forward without shipping that winner's code.
+   winner can initially remain `not_reviewed`. Under the adopted
+   `elected_winner_sol61max_v1` policy it is automatically reviewed before
+   source promotion and the next epoch; missing review blocks progression.
+   Older empty-policy seasons retain their independent source-choice rules.
 4. Run the separately scoped settlement integration against
    `GET /competition/v2/events?after_cursor=0&limit=100`. Persist each full page
    before advancing its cursor. Poll again after restart or an outage; never
@@ -191,24 +218,40 @@ validates it but never repairs or rewrites it. A canonical patch must:
   no binary, create, delete, rename, copy, mode, submodule, or build-tag
   operation.
 
-For this season the only allowed path is
+The currently prepared allowlist contains only
 `connect/resident_contract_manager.go`. Generate and JSON-encode the patch
-without passing its contents through a shell variable:
+without passing its contents through a shell variable. The example below is
+for an advertised **v2** round. Run preflight before the separately managed
+production fee/admission step; preflight itself does not reserve a job:
 
-```sh
+```bash
+set -euo pipefail
+
 git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ -- \
   connect/resident_contract_manager.go > submission.patch
 
 test -s submission.patch
 test "$(tail -c 1 submission.patch | od -An -tu1 | tr -d ' ')" = 10
 test "$(tail -c 2 submission.patch | od -An -tu1 | tr -s ' ' | sed 's/^ //')" != "10 10"
-! LC_ALL=C grep -q $'\r' submission.patch
+if LC_ALL=C grep -q $'\r' submission.patch; then
+  printf 'submission.patch contains a forbidden CR byte\n' >&2
+  exit 1
+fi
 
 jq -n --arg round_id "$ROUND_ID" --rawfile patch submission.patch \
   '{round_id:$round_id,patch:$patch}' > submission.json
 curl --fail-with-body --header "Authorization: Bearer $SUBMITTER_TOKEN" \
   --header 'Content-Type: application/json' --data-binary @submission.json \
-  https://api.bringyour.com/competition/score
+  --output preflight.json \
+  https://api.bringyour.com/competition/v2/score/preflight
+jq -e --arg round "$ROUND_ID" \
+  '.round_id == $round and .decision_mode == "provisional_reward_v2" and .reward_eligible == true' \
+  preflight.json >/dev/null
+
+# Inspect successful preflight and complete the Apex fee step before admission.
+curl --fail-with-body --header "Authorization: Bearer $SUBMITTER_TOKEN" \
+  --header 'Content-Type: application/json' --data-binary @submission.json \
+  https://api.bringyour.com/competition/v2/score
 ```
 
 Do not use `patch=$(git diff ...)`, `printf %s`, or a JSON helper that trims
@@ -228,10 +271,14 @@ display-only. Placeability requires every correctness, traffic-volume,
 path-integrity, matchmaking, stability, and resource gate to pass. Takeover
 also requires the epoch margin and a one-sided Welch result at `p <= 0.05`.
 
-In production, statistical eligibility enters the private honesty-review
-ranking; it does not guarantee a win. A dishonest or unsafe candidate is rejected and review moves
-to the next ranked significant candidate. If none remains, the epoch has no
-winner and the incumbent code and threshold carry forward unchanged.
+In the planned v2 production policy, statistical eligibility enters the sealed
+reward ranking; it is not source approval. The provisional reward winner is
+published and automatically reviewed. Substantiated dishonesty or unsafe
+behavior causes a published revocation/re-election and review of the next
+eligible candidate. If none remains, there is no reward winner and the incumbent
+source carries forward. Only an approved, built and qualified winner supplies
+the next epoch's source and supported margin; missing review or qualification
+does not permit a silent carry-forward.
 
 ## Credential delivery, rotation, and revocation
 
@@ -254,7 +301,8 @@ the token; do not paste it into the report.
 ## Fields still requiring Apex/business publication
 
 - Apex competition and private-registry identifiers;
-- epoch-1 `opens_at`, the resulting season end, and public announcement time;
+- publication of the fixed epoch-1 opening `2026-10-28T00:00:00Z`, resulting
+  season end, and public announcement time;
 - rewards and payout schedule;
 - eligibility, geography, tax, legal terms, and privacy notice;
 - fee settlement, failed-submission, refund, and chargeback policy;

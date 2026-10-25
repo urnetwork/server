@@ -91,18 +91,25 @@ unrevealed; the CLI requires explicit confirmation of that invariant.
 
 ### Suspected dishonest winner or score tampering
 
-Do not approve or promote. Preserve the private candidate directory and write
-a bounded JSON review report identifying the observed behavior. Reject through
-`run-main.sh`, which records the decision append-only and advances to the next
-ranked significant candidate. If a promoted branch is suspected, stop the next
+Do not approve or promote. Preserve the exact retained patch, authenticated
+review packet and evidence, and write the schema-complete bounded review report.
+For the adopted v2 policy, use the scoped review harness/API to append the
+substantiated rejection and public reason, revoke/re-elect from the original
+sealed ranking and review the next eligible candidate. Do not edit a published
+decision, forge an approval or silently carry forward on a review timeout.
+Legacy v1 rounds retain their ordered `run-main.sh` review flow; never switch
+an admitted round's policy during recovery. If a promoted branch is suspected, stop the next
 round before admission and retain all Git, score, patch, and MinIO identities;
 do not rewrite published history.
 
 ### Embargo leak
 
 Disable the leaking surface, preserve access logs and response bodies, revoke
-affected credentials, and page support. The public leaderboard must include
-only finalized epochs. Treat disclosed hidden seeds/workloads or candidate
+affected credentials, and page support. The v1 leaderboard includes only
+finalized v1 epochs. V2 results and reward decisions become public only after
+the immutable seal and frozen reveal gate; review can follow that publication.
+V2 rounds are not projected onto the legacy leaderboard. Treat early disclosure
+of hidden seeds/workloads or candidate
 scores as an integrity incident and do not silently continue the round.
 
 ## Recovery and closure

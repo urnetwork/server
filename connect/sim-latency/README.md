@@ -16,30 +16,42 @@ make
 `make` writes `build/<goos>/<goarch>/sim-latency`. The package test gate is
 Go-only and runs under the race detector against the local PostgreSQL and Redis
 services, like the other server packages.
+The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
+`PATH` and use `GOTOOLCHAIN=local`; build/test launchers reject other versions.
 
 ## Current competition contract
 
-The final environment is defined by the source-epoch ledger at
+Public opening is fixed at **2026-10-28 00:00 UTC**. Preparation now uses a
+fresh Go 1.27.3 checkpoint; its final scale, calibrated margin and official
+epoch baseline are **not yet qualified**. Follow
+[`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md) and its
+exact-artifact records for current evidence. An installed image or a passing
+local smoke is not production activation.
+
+The environment is defined by the source-epoch ledger at
 `config/main/sim-latency.yml`, the evaluator configuration in
 `config/main/competition.yml`, and the authenticated same-round baseline manifest.
-The initial calibrated values are:
+The table below separates fixed competition boundaries from historical
+calibration; it is not a claim that the new checkpoint has passed calibration.
 
-| Item | Final value |
+| Item | Boundary or qualification status |
 |---|---|
 | Evaluator host | one 128 GiB-class Ubuntu host with 12 isolated CPUs |
 | CPU boundary | 10 evaluation CPUs; 2 management/cleanup CPUs |
-| Workload | 1,800 providers; 200 client identities; 80 arrivals/minute |
+| Workload | Provider count pending fresh frontier; 200 clients and 80 arrivals/minute in the current trials |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
 | Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
-| Initial significant-improvement percentage | 16.1% |
+| Initial significant-improvement percentage | 16.1% historical/provisional floor; fresh calibration pending |
 | Admission | six seven-day epochs; unbounded paid submissions at $20 each |
 | Dispatch | immediate single-job FIFO; Redis list backed by authoritative PostgreSQL |
 | Submission deadline | 3 hours total, including attempts, backoff, score, and cleanup |
 
-The 1,800-provider point is the competition target. Larger configurations are
-useful only for development stress tests and are not an alternative production
-scale.
+The historical qualified checkpoint used 1,800 providers. Do not transfer that
+qualification, its measurements or its final report to the new source/image.
+Select the new scale from fresh impairment-on/off frontier evidence, correctness
+and resource gates, and the full cold-job three-hour budget. Incomplete points
+are retained for diagnosis and never count as control samples.
 
 Every canonical submission patch gets a content-addressed image derived from
 the immutable evaluator base. Candidate execution and builds are offline and
@@ -63,7 +75,7 @@ See:
 - [`playbook.yml`](playbook.yml) for machine-readable launch status;
 - [`baseline/README.md`](baseline/README.md) for preserved calibration evidence;
 - [`baseline/final-baseline.html`](baseline/final-baseline.html) for the visual
-  baseline report;
+  **historical** baseline report (not the new production checkpoint);
 - [`../../controller/competition_controller.go`](../../controller/competition_controller.go)
   and [`../../model/competition_model.go`](../../model/competition_model.go)
   for the API/worker implementation; and
