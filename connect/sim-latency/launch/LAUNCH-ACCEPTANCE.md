@@ -21,6 +21,14 @@ endpoint, not this configured service. This corrects the probe, not configuratio
 or deployment; authenticated locking/versioning/replication/capacity proof is
 still pending. User-confirmed main maintenance remains an activation hold.
 
+The API's public 503 body is specifically infrastructure `source_not_ready`:
+`the exact runtime source envelope is unavailable` (`retriable: true`). The
+process is responding; do not infer a DB outage or failed MinIO connection from
+that status alone. The runtime guard requires the exact installed/protected
+source envelope and its immutable intent to match. Qualifying the intended
+release and its independent readiness acknowledgments remains necessary; no
+guard bypass or main restart is authorized by this observation.
+
 The previous Stage A stopped at its first cohort:
 nine controls completed, but control 1 failed baseline stability for
 `unexpected_recovery`. No candidate build or later cohort started; exact

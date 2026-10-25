@@ -31,6 +31,8 @@
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-25T15:50:18Z",
     "competition_info_http": 503,
+    "competition_info_code": "source_not_ready",
+    "competition_info_message": "the exact runtime source envelope is unavailable",
     "competition_info_observed_at": "2026-10-25T15:48:58Z",
     "minio_ready_connection": "HTTP 200 at currently configured172.28.208.176:23900",
     "minio_ready_http": 200,
@@ -390,7 +392,7 @@
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
     "last_check_at": "2026-10-25T15:50:18Z",
     "api_info_http": 503,
-    "api_info_observation": "Read-only GET at15:48:58UTC returned503. Main maintenance hold still requires user clearance; no restart authorized.",
+    "api_info_observation": "Read-only GET15:51UTC returns typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. API is responding; this is not proof of DB outage or MinIO transport failure. Underlying envelope/protection prerequisite is deliberately not disclosed publicly. Qualify/install the exact intended envelope and readiness acknowledgments after maintenance clearance; do not bypass guards or restart from this response alone.",
     "minio_health": "Configured172.28.208.176:23900 returned200. Old .177 probe was stale, not proof current MinIO unavailable. Authenticated durability/retention/capacity/replication acceptance remains pending.",
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },
