@@ -15,6 +15,10 @@ measurements remain necessary. The subsequent 3,600-provider on point also
 completed (9m28s, 2,482 measured rows, two failed rows), with retained SQL
 serialization/cancellation events and no direct-controller resource report.
 Neither exploratory completion is a formal scoring-gate qualification.
+The same image's complete impairment-off phase is retained alongside those
+on-mode trials: all four tested counts completed, with zero measured failures
+at 1,800/3,600/7,200 and 22 at 15,000. The largest tested completed on point is
+3,600, pending full gate, cold R9 timing and statistical/reference qualification.
 
 The later Go 1.27.3, provide-lock 15,000-provider impairment-on attempt is in
 [`prelaunch-provide-frontier-2026-10-24/`](prelaunch-provide-frontier-2026-10-24/README.md).

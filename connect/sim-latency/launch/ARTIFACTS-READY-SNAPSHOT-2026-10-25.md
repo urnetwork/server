@@ -144,6 +144,18 @@ private controller adds only 3,600 to its count allowlist; previous controller
 bytes are unchanged. Full gate validation, cold R9 timing and impairment-off
 frontier work remain necessary; this is not yet a qualified production scale.
 
+The serial off phase then completed at all four counts without point retries:
+1,800/3,600/7,200/15,000 providers in 430/447/505/793 seconds, respectively.
+The first three had zero measured failures; 15,000 had 22 failures among 2,294
+measured rows. Each has authenticated complete metadata/marker and verified
+cleanup, but no direct-controller resource report. All four actual child
+command lines carried `--no-impair` at each point. SQL retry/cancellation and
+the 1,800-point lost-client-connection FATAL remain visible in preserved logs;
+no provide-key duplicates or restart sequence were observed. The exact eight-
+point census is in the archive's `INDEX.json`. The largest tested on-mode
+completion, 3,600 providers, is only a candidate for full official-gate and
+cold R9 budget qualification, not a selected production scale or baseline.
+
 Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
 from the public `/competition/info` endpoint and connection refusal from
 `172.28.208.177:23900/minio/health/live`. The dedicated

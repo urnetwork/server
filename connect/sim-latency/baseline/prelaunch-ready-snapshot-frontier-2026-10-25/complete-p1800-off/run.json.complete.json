@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-effe-p1800-off-initial",
+  "run_manifest_sha256": "03b44aecac83b57ee8c5b9caf7fb0b4ebef1746429ddf2f2632881c095fc1411",
+  "run_manifest_bytes": 2743,
+  "completed_unix_ms": 1792893049211
+}

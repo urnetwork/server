@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "frontier-effe-p3600-off-initial",
+  "run_manifest_sha256": "e14bdaa64541d4598b4b5d27830337a00abdd9124cdb1379861c256a9ed5f6fd",
+  "run_manifest_bytes": 2737,
+  "completed_unix_ms": 1792893495796
+}

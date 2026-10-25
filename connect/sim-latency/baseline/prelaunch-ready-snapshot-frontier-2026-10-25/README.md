@@ -104,6 +104,41 @@ Keep the SQL events visible rather than describing the run as error-free or
 loosening the stability gate. The observed duration alone also does not prove
 that a cold R9 baseline-plus-candidate job fits three hours.
 
+## Impairment-off phase
+
+All four off-mode points used `run-case-v2.sh` serially, with fresh workloads,
+source checkouts and services, the same public seed and other parameters, and
+no external point retries. The parent and all four live shard command lines
+were inspected for `--no-impair` at every point. These observations are retained
+in the execution-tool evidence, not reconstructed as raw command-line snapshots.
+
+| Providers | Exit | Wall seconds | Measured rows | Failed rows |
+| --- | --- | --- | --- | --- |
+| 1,800 | 0 | 430 | 2,744 | 0 |
+| 3,600 | 0 | 447 | 2,744 | 0 |
+| 7,200 | 0 | 505 | 2,744 | 0 |
+| 15,000 | 0 | 793 | 2,294 | 22 |
+
+All four sidecars and completion markers authenticate their final CSVs. None
+has a final resource report from this direct controller. The 15,000-provider
+boundary validation internally retried one unready client within its existing
+three-attempt budget before establishing 200/200; that is not a whole-point
+retry. All owned containers/networks were removed after each point, and the
+exact base-image identity remained unchanged.
+
+The service logs remain intact: 1,800 has six serialization errors, three
+cancellations and one backend `connection to client lost` FATAL after a broken
+pipe; 3,600 has 30 serialization errors; 7,200 has one serialization error and
+one cancellation; 15,000 has two serialization errors and five cancellations.
+No provide-key duplicates or database restart/PANIC sequence was observed.
+These are not error-free-service claims or grounds to relax stability gates.
+
+The largest tested **on-mode** point to complete is 3,600 providers. The
+incomplete on-mode 7,200/15,000 points cannot be rescued by their off-mode
+outcomes. Scale selection still requires full official gate inputs, a real
+cold nine-control-plus-nine-candidate job under three hours, same-seed stability
+and independent reference calibration. No point here is an official baseline.
+
 ## Preserved bytes
 
 `failed-p15000-on/`, `failed-p7200-on/`, `complete-p1800-on/` and
@@ -125,6 +160,11 @@ checks and all gates are unchanged. Its SHA-256 is
 `f95655f7d957bfa7b41969cfb54f218d3fd6e6f2f5b4328ba8697b5d6fe1bad9`.
 It was used for the 3,600-provider point above. No simulator or scoring code
 changed for that count admission.
+
+The four `complete-pCOUNT-off/` directories retain the same artifact set and
+their completion markers. [`INDEX.json`](INDEX.json) is a machine-readable
+census of these eight terminal exploratory outcomes, with explicit non-official
+status and no accepted baseline samples.
 
 All regular files are covered by the enclosing `baseline/MANIFEST.sha256`.
 Older datasets and their outcomes remain unchanged. Local source evidence and

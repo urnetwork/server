@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 01:30 UTC
+## Current preparation pointer — October 25, 02:20 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -47,7 +47,12 @@ completion, not a qualified scale or epoch baseline. The 3,600-provider on point
 also completed (568 seconds, 2,482 measured rows, two failed rows, authenticated
 marker and clean teardown), with retained SQL serialization/cancellation events.
 Neither direct-controller point has a final resource report. Full gate
-qualification, cold R9 timing and impairment-off frontier work remain pending.
+qualification and cold R9 timing remain pending. The off-mode phase completed
+at all four counts (430/447/505/793 seconds, respectively), with no measured
+failures at 1,800/3,600/7,200 and 22 at 15,000. Actual four-child off-mode
+arguments, complete markers and cleanup were verified. Eight exact outcomes
+are retained; no official baseline or final scale is accepted. The largest
+tested completed on point, 3,600, is the leading full-qualification candidate.
 Further frontier/diagnostic work must preserve the correctness gates.
 Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).
