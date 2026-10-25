@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T11:54:09Z",
+  "observed_at": "2026-10-25T12:13:14Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "formal_stage_a_stopped_baseline_unexpected_recovery",
+  "status": "cancellation_fix_smoke_passed_release_validation_pending",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "evaluated_source": {
     "server_commit": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
@@ -42,8 +42,25 @@
     "archive_sha256": "e76abdad43d682c066c4b09ba37be2ff53e26f54c6ccbdfda1b1fbe03ac05e0d",
     "archive_original_files_verified": 125,
     "archive_verification_log_sha256": "6bb3602a5c1ee2025239366d3546c9c6dcbf0403631d7354badea30cb3139cea",
-    "failure": "Baseline scorer rejected control 1 for unexpected_recovery. A canceled announce database write retained a socket timeout in its joined stop cause; IsDoneError classifies that physical timeout as unexpected. Root-cause investigation is in progress; no stability gate has been weakened.",
+    "failure": "Baseline scorer rejected control 1 for unexpected_recovery. A canceled announce database write retained a socket timeout in its joined stop cause; IsDoneError classified that physical timeout as unexpected. The correction passed deterministic old-body/fixed-body proofs and17-test race smoke; new release qualification remains pending. No stability gate was weakened.",
     "next_action": "Preserve the failed position and original evidence. Diagnose cancellation/error classification and add deterministic regressions. Do not retry this cohort, substitute a successful draw, or start positions 2-5. A correction requires a new immutable release and protocol."
+  },
+  "cancellation_fix_qualification": {
+    "main_commit": "e2b87b8ae0fa26fb79f4ab5219e94c641be2268b",
+    "published_evaluation_candidate_commit": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+    "candidate_branch": "sim-latency",
+    "candidate_parent": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
+    "candidate_scope": "Only db_stop_cause.go, trace.go and11new deterministic root tests; other nine repository pins unchanged. Existing config ledger and evaluator image remain old until a corrected release is qualified.",
+    "candidate_checkout": "/home/by/urnetwork/temp/canceled-stop-release-20261025.o4vl2UXU/server",
+    "smoke_tests_passed": 17,
+    "smoke_race_enabled": true,
+    "smoke_exit": 0,
+    "smoke_duration_seconds": 115,
+    "smoke_log_sha256": "f4670ce7fef8cd636c9bf9e1f299958da8d0e1ec918fa34ff5345148bc11268b",
+    "smoke_cleanup_verified": true,
+    "full_validation": "Three consecutive full simulator suites and clean-commit targeted root smoke requested from independent Sol6.1low executor; no live handle observed yet.",
+    "scoring_authorized": false,
+    "record": "server/connect/sim-latency/launch/DB-CANCELLATION-RECOVERY-2026-10-25.md"
   },
   "prepared_formal_campaign": {
     "root": "/home/by/urnetwork/temp/calibration-campaign-preparation-20261025.lG8y5chy",
