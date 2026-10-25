@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-Observation: **2026-10-25T15:50:18Z**. The corrected source/image and isolated
+Observation: **2026-10-25T16:55:46Z**. The corrected source/image and isolated
 trusted script bundle are prepared. Three consecutive complete control suites
 passed 514 tests each, with cleanup verified. See
 [network release qualification](NETWORK-BOUNDARY-2026-10-25.md) and the
@@ -13,7 +13,10 @@ passed 514 tests each, with cleanup verified. See
 The corrected-release first formal cohort started at **15:28:07 UTC**, with a
 three-hour deadline at **18:28:07 UTC**, after all five fresh inputs and the
 freeze were independently verified and pushed as `2844161a9`. No calibration
-acceptance is claimed from an in-progress cohort. The latest read-only
+acceptance is claimed from an in-progress cohort. All nine controls completed
+and the pristine baseline scorer validated them; the same attempt is now
+building the offline no-op candidate. No candidate replicate has completed at
+this observation, and the original deadline is unchanged. The latest read-only
 API probe returned HTTP 503 and the dedicated review-provider key remains
 absent. Current Sille config selects MinIO `172.28.208.176:23900`, which returns
 HTTP 200 at `/minio/health/ready`. Earlier `.177` refusals tested the obsolete

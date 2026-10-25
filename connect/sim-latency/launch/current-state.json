@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-25T15:50:18Z",
+  "observed_at": "2026-10-25T16:55:46Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
   "status": "published_corrected_release_stage_a_cohort_01_running",
@@ -71,7 +71,13 @@
     "runner_pid": 875441,
     "evaluator_pid": 875570,
     "manager_uid": 0,
-    "phase": "running",
+    "phase": "offline_candidate_build",
+    "baseline_completed": 9,
+    "candidate_completed": 0,
+    "baseline_validation_passed": true,
+    "baseline_validation_observed_at": "2026-10-25T16:55:46Z",
+    "baseline_working_artifact_sha256": "fcb1909bba75e920333eaac2ab6c7265310841e7825a16e607b54f8798f2d7cb",
+    "baseline_status_limit": "This is the first cohort's validated R9 control, not a completed A/A pair, accepted five-cohort calibration or hidden production baseline. Preserve all outcomes under the original deadline.",
     "cohort_position": 1,
     "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
     "cohort_root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01",
@@ -387,6 +393,17 @@
     "status": "draft_only_not_applied_compiled_tested_or_performance_qualified",
     "scope": "Only frozen server/connect/resident_contract_manager.go; replace redundant owner-locked limiter objects with timestamps, preserving admission/cache/deadline/ownership rules by design intent, not yet proven.",
     "next_action": "Read-only review may continue. No build, tests or pilot while formal scoring is live. Requires independent baseline/candidate correctness screens, a separate predeclared fresh-control pilot and held-out qualification; never reuse Stage A measurements."
+  },
+  "snapshot_reference_research": {
+    "status": "uncompiled_untested_unmeasured_draft_only",
+    "path": "server/connect/sim-latency/evaluator/references/2026-10-25/SNAPSHOT-HYPOTHESIS.md",
+    "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+    "candidate_test_fixture_sha256": "26c459d5bf580a94de34b45636847a6b6880d190681d66bd5df52d2ca36bd40f",
+    "candidate_test_drafts": 8,
+    "benchmark_fixture_sha256": "f7a84b34cdcacf09e57004259410d43ef7b48f4d0663503b51add584aab28060",
+    "private_workspace": "/home/by/urnetwork/temp/reference-snapshot-draft-20261025.BFH83oNJ",
+    "evaluated_source_changed": false,
+    "next_action": "Only after a clean scoring intermission: baseline/candidate frozen-source correctness screens, eight candidate tests and deterministic delayed-hit guard controls; supporting warm-hit/refresh-cost benchmarks; then separately freeze a fresh full R9 directional pilot if warranted. No reference is qualified yet."
   },
   "external_holds": {
     "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
