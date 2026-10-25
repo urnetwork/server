@@ -72,6 +72,7 @@ func TestEvaluatorMeasuresRoundBaselineBeforeCandidateBuild(t *testing.T) {
 // Controls only synthetic Docker/cgroup observations; no daemon, mounts, live
 // credentials or production services are reachable through the command stub.
 type evaluatorStageFixture struct {
+	networkUnsafe     bool
 	role              string
 	exitCode          int
 	waitOutput        string
@@ -158,6 +159,11 @@ baseline_source_root=/synthetic/source
 candidate_source_root=/synthetic/source
 container_host_uid="$(id -u)"
 container_host_gid="$(id -g)"
+NETWORK_BOUNDARY=fixture_network_boundary
+fixture_network_boundary() {
+    [ "$FIXTURE_NETWORK_UNSAFE" != true ] || return 1
+    printf '%s\n' '{"schema":1,"isolated_gateway":true}'
+}
 RUNNER_MEMORY_BYTES=77309411328
 POSTGRES_MEMORY_BYTES=17179869184
 REDIS_MEMORY_BYTES=8589934592
@@ -195,6 +201,7 @@ sync() {
 }
 compose_with() {
     local last="${!#}"
+    case " $* " in *' runner '*) printf 'runner dependency reached\n' >> "$FIXTURE_ROOT/runner-admitted" ;; esac
     case " $* " in
         *' ps '*) printf 'synthetic-%s\n' "$last" ;;
         *' migrate '*) printf '%s\n' '{"schema":1,"database_version":1,"migration_count":1}' ;;
@@ -285,12 +292,42 @@ sudo() {
 		"FIXTURE_MISSING_OOM_COUNTER=" + fixture.missingOomCounter,
 		"FIXTURE_ATTEMPT=" + strconv.Itoa(fixture.attempt),
 		"FIXTURE_ATTEMPT_TOKEN=" + attemptToken,
+		"FIXTURE_NETWORK_UNSAFE=" + strconv.FormatBool(fixture.networkUnsafe),
 	}
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("fixture timed out: %s", output)
 	}
 	return root, output, err
+}
+
+// A failed network boundary ends admission before candidate preflight or any
+// runner command. Backing images are trusted; candidate initialization is not.
+func TestEvaluatorRejectsHostGatewayBeforeRunnerAdmission(t *testing.T) {
+	root, output, err := runEvaluatorStageFixture(t, evaluatorStageFixture{networkUnsafe: true})
+	if err == nil || !strings.Contains(string(output), "network boundary failed before runner admission") {
+		t.Fatalf("unsafe network did not stop at admission: %v %s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "runner-admitted")); !os.IsNotExist(err) {
+		t.Fatal("candidate runner dependency reached before network isolation", err)
+	}
+}
+
+// Every live job namespace must retain both enforced IPv6-disable settings;
+// the bridge's automatic link-local address must never become an escape path.
+func TestEvaluatorRequiresDisabledIpv6JobNamespaces(t *testing.T) {
+	for index := 0; index < 3; index++ {
+		for _, key := range []string{"net.ipv6.conf.all.disable_ipv6", "net.ipv6.conf.default.disable_ipv6"} {
+			_, output, err := runEvaluatorStageFixture(t, evaluatorStageFixture{
+				mutateInspection: func(inspect []map[string]any) {
+					inspect[index]["HostConfig"].(map[string]any)["Sysctls"].(map[string]any)[key] = "0"
+				},
+			})
+			if err == nil || !strings.Contains(string(output), "live container policy mismatch") {
+				t.Fatalf("IPv6-enabled namespace accepted: index=%d key=%s err=%v output=%s", index, key, err, output)
+			}
+		}
+	}
 }
 
 // A candidate's own nonzero exit is terminal after trusted containment checks,

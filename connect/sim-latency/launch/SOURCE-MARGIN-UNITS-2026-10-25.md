@@ -63,6 +63,22 @@ Evidence roots: `temp/control-margin-smoke-20261025.YR6FyVbt/` and
 fixture remains separately under `temp/source-margin-prefix-20261025.6IBaUqAc/`
 with an explicit outcome correction beside the untouched logs.
 
-Commit/pull/push smoke-qualified code before larger validation. Three full main
-control simulator suites and actual runtime/provider/readiness qualification
-remain separate gates; this smoke is not production activation or calibration.
+Smoke-qualified code was committed/pulled/pushed as server main
+`fbf9730a33da2b25c56e085e6e773b7d3ba640af` before larger validation.
+Three consecutive complete simulator suites then passed **509 top-level
+executions each** (one non-race lifecycle plus 508 race-enabled tests), with
+whole walls 322/162/161 seconds and race-package times
+161.955/154.185/154.098 seconds.
+
+| Suite | Full log SHA-256 |
+| --- | --- |
+| 1 | `3c27af1ebaf0f188082c3138d3c841875780599befbbdb9d3df6e194f49adb20` |
+| 2 | `348caae298db0a13bc1273e0a326fddbdcca8b9bf14f20d6735df195850117e5` |
+| 3 | `4dfa03e79bb59a03da4b3fb37f6860c821de4d2e3384b0c0033b69f970b490ee` |
+
+Evidence: `temp/control-margin-full-three-20261025.aLsY3sbm/`; launch log
+SHA-256 `0ec6bfda178b909b025c2f905d311a8361060427ca65140a97c425f6a3b91f91`.
+Source stayed clean, final cleanup was 0, original-only resources remained and
+the singleton slot was free. No actual runtime/provider/readiness acceptance
+follows; the evaluated source/image remain unchanged. Later network-boundary
+changes require their own qualification.

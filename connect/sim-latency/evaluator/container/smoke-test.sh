@@ -9,6 +9,7 @@ umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
+readonly NETWORK_BOUNDARY="$SCRIPT_DIR/network-boundary.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
 readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
@@ -35,6 +36,7 @@ for command in awk date git install jq mktemp realpath sha256sum stat sudo sync 
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 [ -x "$RESOURCE_BOUNDARY" ] || { printf 'resource boundary is not executable\n' >&2; exit 1; }
+[ -x "$NETWORK_BOUNDARY" ] || { printf 'network boundary is not executable\n' >&2; exit 1; }
 [ -x "$HASH_LOCAL_MOUNT" ] || { printf 'local-mount digest helper is not executable\n' >&2; exit 1; }
 [ -x "$DOCKER_ID_MAP" ] || { printf 'Docker id-map resolver is not executable\n' >&2; exit 1; }
 [ -x "$PREPARE_EVALUATION_SOURCE" ] || { printf 'evaluation source preparer is not executable\n' >&2; exit 1; }
@@ -371,6 +373,7 @@ smoke_stage=candidate
 active_project="urnetwork-container-smoke-run-${candidate_sha:0:12}"
 compose --profile run config >/dev/null
 compose --profile run up --detach --wait postgres redis >&2
+"$NETWORK_BOUNDARY" "${active_project}_evaluation" > "$smoke_root/network-boundary-preflight.json"
 migration_json="$(compose --profile run run --rm --no-deps --no-tty migrate)"
 jq -e '.schema == 1 and
        .database_version > 0 and
@@ -385,6 +388,8 @@ sudo -n docker inspect "$runner_id" | jq -e --arg cpuset "$SMOKE_CPUSET" \
     --arg source "$evaluation_source_dir" \
     '.[0].Config.User == "65532:65532" and
      .[0].HostConfig.ReadonlyRootfs == true and
+     .[0].HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"] == "1" and
+     .[0].HostConfig.Sysctls["net.ipv6.conf.default.disable_ipv6"] == "1" and
      .[0].HostConfig.CpusetCpus == $cpuset and
      .[0].HostConfig.Memory == 2147483648 and
      .[0].HostConfig.MemorySwap == 2147483648 and
@@ -411,7 +416,7 @@ compose --profile run run --rm --no-deps --no-tty \
         ! touch /runtime/config/local/write-test
         ! touch /runtime/vault/local/write-test
     '
-sudo -n docker network inspect "$network_id" | jq -e '.[0].Internal == true' >/dev/null
+"$NETWORK_BOUNDARY" "$network_id" > "$smoke_root/network-boundary-preflight.post.json"
 compose --profile run down --volumes --remove-orphans >&2
 active_project=""
 verify_local_sources_unchanged
@@ -420,6 +425,7 @@ smoke_action=preflight
 smoke_stage=candidate
 active_project="urnetwork-container-smoke-preflight-${candidate_sha:0:12}"
 compose --profile run up --detach --wait postgres redis >&2
+"$NETWORK_BOUNDARY" "${active_project}_evaluation" > "$smoke_root/network-boundary-candidate-preflight.json"
 migration_json="$(compose --profile run run --rm --no-deps --no-tty migrate)"
 jq -e '.schema == 1 and
        .database_version > 0 and
@@ -436,6 +442,7 @@ smoke_action=run
 smoke_stage=candidate
 active_project="urnetwork-container-smoke-simulator-${candidate_sha:0:12}"
 compose --profile run up --detach --wait postgres redis >&2
+"$NETWORK_BOUNDARY" "${active_project}_evaluation" > "$smoke_root/network-boundary-candidate-run.json"
 migration_json="$(compose --profile run run --rm --no-deps --no-tty migrate)"
 jq -e '.schema == 1 and
        .database_version > 0 and

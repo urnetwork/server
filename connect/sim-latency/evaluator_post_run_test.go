@@ -118,6 +118,10 @@ func syntheticInspect(statePostgres, stateRedis map[string]any) []map[string]any
 	}
 	for _, container := range []map[string]any{runner, postgres, redis} {
 		container["RestartCount"] = 0
+		container["HostConfig"].(map[string]any)["Sysctls"] = map[string]any{
+			"net.ipv6.conf.all.disable_ipv6":     "1",
+			"net.ipv6.conf.default.disable_ipv6": "1",
+		}
 		container["HostConfig"].(map[string]any)["RestartPolicy"] = map[string]any{"Name": "no"}
 		container["Config"].(map[string]any)["Labels"] = map[string]any{
 			"com.docker.compose.project":         "synthetic",
