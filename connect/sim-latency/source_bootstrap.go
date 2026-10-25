@@ -34,7 +34,7 @@ func validateBootstrapSource(manifest *sourceManifest, settings *controller.Sett
 	}
 	generation, round := manifest.EvaluationSource.Generations[0], manifest.EvaluationSource.Rounds[0]
 	if generation.Generation != 0 || generation.Kind != "baseline" || generation.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 ||
-		generation.Repositories.Server.Commit != settings.BaseSha || generation.SignificantImprovementPercent != settings.EvaluationPolicy.TakeoverMargin*100 ||
+		generation.Repositories.Server.Commit != settings.BaseSha || !sourceMarginMatches(generation.SignificantImprovementPercent, settings.EvaluationPolicy.TakeoverMargin) ||
 		round.Epoch != 1 || round.SourceGeneration != 0 || round.ActivationGeneration != 1 || settings.AutomationPolicy.SourceActivationGeneration != 1 {
 		return errors.New("baseline manifest differs from the approved epoch-one policy")
 	}

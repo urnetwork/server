@@ -238,7 +238,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		return nil, errors.New("v2 supervisor requires an explicitly provisioned v2 baseline manifest")
 	}
 	lockedGeneration, err := manifest.generation(current.SourceGeneration)
-	if err != nil || lockedGeneration.SourceLockSha256 != current.SourceLockSha256 || lockedGeneration.SignificantImprovementPercent != current.Threshold*100 {
+	if err != nil || lockedGeneration.SourceLockSha256 != current.SourceLockSha256 || !sourceMarginMatches(lockedGeneration.SignificantImprovementPercent, current.Threshold) {
 		return nil, errors.New("active source pointer disagrees with its immutable manifest")
 	}
 	reason, rewardDigest := "review_pending", ""

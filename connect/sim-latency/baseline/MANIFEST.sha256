@@ -1,8 +1,8 @@
 6499cb1b08eb1780cf3576e9eb24d78fb6e3ad07ab0cfad1ed14052bcc61b633  .gitattributes
-53ff416f94905193a4a34129c60fea33d645ea65caed50c929033dcafd25c536  INDEX.json
+f5c6b5efcb7f177c22165950da1a1d54f594fae979db32c1085400aac142fcee  INDEX.json
 cc145d9445f25ccecc5bbdad4fc7d4397e1c7b8602b494950e611f5ca6805b86  README.md
 cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9  final-baseline.html
-84ab8a04b815f855ce65654c979fef07a1d1271495b7585a7274c45ccb1dbf43  final-preview.html
+b61dff369c0953c15259d45675f7ba0a0781444b0bf5b9c935729712e66e1771  final-preview.html
 768c57b3d341eeb31861ba848a595b94f9e6f0b71d0364e29205968bc3aedf1e  go.mod
 3f62dd3ea030590f151af902131765b2358084402e4dd0f2929d2dcced0545e7  prelaunch-2026-10-24/INDEX.json
 20f90fd20674fdc6ed3d074b2f76a94e5b6753e11e11a43f483b6fb7f639aed7  prelaunch-2026-10-24/README.md
@@ -270,7 +270,13 @@ d5bed16dabfa54bbb956c992eaa700db9b762c20ec542f5845accfe3aa330380  prelaunch-read
 884a4eda6dc5e3343dc832db692c540c97a0103cbf59aa0cdaed3857ec302700  prelaunch-ready-snapshot-frontier-2026-10-25/failed-p7200-on/runner.log.gz
 f2e0a2e16cccdaf371c011993505f3ed1367fff2f16e00264f1c75f599e03a5e  prelaunch-ready-snapshot-frontier-2026-10-25/failed-p7200-on/services.log.gz
 cda30e8fcda9486b3cb435d535cb7675eb57d354285aefaa3acb37f05aadba0a  prelaunch-ready-snapshot-frontier-2026-10-25/image-record.json
-3fd332c4369078d1a5f3944f432d54b643ed107351ef4fa4a7c7968ce46255c7  prelaunch-same-seed-r9-2026-10-25/INDEX.json
+177ea22ae9f64491c3c4549b0137382113428721a406013ddb9b57027d1756c0  prelaunch-same-seed-r9-2026-10-25/INDEX.json
+040f545c7f31633edd67b25b67204656356a9339b6a89d58f690bf48533a05fd  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md
+6bb3602a5c1ee2025239366d3546c9c6dcbf0403631d7354badea30cb3139cea  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/archive-verification.log
+4a073532b9f45c72665b1311087526b9ea64ba65720722df1954d79ab0e7cc86  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/baseline-scorer.log
+e76abdad43d682c066c4b09ba37be2ff53e26f54c6ccbdfda1b1fbe03ac05e0d  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/failed-evidence.tar.gz.part-00
+de83c05135585dd815c788d5f6468decadb7b9df86fbc170583a53ac9a82ff23  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/failure.json
+b15b67fe287f362f5fcd81509f6bbcf3f0ec78611f4b28265712b0b767c5e6dc  prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/manager-terminal.log
 bafdd8307a22d585f76a95565abf568ef75f36c982d1218c729147483f929ef7  prelaunch-same-seed-r9-2026-10-25/predeclared/cohort-runner.sh
 8918df4980ea63b937410683fd17d530cebfbff1b38724e5bac44b0ce1e46ead  prelaunch-same-seed-r9-2026-10-25/predeclared/evaluation-policy-canonical.json
 32adc93670891bb98b9d980b3148d351ba33e60cb56106de7ea93973a4a22c8a  prelaunch-same-seed-r9-2026-10-25/predeclared/native-missing-input.json

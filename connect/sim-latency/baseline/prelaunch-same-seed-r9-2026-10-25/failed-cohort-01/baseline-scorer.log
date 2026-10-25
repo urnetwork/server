@@ -1,0 +1,9 @@
+[env]glog not configured from command line. Using default configuration.
+I1025 11:44:03.563172      16 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1025 11:44:03.563341      16 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1025 11:44:03.563374      16 env.go:81] [env]settings loaded
+[env]glog not configured from command line. Using default configuration.
+I1025 11:44:03.994800      99 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1025 11:44:03.994957      99 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1025 11:44:03.994999      99 env.go:81] [env]settings loaded
+[sim-latency] score baseline: baseline replicate 1 is not stable (findings: unexpected_recovery)

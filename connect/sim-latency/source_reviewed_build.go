@@ -42,7 +42,7 @@ func reviewedSourceImageManifest(current *model.CompetitionSourceActivation, pro
 		return nil, errors.New("reviewed image manifest does not end at the active generation")
 	}
 	locked, err := manifest.generation(current.SourceGeneration)
-	if err != nil || locked.SourceLockSha256 != current.SourceLockSha256 || locked.SignificantImprovementPercent != current.Threshold*100 {
+	if err != nil || locked.SourceLockSha256 != current.SourceLockSha256 || !sourceMarginMatches(locked.SignificantImprovementPercent, current.Threshold) {
 		return nil, errors.New("reviewed image incumbent differs from its immutable manifest")
 	}
 	currentDigest, err := model.CompetitionSourceLockDigestForMode(current.Commits, current.Staging)

@@ -25,6 +25,11 @@ import (
 func IsDoneError(r any) bool {
 	switch v := r.(type) {
 	case error:
+		// The database boundary verified explicit caller cancellation and the
+		// complete physical timeout tree while retaining its diagnostic causes.
+		if stopped, ok := v.(*dbCanceledSocketStop); ok && stopped != nil {
+			return true
+		}
 		if joined, ok := v.(interface{ Unwrap() []error }); ok {
 			causes := joined.Unwrap()
 			if len(causes) == 0 {

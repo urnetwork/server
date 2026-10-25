@@ -95,7 +95,8 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 		if proposal.Schema != 2 || proposal.Staging != current.Staging || proposal.ReviewId == (server.Id{}) || !validSha256(proposal.ReviewDecisionDigest) ||
 			proposal.JobId == (server.Id{}) || proposal.SubmittedAt.IsZero() || proposal.BaseSourceLockSha256 != current.SourceLockSha256 || proposal.ReadyAt.IsZero() || proposal.ReviewedAt.IsZero() ||
 			proposal.ReadyAt.After(deadline) || proposal.ReviewedAt.After(deadline) || !finitePositive(proposal.RawScore) || validateSourceSignificanceForMode(proposal.Significance, current.Staging) != nil ||
-			proposal.Significance.RecommendedNextEpochTakeoverMarginPercent < current.Threshold*100 {
+			(proposal.Significance.RecommendedNextEpochTakeoverMarginPercent < current.Threshold*100 &&
+				!sourceMarginMatches(proposal.Significance.RecommendedNextEpochTakeoverMarginPercent, current.Threshold)) {
 			continue
 		}
 		lockDigest, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
