@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 00:14 UTC
+## Current preparation pointer — October 25, 00:54 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -28,9 +28,12 @@ checkouts of all ten frozen repositories in the build context. Its local tag is
 `sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793`.
 Actual compiler/recovery/source gates and independent local image lifecycle,
 build-isolation and host adversarial-cleanup phases passed. The first fresh
-15,000-provider impairment-on point is active in
-`temp/ready-snapshot-frontier-20261025.oPXXTOEe`; it is not yet an accepted
-capacity point or baseline. Full production qualification is not complete. See
+15,000-provider impairment-on point failed after 1,090 seconds at matchmaking
+probe 2, followed by a shard-0 TERM timeout. Its complete retained artifacts
+are in `baseline/prelaunch-ready-snapshot-frontier-2026-10-25/`. The startup
+barrier held and provide-key duplicate errors were absent, but this remains an
+incomplete capacity point, not a baseline. The next point must test lower scale
+without changing the correctness gates. Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).
 No new performance result is claimed. Neither
 production nor a new staging round is activated. Final scale/margin, fresh

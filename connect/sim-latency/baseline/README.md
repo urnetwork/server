@@ -1,10 +1,18 @@
 # Sim-latency baseline preservation
 
+The corrected Go 1.27.3 readiness/snapshot source's first 15,000-provider
+impairment-on attempt is preserved in
+[`prelaunch-ready-snapshot-frontier-2026-10-25/`](prelaunch-ready-snapshot-frontier-2026-10-25/README.md).
+It failed after 18m10s at matchmaking probe 2 and is not a baseline or accepted
+scale. Its startup barrier held and no provide-key duplicate errors were found;
+the remaining failure still needs diagnosis and lower-scale measurement.
+
 The later Go 1.27.3, provide-lock 15,000-provider impairment-on attempt is in
 [`prelaunch-provide-frontier-2026-10-24/`](prelaunch-provide-frontier-2026-10-24/README.md).
 It failed at matchmaking probe 6 and is retained with full logs and partial
 data. It is not a baseline or accepted scale. Subsequent transaction-snapshot
-and fleet-readiness fixes require a new image and fresh measurements.
+and fleet-readiness fixes are present in the newer source above; the old run
+must not be relabeled as evidence from that newer image.
 
 Corrected-image capacity results are in
 [`prelaunch-corrected-frontier-2026-10-24/`](prelaunch-corrected-frontier-2026-10-24/README.md).

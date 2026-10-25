@@ -107,7 +107,17 @@ after all phases and cleanup completed. Its separate root is
 `temp/ready-snapshot-frontier-20261025.oPXXTOEe`. It uses fresh services, all four
 fleet shards, 200 clients and the exact new image to generate its workload.
 The earlier failed source's rows are not reused. The point is exploratory and
-has no accepted result until terminal completion and artifact checks.
+failed after 1,090 seconds with `matchmaking_probe_failed` at probe 2 and a
+shard-0 TERM timeout. All 200 clients were ready; the incomplete sidecar has
+167 measured rows and 62 failures. The corrected readiness barrier preceded
+prewarm; no provide-key duplicate errors occurred, although ten serialization
+errors and five statement cancellations remain in the service log. Cleanup
+left only the original persistent services. Measurement began approximately
+16m35s after public start, before the required 180-second window, so this point
+also raises a cold eighteen-run three-hour budget concern. It is not an
+accepted scale or baseline. Exact logs, workload, sidecar, CSV, image receipt
+and controllers are versioned in
+[`baseline/prelaunch-ready-snapshot-frontier-2026-10-25/`](../baseline/prelaunch-ready-snapshot-frontier-2026-10-25/README.md).
 
 Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
 from the public `/competition/info` endpoint and connection refusal from

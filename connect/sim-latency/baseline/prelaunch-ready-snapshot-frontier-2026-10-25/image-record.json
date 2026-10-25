@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "staging": false,
+  "image": "urnetwork/sim-latency-evaluator-base:ready-snapshot-0d58d0d9",
+  "image_id": "sha256:effe9ba5dc9cc337b4f250977c5f921ea42e4a336b30e3a5b54a9fd1bbe7f793",
+  "base_sha": "0d58d0d91b069c62bcfb39cd72166c26925b786a",
+  "source_epoch": 0,
+  "source_config_sha256": "156aee96af328e2b4d4d838f2de2eecb0204650b8400504a0eca773b9838de2f",
+  "source_lock_sha256": "2cb2ff2a9b1f64a61e165a194e72ad9ee07aae0d76cf43dddf47a3e3dce952ed",
+  "development_snapshot": false
+}
