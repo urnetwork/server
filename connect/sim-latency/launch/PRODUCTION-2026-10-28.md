@@ -1,6 +1,6 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 01:05 UTC
+## Current preparation pointer — October 25, 01:17 UTC
 
 The latest source-ledger publication is config main
 `949e08c8c5412206e06709e36f8bfbe1e182aef3`, server
@@ -34,7 +34,11 @@ are in `baseline/prelaunch-ready-snapshot-frontier-2026-10-25/`. The startup
 barrier held and provide-key duplicate errors were absent, but this remains an
 incomplete capacity point, not a baseline. A fresh 7,200-provider on point also
 failed after 606 seconds at the initial matchmaking probe, with zero measured
-rows and clean teardown. Both outcomes are retained; no passing scale is claimed.
+rows and clean teardown. Both outcomes are retained. The next 1,800-provider on
+point completed in 525 seconds with an authenticated marker, 2,441 measured
+rows, two failed rows, no SQL errors and clean teardown. It is one exploratory
+completion, not a qualified scale or epoch baseline; a 3,600-provider point and
+impairment-off frontier work remain to bracket capacity.
 Further frontier/diagnostic work must preserve the correctness gates.
 Full production qualification is not complete. See
 [ARTIFACTS-READY-SNAPSHOT-2026-10-25.md](ARTIFACTS-READY-SNAPSHOT-2026-10-25.md).

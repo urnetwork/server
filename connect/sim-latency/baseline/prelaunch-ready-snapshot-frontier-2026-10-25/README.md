@@ -1,4 +1,4 @@
-# Corrected Go 1.27.3 frontier — retained incomplete points
+# Corrected Go 1.27.3 frontier — exploratory capacity points
 
 Exploratory public-seed evidence only: **not an official baseline, accepted
 scale, variance calibration or significance threshold**. No incomplete metrics
@@ -66,14 +66,35 @@ The point establishes neither a passing scale nor a baseline. All owned
 containers/networks were removed, leaving the original services; no retry or
 additional point ran before this result was retained.
 
+## 1,800-provider impairment-on result
+
+The third point changed only provider count, to **1,800**, with fresh services
+and the same exact image, source, seed, 200 clients, arrival rate, timings,
+quality window, four hosts and four shards. It completed with **exit 0 after
+525 seconds (8m45s)**. All 200 clients were ready; the sidecar records 2,744
+total rows, 2,441 measured-window rows and two failed measured rows. Its final
+completion marker authenticates the sidecar, whose digest authenticates the
+CSV. The full 180-second measured window began at
+`2026-10-25T01:12:53.624Z`. The service log contains zero PostgreSQL
+ERROR/FATAL/PANIC lines. All owned containers/networks were removed.
+
+This direct exploratory controller emits no final resource report. A complete
+run and its marker are not proof of all official scoring/containment gates,
+same-seed variance, reference separability, full cold R9 job duration or an
+accepted production scale. The single point is **not an epoch baseline**.
+The next frontier work must bracket capacity and test impairment off without
+weakening the existing correctness or timeout gates.
+
 ## Preserved bytes
 
-`failed-p15000-on/` and `failed-p7200-on/` retain each final sidecar, CSV,
-ID-map receipt, generated
+`failed-p15000-on/`, `failed-p7200-on/` and `complete-p1800-on/` retain each
+final sidecar, CSV, ID-map receipt, generated
 workload and complete runner/service logs. Deterministic gzip headers (`-n`)
 permit exact decompressed-byte verification. `controller/` contains the actual
 executed scripts, including private paths for provenance rather than deployment.
 `image-record.json` is the original image build receipt.
+Only the complete 1,800-provider point includes a completion marker; no absent
+artifact is synthesized for an incomplete point.
 
 All regular files are covered by the enclosing `baseline/MANIFEST.sha256`.
 Older datasets and their outcomes remain unchanged. Local source evidence and

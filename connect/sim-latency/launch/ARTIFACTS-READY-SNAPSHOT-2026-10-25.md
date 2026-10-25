@@ -128,6 +128,16 @@ are retained alongside the 15,000-provider point. Neither point passes capacity;
 the remaining discovery failure is not established as caused by either of the
 earlier corrected defects.
 
+The next 1,800-provider impairment-on point completed in 525 seconds with all
+200 clients, 2,441 measured-window rows, two failed rows, an authenticated
+completion marker and no PostgreSQL ERROR/FATAL/PANIC lines. Cleanup passed.
+Its exact artifacts are retained in the same baseline archive. The direct
+controller emits no final resource report. This is the first clean exploratory
+completion for this image, not acceptance of scale, official scoring gates,
+full cold R9 duration, variance, significance or an epoch control. A 3,600-provider
+point will bracket the gap to the incomplete 7,200-provider point; impairment-off
+frontier work is still required.
+
 Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
 from the public `/competition/info` endpoint and connection refusal from
 `172.28.208.177:23900/minio/health/live`. The dedicated
