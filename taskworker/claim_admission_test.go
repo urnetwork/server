@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -40,9 +41,13 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("production target placement differs or mutated its caller", production.TargetClaimLimits)
 	}
 	production.TargetClaimLimits = nil
-	totals := task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName()
-	if !reflect.DeepEqual(production.TargetClaimShares, map[string]int{totals: legacyProviderTotalsClaimSharePeriod}) || settings.TargetClaimShares != nil {
-		t.Fatal("production provider totals share differs or mutated its caller")
+	shares := map[string]int{
+		task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName(): legacyProviderTotalsClaimSharePeriod,
+		task.NewTaskTarget(work.FlushTransferDebits).TargetFunctionName():        financialOwnerClaimSharePeriod,
+		task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName():       financialOwnerClaimSharePeriod,
+	}
+	if !reflect.DeepEqual(production.TargetClaimShares, shares) || settings.TargetClaimShares != nil {
+		t.Fatal("production claim shares differ or mutated their caller", production.TargetClaimShares)
 	}
 	production.TargetClaimShares = nil
 	if !production.FairClaimFunctions || settings.FairClaimFunctions {
@@ -56,8 +61,8 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1}) || !operator.ClaimRegisteredTargetsOnly {
 		t.Fatal("independent profile did not retain mirror-only placement")
 	}
-	if !reflect.DeepEqual(operator.TargetClaimShares, map[string]int{totals: legacyProviderTotalsClaimSharePeriod}) {
-		t.Fatal("independent profile lost the provider totals share")
+	if !reflect.DeepEqual(operator.TargetClaimShares, shares) {
+		t.Fatal("independent profile lost the claim shares", operator.TargetClaimShares)
 	}
 }
 
