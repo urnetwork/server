@@ -108,3 +108,12 @@ after all phases and cleanup completed. Its separate root is
 fleet shards, 200 clients and the exact new image to generate its workload.
 The earlier failed source's rows are not reused. The point is exploratory and
 has no accepted result until terminal completion and artifact checks.
+
+Read-only maintenance checks at October 25, 00:35 UTC still returned HTTP 503
+from the public `/competition/info` endpoint and connection refusal from
+`172.28.208.177:23900/minio/health/live`. The dedicated
+`vault/main/competition-review-openai.key` file was absent. No API/database
+mutation, runtime activation or service restart was attempted. Maintenance
+completion and the dedicated credential are prerequisites for the remaining
+live-readiness and genuine provider-backed qualification work; local capacity
+measurement continues independently.
