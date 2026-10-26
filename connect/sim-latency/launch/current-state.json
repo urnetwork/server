@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T18:10:00Z",
+  "observed_at": "2026-10-26T19:52:45Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -29,7 +29,33 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
-  "status": "calibration_tool_264_passes_margin_receipt_frozen_reference_images_built_snow_live_qualification_pending",
+  "status": "bridge_precommit_authenticated_snow_cancellation_stdin_fix_under_independent_test",
+  "snow_first_qualification_attempt": {
+    "terminal": true,
+    "qualified": false,
+    "provider_calls": 0,
+    "provider_input_released": false,
+    "wrapper_exit": 4,
+    "cleanup_verified": true,
+    "evidence_directory": "/var/lib/urnetwork/competition-review/attempts/invocation.Jgu0ziWH",
+    "failure": "asynchronous shell reader inherited /dev/null instead of parent stdin",
+    "fix_commit": "43a691219",
+    "regression_test": "TestReviewQualificationWrapperPreservesBackgroundInput",
+    "fix_qualified": false,
+    "automatic_retry_performed": false
+  },
+  "bridge_precommit_authentication": {
+    "passed": true,
+    "receipt_sha256": "2a012f79b0bad14576c5cf9ad1a7e59a0e4579f126bec090423bef70673f4747",
+    "receipt": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/precommit-authentication.json",
+    "measurements_started": false
+  },
+  "current_boot_resource_bomb_qualification": {
+    "passed": true,
+    "receipt_sha256": "b02f4d249cf6614959e0e32b95d1795bc02d1fecf65a124a036b800fb309a7cb",
+    "receipt": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/host-qualification/resource-bomb-report.json",
+    "full_production_round_host_rebaseline_proved": false
+  },
   "latest_native_margin_freeze": {
     "margin": 0.269,
     "receipt_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
