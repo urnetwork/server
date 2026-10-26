@@ -404,7 +404,7 @@ func persistWinnerSnowMember(directory string, index int, phase string, value an
 		return errors.New("Snow member journal directory or identity is invalid")
 	}
 	content, err := json.Marshal(value)
-	if err != nil || len(content) > 1024*1024 {
+	if err != nil || len(content) > defaultWinnerSnowModelSettings().MaximumMemberJournalBytes {
 		return errors.New("Snow member journal exceeds its bound")
 	}
 	file, err := os.OpenFile(filepath.Join(directory, fmt.Sprintf("member-%02d.%s.json", index, phase)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

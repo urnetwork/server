@@ -23,12 +23,13 @@ import (
 
 // Per-process bounds are independent of candidate text and frozen policy.
 type winnerModelSettings struct {
-	RequestTimeout      time.Duration
-	MaximumInputBytes   int64
-	MaximumStreamBytes  int64
-	MaximumEventBytes   int
-	MaximumOutputTokens int
-	MaximumRefusalBytes int64
+	RequestTimeout            time.Duration
+	MaximumInputBytes         int64
+	MaximumStreamBytes        int64
+	MaximumEventBytes         int
+	MaximumOutputTokens       int
+	MaximumRefusalBytes       int64
+	MaximumMemberJournalBytes int
 }
 
 // Explicit provider snapshot for the new Mini policy. The policy's family name
@@ -46,7 +47,7 @@ func winnerReviewProviderModelName(policyModel string) string {
 // Large reasoning budgets do not enlarge source, response or execution access.
 func defaultWinnerModelSettings() winnerModelSettings {
 	return winnerModelSettings{RequestTimeout: 30 * time.Minute, MaximumInputBytes: 4 * 1024 * 1024,
-		MaximumStreamBytes: 16 * 1024 * 1024, MaximumEventBytes: 1024 * 1024, MaximumOutputTokens: 65536, MaximumRefusalBytes: 64 * 1024}
+		MaximumStreamBytes: 16 * 1024 * 1024, MaximumEventBytes: 1024 * 1024, MaximumOutputTokens: 65536, MaximumRefusalBytes: 64 * 1024, MaximumMemberJournalBytes: 1024 * 1024}
 }
 
 // The model chooses findings, never authenticated identities or publication rights.
