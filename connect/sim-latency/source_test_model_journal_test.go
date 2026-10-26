@@ -31,7 +31,7 @@ func TestSourceTestModelJournalReplaysProviderAndExecutionWithoutAnotherDraw(t *
 		requests++
 		stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
 		if requests == 2 {
-			stream = winnerModelFixtureStream(t, `{"passed":true,"summary":"Synthetic prescribed tests passed."}`)
+			stream = winnerModelFixtureStreamForModel(t, `{"passed":true,"summary":"Synthetic prescribed tests passed."}`, sourceTestModelName)
 		} else if requests != 1 {
 			t.Fatal("restart sampled another provider response")
 		}

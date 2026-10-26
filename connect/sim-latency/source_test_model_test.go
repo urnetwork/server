@@ -73,7 +73,7 @@ func TestSourceTestModelPinsAuthorityExecutesOnceAndPreservesOpaqueState(t *test
 			if requests != 2 || len(payload.Tools) != 0 || string(payload.ToolChoice) != `"none"` || !strings.Contains(string(body), "synthetic-opaque-encrypted-reasoning") || !strings.Contains(string(body), "function_call_output") {
 				t.Fatal("completion lost opaque tool state or gained another execution")
 			}
-			stream = winnerModelFixtureStream(t, `{"passed":true,"summary":"All prescribed tests passed."}`)
+			stream = winnerModelFixtureStreamForModel(t, `{"passed":true,"summary":"All prescribed tests passed."}`, sourceTestModelName)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
 	})}
@@ -90,6 +90,34 @@ func TestSourceTestModelPinsAuthorityExecutesOnceAndPreservesOpaqueState(t *test
 	})
 	if err != nil || evidence == nil || !evidence.Passed || evidence.Model != "gpt-6.1-sol" || evidence.Reasoning != "low" || requests != 2 || executions != 1 || !validSha256(evidence.PlanSha256) {
 		t.Fatal("independent test evidence lost actual execution or provider provenance", evidence, err)
+	}
+}
+
+// A valid terminal envelope from another review role cannot authorize either
+// execution or its completion. Positive fixtures must use the requested model.
+func TestSourceTestModelRejectsUnrequestedModelAtEveryPhase(t *testing.T) {
+	for _, wrongPhase := range []int{1, 2} {
+		plan := sourceTestPlanFixture()
+		requests, executions := 0, 0
+		client := &http.Client{Transport: winnerReviewTransport(func(*http.Request) (*http.Response, error) {
+			requests++
+			stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
+			if requests == 2 {
+				stream = winnerModelFixtureStreamForModel(t, `{"passed":true,"summary":"Synthetic observed execution."}`, sourceTestModelName)
+			}
+			if requests == wrongPhase {
+				stream = strings.ReplaceAll(stream, sourceTestModelName, winnerReviewMiniProviderSnapshot)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
+		})}
+		evidence, err := executeSourceTestModel(context.Background(), client, "synthetic-model-key", plan, defaultSourceTestModelSettings(), func(context.Context) (sourceTestExecution, error) {
+			executions++
+			return sourceTestExecutionFixture(plan), nil
+		})
+		var diagnostic *winnerModelResponseDiagnostic
+		if err == nil || evidence != nil || !errors.As(err, &diagnostic) || diagnostic.Cause != "model_mismatch" || requests != wrongPhase || executions != wrongPhase-1 {
+			t.Fatalf("phase %d accepted an unrequested model or changed execution count: requests=%d executions=%d evidence=%v error=%v", wrongPhase, requests, executions, evidence, err)
+		}
 	}
 }
 
@@ -131,7 +159,7 @@ func TestSourceTestModelCannotBlessFailureOrSubstituteEvidence(t *testing.T) {
 				case "missing-judgment":
 					output = `{"summary":"Synthetic completion."}`
 				}
-				stream = winnerModelFixtureStream(t, output)
+				stream = winnerModelFixtureStreamForModel(t, output, sourceTestModelName)
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
 		})}
@@ -182,7 +210,7 @@ func TestSourceTestModelRetainsObservedFailedExecution(t *testing.T) {
 		requests++
 		stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
 		if requests == 2 {
-			stream = winnerModelFixtureStream(t, `{"passed":false,"summary":"Observed prescribed tests failed."}`)
+			stream = winnerModelFixtureStreamForModel(t, `{"passed":false,"summary":"Observed prescribed tests failed."}`, sourceTestModelName)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
 	})}

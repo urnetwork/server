@@ -313,7 +313,7 @@
       "id": 42,
       "type": "stat",
       "title": "stuck creations, busiest process",
-      "description": "CreateContract calls now in stage other in the busiest selected proxy process. Stage other counts the time no stage instruments; in the 2026-10-26 storm it held failed calls waiting out their reservation cleanup, about 9k per process. Red at 1,000 per process (SIGNALS.md section 26); normally under 50 across the fleet.",
+      "description": "CreateContract calls in stage other in the busiest selected proxy process, as each process's two-minute maximum: the count moves in waves as cleanup budgets end together. Stage other counts the time no stage instruments; in the 2026-10-26 storm it held failed calls waiting out their reservation cleanup, about 9k per process. Red from 1,000: the PAGE of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 30.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -365,15 +365,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(sum by (host, block, instance) (urnetwork_contract_creation_stage_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",stage=\"other\"}))"
+          "expr": "max(sum by (host, block, instance) (max_over_time(urnetwork_contract_creation_stage_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",stage=\"other\"}[2m])))"
         }
       ]
     },
     {
       "id": 43,
       "type": "stat",
-      "title": "cancel ratio",
-      "description": "Share of the CreateContract calls that returned in the last five minutes that ended canceled. Red at 20% (SIGNALS.md section 26). A canceled call counts when it returns, so this trails the in-flight count; on 2026-10-26 it trailed the storm by the 300 s cleanup budget of that build.",
+      "title": "failure share",
+      "description": "(canceled + panic) over (contract_reply + canceled + panic) for the CreateContract calls that returned in the last five minutes, as SIGNALS.md section 25.1 defines it: protocol_reject stays out, since it would swamp the share. Shown only with at least 20 such calls/s. Orange from 5% (the WARN, 10 minutes), red from 20% (the PAGE of SIGNALS.md section 26, 5 minutes). Healthy is 0-1.3%, 3-5% in the busiest hours. A call counts when it returns, so the share trails the in-flight count.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -397,6 +397,10 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
               },
               {
                 "color": "red",
@@ -425,7 +429,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=\"canceled\"}[5m])) / (sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[5m])) > 0)"
+          "expr": "sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=~\"canceled|panic\"}[5m])) / (sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=~\"contract_reply|canceled|panic\"}[5m])) >= 20)"
         }
       ]
     },
@@ -433,7 +437,7 @@
       "id": 44,
       "type": "stat",
       "title": "release-pending errors / s",
-      "description": "Redis release-pending calls that failed, per second over five minutes: reservation cleanup that could not reach Redis. Red at 10/s (SIGNALS.md section 26). None all day before the 2026-10-26 storm; 86k/s at its peak.",
+      "description": "Redis release-pending calls that failed, per second over five minutes: reservation cleanup that could not reach Redis. Orange from 10/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 0.6/s; 86k/s at the 2026-10-26 storm's peak.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -458,7 +462,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 10
               }
             ]
@@ -492,7 +496,7 @@
       "id": 45,
       "type": "stat",
       "title": "Redis pool timeouts / s",
-      "description": "go-redis pool timeouts of the selected proxy processes per second over five minutes: commands that waited past the pool timeout for a connection. Red at 10/s (SIGNALS.md section 26). Sustained timeouts came with reconnect churn on the Redis nodes in the 2026-10-26 storm (HELLO on the Redis cluster dashboard).",
+      "description": "go-redis pool timeouts of the selected proxy processes per second over five minutes: commands that waited past the pool timeout for a connection. Orange from 10/s (the WARN of SIGNALS.md section 26, 5 minutes), red from 1,000/s (the PAGE of SIGNALS.md section 3.5b). Sustained timeouts came with reconnect churn on the Redis nodes in the 2026-10-26 storm (HELLO on the Redis cluster dashboard).",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -517,8 +521,12 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
               }
             ]
           }
@@ -551,7 +559,7 @@
       "id": 46,
       "type": "stat",
       "title": "busiest proxy host CPU",
-      "description": "Busy share of all cores (1 - idle) over five minutes on the busiest host running the selected proxy processes. Red at 85% (SIGNALS.md section 26). The proxy hosts ran above 90% busy in the 2026-10-26 storm.",
+      "description": "Busy share (neither idle nor I/O wait) over five minutes of the busiest host running the selected proxy processes. Orange from 85%: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is 9-51%; the proxy hosts ran 89-96% busy in the 2026-10-26 storm, the last of its signals to rise.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -579,7 +587,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 0.85
               }
             ]
@@ -605,15 +613,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max((1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[5m]))) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}))"
+          "expr": "max(1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=~\"idle|iowait\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}))"
         }
       ]
     },
     {
       "id": 47,
       "type": "stat",
-      "title": "cap refusals / s",
-      "description": "Contract creations the per-process cap refused at once, per second over five minutes (urnetwork_hosted_contract_admission_refusals_total; HostedContractConcurrency, 256 per process by default). Refusals mean the cap is holding a burst back; the device asks again on its own schedule. No SIGNALS.md section 26 threshold.",
+      "title": "cap refusals / s, busiest process",
+      "description": "Contract creations the per-process cap (HostedContractConcurrency, 256 by default) refused at once, per second over five minutes, in the busiest selected process. A process counts only once it has run 30 minutes: a block's own restart brings 12-21 minutes of expected refusals. Orange from 50/s: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Refusals mean creations are not returning; the cap protects the process but does not end a storm.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -634,8 +642,12 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
               }
             ]
           }
@@ -660,7 +672,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[5m]))"
+          "expr": "max(sum by (host, block) (rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[5m])) and on (host, block) (time() - max by (host, block) (process_start_time_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}) > 1800))"
         }
       ]
     },
@@ -728,7 +740,7 @@
       "id": 49,
       "type": "timeseries",
       "title": "calls in stage other per process",
-      "description": "Calls now in stage other, for the busiest process of each block on each host (a rollout's old and new process show as one line). The line is the SIGNALS.md section 26 threshold of 1,000 per process. On builds with the per-process cap, HostedContractConcurrency (256 by default) bounds the creations in flight.",
+      "description": "Each process's two-minute maximum of calls in stage other, for the busiest process of each block on each host (a rollout's old and new process show as one line). The line is the PAGE of SIGNALS.md section 26: 1,000 for 5 minutes. A process under the per-process cap stays near 256 (HostedContractConcurrency); then the cap refusals carry the storm.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -795,7 +807,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (host, block) (sum by (host, block, instance) (urnetwork_contract_creation_stage_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",stage=\"other\"}))",
+          "expr": "max by (host, block) (sum by (host, block, instance) (max_over_time(urnetwork_contract_creation_stage_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",stage=\"other\"}[2m])))",
           "legendFormat": "{{host}} {{block}}"
         }
       ]
@@ -804,10 +816,10 @@
       "id": 50,
       "type": "timeseries",
       "title": "CreateContract completions / s by outcome",
-      "description": "Returned calls per second by outcome. contract_reply hands a contract back (it does not prove delivery); canceled is a call whose caller gave up, counted when the call returns; protocol_reject is a refusal sent to the client, by cause in the rejections panel. In the 2026-10-26 storm contract_reply fell from about 240/s to 25/s while canceled ran 450-1,350/s.",
+      "description": "Returned calls per second by outcome. contract_reply hands a contract back (it does not prove delivery); canceled is a call whose caller gave up, counted when the call returns; protocol_reject is a refusal sent to the client, by cause below. In the 2026-10-26 storm contract_reply fell from about 240/s to 25/s while canceled ran 450-1,350/s.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 23
       },
@@ -939,12 +951,12 @@
     {
       "id": 51,
       "type": "timeseries",
-      "title": "cancel ratio",
-      "description": "Canceled over all returned CreateContract calls of the selected processes. The line is the SIGNALS.md section 26 threshold of 20%. It trails the in-flight count, because a call counts when it returns.",
+      "title": "failure share (canceled + panic)",
+      "description": "(canceled + panic) over (contract_reply + canceled + panic), as SIGNALS.md section 25.1 defines it; protocol_reject stays out of both sides. The lines are its WARN at 5% (10 minutes) and the PAGE at 20% (5 minutes, SIGNALS.md section 26), which count only with at least 20 such calls/s. It trails the in-flight count, because a call counts when it returns.",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 23
       },
       "datasource": {
@@ -962,6 +974,10 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
               },
               {
                 "color": "red",
@@ -1008,8 +1024,84 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=\"canceled\"}[$__rate_interval])) / (sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) > 0)",
-          "legendFormat": "canceled share"
+          "expr": "sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=~\"canceled|panic\"}[$__rate_interval])) / (sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=~\"contract_reply|canceled|panic\"}[$__rate_interval])) > 0)",
+          "legendFormat": "failure share"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "contract replies against their 2-hour median",
+      "description": "Proxy contract_reply per second over five minutes, divided by its median over the two hours that end 10 minutes earlier. Under 0.25 for 10 minutes is the PAGE of SIGNALS.md section 26 (shaded). In the 2026-10-26 storm it fell to 0.13 at 14:56Z. The median absorbs a collapse within two hours, so a long storm shows in the stuck calls and the failure share instead; a proxy rollout that resets devices also dips it.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "transparent",
+                "value": 0.25
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=\"contract_reply\"}[5m])) / quantile_over_time(0.5, sum(rate(urnetwork_contract_creation_completed_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome=\"contract_reply\"}[5m]))[2h:5m] offset 10m)",
+          "legendFormat": "replies / 2-hour median"
         }
       ]
     },
@@ -1017,7 +1109,7 @@
       "id": 52,
       "type": "timeseries",
       "title": "contract rejections / s by cause",
-      "description": "Protocol rejections generated for CreateContract, by cause. deadline is a creation that ran out of time inside the server; it reached about 1.9k/s in the 2026-10-26 storm. insufficient_balance follows a daily pattern and is not by itself a storm signal.",
+      "description": "Protocol rejections generated for CreateContract, by cause. deadline is a creation that ran out of time inside the server: 0-0.6/s when healthy, about 1.9k/s at the 2026-10-26 storm's peak. insufficient_balance follows a daily pattern and is not by itself a storm signal.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1096,8 +1188,8 @@
     {
       "id": 53,
       "type": "timeseries",
-      "title": "creations refused by the per-process cap / s",
-      "description": "Per host, contract creations refused at once because their process already ran HostedContractConcurrency (256 by default) creations. A refusal costs no credential, database or Redis work. Processes on builds without the cap export nothing.",
+      "title": "cap refusals / s per process, after 30 minutes",
+      "description": "Contract creations refused at once by each process's cap (HostedContractConcurrency, 256 by default), for the processes of each block that have run 30 minutes or more: a block's own restart brings 12-21 minutes of expected refusals, which this leaves out. The line is the WARN of SIGNALS.md section 26: 50/s for 10 minutes. A refusal costs no credential, database or Redis work. Processes without the cap export nothing.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1112,17 +1204,33 @@
         "defaults": {
           "unit": "ops",
           "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "fillOpacity": 10,
+            "lineWidth": 1,
+            "fillOpacity": 0,
             "showPoints": "never",
             "spanNulls": false,
             "axisPlacement": "auto",
             "stacking": {
               "mode": "none",
               "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
             }
           }
         },
@@ -1148,8 +1256,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host) (rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
-          "legendFormat": "{{host}}"
+          "expr": "sum by (host, block) (rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) and on (host, block) (time() - max by (host, block) (process_start_time_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}) > 1800)",
+          "legendFormat": "{{host}} {{block}}"
         }
       ]
     },
@@ -1157,7 +1265,7 @@
       "id": 54,
       "type": "timeseries",
       "title": "Redis reservation results / s",
-      "description": "Reservation operations per second by operation and result, on a log scale so a few errors per second show beside thousands of routine refusals. Highlighted: error, dropped and expired in red, pending in orange; routine results are gray. release-pending error is reservation cleanup that could not reach Redis (86k/s at the 2026-10-26 peak); reserve-pending refused is normal grant selection.",
+      "description": "Reservation operations per second by operation and result, on a log scale so a few errors per second show beside thousands of routine refusals. Highlighted: error, dropped and expired in red, pending in orange; routine results are gray. release-pending error is reservation cleanup that could not reach Redis (WARN above 10/s for 5 minutes, SIGNALS.md section 26; 86k/s at the 2026-10-26 peak); reserve-pending refused is normal grant selection, and recovery pending is normal background.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1274,7 +1382,7 @@
       "id": 55,
       "type": "timeseries",
       "title": "reservation compensation results / s",
-      "description": "How the token release of each failed creation ended: completed, or pending (balances left reserved). Builds with the deferred compensation owner also count deferred (handed to the process-wide owner after the request's own pass, then counted again as completed, pending or expired), dropped (the owner's queue of 1,024 balances was full) and expired (the 5 s budget ended in the queue). Tokens left pending, dropped or expired stay reserved until a later request on the grant reclaims them after 10 minutes, or their 24-hour lease ends.",
+      "description": "How the token release of each failed creation ended, on a log scale: completed, or pending (balances left reserved). Builds with the deferred compensation owner also count deferred (handed to the process-wide owner after the request's own pass, then counted again as completed, pending or expired), dropped (the owner's queue of 1,024 balances was full) and expired (the 5 s budget ended in the queue). The line is the WARN of SIGNALS.md section 26: dropped plus expired above 1/s for 10 minutes. Tokens left pending, dropped or expired stay reserved until a later request on the grant reclaims them after 10 minutes, or their 24-hour lease ends.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1288,7 +1396,19 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -1300,6 +1420,13 @@
             "stacking": {
               "mode": "none",
               "group": "A"
+            },
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            },
+            "thresholdsStyle": {
+              "mode": "line"
             }
           }
         },
@@ -1390,6 +1517,25 @@
                 "value": 3
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dropped + expired"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
           }
         ]
       },
@@ -1415,6 +1561,11 @@
           "refId": "A",
           "expr": "sum by (result) (rate(urnetwork_redis_contract_reservation_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",operation=\"compensation\"}[$__rate_interval]))",
           "legendFormat": "{{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_redis_contract_reservation_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",operation=\"compensation\",result=~\"dropped|expired\"}[$__rate_interval]))",
+          "legendFormat": "dropped + expired"
         }
       ]
     },
@@ -1422,7 +1573,7 @@
       "id": 56,
       "type": "timeseries",
       "title": "Redis client pool timeouts and misses / s",
-      "description": "go-redis pool timeouts (a command waited past the pool timeout for a connection) and misses (no idle connection, so a new one was dialed) of the selected proxy processes. The line is the SIGNALS.md section 26 threshold of 10 timeouts/s. Misses in the thousands are reconnect churn; the Redis nodes show it as HELLO.",
+      "description": "go-redis pool timeouts (a command waited past the pool timeout for a connection) and misses (no idle connection, so a new one was dialed) of the selected proxy processes. The lines are for timeouts: the WARN of SIGNALS.md section 26 at 10/s (5 minutes) and the PAGE of SIGNALS.md section 3.5b at 1,000/s. Misses in the thousands are reconnect churn; the Redis nodes show it as HELLO.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1445,8 +1596,12 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
               }
             ]
           },
@@ -1519,7 +1674,7 @@
       "id": 57,
       "type": "timeseries",
       "title": "proxy host CPU busy",
-      "description": "Busy share of all cores (1 - idle) on each host that runs the selected proxy processes. The line is the SIGNALS.md section 26 threshold of 85%.",
+      "description": "Busy share (neither idle nor I/O wait, summed over the CPUs) of each host that runs the selected proxy processes. The line is the WARN of SIGNALS.md section 26: 85% for 10 minutes. Healthy is 9-51%; read it with the stuck calls, since it rose last in the 2026-10-26 storm.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1543,7 +1698,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 0.85
               }
             ]
@@ -1587,7 +1742,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[$__rate_interval]))) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "expr": "1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=~\"idle|iowait\"}[$__rate_interval])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\"}[$__rate_interval])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
           "legendFormat": "{{host}}"
         }
       ]
@@ -1596,7 +1751,7 @@
       "id": 58,
       "type": "timeseries",
       "title": "goroutines per process",
-      "description": "Goroutines of the busiest process of each block on each host. Every hosted device runs its own goroutines, so the baseline follows the device count; a rise with a flat device count points at calls piling up.",
+      "description": "Goroutines of the busiest process of each block on each host. Every hosted device runs its own goroutines, so the count follows the device count and does not by itself show a storm (SIGNALS.md section 26, measured and not adopted): about 215k per process in the 2026-10-26 storm, against 241-287k that morning.",
       "gridPos": {
         "h": 8,
         "w": 12,

@@ -241,8 +241,9 @@ func VerifyPlayPurchase(
 	if err != nil {
 		return nil, err
 	}
-	if renewalResult.Canceled {
-		// the state flipped between the two fetches
+	if renewalResult.Canceled && !renewalResult.Renewed {
+		// the state flipped between the two fetches; a flip to a paid-through
+		// cancellation still credits its period (Renewed) and reports it
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 	expiryTime := renewalResult.ExpiryTime
