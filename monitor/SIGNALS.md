@@ -13418,6 +13418,17 @@ server while PostgreSQL, the 6432 listener and every PgBouncer unit stayed up,
 and nothing alerted. A starved pool is the direct signal: in `SHOW POOLS`,
 `cl_waiting > 0` with `sv_active + sv_idle + sv_used + sv_tested = 0` for more
 than 30 s. A healthy pool is starved only while its first login completes.
+
+Scope boundary: this empty-server predicate does not detect a busy-server queue.
+Waiting clients with positive established servers can still experience delay or
+`query_wait_timeout`; a healthy empty-server class is not proof of no queued
+clients or healthy service. Keep the existing query-wait log class and source
+visibility independent. A separate busy-server wait/queue rule needs its owning
+thresholds, same-pool server/wait denominator and complete fresh source window;
+do not reclassify all queues as the historical zero-server livelock or tune
+PgBouncer from a stage-latency shape. Existing external repair/tuning ownership
+remains unchanged.
+
 Read one instance's admin console, read-only, as the account PgBouncer runs as
 (`postgres`, as in the exporter unit):
 
@@ -22855,10 +22866,10 @@ Rules added:
 ### 2.30 Contract-creation stage latency — the database reaching the data plane
 Probe: `contract-stage-latency`
 
-A client cannot carry traffic until its contract exists. When the database
-queues, every stage of contract creation slows together. That is the
-user-visible cost of pool saturation, and it feeds the identity-churn loop
-(§14.8).
+A client cannot carry traffic until its contract exists. Elevated completed-call
+wall time can reflect pool queueing, client CPU scheduling, locks, query work
+or network round trips. Stage shape alone does not select that cause; slow
+contract creation can feed the identity-churn loop (§14.8).
 
 Source: `urnetwork_contract_creation_completed_stage_seconds_total{stage}` over
 `urnetwork_contract_creation_completed_total{outcome="contract_reply"}`. The
@@ -22882,8 +22893,18 @@ all are an unbounded mean.
 | companion_origin | 3 | 62 |
 | grant_selection | 4.6 | 32 |
 
-Every database stage rose 50 to 150 times. That is pool queueing
-(`pgbouncer_pool_clients_waiting` at 850–1,250), not one slow query.
+The historical stage increases coincided with queued PgBouncer clients at
+850–1,250. That context supported investigating pool pressure in that interval;
+the stage totals alone do not exclude client scheduling or network residence.
+
+The returned-call outcome counter eagerly exports both ingress classes and the
+five fixed outcomes: error, contract_reply, protocol_reject, canceled and panic.
+Each finished timing owner contributes exactly one outcome; ended context takes
+cancellation precedence. A prospective cancellation fraction must use all
+returned outcomes for the same qualified process/ingress window, not replies
+alone, HTTP-request completions, unfinished attempts or delivered successes.
+The stage mean includes canceled wall residence, but is not that ratio. No
+new cancellation threshold or customer-failure cause is inferred here.
 
 Thresholds: WARN when the total mean exceeds 250 ms for 10 minutes; PAGE when
 it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
@@ -22904,8 +22925,8 @@ minimum is the verdict; the five-minute stages are attribution.
 
 `contract-stage-latency` (WARN over 250 ms, PAGE over 1 s, both exclusive) names
 the per-reply mean of each stage with its share of the total. A stage holding at
-least 70% of the total is reported as `concentrated_stage` and the alert says
-query or plan problem instead of pool queueing. `contract-stage-latency-unobservable`
+least 70% of the total is reported as `concentrated_stage`. This identifies an
+application span, not a database query/plan or pool diagnosis. `contract-stage-latency-unobservable`
 (visibility, sustain 2) reports a failed or annotated read, a hold with missing
 points, an idle hold (no calls, NaN), fewer than 100 returned calls in five
 minutes, an unrecognized stage or outcome label, and any desired api, connect,
@@ -22918,15 +22939,19 @@ processes still alerts beside the coverage warning; a healthy mean on partial
 coverage is never certified. Only stage and outcome labels, counts and
 inventory slot names leave Mimir; no client, contract or query text does.
 
-False-positive qualifier: one stage rising alone (for example
-`companion_origin`) is a query or plan problem, not pool saturation; read the
-spread across stages. False-negative qualifier: means hide tails, and the code
-exports no per-stage histogram.
+False-positive qualifier: exclusive application wall residence is not query CPU
+or PostgreSQL wait residence. Both broad and concentrated spans can include
+pool acquisition, locks, client scheduling or network work; optional aggregate
+control-route/queued-client context is not an exact-attempt causal join.
+False-negative qualifier: means hide tails and aggregate services/ingresses;
+this signal has no independent cancellation-ratio verdict or per-stage histogram.
+A fast reply mean does not establish all contract attempts or deliveries succeeded.
 
-ACTION: read §2.11a pool starvation, §2.2 wait events and §5.6 first. A
-concentrated stage is a query and plan investigation (§2.3, §5.8). A spread
-across stages is pool queueing: follow §5.12 and break the §14.8 churn loop on
-the database or client side. Do not restart Connect, API or the proxies
+ACTION: read §2.11a pool starvation, §2.2 wait events and §5.6 first. Compare
+same-interval pool acquisition/residence, lock/query work (§2.3, §5.8), client
+CPU pressure (§8.14a) and network timing before assigning an owning repair.
+Concentration narrows the application span; broad stage growth suggests shared
+pressure without selecting it. Preserve the existing PgBouncer/host owners. Do not restart Connect, API or the proxies
 fleet-wide: every restart recreates windows and contracts. Verify with a full
 10-minute hold at or under 250 ms on complete slot coverage, PgBouncer queued
 clients at 0 and the `/connect/control` mean back in single-digit milliseconds.

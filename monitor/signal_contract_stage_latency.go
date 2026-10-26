@@ -368,9 +368,10 @@ func evaluateContractStageLatency(
 	if settings.PageMean.Seconds() < observation.holdMean {
 		tier = tierPage
 	}
-	mechanism := "Every database stage of CreateContract slowed together. That is PgBouncer and PostgreSQL pool queueing: each stage waits for a connection, so the slowdown is spread across relationship, metadata, endpoint lookup, client stamp and the transaction rather than held by one query."
+	causeQualifier := "Stage totals alone do not identify a query, pool, host or network cause."
+	mechanism := "Several contract-creation stages have elevated completed-call wall time per contract reply. This spread is compatible with pool queueing, but client CPU scheduling, network round trips and mixed call outcomes can also contribute. " + causeQualifier
 	if concentrated != "none" {
-		mechanism = fmt.Sprintf("One stage, %s, holds most of the contract-creation time. A single stage rising alone is a query or plan problem in that stage, not pool saturation: pool queueing slows every database stage together.", concentrated)
+		mechanism = fmt.Sprintf("Stage %s holds most of the completed-call wall time. Concentration names the application stage to inspect; pool acquisition, lock waits, query execution, client scheduling and network round trips within that stage remain possible. %s", concentrated, causeQualifier)
 	}
 	findings = append(findings, finding{
 		probeId: contractStageLatencyProbeId, tier: tier, class: "contract-stage-latency",
@@ -381,8 +382,8 @@ func evaluateContractStageLatency(
 		baseline:  fmt.Sprintf("The %s mean time per contract reply stays at or under %s throughout every %s hold; on 2026-10-15 it was about 50 ms, with relationship 20 ms, other 8 ms and every other stage under 5 ms.", settings.Window, settings.WarnMean, settings.Hold),
 		observed:  observed,
 		evidence:  "One Mimir instant query evaluated behind now: per-stage and per-outcome counter increases summed over every producing process and ingress, the minimum of the rolling per-reply mean over the hold, its point count against the expected count, and each desired slot's contract-stage capability gauge. Stage and outcome labels are fixed server words; no client, contract or query text leaves Mimir.",
-		context:   "Means hide tails, and the code exports no per-stage histogram. Read the spread across stages: one stage rising alone (for example companion_origin) is a query or plan problem, many rising together is pool queueing. The /connect/control mean was 2 ms healthy and 99-171 ms on 2026-10-21/22; queued PgBouncer clients were 850-1,250 at the 10-22 peak. Slow contract creation feeds the hosted identity-churn loop (§14.8).",
-		action:    "Read §2.11a pool starvation and queued clients, §2.2 wait events and §5.6 first. If one stage dominates, find its query and plan (§2.3, §5.8) instead of treating the pool. If every stage rose together, follow §5.12 for pool queueing and break the §14.8 churn loop on the database or client side; do not restart Connect, API or the proxies fleet-wide, since every restart recreates windows and contracts.",
+		context:   "Means hide tails, and the code exports no per-stage histogram. The stage spans are exclusive application wall residence for returned calls, including canceled, rejected and panicking calls; they are not PostgreSQL CPU or wait residence. Optional control-route and queued-client context is not a same-attempt causal join. A low context value does not rule out pool pressure, and a high value does not prove it caused this stage. Slow contract creation can feed the hosted identity-churn loop (§14.8).",
+		action:    "Read §2.11a pool starvation and queued clients, §2.2 wait events and §5.6 first. For the same affected interval, distinguish pool acquisition/residence, lock or query work (§2.3, §5.8), client CPU pressure (§8.14a) and network timing before choosing the owning repair. A concentrated stage narrows the application span; broad stage growth suggests shared pressure without selecting its cause. Preserve the existing PgBouncer and host owners; do not restart Connect, API or the proxies fleet-wide, since every restart recreates windows and contracts.",
 		verify:    fmt.Sprintf("The per-reply mean stays at or under %s for a full %s hold with complete slot coverage, PgBouncer queued clients return to 0 and the /connect/control mean returns to single-digit milliseconds.", settings.WarnMean, settings.Hold),
 		playbook:  "SIGNALS.md §2.30 and §5.12",
 	})
