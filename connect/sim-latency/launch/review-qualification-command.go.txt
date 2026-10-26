@@ -1,0 +1,212 @@
+// Explicit genuine-provider command. A separately supplied post-funding receipt
+// is consumed once; no models-list request, automatic retry or main write exists.
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// Reads a published exact-executable qualification without retaining the large
+// test binary in memory. It is not a claim that a mock called a real provider.
+func authenticateReviewQualificationInputs(config reviewQualificationConfig, settings reviewQualificationSettings) (*reviewQualificationImage, error) {
+	if config.Schema != 1 || config.Kind != "winner-review-provider-qualification-config" || !filepath.IsAbs(config.OutputDirectory) || filepath.Clean(config.OutputDirectory) != config.OutputDirectory {
+		return nil, errors.New("explicit review qualification configuration required")
+	}
+	if err := reviewQualificationPrivateRoot(filepath.Dir(config.OutputDirectory)); err != nil {
+		return nil, err
+	}
+	if err := verifySourceSupervisorProgram(config.Broker.Path, config.Broker.Sha256); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(config.Broker.Path)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		return nil, errors.New("actual review wrapper must be root owned")
+	}
+	configuration, err := readReviewQualificationPin(config.BrokerConfiguration, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	if config.BrokerConfiguration.Path != "/etc/urnetwork/competition-review.json" {
+		return nil, errors.New("review qualification cannot redirect the installed wrapper configuration")
+	}
+	var deployment struct {
+		ImageId      string `json:"image_id"`
+		ModelKeyFile string `json:"model_key_file"`
+	}
+	if err := decodeStrictJSONBytes(configuration, &deployment, "review wrapper deployment"); err != nil {
+		return nil, err
+	}
+	if deployment.ModelKeyFile != "/var/lib/urnetwork/competition-review/model.key" {
+		return nil, errors.New("review wrapper must use only the dedicated runtime key leaf")
+	}
+	imageBytes, err := readReviewQualificationPin(config.Image, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var image reviewQualificationImage
+	if err := decodeStrictJSONBytes(imageBytes, &image, "qualified review scratch image"); err != nil {
+		return nil, err
+	}
+	if image.Schema != 1 || image.Kind != "winner-review-scratch-image-qualification" || !image.Accepted || image.ImageId != deployment.ImageId || !validSha256(image.BinarySha256) || !sourceGitShaPattern.MatchString(image.SourceCommit) || image.GoVersion != "go1.27.3" || image.PolicyModel != "gpt-5.4-mini" || image.ProviderModel != winnerReviewMiniProviderSnapshot || len(image.Evidence) == 0 {
+		return nil, errors.New("current mini/xhigh image/source qualification missing")
+	}
+	for _, pin := range image.Evidence {
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return nil, err
+		}
+	}
+	unitBytes, err := readReviewQualificationPin(config.UnitQualification, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var unit reviewQualificationUnitReceipt
+	if err := decodeStrictJSONBytes(unitBytes, &unit, "review qualification unit receipt"); err != nil {
+		return nil, err
+	}
+	if unit.Schema != 1 || unit.Kind != "winner-review-qualification-unit-receipt" || !unit.Accepted || !unit.Race || unit.ConsecutivePasses != 3 || unit.Skips != 0 || len(unit.Logs) != 3 || len(unit.Sources) == 0 || !validSha256(unit.BinarySha256) {
+		return nil, errors.New("three complete race guard passes required before genuine qualification")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.New()
+	n, hashErr := io.Copy(digest, io.LimitReader(file, 1024*1024*1024+1))
+	closeErr := file.Close()
+	if hashErr != nil || closeErr != nil || n > 1024*1024*1024 || hex.EncodeToString(digest.Sum(nil)) != unit.BinarySha256 {
+		return nil, errors.New("review qualification executable differs from qualified binary")
+	}
+	for _, pin := range append(append([]reviewQualificationPin{}, unit.Sources...), unit.Logs...) {
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return nil, err
+		}
+	}
+	fundingBytes, err := readReviewQualificationPin(config.Funding, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, errors.New("provider credit remains blocked until independently pinned funding authorization exists")
+	}
+	var funding reviewQualificationFunding
+	if err := decodeStrictJSONBytes(fundingBytes, &funding, "post-refusal provider funding authorization"); err != nil {
+		return nil, err
+	}
+	if funding.Schema != 1 || funding.Kind != "winner-review-provider-funded-qualification-authorization" || funding.PolicyModel != "gpt-5.4-mini" || funding.ProviderModel != winnerReviewMiniProviderSnapshot || !funding.ConfirmedFunded || !funding.SingleAttempt || funding.AuthorizedAt.IsZero() || funding.AuthorizedAt.After(time.Now().UTC()) {
+		return nil, errors.New("user funding confirmation and one-attempt authorization required; no provider retry")
+	}
+	if _, err := readReviewQualificationPin(funding.PriorRefusal, settings.MaximumBytes, true); err != nil {
+		return nil, errors.New("original quota refusal must remain retained and pinned")
+	}
+	return &image, nil
+}
+
+// One funding authorization cannot be reused in a new output directory to
+// sample provider answers again. A failed attempt remains an operator hold.
+func consumeReviewQualificationAuthorization(config reviewQualificationConfig, settings reviewQualificationSettings) error {
+	parent := filepath.Dir(settings.StateRoot)
+	if err := reviewQualificationPrivateRoot(parent); err != nil {
+		return err
+	}
+	directory := filepath.Join(parent, "qualification-authorizations")
+	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := reviewQualificationPrivateRoot(directory); err != nil {
+		return err
+	}
+	if err := writeReviewQualificationJson(filepath.Join(directory, config.Funding.Sha256+".used.json"), map[string]any{"schema": 1, "funding_authorization_sha256": config.Funding.Sha256, "output_directory": config.OutputDirectory, "automatic_retries": false}); err != nil {
+		return err
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+// Unset opt-in is inert, not a skipped test. Funding/config receipts are checked
+// before a child, DNS lookup, models-list check or real Responses request exists.
+func TestReviewQualificationCommand(t *testing.T) {
+	if os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_COMMAND") == "" {
+		return
+	}
+	if os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_COMMAND") != "run" || os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_REAL_OPT_IN") != "1" {
+		t.Fatal("genuine qualification requires explicit run and separate opt-in")
+	}
+	if err := validateReviewQualificationRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultReviewQualificationSettings()
+	configPin := reviewQualificationPin{Path: os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_CONFIG"), Sha256: os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_CONFIG_SHA256")}
+	configBytes, err := readReviewQualificationPin(configPin, settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config reviewQualificationConfig
+	if err := decodeStrictJSONBytes(configBytes, &config, "review qualification configuration"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	var report *reviewQualificationReport
+	_, err = withCalibrationScoringSlot(settings.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		image, err := authenticateReviewQualificationInputs(config, settings)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(config.OutputDirectory, 0700); err != nil {
+			return nil, err
+		}
+		if err := writePrivateReviewFile(filepath.Join(config.OutputDirectory, "configuration.json"), configBytes); err != nil {
+			return nil, err
+		}
+		cases, err := frozenReviewQualificationCases()
+		if err != nil {
+			return nil, err
+		}
+		plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-provider-qualification-plan", PolicyModel: "gpt-5.4-mini", ProviderModel: winnerReviewMiniProviderSnapshot, Reasoning: "xhigh", BrokerSha256: config.Broker.Sha256, ImageReceiptSha256: config.Image.Sha256, Cases: cases}
+		if err := validateReviewQualificationPlan(plan); err != nil {
+			return nil, err
+		}
+		if err := writeReviewQualificationJson(filepath.Join(config.OutputDirectory, "precommitted-plan.json"), plan); err != nil {
+			return nil, err
+		}
+		if err := consumeReviewQualificationAuthorization(config, settings); err != nil {
+			return nil, err
+		}
+		hooks := reviewQualificationHooks{Mode: "genuine_provider", Now: time.Now,
+			Invoke: func(ctx context.Context, input []byte) ([]byte, []byte, error) {
+				if _, err := readReviewQualificationPin(config.BrokerConfiguration, settings.MaximumBytes, false); err != nil {
+					return nil, nil, err
+				}
+				return invokeReviewQualificationBroker(ctx, config.Broker, input)
+			},
+			AuthenticateContainment: func(input, output, diagnostics []byte, canceled bool) (string, error) {
+				if _, err := readReviewQualificationPin(config.BrokerConfiguration, settings.MaximumBytes, false); err != nil {
+					return "", err
+				}
+				return authenticateReviewQualificationContainment(input, output, diagnostics, canceled, image.ImageId, settings)
+			}}
+		report, err = executeReviewQualification(ctx, config.OutputDirectory, plan, settings, hooks)
+		return nil, err
+	})
+	if err != nil {
+		t.Fatal("review provider qualification failed closed; inspect retained private artifacts; no automatic retry: ", err)
+	}
+	t.Log(fmt.Sprintf("provider qualification complete=%t qualified=%t cases=%d; no main/API/database writes", report.Complete, report.Qualified, len(report.Observations)))
+}

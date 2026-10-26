@@ -1,0 +1,295 @@
+// Independently reads actual wrapper/cgroup/firewall/Docker evidence. A model's
+// no-tools assertion or an app-fixed URL alone is never a network fence proof.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"syscall"
+)
+
+// The wrapper emits this last stderr line only after owned cleanup completes.
+type reviewQualificationWrapperReceipt struct {
+	Schema           int    `json:"schema"`
+	Kind             string `json:"kind"`
+	Owner            string `json:"owner"`
+	AttemptDirectory string `json:"attempt_directory"`
+	ManifestSha256   string `json:"evidence_manifest_sha256"`
+	WrapperExit      int    `json:"wrapper_exit"`
+	CleanupVerified  bool   `json:"cleanup_verified"`
+}
+
+// Digests bind only relative ordinary files in the private per-invocation tree.
+type reviewQualificationBinding struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
+// Authenticates root-owned private paths, not candidate-selected host aliases.
+func reviewQualificationPrivateRoot(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	info, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || !filepath.IsAbs(path) || filepath.Clean(path) != path || resolved != path || !info.IsDir() || info.Mode().Perm() != 0700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return errors.New("review qualification needs an owned canonical 0700 directory")
+	}
+	return nil
+}
+
+// Decodes the actual single-key container, never a desired-command template.
+func validateReviewQualificationContainer(content []byte, owner, image, network, providerIp string) error {
+	var containers []struct {
+		Id, Image string
+		Config    struct {
+			User                 string
+			Entrypoint, Cmd, Env []string
+			Labels               map[string]string
+		}
+		HostConfig struct {
+			NetworkMode                                                       string
+			ReadonlyRootfs, Privileged, Init                                  bool
+			CgroupnsMode, CpusetCpus, PidMode, IpcMode, UTSMode               string
+			NanoCpus, Memory, MemorySwap                                      int64
+			PidsLimit                                                         int
+			CapDrop, CapAdd, SecurityOpt, Dns, ExtraHosts, VolumesFrom, Binds []string
+			Sysctls                                                           map[string]string
+			Devices, DeviceRequests                                           []json.RawMessage
+			Tmpfs, PortBindings                                               map[string]json.RawMessage
+		}
+		Mounts []struct {
+			Type, Source, Destination string
+			Rw                        bool `json:"RW"`
+		}
+	}
+	if json.Unmarshal(content, &containers) != nil || len(containers) != 1 {
+		return errors.New("actual review container inspection invalid")
+	}
+	container := containers[0]
+	host := container.HostConfig
+	noPrivilege := false
+	for _, option := range host.SecurityOpt {
+		noPrivilege = noPrivilege || option == "no-new-privileges:true"
+	}
+	if !validSha256(container.Id) || container.Image != image || container.Config.Labels["com.urnetwork.review.owner"] != owner || container.Config.User != "65532:65532" || !reflect.DeepEqual(container.Config.Entrypoint, []string{"/review-broker", "review-broker", "--model-key-file=/run/secrets/model-key"}) || len(container.Config.Cmd) != 0 || host.NetworkMode != network || !host.ReadonlyRootfs || host.Privileged || !host.Init || host.CgroupnsMode != "private" || host.CpusetCpus != "20,22" || host.NanoCpus != 1000000000 || host.Memory != 2147483648 || host.MemorySwap != 2147483648 || host.PidsLimit != 64 || !reflect.DeepEqual(host.CapDrop, []string{"ALL"}) || len(host.CapAdd) != 0 || !noPrivilege || !reflect.DeepEqual(host.Dns, []string{"127.0.0.1"}) || !reflect.DeepEqual(host.ExtraHosts, []string{"api.openai.com:" + providerIp}) || host.Sysctls["net.ipv6.conf.all.disable_ipv6"] != "1" || host.Sysctls["net.ipv6.conf.default.disable_ipv6"] != "1" || host.PidMode != "" || host.IpcMode != "private" || host.UTSMode != "" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || len(host.Binds) != 0 || len(host.VolumesFrom) != 0 || len(host.Tmpfs) != 0 || len(host.PortBindings) != 0 || len(container.Mounts) != 1 {
+		return errors.New("actual review container gained authority or lost resource/network bounds")
+	}
+	mount := container.Mounts[0]
+	if mount.Type != "bind" || mount.Source != "/var/lib/urnetwork/competition-review/model.key" || mount.Destination != "/run/secrets/model-key" || mount.Rw {
+		return errors.New("actual broker mounted more than the dedicated read-only key leaf")
+	}
+	for _, entry := range container.Config.Env {
+		if !strings.HasPrefix(entry, "PATH=") && !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "HOSTNAME=") {
+			return errors.New("actual review container inherited ambient environment")
+		}
+	}
+	return nil
+}
+
+// The sole forwarding acceptance is provider IPv4:443; every other source
+// packet drops, and the first host-input rule denies the whole owned subnet.
+func validateReviewQualificationFence(chainContent, forwardContent, inputContent []byte, owner, subnet, providerIp string) error {
+	if !validSha256(owner) {
+		return errors.New("provider fence owner identity invalid")
+	}
+	chain := "URRV_" + owner[:16]
+	comment := "urnetwork-review-" + owner
+	rows := func(content []byte, prefix string) []string {
+		out := []string{}
+		for _, line := range strings.Split(strings.ReplaceAll(string(content), "\"", ""), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+	forwardRows, inputRows := rows(forwardContent, "-A DOCKER-USER "), rows(inputContent, "-A INPUT ")
+	if len(forwardRows) == 0 || len(inputRows) == 0 || forwardRows[0] != fmt.Sprintf("-A DOCKER-USER -s %s -m comment --comment %s -j %s", subnet, comment, chain) || inputRows[0] != fmt.Sprintf("-A INPUT -s %s -m comment --comment %s -j DROP", subnet, comment) {
+		return errors.New("actual review fence is not first in forwarded/host-input paths")
+	}
+	chainRows := rows(chainContent, "-A "+chain+" ")
+	if len(chainRows) != 2 || chainRows[1] != "-A "+chain+" -j DROP" {
+		return errors.New("actual provider fence is not default deny")
+	}
+	fields := strings.Fields(chainRows[0])
+	if len(fields) < 2 || fields[0] != "-A" || fields[1] != chain {
+		return errors.New("provider fence chain identity invalid")
+	}
+	values := map[string]string{}
+	for i := 2; i < len(fields); i += 2 {
+		if i+1 >= len(fields) || values[fields[i]] != "" {
+			return errors.New("provider fence conditions ambiguous")
+		}
+		values[fields[i]] = fields[i+1]
+	}
+	if values["-d"] != providerIp+"/32" || values["-p"] != "tcp" || values["--dport"] != "443" || values["-j"] != "ACCEPT" || (values["-m"] != "" && values["-m"] != "tcp") || len(values) < 4 || len(values) > 5 {
+		return errors.New("actual provider fence allows an unexpected destination/protocol")
+	}
+	return nil
+}
+
+// Verifies captured wrapper outputs against its independently read original
+// manifest, exact input, owner/network ids, actual Docker limits, running cgroup
+// and kernel rule snapshots. Nothing here trusts a model's containment claims.
+func authenticateReviewQualificationContainment(input, output, diagnostics []byte, canceled bool, image string, settings reviewQualificationSettings) (string, error) {
+	lines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
+	if len(lines) == 0 {
+		return "", errors.New("wrapper containment receipt missing")
+	}
+	var receipt reviewQualificationWrapperReceipt
+	if err := decodeStrictJSONBytes(lines[len(lines)-1], &receipt, "actual wrapper receipt"); err != nil {
+		return "", err
+	}
+	if receipt.Schema != 1 || receipt.Kind != "winner-review-container-receipt" || !validSha256(receipt.Owner) || !receipt.CleanupVerified || !strings.HasPrefix(receipt.AttemptDirectory, settings.StateRoot+"/invocation.") {
+		return "", errors.New("actual wrapper owner/cleanup receipt invalid")
+	}
+	if err := reviewQualificationPrivateRoot(receipt.AttemptDirectory); err != nil {
+		return "", err
+	}
+	manifestBytes, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, "evidence-manifest.json"), Sha256: receipt.ManifestSha256}, settings.MaximumBytes, true)
+	if err != nil {
+		return "", err
+	}
+	var manifest struct {
+		Schema    int                          `json:"schema"`
+		Kind      string                       `json:"kind"`
+		Artifacts []reviewQualificationBinding `json:"artifacts"`
+	}
+	if err := decodeStrictJSONBytes(manifestBytes, &manifest, "actual broker evidence manifest"); err != nil {
+		return "", err
+	}
+	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > 16 {
+		return "", errors.New("actual wrapper evidence manifest invalid")
+	}
+	expectedArtifacts := 14
+	if canceled {
+		expectedArtifacts = 13
+	}
+	if len(manifest.Artifacts) != expectedArtifacts {
+		return "", errors.New("actual wrapper evidence coverage changed")
+	}
+	artifacts := map[string][]byte{}
+	for _, binding := range manifest.Artifacts {
+		if binding.Path == "" || filepath.Base(binding.Path) != binding.Path || artifacts[binding.Path] != nil || binding.Bytes < 0 || binding.Bytes > settings.MaximumBytes {
+			return "", errors.New("actual wrapper evidence binding invalid")
+		}
+		content, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, binding.Path), Sha256: binding.Sha256}, settings.MaximumBytes, true)
+		if err != nil || int64(len(content)) != binding.Bytes {
+			return "", errors.New("actual wrapper evidence bytes changed")
+		}
+		artifacts[binding.Path] = content
+	}
+	for _, required := range []string{"input.json", "image-inspect.json", "network-inspect.json", "container-inspect.json", "cgroup.json", "provider-address.txt", "fence.json", "fence-forward.txt", "fence-input.txt", "fence-chain.txt", "broker.stdout", "broker.stderr", "terminal.json"} {
+		if _, present := artifacts[required]; !present {
+			return "", errors.New("actual wrapper omitted required containment evidence")
+		}
+	}
+	if !bytes.Equal(artifacts["input.json"], input) || !bytes.Equal(artifacts["broker.stdout"], output) {
+		return "", errors.New("wrapper containment receipt belongs to different request/output bytes")
+	}
+	var terminal struct {
+		Schema                int    `json:"schema"`
+		Kind                  string `json:"kind"`
+		Owner                 string `json:"owner"`
+		ImageId               string `json:"image_id"`
+		ContainerId           string `json:"container_id"`
+		NetworkId             string `json:"network_id"`
+		WrapperExit           int    `json:"wrapper_exit"`
+		BrokerExit            *int   `json:"broker_exit"`
+		BrokerExitObserved    bool   `json:"broker_exit_observed"`
+		CleanupVerified       bool   `json:"cleanup_verified"`
+		ProviderInputReleased bool   `json:"provider_input_released"`
+	}
+	if err := decodeStrictJSONBytes(artifacts["terminal.json"], &terminal, "actual review terminal"); err != nil {
+		return "", err
+	}
+	if terminal.Schema != 1 || terminal.Kind != "winner-review-container-terminal" || terminal.Owner != receipt.Owner || terminal.ImageId != image || !validSha256(terminal.ContainerId) || !validSha256(terminal.NetworkId) || terminal.WrapperExit != receipt.WrapperExit || !terminal.CleanupVerified || terminal.ProviderInputReleased == canceled {
+		return "", errors.New("actual review terminal identity/cancellation invalid")
+	}
+	if canceled && (terminal.BrokerExit != nil || terminal.BrokerExitObserved || receipt.WrapperExit != 143) {
+		return "", errors.New("actual cancellation did not preserve its nonzero terminal status")
+	}
+	var imageInspections []struct{ Id string }
+	if json.Unmarshal(artifacts["image-inspect.json"], &imageInspections) != nil || len(imageInspections) != 1 || imageInspections[0].Id != image {
+		return "", errors.New("actual broker image inspection differs from qualified image")
+	}
+	var containerIdentities []struct{ Id string }
+	if json.Unmarshal(artifacts["container-inspect.json"], &containerIdentities) != nil || len(containerIdentities) != 1 || containerIdentities[0].Id != terminal.ContainerId {
+		return "", errors.New("actual broker container receipt substituted another child")
+	}
+	if !canceled {
+		var state struct {
+			Status    string
+			Running   bool
+			ExitCode  int
+			OomKilled bool `json:"OOMKilled"`
+		}
+		if json.Unmarshal(artifacts["container-state.json"], &state) != nil || state.Status != "exited" || state.Running || state.OomKilled || !terminal.BrokerExitObserved || terminal.BrokerExit == nil || state.ExitCode != *terminal.BrokerExit {
+			return "", errors.New("actual broker terminal process state invalid")
+		}
+	}
+	var networks []struct {
+		Id, Driver, Scope                string
+		Internal, EnableIPv6, Attachable bool
+		Labels, Options                  map[string]string
+		IPAM                             struct{ Config []struct{ Subnet string } }
+	}
+	if json.Unmarshal(artifacts["network-inspect.json"], &networks) != nil || len(networks) != 1 {
+		return "", errors.New("actual review network inspection invalid")
+	}
+	network := networks[0]
+	if network.Id != terminal.NetworkId || network.Driver != "bridge" || network.Scope != "local" || network.Internal || network.EnableIPv6 || network.Attachable || network.Labels["com.urnetwork.review.owner"] != receipt.Owner || network.Options["com.docker.network.bridge.enable_icc"] != "false" || len(network.IPAM.Config) != 1 {
+		return "", errors.New("actual review network escaped its owner/isolation plan")
+	}
+	subnet := network.IPAM.Config[0].Subnet
+	address, _, err := net.ParseCIDR(subnet)
+	if err != nil || !address.IsPrivate() {
+		return "", errors.New("actual review network subnet invalid")
+	}
+	var fence struct {
+		Schema               int    `json:"schema"`
+		Kind                 string `json:"kind"`
+		Owner, Chain         string
+		SourceSubnet         string `json:"source_subnet"`
+		ProviderHost         string `json:"provider_host"`
+		ProviderIp           string `json:"provider_ipv4"`
+		ProviderPort         int    `json:"provider_port"`
+		ExternalDns          bool   `json:"external_dns"`
+		HostInputDenied      bool   `json:"host_input_denied"`
+		DefaultDeny          bool   `json:"default_deny"`
+		InstalledBeforeStart bool   `json:"installed_before_start"`
+	}
+	if json.Unmarshal(artifacts["fence.json"], &fence) != nil || fence.Schema != 1 || fence.Kind != "winner-review-provider-egress-fence" || fence.Owner != receipt.Owner || fence.Chain != "URRV_"+receipt.Owner[:16] || fence.SourceSubnet != subnet || fence.ProviderHost != "api.openai.com" || fence.ProviderPort != 443 || fence.ExternalDns || !fence.HostInputDenied || !fence.DefaultDeny || !fence.InstalledBeforeStart {
+		return "", errors.New("actual provider fence metadata invalid")
+	}
+	provider := net.ParseIP(fence.ProviderIp)
+	if provider == nil || provider.To4() == nil || !provider.IsGlobalUnicast() || provider.IsPrivate() || strings.TrimSpace(string(artifacts["provider-address.txt"])) != fence.ProviderIp {
+		return "", errors.New("actual provider address invalid")
+	}
+	if err := validateReviewQualificationFence(artifacts["fence-chain.txt"], artifacts["fence-forward.txt"], artifacts["fence-input.txt"], receipt.Owner, subnet, fence.ProviderIp); err != nil {
+		return "", err
+	}
+	if err := validateReviewQualificationContainer(artifacts["container-inspect.json"], receipt.Owner, image, terminal.NetworkId, fence.ProviderIp); err != nil {
+		return "", err
+	}
+	var cgroup struct {
+		Schema      int `json:"schema"`
+		Kind, Path  string
+		MemoryMax   string `json:"memory_max"`
+		SwapMax     string `json:"memory_swap_max"`
+		PidsMax     string `json:"pids_max"`
+		CpuMax      string `json:"cpu_max"`
+		CpuSet      string `json:"cpuset_cpus"`
+		BeforeInput bool   `json:"observed_before_provider_input"`
+	}
+	if json.Unmarshal(artifacts["cgroup.json"], &cgroup) != nil || cgroup.Schema != 1 || cgroup.Kind != "winner-review-running-cgroup" || !strings.HasPrefix(cgroup.Path, "/") || cgroup.MemoryMax != "2147483648" || cgroup.SwapMax != "0" || cgroup.PidsMax != "64" || cgroup.CpuMax != "100000 100000" || cgroup.CpuSet != "20,22" || !cgroup.BeforeInput {
+		return "", errors.New("actual running broker cgroup limits were not observed before provider input")
+	}
+	return reviewQualificationHash(lines[len(lines)-1]), nil
+}

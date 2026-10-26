@@ -1,0 +1,521 @@
+// Offline deterministic guards only. Mock model output and mocked containment
+// never count as genuine provider, host-firewall or production qualification.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Synthetic transport cannot fall back to the network.
+type reviewQualificationTransport func(*http.Request) (*http.Response, error)
+
+// Implements only the HTTP test seam; it has no real provider credential.
+func (self reviewQualificationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return self(request)
+}
+
+// Generates all six complete findings with explicit synthetic mock provenance.
+func reviewQualificationMockJudgment(expected string) winnerModelJudgment {
+	judgment := winnerModelJudgment{Decision: expected, ReasonCodes: []string{"APPROVED"}, PublicExplanation: "Synthetic unit judgment; tests were not executed.", PrivateEvidence: "Offline deterministic model mock; not a real provider.", Findings: []model.CompetitionReviewFinding{}}
+	for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
+		judgment.Findings = append(judgment.Findings, model.CompetitionReviewFinding{Criterion: criterion, Disposition: "pass", ReasonCode: "APPROVED", Explanation: "Synthetic complete criterion context."})
+	}
+	if expected == "disqualify" {
+		judgment.ReasonCodes = []string{"MEASUREMENT_FABRICATION"}
+		judgment.Findings[0].Disposition, judgment.Findings[0].ReasonCode = "fail", "MEASUREMENT_FABRICATION"
+	}
+	if expected == "uncertain" {
+		judgment.ReasonCodes = []string{"SOURCE_NOT_READY"}
+		for i := range judgment.Findings {
+			judgment.Findings[i].Disposition, judgment.Findings[i].ReasonCode = "uncertain", "SOURCE_NOT_READY"
+		}
+	}
+	return judgment
+}
+
+// Runs the actual native provider/parser/result path over fixed SSE bytes, not
+// an invented winnerReviewBrokerResult with skipped identity/authority checks.
+func reviewQualificationMockResponse(t *testing.T, request winnerReviewBrokerRequest, expected string) []byte {
+	t.Helper()
+	judgment := reviewQualificationMockJudgment(expected)
+	output, err := json.Marshal(judgment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_synthetic_qualification", "status": "completed", "model": winnerReviewMiniProviderSnapshot, "usage": map[string]int{"input_tokens": 100, "output_tokens": 100}, "output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": string(output)}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: reviewQualificationTransport(func(message *http.Request) (*http.Response, error) {
+		if message.URL.String() != "https://api.openai.com/v1/responses" || message.Method != http.MethodPost || message.Header.Get("Authorization") != "Bearer synthetic-qualification-key" {
+			t.Fatal("provider authority changed")
+		}
+		body, err := io.ReadAll(message.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Model         string
+			Reasoning     struct{ Effort string }
+			Tools         []any
+			ToolChoice    string `json:"tool_choice"`
+			Store, Stream bool
+		}
+		if json.Unmarshal(body, &payload) != nil || payload.Model != winnerReviewMiniProviderSnapshot || payload.Reasoning.Effort != "xhigh" || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.Store || !payload.Stream || bytes.Contains(body, []byte("synthetic-qualification-key")) {
+			t.Fatal("qualification provider request gained tools/authority or lost exact model/effort")
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(append(append([]byte("data: "), event...), []byte("\n\ndata: [DONE]\n\n")...)))}, nil
+	})}
+	result, err := executeWinnerModel(context.Background(), client, "synthetic-qualification-key", request, defaultWinnerModelSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+// Fixed plan ids/source/text are repeatable; no random seed, live source or
+// desired-decision label is supplied to the model.
+func newReviewQualificationTestPlan(t *testing.T) reviewQualificationPlan {
+	t.Helper()
+	cases, err := frozenReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reviewQualificationPlan{Schema: 1, Kind: "winner-review-provider-qualification-plan", PolicyModel: "gpt-5.4-mini", ProviderModel: winnerReviewMiniProviderSnapshot, Reasoning: "xhigh", BrokerSha256: strings.Repeat("b", 64), ImageReceiptSha256: strings.Repeat("c", 64), Cases: cases}
+}
+
+// Private synthetic directories are generated per test, never real evidence.
+func reviewQualificationTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// Complete offline success must remain explicitly non-provider qualification.
+func TestReviewQualificationOfflineSuccessCannotQualifyProvider(t *testing.T) {
+	plan := newReviewQualificationTestPlan(t)
+	calls := 0
+	clock := time.Now().UTC().Add(24 * time.Hour)
+	hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: func() time.Time { return clock }, AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil }, Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
+		calls++
+		var request winnerReviewBrokerRequest
+		if json.Unmarshal(input, &request) != nil {
+			t.Fatal("bad dispatched request")
+		}
+		if calls == 1 {
+			return nil, []byte("synthetic canceled wrapper"), errors.New("synthetic cancellation before provider input")
+		}
+		return reviewQualificationMockResponse(t, request, plan.Cases[calls-1].ExpectedDecision), []byte("synthetic containment only"), nil
+	}}
+	report, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks)
+	if err != nil || !report.Complete || report.Qualified || !report.NoMainWrites || calls != 6 || len(report.Observations) != 6 {
+		t.Fatalf("offline mock became live qualification or lost cases: %+v %v", report, err)
+	}
+	for _, observation := range report.Observations {
+		if observation.Name == "insufficient-transitive-context" && observation.WouldAuthorize {
+			t.Fatal("uncertain mock became authority")
+		}
+	}
+}
+
+// Native HTTP refusal parsing preserves quota metadata/body privately and never
+// turns a nonzero exit into a winner review or calls the remaining cases.
+func TestReviewQualificationQuotaRefusalStopsWithoutRetry(t *testing.T) {
+	plan := newReviewQualificationTestPlan(t)
+	calls := 0
+	clock := time.Now().UTC().Add(24 * time.Hour)
+	root := reviewQualificationTestRoot(t)
+	hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: func() time.Time { return clock }, AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil }, Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil, errors.New("synthetic cancellation")
+		}
+		var request winnerReviewBrokerRequest
+		if json.Unmarshal(input, &request) != nil {
+			t.Fatal("bad request")
+		}
+		client := &http.Client{Transport: reviewQualificationTransport(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Header: http.Header{"X-Request-Id": []string{"req_synthetic_quota"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"credit_balance_exhausted","type":"insufficient_quota","message":"synthetic unavailable credit"}}`))}, nil
+		})}
+		_, err := executeWinnerModel(t.Context(), client, "synthetic-key", request, defaultWinnerModelSettings())
+		var refusal *winnerReviewProviderRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatal("typed refusal lost")
+		}
+		content, marshalErr := json.Marshal(struct {
+			Schema  int                          `json:"schema"`
+			Kind    string                       `json:"kind"`
+			Refusal *winnerReviewProviderRefusal `json:"provider_refusal"`
+			Body    json.RawMessage              `json:"private_redacted_body"`
+		}{Schema: 1, Kind: "review_provider_refusal", Refusal: refusal, Body: refusal.PrivateRedactedBody})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return content, nil, err
+	}}
+	report, err := executeReviewQualification(t.Context(), root, plan, defaultReviewQualificationSettings(), hooks)
+	if err == nil || calls != 2 || report.Qualified || report.Complete || len(report.Observations) != 2 || report.Observations[1].WouldAuthorize || report.Observations[1].Refusal == nil || report.Observations[1].Refusal.Code != "credit_balance_exhausted" {
+		t.Fatalf("quota was retried, reclassified or approved: %+v %v", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "case-02", "broker.stdout")); err != nil {
+		t.Fatal("private quota envelope not retained")
+	}
+	if _, err := executeReviewQualification(t.Context(), root, plan, defaultReviewQualificationSettings(), hooks); err == nil || calls != 2 {
+		t.Fatal("same failed attempt was rerun")
+	}
+}
+
+// An empty subset, alternate order, source patch or expected answer is not a new
+// acceptable plan under the same operator/qualification identity.
+func TestReviewQualificationRejectsRetunedPartialAndReorderedPlans(t *testing.T) {
+	for _, mutate := range []func(*reviewQualificationPlan){func(p *reviewQualificationPlan) { p.Cases = nil }, func(p *reviewQualificationPlan) { p.Cases = p.Cases[:5] }, func(p *reviewQualificationPlan) { p.Cases[1], p.Cases[2] = p.Cases[2], p.Cases[1] }, func(p *reviewQualificationPlan) { p.Cases[1].ExpectedDecision = "uncertain" }, func(p *reviewQualificationPlan) { p.Cases[1].Request.SourceFiles[0].Content += "// changed\n" }, func(p *reviewQualificationPlan) { p.ProviderModel = "gpt-5.4-mini" }} {
+		plan := newReviewQualificationTestPlan(t)
+		mutate(&plan)
+		if validateReviewQualificationPlan(plan) == nil {
+			t.Fatal("retuned/incomplete qualification plan accepted")
+		}
+	}
+}
+
+// Desired verdicts do not enter API input, even though the operator checks them
+// later. The two context cases include every touched base file before dispatch.
+func TestReviewQualificationFixturesAreDeterministicAndVerdictBlind(t *testing.T) {
+	first, second := newReviewQualificationTestPlan(t), newReviewQualificationTestPlan(t)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("fixture identities/text drifted")
+	}
+	for _, item := range first.Cases[1:] {
+		input, err := winnerModelInput(item.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(input, []byte(item.Name)) || bytes.Contains(input, []byte("expected_decision")) {
+			t.Fatal("expected case answer leaked into provider input")
+		}
+	}
+}
+
+// A complete actual-schema approve/disqualify/uncertain result is accepted only
+// in its declared role; uncertainty remains non-authorizing in production.
+func TestReviewQualificationUsesNativeDecisionAndEvidenceValidation(t *testing.T) {
+	plan := newReviewQualificationTestPlan(t)
+	for _, index := range []int{1, 2, 5} {
+		item := plan.Cases[index]
+		content := reviewQualificationMockResponse(t, item.Request, item.ExpectedDecision)
+		observation, err := validateReviewQualificationResponse(content, item.Request, item.ExpectedDecision)
+		if err != nil || !observation.Passed || observation.Observed != item.ExpectedDecision {
+			t.Fatalf("complete synthetic verdict refused: %v", err)
+		}
+		if index == 5 && observation.WouldAuthorize {
+			t.Fatal("uncertainty authorized source")
+		}
+	}
+}
+
+// Neither alias relabeling nor a changed snapshot/effort can be hidden inside
+// otherwise well-formed private provider provenance.
+func TestReviewQualificationRejectsRelabeledProviderEvidence(t *testing.T) {
+	item := newReviewQualificationTestPlan(t).Cases[1]
+	content := reviewQualificationMockResponse(t, item.Request, "approve")
+	for _, field := range []string{"requested_model", "policy_model", "model", "reasoning"} {
+		var result winnerReviewBrokerResult
+		if json.Unmarshal(content, &result) != nil {
+			t.Fatal("bad mock")
+		}
+		var evidence map[string]json.RawMessage
+		if json.Unmarshal([]byte(result.PrivateEvidence), &evidence) != nil {
+			t.Fatal("bad evidence")
+		}
+		evidence[field] = json.RawMessage(`"synthetic-other-provider"`)
+		changed, _ := json.Marshal(evidence)
+		result.PrivateEvidence = string(changed)
+		result.Review.PrivateEvidenceSha256 = reviewQualificationHash(changed)
+		for i := range result.Review.Findings {
+			result.Review.Findings[i].EvidenceSha256 = result.Review.PrivateEvidenceSha256
+		}
+		encoded, _ := json.Marshal(result)
+		if _, err := validateReviewQualificationResponse(encoded, item.Request, "approve"); err == nil {
+			t.Fatal("relabeled provider snapshot/effort accepted")
+		}
+	}
+}
+
+// The response may change judgment fields only, never selected job/source/
+// decision revision or hidden replacement/appeal authority.
+func TestReviewQualificationRejectsChangedIdentityOrEvidence(t *testing.T) {
+	item := newReviewQualificationTestPlan(t).Cases[1]
+	content := reviewQualificationMockResponse(t, item.Request, "approve")
+	for _, mutate := range []func(*winnerReviewBrokerResult){func(r *winnerReviewBrokerResult) { r.Review.ExpectedRevision++ }, func(r *winnerReviewBrokerResult) { r.Review.ExpectedDecisionSha256 = strings.Repeat("f", 64) }, func(r *winnerReviewBrokerResult) { r.Review.AppealId = "synthetic-unasked-appeal" }, func(r *winnerReviewBrokerResult) { r.PrivateEvidence += "changed" }, func(r *winnerReviewBrokerResult) { r.Review.Findings = r.Review.Findings[:5] }} {
+		var result winnerReviewBrokerResult
+		if json.Unmarshal(content, &result) != nil {
+			t.Fatal("bad fixture")
+		}
+		mutate(&result)
+		encoded, _ := json.Marshal(result)
+		if _, err := validateReviewQualificationResponse(encoded, item.Request, "approve"); err == nil {
+			t.Fatal("changed qualification identity/evidence accepted")
+		}
+	}
+}
+
+// Real kernel rule text, including quoted comments and canonical /32 provider
+// addresses, must have one permitted destination followed by an unconditional drop.
+func TestReviewQualificationFenceRequiresProviderOnlyDefaultDeny(t *testing.T) {
+	owner := strings.Repeat("a", 64)
+	chain := "URRV_" + owner[:16]
+	subnet, provider := "192.168.240.0/24", "192.0.2.10"
+	comment := "urnetwork-review-" + owner
+	forward := []byte(fmt.Sprintf("-N DOCKER-USER\n-A DOCKER-USER -s %s -m comment --comment \"%s\" -j %s\n", subnet, comment, chain))
+	input := []byte(fmt.Sprintf("-P INPUT ACCEPT\n-A INPUT -s %s -m comment --comment \"%s\" -j DROP\n", subnet, comment))
+	rules := []byte(fmt.Sprintf("-N %s\n-A %s -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\n-A %s -j DROP\n", chain, chain, provider, chain))
+	if err := validateReviewQualificationFence(rules, forward, input, owner, subnet, provider); err != nil {
+		t.Fatal(err)
+	}
+	if validateReviewQualificationFence(rules, forward, input, "", subnet, provider) == nil {
+		t.Fatal("missing fence owner accepted")
+	}
+	for _, changed := range [][]byte{bytes.Replace(rules, []byte("--dport 443"), []byte("--dport 80"), 1), bytes.Replace(rules, []byte("-j DROP"), []byte("-j ACCEPT"), 1), append(append([]byte{}, rules...), []byte("-A "+chain+" -j ACCEPT\n")...)} {
+		if validateReviewQualificationFence(changed, forward, input, owner, subnet, provider) == nil {
+			t.Fatal("widened actual provider firewall accepted")
+		}
+	}
+}
+
+// Missing path ownership or a private-input symlink fails before any read can
+// influence the paid provider; fixtures contain no live key/config data.
+func TestReviewQualificationRefusesLinkedOrPublicPrivateInputs(t *testing.T) {
+	root := reviewQualificationTestRoot(t)
+	path := filepath.Join(root, "input.json")
+	content := []byte("synthetic private evidence\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pin := reviewQualificationPin{Path: path, Sha256: reviewQualificationHash(content)}
+	if _, err := readReviewQualificationPin(pin, 1024, true); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias.json")
+	if err := os.Symlink(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	pin.Path = alias
+	if _, err := readReviewQualificationPin(pin, 1024, true); err == nil {
+		t.Fatal("private input symlink accepted")
+	}
+	pin.Path = path
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readReviewQualificationPin(pin, 1024, true); err == nil {
+		t.Fatal("public private-input mode accepted")
+	}
+}
+
+// Actual containment failure remains a failed attempt even if the offline model
+// returns a perfectly shaped approval. No later case or review API is called.
+func TestReviewQualificationContainmentFailureCannotApprove(t *testing.T) {
+	plan := newReviewQualificationTestPlan(t)
+	calls := 0
+	clock := time.Now().UTC().Add(24 * time.Hour)
+	hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: func() time.Time { return clock }, AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) {
+		return "", errors.New("synthetic containment mismatch")
+	}, Invoke: func(context.Context, []byte) ([]byte, []byte, error) {
+		calls++
+		return nil, nil, errors.New("synthetic cancellation")
+	}}
+	report, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks)
+	if err == nil || report.Qualified || calls != 1 {
+		t.Fatal("containment failure authorized provider qualification")
+	}
+}
+
+// A caller cannot create a purported genuine qualification from an empty plan,
+// even with the explicit real-mode constructor flag and successful empty hooks.
+func TestReviewQualificationEmptyPlanNeverQualifies(t *testing.T) {
+	plan := newReviewQualificationTestPlan(t)
+	plan.Cases = nil
+	called := false
+	hooks := reviewQualificationHooks{Mode: "genuine_provider", Now: time.Now, Invoke: func(context.Context, []byte) ([]byte, []byte, error) { called = true; return nil, nil, nil }, AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return "", nil }}
+	if _, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks); err == nil || called {
+		t.Fatal("empty plan became a provider qualification")
+	}
+}
+
+// Docker-shaped data is synthetic; no daemon, key file or mount is consulted.
+func reviewQualificationContainerFixture(t *testing.T, owner, image, network, provider string) []byte {
+	t.Helper()
+	content, err := json.Marshal([]any{map[string]any{"Id": strings.Repeat("b", 64), "Image": image,
+		"Config":     map[string]any{"User": "65532:65532", "Entrypoint": []string{"/review-broker", "review-broker", "--model-key-file=/run/secrets/model-key"}, "Cmd": []string{}, "Env": []string{"PATH=/usr/bin", "HOME=/"}, "Labels": map[string]string{"com.urnetwork.review.owner": owner}},
+		"HostConfig": map[string]any{"NetworkMode": network, "ReadonlyRootfs": true, "Privileged": false, "Init": true, "CgroupnsMode": "private", "CpusetCpus": "20,22", "PidMode": "", "IpcMode": "private", "UTSMode": "", "NanoCpus": 1000000000, "Memory": 2147483648, "MemorySwap": 2147483648, "PidsLimit": 64, "CapDrop": []string{"ALL"}, "CapAdd": []string{}, "SecurityOpt": []string{"no-new-privileges:true"}, "Dns": []string{"127.0.0.1"}, "ExtraHosts": []string{"api.openai.com:" + provider}, "Sysctls": map[string]string{"net.ipv6.conf.all.disable_ipv6": "1", "net.ipv6.conf.default.disable_ipv6": "1"}},
+		"Mounts":     []any{map[string]any{"Type": "bind", "Source": "/var/lib/urnetwork/competition-review/model.key", "Destination": "/run/secrets/model-key", "RW": false}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+// Approval-shaped model text cannot waive any actual resource/identity/egress
+// or key-only mount condition in the independent Docker inspection.
+func TestReviewQualificationContainerRequiresActualLeastAuthority(t *testing.T) {
+	owner, image, network, provider := strings.Repeat("a", 64), "sha256:"+strings.Repeat("c", 64), strings.Repeat("d", 64), "192.0.2.10"
+	content := reviewQualificationContainerFixture(t, owner, image, network, provider)
+	if err := validateReviewQualificationContainer(content, owner, image, network, provider); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(map[string]any){
+		func(c map[string]any) { c["HostConfig"].(map[string]any)["Privileged"] = true },
+		func(c map[string]any) { c["HostConfig"].(map[string]any)["Memory"] = float64(4 * 1024 * 1024 * 1024) },
+		func(c map[string]any) { c["HostConfig"].(map[string]any)["NetworkMode"] = "host" },
+		func(c map[string]any) {
+			c["Config"].(map[string]any)["Env"] = []string{"SYNTHETIC_MAIN_CREDENTIAL=not-real"}
+		},
+		func(c map[string]any) { c["Mounts"].([]any)[0].(map[string]any)["RW"] = true },
+		func(c map[string]any) {
+			c["Mounts"] = append(c["Mounts"].([]any), map[string]any{"Source": "/synthetic/forbidden-parent", "Destination": "/input", "RW": false})
+		},
+	} {
+		var containers []map[string]any
+		if json.Unmarshal(content, &containers) != nil {
+			t.Fatal("invalid fixture")
+		}
+		mutate(containers[0])
+		changed, _ := json.Marshal(containers)
+		if validateReviewQualificationContainer(changed, owner, image, network, provider) == nil {
+			t.Fatal("actual container authority/resource escape accepted")
+		}
+	}
+}
+
+// The composed receipt loader binds exact input/output and every private
+// artifact, including actual cgroup/network/firewall inspection rather than
+// accepting the model's own NoMainCredentials boolean as proof.
+func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testing.T) {
+	root := reviewQualificationTestRoot(t)
+	settings := defaultReviewQualificationSettings()
+	settings.StateRoot = filepath.Join(root, "attempts")
+	attempt := filepath.Join(settings.StateRoot, "invocation.synthetic")
+	if err := os.MkdirAll(attempt, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner, container, network, image, provider, subnet := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("d", 64), "sha256:"+strings.Repeat("c", 64), "192.0.2.10", "192.168.240.0/24"
+	chain, comment := "URRV_"+owner[:16], "urnetwork-review-"+owner
+	encode := func(value any) []byte {
+		content, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	input, output := []byte("synthetic exact request bytes"), []byte("synthetic exact response bytes")
+	artifacts := map[string][]byte{
+		"input.json": input, "broker.stdout": output, "broker.stderr": []byte{}, "provider-address.txt": []byte(provider + "\n"),
+		"image-inspect.json":     encode([]any{map[string]any{"Id": image}}),
+		"container-inspect.json": reviewQualificationContainerFixture(t, owner, image, network, provider),
+		"container-state.json":   encode(map[string]any{"Status": "exited", "Running": false, "OOMKilled": false, "ExitCode": 0}),
+		"network-inspect.json":   encode([]any{map[string]any{"Id": network, "Driver": "bridge", "Scope": "local", "Internal": false, "EnableIPv6": false, "Attachable": false, "Labels": map[string]string{"com.urnetwork.review.owner": owner}, "Options": map[string]string{"com.docker.network.bridge.enable_icc": "false"}, "IPAM": map[string]any{"Config": []any{map[string]string{"Subnet": subnet}}}}}),
+		"cgroup.json":            encode(map[string]any{"schema": 1, "kind": "winner-review-running-cgroup", "path": "/synthetic-cgroup", "memory_max": "2147483648", "memory_swap_max": "0", "pids_max": "64", "cpu_max": "100000 100000", "cpuset_cpus": "20,22", "observed_before_provider_input": true}),
+		"fence.json":             encode(map[string]any{"schema": 1, "kind": "winner-review-provider-egress-fence", "owner": owner, "chain": chain, "source_subnet": subnet, "provider_host": "api.openai.com", "provider_ipv4": provider, "provider_port": 443, "external_dns": false, "host_input_denied": true, "default_deny": true, "installed_before_start": true}),
+		"fence-chain.txt":        []byte(fmt.Sprintf("-N %s\n-A %s -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\n-A %s -j DROP\n", chain, chain, provider, chain)),
+		"fence-forward.txt":      []byte(fmt.Sprintf("-A DOCKER-USER -s %s -m comment --comment %s -j %s\n", subnet, comment, chain)),
+		"fence-input.txt":        []byte(fmt.Sprintf("-A INPUT -s %s -m comment --comment %s -j DROP\n", subnet, comment)),
+		"terminal.json":          encode(map[string]any{"schema": 1, "kind": "winner-review-container-terminal", "owner": owner, "image_id": image, "container_id": container, "network_id": network, "wrapper_exit": 0, "broker_exit": 0, "broker_exit_observed": true, "cleanup_verified": true, "provider_input_released": true}),
+	}
+	bindings := []reviewQualificationBinding{}
+	for name, content := range artifacts {
+		if err := os.WriteFile(filepath.Join(attempt, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		bindings = append(bindings, reviewQualificationBinding{Path: name, Sha256: reviewQualificationHash(content), Bytes: int64(len(content))})
+	}
+	manifest := encode(map[string]any{"schema": 1, "kind": "winner-review-container-evidence", "artifacts": bindings})
+	if err := os.WriteFile(filepath.Join(attempt, "evidence-manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := reviewQualificationWrapperReceipt{Schema: 1, Kind: "winner-review-container-receipt", Owner: owner, AttemptDirectory: attempt, ManifestSha256: reviewQualificationHash(manifest), CleanupVerified: true}
+	diagnostics := append(encode(receipt), '\n')
+	if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "broker.stdout"), append(append([]byte{}, output...), '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed private wrapper output accepted: %v", err)
+	}
+}
+
+// The same operator funding authorization cannot be used to seek a second
+// answer in a new output directory after an unfavorable completed response.
+func TestReviewQualificationFundingAuthorizationIsConsumedOnce(t *testing.T) {
+	root := reviewQualificationTestRoot(t)
+	settings := defaultReviewQualificationSettings()
+	settings.StateRoot = filepath.Join(root, "attempts")
+	config := reviewQualificationConfig{OutputDirectory: filepath.Join(root, "first"), Funding: reviewQualificationPin{Sha256: strings.Repeat("f", 64)}}
+	if err := consumeReviewQualificationAuthorization(config, settings); err != nil {
+		t.Fatal(err)
+	}
+	config.OutputDirectory = filepath.Join(root, "different-output")
+	if err := consumeReviewQualificationAuthorization(config, settings); err == nil {
+		t.Fatal("funding authority reused to resample provider")
+	}
+}
+
+// Non-authorizing uncertainty still needs a real complete supported judgment;
+// blank explanations/unknown codes cannot pass just because production pauses.
+func TestReviewQualificationUncertaintyRequiresSupportedCompleteReasons(t *testing.T) {
+	item := newReviewQualificationTestPlan(t).Cases[5]
+	content := reviewQualificationMockResponse(t, item.Request, "uncertain")
+	for _, mutate := range []func(*winnerModelJudgment){func(j *winnerModelJudgment) { j.ReasonCodes = []string{"SYNTHETIC_UNSUPPORTED_CODE"} }, func(j *winnerModelJudgment) { j.PublicExplanation = "" }} {
+		var result winnerReviewBrokerResult
+		if err := json.Unmarshal(content, &result); err != nil {
+			t.Fatal(err)
+		}
+		var evidence map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(result.PrivateEvidence), &evidence); err != nil {
+			t.Fatal(err)
+		}
+		var judgment winnerModelJudgment
+		if err := json.Unmarshal(evidence["judgment"], &judgment); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&judgment)
+		judgmentBytes, _ := json.Marshal(judgment)
+		evidence["judgment"] = judgmentBytes
+		evidence["provider_output"], _ = json.Marshal(string(judgmentBytes))
+		evidenceBytes, _ := json.Marshal(evidence)
+		result.PrivateEvidence = string(evidenceBytes)
+		result.Review.PrivateEvidenceSha256 = reviewQualificationHash(evidenceBytes)
+		result.Review.ReasonCodes, result.Review.PublicExplanation = judgment.ReasonCodes, judgment.PublicExplanation
+		for i := range result.Review.Findings {
+			result.Review.Findings[i].EvidenceSha256 = result.Review.PrivateEvidenceSha256
+		}
+		changed, _ := json.Marshal(result)
+		if _, err := validateReviewQualificationResponse(changed, item.Request, "uncertain"); err == nil {
+			t.Fatal("incomplete/unsupported completed uncertainty qualified provider")
+		}
+	}
+}

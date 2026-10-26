@@ -63,8 +63,10 @@ non-group/world-writable `/etc/urnetwork/competition-review.json`:
 
 The wrapper runs its immutable scratch image non-root/read-only, without
 capabilities, with one CPU on the management cores and 2 GiB memory. The fixed
-client needs provider HTTPS/DNS egress; deployment must verify that no alternative
-tools, host mounts or credentials are reachable. The wrapper is for the qualified
+client uses provider HTTPS through a host-resolved, single-provider-IP fence;
+external DNS in the container is disabled. Deployment must verify that no alternative
+tools, host mounts or credentials are reachable. An IP fence is not independently
+a TLS-hostname-aware proxy. The wrapper is for the qualified
 host's core mapping, not a portable assumption about another evaluator host.
 Pin the installed wrapper digest as the supervisor's `--review-sha256`; pin and
 retain the image/key deployment record separately. No key appears in command
@@ -82,6 +84,11 @@ Verify malformed/completed uncertainty cannot be resampled into approval, and
 that unavailable model access pauses progression without approving/rejecting a
 candidate. Verify memory/CPU bounds, no main source/config/vault/socket mounts,
 and cleanup on cancellation. Retain those receipts with the launch evidence.
+
+Follow the [provider qualification procedure](../../launch/REVIEW-PROVIDER-QUALIFICATION.md)
+for the fixed cases, exact snapshot, observed container/cgroup/firewall receipts,
+and bounded cancellation checks. Its draft tools and this uninstalled wrapper
+are preparation only until their independent execution and live proof pass.
 
 As of implementation, no live provider qualification or key provisioning is
 implied. The broker must not be enabled solely because its Go tests pass.
