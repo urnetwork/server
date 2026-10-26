@@ -80,6 +80,63 @@ func TestCompetitionHostQualificationUsesOnlyTrustedCommentPatch(t *testing.T) {
 	}
 }
 
+// Broad repository globs still probe the authenticated server file. The
+// canonical patch retains its mono-root prefix until trusted routing.
+func TestCompetitionHostQualificationRoutesMonoRootSource(t *testing.T) {
+	policy := validSettings().PatchPolicy
+	policy.PathBase = competitionMonoRootPathBase
+	policy.AllowedPaths = nil
+	policy.ForbiddenPaths = []string{"server/connect/sim-latency/**"}
+	for _, repository := range model.CompetitionSourceRepositoryNames() {
+		policy.AllowedPaths = append(policy.AllowedPaths, repository+"/**")
+	}
+	path, sourcePath, err := competitionQualificationSourcePaths(policy)
+	if err != nil || path != "server/connect/resident_contract_manager.go" || sourcePath != "connect/resident_contract_manager.go" {
+		t.Fatalf("broad source routing path=%q source=%q error=%v", path, sourcePath, err)
+	}
+	patch, err := competitionQualificationPatch(path, []byte("package synthetic\n\nfunc Example() int { return 1 }\n"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed, patchError := SplitCompetitionRepositoryPatch(string(patch.Bytes), policy)
+	if patchError != nil || len(routed) != 1 || !bytes.Contains(routed["server"], []byte("--- a/"+sourcePath+"\n")) ||
+		!bytes.Contains(patch.Bytes, []byte("--- a/"+path+"\n")) || !bytes.Contains(routed["server"], []byte("+"+competitionHostQualificationComment+"\n")) {
+		t.Fatalf("trusted broad comment did not preserve policy and server routing: %v", patchError)
+	}
+}
+
+// Legacy inventories keep their original first sorted literal file; this
+// change never adds a mono-root prefix to old policies or receipts.
+func TestCompetitionHostQualificationSourcePathsPreserveLegacy(t *testing.T) {
+	policy := validSettings().PatchPolicy
+	policy.AllowedPaths = []string{"connect/second.go", "connect/example.go"}
+	path, sourcePath, err := competitionQualificationSourcePaths(policy)
+	if err != nil || path != "connect/example.go" || sourcePath != path {
+		t.Fatalf("legacy source routing path=%q source=%q error=%v", path, sourcePath, err)
+	}
+}
+
+// Choosing a fixed trusted file grants no policy exception. Missing server
+// authority, explicit denial and unknown path modes still refuse the probe.
+func TestCompetitionHostQualificationSourcePathsRefuseMissingSurface(t *testing.T) {
+	for _, sample := range []struct {
+		name   string
+		policy PatchPolicy
+	}{
+		{name: "empty", policy: PatchPolicy{}},
+		{name: "legacy glob", policy: PatchPolicy{AllowedPaths: []string{"connect/**"}}},
+		{name: "legacy non-Go", policy: PatchPolicy{AllowedPaths: []string{"connect/example.txt"}}},
+		{name: "unknown mode", policy: PatchPolicy{PathBase: "unsupported", AllowedPaths: []string{"server/**"}}},
+		{name: "no server permission", policy: PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"connect/**"}}},
+		{name: "explicit denial", policy: PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"server/**"}, ForbiddenPaths: []string{"server/connect/resident_contract_manager.go"}}},
+		{name: "protected-only permission", policy: PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"server/connect/sim-latency/**"}}},
+	} {
+		if path, sourcePath, err := competitionQualificationSourcePaths(sample.policy); err == nil {
+			t.Fatalf("%s source permission accepted: patch=%q source=%q", sample.name, path, sourcePath)
+		}
+	}
+}
+
 // Durable API evidence, not the request or root configuration, supplies the
 // observed API identity for this exact unactivated transition.
 func TestCompetitionHostQualificationRequiresExactApiReceipt(t *testing.T) {

@@ -319,22 +319,43 @@ func competitionQualificationPatch(path string, source []byte, policy PatchPolic
 	return canonical, nil
 }
 
+// The broad allowlist names repository subtrees, not literal Go files. Keep
+// the trusted probe on its existing server source and strip the repository
+// prefix only for the pinned server-tree lookup, never from the patch policy.
+func competitionQualificationSourcePaths(policy PatchPolicy) (string, string, error) {
+	if len(policy.AllowedPaths) == 0 || validateCompetitionAllowedPaths(policy) != nil {
+		return "", "", errors.New("host qualification has no approved Go patch surface")
+	}
+	path, sourcePath := "", ""
+	if policy.PathBase == competitionMonoRootPathBase {
+		path = "server/connect/resident_contract_manager.go"
+		_, relative, err := competitionRepositoryPath(path)
+		if err != nil {
+			return "", "", err
+		}
+		sourcePath = relative
+	} else {
+		paths := append([]string(nil), policy.AllowedPaths...)
+		sort.Strings(paths)
+		path, sourcePath = paths[0], paths[0]
+	}
+	if err := validateRepositoryPath(path); err != nil || filepath.Ext(path) != ".go" || !pathAllowed(path, policy) {
+		return "", "", errors.New("host qualification patch path is invalid or outside the approved policy")
+	}
+	return path, sourcePath, nil
+}
+
 // Reads a committed blob, not an arbitrary image working-tree path. The real
 // evaluator independently verifies the image/source lock before applying it.
 func readCompetitionQualificationSource(ctx context.Context, directory string, settings *Settings) (string, []byte, error) {
-	paths := append([]string(nil), settings.PatchPolicy.AllowedPaths...)
-	sort.Strings(paths)
-	if len(paths) == 0 {
-		return "", nil, errors.New("host qualification has no approved Go patch surface")
-	}
-	path := paths[0]
-	if err := validateRepositoryPath(path); err != nil || filepath.Ext(path) != ".go" {
-		return "", nil, errors.New("host qualification patch path is invalid")
+	path, sourcePath, err := competitionQualificationSourcePaths(settings.PatchPolicy)
+	if err != nil {
+		return "", nil, err
 	}
 	stdout, stderr := &boundedBuffer{limit: 1024 * 1024}, &boundedBuffer{limit: 64 * 1024}
 	exitCode, err := runContainedCommand(ctx, directory, "/usr/bin/docker", []string{
 		"run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-		"--entrypoint", "/usr/bin/git", settings.EvaluatorImageDigest, "-C", "/workspace/server", "show", settings.BaseSha + ":" + path,
+		"--entrypoint", "/usr/bin/git", settings.EvaluatorImageDigest, "-C", "/workspace/server", "show", settings.BaseSha + ":" + sourcePath,
 	}, stdout, stderr)
 	if err != nil || exitCode != 0 {
 		return "", nil, errors.New("could not read the locked Go source from the evaluator image")
