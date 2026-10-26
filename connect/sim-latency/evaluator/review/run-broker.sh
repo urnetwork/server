@@ -179,11 +179,15 @@ trap 'exit 130' INT
 
 # The parent sends a finite bounded JSON document; capture it before any model
 # request. No key bytes are read by this wrapper or included in its receipts.
-head -c "$((input_limit+1))" > "$attempt_directory/input.json" &
+# Explicit stdin redirection prevents non-interactive Bash from substituting
+# /dev/null for this asynchronous reader.
+# review_input_capture_program_begin
+head -c "$((input_limit+1))" <&0 > "$attempt_directory/input.json" &
 active_pid=$!
 wait "$active_pid"
 active_pid=""
 (( $(stat -c %s "$attempt_directory/input.json") <= input_limit ))
+# review_input_capture_program_end
 deadline="$(jq -er '.request.deadline | strings' "$attempt_directory/input.json")"
 deadline_epoch="$(date -u -d "$deadline" +%s)"
 remaining=$((deadline_epoch-$(date -u +%s)))

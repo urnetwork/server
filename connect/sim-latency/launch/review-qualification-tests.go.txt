@@ -25,6 +25,36 @@ import (
 // Synthetic transport cannot fall back to the network.
 type reviewQualificationTransport func(*http.Request) (*http.Response, error)
 
+// Exercises the actual asynchronous shell reader without Docker or providers.
+// An implicit background stdin becomes /dev/null even with a finite parent pipe.
+func TestReviewQualificationWrapperPreservesBackgroundInput(t *testing.T) {
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(content), "# review_input_capture_program_begin\n")
+	if !found {
+		t.Fatal("wrapper input capture boundary missing")
+	}
+	program, _, found = strings.Cut(program, "# review_input_capture_program_end")
+	if !found {
+		t.Fatal("wrapper input capture end missing")
+	}
+	for _, input := range []string{`{"operation":"synthetic_cancel"}`, strings.Repeat("x", 64), strings.Repeat("y", 65), strings.Repeat("z", 66)} {
+		directory := t.TempDir()
+		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", "set -Eeuo pipefail\ninput_limit=64\nattempt_directory=\"$1\"\n"+program, "synthetic-input-capture", directory)
+		command.Stdin = strings.NewReader(input)
+		output, commandErr := command.CombinedOutput()
+		captured, readErr := os.ReadFile(filepath.Join(directory, "input.json"))
+		if readErr != nil || string(captured) != input[:min(len(input), 65)] {
+			t.Fatalf("background reader lost request bytes: got %q want %q; read=%v command=%v output=%s", captured, input, readErr, commandErr, output)
+		}
+		if (commandErr == nil) != (len(input) <= 64) {
+			t.Fatalf("input limit changed: bytes=%d error=%v output=%s", len(input), commandErr, output)
+		}
+	}
+}
+
 // Implements only the HTTP test seam; it has no real provider credential.
 func (self reviewQualificationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return self(request)
