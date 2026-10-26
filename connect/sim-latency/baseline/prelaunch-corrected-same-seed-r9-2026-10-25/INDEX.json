@@ -5,8 +5,8 @@
   "official_epoch_baseline": false,
   "production_activated": false,
   "measurements_started_at_publication": 0,
-  "current_status": "first_cohort_completed_passed_preserved",
-  "completed_cohorts": 1,
+  "current_status": "two_fixed_cohorts_completed_passed_preserved",
+  "completed_cohorts": 2,
   "outcomes": [
     {
       "position": 1,
@@ -28,6 +28,28 @@
       "additional_companions": 4,
       "gzip_sha256": "c66a507e775b57ef514eec336919a450728ac5c97a63ab04886bf6e3cbad96c5",
       "archive_verification_log_sha256": "97408c494b932407fe8aa462058ff7eb97a89f7c9c203f98a02eccf175a8c9c1"
+    },
+    {
+      "position": 2,
+      "path": "completed/cohort-02/README.md",
+      "summary_path": "completed/cohort-02/pair-summary.json",
+      "summary_sha256": "8cb75650c4453a6df323260c57b461eda326ef06bacd8304f872ad4063fec981",
+      "started_at": "2026-10-25T23:23:57Z",
+      "ended_at": "2026-10-26T02:15:37Z",
+      "exit_code": 0,
+      "duration_seconds": 10300,
+      "control_replicates": 9,
+      "candidate_replicates": 9,
+      "all_gates_passed": true,
+      "placeable": true,
+      "takeover_eligible": false,
+      "statistically_significant": false,
+      "cleanup_verified": true,
+      "original_regular_files": 481,
+      "additional_companions": 7,
+      "gzip_sha256": "c9ec070a4a801c55ed755059d9d859a22aee486977c075f1342b49aad8ff5c5d",
+      "archive_verification_log_sha256": "741600d827701a4cb7b3dc5c994fd0dfc08f983b291e88d3fc29b9fbda6b04f4",
+      "independent_archive_verification_log_sha256": "92930eea07719d07b8f440001c8a752ce2a2d4a6c5e1bc74804c29d521ba315a"
     }
   ],
   "planned_cohorts": 5,

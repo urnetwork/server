@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-Calibration observation: **2026-10-26T00:50:07Z**; external readiness observations
+Calibration observation: **2026-10-26T02:30:05Z**; external readiness observations
 remain the separately dated checks below. The corrected source/image and isolated
 trusted script bundle are prepared. Three consecutive complete control suites
 passed 514 tests each, with cleanup verified. See
@@ -20,10 +20,14 @@ non-takeover, and cleanup was verified. All 481 originals plus four companions
 are [preserved and independently verified](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md).
 This is one completed cohort/full-window functional check, not accepted
 five-cohort calibration, final scale/margin or a hidden production baseline.
-Position 2 is running its original attempt, with all nine controls complete and
-candidate construction underway. Its original three-hour deadline is
-**2026-10-26T02:23:57Z**; positions 3–5 remain unstarted. Do not infer completion
-from this progress checkpoint. The latest read-only
+Position 2 completed its original 9+9 attempt at **02:15:37 UTC**, in
+**10,300 seconds**, 500 seconds inside its unchanged bound. All gates,
+placeability, typed completion and exact cleanup passed. Its mean was 1.16%
+worse despite a lower median; p=0.579, not significant or takeover-eligible.
+All [481 originals and 7 companions](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-02/README.md)
+are archived and independently verified, including all 7/465/5 artifact
+bindings. This is **2/5 cohorts**, not accepted calibration. Positions 3–5 remain
+unstarted; tool qualification follows phase publication. The latest read-only
 API probe returned HTTP 503 and the dedicated review-provider key remains
 absent. Current Sille config selects MinIO `172.28.208.176:23900`, which returns
 HTTP 200 at `/minio/health/ready`. Earlier `.177` refusals tested the obsolete
@@ -57,7 +61,7 @@ substitute for formal calibration or live readiness.
 | --- | --- | --- |
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Corrected evaluated server `c1f9dda60`, image `002c3904…`, actual Go 1.27.3 and canonical lock `5e00bf5e…` are recorded in [the corrected image qualification](ARTIFACTS-CANCELED-STOP-2026-10-25.md). Preserve these exact identities through subsequent qualification. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Passed the prospectively declared corrected-release first cohort: 10,498 seconds, all gates and exact cleanup. Complete [original evidence](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md) is verified. It is one observation serving two checks, not two independent cohorts; other seeds are not yet qualified. |
-| Statistical calibration | Predeclared fresh run/seed counts and algorithm, retained failures, measured variance, no-op placement, reference ordering and initial margin supported by this source/image | 1/5 fresh A/A cohorts complete. First-pair mean change was 2.80%, Welch p=0.297; practical floor 16.1% versus this comparison's 9.018% significance fringe. No significant no-op/takeover. Five-cohort reduction and independent references remain open; 16.1% is still provisional. |
+| Statistical calibration | Predeclared fresh run/seed counts and algorithm, retained failures, measured variance, no-op placement, reference ordering and initial margin supported by this source/image | 2/5 fixed fresh A/A cohorts complete. First-pair mean improved 2.80%, p=0.297; second mean was 1.16% worse, p=0.579. Both placeable, neither significant/takeover. Practical floor remains 16.1%; the separate comparison-specific fringes are 9.018% and 10.046%. All unfavorable outcomes are retained. Five-cohort reduction and independent references remain open; no new margin is accepted. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Local isolation and host bomb evidence exists in the image record. New image-bound host rebaseline and live readiness remain unverified. |
 | Honesty and source-test providers | Genuine provider-backed Sol 6.1 max review and Sol 6.1 low test execution; retained identities/results for acceptance, rejection, uncertainty and unsafe/prompt-injected input | Dedicated review key absent at the last check. Fixtures or synthetic model labels cannot satisfy this gate. Never expose the key in logs or reports. |

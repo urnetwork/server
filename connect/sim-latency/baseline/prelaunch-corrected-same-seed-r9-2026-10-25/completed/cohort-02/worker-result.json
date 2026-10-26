@@ -1,0 +1,321 @@
+{
+  "schema": 1,
+  "job_id": "8cd8edae-c30c-407f-b611-bda14dfe2764",
+  "score": {
+    "score_schema": 1,
+    "raw_score": 17557.35469999998,
+    "normalized_score": 101.63485220242215,
+    "placeable": true,
+    "takeover_eligible": false,
+    "gates": {
+      "G1_success": {
+        "passed": true,
+        "details": {
+          "absolute_min_inclusive": 0.97,
+          "baseline": 0.999581589958159,
+          "baseline_minus_max": 0.989581589958159,
+          "candidate": 1
+        }
+      },
+      "G2_volume": {
+        "passed": true,
+        "details": {
+          "bytes_max": 3203264275.05,
+          "bytes_min": 2898191486.95,
+          "candidate_bytes": 3112388624,
+          "candidate_requests": 2442,
+          "request_max": 2526.3,
+          "request_min": 2285.7
+        }
+      },
+      "G3_path_integrity": {
+        "passed": true,
+        "details": {
+          "minimum_inclusive": 0.95,
+          "minimum_replicate_coverage": 1.1523965242241208
+        }
+      },
+      "G4_matchmaking": {
+        "passed": true,
+        "details": {
+          "all_pools_nonempty": true,
+          "all_replicates_have_samples": true,
+          "all_replicates_span_at_least_minimum": true,
+          "baseline_load_p95_ms": 31.49893617630003,
+          "baseline_minimum_replicate_sample_span_fraction": 0.9399944444444445,
+          "baseline_pool_p05": 2518,
+          "candidate_load_p95_ms": 30.526956748962387,
+          "candidate_pool_p05": 2518,
+          "maximum_inclusive_ms": 39.37367022037504,
+          "minimum_replicate_sample_span_fraction": 0.93955,
+          "pool_minimum_inclusive": 2266.2000000000003,
+          "sample_span_minimum_inclusive": 0.9
+        }
+      },
+      "G5_stability": {
+        "passed": true,
+        "details": {
+          "all_replicates_clean": true
+        }
+      },
+      "G6_resources": {
+        "passed": true,
+        "details": {
+          "all_replicates_within_limits": true
+        }
+      }
+    },
+    "significance": {
+      "method": "one-sided-welch-t",
+      "alpha": 0.05,
+      "replicate_count": 9,
+      "baseline_mean_raw_score": 17859.202794444438,
+      "candidate_mean_raw_score": 18066.03480555555,
+      "baseline_sample_variance": 5739486.722138452,
+      "candidate_sample_variance": 3712001.7728263806,
+      "observed_improvement_percent": -1.158125664911839,
+      "takeover_margin_percent": 16.1,
+      "minimum_significant_improvement_percent": 10.046374979174612,
+      "required_improvement_percent": 16.1,
+      "one_sided_p_value": 0.5786459056773868,
+      "welch_t": -0.20183147984718214,
+      "welch_degrees_of_freedom": 15.296123850956185,
+      "statistically_significant": false,
+      "next_epoch_minimum_improvement_percent": 9.348509849134482,
+      "recommended_next_epoch_takeover_margin_percent": 16.1,
+      "recommended_next_epoch_takeover_margin_supported": true
+    },
+    "diagnostics": {
+      "round_id": "9dfa6395-6c81-4a74-94bc-d8538fabb169",
+      "baseline_sha256": "2e688a73fbe522252d4a99c90aaf9951d0c7c70236e14fc36200e5675d02be98",
+      "replicate_count": 9,
+      "request_timeout_ms": 120000,
+      "takeover_margin": 0.161,
+      "baseline_takeover_raw_max": 14971.4444685,
+      "baseline_takeover_eligible": false,
+      "baseline": {
+        "raw_score": 17844.3915,
+        "success_rate": 0.999581589958159,
+        "request_count": 2406,
+        "received_bytes": 3050727881,
+        "findproviders_load_p95_ms": 31.49893617630003,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.9399944444444445
+      },
+      "candidate": {
+        "raw_score": 17557.35469999998,
+        "success_rate": 1,
+        "request_count": 2442,
+        "received_bytes": 3112388624,
+        "accounting_coverage": 1.1523965242241208,
+        "findproviders_load_p95_ms": 30.526956748962387,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.93955
+      },
+      "replicates": [
+        {
+          "evaluation_id": "candidate-01-8cd8edae",
+          "raw_score": 20673.228000000006,
+          "success_rate": 1,
+          "request_count": 2433,
+          "received_bytes": 3098980376,
+          "provider_egress_bytes": 3675106850,
+          "accounting_coverage": 1.185908396988184,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 35.666470909118594,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401166666666667,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-02-8cd8edae",
+          "raw_score": 16958.76769999996,
+          "success_rate": 1,
+          "request_count": 2467,
+          "received_bytes": 3152363681,
+          "provider_egress_bytes": 3674321361,
+          "accounting_coverage": 1.1655766062608688,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 30.526956748962387,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401722222222222,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-03-8cd8edae",
+          "raw_score": 18290.72845,
+          "success_rate": 0.9991902834008097,
+          "request_count": 2470,
+          "received_bytes": 3143602429,
+          "provider_egress_bytes": 3671871015,
+          "accounting_coverage": 1.1680456094341567,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 29.425845813751202,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401666666666667,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-04-8cd8edae",
+          "raw_score": 16044.56875,
+          "success_rate": 1,
+          "request_count": 2476,
+          "received_bytes": 3146112231,
+          "provider_egress_bytes": 3672476576,
+          "accounting_coverage": 1.1673062835500607,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 30.325272560119597,
+          "findproviders_pool_p05": 2520,
+          "findproviders_sample_span_fraction": 0.9401611111111111,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-05-8cd8edae",
+          "raw_score": 15651.002699999997,
+          "success_rate": 0.9995867768595041,
+          "request_count": 2420,
+          "received_bytes": 3071971446,
+          "provider_egress_bytes": 3669574564,
+          "accounting_coverage": 1.1945340731529703,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 28.311500167846678,
+          "findproviders_pool_p05": 2517,
+          "findproviders_sample_span_fraction": 0.93955,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-06-8cd8edae",
+          "raw_score": 17557.35469999998,
+          "success_rate": 1,
+          "request_count": 2439,
+          "received_bytes": 3097957315,
+          "provider_egress_bytes": 3673195286,
+          "accounting_coverage": 1.1856829880175415,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 29.891205406188927,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9402944444444444,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-07-8cd8edae",
+          "raw_score": 20248.03444999997,
+          "success_rate": 1,
+          "request_count": 2442,
+          "received_bytes": 3112388624,
+          "provider_egress_bytes": 3676060089,
+          "accounting_coverage": 1.1811057464525676,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 31.466227531433084,
+          "findproviders_pool_p05": 2520,
+          "findproviders_sample_span_fraction": 0.9398333333333333,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-08-8cd8edae",
+          "raw_score": 16832.5814,
+          "success_rate": 1,
+          "request_count": 2499,
+          "received_bytes": 3186611791,
+          "provider_egress_bytes": 3672240352,
+          "accounting_coverage": 1.1523965242241208,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.28488712310775,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9404777777777777,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-09-8cd8edae",
+          "raw_score": 20338.04710000001,
+          "success_rate": 0.9987593052109182,
+          "request_count": 2418,
+          "received_bytes": 3038287834,
+          "provider_egress_bytes": 3671964861,
+          "accounting_coverage": 1.208563856231404,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.17023372650144,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401277777777778,
+          "stability_findings": [],
+          "resource_findings": []
+        }
+      ]
+    }
+  },
+  "eval_error": null,
+  "security": {
+    "template_database_reset": true,
+    "redis_reset": true,
+    "cgroup_contained": true,
+    "resource_limits": true,
+    "management_cpu_reserved": true,
+    "management_memory_reserved": true,
+    "default_deny_network": true,
+    "offline_build": true,
+    "offline_build_resource_limits": true,
+    "no_production_secrets": true,
+    "structural_patch_check": true,
+    "accounting_complete": true,
+    "resource_report_complete": true,
+    "cleanup_complete": true,
+    "immutable_reports": true,
+    "cgroup_id": "urnetwork-evaluation-8cd8edaec30c407fb611bda14dfe2764.slice",
+    "template_database_id": "f5f0010ee8e05b749a215efac4808878a6dce27f3516a9cca4e46465c46a6070",
+    "redis_generation_id": "210549221b90fa60c3c394abea53e96dbbbd7a12f49ae1cb52d0380bf1ad5cf2"
+  },
+  "artifacts": [
+    {
+      "path": "accounting.json",
+      "sha256": "96a1a67dbd67e3f461d572d354911890c92a6ea7793ba73eae13c569f4e2c549",
+      "bytes": 5580
+    },
+    {
+      "path": "baseline.json",
+      "sha256": "2e688a73fbe522252d4a99c90aaf9951d0c7c70236e14fc36200e5675d02be98",
+      "bytes": 8995
+    },
+    {
+      "path": "resources.json",
+      "sha256": "6d25f30c5f7f2aacd8ba3e6fa6627a48fe7e70369fc870f8c5d06f3743e743be",
+      "bytes": 6065
+    },
+    {
+      "path": "score.json",
+      "sha256": "ad7ec94df88dacb90c3c575fb3e6118b533c5f29ff15664295ef6621bc36be71",
+      "bytes": 9147
+    },
+    {
+      "path": "evaluation-progress.json",
+      "sha256": "edea9ab14a3b699fc28ef3ae1195f6a75012ffa916d16028d36c4ad298930693",
+      "bytes": 19340
+    },
+    {
+      "path": "evaluation.complete.json",
+      "sha256": "8c83faf9783d05400ad500d452354777edfc5ea66a5bc7919c41174cfeaf799a",
+      "bytes": 1039
+    },
+    {
+      "path": "evidence-manifest.json",
+      "sha256": "7971fca2cb6ad418e25fbd6de30a59c8319ee3fd874c0f882777710f8a14e316",
+      "bytes": 97216
+    }
+  ]
+}
