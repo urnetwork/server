@@ -100,3 +100,14 @@ func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, win
 func CompetitionRepositoryPatchSourceBodySql() string {
 	return strings.Split(competitionRepositoryPatchMigration(), "$source$")[1]
 }
+
+// Read-only catalog consumers use the actual published Snow replacement
+// bodies; the retained mono-root source body remains owned by its migration.
+func CompetitionSnowWinnerReviewBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, identityGuard, findings string) {
+	migration := competitionSnowWinnerReviewMigration()
+	guards := strings.Split(migration, "$guard$")
+	return strings.Split(migration, "$provider$")[1], guards[1],
+		strings.Split(migration, "$winner_source$")[1],
+		strings.Split(migration, "$winner_review$")[1], guards[3],
+		strings.Split(migration, "$snow_findings$")[1]
+}

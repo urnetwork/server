@@ -29467,6 +29467,16 @@ controls. Catalog source failures or malformed observations are not health;
 these checks do not prove runtime review activity or deployed application
 adoption, and deliberately retired body text is not schema drift.
 
+
+Version 893 transfers provider/winner/round custody from 892 while retaining
+892's exact mono-root source authorization. Its own artifact additionally
+requires the full Snow findings validator and review identity guard bodies,
+metadata and identity trigger. Only v844's replaced identity-body subpredicate
+expires at 893; its other schema, source-lock and trigger protections remain
+required. Prefix 892 still detects an altered historical identity body, and
+893 still detects altered retained source or scope-lock custody. These are
+catalog checks, not proof that a reviewer ran or any model output is valid.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
