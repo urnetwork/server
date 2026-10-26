@@ -297,6 +297,8 @@ func UpdatePaymentWallet(ctx context.Context, paymentId server.Id) {
 	// the wallet the funds were actually sent to.
 	// note `account_wallet.network_id` must match the payment network,
 	// so that a payout is never redirected to another network's wallet
+	// note a manual reimbursement keeps the wallet it was created with
+	// (account_payment_reimbursement.go)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -323,7 +325,8 @@ func UpdatePaymentWallet(ctx context.Context, paymentId server.Id) {
 		        	account_payment.payment_record IS NULL AND
 		        	account_payment.circle_idempotency_key IS NULL AND
 		        	account_payment.completed = false AND
-		        	account_payment.canceled = false
+		        	account_payment.canceled = false AND
+		        	NOT `+manualReimbursementMarked("account_payment")+`
 
 		    ) t
 		    WHERE account_payment.payment_id = t.payment_id
@@ -879,7 +882,8 @@ const HungPaymentExpiration = 30 * 24 * time.Hour
 // crash/timeout window around that call. tx_hash is a final defensive marker
 // for legacy rows. Retry-state payments remain pending regardless of age, and
 // so do payments of a plan whose staged sweep assignment is pending, whose
-// cancellation would release sweeps the plan still reserves.
+// cancellation would release sweeps the plan still reserves, and manual
+// reimbursements, which have no sweeps to re-plan.
 func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
 	minTime := maxTime.Add(-HungPaymentExpiration)
 	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
@@ -901,7 +905,8 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 				tx_hash IS NULL AND
 				(NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0)) AND
 				create_time < $1 AND
-				NOT `+paymentPlanAssignmentPendingSql+`
+				NOT `+paymentPlanAssignmentPendingSql+` AND
+				NOT `+manualReimbursementMarked("p")+`
 			RETURNING payment_id
 			`,
 			minTime,
