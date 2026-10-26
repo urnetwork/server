@@ -2101,6 +2101,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 func adminWalletTransfer(opts docopt.Opts) {
 	ctx := context.Background()
+	server.Raise(controller.RequireUsdcPaymentsOn())
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {

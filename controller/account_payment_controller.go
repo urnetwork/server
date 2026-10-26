@@ -53,9 +53,16 @@ func TransferStats(session *session.ClientSession) (*model.TransferStats, error)
 	return model.GetTransferStats(session.Ctx, session.ByJwt.NetworkId), nil
 }
 
+// While USDC payments are off, only a payment Circle already holds is
+// scheduled, for its status check; every other pending payment stays as it is
+// and no longer cycles.
 func SchedulePendingPayments(clientSession *session.ClientSession) {
+	usdcPayout, _ := loadUsdcPayoutPolicy()
 	pendingPayments := model.GetPendingPayments(clientSession.Ctx)
 	for _, payment := range pendingPayments {
+		if !usdcPayout.PaymentsOn() && payment.PaymentRecord == nil {
+			continue
+		}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			ScheduleAdvancePayment(&AdvancePaymentArgs{
 				PaymentId: payment.PaymentId,
@@ -100,6 +107,50 @@ func configuredMissingWalletNoticeMinPayout() model.NanoCents {
 	return missingWalletNoticeMinPayout(model.EnvSubsidyConfig().MinWalletPayoutUsd)
 }
 
+// The held reason of a USDC payout while payments are off.
+const usdcPaymentsOffReason = "usdc payments are off (usdc_payout.yml)"
+
+// The refusal of a USDC send while payments are off.
+var ErrUsdcPaymentsOff = errors.New("usdc payments are off (usdc_payout.yml); turn payments on to send")
+
+// Reports an unreadable usdc_payout.yml at most once a minute.
+var usdcPayoutPolicyErrorReports = newBoundedReport(time.Minute)
+
+// The usdc_payout.yml switches. A file that cannot be read or parsed asks no
+// network to connect a wallet and sends nothing; the error is reported and
+// returned for callers that surface it.
+func loadUsdcPayoutPolicy() (*server.UsdcPayoutPolicy, error) {
+	policy, err := server.LoadUsdcPayoutPolicy()
+	if err != nil {
+		if suppressedCount, ok := usdcPayoutPolicyErrorReports.Allow(server.NowUtc()); ok {
+			glog.Infof("[payout]%s: asking no network to connect a wallet and sending no usdc; %d more since the last report\n", err, suppressedCount)
+		}
+		return &server.UsdcPayoutPolicy{
+			WalletRequests: server.UsdcPayoutOff,
+			Payments:       server.UsdcPayoutOff,
+		}, err
+	}
+	return policy, nil
+}
+
+// Whether a withheld payout may ask its network to connect a wallet.
+func usdcWalletRequestsOn() bool {
+	policy, _ := loadUsdcPayoutPolicy()
+	return policy.WalletRequestsOn()
+}
+
+// Refuses a USDC send while payments are off.
+func RequireUsdcPaymentsOn() error {
+	policy, err := loadUsdcPayoutPolicy()
+	if err != nil {
+		return errors.Join(ErrUsdcPaymentsOff, err)
+	}
+	if !policy.PaymentsOn() {
+		return ErrUsdcPaymentsOff
+	}
+	return nil
+}
+
 // A payout run holds a missing-wallet notice in the outbox at most this long
 // before any delivery run releases it. Longer than the payout task's max time
 // (work.SchedulePayout), so a live run is never split; a run that stopped before
@@ -118,8 +169,11 @@ type heldMissingWalletNotice struct {
 // Holds a missing-wallet notice in the outbox for each wallet-less payment of
 // the slice, in the slice's own transaction, so the notices commit with the
 // payments they are about. A network whose admin has no email or phone gets
-// none.
+// none, and while wallet requests are off no network gets one.
 func holdMissingWalletNoticesInTx(ctx context.Context, tx server.PgTx, plan *model.PaymentPlan) {
+	if !usdcWalletRequestsOn() {
+		return
+	}
 	networkIds := []server.Id{}
 	for networkId, payment := range plan.NetworkPayments {
 		if payment.WalletId == nil {
@@ -189,17 +243,27 @@ func coalesceMissingWalletNotices(
 // transaction: one notice per network, due now, carrying the total withheld
 // across the held slices (see coalesceMissingWalletNotices). The minimum is
 // read only when something is held. A held notice that cannot be decoded is
-// released as it is. Returns the number released.
+// released as it is. While wallet requests are off, the held notices are
+// removed instead, so none is sent. Returns the number released.
 func releaseMissingWalletNotices(
 	ctx context.Context,
 	heldBefore time.Time,
 	minPayout func() model.NanoCents,
 ) (releasedCount int) {
 	templateName := (&MissingWalletTemplate{}).Name()
+	walletRequests := usdcWalletRequestsOn()
 	server.Tx(ctx, func(tx server.PgTx) {
 		releasedCount = 0
 		heldMessages := model.GetHeldAccountMessagesForUpdateInTx(ctx, tx, templateName, heldBefore)
 		if len(heldMessages) == 0 {
+			return
+		}
+		if !walletRequests {
+			messageIds := make([]server.Id, 0, len(heldMessages))
+			for _, message := range heldMessages {
+				messageIds = append(messageIds, message.MessageId)
+			}
+			model.RemoveHeldAccountMessagesInTx(ctx, tx, messageIds)
 			return
 		}
 		now := server.NowUtc()
@@ -338,6 +402,9 @@ type AdvancePaymentResult struct {
 	Canceled   bool   `json:"canceled"`
 	Retryable  bool   `json:"retryable,omitempty"`
 	HeldReason string `json:"held_reason,omitempty"`
+	// USDC payments are off and Circle does not hold the payment: nothing was
+	// submitted, and the payment is not scheduled again
+	PaymentsOff bool `json:"payments_off,omitempty"`
 }
 
 func ScheduleAdvancePayment(
@@ -366,7 +433,10 @@ func AdvancePayment(
 	advancePaymentArgs *AdvancePaymentArgs,
 	clientSession *session.ClientSession,
 ) (*AdvancePaymentResult, error) {
-	model.UpdatePaymentWallet(clientSession.Ctx, advancePaymentArgs.PaymentId)
+	usdcPayout, usdcPayoutErr := loadUsdcPayoutPolicy()
+	if usdcPayout.PaymentsOn() {
+		model.UpdatePaymentWallet(clientSession.Ctx, advancePaymentArgs.PaymentId)
+	}
 	payment, err := model.GetPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
 	if err != nil {
 		return &AdvancePaymentResult{}, err
@@ -387,6 +457,17 @@ func AdvancePayment(
 			Complete: payment.Completed,
 			Canceled: payment.Canceled,
 		}, nil
+	}
+
+	if !usdcPayout.PaymentsOn() && payment.PaymentRecord == nil {
+		// Circle does not hold this payment, so nothing is reserved or
+		// submitted: an attempt keyed before payments turned off stays retained
+		// for reconciliation. A payment Circle holds keeps its status check
+		// below, so no sent transfer goes untracked.
+		return &AdvancePaymentResult{
+			PaymentsOff: true,
+			HeldReason:  usdcPaymentsOffReason,
+		}, usdcPayoutErr
 	}
 
 	if payment.WalletId == nil && payment.PaymentRecord == nil {
@@ -434,7 +515,7 @@ func AdvancePaymentPost(
 	if err := clientSession.Ctx.Err(); err != nil {
 		return err
 	}
-	if !advancePaymentResult.Canceled && !advancePaymentResult.Complete {
+	if !advancePaymentResult.Canceled && !advancePaymentResult.Complete && !advancePaymentResult.PaymentsOff {
 		// keep checking on the payment until it is completed or canceled
 		ScheduleAdvancePayment(advancePaymentArgs, clientSession, tx)
 	}
