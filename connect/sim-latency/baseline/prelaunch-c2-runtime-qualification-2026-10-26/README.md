@@ -16,3 +16,12 @@ in restricted local artifacts; its digest is recorded, not a claim that every
 current-main change was tested. No provider inference or timed scoring ran.
 This evidence does not qualify broad-container capacity, Snow review, the
 future 5 GiB release, or production activation.
+
+## Failed actual four-GiB container capacity qualification
+
+`broad-4g-failed/` preserves the actual attempted container qualification,
+including its reviewed script, observed allocated capacity, output and terminal.
+It failed before candidate building or scoring: projected use was 4,391,722,866
+bytes against the 4,294,967,296-byte hard cap. Cleanup completed. This failure
+is not omitted, retried under the same profile, or counted as a passing runtime
+qualification. A prospective five-GiB profile must qualify independently.

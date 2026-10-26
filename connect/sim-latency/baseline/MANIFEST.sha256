@@ -48,7 +48,10 @@ a2b35f860c755b4e56eaad81c3e1fdb692d23f8eff7bd2c4bfe4ed31aa91f6eb  prelaunch-2026
 db7d7da3158c5525e1eb74b05a986997dd3bfbb5c4236e5ca10903f01c5bd82f  prelaunch-2026-10-24/source-manifest.yml
 b1ef358a1f6aa393ea441f6e3ddb384bbf026a1355b80b8d43766188340d2a05  prelaunch-2026-10-24/source-record.json
 7db7229bcb77fcb794c9d1cc14184944671fafaf71ce594311bbb9b267714043  prelaunch-c2-runtime-qualification-2026-10-26/INDEX.json
-7804a9dd0e441ad16bf87bc31b15bfb5051218e130fc5651b2410cb9cbd601f4  prelaunch-c2-runtime-qualification-2026-10-26/README.md
+356f044db37c7cc43f83b3c513ebe109599d8658913cc6c7a5f88007655df0d3  prelaunch-c2-runtime-qualification-2026-10-26/README.md
+c97c3fd3d5c293bf03cdb672c2036cf1dcbaa8a8c39dc99cb93737916ebe4129  prelaunch-c2-runtime-qualification-2026-10-26/broad-4g-failed/execution.stderr
+573b06d1c92ea1d89acf4fb68341209793d1847fbad06229a26f0ea21d8e7942  prelaunch-c2-runtime-qualification-2026-10-26/broad-4g-failed/execution.stdout
+5e584a3d9787c89e1a1b56e0410b9eb50d5d3b063a7998b4f0687f43c63ed9bc  prelaunch-c2-runtime-qualification-2026-10-26/broad-4g-failed/qualify.sh
 b1aa3ae0eecb13c69a0a5b410f5f0d00a581bc13452ac35110568d34f5822a2e  prelaunch-c2-runtime-qualification-2026-10-26/builder-1.stderr
 ccf2bcd344f25ba41c26722b4456aba7fe875ec85e4d5f9fd28b7e4a8b9deb88  prelaunch-c2-runtime-qualification-2026-10-26/builder-1.stdout
 da6d8fd062e5685b4f317fad7c9116d06a2e40cd5d6afd829ada8cb13fa39f14  prelaunch-c2-runtime-qualification-2026-10-26/builder-2.stderr
