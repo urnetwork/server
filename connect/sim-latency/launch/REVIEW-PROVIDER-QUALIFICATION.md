@@ -6,6 +6,125 @@ installed release, services, databases and dedicated key are unchanged. Static
 run a containment/network probe or call the provider while a timed cohort owns
 the canonical scoring slot.
 
+## Prospective Snow three-model policy — October 26 override
+
+The newly selected policy is `elected_winner_snow_union_v1`, aggregate label
+`snow-qwen-gemma-muse-union`, aggregate reasoning `provider-default`. This label
+is not a served model id. The exact three served models/checkpoints/efforts are
+the native `defaultWinnerSnowProviderSettings()` contract: Qwen, Gemma and Muse,
+serially, with six findings each. Public output retains all **18** findings with
+the actual model attribution; private evidence retains each original judgment,
+usage, raw provider output, response id, request/response digest and revision.
+All three valid approvals are required. Any valid substantiated rejection wins
+only after all members are available; missing/error members hold. Completed
+uncertainty holds unless another fully validated member rejects. No issue is
+dropped because an earlier model already flagged the candidate.
+
+The operator-confirmed frontend is
+`http://192.168.1.162:8000/v1/responses`, with no API key. It is unauthenticated
+LAN HTTP, **not TLS** and not an external OpenAI provider. No paid retry or old
+funding authorization is involved. Historical Mini/Sol identities and retained
+quota evidence below stay unchanged; they do not qualify this new provider.
+
+Use a fresh image built with [Dockerfile.snow](../evaluator/review/Dockerfile.snow),
+never relabel the old image. Its real immutable entrypoint is
+`/review-broker review-broker`; the wrapper supplies and inspects exactly:
+
+```text
+--review-provider-settings=/run/review/provider.json
+--review-provider-settings-sha256=ACTUAL_PUBLIC_SETTINGS_SHA256
+--review-state-directory=/run/review/state
+```
+
+The explicit Snow `/etc/urnetwork/competition-review.json` has exactly three
+fields (render independent actual image/settings pins):
+
+```json
+{
+  "image_id": "sha256:ACTUAL_NEW_SNOW_BROKER_IMAGE_ID",
+  "provider_settings_file": "/var/lib/urnetwork/competition-review/snow-provider.json",
+  "provider_settings_sha256": "ACTUAL_PUBLIC_SETTINGS_SHA256"
+}
+```
+
+The settings leaf is root:root0444, single-link, with protected canonical
+ancestry. Its exact schema is `schema:1`, kind `snow-review-provider`, the fixed
+endpoint and the exact ordered native `members` array, each with `name`,
+`model`, `revision`, `reasoning`. Only that public leaf is mounted read-only.
+There is **no model key mount or key-ownership exemption**. The only RW mount
+is a newly created private per-attempt `member-state` directory at
+`/run/review/state`; after starting behind the stdin barrier the wrapper reads
+the actual full uid map, then assigns only this new leaf to the mapped uid65532
+with mode0700. The parent state directory remains root0700. Scratch root,
+cap-drop/no-new-privileges, one CPU/2GiB/no swap/64 PIDs and joined cleanup remain.
+The actual network accepts only Snow IPv4/TCP8000; external DNS, host input and
+all other forwarding destinations are denied. It is not a hostname proxy.
+
+Before releasing input, a root-private O_EXCL whole-attempt claim binds the
+template idempotency key, exact input/settings/modelset, owner and attempt path.
+Changing the deadline or output path does not permit reroll. Pre-input
+cancellation consumes no claim. A lost/inflight result is an operator hold,
+not an automatic resume/retry. Each native member persists exactly
+`member-01.started.json` and `member-01.complete.json` through03, O_EXCL+fsync,
+before proceeding to the next member. A started file without completion holds.
+The output leaf has a hard per-file1MiB RLIMIT_FSIZE and six fixed native file
+names; this is not a claim of an independent filesystem quota. The wrapper
+seals only those six files after joined cleanup and rejects extra names,
+links, wrong modes/owners or oversized files.
+
+Snow's complete private wrapper manifest has **25 files** for a completed
+attempt and **17** for pre-input cancellation. The reader authenticates the
+captured settings/map/state ownership, actual Docker Cmd/two mounts/cgroup/fence,
+independently rereads the durable root claim, and binds every started/complete
+pair to the original native input and complete returned member observation.
+Original member-state files are retained, not deleted. Cancellation additionally
+requires the actual journal directory to be empty. Historical counts stay16/15.
+
+The same `TestReviewQualificationCommand` dispatches only the distinct config
+kind `winner-review-snow-provider-qualification-config`. Its fields are schema1,
+kind, `output_directory`, pinned `broker`, `broker_configuration`, `image`,
+`unit_qualification`, `provider_settings` and `authorization`. The fresh image
+receipt uses kind `winner-review-snow-scratch-image-qualification`; both its
+policy/provider label fields identify the aggregate, while the plan/evidence
+retain the three actual member identities. The local authorization has schema1,
+kind `winner-review-snow-provider-qualification-authorization`, `policy`, exact
+`provider_settings_sha256`, `output_directory`, `authorized_at`,
+`single_qualification_attempt:true`, `no_external_providers:true`. It is consumed
+once under `snow-qualification-authorizations`, without any funding/key field.
+
+Copy all **eight** `review-qualification*.go.txt` drafts and the actual wrapper
+into a fresh current-control workspace containing the committed native Snow
+implementation. The selection `^TestReviewQualification` has **39 tests**:
+23 historical guards and16 new Snow guards. Run three consecutive race passes,
+zero skips, all real-operation environment variables unset. Separately include
+the native `^TestWinnerSnow` six guards. Offline HTTP mocks never count as
+Snow inference or actual firewall/cgroup qualification. Preserve old23-test
+snapshots, failures and exact new binary/source/log pins.
+
+Only after those gates, fresh image installation and explicit one-attempt
+authority, invoke the qualified driver with the existing command/config pins
+and all three opt-ins:
+
+```bash
+export SIM_LATENCY_REVIEW_QUALIFICATION_COMMAND=run
+export SIM_LATENCY_REVIEW_QUALIFICATION_REAL_OPT_IN=1
+export SIM_LATENCY_REVIEW_QUALIFICATION_SNOW_OPT_IN=1
+export SIM_LATENCY_REVIEW_QUALIFICATION_CONFIG=/absolute/private/snow-qualification.json
+export SIM_LATENCY_REVIEW_QUALIFICATION_CONFIG_SHA256=ACTUAL_CONFIGURATION_SHA256
+taskset -c 20,22 /absolute/qualified/review-qualification.test \
+  -test.run '^TestReviewQualificationCommand$' -test.count=1 -test.v
+```
+
+The six fixtures are unchanged: cancellation, honest comment/no-op, concrete
+score fabrication, benchmark-only cheating, untrusted prompt injection, missing
+transitive context. The real path uses the native parent union validator with
+the original authenticated request; it does not manufacture another aggregator.
+One shared30-minute case deadline covers all three serial calls and swaps,
+8192 output tokens/member. No main API/database write, candidate execution or
+automatic member/case retry is authorized. Genuine execution is still pending.
+
+## Historical Mini-only procedure — retained, not the new Snow policy
+
 The supplied dedicated key has model-metadata access, but the actual Responses
 request returned HTTP 429 `credit_balance_exhausted`. HTTP 200 from `/models`
 does not qualify inference. Do not retry until the user funds the credited

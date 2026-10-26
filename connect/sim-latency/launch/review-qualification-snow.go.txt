@@ -1,0 +1,109 @@
+// The prospective Snow qualification reuses the actual broker/containment
+// workflow. All three native judgments and their union remain private evidence.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Historical fixture text/verdicts are unchanged; only the new explicitly
+// selected provider policy and a separate idempotency namespace are applied.
+func frozenSnowReviewQualificationCases() ([]reviewQualificationCase, error) {
+	cases, err := frozenReviewQualificationCases()
+	if err != nil {
+		return nil, err
+	}
+	for index := range cases {
+		request := &cases[index].Request
+		request.Template.ReviewerModel, request.Template.ReviewerReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
+		request.Template.IdempotencyKey = fmt.Sprintf("synthetic-snow-review-qualification-%02d", index+1)
+		request.Request.ReviewerModel, request.Request.ReviewerReasoning = request.Template.ReviewerModel, request.Template.ReviewerReasoning
+		request.Request.Policy.WinnerReviewPolicy = model.CompetitionSnowWinnerReviewPolicy
+		content, err := json.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
+		cases[index].RequestSha256 = reviewQualificationHash(content)
+	}
+	return cases, nil
+}
+
+// A valid models-list response, a smaller pool or a changed checkpoint cannot
+// qualify this exact three-member policy or change any frozen expected answer.
+func validateSnowReviewQualificationPlan(plan reviewQualificationPlan, provider winnerSnowProviderSettings, settingsSha256 string) error {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		return err
+	}
+	if validateWinnerSnowProviderSettings(provider) != nil || !validSha256(settingsSha256) || plan.Schema != 1 || plan.Kind != "winner-review-snow-provider-qualification-plan" || plan.PolicyModel != model.CompetitionSnowWinnerReviewModel || plan.ProviderModel != model.CompetitionSnowWinnerReviewModel || plan.Reasoning != model.CompetitionSnowWinnerReviewReasoning || plan.ProviderSettingsSha256 != settingsSha256 || !reflect.DeepEqual(plan.Members, provider.Members) || !validSha256(plan.BrokerSha256) || !validSha256(plan.ImageReceiptSha256) || !reflect.DeepEqual(plan.Cases, cases) {
+		return errors.New("Snow qualification requires all three exact members and all six frozen cases")
+	}
+	return nil
+}
+
+// Uses the real parent validator to recompute the union. No local approval
+// emulator or second aggregation algorithm can erase a member's issues.
+func validateSnowReviewQualificationResponse(content []byte, request winnerReviewBrokerRequest, expected string, provider winnerSnowProviderSettings, settingsSha256 string, settings reviewQualificationSettings) (reviewQualificationObservation, error) {
+	observation := reviewQualificationObservation{Expected: expected, ResponseSha256: reviewQualificationHash(content)}
+	if err := rejectWinnerReviewCaseAliases(content); err != nil {
+		return observation, err
+	}
+	var result winnerReviewBrokerResult
+	if err := decodeStrictJSONBytes(content, &result, "Snow qualification broker response"); err != nil {
+		return observation, err
+	}
+	if result.Schema != 1 || result.Model != model.CompetitionSnowWinnerReviewModel || result.Reasoning != model.CompetitionSnowWinnerReviewReasoning || !result.NoMainCredentials || !result.NoCandidateExecution || len(result.PrivateEvidence) == 0 || int64(len(result.PrivateEvidence)) > settings.MaximumSnowEvidenceBytes || reviewQualificationHash([]byte(result.PrivateEvidence)) != result.Review.PrivateEvidenceSha256 {
+		return observation, errors.New("Snow qualification broker provenance invalid")
+	}
+	if err := validateWinnerSnowEvidence(&result, request); err != nil {
+		return observation, err
+	}
+	var evidence winnerSnowEvidence
+	if err := decodeStrictJSONBytes([]byte(result.PrivateEvidence), &evidence, "Snow qualification member originals"); err != nil {
+		return observation, err
+	}
+	if evidence.ProviderSettingsSha256 != settingsSha256 || !reflect.DeepEqual(evidence.ProviderSettings, provider) || len(evidence.Members) != len(provider.Members) || len(evidence.Members) != 3 || len(result.Review.Findings) != 18 || evidence.Judgment.Decision != expected {
+		return observation, errors.New("Snow qualification lost a member, checkpoint, settings pin or expected union")
+	}
+	seen := map[string]bool{}
+	uncertain, rejecting := false, false
+	for index, member := range evidence.Members {
+		pin := provider.Members[index]
+		if member.Name != pin.Name || member.RequestedModel != pin.Model || member.Model != pin.Model || member.Revision != pin.Revision || member.Reasoning != pin.Reasoning || member.ProviderResponseId == "" || seen[member.ProviderResponseId] || !validSha256(member.RequestSha256) || !validSha256(member.ResponseSha256) || member.Error != "" {
+			return observation, errors.New("Snow qualification lacks three independent completed model receipts")
+		}
+		seen[member.ProviderResponseId] = true
+		var usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		}
+		if json.Unmarshal(member.Usage, &usage) != nil || usage.InputTokens <= 0 || usage.OutputTokens <= 0 {
+			return observation, errors.New("Snow qualification lacks genuine per-model completed usage")
+		}
+		var judgment winnerModelJudgment
+		if err := decodeStrictJSONBytes([]byte(member.ProviderOutput), &judgment, "Snow original member judgment"); err != nil || !reflect.DeepEqual(judgment, member.Judgment) || validateWinnerSnowMember(judgment, request) != nil {
+			return observation, errors.New("Snow qualification changed an original member judgment")
+		}
+		uncertain = uncertain || judgment.Decision == "uncertain"
+		rejecting = rejecting || judgment.Decision == "disqualify"
+		observation.ProviderResponseIds = append(observation.ProviderResponseIds, member.Name+":"+member.ProviderResponseId)
+	}
+	authorityErr := validateWinnerReviewBrokerResult(&result, request.Template, request.Request.Policy, request)
+	if expected == "uncertain" {
+		if authorityErr == nil || !uncertain || rejecting || result.Review.RewardDisposition != "pending" || result.Review.SourceDisposition != "deferred" {
+			return observation, errors.New("Snow completed uncertainty became authority or was fabricated")
+		}
+	} else if expected != "approve" && expected != "disqualify" {
+		return observation, errors.New("Snow qualification expected decision is unsupported")
+	} else if authorityErr != nil || (expected == "approve" && (uncertain || rejecting)) || (expected == "disqualify" && !rejecting) {
+		return observation, errors.New("Snow qualification native authority or union decision mismatch")
+	}
+	observation.Observed, observation.PrivateEvidenceSha256 = expected, result.Review.PrivateEvidenceSha256
+	observation.WouldAuthorize, observation.Passed = authorityErr == nil, true
+	return observation, nil
+}

@@ -15,17 +15,49 @@ readonly invocation_limit_seconds=1800 cleanup_limit_seconds=20 command_limit_se
 permissions="$(stat -c %a "$configuration")"
 (( (8#$permissions & 8#022) == 0 )) || exit 1
 image="$(jq -er '.image_id' "$configuration")"
-key="$(jq -er '.model_key_file' "$configuration")"
-jq -e '(keys|sort)==["image_id","model_key_file"]' "$configuration" >/dev/null
 [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-[[ "$key" == /var/lib/urnetwork/competition-review/model.key ]] || exit 1
-[[ -f "$key" && ! -L "$key" ]] || exit 1
-[[ "$(stat -c %a "$key")" == 400 ]] || exit 1
-[[ "$(stat -c %u /var/lib/urnetwork/competition-review)" == 0 ]] || exit 1
-[[ "$(stat -c %a /var/lib/urnetwork/competition-review)" == 700 ]] || exit 1
-[[ "$(realpath -e "$key")" == "$key" ]] || exit 1
-key_identity="$(stat -c %d:%i:%u:%g:%a:%s:%h "$key")"
-readonly key_identity
+provider_kind=legacy
+provider_settings="" provider_settings_sha256=""
+if jq -e '(keys|sort)==["image_id","model_key_file"]' "$configuration" >/dev/null; then
+    key="$(jq -er '.model_key_file' "$configuration")"
+    [[ "$key" == /var/lib/urnetwork/competition-review/model.key ]] || exit 1
+    [[ -f "$key" && ! -L "$key" ]] || exit 1
+    [[ "$(stat -c %a "$key")" == 400 ]] || exit 1
+    [[ "$(stat -c %u /var/lib/urnetwork/competition-review)" == 0 ]] || exit 1
+    [[ "$(stat -c %a /var/lib/urnetwork/competition-review)" == 700 ]] || exit 1
+    [[ "$(realpath -e "$key")" == "$key" ]] || exit 1
+    key_identity="$(stat -c %d:%i:%u:%g:%a:%s:%h "$key")"
+    readonly key_identity
+else
+    jq -e '(keys|sort)==["image_id","provider_settings_file","provider_settings_sha256"]' "$configuration" >/dev/null
+    provider_kind=snow
+    provider_settings="$(jq -er '.provider_settings_file' "$configuration")"
+    provider_settings_sha256="$(jq -er '.provider_settings_sha256' "$configuration")"
+    [[ "$provider_settings" == /var/lib/urnetwork/competition-review/snow-provider.json && "$provider_settings_sha256" =~ ^[0-9a-f]{64}$ ]]
+    [[ -f "$provider_settings" && ! -L "$provider_settings" && "$(realpath -e "$provider_settings")" == "$provider_settings" ]]
+    [[ "$(stat -c %u:%g:%a:%h "$provider_settings")" == 0:0:444:1 ]]
+    (( $(stat -c %s "$provider_settings") > 0 && $(stat -c %s "$provider_settings") <= input_limit ))
+    current="$provider_settings"
+    while :; do
+        [[ ! -L "$current" && "$(stat -c %u "$current")" == 0 ]]
+        permissions="$(stat -c %a "$current")"
+        (( (8#$permissions & 8#022) == 0 ))
+        [[ "$current" != / ]] || break
+        current="$(dirname "$current")"
+        [[ -d "$current" ]]
+    done
+    [[ "$(sha256sum "$provider_settings" | cut -d ' ' -f1)" == "$provider_settings_sha256" ]]
+    jq -e '(keys|sort)==["endpoint","kind","members","schema"] and .schema==1 and .kind=="snow-review-provider" and
+        .endpoint=="http://192.168.1.162:8000/v1/responses" and (.members|length)==3 and
+        [.members[].name]==["qwen","gemma","muse"] and
+        [.members[].model]==["qwen3.8-27b","gemma-4-26b-a4b","muse-glimmer-30b"] and
+        all(.members[]; (keys|sort)==["model","name","reasoning","revision"] and (.revision|type)=="string" and (.revision|test("^[0-9a-f]{40}$")) and
+            (.reasoning|type)=="string" and (.reasoning|length)>0)' "$provider_settings" >/dev/null
+    provider_settings_identity="$(stat -c %d:%i:%u:%g:%a:%s:%h "$provider_settings")"
+    readonly provider_settings_identity
+fi
+readonly provider_kind provider_settings provider_settings_sha256
+[[ "$(stat -c %u:%a "$state_root")" == 0:700 ]] || exit 1
 [[ "$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)" == 20,22 ]] || exit 1
 readonly docker=(/usr/bin/docker --host=unix:///var/run/docker.sock)
 bounded() { timeout --signal=TERM --kill-after=1s "${command_limit_seconds}s" "$@"; }
@@ -37,6 +69,8 @@ if [[ ! -d "$state_root/attempts" ]]; then mkdir -m 0700 "$state_root/attempts";
 exec 8<>"$state_root/broker.lock"
 flock -n 8
 attempt_directory="$(mktemp -d "$state_root/attempts/invocation.XXXXXXXX")"
+member_state="$attempt_directory/member-state"
+if [[ "$provider_kind" == snow ]]; then mkdir -m 0700 "$member_state"; fi
 owner="$(openssl rand -hex 32)"
 [[ "$owner" =~ ^[0-9a-f]{64}$ ]] || exit 1
 container_name="urnetwork-review-$owner"
@@ -102,6 +136,20 @@ finish() {
     [[ ! -f "$attempt_directory/broker.stderr" ]] || error_bytes="$(stat -c %s "$attempt_directory/broker.stderr")"
     ((output_bytes<=output_limit && error_bytes<=error_limit)) || status=1
     $cleanup_verified || status=1
+    if [[ "$provider_kind" == snow && -n "${mapped_uid:-}" ]] && $cleanup_verified; then
+        shopt -s nullglob dotglob
+        state_files=("$member_state"/*)
+        ((${#state_files[@]}<=6)) || evidence_verified=false
+        for source in "${state_files[@]}"; do
+            name="${source##*/}"
+            if [[ ! "$name" =~ ^member-0[123]\.(started|complete)\.json$ || -L "$source" || ! -f "$source" ]]; then evidence_verified=false; continue; fi
+            [[ "$(stat -c %u:%a:%h "$source")" == "$mapped_uid:600:1" ]] || { evidence_verified=false; continue; }
+            (($(stat -c %s "$source")<=1048576)) || { evidence_verified=false; continue; }
+            head -c 1048577 "$source" > "$attempt_directory/$name" || evidence_verified=false
+            [[ "$(sha256sum "$source" | cut -d ' ' -f1)" == "$(sha256sum "$attempt_directory/$name" | cut -d ' ' -f1)" ]] || evidence_verified=false
+        done
+    fi
+    $evidence_verified || status=1
     jq -n --argjson status "$status" --argjson broker_status "$broker_status" --argjson observed "$broker_exit_observed" --argjson cleanup "$cleanup_verified" --argjson released "$provider_input_released" \
         --arg owner "$owner" --arg image "$image" --arg container "$container_id" --arg network "$network_id" \
         '{schema:1,kind:"winner-review-container-terminal",owner:$owner,image_id:$image,container_id:$container,
@@ -109,7 +157,7 @@ finish() {
     (
         set -Eeuo pipefail
         cd "$attempt_directory" || exit 1
-        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json uid-map.txt key-ownership.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
+        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json uid-map.txt key-ownership.json provider-settings.json provider-settings-ownership.json member-state-ownership.json attempt-claim.json member-01.started.json member-01.complete.json member-02.started.json member-02.complete.json member-03.started.json member-03.complete.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
             [[ ! -f "$file" ]] || jq -cn --arg path "$file" --arg sha256 "$(sha256sum "$file" | cut -d ' ' -f1)" --argjson bytes "$(stat -c %s "$file")" '{path:$path,sha256:$sha256,bytes:$bytes}'
         done | jq -s '{schema:1,kind:"winner-review-container-evidence",artifacts:.}'
     ) > "$attempt_directory/evidence-manifest.json" || evidence_verified=false
@@ -141,10 +189,26 @@ deadline_epoch="$(date -u -d "$deadline" +%s)"
 remaining=$((deadline_epoch-$(date -u +%s)))
 ((remaining>0 && remaining<=invocation_limit_seconds))
 
-# Resolve once on the trusted host; the container gets no external DNS. TLS
-# still verifies api.openai.com. A transport failure never selects another IP.
-resolution="$(bounded getent ahostsv4 api.openai.com)"
-provider_ip="$(awk '{print $1}' <<<"$resolution" | sort -u | head -n 1)"
+# Historical HTTPS resolves once on the host. Snow is one fixed unauthenticated
+# LAN HTTP frontend: no DNS, TLS, key or public-provider assertion is implied.
+provider_ip=192.168.1.162 provider_host=192.168.1.162 provider_port=8000
+provider_network_arguments=()
+provider_command_arguments=("--review-provider-settings=/run/review/provider.json" "--review-provider-settings-sha256=$provider_settings_sha256" "--review-state-directory=/run/review/state")
+provider_state_arguments=(--ulimit fsize=1048576:1048576 --mount "type=bind,source=$member_state,target=/run/review/state")
+provider_entrypoint='["/review-broker","review-broker"]'
+provider_extra_hosts='[]'
+provider_mount_source="$provider_settings" provider_mount_target=/run/review/provider.json
+if [[ "$provider_kind" == legacy ]]; then
+    resolution="$(bounded getent ahostsv4 api.openai.com)"
+    provider_ip="$(awk '{print $1}' <<<"$resolution" | sort -u | head -n 1)"
+    provider_host=api.openai.com provider_port=443
+    provider_network_arguments=(--add-host "api.openai.com:$provider_ip")
+    provider_command_arguments=()
+    provider_state_arguments=()
+    provider_entrypoint='["/review-broker","review-broker","--model-key-file=/run/secrets/model-key"]'
+    provider_extra_hosts="$(jq -cn --arg host "api.openai.com:$provider_ip" '[$host]')"
+    provider_mount_source="$key" provider_mount_target=/run/secrets/model-key
+fi
 public_ipv4() {
     local value="$1" a b c d
     [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -154,7 +218,7 @@ public_ipv4() {
     ! (( (a==100 && b>=64 && b<=127) || (a==169 && b==254) || (a==172 && b>=16 && b<=31) ||
          (a==192 && (b==168 || b==0 || (b==88 && c==99))) || (a==198 && (b==18 || b==19 || (b==51 && c==100))) || (a==203 && b==0 && c==113) ))
 }
-public_ipv4 "$provider_ip"
+if [[ "$provider_kind" == legacy ]]; then public_ipv4 "$provider_ip"; fi
 printf '%s\n' "$provider_ip" > "$attempt_directory/provider-address.txt"
 bounded "${docker[@]}" image inspect "$image" > "$attempt_directory/image-inspect.json"
 network_may_exist=true
@@ -165,17 +229,17 @@ jq -e --arg owner "$owner" --arg id "$network_id" 'length==1 and .[0].Id==$id an
 subnet="$(jq -er '.[0].IPAM.Config[0].Subnet' "$attempt_directory/network-inspect.json")"
 [[ "$subnet" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9.]+/(1[6-9]|2[0-9]|30)$ ]]
 
-# Install source-scoped host-input denial and the sole HTTPS destination before
+# Install source-scoped host-input denial and the sole provider destination before
 # creating/starting a child. These are actual kernel rules, not app claims.
 bounded /usr/sbin/iptables --wait 1 --new-chain "$chain"
 chain_created=true
-bounded /usr/sbin/iptables --wait 1 --append "$chain" --destination "$provider_ip" --protocol tcp --dport 443 --jump ACCEPT
+bounded /usr/sbin/iptables --wait 1 --append "$chain" --destination "$provider_ip" --protocol tcp --dport "$provider_port" --jump ACCEPT
 bounded /usr/sbin/iptables --wait 1 --append "$chain" --jump DROP
 bounded /usr/sbin/iptables --wait 1 --insert DOCKER-USER 1 --source "$subnet" --match comment --comment "$comment" --jump "$chain"
 forward_added=true
 bounded /usr/sbin/iptables --wait 1 --insert INPUT 1 --source "$subnet" --match comment --comment "$comment" --jump DROP
 input_added=true
-bounded /usr/sbin/iptables --wait 1 --check "$chain" --destination "$provider_ip" --protocol tcp --dport 443 --jump ACCEPT
+bounded /usr/sbin/iptables --wait 1 --check "$chain" --destination "$provider_ip" --protocol tcp --dport "$provider_port" --jump ACCEPT
 bounded /usr/sbin/iptables --wait 1 --check "$chain" --jump DROP
 bounded /usr/sbin/iptables --wait 1 --list-rules DOCKER-USER > "$attempt_directory/fence-forward.txt"
 bounded /usr/sbin/iptables --wait 1 --list-rules INPUT > "$attempt_directory/fence-input.txt"
@@ -183,29 +247,34 @@ bounded /usr/sbin/iptables --wait 1 --list-rules "$chain" > "$attempt_directory/
 [[ "$(awk '$1=="-A" {print;exit}' "$attempt_directory/fence-forward.txt" | tr -d '"')" == "-A DOCKER-USER -s $subnet -m comment --comment $comment -j $chain" ]]
 [[ "$(awk '$1=="-A" {print;exit}' "$attempt_directory/fence-input.txt" | tr -d '"')" == "-A INPUT -s $subnet -m comment --comment $comment -j DROP" ]]
 [[ "$(awk '$1=="-A" {n++} END {print n+0}' "$attempt_directory/fence-chain.txt")" == 2 ]]
-jq -n --arg owner "$owner" --arg chain "$chain" --arg subnet "$subnet" --arg ip "$provider_ip" '{schema:1,kind:"winner-review-provider-egress-fence",owner:$owner,chain:$chain,source_subnet:$subnet,provider_host:"api.openai.com",provider_ipv4:$ip,provider_port:443,external_dns:false,host_input_denied:true,default_deny:true,installed_before_start:true}' > "$attempt_directory/fence.json"
+jq -n --arg owner "$owner" --arg chain "$chain" --arg subnet "$subnet" --arg ip "$provider_ip" --arg host "$provider_host" --argjson port "$provider_port" '{schema:1,kind:"winner-review-provider-egress-fence",owner:$owner,chain:$chain,source_subnet:$subnet,provider_host:$host,provider_ipv4:$ip,provider_port:$port,external_dns:false,host_input_denied:true,default_deny:true,installed_before_start:true}' > "$attempt_directory/fence.json"
 
 container_may_exist=true
 container_id="$(bounded "${docker[@]}" create --interactive --init --pull=never --name "$container_name" --label "com.urnetwork.review.owner=$owner" \
-    --network "$network_id" --dns 127.0.0.1 --add-host "api.openai.com:$provider_ip" --read-only --user 65532:65532 --cap-drop ALL \
+    --network "$network_id" --dns 127.0.0.1 "${provider_network_arguments[@]}" --read-only --user 65532:65532 --cap-drop ALL \
     --security-opt no-new-privileges:true --cgroupns private --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 \
     --pids-limit 64 --memory 2g --memory-swap 2g --cpus 1 --cpuset-cpus 20,22 --ulimit nofile=1024:1024 --ulimit core=0:0 \
-    --mount "type=bind,source=$key,target=/run/secrets/model-key,readonly" "$image")"
+    --mount "type=bind,source=$provider_mount_source,target=$provider_mount_target,readonly" "${provider_state_arguments[@]}" "$image" "${provider_command_arguments[@]}")"
 [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]
 bounded "${docker[@]}" inspect "$container_id" > "$attempt_directory/container-inspect.json"
-jq -e --arg id "$container_id" --arg image "$image" --arg owner "$owner" --arg network "$network_id" --arg key "$key" --arg host "api.openai.com:$provider_ip" '
+provider_command_json="$(jq -cn --args '$ARGS.positional' -- "${provider_command_arguments[@]}")"
+jq -e --arg id "$container_id" --arg image "$image" --arg owner "$owner" --arg network "$network_id" --arg leaf "$provider_mount_source" --arg target "$provider_mount_target" --arg state "$member_state" --argjson snow "$([[ "$provider_kind" == snow ]] && printf true || printf false)" --argjson hosts "$provider_extra_hosts" --argjson entrypoint "$provider_entrypoint" --argjson command "$provider_command_json" '
  length==1 and .[0].Id==$id and .[0].Image==$image and .[0].Config.User=="65532:65532" and
- .[0].Config.Entrypoint==["/review-broker","review-broker","--model-key-file=/run/secrets/model-key"] and
- ((.[0].Config.Cmd//[])|length)==0 and .[0].Config.Labels["com.urnetwork.review.owner"]==$owner and
+ .[0].Config.Entrypoint==$entrypoint and
+ (.[0].Config.Cmd//[])==$command and .[0].Config.Labels["com.urnetwork.review.owner"]==$owner and
  .[0].HostConfig.NetworkMode==$network and .[0].HostConfig.ReadonlyRootfs==true and .[0].HostConfig.Privileged==false and
  .[0].HostConfig.CgroupnsMode=="private" and .[0].HostConfig.CpusetCpus=="20,22" and .[0].HostConfig.NanoCpus==1000000000 and
  .[0].HostConfig.Memory==2147483648 and .[0].HostConfig.MemorySwap==2147483648 and .[0].HostConfig.PidsLimit==64 and
  .[0].HostConfig.CapDrop==["ALL"] and ((.[0].HostConfig.CapAdd//[])|length)==0 and .[0].HostConfig.Init==true and
  (.[0].HostConfig.SecurityOpt|index("no-new-privileges:true")!=null) and .[0].HostConfig.Dns==["127.0.0.1"] and
- .[0].HostConfig.ExtraHosts==[$host] and .[0].HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"]=="1" and
+ (.[0].HostConfig.ExtraHosts//[])==$hosts and .[0].HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"]=="1" and
  .[0].HostConfig.Sysctls["net.ipv6.conf.default.disable_ipv6"]=="1" and
- (.[0].Mounts|length)==1 and .[0].Mounts[0].Type=="bind" and .[0].Mounts[0].Source==$key and
- .[0].Mounts[0].Destination=="/run/secrets/model-key" and .[0].Mounts[0].RW==false and
+ (.[0].Mounts|length)==(if $snow then 2 else 1 end) and
+ any(.[0].Mounts[]; .Type=="bind" and .Source==$leaf and .Destination==$target and .RW==false) and
+ (if $snow then
+    any(.[0].Mounts[]; .Type=="bind" and .Source==$state and .Destination=="/run/review/state" and .RW==true) and
+    any(.[0].HostConfig.Ulimits[]; .Name=="fsize" and .Soft==1048576 and .Hard==1048576)
+  else true end) and
  .[0].HostConfig.PidMode=="" and .[0].HostConfig.IpcMode=="private" and .[0].HostConfig.UTSMode=="" and
  ((.[0].HostConfig.Devices//[])|length)==0 and ((.[0].HostConfig.DeviceRequests//[])|length)==0 and
  ((.[0].HostConfig.Binds//[])|length)==0 and ((.[0].HostConfig.VolumesFrom//[])|length)==0 and
@@ -261,6 +330,7 @@ END { if (bad || count==0 || found!=1) exit 1; printf "%.0f\n",mapped }
 # review_uid_map_program_end
 mapped_uid="$(awk "$review_uid_map_program" "$attempt_directory/uid-map.txt")"
 [[ "$mapped_uid" =~ ^[0-9]+$ ]]
+if [[ "$provider_kind" == legacy ]]; then
 [[ ! -L "$key" && -f "$key" && "$(stat -c %d:%i:%u:%g:%a:%s:%h "$key")" == "$key_identity" ]]
 IFS=: read -r key_device key_inode key_uid key_gid key_mode key_bytes key_links <<<"$key_identity"
 jq -n --arg owner "$owner" --arg container "$container_id" --argjson pid "$broker_pid" --arg path "$key" \
@@ -273,8 +343,57 @@ jq -n --arg owner "$owner" --arg container "$container_id" --argjson pid "$broke
       parent_owner_uid:0,parent_mode:"0700",observed_before_provider_input:true}' > "$attempt_directory/key-ownership.json"
 [[ "$key_mode" == 400 && "$key_uid" == "$mapped_uid" && "$key_links" == 1 && "$mapped_uid" != 0 ]]
 ((key_bytes>0 && key_bytes<=4096))
+else
+    [[ "$mapped_uid" != 0 && ! -L "$provider_settings" && -f "$provider_settings" ]]
+    [[ "$(stat -c %d:%i:%u:%g:%a:%s:%h "$provider_settings")" == "$provider_settings_identity" ]]
+    head -c "$((input_limit+1))" "$provider_settings" > "$attempt_directory/provider-settings.json"
+    [[ "$(sha256sum "$attempt_directory/provider-settings.json" | cut -d ' ' -f1)" == "$provider_settings_sha256" ]]
+    IFS=: read -r settings_device settings_inode settings_uid settings_gid settings_mode settings_bytes settings_links <<<"$provider_settings_identity"
+    jq -n --arg owner "$owner" --arg container "$container_id" --argjson pid "$broker_pid" --arg path "$provider_settings" \
+        --arg map_sha256 "$(sha256sum "$attempt_directory/uid-map.txt" | cut -d ' ' -f1)" --arg settings_sha256 "$provider_settings_sha256" \
+        --argjson mapped_uid "$mapped_uid" --arg device "$settings_device" --arg inode "$settings_inode" --argjson bytes "$settings_bytes" \
+        '{schema:1,kind:"winner-review-provider-settings-ownership",owner:$owner,container_id:$container,container_pid:$pid,
+          path:$path,container_uid:65532,mapped_host_uid:$mapped_uid,host_uid:0,host_gid:0,mode:"0444",bytes:$bytes,links:1,
+          device:$device,inode:$inode,uid_map_sha256:$map_sha256,provider_settings_sha256:$settings_sha256,
+          observed_before_provider_input:true}' > "$attempt_directory/provider-settings-ownership.json"
+    chown "$mapped_uid":0 "$member_state"
+    [[ ! -L "$member_state" && -d "$member_state" && "$(stat -c %u:%g:%a "$member_state")" == "$mapped_uid:0:700" ]]
+    jq -n --arg owner "$owner" --arg container "$container_id" --argjson pid "$broker_pid" --arg path "$member_state" \
+        --arg map_sha256 "$(sha256sum "$attempt_directory/uid-map.txt" | cut -d ' ' -f1)" --argjson mapped_uid "$mapped_uid" \
+        --arg device "$(stat -c %d "$member_state")" --arg inode "$(stat -c %i "$member_state")" \
+        '{schema:1,kind:"winner-review-member-state-ownership",owner:$owner,container_id:$container,container_pid:$pid,
+          path:$path,container_uid:65532,mapped_host_uid:$mapped_uid,host_uid:$mapped_uid,host_gid:0,mode:"0700",
+          device:$device,inode:$inode,uid_map_sha256:$map_sha256,observed_before_provider_input:true}' > "$attempt_directory/member-state-ownership.json"
+fi
 [[ "$(stat -c %u:%a "$state_root")" == 0:700 ]]
 if [[ "$(jq -er '.operation' "$attempt_directory/input.json")" == qualification_cancel_before_provider ]]; then exit 143; fi
+# review_snow_attempt_program_begin
+claim_snow_attempt() {
+    [[ "$provider_kind" == snow ]]
+    if [[ "$(jq -er '.operation' "$attempt_directory/input.json")" == qualification_cancel_before_provider ]]; then return 0; fi
+    idempotency_key="$(jq -er '.template.idempotency_key | strings | select(length>0 and length<=512)' "$attempt_directory/input.json")"
+    idempotency_sha256="$(printf '%s' "$idempotency_key" | sha256sum | cut -d ' ' -f1)"
+    claim_directory="$state_root/snow-review-claims"
+    [[ ! -L "$claim_directory" ]]
+    if [[ ! -d "$claim_directory" ]]; then mkdir -m 0700 "$claim_directory"; fi
+    [[ "$(stat -c %u:%g:%a "$claim_directory")" == 0:0:700 ]]
+    model_set="$(jq -cS '.members' "$attempt_directory/provider-settings.json")"
+    model_set_sha256="$(printf '%s' "$model_set" | sha256sum | cut -d ' ' -f1)"
+    claim_path="$claim_directory/$idempotency_sha256.json"
+    (
+        set -o noclobber
+        jq -n --arg key_sha256 "$idempotency_sha256" --arg input_sha256 "$(sha256sum "$attempt_directory/input.json" | cut -d ' ' -f1)" \
+            --arg settings_sha256 "$provider_settings_sha256" --arg model_set_sha256 "$model_set_sha256" --arg owner "$owner" --arg attempt "$attempt_directory" \
+            '{schema:1,kind:"snow-review-single-attempt-claim",idempotency_key_sha256:$key_sha256,input_sha256:$input_sha256,
+              provider_settings_sha256:$settings_sha256,model_set_sha256:$model_set_sha256,owner:$owner,attempt_directory:$attempt,
+              automatic_retries:false}' > "$claim_path"
+    )
+    bounded sync -f "$claim_path"
+    bounded sync -f "$claim_directory"
+    cp -- "$claim_path" "$attempt_directory/attempt-claim.json"
+}
+# review_snow_attempt_program_end
+if [[ "$provider_kind" == snow ]]; then claim_snow_attempt; fi
 provider_input_released=true
 timeout --signal=TERM --kill-after=1s "${command_limit_seconds}s" cat "$attempt_directory/input.json" >&7 7>&- &
 input_pid=$!

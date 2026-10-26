@@ -1,0 +1,8 @@
+# Only a newly qualified trusted static broker and public CA bundle are inputs.
+# The wrapper supplies pinned settings and a private journal leaf as inspected Cmd.
+# No model key, repository root, config/vault parent or candidate is in context.
+FROM scratch
+COPY sim-latency /review-broker
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+ENTRYPOINT ["/review-broker", "review-broker"]

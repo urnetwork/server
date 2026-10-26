@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,35 +67,8 @@ func authenticateReviewQualificationInputs(config reviewQualificationConfig, set
 			return nil, err
 		}
 	}
-	unitBytes, err := readReviewQualificationPin(config.UnitQualification, settings.MaximumBytes, false)
-	if err != nil {
+	if err := authenticateReviewQualificationUnit(config.UnitQualification, settings); err != nil {
 		return nil, err
-	}
-	var unit reviewQualificationUnitReceipt
-	if err := decodeStrictJSONBytes(unitBytes, &unit, "review qualification unit receipt"); err != nil {
-		return nil, err
-	}
-	if unit.Schema != 1 || unit.Kind != "winner-review-qualification-unit-receipt" || !unit.Accepted || !unit.Race || unit.ConsecutivePasses != 3 || unit.Skips != 0 || len(unit.Logs) != 3 || len(unit.Sources) == 0 || !validSha256(unit.BinarySha256) {
-		return nil, errors.New("three complete race guard passes required before genuine qualification")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
-	file, err := os.Open(executable)
-	if err != nil {
-		return nil, err
-	}
-	digest := sha256.New()
-	n, hashErr := io.Copy(digest, io.LimitReader(file, 1024*1024*1024+1))
-	closeErr := file.Close()
-	if hashErr != nil || closeErr != nil || n > 1024*1024*1024 || hex.EncodeToString(digest.Sum(nil)) != unit.BinarySha256 {
-		return nil, errors.New("review qualification executable differs from qualified binary")
-	}
-	for _, pin := range append(append([]reviewQualificationPin{}, unit.Sources...), unit.Logs...) {
-		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
-			return nil, err
-		}
 	}
 	fundingBytes, err := readReviewQualificationPin(config.Funding, settings.MaximumBytes, true)
 	if err != nil {
@@ -111,6 +85,42 @@ func authenticateReviewQualificationInputs(config reviewQualificationConfig, set
 		return nil, errors.New("original quota refusal must remain retained and pinned")
 	}
 	return &image, nil
+}
+
+// Both explicit provider policies require the exact qualified driver binary
+// and published complete three-pass unit logs before a real broker starts.
+func authenticateReviewQualificationUnit(pin reviewQualificationPin, settings reviewQualificationSettings) error {
+	unitBytes, err := readReviewQualificationPin(pin, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var unit reviewQualificationUnitReceipt
+	if err := decodeStrictJSONBytes(unitBytes, &unit, "review qualification unit receipt"); err != nil {
+		return err
+	}
+	if unit.Schema != 1 || unit.Kind != "winner-review-qualification-unit-receipt" || !unit.Accepted || !unit.Race || unit.ConsecutivePasses != 3 || unit.Skips != 0 || len(unit.Logs) != 3 || len(unit.Sources) == 0 || !validSha256(unit.BinarySha256) {
+		return errors.New("three complete race guard passes required before genuine qualification")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return err
+	}
+	digest := sha256.New()
+	n, hashErr := io.Copy(digest, io.LimitReader(file, settings.MaximumExecutableBytes+1))
+	closeErr := file.Close()
+	if hashErr != nil || closeErr != nil || n > settings.MaximumExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != unit.BinarySha256 {
+		return errors.New("review qualification executable differs from qualified binary")
+	}
+	for _, pin := range append(append([]reviewQualificationPin{}, unit.Sources...), unit.Logs...) {
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // One funding authorization cannot be reused in a new output directory to
@@ -155,6 +165,16 @@ func TestReviewQualificationCommand(t *testing.T) {
 	configBytes, err := readReviewQualificationPin(configPin, settings.MaximumBytes, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var header struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(configBytes, &header); err != nil {
+		t.Fatal(err)
+	}
+	if header.Kind == "winner-review-snow-provider-qualification-config" {
+		runSnowReviewQualificationCommand(t, configBytes, settings)
+		return
 	}
 	var config reviewQualificationConfig
 	if err := decodeStrictJSONBytes(configBytes, &config, "review qualification configuration"); err != nil {

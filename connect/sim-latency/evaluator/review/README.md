@@ -1,5 +1,21 @@
 # Isolated elected-winner review broker
 
+The October26 prospective policy is now `elected_winner_snow_union_v1`: all
+three exact Snow Qwen/Gemma/Muse members, with all18 attributed findings and
+unanimous approval. Missing/error results hold; fully validated rejection is
+retained without dropping later model issues. This is not a relabel of the
+historical Mini/Sol procedures below. Use the new [Snow Dockerfile](Dockerfile.snow)
+and the [three-member qualification contract](../../launch/REVIEW-PROVIDER-QUALIFICATION.md#prospective-snow-three-model-policy--october-26-override).
+The new wrapper branch mounts only a public pinned root0444 settings leaf RO
+and one mapped-uid0700 journal leaf RW, never a key or main/vault/config parent.
+It fences only the fixed Snow LAN IPv4/TCP8000, not external HTTPS. Its real
+entrypoint is `/review-broker review-broker`, with exactly three inspected
+settings/hash/state-directory arguments. Whole-attempt/member O_EXCL journals
+prevent rerolls; cancellation before provider input consumes no claim. These
+new bytes are unqualified until independent unit and genuine broker proof pass.
+
+## Historical key-backed policies
+
 This is the real tool-free Responses API client for `gpt-5.4-mini` at `xhigh`
 reasoning, not a template-approval emulator. Its strict judgment passes through
 the manager's authenticated six-criterion validation before any main API write.
