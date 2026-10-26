@@ -38,11 +38,11 @@ calibration; it is not a claim that the new checkpoint has passed calibration.
 |---|---|
 | Evaluator host | one 128 GiB-class Ubuntu host with 12 isolated CPUs |
 | CPU boundary | 10 evaluation CPUs; 2 management/cleanup CPUs |
-| Workload | Provider count pending fresh frontier; 200 clients and 80 arrivals/minute in the current trials |
+| Workload | 3,600-provider qualification profile; 200 clients and 80 arrivals/minute; fresh bridge and independent-seed acceptance remain pending |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
 | Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
-| Initial significant-improvement percentage | 16.1% historical/provisional floor; fresh calibration pending |
+| Initial significant-improvement percentage | 26.9% prospectively frozen by the accepted October 26 three-pair reduction; fresh instrument bridge and independent-seed qualification remain pending |
 | Admission | six seven-day epochs; unbounded paid submissions at $20 each |
 | Dispatch | immediate single-job FIFO; Redis list backed by authoritative PostgreSQL |
 | Submission deadline | 3 hours total, including attempts, backoff, score, and cleanup |
@@ -123,15 +123,17 @@ The public round-result/history endpoints return `409 round_not_published` until
 that boundary, then return a `no-store` projection. A provisional reward can be
 published without a completed honesty review.
 
-Newly approved seasons can adopt `elected_winner_sol61max_v1` closing:
-publish the provisional winner, automatically review it with qualified Sol 6.1
-max, revoke/re-elect on substantiated rejection, then independently build,
+The prospective October 28 season selects `elected_winner_gpt54mini_xhigh_v1`:
+publish the provisional winner, automatically review it with qualified GPT-5.4
+mini/xhigh, revoke/re-elect on substantiated rejection, then independently build,
 qualify and promote that approved winner before opening the next epoch.
 Only an exhausted eligible ranking carries the incumbent forward. Missing or
 expired review and failed source qualification block and alert support; they
 never silently approve, promote another candidate, or fall back. The sixth
 epoch is reviewed before the supervisor exits. This prospective policy leaves
-existing round rules unchanged. See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
+existing round rules unchanged; historical `elected_winner_sol61max_v1` records
+retain their Sol 6.1/max identities. Provider qualification remains required.
+See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
 for activation, the private model-broker protocol, scoped authority, and
 independent build/readiness requirements.
 
@@ -243,7 +245,11 @@ control does not turn requests within a run into independent observations.
 This is part of the immutable evaluation result, not a post-hoc leaderboard
 calculation.
 
-Production epoch 1 begins from source epoch 0's calibrated 16.1% requirement.
+The prospective production source epoch 0 margin is **26.9%**, frozen by the
+[accepted original-three reduction](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
+Its fresh revised-instrument bridge, independent reference ordering and live
+readiness must still pass before activation. Historical 16.1% values remain
+attached to their original rounds, not silently substituted for this margin.
 Under legacy v1, production statistical eligibility places a submission into
 the ranked honesty-review queue; it does not by itself make the submission a
 winner. V2 instead publishes the provisional reward and independent approval

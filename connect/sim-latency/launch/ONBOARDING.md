@@ -3,13 +3,13 @@
 Status: integration draft; live qualification and the publication records
 called out below must be bound to the production release before public use.
 
-## Current production preparation — October 25, 2026
+## Current production preparation — October 26, 2026
 
 The public opening is fixed at **2026-10-28 00:00 UTC**. The planned production
 contract is explicitly v2, with winner-review policy
-`elected_winner_sol61max_v1`: drain and seal, publish the provisional reward
-winner after the reveal gate, automatically review it with qualified Sol 6.1
-max, revoke/re-elect on substantiated rejection, then build, qualify and promote
+`elected_winner_gpt54mini_xhigh_v1`: drain and seal, publish the provisional reward
+winner after the reveal gate, automatically review it with qualified GPT-5.4
+mini/xhigh, revoke/re-elect on substantiated rejection, then build, qualify and promote
 the approved winner before the next epoch. Only an exhausted eligible ranking
 carries the incumbent forward. Missing review or failed qualification pauses
 and alerts; it does not silently approve or substitute source. Six full weekly
@@ -23,8 +23,13 @@ publishes through the legacy leaderboard. See the
 [current protocol](../README.md#macrocosmos-integration-v2-contract) and
 [automation policy](../AUTOMATION.md).
 
-Go **1.27.3** is mandatory for the new evaluator. Scale, margin and the new
-official baseline remain under qualification; September capacity estimates
+Go **1.27.3** is mandatory for the new evaluator. The accepted original-three
+reduction froze **26.9%** prospectively for the 3,600-provider/200-client profile.
+The fresh instrument bridge, all-three independent reference ordering and live
+readiness remain pending. Patches use `mono_root_v1`: prefix paths with one of
+the ten locked repository roots; protected `server/connect/sim-latency/**` and
+repository metadata remain forbidden. The hidden official baseline is not yet
+qualified; September capacity estimates
 below are historical, not throughput promises for this checkpoint. Current
 release evidence is in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
 
@@ -153,7 +158,7 @@ For an enabled v2 competition:
    complete reward revisions, and separately identified `integrity_review`,
    `source_approval`, `source_decision`, and `settlement_status`. A provisional
    winner can initially remain `not_reviewed`. Under the adopted
-   `elected_winner_sol61max_v1` policy it is automatically reviewed before
+   `elected_winner_gpt54mini_xhigh_v1` policy it is automatically reviewed before
    source promotion and the next epoch; missing review blocks progression.
    Older empty-policy seasons retain their independent source-choice rules.
 4. Run the separately scoped settlement integration against
