@@ -137,3 +137,22 @@ race passes with zero skips. Preserve all attempts. The eventual operator must
 inject `crypto/rand.Reader`, commit the complete five-round order before the
 first result and refuse order changes; this helper alone does none of those
 publication or request-binding steps. No tests may overlap a timed evaluation.
+
+## Unqualified accepted-margin pin draft
+
+The [margin-pin core](held-out-margin-pin.go.txt) and
+[five deterministic test drafts](held-out-margin-pin-tests.go.txt) authenticate
+exact analysis bytes against an independently supplied publication digest,
+strictly decode the existing native report type, and check full sample counts,
+acceptance, input/policy bindings, placeability and the supported margin grid.
+They do not calculate or lower a margin. Synthetic accepted-shape fixtures are
+not native replay evidence. These drafts are uncompiled and unexecuted.
+
+Qualify them as `_test.go` files in the exclusive frozen workspace with actual
+Go 1.27.3, selecting `^TestHeldOutMargin` for three complete race passes with
+zero skips. Preserve failures. The wrapper must obtain the expected digest from
+the published genuine analyzer receipt, never compute both its expected pin and
+input from the same untrusted file. It must separately authenticate the input
+manifest, template policy and original artifacts; this narrow pin does not
+replace the native analyzer's full replay or the wrapper's source/request
+binding. No actual Stage A report has been accepted by these drafts.

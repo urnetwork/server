@@ -1,0 +1,51 @@
+// Draft accepted-report pin, not a replacement for the native analyzer or the
+// complete held-out preparation wrapper. No actual margin is selected here.
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"math"
+)
+
+// Expected identities come from the published native analysis receipt. A caller
+// must not derive the expected report digest from the same untrusted input.
+type heldOutMarginPins struct {
+	ReportSha256           string
+	InputManifestSha256    string
+	EvaluationPolicySha256 string
+}
+
+// Authenticates exact report bytes before strict decoding, then refuses failed
+// analysis or a non-protocol result. Does not authenticate the underlying files,
+// replay results, select a margin, or permit measurement by itself.
+func pinnedHeldOutMargin(content []byte, pins heldOutMarginPins) (float64, error) {
+	settings := defaultCalibrationAnalysisSettings()
+	if !validSha256(pins.ReportSha256) || !validSha256(pins.InputManifestSha256) || !validSha256(pins.EvaluationPolicySha256) || len(content) == 0 || int64(len(content)) > settings.MaximumArtifactBytes {
+		return 0, errors.New("accepted-analysis pins or bounded bytes missing")
+	}
+	digest := sha256.Sum256(content)
+	if hex.EncodeToString(digest[:]) != pins.ReportSha256 {
+		return 0, errors.New("accepted-analysis bytes changed")
+	}
+	var report calibrationAnalysisReport
+	if err := decodeStrictJSONBytes(content, &report, "accepted calibration analysis"); err != nil {
+		return 0, err
+	}
+	if report.Kind != "sim-latency-calibration-analysis" || !report.Accepted || len(report.Reasons) != 0 || report.Cohorts != settings.Cohorts || report.ObservedReplicates != settings.Cohorts*settings.Replicates*2 || report.BootstrapDraws != settings.BootstrapDraws || report.InputManifestSha256 != pins.InputManifestSha256 || report.EvaluationPolicySha256 != pins.EvaluationPolicySha256 {
+		return 0, errors.New("analysis is not the pinned accepted full Stage A result")
+	}
+	finite := func(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+	margin := report.RecommendedMargin
+	if !finite(report.Placeability) || report.Placeability < settings.MinimumPlaceability || report.Placeability > 1 || !finite(margin) || margin < settings.MarginFloor || margin > settings.MaximumMargin {
+		return 0, errors.New("accepted-analysis numerical bounds failed")
+	}
+	// Round-trip the integer tick rather than accepting an arbitrary almost-grid
+	// value. The native analyzer computes the same integer/scale quotient.
+	tick := math.Round(margin * settings.MarginRoundingScale)
+	if margin != tick/settings.MarginRoundingScale {
+		return 0, errors.New("accepted margin is not on the frozen upward-rounding grid")
+	}
+	return margin, nil
+}
