@@ -44,7 +44,7 @@ func defaultSourceTestSnowRuntimeSettings() sourceTestSnowRuntimeSettings {
 	sandbox.Timeout, sandbox.OutputBytes = 5*time.Minute, 2*1024*1024
 	return sourceTestSnowRuntimeSettings{MaximumBytes: 16 * 1024 * 1024, Sandbox: sandbox,
 		ScoringLock:      "/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock",
-		EvaluatorImageId: "sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24", EvaluatorCommit: "a9e8e1a710b24c749e6499a0606938252c83e136",
+		EvaluatorImageId: "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2", EvaluatorCommit: "a9e8e1a710b24c749e6499a0606938252c83e136",
 		RawSourceLockSha256: "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11", SourceLockSha256: "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf"}
 }
 
