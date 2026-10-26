@@ -94,6 +94,7 @@ func NewSignals() []Signal {
 		NewPgBouncerStallsSignal(),
 		NewPgBouncerPoolStarvationSignal(),
 		NewContractStageLatencySignal(),
+		NewContractFailureShareSignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewWorkerCapSignal(),
@@ -213,6 +214,7 @@ func NewSignals() []Signal {
 		NewMoveOutcomesSignal(),
 		NewMoverSignal(),
 		NewDrainMovesSignal(),
+		NewContractStageInflightSignal(),
 	}
 }
 

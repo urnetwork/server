@@ -319,7 +319,7 @@
       "id": 20,
       "type": "stat",
       "title": "busiest main thread",
-      "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Red at 0.85 (SIGNALS.md section 26). Normal is 0.4-0.5. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling.",
+      "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Orange from 0.85: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is at most 0.64. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -347,7 +347,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 0.85
               }
             ]
@@ -381,7 +381,7 @@
       "id": 21,
       "type": "stat",
       "title": "highest HELLO rate on one node",
-      "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Red at 500/s (SIGNALS.md section 26). Near 0 normally; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts.",
+      "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Orange from 500/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 12/s; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -406,7 +406,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 500
               }
             ]
@@ -440,7 +440,7 @@
       "id": 22,
       "type": "stat",
       "title": "highest client pool timeouts (one service)",
-      "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Red at 10/s (SIGNALS.md section 26). The proxy reached 12-14k/s in the 2026-10-26 storm.",
+      "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Orange from 10/s, the WARN of SIGNALS.md section 26 after 5 minutes; red from 1,000/s, the PAGE of SIGNALS.md section 3.5b. Healthy is 0. The proxy reached 12-14k/s in the 2026-10-26 storm.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -465,8 +465,12 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
               }
             ]
           }
@@ -567,7 +571,7 @@
       "id": 25,
       "type": "timeseries",
       "title": "main-thread CPU per node",
-      "description": "Per-node main-thread CPU, user plus system seconds per second over five minutes (redis_cpu_user/sys_main_thread_seconds_total); 1.0 is one full core, all the main thread can use. The line is the SIGNALS.md section 26 threshold of 0.85. A saturated main thread delays every command on its node, whether the time goes to commands or to accepting connections: compare ops / s and HELLO / s.",
+      "description": "Per-node main-thread CPU, user plus system seconds per second over five minutes (redis_cpu_user/sys_main_thread_seconds_total); 1.0 is one full core, all the main thread can use. The line is the WARN of SIGNALS.md section 26: 0.85 for 10 minutes. A saturated main thread delays every command on its node, whether the time goes to commands or to accepting connections: compare ops / s and HELLO / s.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -590,7 +594,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 0.85
               }
             ]
@@ -643,7 +647,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "HELLO / s per node",
-      "description": "HELLO commands per node per second over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. The line is the SIGNALS.md section 26 threshold of 500/s. Reconnect storms, from timeouts that close connections or from pool misses, show here before the main thread saturates.",
+      "description": "HELLO commands per node per second over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. The line is the WARN of SIGNALS.md section 26: 500/s for 5 minutes. Reconnect storms, from timeouts that close connections or from pool misses, show here before the main thread saturates.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -666,7 +670,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 500
               }
             ]
@@ -1442,7 +1446,7 @@
       "id": 16,
       "type": "timeseries",
       "title": "pool timeouts / s by service",
-      "description": "go-redis pool timeouts per second by service (urnetwork_redis_pool_timeouts_total, pushed by the services). Any sustained nonzero rate means the app is waiting on pool connections and warns. The line is the SIGNALS.md section 26 threshold of 10/s per service.",
+      "description": "go-redis pool timeouts per second by service (urnetwork_redis_pool_timeouts_total, pushed by the services). Any sustained nonzero rate means the app is waiting on pool connections and warns. The lines are the WARN of SIGNALS.md section 26 at 10/s per service (5 minutes) and the PAGE of SIGNALS.md section 3.5b at 1,000/s.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1480,8 +1484,12 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
               }
             ]
           }

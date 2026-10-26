@@ -19608,11 +19608,13 @@ The shared controller also exports
 `urnetwork_contract_creation_completed_stage_seconds_total{ingress,stage}`,
 `urnetwork_contract_creation_stage_inflight{ingress,stage}`,
 `urnetwork_contract_creation_completed_total{ingress,outcome}`, and capability
-`urnetwork_contract_creation_stage_timing_enabled=1`. The 17 stage labels are
+`urnetwork_contract_creation_stage_timing_enabled=1`. The 20 stage labels are
 `other`, `relationship`, `provide_modes`, `provide_secret`, `metadata`,
 `endpoint_lookup`, `companion_origin`, `payer_gate`, `transaction`,
 `shard_fence`, `grant_selection`, `reservation_snapshot`, `client_fence`,
-`post_commit`, `client_stamp`, `stream`, and `response`. Every fixed cell is
+`post_commit`, `client_stamp`, `stream`, `response`,
+`companion_plain_origin_read`, `companion_fallback_origin_read`, and
+`companion_origin_precheck_read`. Every fixed cell is
 exported at zero. An older executable's missing collector is unavailable,
 not zero work. HTTP ingress comes from the existing server context marker.
 
@@ -29452,6 +29454,30 @@ hold in either layout (`migration_contract_partition.go`):
 layouts themselves and inject each of these faults;
 `TestMigrationsContractPartitionedLegacySettlementKeyClones` checks the legacy
 settlement key's clones one version before the queue's retirement.
+
+
+Published competition successor contracts preserve exact catalog custody across
+versions 859, 891 and 892. The v859 body predicate remains required before
+891; 891 retires it and requires the provider-aware winner/round guards plus
+the unchanged source and checkpoint guards. Version 892 retires 891's source
+body and republishes the complete guard set with the reviewed-repository
+source body. The provider function's full body, argument names, volatility,
+parallel safety and trigger custody are catalog authority. Numeric migration
+head alone does not establish these artifacts. Coherent published prefixes
+and rolled-back body/metadata/trigger faults are deterministic acceptance
+controls. Catalog source failures or malformed observations are not health;
+these checks do not prove runtime review activity or deployed application
+adoption, and deliberately retired body text is not schema drift.
+
+
+Version 893 transfers provider/winner/round custody from 892 while retaining
+892's exact mono-root source authorization. Its own artifact additionally
+requires the full Snow findings validator and review identity guard bodies,
+metadata and identity trigger. Only v844's replaced identity-body subpredicate
+expires at 893; its other schema, source-lock and trigger protections remain
+required. Prefix 892 still detects an altered historical identity body, and
+893 still detects altered retained source or scope-lock custody. These are
+catalog checks, not proof that a reviewer ran or any model output is valid.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
@@ -45742,19 +45768,35 @@ the final rule windows.
 
 ### 25.1 Contract-creation failures per service — the share and the reply floor
 
-Status: proposed 2026-10-26; the per-service share and the seasonal floor are
-missing. §1.1 (`contract-rate`) counts committed contracts in SQL against a
-trailing-hour median, and §2.30 (`contract-stage-latency`) measures the mean
-time per reply across every service.
+Probe: `contract-failure-share` (private implementation candidate; seasonal
+`contract-reply-floor` remains proposed).
+
+The per-service share reads one bounded Mimir range query every minute, evaluated
+two minutes behind the monitor clock. Each point uses a five-minute counter
+rate. PAGE requires all six requested one-minute points spanning five minutes at
+or above 20%; WARN requires all eleven points spanning ten minutes at or above
+5%. The traffic floor is 20 eligible returned calls/s at every point, using the
+same three-outcome denominator as the ratio. Cadence and policy live in owning
+settings; emitted baseline/recovery guidance states effective configured values.
+These are sampled history holds,
+not evidence of continuous scrapes or delivery. §1.1 (`contract-rate`) counts
+committed contracts in SQL; §2.30 measures application wall time per reply.
+The separate Grafana rule/contact-point delivery requirement above is still
+external and unverified; monitor implementation alone does not complete it.
 
 Source (exists): `urnetwork_contract_creation_completed_total{job,outcome}`
 from every service that creates contracts (api, proxy, connect, taskworker,
-alt), with outcomes `contract_reply`, `canceled`, `panic` and
-`protocol_reject`.
+alt), with eagerly initialized outcomes `contract_reply`, `canceled`, `panic`,
+`protocol_reject` and `error` for both internal/http ingresses. One timing owner
+records one disposition when it finishes; ended context takes cancellation
+precedence. A generated reply does not establish client delivery.
 
 - Failure share per job over 5 minutes: (`canceled` + `panic`) ÷
   (`contract_reply` + `canceled` + `panic`). `protocol_reject` stays out of
-  both sides: it ran at about 2,350/s on the api in steady state on 10-26,
+  both sides. The producer's fifth outcome, `error`, is also outside this
+  explicitly authored three-state ratio; both excluded rates are disclosed,
+  never silently added to its denominator. Protocol rejection ran at about
+  2,350/s on the api in steady state on 10-26,
   and at 15–19k/s for days before 10-19 with almost no row work (10-19
   postmortem), so it would swamp the denominator. Track it on its own.
 - Reply floor per job: `contract_reply`/s against the median of the same
@@ -45801,10 +45843,40 @@ service whose callers stop calling shows no failures. The floor needs 7 days
 of history, so a new rule is unknown, not healthy, for its first week; the
 median absorbs up to three bad days.
 
-ACTION: the split names the boundary. Every service at once points to the
-database path (§2.11b, §2.11a, §5.6). The proxy alone points to Redis
-(§3.5b), escrow admission (§2.6b; the 10-24 single-slot path) or the proxy
-hosts. Then read §2.30 for the stage.
+Source authority and closure: active placement defines desired service/host/block
+slots; an optional unplaced alt is not required. Every required slot must have
+exactly one publisher, both ingresses and every eager outcome at every requested
+step. Current/prior original sample clocks must be fresh, the same process must
+predate the rate window, and its counters must have at least two samples and no
+reported reset in that window. A missing entire job, missing eager zero,
+overlapping publisher, reset, stale source, partial history or refused/capped
+read is unknown, never zero. This qualifies observed process accounting; it does
+not establish artifacts, authentic source identity or complete intra-step scrape
+coverage. More than one legitimate process per declared slot is conservatively
+unknown. Per-service incidents survive a sibling's source loss; visibility
+uncertainty can conservatively hold sibling clears too.
+
+Below-floor jobs supply scoped clear holds, not healthy recovery. A ratio
+incident clears only after every point of a complete eligible ten-minute hold
+is below 5%. A new qualified five-minute PAGE survives older WARN-history gaps.
+Missing or low traffic never clears an armed incident. Qualified source rates use deterministic compensated accumulation
+before the unchanged inclusive comparisons, so source/map ordering cannot shift
+a rounded total across a band. No epsilon broadens the traffic floor or shares. `error` failures,
+unfinished calls and stopped callers can evade this ratio; the unimplemented
+seasonal reply floor remains a separate coverage gap.
+
+Cost: one query_range, nine fixed expression branches and eleven evaluation
+points, retaining at most 54 series per current process (594 points/slot before
+partial/overlap series). The response is capped at 4 MiB and 65,536 total points;
+overflow is cannot-observe, not truncated health. The explicit range/lookback reaches fifteen
+minutes before the delayed evaluation; instant-selector lookback also applies,
+and original sample ages are qualified separately. No extra request or producer
+change is introduced.
+
+ACTION: the split identifies the affected observed service cohort, not its
+cause. Compare rollout drain and client departure with §2.30, PgBouncer queue
+context (§2.11b/§2.11a), CPU pressure (§8.14a), Redis (§3.5b) and escrow admission
+(§2.6b) before selecting a repair. Preserve the existing external owners.
 
 ### 25.2 Connect handshake refusals and acceptance
 
@@ -46008,6 +46080,683 @@ ACTION: the failing step names the boundary: steps 1–2 ingress and
 authentication (§18, §25.3), step 3 the score cache (§2.8, §2.9), step 4
 Connect and contract creation (§25.2, §25.1, §2.30), step 5 the hosted proxy
 (§14).
+
+## 26. Backlog and storm signals — from the 2026-10-26 incidents
+
+Two incidents on 2026-10-26 ran for hours before anyone looked. Mimir showed
+both within minutes of onset, but no rule read the series that showed them.
+
+| Incident | Window | How it was found | After onset |
+|---|---|---|---|
+| A: services-tier CPU and the PgBouncer backlog | 10-25 19:00Z to 10-26 14:08Z | a monitoring pass at 02:25–02:30Z | about 7.5 h |
+| B: the hosted proxy's compensation retry storm | 10-26 14:43Z to 18:08Z | the connect rollout's gate aborted at 15:42:38Z; nothing paged | about 1 h |
+
+A ([postmortem](../../factury/postmortem/2026-10-26-services-cpu-pgbouncer-queue.md)):
+connect ran with GOMAXPROCS 72 on edge-0, edge-1, edge-3 and edge-4 and
+filled their CPUs. Its CPU-starved clients held their transactions open, so
+PgBouncer's 640 server connections stayed busy while 1,500–11,000 clients
+waited. Its Detection: "No signal covered the PgBouncer queue,
+idle-in-transaction share, contract cancellation ratio or services-edge CPU
+pressure." The postmortem ends at 03:40Z, mitigated. The queue held until it
+cleared at 14:08–14:10Z on 10-26, during release 1: the proxies' rollout
+ended at 14:07Z, the pools went to 22 servers each (704 in all) at
+14:08–14:17Z, and connect moved to 16 cores block by block from 14:18Z.
+
+B (draft postmortem `postmortem/2026-10-26-proxy-compensation-retry-storm.md`
+on factury branch `postmortem/proxy-compensation-storm-2026-10-26`): a connect
+block's drain "creates bursts of new and stalled send sequences on every proxy
+process". Each failed contract creation then waited up to 300 s on its own
+reservation cleanup. The cleanup loops churned the admission Redis client's
+connections until Redis main threads saturated, with up to 182k creations in
+flight, about 9k per process. The connect rollout's gate counted returned
+cancellations and aborted at 15:42:38Z. Its Detection: "No signal covers the
+`other`-stage in-flight count, `release-pending` errors, proxy Redis pool
+timeouts or proxy host CPU."
+
+The same storm appears four more times in Mimir, and the entries below replay
+each: the 10-25 proxy aftershock (14:45Z to 17:53Z; §25.1, §3.5a), connect
+g1–g4 drained together on 10-25 (22:53Z), a burst while the proxy blocks
+rolled out the contract cap on 10-26 (18:52Z to 19:28Z), and connect g4's
+drain at 19:39:56Z on 10-26, which ran until about 21:05Z with the cap
+refusing up to 923 packs/s.
+
+| Entry | Proposed class | Source (in Mimir?) | WARN | PAGE | First firing, replayed |
+|---|---|---|---|---|---|
+| PgBouncer backlog | `pgbouncer-backlog` | `pgbouncer_pool_clients_waiting`, `pgbouncer_pool_maxwait_seconds` (yes) | waiting over 100 for 10 min; oldest wait over 0.5 s for 10 min | waiting over 1,000 for 5 min | A: WARN 19:29Z, PAGE 20:03Z |
+| Services-tier CPU | `services-cpu-busy` | `node_cpu_seconds_total` (yes) | the four edges together over 80% for 10 min; one over 85% for 30 min | — | A: 19:50Z |
+| Database acquire wait | `db-acquire-wait` | `urnetwork_pg_pool_acquire_duration_seconds_total`, `urnetwork_pg_pool_acquires_total` (yes) | a service's mean over 100 ms for 5 min | — | A: 20:08Z, the proxy |
+| Stuck creations | `contract-creations-stuck` | `urnetwork_contract_creation_stage_inflight` (yes) | — | a process over 1,000 in stage `other` for 5 min | B: 14:51Z |
+| Cancellation share | §25.1 `contract-failure-share` | `urnetwork_contract_creation_completed_total` (yes) | §25.1 | 20% or more for 5 min | B: 14:52Z |
+| Release errors | `reservation-release-errors` | `urnetwork_redis_contract_reservation_total` (yes) | `release-pending` errors over 10/s for 5 min | — | B: 14:50Z |
+| Compensation outcomes | `compensation-dropped` | the same counter's `dropped` and `expired` (not emitted yet) | over 1/s for 10 min | — | not replayable |
+| Redis pool timeouts | `redis-pool-timeouts` | `urnetwork_redis_pool_timeouts_total` (yes) | a service over 10/s for 5 min | §3.5b | B: 14:52Z |
+| Redis main thread | `redis-main-thread-saturated` | `redis_cpu_user_main_thread_seconds_total`, `redis_cpu_sys_main_thread_seconds_total` (yes) | a node over 0.85 for 10 min | — | B: 14:58Z; 10-24 17:38Z |
+| Redis connection churn | `redis-connection-churn` | `redis_commands_total{cmd="hello"}` (yes) | a node over 500/s for 5 min | — | B: 14:52Z |
+| Proxy host CPU | `proxy-host-cpu` | `node_cpu_seconds_total` (yes) | a host over 85% for 10 min | — | B: 15:26Z |
+| Proxy reply collapse | `contract-reply-collapse` | `urnetwork_contract_creation_completed_total` (yes) | — | replies under 25% of their trailing 2-hour median for 10 min | B: 14:56Z |
+| Contract cap | `hosted-contract-cap-saturated` | `urnetwork_hosted_contract_admission_refusals_total` (yes, proxy g4–g10 since 10-26 18:35Z) | a process over 50/s for 10 min, 30 min or more after its start | — | 10-26 20:21Z |
+
+A was found at 02:25Z, so its signals led by 6 h 11 min to 6 h 56 min; B's
+rollout aborted at 15:42:38Z, so its signals led by 16 to 52 minutes, with
+proxy host CPU last. Replays evaluate each expression at one-minute steps
+over Mimir from 10-19 00:00Z to 10-26 20:30Z. "For N min" means N consecutive
+evaluations held; a Grafana rule with `for: Nm` fires up to a minute later.
+The healthy references are 10-20 08:00–12:00Z and 16:00–20:00Z, with no
+recorded incident. 10-25 and 10-26 08:00–12:00Z are not healthy for the
+database path: the registration convoy held 12,186–14,263 clients waiting
+and A's morning 148–2,877. For the proxy and Redis series, 10-26 08:00–12:00Z
+and 14:10–14:40Z serve as well.
+
+Delivery: as §25, first a Grafana rule on Mimir whose contact point reaches a
+person, then a monitor probe; each entry names the probe to extend. None of
+these rows is in §7's tables yet; add each when its rule is built. A PAGE is
+acknowledged by a person (§7, 2026-10-22 rule 4). These signals watch the
+services and Redis, where both incidents started; §25's watch what customers
+see.
+
+### PgBouncer backlog — clients waiting and the oldest wait
+
+Status: proposed 2026-10-26; no rule or probe implements it. Use it in place
+of §2.11b's `pgbouncer-saturated` levels (WARN 500 and PAGE 2,000 on 10-minute
+averages, with servers at or above 608). It drops the server condition: since
+14:08–14:17Z on 10-26 each of the 32 pools has 22 servers (704 in all), so 608
+no longer means 95%. The existing Grafana rule `pgbouncer-pool-queue-wait-high`
+(§2.11a: the oldest wait over 3 s for 2 minutes) never fired in A. The oldest
+wait peaked at 1.3 s overnight and 2.14 s in the morning, because
+`query_wait_timeout` (4 s) drops a client before it waits much longer.
+
+Source (exists): the §2.11a exporter's `pgbouncer_pool_clients_waiting` and
+`pgbouncer_pool_maxwait_seconds` (job `pgbouncer`, 15 s readings).
+
+```promql
+sum(avg_over_time(pgbouncer_pool_clients_waiting{env="main"}[5m]))
+max(max_over_time(pgbouncer_pool_maxwait_seconds{env="main"}[5m]))
+```
+
+Healthy: waiting 0–16 on 10-20 (5-minute averages) and 0 since 14:10Z on
+10-26; the oldest wait at most 0.37 s on 10-20. Outside recorded incidents
+the queue passed 100 three times, for 5–6 minutes each: 10-20 01:30Z (peak
+246), 10-21 03:21Z (205) and 05:11Z (384).
+
+Thresholds:
+- WARN `pgbouncer-backlog`: waiting above 100 for 10 minutes, or the oldest
+  wait above 0.5 s for 10 minutes.
+- PAGE: waiting above 1,000 for 5 minutes.
+
+A WARN held for only 5 minutes would also have fired on those three bursts.
+Held for 10 minutes, the waiting arm fired 20 times from 10-19 to 10-26, each
+during a recorded incident or connect's CPU-saturated stretch of 10-21 to
+10-23 (§3.5b). The PAGE never fired outside them.
+
+Evidence:
+- A: WARN at 19:29Z on 10-25 (483 waiting at 19:24Z) and without a break from
+  19:54Z; PAGE at 20:03Z, 6 h 22 min before A was found. The oldest-wait arm
+  followed at 20:14Z (0.56 s median, 1.3 s peak through the night). §2.11b's
+  own replay of A: WARN 20:00Z, PAGE 22:30Z. The queue then held at
+  150–3,700 until 14:08Z on 10-26 (2,500–3,700 from 12:00Z to 13:40Z), and
+  has been 0 since.
+- PAGE on 10-25 at 00:06Z (the second degradation, peak 5,184) and 07:09Z
+  (the convoy, 15,685); on 10-19 at 02:38Z and 10:01Z (the livelock, 19.0k and
+  16.1k); on 10-21 at 14:23Z (the churn, 5.7k); and through the queues of
+  10-22 and 10-23 (4.1–4.9k).
+- B: 0 throughout; the storm did not reach PgBouncer.
+
+False-positive qualifiers: a deploy's reconnect wave can queue past 1,000 for
+minutes: 10-24 21:02Z, 1,216 during the api and connect rollout of
+20:44–21:06Z; read `rollout-guard`. The oldest-wait arm fired once where the
+waiting arm did not: 10-24 15:45Z (0.84 s), during the reduced load-balancer
+capacity of 11:29–16:48Z. False-negative qualifiers: as §2.11b, the fleet
+sum hides one hot instance, and a console that stops answering drops its
+series, which is unknown, not zero.
+
+ACTION: §2.11b's: the idle-in-transaction groups (§1.3), the services-tier
+CPU entry below and §8.14a. Hold connect and alt rollouts: their reconnect
+waves made A's cancellation peaks at 21:10Z and 23:00Z. Follow-up: add both
+predicates to `pgbouncer-pool-starvation` (§2.11a), which reads these gauges
+every minute.
+
+### Services-tier CPU — the four services edges together and each one
+
+Status: proposed 2026-10-26; no rule or probe implements it. §8.14's
+`host-cpu-saturation` pages at 90% execution with load at 1.25 per CPU for two
+probes, which A's hosts held only in bursts, and the monitor that owns it ran
+only on demand (§25); §8.14a's `host-pressure` reads run-queue delay by SSH.
+
+Source (exists): `node_cpu_seconds_total{mode}` for edge-0 (96 CPUs), edge-1,
+edge-3 and edge-4 (72 each). Busy is the non-idle, non-I/O-wait share, as in
+§8.14; summing before dividing weighs each host by its CPUs.
+
+```promql
+1 - sum(rate(node_cpu_seconds_total{env="main",host=~"by-us-fmt-5-edge-[0134]",mode=~"idle|iowait"}[5m]))
+  / sum(rate(node_cpu_seconds_total{env="main",host=~"by-us-fmt-5-edge-[0134]"}[5m]))
+1 - sum by (host) (rate(node_cpu_seconds_total{env="main",host=~"by-us-fmt-5-edge-[0134]",mode=~"idle|iowait"}[5m]))
+  / sum by (host) (rate(node_cpu_seconds_total{env="main",host=~"by-us-fmt-5-edge-[0134]"}[5m]))
+```
+
+Healthy: the four together 46–56% on 10-20 and at most 72% on any day from
+10-19 to 10-24; 59–66% after 18:20Z on 10-26, with most of connect on 16
+cores. One host can run hot without a fault: on 10-20 edge-3, the busiest
+under connect's placement (§24), ran 76–80% (medians) and passed 85% for
+10–25 minutes five times.
+
+Thresholds:
+- WARN `services-cpu-busy`: the four together above 80% for 10 minutes, or one
+  host above 85% for 30 minutes.
+- No PAGE: the PgBouncer backlog pages the effect on customers.
+
+Evidence:
+- A: the four together fired at 19:50Z on 10-25 (82.4% median through the
+  night, 90% at 21:05Z), 6 h 35 min before A was found, and held until 14:12Z
+  on 10-26; edge-3 alone fired at 20:14Z. The medians were 76% on edge-0,
+  83% on edge-1, 86% on edge-3 and 87.5% on edge-4. §8.14's 90% held only in
+  bursts: edge-3 at 21:00–21:09Z (95.4%, load 1.7–4.7 per CPU) and
+  22:50–22:54Z, edge-4 at 22:48–22:56Z, then 2–11 minutes at a time on edge-4
+  from 11:57Z on 10-26. A continuous `host-load` would have paged at about
+  21:01Z and cleared between bursts.
+- From 10-19 to 10-26 the four together passed 80% only during A. The per-host
+  arm also caught connect's CPU-saturated stretch of 10-21 and 10-22 (edge-3
+  and edge-4 up to 98%) and 10-24 to 10-25 (the outage recovery, the reduced
+  load-balancer capacity and the second degradation), while the four together
+  stayed at or under 72%.
+- B: 45–70%; the storm was on the proxy hosts.
+
+False-positive qualifiers: a placement hot spot holds one host high for hours
+while customers are fine (edge-3 on 10-20), hence the 30-minute hold on one
+host; the mover narrows it (§24.1). Even held 30 minutes, the per-host arm
+fired on edge-3 at 04:40Z and 05:20Z on 10-21 with no recorded incident,
+nine hours before the churn. A rollout's overlap runs two generations of a
+service for minutes (§8.2). False-negative qualifiers: busy share is not
+run-queue delay. On 09-26, edge-4 had 54% CPU pressure with 23% idle
+(§8.14a), so read `host-pressure` beside it. A host whose exporter is missing
+is unknown (§8.14).
+
+ACTION: read CPU by service on the hot hosts (`process_cpu_seconds_total`)
+and §8.14a. Hold connect and alt rollouts. Reduce load (connect's `cores`,
+§24 placement, capacity) rather than restarting. Follow-up: add both
+predicates to `host-load` (§8.14), which reads this family every minute.
+
+### Service database pool acquire wait
+
+Status: proposed 2026-10-26; no rule or probe implements it. The mover
+already pauses on the same mean above 50 ms (`db_paused`, §24.5).
+
+Source (exists): `urnetwork_pg_pool_acquire_duration_seconds_total{pool}`, the
+total wait of successful acquisitions, over
+`urnetwork_pg_pool_acquires_total{pool,outcome="acquired"}` (`db_metrics.go`).
+There is no `urnetwork_db_*` acquire metric; that family counts transaction
+outcomes.
+
+```promql
+sum by (service) (rate(urnetwork_pg_pool_acquire_duration_seconds_total{env="main",pool="default"}[5m]))
+  / sum by (service) (rate(urnetwork_pg_pool_acquires_total{env="main",pool="default",outcome="acquired"}[5m]))
+```
+
+Healthy (10-20): connect 1.2–5.3 ms; the proxy, api and taskworker under 4 ms.
+No service passed 100 ms on 10-20, or on 10-21 before the churn.
+
+Threshold: WARN `db-acquire-wait`: a service's mean above 100 ms for 5
+minutes.
+
+Evidence:
+- A: the proxy fired at 20:08Z on 10-25 (230 ms), 6 h 17 min before A was
+  found, and stayed above 100 ms for most of the night: 183 ms median, 1,030
+  ms at 02:50Z. Connect peaked at 83 ms and the api at 3.4 ms. On 10-26 at
+  13:30Z the mean over every service was 225 ms, the proxy's 886 ms and
+  connect's 135 ms.
+- 10-25 convoy (08:00–12:00Z): the proxy 11.8–15.9 s, connect 1.9–2.4 s, the
+  api 0.5–0.7 s.
+- B: the proxy's median 1.5 ms; the storm never reached the database path.
+
+False-positive qualifiers: a process's first acquisitions wait for new
+connections, but connect's block restarts on 10-26 (14:18Z to 15:15Z) kept its
+mean under 7 ms. A service with few acquisitions (alt, gossip, mcp) can swing
+on a handful of slow ones: alt read 299 ms at 09:35Z on 10-26.
+False-negative qualifiers: canceled acquisitions are counted but not timed,
+and A's postmortem counts 1.77M abandoned on connect and 780k on the proxy;
+read `outcome="canceled"` beside the mean.
+
+ACTION: the service with the wait is the one queued: read the PgBouncer
+backlog and services-tier CPU entries. Follow-up: add it to the Mimir read of
+`contract-stage-latency` (§2.30), which already takes PgBouncer context every
+minute.
+
+### Stuck contract creations — stage `other` in flight per process
+
+Status: proposed 2026-10-26; no rule or probe implements it. §2.30's
+`contract-stage-latency` reads completed stage seconds, which count a stuck
+call only once it returns.
+
+Source (exists): `urnetwork_contract_creation_stage_inflight{stage="other"}`,
+calls in flight in the stage that holds uninstrumented time. Until B's
+follow-up 6 adds a `compensation` stage, a creation waiting out its
+reservation cleanup counts here.
+
+```promql
+max by (service) (
+  sum by (service, host, block, instance) (
+    max_over_time(urnetwork_contract_creation_stage_inflight{env="main",stage="other"}[2m])))
+```
+
+The count moves in waves as cleanup budgets end together: in B, 126,117 in
+all at 15:06Z, 12,661 at 15:08Z and 182,028 at 15:15Z. Each process's
+2-minute maximum is therefore the reading; it fired 12 minutes earlier in B
+than the raw gauge.
+
+Healthy: at most 30 in any process (10-20; 10-26 08:00–12:00Z) and 0–142
+across the proxy fleet. Before the cap, a proxy process held more than 256 in
+0.55% of its minutes from 00:00Z to 14:00Z on 10-26 (`88117cc03`).
+
+Threshold: PAGE `contract-creations-stuck`: any process above 1,000 for 5
+minutes.
+
+Evidence:
+- B: 14:51Z, 8 minutes after onset and 51 minutes before the gate aborted (the
+  raw gauge: 15:03Z). Peaks: 182,028 in all at 15:15Z, 11,444 in one process.
+- 10-25 aftershock: 14:49Z; 188,872 in all at 16:28Z, 11,996 in one process.
+- 10-25 22:57Z, connect g1–g4 drained together: 75,266 in all. A's postmortem
+  read the matching 420/s cancellation peak at 23:00Z as reconnects queuing
+  at PgBouncer.
+- 10-26 19:03Z, during the proxy rollout of the cap (g4–g10 restarted
+  18:35–19:04Z): 6,583 in one g10 process.
+- 10-26 after connect g4's drain at 19:39:56Z: 2,179 in all at 19:50Z. Under
+  the cap a process stayed near 256 (g6 at 255 at 20:30Z), while g1–g3, which
+  run without it, reached 832 at 20:20Z.
+- It never fired from 10-19 to 10-24, and no other service passed 1,000 (the
+  api peaked at 569 at 18:08Z on 10-26).
+
+False-positive qualifiers: a proxy block's restart drains its devices onto
+the other blocks, which then create contracts together (19:03Z above); read
+`rollout-guard`. False-negative qualifiers: a capped process stays near 256,
+so once every block runs the cap the cap entry carries the storm. The
+deferred compensation owner (`0a075c97a` on `fix/redis-compensation-storm`,
+in review) moves cleanup out of the call; `other` then stops counting it, and
+the compensation outcomes below do. A process that stops pushing is unknown,
+not zero.
+
+ACTION: B's: find the trigger in `rollout-guard` (a connect, alt or proxy
+block drain), hold rollouts, and read the release-error and Redis entries for
+the node. Same-image proxy restarts cleared it for minutes only: after the
+restarts of 16:00–16:29Z, about 60k calls were stuck again by 16:33Z.
+Follow-up: add the gauge to `contract-stage-latency` (§2.30), which reads the
+same family.
+
+### Cancellation share — §25.1's rule, and why it lags
+
+Status: §25.1's `contract-failure-share` (PAGE at 20% or more for 5 minutes,
+with at least 20 creations/s) is this rule; build it as §25.1 specifies. Its
+denominator leaves `protocol_reject` out, and B's data supports that. The
+proxy's protocol rejects ran about 10/s on the morning of 10-26 but 571–1,283/s
+(medians) on 10-20, against 45–355 replies/s. The api's run 2,000–7,000/s
+against 190–360 replies/s. Either would swamp a share of all outcomes.
+
+Evidence: in B the proxy's share was 58.8% over the 5 minutes to 14:48Z and
+76–97% after: PAGE at 14:52Z, 50 minutes before the gate aborted. Canceled
+over all five outcomes fired at 14:56Z and fell under 20% again at
+15:01–15:02Z.
+
+The lag: a canceled call is counted when it returns. Under the 300 s cleanup
+budget the calls stuck at 15:02–15:06Z returned at 15:07–15:10Z (606–1,801
+cancellations/s). Then almost none returned, 0.13–0.22/s at 15:12–15:14Z,
+while the in-flight count rose from 41,996 to 147,932. The rollout gate
+(1-minute cancellations at or under 6/s for 2 minutes) passed at 15:12:27Z
+in that lull, and g3's runners stopped in the same second. A call that ends
+as a protocol reject is never counted (B's Detection). The 5 s budget
+(`6ba9d88af`), on the proxies from 18:00Z on 10-26, shortens the lag but
+does not remove it.
+
+### Reservation release errors and compensation outcomes
+
+Status: proposed 2026-10-26; no rule or probe implements it. §1.3c defines the
+counter's operations and results.
+
+Source (exists): `urnetwork_redis_contract_reservation_total` by `operation`
+and `result`. `release-pending` releases tokens a request reserved but did not
+publish; `error` is a release that failed and is retried or left pending. The
+operation first appears at about 12:00Z on 10-25.
+
+```promql
+sum by (service) (rate(urnetwork_redis_contract_reservation_total{env="main",operation="release-pending",result="error"}[5m]))
+sum by (service, result) (rate(urnetwork_redis_contract_reservation_total{env="main",operation="compensation"}[5m]))
+```
+
+Healthy: `release-pending` errors at most 0.6/s on any service (10-26
+08:00–12:00Z and 14:10–14:40Z); compensation `pending` 0.
+
+Thresholds:
+- WARN `reservation-release-errors`: a service above 10/s for 5 minutes.
+- WARN `compensation-dropped`, once the deferred owner ships (`0a075c97a` on
+  `fix/redis-compensation-storm`, in review): `dropped` plus `expired` above
+  1/s for 10 minutes. The owner counts `deferred` when it takes a compensation,
+  `expired` when the request's budget ends in its queue and `dropped` when its
+  1,024-balance queue is full; `completed` and `pending` keep their meaning.
+  Its operator note: "A sustained `dropped` rate means Redis refuses releases
+  faster than the owner retries them." Both leave tokens reserved until a page
+  on the balance takes them after 10 minutes, or their 24-hour lease ends. No
+  baseline exists yet; re-derive the level after a week.
+
+Evidence:
+- B: 23/s at 14:46Z and 409/s at 14:47Z; WARN at 14:50Z, 7 minutes after
+  onset and 52 minutes before the gate aborted. Median 66,572/s through B,
+  88,570/s at 17:15Z. Compensation `pending` above 10/s followed at 15:09Z
+  (600/s peak).
+- 10-25 aftershock: 14:49Z, 100,588/s at 16:03Z; the api too, 26,573/s at
+  15:54Z.
+- 10-25 22:57Z (27,719/s); 10-26 05:29Z and 07:12Z in A's morning (776/s and
+  160/s); 18:56–19:28Z during the cap rollout (4,721/s); and from 19:48Z after
+  connect g4's drain, 1,653/s at 20:15Z.
+- Every other firing fell at the aftershock's end or inside A: 18:55Z to
+  19:40Z on 10-25 (3,466/s) and 21:11Z (2,180/s, as connect's 20:47–20:53Z
+  rollout finished draining).
+
+False-positive qualifiers: a Redis failover or slot migration fails in-flight
+releases once; hold the 5 minutes. False-negative qualifiers: the counter
+has no node label; find the node with the Redis entries below. A build
+without the operation is unknown, not zero. A release error leaves its
+tokens pending, so a displayed balance can stay low for up to 25 hours (B's
+Impact); the errors cost credit as well as load.
+
+ACTION: B's: read the pool-timeout and HELLO entries for the node, and hold
+connect, alt and proxy rollouts. Follow-up: add both to `redis-pool` (§3.5b),
+which reads service Redis counters from Mimir.
+
+### Redis client pool timeouts per service — an earlier band
+
+Status: proposed 2026-10-26 as a lower band for `redis-pool` (§3.5b), which
+warns at a 10-minute floor of 50 timeouts/s and pages at 1,000/s; neither the
+band nor its class is implemented.
+
+Source (exists): `urnetwork_redis_pool_timeouts_total` and
+`urnetwork_redis_pool_misses_total` (§3.5b).
+
+```promql
+sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env="main"}[5m]))
+```
+
+Healthy: 0 on every service (10-20, 10-25 08:00–12:00Z, 10-26 14:10–14:40Z);
+connect up to 1.3/s while starved of CPU on the morning of 10-26.
+
+Threshold: WARN `redis-pool-timeouts`: a service above 10/s for 5 minutes.
+
+Evidence:
+- B: the proxy at 14.7/s at 14:48Z and 186/s at 14:51Z; WARN at 14:52Z.
+  §3.5b's floor reaches 50/s at about 15:00Z and 1,000/s at about 15:12Z.
+  Peak 14,348/s at 15:43Z, with 27,301 misses/s at 17:08Z.
+- 10-25 aftershock: the proxy at 14:49Z (14,945/s at 16:32Z), the api at
+  15:48Z (1,564/s).
+- The proxy fired at no other time from 10-19 to 10-24 except 10-23 19:59Z
+  (220/s), when the edges were stopped for the disk-full outage.
+- Connect fired through its CPU-saturated stretch of 10-21 to 10-23 (up to
+  757/s) and on 10-24 and 10-25, but not during A (at most 6/s): a CPU-starved
+  client times out its own pool without a Redis fault.
+- After connect g4's drain on 10-26: the proxy at 11–58/s from 19:55Z to
+  20:15Z.
+
+False-positive qualifiers: §3.5b's; read the services-tier CPU entry before
+blaming Redis for connect. False-negative qualifiers: §3.5b's: the counters
+name no node, and nested pipeline and pub/sub pools are not exported.
+
+ACTION: §3.5b's: find the node (the HELLO and main-thread entries), and do
+not raise pool sizes or timeouts. For the proxy, see B's follow-ups 3 and 4
+(a connection closed on every timeout, a PING per callback). Follow-up: add
+the band to `redis-pool`.
+
+### Redis node main thread and connection churn
+
+Status: proposed 2026-10-26; no rule or probe implements either. §3.4's
+`redis-cpu-sustained` samples whole-process CPU above 200%, which a saturated
+main thread with idle io-threads never reaches.
+
+Source (exists): the Redis exporter (job `redis`), per node:
+`redis_cpu_user_main_thread_seconds_total`,
+`redis_cpu_sys_main_thread_seconds_total` and `redis_commands_total{cmd}`,
+labelled with `host` (edge-5, edge-6) and `node` (the port).
+
+```promql
+rate(redis_cpu_user_main_thread_seconds_total{env="main"}[5m]) + rate(redis_cpu_sys_main_thread_seconds_total{env="main"}[5m])
+rate(redis_commands_total{env="main",cmd="hello"}[5m])
+```
+
+go-redis v9 opens every new connection with HELLO, so the HELLO rate is the
+services' reconnect rate.
+
+Healthy: the busiest node's main thread at most 0.64 (on edge-6, 10-20 and
+10-26 08:00–12:00Z) and edge-5's at most 0.44; HELLO at most 3.6/s per node
+on 10-20 and 12/s on 10-26 08:00–12:00Z.
+
+Thresholds:
+- WARN `redis-main-thread-saturated`: a node above 0.85 for 10 minutes.
+- WARN `redis-connection-churn`: a node above 500 HELLO/s for 5 minutes.
+
+Evidence:
+- B: HELLO on node 6394 at 14:52Z (3,504/s at 14:58Z); the main thread on
+  6394 at 14:58Z (0.945 at 14:52Z). The saturation then moved between nodes
+  for most of the storm: 6396 from 15:14Z to 16:20Z (0.985), 6394 from 16:22Z
+  to 16:36Z, 6408 from 17:02Z to 17:56Z (0.983). B's draft names only the
+  16:22–16:36Z window. HELLO reached 18,936/s on 6396 at 16:10Z.
+- 10-25 aftershock: HELLO at 14:49Z (6408, 7,620/s), the main thread at 15:08Z
+  (6408) and 16:34Z (6396).
+- 10-24 escrow outage: edge-5 nodes 6421 and 6419 above 0.85 on and off from
+  17:38Z to 23:06Z (0.947 peak), the first firing about 1 h 50 min before the
+  owner's report at about 19:30Z. HELLO stayed under 500, so the load was
+  commands, not reconnects; that outage ran through one slot's escrow path
+  (§2.6b).
+- 10-25 22:58Z (HELLO 8,636/s on 6396); 10-26 19:04–19:26Z during the cap
+  rollout (HELLO 2,761/s and 0.964 on 6396); after connect g4's drain, HELLO
+  1.4–1.9k/s from 19:55Z and the busiest main thread 0.86–0.93 from 19:50Z to
+  20:15Z.
+- One firing outside an incident: node 6399's main thread at 0.988 from 21:30Z
+  to 21:57Z on 10-20, with HELLO quiet; unexplained.
+
+False-positive qualifiers: `CLIENT LIST` on a node with tens of thousands of
+clients takes hundreds of milliseconds of its main thread (§3.5a); a slot
+migration or failover raises both for a minute or two; hold the windows.
+BGSAVE runs in a child process, not on the main thread. False-negative
+qualifiers: a node whose scrape fails is unknown; clients that do not open
+with HELLO reconnect without showing here (§3.5 counts connections).
+
+ACTION: count the client hosts' sockets per Redis port (§3.5a) to find who
+reconnects; for the proxy, see B's follow-ups 3 and 4. Do not run
+`CLIENT LIST` on a saturated node, and do not raise `maxclients`. Follow-up:
+a Mimir reader beside `redis-pool` (§3.5b); `redis-process` (§3.4) samples
+process CPU over SSH, not the main thread.
+
+### Proxy host CPU
+
+Status: proposed 2026-10-26; no rule or probe implements it.
+
+Source (exists): `node_cpu_seconds_total{mode}` on crisp and fireside, 24 CPUs
+each. Each host runs 10 proxy processes at GOMAXPROCS 8, up to 80 cores of
+demand on 24 (B's Root cause 3).
+
+```promql
+1 - sum by (host) (rate(node_cpu_seconds_total{env="main",host=~"crisp|fireside",mode=~"idle|iowait"}[5m]))
+  / sum by (host) (rate(node_cpu_seconds_total{env="main",host=~"crisp|fireside"}[5m]))
+```
+
+Healthy: 9–24% on 10-20; 34–42% on 10-26 08:00–12:00Z, with 250–418
+replies/s; 38–51% from 18:20Z on 10-26.
+
+Threshold: WARN `proxy-host-cpu`: a host above 85% for 10 minutes.
+
+Evidence:
+- B: 15:26Z, 43 minutes after onset and 16 minutes before the gate aborted.
+  The CPU rose late, after g3's restart at 15:12–15:15Z, when 77k–182k calls
+  were already stuck: 88.6–89% median through B, 96.3% peak, and again from
+  17:16Z. At 70% it would have fired at 15:23Z.
+- 10-25 aftershock: 85.8% at 14:56Z, not held for 10 minutes; at 70% it would
+  have fired at 14:58Z.
+- Other firings: 10-22 00:37Z (the edge reboots) and 10-24 04:08–05:27Z and
+  13:11–16:36Z, as every device reconnected after the full outages and
+  through the reduced load-balancer capacity.
+- After connect g4's drain on 10-26: 52% at 19:50Z, 78–80% at 20:20Z.
+
+False-positive qualifiers: a proxy rollout runs two generations per block for
+minutes (§14.7); a recovery from a full outage reconnects every device at
+once (10-24). False-negative qualifiers: it is the last of B's signals; read
+it with stuck creations, not alone.
+
+ACTION: B's: hold connect, alt and proxy rollouts and read the
+stuck-creation entry; same-image proxy restarts held for minutes only.
+Follow-up: a per-role band in `host-load` (§8.14), which reads this family
+for every host.
+
+### Proxy contract replies against their previous two hours
+
+Status: proposed 2026-10-26; no rule or probe implements it.
+
+Source (exists): the proxy's
+`urnetwork_contract_creation_completed_total{outcome="contract_reply"}`.
+
+```promql
+sum(rate(urnetwork_contract_creation_completed_total{env="main",service="proxy",outcome="contract_reply"}[5m]))
+  / quantile_over_time(0.5, sum(rate(urnetwork_contract_creation_completed_total{env="main",service="proxy",outcome="contract_reply"}[5m]))[2h:5m] offset 10m)
+```
+
+Threshold: PAGE `contract-reply-collapse`: the ratio under 0.25 for 10
+minutes. It follows §1.1's `contracts-collapse`, which compares contracts
+with their trailing-hour median.
+
+A day-earlier or 7-day reference does not fit this series:
+- one day earlier, B's hours on 10-25 were the convoy's end and the
+  aftershock (0.2–112 replies/s), so the ratio stayed between 0.3 and 5 and
+  held under 0.25 only from 17:52Z, 3 h 9 min after onset;
+- the hosted proxy's replies grew from about 45/s on 10-20 to 250–420/s on
+  the morning of 10-26, so B's 20–28/s was 0.4–1.0 of the 7-day same-window
+  median. §25.1's `contract-reply-floor` (under 30%) would not have fired for
+  B.
+
+Evidence: B fires at 14:56Z (27.7 replies/s against a 2-hour median of
+205/s), 46 minutes before the gate aborted. The other firings from 10-19 to
+10-26 were
+10-19 10:38Z and 11:08Z (the livelock), 10-23 11:24Z (the disk-full outage),
+10-25 01:32Z, 06:30Z and 07:18Z (the second degradation and the convoy), and
+14:22Z on 10-26. At 14:22Z the proxy rollout had cut replies from about 240/s
+to 35–55/s as live devices fell from 22.7k to 16.8k.
+
+False-positive qualifiers: a proxy rollout that resets devices (14:22Z on
+10-26); read `rollout-guard`. False-negative qualifiers: the median absorbs a
+collapse within two hours (B: 14:56Z to 15:20Z), so the stuck-creation and
+cancellation entries carry a long storm. A decline slower than two hours
+needs §25.1's floor.
+
+ACTION: as §25.1. Follow-up: build it with §25.1's reader.
+
+### Hosted contract admission cap
+
+Status: proposed 2026-10-26; no rule or probe implements it. The cap
+(`88117cc03`) runs on proxy g4–g10 since 18:35–19:04Z on 10-26; g1–g3 run the
+5 s budget without it.
+
+Source (exists): `urnetwork_hosted_contract_admission_refusals_total`, the
+control packs a proxy process refused with a 429 because 256 contract
+creations (`HostedContractConcurrency`) were already in flight. A pack is
+refused before any credential or database read; packs that close, provide or
+set keys are never refused. The device counts a refusal as a failed control
+round trip and asks again on its 1, 2, 4, 5 s schedule.
+
+```promql
+sum by (host, block) (rate(urnetwork_hosted_contract_admission_refusals_total{env="main"}[5m]))
+  and on (host, block)
+    (time() - max by (host, block) (process_start_time_seconds{env="main",service="proxy"}) > 1800)
+```
+
+Healthy: no baseline yet. The fleet refused nothing from 19:30Z to 19:40Z on
+10-26, between the cap's rollout and connect g4's drain. Before the cap, a
+process held more than 256 in flight in 0.55% of its minutes from 00:00Z to
+14:00Z on 10-26 (the commit's census).
+
+Threshold: WARN `hosted-contract-cap-saturated`: a process above 50/s for 10
+minutes, once it has run 30 minutes.
+
+Evidence:
+- Rollout bursts: g4–g10 restarted from 18:35:09Z to 19:04:24Z, about 5
+  minutes apart. g7–g10 refused 103–137/s at peak and stayed above 50/s for
+  12–21 minutes, from 18:52Z to 19:19Z, each within 30 minutes of its own
+  start; the fleet was back at 0 by 19:30Z. The 30-minute condition leaves
+  these out.
+- Connect g4's drain, with new containers at 19:39:56Z: refusals rose from
+  16/s across the fleet at 19:45Z to 923/s at 20:50Z and fell under 1/s by
+  21:10Z, as replies recovered from 105/s to 258/s. g4 on both hosts, running
+  since 18:35Z, held above 50/s from 20:12Z, so the rule fires at 20:21Z.
+
+False-positive qualifiers: the 30-minute condition covers a block's own
+restart; a rolling restart's refusals ended within 15 minutes of the last
+block's start. A connect or alt drain's burst is not excluded: it is how B
+began. False-negative qualifiers: blocks without the cap show stuck
+creations instead. A refused pack can carry several creations, so refusals
+undercount the creations turned away.
+
+ACTION: a saturated cap means the process's creations are not returning: read
+the stuck-creation, release-error and Redis entries, and hold rollouts. The
+cap protects the process; it does not end the storm. Follow-up: add it to
+`identity-churn` (§14.8), which already reads the mint cap's
+`urnetwork_hosted_mint_admission_refusals_total`.
+
+### Rollout gates for connect and alt restarts
+
+Status: guidance for rollout scripts and `rollout-guard`; partly in use since
+the connect g4 rollout at 19:36Z on 10-26.
+
+A connect block's drain bursts contract creation on every proxy process (B's
+Root cause 5), and alt embeds a connect exchange, so its drain does the same.
+The burst lands on the proxy hosts and on Redis, not on the database path.
+
+B's gate held each block at least 8 minutes, then waited for 2 consecutive
+minutes of PgBouncer waiting (5-minute average) at or under 1,000, proxy
+cancellations at or under 6/s and api cancellations at or under 14/s:
+- g1's gate passed at 14:45:01Z, two minutes into B (36 calls in flight at
+  14:44Z, 323 at 14:45Z);
+- g2's passed at 15:12:27Z in the cancellation lull above, with 77k–113k calls
+  in flight, and g3's runners stopped in the same second;
+- on 10-25 at 22:44Z, connect g1–g4 drained together, and 75k calls were in
+  flight by 22:57Z.
+
+The g4 gate of 10-26 also read stuck creations and proxy host CPU: 940 in
+flight across the fleet and 60% at 19:48:44Z, then 2,179 and 62% at
+19:50:01Z. It aborted then, 10 minutes after the new containers started,
+with cancellations at 25–35/s. An abort does not undo the drain:
+`release-pending` errors went from 376/s at 19:50Z to 1,653/s at 20:15Z.
+
+Gate every connect and alt block, before it and through its hold, on:
+- proxy stuck creations (stage `other`) under 1,000 across the fleet (healthy
+  0–142);
+- proxy host CPU at or under 70% on both hosts (healthy 9–51%; B passed 70% at
+  15:14Z);
+- `release-pending` errors and proxy Redis pool timeouts under 10/s;
+- cap refusals under 50/s per process;
+- PgBouncer waiting (5-minute average) under 100, for A's reconnect waves.
+
+Hold each block at least 15 minutes after its new containers start. The
+storms showed 4–8 minutes after the new containers started (B at 14:43Z
+after 14:35:28Z, and 19:44Z after 19:39:56Z on 10-26), and an 8-minute hold
+let g1 pass two minutes into B. Use cancellations only as a corroborating
+check: they are counted at return, up to the cleanup budget later (300 s
+before the proxies took the 5 s budget from 18:00Z on 10-26), and can read
+near zero while the pile grows. Drain one block at a time, and stop the whole
+rollout, not only the block, on any breach.
+
+### Measured and not adopted
+
+- Proxy goroutines: about 215k per process in B, against 241–287k in the
+  busiest process on the morning of 10-26, before B. Hosted devices hold many
+  goroutines, so the count does not discriminate.
+- `recovery` `pending`: medians of 375–1,367/s on the proxy on 10-20 and
+  1,178/s in B; it is normal background.
+- Insufficient-balance refusals alone, the daily trap.
+  `urnetwork_connect_contract_rejections_total{cause="insufficient_balance"}`
+  (all services, hourly means) ran 82–465/s in each hour from 14:00Z to 21:00Z
+  on 10-25 and 10-26, 100–5,500/s through many hours of 10-19 to 10-21 and
+  10-24, and 0 on 10-22 and 10-23. §7's `contract-balance-failure-rate` (over
+  4,000/min for 5 minutes on `urnetwork_connect_contract_failures_total`)
+  fired on and off from 14:11Z to 19:39Z on 10-25 and from 14:49Z through
+  20:20Z on 10-26, including 18:29–18:46Z, after B ended and before the cap
+  rollout's burst. B began as that day's wave rose (127 to 778/s at
+  14:44–14:46Z), but the 10-25 aftershock began as its wave ended (231/s to
+  about 2/s at 14:44–14:46Z). Page on the entries above, not on balance
+  refusals.
+- Deadline rejections (`cause="deadline"`): 0–0.6/s when healthy, 672/s
+  median and 1,869/s peak in B, 1,608/s in the 10-25 aftershock. They
+  corroborate a storm, but are counted only when a caller's deadline passes.
 
 ## Shared provider-egress dashboard refresh
 
@@ -46254,3 +47003,22 @@ transaction. Failed required batches, body rollback and retried attempts do not
 publish; an unknown commit reply remains an observation gap. Optional posts run
 after publication. Counters reset with process lifetime and are not crash-durable
 history; no IDs, task names, args or private result text become labels.
+
+
+### 26 Current Proxy OTHER-stage occupancy
+
+Probe: `contract-stage-inflight`
+
+Source: `urnetwork_contract_creation_stage_inflight{job="proxy",stage="other",ingress="internal"|"http"}` and `urnetwork_contract_creation_stage_timing_enabled=1`, joined to the same current process start and original scrape timestamps. This is current synchronous exclusive stage occupancy, including unfinished calls; it does not depend on completed-call counters. Begin enters OTHER, nested stage entry moves one owner, and completion/cancellation/panic finalization releases it. Async work without the timing owner is outside this signal. §2.30 remains returned-stage means and §25.1 returned outcomes; neither replaces this current gauge.
+
+Policy: WARN `contract-stage-inflight-high` when internal+HTTP OTHER owners are strictly greater than **1000 calls per qualified Proxy process**, at **two consecutive fresh, distinct source-clock observations of that same process generation**. No PAGE band or escalation. This is Root's operational monitor-policy selection from the postmortem's authored 1000/process benchmark and rollout reference, not a claim of an already user-approved alert threshold. Calibration remains pending. `ContractStageInflightSettings.WarnCalls` is a whole positive call count; zero selects 1000, not disabled. `Sustain` is a source-observation count; zero selects 2 and values below 2 are invalid. Custom bands retain all source/coverage/recovery requirements.
+
+The nominal signal cadence is one minute; the production global minimum of **15 minutes** still applies. Two observations are not two minutes or continuous persistence, and cannot promise detection within the reported 300-second cancellation lag. Source-clock maturity is enforced by the owning reducer; a mature alert has generic gate Sustain=1 so the generic tick gate does not add a second two-run hold. A fresh new generation starts over. Missing/partial/stale/duplicate/reset/repeated clocks and ambiguous generation selection are UNKNOWN; they cannot mature or clear an incident. Repeated clocks break the high streak.
+
+The bounded one-vector query returns start, capability, both exact ingress cells and their original sample timestamps without aggregation across processes. All four timestamps must agree, be fresh within 90 seconds (future skew at most 30 seconds), and follow the process start; both counts must be exact finite nonnegative integers. Both ingress cells are exported even at zero. Expected active host/block slots come from the configured Proxy inventory; absent or mismatched scope is UNKNOWN. Every observed candidate is considered before newest-generation selection; equal newest starts or missing starts are UNKNOWN. Freshness does not independently prove that a process is still alive or inventory is complete.
+
+The query uses the existing byte-bounded Mimir gateway adapter: one vector, maximum 4 MiB, at most 4096 series, curl max-time 20 seconds and the existing signal/global owner budgets. No pool, producer, storage, application timeout, production probe floor or concurrency limit changes. Arbitrary response errors/labels and private process nonces are not rendered. Targets use inventory-owned slots. `contract-stage-inflight-unobservable` is visibility and prevents absence credit; positive complete sibling processes remain visible beside a gap. A first high sample silently holds the original class rather than granting absence. Fresh below-band complete scope permits the normal notifier complete-run recovery hold; replacement or unknown evidence cannot certify recovery.
+
+False positives: legitimate high turnover, uninstrumented synchronous work or a transient occupancy burst can exceed the band; two sampled observations do not establish an individual hung call. False negatives: per-process counts below the band can sum to a large fleet population; work in other instrumented stages, deferred async compensation or missing publishers is not measured as OTHER. Low OTHER does not prove compensation queues drained, healthy Redis/PG, low CPU or customer recovery. Correlate the same process generation and bounded owner/stage evidence before any repair. Do not raise pools or restart based on this gauge.
+
+Synthetic controls cover public constructor → bounded vector → source-clock reducer → actual cadence gate/in-memory notifier; strict count threshold and ingress sum; no completed calls; repeated/stale/missing/invalid source cells; equal/newer generation ambiguity; cancellation with no baseline commit; independent positive siblings; default/custom/invalid policy; fixed private-label omission; and unknown/replacement versus complete below-band recovery. No Main or network execution is required for those controls.

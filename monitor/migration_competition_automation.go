@@ -232,7 +232,7 @@ var competitionMigration844ArtifactQuery = "(" +
 	snMainnetMigrationFunction("competition_v2_source_readiness_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2SourceReadinessGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_source_pointer_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2SourcePointerGuardBody) + " AND " +
 	migrationCompetitionBefore(847, snMainnetMigrationFunction("competition_v2_round_insert_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2RoundInsertGuardBody)) + " AND " +
-	snMainnetMigrationFunction("competition_v2_review_identity_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2ReviewIdentityGuardBody) + " AND " +
+	migrationCompetitionBefore(893, snMainnetMigrationFunction("competition_v2_review_identity_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2ReviewIdentityGuardBody)) + " AND " +
 	snMainnetMigrationFunction("competition_v2_outbox_identity_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2OutboxIdentityGuardBody) + " AND " +
 	snMainnetMigrationFunction("competition_v2_decision_outbox_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2DecisionOutboxGuardBody) + " AND " +
 	migrationCompetitionBefore(847, snMainnetMigrationFunction("competition_v2_receipt_identity_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2ReceiptIdentityGuardBody)) + " AND " +
