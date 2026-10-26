@@ -68,6 +68,17 @@ bytes, the wrapper independently observes:
   rules, with exactly one resolved `api.openai.com` IPv4/TCP-443 acceptance
   followed by unconditional drop.
 
+The new UID revision also captures the running child's complete raw
+`/proc/PID/uid_map` and stat-only key metadata before input release. The private
+manifest independently pins both captures. The key must stay mode 0400, with a
+root-owned 0700 host parent, and belong to the **actual mapped host UID for
+container UID 65532**. A root-owned0400 key or a hardcoded65532 host owner is
+not readable by a remapped broker. Mapping gaps, ambiguous/overflowed ranges,
+changed map bytes, wrong owner/PID/container and widened permissions refuse.
+No key contents are read by this guard. Provision ownership using previously
+qualified daemon mapping evidence; if an image loads its key before stdin, bad
+provisioning may exit before the diagnostic barrier and remains unqualified.
+
 DNS resolution occurs once on the trusted host, before start. The child receives
 the resulting `api.openai.com` hosts entry and still verifies TLS for the fixed
 hostname. This is an observed **provider-IP HTTPS fence**, not a hostname-aware
@@ -160,11 +171,19 @@ must never enter any retained body or ordinary error string.
    done
    ```
 
-   Use a fail-fast shell. Require **16 top-level passes** each time (15 substantive
+   Use a fail-fast shell. The new UID-map revision requires **22 top-level passes** each time (21 substantive
    deterministic guards plus the inert command helper), zero skips/failures and
    an overall package pass. Preserve every failed attempt. Recheck the same
    executable/source/workspace bytes after the third pass. No unit mock result
    can set `qualified=true` for a real provider.
+
+   The four draft files **and the actual revised wrapper** must come from the
+   same pinned new source revision. Six new Go guards exercise both the native
+   reader and the exact awk parser extracted from that wrapper using synthetic
+   UID maps only. Preserve the prior 16-test private source/binary/log snapshot;
+   its active passes cannot qualify these changed bytes. Complete successful
+   wrapper manifests now contain sixteen artifacts, or fifteen for cancellation,
+   including `uid-map.txt` and `key-ownership.json`.
 4. Independently qualify/review the actual trusted binary and minimal scratch
    image, then install the exact wrapper root-owned 0555 without changing main
    service settings or activating the review policy. Its fixed root-owned

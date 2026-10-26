@@ -1,0 +1,4 @@
+{
+  "image_id": "${QUALIFIED_MINI_REVIEW_OCI_IMAGE_ID}",
+  "model_key_file": "/var/lib/urnetwork/competition-review/model.key"
+}

@@ -7,6 +7,12 @@ the end of this file. The original five-pair/five-seed default and its retained
 qualification snapshot below are historical contracts, not silently changed
 three-pair results.
 
+At **2026-10-26T15:01:22Z**, the corrected native three-pair analysis accepted
+all 54 original observations and froze **M = 0.269 (26.9%)**, report SHA-256
+`e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb`.
+See the [published margin freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
+The fresh C2 bridge and all-three independent B ordering remain pending.
+
 This is an execution checklist for Stage B of the
 [frozen statistical protocol](CALIBRATION-PROTOCOL-2026-10-25.md), not a new
 statistical rule, accepted calibration or authorization to start measurements.
@@ -98,12 +104,14 @@ and the deliberately shared same-round control correctly.
 
 ## Original operator qualification snapshot
 
-The original fourteen-file private snapshot is being independently qualified;
-the amended source below is a different, still **uncompiled and unexecuted**
-source set. Do not treat an original-snapshot pass as qualification of changed
-bytes. No actual Stage A margin, real hidden seeds or held-out measurements
-have been created by these drafts. Do not run synthetic qualification alongside
-a timed evaluation.
+The original fourteen-file private snapshot passed **62 tests × 3 runs**;
+[its exact evidence is retained](../baseline/prelaunch-heldout-tool-qualification-2026-10-26/README.md).
+The full amended held-out operator is a different, still unqualified source
+set. Its separate three-A assembler and corrected native analyzer passed their
+fourteen selected guards three times and produced the published A freeze.
+No hidden seeds or held-out measurements are created by these status records.
+Do not treat an original-snapshot pass as qualification of changed bytes or run
+synthetic qualification alongside a timed evaluation.
 
 | Draft | Responsibility |
 | --- | --- |
@@ -328,9 +336,10 @@ New source extensions are [protocol/release binding](held-out-amendment.go.txt),
 [fixed-margin native bridge verification](held-out-bridge.go.txt),
 [amendment/bridge guards](held-out-amendment-tests.go.txt), and the separately
 selectable [three-A assembler](held-out-three-a-input-assembly.go.txt) with
-[tests](held-out-three-a-input-assembly-tests.go.txt). Current amended source
-is static only; no compilation, test pass, formal Mini review or actual provider
-qualification is claimed by this document.
+[tests](held-out-three-a-input-assembly-tests.go.txt). The separate assembler and
+corrected native analysis are qualified/executed as recorded in the margin
+freeze; the full amended B operator still requires its own qualification.
+No formal Mini review or actual provider qualification is claimed here.
 
 ### Fast independent original-three assembly
 
@@ -349,9 +358,9 @@ same helper binary as root on CPUs 20,22 with:
 
 ```bash
 export SIM_LATENCY_ASSEMBLE_THREE_A_PROTOCOL=launch-3a-bridge-3b-2026-10-26-v1
-export SIM_LATENCY_ASSEMBLE_THREE_A_APPROVAL=/home/by/urnetwork/server/connect/sim-latency/launch/CALIBRATION-AMENDMENT-2026-10-26.md
+export SIM_LATENCY_ASSEMBLE_THREE_A_APPROVAL=/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/approval.md
 export SIM_LATENCY_ASSEMBLE_THREE_A_APPROVAL_SHA256=a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c
-export SIM_LATENCY_ASSEMBLE_THREE_A_PLAN=/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-corrected-same-seed-r9-2026-10-25/predeclared/plan.json
+export SIM_LATENCY_ASSEMBLE_THREE_A_PLAN=/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/original-plan.json
 export SIM_LATENCY_ASSEMBLE_THREE_A_PLAN_SHA256=24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8
 export SIM_LATENCY_ASSEMBLE_THREE_A_LOCK=/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock
 taskset -c 20,22 /explicit/private/qualified/assembly.test \
@@ -368,23 +377,25 @@ the actual new digest. Existing output or any partial/changed position refuses;
 do not delete a failed output and retry without an independently diagnosed
 correction. No bootstrap, scorer replay or margin is produced by assembly.
 
-### Exact prospective native analysis command
+### Retained native analysis command shape
 
-Use the separately qualified **new native analyzer**, not the unchanged
-installed `30f340a27` executable. Preserve new stdout/stderr files exclusively;
-never overwrite an original five-pair record. Replace only the manifest digest
-placeholder with the actual authenticated assembly output:
+The actual A analysis is complete; do not rerun it to select another margin.
+For an independently authorized verification, use the separately installed
+corrected native analyzer below, not unchanged `30f340a27` or the retained old
+`2f46d3cc6` binary. Preserve new stdout/stderr exclusively. Both publication
+files below are root-owned immutable 0444 copies; the writable operator-checkout
+files were correctly refused and their failed preflight evidence is retained.
 
 ```bash
-taskset -c 20,22 /explicit/private/qualified/sim-latency calibrate \
+taskset -c 20,22 /usr/local/libexec/urnetwork/competition-calibration-3a-21f371d18/sim-latency calibrate \
   --calibration-inputs=/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/analysis-inputs-three-a-v1.json \
-  --calibration-inputs-sha256=<actual-assembled-manifest-sha256> \
+  --calibration-inputs-sha256=abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94 \
   --calibration-lock=/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock \
   --calibration-cpuset=20,22 \
   --calibration-protocol=launch-3a-bridge-3b-2026-10-26-v1 \
-  --calibration-approval=/home/by/urnetwork/server/connect/sim-latency/launch/CALIBRATION-AMENDMENT-2026-10-26.md \
+  --calibration-approval=/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/approval.md \
   --calibration-approval-sha256=a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c \
-  --calibration-original-plan=/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-corrected-same-seed-r9-2026-10-25/predeclared/plan.json \
+  --calibration-original-plan=/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/original-plan.json \
   --calibration-original-plan-sha256=24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8
 ```
 
@@ -463,7 +474,7 @@ fourteen-file/62-test qualification snapshot. Run the same newly built race
 binary three consecutive times with `^TestHeldOut`, all real operation/assembly
 variables unset: expected **87 passes**, 85 substantive guards plus two inert
 commands, zero skips. The native `^TestCalibration` selection separately has
-63 tests, including the eight new protocol guards; validate it three times too.
+64 tests, including the nine named-protocol guards; validate it three times too.
 Do not compile or test while a timed evaluation is active.
 
 Successful preparation draws exactly three fresh cryptographic seeds, calls

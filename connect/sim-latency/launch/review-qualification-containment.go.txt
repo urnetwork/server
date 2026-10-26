@@ -11,9 +11,121 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 )
+
+// Allocation/count bounds belong to this evidence reader, not model input.
+type reviewQualificationUidSettings struct {
+	MaximumBytes, MaximumRanges int
+	MaximumKeyBytes             int64
+}
+
+// Matches the bounded shell capture and existing private-token reader.
+func defaultReviewQualificationUidSettings() reviewQualificationUidSettings {
+	return reviewQualificationUidSettings{MaximumBytes: 16 * 1024, MaximumRanges: 340, MaximumKeyBytes: 4096}
+}
+
+// Linux uid_map ranges are exact unsigned decimals, bounded and nonoverlapping
+// on both sides. A missing UID must not fall back to identity mapping.
+func reviewQualificationMappedUid(content []byte, uid uint64) (uint64, error) {
+	const limit = uint64(4294967295)
+	settings := defaultReviewQualificationUidSettings()
+	if len(content) == 0 || len(content) > settings.MaximumBytes || uid >= limit {
+		return 0, errors.New("broker UID map is empty, oversized or outside Linux UID bounds")
+	}
+	for _, c := range content {
+		if (c < '0' || c > '9') && c != ' ' && c != '\t' && c != '\n' {
+			return 0, errors.New("broker UID map contains noncanonical characters")
+		}
+	}
+	lines := strings.Split(string(content), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 || len(lines) > settings.MaximumRanges {
+		return 0, errors.New("broker UID map range count invalid")
+	}
+	type uidRange struct{ start, host, count uint64 }
+	ranges := []uidRange{}
+	mapped, found := uint64(0), false
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return 0, errors.New("broker UID map range is malformed")
+		}
+		values := make([]uint64, 3)
+		for index, field := range fields {
+			value, err := strconv.ParseUint(field, 10, 32)
+			if err != nil || strconv.FormatUint(value, 10) != field {
+				return 0, errors.New("broker UID map decimal is invalid")
+			}
+			values[index] = value
+		}
+		next := uidRange{start: values[0], host: values[1], count: values[2]}
+		if next.start >= limit || next.host >= limit || next.count == 0 || next.count > limit || next.start+next.count > limit || next.host+next.count > limit {
+			return 0, errors.New("broker UID map range overflows Linux UID bounds")
+		}
+		for _, previous := range ranges {
+			if (next.start < previous.start+previous.count && previous.start < next.start+next.count) || (next.host < previous.host+previous.count && previous.host < next.host+next.count) {
+				return 0, errors.New("broker UID map ranges overlap")
+			}
+		}
+		ranges = append(ranges, next)
+		if next.start <= uid && uid-next.start < next.count {
+			if found {
+				return 0, errors.New("broker UID has an ambiguous host mapping")
+			}
+			mapped, found = next.host+uid-next.start, true
+		}
+	}
+	if !found {
+		return 0, errors.New("broker container UID is not mapped")
+	}
+	return mapped, nil
+}
+
+// Only stat metadata is captured. Key contents, a daemon-name mapping guess or
+// caller self-reported readability cannot authorize provider input.
+func validateReviewQualificationKeyOwnership(uidMap, content []byte, owner, container string, pid int) error {
+	settings := defaultReviewQualificationUidSettings()
+	if err := rejectWinnerReviewCaseAliases(content); err != nil {
+		return err
+	}
+	mapped, err := reviewQualificationMappedUid(uidMap, 65532)
+	if err != nil {
+		return err
+	}
+	var key struct {
+		Schema        int `json:"schema"`
+		Kind, Owner   string
+		ContainerId   string `json:"container_id"`
+		Pid           int    `json:"container_pid"`
+		Path          string
+		ContainerUid  uint64 `json:"container_uid"`
+		MappedUid     uint64 `json:"mapped_host_uid"`
+		Uid           uint64 `json:"host_uid"`
+		Gid           uint64 `json:"host_gid"`
+		Mode          string
+		Bytes         int64
+		Links         int
+		Device, Inode string
+		UidMapSha256  string `json:"uid_map_sha256"`
+		ParentUid     uint64 `json:"parent_owner_uid"`
+		ParentMode    string `json:"parent_mode"`
+		BeforeInput   bool   `json:"observed_before_provider_input"`
+	}
+	if err := decodeStrictJSONBytes(content, &key, "actual review key ownership metadata"); err != nil {
+		return err
+	}
+	device, deviceErr := strconv.ParseUint(key.Device, 10, 64)
+	inode, inodeErr := strconv.ParseUint(key.Inode, 10, 64)
+	if key.Schema != 1 || key.Kind != "winner-review-key-ownership" || key.Owner != owner || !validSha256(owner) || key.ContainerId != container || !validSha256(container) || key.Pid != pid || pid < 1 || key.Path != "/var/lib/urnetwork/competition-review/model.key" || key.ContainerUid != 65532 || key.MappedUid != mapped || mapped == 0 || key.Uid != mapped || key.Gid >= 4294967295 || key.Mode != "0400" || key.Bytes < 1 || key.Bytes > settings.MaximumKeyBytes || key.Links != 1 || deviceErr != nil || inodeErr != nil || key.Device != strconv.FormatUint(device, 10) || key.Inode != strconv.FormatUint(inode, 10) || inode == 0 || key.UidMapSha256 != reviewQualificationHash(uidMap) || key.ParentUid != 0 || key.ParentMode != "0700" || !key.BeforeInput {
+		return errors.New("dedicated review key is not privately readable by the actual mapped broker UID")
+	}
+	return nil
+}
 
 // The wrapper emits this last stderr line only after owned cleanup completes.
 type reviewQualificationWrapperReceipt struct {
@@ -167,9 +279,9 @@ func authenticateReviewQualificationContainment(input, output, diagnostics []byt
 	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > 16 {
 		return "", errors.New("actual wrapper evidence manifest invalid")
 	}
-	expectedArtifacts := 14
+	expectedArtifacts := 16
 	if canceled {
-		expectedArtifacts = 13
+		expectedArtifacts = 15
 	}
 	if len(manifest.Artifacts) != expectedArtifacts {
 		return "", errors.New("actual wrapper evidence coverage changed")
@@ -185,7 +297,7 @@ func authenticateReviewQualificationContainment(input, output, diagnostics []byt
 		}
 		artifacts[binding.Path] = content
 	}
-	for _, required := range []string{"input.json", "image-inspect.json", "network-inspect.json", "container-inspect.json", "cgroup.json", "provider-address.txt", "fence.json", "fence-forward.txt", "fence-input.txt", "fence-chain.txt", "broker.stdout", "broker.stderr", "terminal.json"} {
+	for _, required := range []string{"input.json", "image-inspect.json", "network-inspect.json", "container-inspect.json", "cgroup.json", "uid-map.txt", "key-ownership.json", "provider-address.txt", "fence.json", "fence-forward.txt", "fence-input.txt", "fence-chain.txt", "broker.stdout", "broker.stderr", "terminal.json"} {
 		if _, present := artifacts[required]; !present {
 			return "", errors.New("actual wrapper omitted required containment evidence")
 		}
@@ -280,6 +392,7 @@ func authenticateReviewQualificationContainment(input, output, diagnostics []byt
 	}
 	var cgroup struct {
 		Schema      int `json:"schema"`
+		Pid         int `json:"container_pid"`
 		Kind, Path  string
 		MemoryMax   string `json:"memory_max"`
 		SwapMax     string `json:"memory_swap_max"`
@@ -288,8 +401,11 @@ func authenticateReviewQualificationContainment(input, output, diagnostics []byt
 		CpuSet      string `json:"cpuset_cpus"`
 		BeforeInput bool   `json:"observed_before_provider_input"`
 	}
-	if json.Unmarshal(artifacts["cgroup.json"], &cgroup) != nil || cgroup.Schema != 1 || cgroup.Kind != "winner-review-running-cgroup" || !strings.HasPrefix(cgroup.Path, "/") || cgroup.MemoryMax != "2147483648" || cgroup.SwapMax != "0" || cgroup.PidsMax != "64" || cgroup.CpuMax != "100000 100000" || cgroup.CpuSet != "20,22" || !cgroup.BeforeInput {
+	if json.Unmarshal(artifacts["cgroup.json"], &cgroup) != nil || cgroup.Schema != 1 || cgroup.Pid < 1 || cgroup.Kind != "winner-review-running-cgroup" || !strings.HasPrefix(cgroup.Path, "/") || cgroup.MemoryMax != "2147483648" || cgroup.SwapMax != "0" || cgroup.PidsMax != "64" || cgroup.CpuMax != "100000 100000" || cgroup.CpuSet != "20,22" || !cgroup.BeforeInput {
 		return "", errors.New("actual running broker cgroup limits were not observed before provider input")
+	}
+	if err := validateReviewQualificationKeyOwnership(artifacts["uid-map.txt"], artifacts["key-ownership.json"], receipt.Owner, terminal.ContainerId, cgroup.Pid); err != nil {
+		return "", err
 	}
 	return reviewQualificationHash(lines[len(lines)-1]), nil
 }

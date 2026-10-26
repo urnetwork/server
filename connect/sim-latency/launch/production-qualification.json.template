@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028",
+  "staging": false,
+  "host_config": "/etc/urnetwork/competition-host.json",
+  "state_directory": "/var/lib/urnetwork/competition-production-20261028/qualification",
+  "promotion_command": "${QUALIFIED_CONTAINMENT_PROMOTER_COMMAND}",
+  "promotion_sha256": "${QUALIFIED_CONTAINMENT_PROMOTER_SHA256}",
+  "resource_bomb_report": "${QUALIFIED_CURRENT_BOOT_RESOURCE_BOMB_REPORT}",
+  "resource_bomb_sha256": "${QUALIFIED_CURRENT_BOOT_RESOURCE_BOMB_SHA256}",
+  "resource_bomb_boot_id": "${QUALIFIED_CURRENT_BOOT_ID}",
+  "worker_command": "${QUALIFIED_CONTROL_DIRECTORY}/competitionworker",
+  "worker_sha256": "${QUALIFIED_COMPETITIONWORKER_SHA256}",
+  "worker_image_digest": "${ACTUAL_WORKER_OCI_IMAGE_ID}",
+  "api_image_digest": "",
+  "reviewed_build_state_directory": "/var/lib/urnetwork/competition-production-20261028/reviewed-builds"
+}

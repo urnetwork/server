@@ -11,8 +11,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -413,7 +415,8 @@ func TestReviewQualificationContainerRequiresActualLeastAuthority(t *testing.T) 
 // The composed receipt loader binds exact input/output and every private
 // artifact, including actual cgroup/network/firewall inspection rather than
 // accepting the model's own NoMainCredentials boolean as proof.
-func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testing.T) {
+func newReviewQualificationContainmentFixture(t *testing.T) ([]byte, []byte, []byte, string, reviewQualificationSettings, string) {
+	t.Helper()
 	root := reviewQualificationTestRoot(t)
 	settings := defaultReviewQualificationSettings()
 	settings.StateRoot = filepath.Join(root, "attempts")
@@ -431,13 +434,16 @@ func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testi
 		return content
 	}
 	input, output := []byte("synthetic exact request bytes"), []byte("synthetic exact response bytes")
+	uidMap := []byte("0 2400000 65536\n")
 	artifacts := map[string][]byte{
 		"input.json": input, "broker.stdout": output, "broker.stderr": []byte{}, "provider-address.txt": []byte(provider + "\n"),
 		"image-inspect.json":     encode([]any{map[string]any{"Id": image}}),
 		"container-inspect.json": reviewQualificationContainerFixture(t, owner, image, network, provider),
 		"container-state.json":   encode(map[string]any{"Status": "exited", "Running": false, "OOMKilled": false, "ExitCode": 0}),
 		"network-inspect.json":   encode([]any{map[string]any{"Id": network, "Driver": "bridge", "Scope": "local", "Internal": false, "EnableIPv6": false, "Attachable": false, "Labels": map[string]string{"com.urnetwork.review.owner": owner}, "Options": map[string]string{"com.docker.network.bridge.enable_icc": "false"}, "IPAM": map[string]any{"Config": []any{map[string]string{"Subnet": subnet}}}}}),
-		"cgroup.json":            encode(map[string]any{"schema": 1, "kind": "winner-review-running-cgroup", "path": "/synthetic-cgroup", "memory_max": "2147483648", "memory_swap_max": "0", "pids_max": "64", "cpu_max": "100000 100000", "cpuset_cpus": "20,22", "observed_before_provider_input": true}),
+		"cgroup.json":            encode(map[string]any{"schema": 1, "kind": "winner-review-running-cgroup", "path": "/synthetic-cgroup", "container_pid": 7777, "memory_max": "2147483648", "memory_swap_max": "0", "pids_max": "64", "cpu_max": "100000 100000", "cpuset_cpus": "20,22", "observed_before_provider_input": true}),
+		"uid-map.txt":            uidMap,
+		"key-ownership.json":     reviewQualificationKeyFixture(t, uidMap, owner, container, 7777),
 		"fence.json":             encode(map[string]any{"schema": 1, "kind": "winner-review-provider-egress-fence", "owner": owner, "chain": chain, "source_subnet": subnet, "provider_host": "api.openai.com", "provider_ipv4": provider, "provider_port": 443, "external_dns": false, "host_input_denied": true, "default_deny": true, "installed_before_start": true}),
 		"fence-chain.txt":        []byte(fmt.Sprintf("-N %s\n-A %s -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\n-A %s -j DROP\n", chain, chain, provider, chain)),
 		"fence-forward.txt":      []byte(fmt.Sprintf("-A DOCKER-USER -s %s -m comment --comment %s -j %s\n", subnet, comment, chain)),
@@ -457,6 +463,12 @@ func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testi
 	}
 	receipt := reviewQualificationWrapperReceipt{Schema: 1, Kind: "winner-review-container-receipt", Owner: owner, AttemptDirectory: attempt, ManifestSha256: reviewQualificationHash(manifest), CleanupVerified: true}
 	diagnostics := append(encode(receipt), '\n')
+	return input, output, diagnostics, image, settings, attempt
+}
+
+// Every private body is bound before interpreting ownership or provider output.
+func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt := newReviewQualificationContainmentFixture(t)
 	if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err != nil {
 		t.Fatal(err)
 	}
@@ -465,6 +477,196 @@ func TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest(t *testi
 	}
 	if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("changed private wrapper output accepted: %v", err)
+	}
+}
+
+// Ownership metadata contains no key bytes and uses only synthetic host IDs.
+func reviewQualificationKeyFixture(t *testing.T, uidMap []byte, owner, container string, pid int) []byte {
+	t.Helper()
+	mapped, err := reviewQualificationMappedUid(uidMap, 65532)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := json.Marshal(map[string]any{"schema": 1, "kind": "winner-review-key-ownership", "owner": owner, "container_id": container, "container_pid": pid, "path": "/var/lib/urnetwork/competition-review/model.key", "container_uid": 65532, "mapped_host_uid": mapped, "host_uid": mapped, "host_gid": uint64(2400000), "mode": "0400", "bytes": 123, "links": 1, "device": "7", "inode": "99", "uid_map_sha256": reviewQualificationHash(uidMap), "parent_owner_uid": 0, "parent_mode": "0700", "observed_before_provider_input": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+// Executes only the actual wrapper's extracted awk parser on synthetic text,
+// never the wrapper, Docker, a key file, namespace or provider request.
+func reviewQualificationShellMappedUid(t *testing.T, content []byte) (uint64, error) {
+	t.Helper()
+	settings := defaultReviewQualificationUidSettings()
+	if len(content) > settings.MaximumBytes {
+		return 0, errors.New("synthetic UID capture exceeds wrapper bound")
+	}
+	wrapper, err := os.ReadFile(filepath.Join("evaluator", "review", "run-broker.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "readonly review_uid_map_program='\n"
+	suffix := "\n'\n# review_uid_map_program_end"
+	start := strings.Index(string(wrapper), prefix)
+	if start < 0 {
+		t.Fatal("qualified wrapper UID parser source missing")
+	}
+	start += len(prefix)
+	end := strings.Index(string(wrapper)[start:], suffix)
+	if end < 0 {
+		t.Fatal("qualified wrapper UID parser terminator missing")
+	}
+	program := string(wrapper)[start : start+end]
+	path := filepath.Join(reviewQualificationTestRoot(t), "synthetic-uid-map.txt")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), defaultReviewQualificationSettings().CleanupGrace)
+	defer cancel()
+	command := exec.CommandContext(ctx, "awk", program, path)
+	output, err := command.Output()
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 32)
+	if err != nil || string(output) != fmt.Sprintf("%d\n", value) {
+		return 0, errors.New("wrapper UID parser output is not one exact unsigned decimal")
+	}
+	return value, nil
+}
+
+// No hardcoded host offset can substitute for the actual running child map.
+func TestReviewQualificationUidMapAcceptsActualMappedIdentity(t *testing.T) {
+	for _, item := range []struct {
+		body     string
+		expected uint64
+	}{{body: "         0          0 4294967295\n", expected: 65532}, {body: "0 2400000 65536\n", expected: 2465532}, {body: "0 8000000 1024\n65000 6200000 1000\n", expected: 6200532}, {body: "65532 7300000 1\n", expected: 7300000}} {
+		mapped, err := reviewQualificationMappedUid([]byte(item.body), 65532)
+		if err != nil || mapped != item.expected {
+			t.Fatalf("Go UID map mismatch: got=%d expected=%d err=%v", mapped, item.expected, err)
+		}
+		shellMapped, err := reviewQualificationShellMappedUid(t, []byte(item.body))
+		if err != nil || shellMapped != item.expected {
+			t.Fatalf("actual wrapper UID parser mismatch: got=%d expected=%d err=%v", shellMapped, item.expected, err)
+		}
+	}
+}
+
+// The demonstrated root-owned0400 leaf and a guessed unremapped65532 owner both
+// fail for a remapped child; the exact mapped owner passes without broad modes.
+func TestReviewQualificationUidKeyRejectsRootOrGuessedOwner(t *testing.T) {
+	uidMap := []byte("0 2400000 65536\n")
+	owner, container := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	original := reviewQualificationKeyFixture(t, uidMap, owner, container, 7777)
+	if err := validateReviewQualificationKeyOwnership(uidMap, original, owner, container, 7777); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(map[string]any){func(k map[string]any) { k["host_uid"] = 0 }, func(k map[string]any) { k["host_uid"] = 65532 }, func(k map[string]any) { k["mode"] = "0444" }, func(k map[string]any) { k["parent_mode"] = "0755" }, func(k map[string]any) { k["links"] = 2 }, func(k map[string]any) { k["parent_owner_uid"] = 2400000 }, func(k map[string]any) { k["mapped_host_uid"] = 65532 }} {
+		var key map[string]any
+		if err := json.Unmarshal(original, &key); err != nil {
+			t.Fatal(err)
+		}
+		mutate(key)
+		changed, err := json.Marshal(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateReviewQualificationKeyOwnership(uidMap, changed, owner, container, 7777); err == nil {
+			t.Fatal("root/guessed/widened key authority accepted")
+		}
+	}
+	rootMap := []byte("65532 0 1\n")
+	if err := validateReviewQualificationKeyOwnership(rootMap, reviewQualificationKeyFixture(t, rootMap, owner, container, 7777), owner, container, 7777); err == nil {
+		t.Fatal("container broker UID mapped onto privileged host root")
+	}
+}
+
+// A target gap is an error, not an invitation to use the same numeric host UID.
+func TestReviewQualificationUidMapRejectsMissingTargetOrGaps(t *testing.T) {
+	for _, body := range []string{"0 2400000 1000\n", "0 2400000 65532\n65533 7300000 1\n", "65533 2400000 10\n"} {
+		if _, err := reviewQualificationMappedUid([]byte(body), 65532); err == nil {
+			t.Error("Go reader guessed an unmapped broker UID")
+		}
+		if _, err := reviewQualificationShellMappedUid(t, []byte(body)); err == nil {
+			t.Error("actual wrapper guessed an unmapped broker UID")
+		}
+	}
+}
+
+// Kernel-format bounds reject malformed/negative/overflow ranges before either
+// decoder can convert an invalid number into a plausible key owner.
+func TestReviewQualificationUidMapRejectsMalformedOrOverflow(t *testing.T) {
+	tooMany := strings.Builder{}
+	tooMany.WriteString("65532 2400000 1\n")
+	for index := 0; index < defaultReviewQualificationUidSettings().MaximumRanges; index++ {
+		fmt.Fprintf(&tooMany, "%d %d 1\n", index, 8000000+index)
+	}
+	for _, body := range []string{"", "\n", "0 2400000\n", "0 2400000 65536 extra\n", "-1 2400000 65536\n", "+0 2400000 65536\n", "00 2400000 65536\n", "0 2400000 0\n", "0 2400000 65536\r\n", "0 4294967290 65536\n", "4294967295 2400000 1\n", "0 2400000 4294967296\n", tooMany.String(), strings.Repeat(" ", defaultReviewQualificationUidSettings().MaximumBytes) + "0 2400000 65536\n"} {
+		if _, err := reviewQualificationMappedUid([]byte(body), 65532); err == nil {
+			t.Errorf("Go reader accepted malformed UID map %q", body[:min(len(body), 64)])
+		}
+		if _, err := reviewQualificationShellMappedUid(t, []byte(body)); err == nil {
+			t.Error("actual wrapper accepted malformed UID map")
+		}
+	}
+}
+
+// Overlap in either namespace can create ambiguous owners, even when just one
+// apparent line covers the requested container UID.
+func TestReviewQualificationUidMapRejectsOverlappingRanges(t *testing.T) {
+	for _, body := range []string{"0 2400000 65536\n65532 7300000 1\n", "0 2400000 65536\n70000 2400100 10\n", "0 2400000 65536\n0 2400000 65536\n"} {
+		if _, err := reviewQualificationMappedUid([]byte(body), 65532); err == nil {
+			t.Error("Go reader accepted overlapping UID ranges")
+		}
+		if _, err := reviewQualificationShellMappedUid(t, []byte(body)); err == nil {
+			t.Error("actual wrapper accepted overlapping UID ranges")
+		}
+	}
+}
+
+// The full raw map hash and key metadata are independently manifest-bound;
+// same-derived-UID substitutions and owner/container/PID drift also refuse.
+func TestReviewQualificationUidCaptureRequiresExactBinding(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt := newReviewQualificationContainmentFixture(t)
+	if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"uid-map.txt", "key-ownership.json"} {
+		path := filepath.Join(attempt, name)
+		original, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(append([]byte{}, original...), ' '), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := authenticateReviewQualificationContainment(input, output, diagnostics, false, image, settings); err == nil {
+			t.Fatalf("changed %s capture was not independently bound", name)
+		}
+		if err := os.WriteFile(path, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uidMap := []byte("0 2400000 65536\n")
+	owner, container := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	original := reviewQualificationKeyFixture(t, uidMap, owner, container, 7777)
+	if err := validateReviewQualificationKeyOwnership([]byte("0\t2400000 65536\n"), original, owner, container, 7777); err == nil {
+		t.Fatal("same derived UID replaced the exact raw map capture")
+	}
+	for _, mutate := range []func(map[string]any){func(k map[string]any) { k["uid_map_sha256"] = strings.Repeat("f", 64) }, func(k map[string]any) { k["container_pid"] = 7778 }, func(k map[string]any) { k["container_id"] = strings.Repeat("c", 64) }, func(k map[string]any) { k["owner"] = strings.Repeat("d", 64) }, func(k map[string]any) { k["observed_before_provider_input"] = false }} {
+		var key map[string]any
+		if err := json.Unmarshal(original, &key); err != nil {
+			t.Fatal(err)
+		}
+		mutate(key)
+		changed, err := json.Marshal(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateReviewQualificationKeyOwnership(uidMap, changed, owner, container, 7777); err == nil {
+			t.Fatal("key ownership capture lost invocation/map/barrier binding")
+		}
 	}
 }
 

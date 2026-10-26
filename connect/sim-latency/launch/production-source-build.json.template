@@ -1,0 +1,7 @@
+{
+  "sandbox": {
+    "state_directory": "/var/lib/urnetwork/competition-production-20261028/reviewed-builds"
+  },
+  "qualification_command": "${QUALIFIED_CONTROL_DIRECTORY}/source-qualify",
+  "qualification_sha256": "${QUALIFIED_SOURCE_QUALIFY_WRAPPER_SHA256}"
+}

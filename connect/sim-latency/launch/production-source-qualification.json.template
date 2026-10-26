@@ -1,0 +1,11 @@
+{
+  "sandbox": {
+    "state_directory": "/var/lib/urnetwork/competition-production-20261028/reviewed-builds"
+  },
+  "host": {
+    "command": "${QUALIFIED_HOST_SELF_CHECK_COMMAND}",
+    "command_sha256": "${QUALIFIED_HOST_SELF_CHECK_SHA256}",
+    "active_config": "/etc/urnetwork/competition-host.json"
+  },
+  "model_key_file": "/var/lib/urnetwork/competition-source-tests/model.key"
+}

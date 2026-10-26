@@ -24,6 +24,8 @@ jq -e '(keys|sort)==["image_id","model_key_file"]' "$configuration" >/dev/null
 [[ "$(stat -c %u /var/lib/urnetwork/competition-review)" == 0 ]] || exit 1
 [[ "$(stat -c %a /var/lib/urnetwork/competition-review)" == 700 ]] || exit 1
 [[ "$(realpath -e "$key")" == "$key" ]] || exit 1
+key_identity="$(stat -c %d:%i:%u:%g:%a:%s:%h "$key")"
+readonly key_identity
 [[ "$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)" == 20,22 ]] || exit 1
 readonly docker=(/usr/bin/docker --host=unix:///var/run/docker.sock)
 bounded() { timeout --signal=TERM --kill-after=1s "${command_limit_seconds}s" "$@"; }
@@ -107,7 +109,7 @@ finish() {
     (
         set -Eeuo pipefail
         cd "$attempt_directory" || exit 1
-        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
+        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json uid-map.txt key-ownership.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
             [[ ! -f "$file" ]] || jq -cn --arg path "$file" --arg sha256 "$(sha256sum "$file" | cut -d ' ' -f1)" --argjson bytes "$(stat -c %s "$file")" '{path:$path,sha256:$sha256,bytes:$bytes}'
         done | jq -s '{schema:1,kind:"winner-review-container-evidence",artifacts:.}'
     ) > "$attempt_directory/evidence-manifest.json" || evidence_verified=false
@@ -233,7 +235,45 @@ memory_max="$(<"$cgroup/memory.max")"; swap_max="$(<"$cgroup/memory.swap.max")"
 pids_max="$(<"$cgroup/pids.max")"; cpu_max="$(<"$cgroup/cpu.max")"; cpu_set="$(<"$cgroup/cpuset.cpus.effective")"
 [[ "$memory_max" == 2147483648 && "$swap_max" == 0 && "$pids_max" == 64 && "$cpu_max" == '100000 100000' && "$cpu_set" == 20,22 ]]
 jq -n --arg path "$cgroup_relative" --arg memory "$memory_max" --arg swap "$swap_max" --arg pids "$pids_max" --arg cpu "$cpu_max" --arg cpuset "$cpu_set" \
-    '{schema:1,kind:"winner-review-running-cgroup",path:$path,memory_max:$memory,memory_swap_max:$swap,pids_max:$pids,cpu_max:$cpu,cpuset_cpus:$cpuset,observed_before_provider_input:true}' > "$attempt_directory/cgroup.json"
+    --argjson pid "$broker_pid" \
+    '{schema:1,kind:"winner-review-running-cgroup",path:$path,container_pid:$pid,memory_max:$memory,memory_swap_max:$swap,pids_max:$pids,cpu_max:$cpu,cpuset_cpus:$cpuset,observed_before_provider_input:true}' > "$attempt_directory/cgroup.json"
+# Read the running child mapping, not a daemon-name guess or host UID literal.
+# The root-private parent denies host traversal; only the bind-mounted leaf is
+# readable by its mapped container owner. Never read or save key contents.
+head -c 16385 "/proc/$broker_pid/uid_map" > "$attempt_directory/uid-map.txt"
+(( $(stat -c %s "$attempt_directory/uid-map.txt") <= 16384 ))
+# review_uid_map_program_begin
+readonly review_uid_map_program='
+BEGIN { limit=4294967295; target=65532; count=0; found=0; bad=0 }
+$0~/[^0-9 \t]/ { bad=1; exit 1 }
+NF!=3 || $1!~/^(0|[1-9][0-9]*)$/ || $2!~/^(0|[1-9][0-9]*)$/ || $3!~/^(0|[1-9][0-9]*)$/ { bad=1; exit 1 }
+{
+    start=$1+0; host=$2+0; span=$3+0;
+    if (start>=limit || host>=limit || span<=0 || span>limit || start+span>limit || host+span>limit || count>=340) { bad=1; exit 1 }
+    for (i=0;i<count;i++) {
+        if ((start<ends[i] && starts[i]<start+span) || (host<hostends[i] && hosts[i]<host+span)) { bad=1; exit 1 }
+    }
+    starts[count]=start; ends[count]=start+span; hosts[count]=host; hostends[count]=host+span; count++;
+    if (start<=target && target<start+span) { mapped=host+target-start; found++ }
+}
+END { if (bad || count==0 || found!=1) exit 1; printf "%.0f\n",mapped }
+'
+# review_uid_map_program_end
+mapped_uid="$(awk "$review_uid_map_program" "$attempt_directory/uid-map.txt")"
+[[ "$mapped_uid" =~ ^[0-9]+$ ]]
+[[ ! -L "$key" && -f "$key" && "$(stat -c %d:%i:%u:%g:%a:%s:%h "$key")" == "$key_identity" ]]
+IFS=: read -r key_device key_inode key_uid key_gid key_mode key_bytes key_links <<<"$key_identity"
+jq -n --arg owner "$owner" --arg container "$container_id" --argjson pid "$broker_pid" --arg path "$key" \
+    --arg map_sha256 "$(sha256sum "$attempt_directory/uid-map.txt" | cut -d ' ' -f1)" \
+    --argjson host_uid "$key_uid" --argjson host_gid "$key_gid" --argjson mapped_uid "$mapped_uid" \
+    --arg device "$key_device" --arg inode "$key_inode" --argjson bytes "$key_bytes" --argjson links "$key_links" \
+    '{schema:1,kind:"winner-review-key-ownership",owner:$owner,container_id:$container,container_pid:$pid,
+      path:$path,container_uid:65532,mapped_host_uid:$mapped_uid,host_uid:$host_uid,host_gid:$host_gid,
+      mode:"0400",bytes:$bytes,links:$links,device:$device,inode:$inode,uid_map_sha256:$map_sha256,
+      parent_owner_uid:0,parent_mode:"0700",observed_before_provider_input:true}' > "$attempt_directory/key-ownership.json"
+[[ "$key_mode" == 400 && "$key_uid" == "$mapped_uid" && "$key_links" == 1 && "$mapped_uid" != 0 ]]
+((key_bytes>0 && key_bytes<=4096))
+[[ "$(stat -c %u:%a "$state_root")" == 0:700 ]]
 if [[ "$(jq -er '.operation' "$attempt_directory/input.json")" == qualification_cancel_before_provider ]]; then exit 143; fi
 provider_input_released=true
 timeout --signal=TERM --kill-after=1s "${command_limit_seconds}s" cat "$attempt_directory/input.json" >&7 7>&- &
