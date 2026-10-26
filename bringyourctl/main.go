@@ -103,6 +103,7 @@ Usage:
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
+    bringyourctl payouts reimburse --file=<file> --reason=<reason> [(--send --expect=<digest>)]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -153,7 +154,7 @@ Usage:
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
-    bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
+    bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
 
@@ -227,7 +228,8 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile dry run printed; --send refuses any other census.
+    --expect=<digest>  The digest the sn-reconcile or reimburse dry run printed; --send refuses any other census.
+    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -392,6 +394,8 @@ func main() {
 			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
 				return controller.SnReconcile(clientSession, send, expect)
 			}))
+		} else if reimburse, _ := opts.Bool("reimburse"); reimburse {
+			os.Exit(payoutsReimburseCommand(opts))
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {

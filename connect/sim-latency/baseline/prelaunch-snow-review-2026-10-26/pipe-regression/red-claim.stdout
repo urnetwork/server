@@ -1,0 +1,4 @@
+=== RUN   TestReviewQualificationSnowClaimsBindWrapperRelease
+    review_qualification_snow_tests_draft_test.go:119: qualification claim is not bound to the authenticated immutable wrapper
+--- FAIL: TestReviewQualificationSnowClaimsBindWrapperRelease (0.17s)
+FAIL

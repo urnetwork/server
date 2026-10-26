@@ -202,16 +202,32 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		redisContractReservationResults.WithLabelValues("selection", "capacity-held").Inc()
 		return errors.Join(&redisGrantSelectionCapacityError{Rows: rowsRead, Selected: len(selected), Limits: limits, LastBalance: last}, held)
 	}
+	// After this request's first refusal, each batch's remaining candidates are
+	// probed read-only, and a reservation the probe proves refused is skipped
+	// (subscription_redis_grant_probe.go). Attempt order and the set of
+	// considered grants are unchanged.
+	probe := redisGrantProbe{contractId: admission.contractId}
 	reserve := func(balance *escrowTransferBalance, whole bool) (bool, error) {
 		if heldBalanceIds[balance.balanceId] || balance.balanceByteCount <= 0 {
 			return false, nil
 		}
-		admission.noteBalance(balance.balanceId)
-		reservation.noteReservationRequest()
 		operation := "reserve-pending"
 		if whole {
 			operation = "reserve-pending-full"
 		}
+		if refused, idle := probe.refuses(balance.balanceId, remaining, whole); refused {
+			// The reservation would have reserved nothing. A grant holding a
+			// recovery or pending marker stays in this request's recovery
+			// discovery, as a refused reservation keeps it; no token exists.
+			if !idle {
+				admission.noteBalance(balance.balanceId)
+				admission.noteZeroReservation(balance.balanceId)
+			}
+			redisContractReservationResults.WithLabelValues(operation, "skipped").Inc()
+			return false, nil
+		}
+		admission.noteBalance(balance.balanceId)
+		reservation.noteReservationRequest()
 		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
 		if err != nil {
 			if redisGrantCounterHeld(err) {
@@ -224,6 +240,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		}
 		if amount == 0 {
 			admission.noteZeroReservation(balance.balanceId)
+			probe.noteRefusal()
 			return false, nil
 		}
 		if whole && amount != remaining {
@@ -298,13 +315,19 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		}
 		if len(candidates) != 0 {
 			start := int(payerClientId.Hash() % uint64(len(candidates)))
-			attempts := 0
+			attempts := make([]*escrowTransferBalance, 0, proberGrantAttemptsPerWindow)
 			for offset := range candidates {
 				balance := candidates[(start+offset)%len(candidates)]
-				if balance.balanceByteCount < requested {
-					continue
+				if requested <= balance.balanceByteCount {
+					attempts = append(attempts, balance)
+					if len(attempts) == proberGrantAttemptsPerWindow {
+						break
+					}
 				}
-				attempts++
+			}
+			probe.forget()
+			for index, balance := range attempts {
+				probe.observe(ctx, attempts[index:])
 				done, err := reserve(balance, true)
 				if err != nil {
 					return nil, 0, err
@@ -317,9 +340,6 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 						}
 					}
 					return selected, priority, nil
-				}
-				if attempts == proberGrantAttemptsPerWindow {
-					break
 				}
 			}
 		}
@@ -365,11 +385,13 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			})
 		})
 		warn()
-		for _, balance := range page {
+		probe.forget()
+		for index, balance := range page {
 			cursor, last = balance, balance.balanceId
 			if len(selected) == limits.MaxSelected {
 				return nil, 0, capacity()
 			}
+			probe.observe(ctx, page[index:])
 			done, err := reserve(balance, false)
 			if err != nil {
 				return nil, 0, err

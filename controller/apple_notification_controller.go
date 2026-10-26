@@ -35,6 +35,23 @@ const appleMaximumUsdPriceMilliunits int64 = 10_000_000
 // The only currency whose price is recorded as net revenue.
 const appleUsdCurrency = "USD"
 
+// The App Store subscriptions the apps sold before the 2026 price tier
+// (supporter_monthly_26 and supporter_yearly_26, from 2026-02): "supporter",
+// the monthly plan from 2025-02, and "supporter_yearly", the yearly plan from
+// 2025-10. Their subscribers keep renewing on them, so every path that
+// credits a verified transaction (the notification webhook, the verify
+// endpoint and the payment reconciler) accepts them next to the configured
+// product_ids. Without them each such renewal was refused, and the subscriber
+// dropped to Free while the App Store kept charging.
+var appleLegacySupporterProductIds = []string{"supporter", "supporter_yearly"}
+
+// appleProductAllowed reports whether a verified transaction's product is a
+// Pro subscription this server credits.
+func appleProductAllowed(allowedProductIds []string, productId string) bool {
+	return slices.Contains(allowedProductIds, productId) ||
+		slices.Contains(appleLegacySupporterProductIds, productId)
+}
+
 type validatedAppleTransaction struct {
 	networkId     server.Id
 	transactionId string
@@ -88,6 +105,9 @@ func ProcessAppleNotification(
 	if notification.TransactionInfo != nil {
 		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable)
 		if err != nil {
+			if actionable && errors.Is(err, errAppleAccountTokenInvalid) {
+				appleRecordUnownedTransaction(ctx, notification, "destination_unresolved", nil)
+			}
 			return false, err
 		}
 	} else if actionable || revocation || notification.NotificationType == "EXPIRED" {
@@ -102,7 +122,7 @@ func ProcessAppleNotification(
 
 		if transaction != nil {
 			if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
-				returnErr = errors.New("App Store account token does not name an existing network")
+				returnErr = errAppleAccountNetworkMissing
 				return
 			}
 		}
@@ -173,10 +193,101 @@ func ProcessAppleNotification(
 		// immediately rather than after ProCacheTtl
 		model.UpdateProNetwork(ctx, networkId)
 	}
+	if actionable && errors.Is(returnErr, errAppleAccountNetworkMissing) {
+		appleRecordUnownedTransaction(ctx, notification, "destination_deleted", &transaction.networkId)
+	}
 	if returnErr == nil && transaction != nil {
 		appleRecordOnboardingOutcome(ctx, notification.NotificationType, transaction, processed, revokedNetworkIds)
 	}
 	return processed, returnErr
+}
+
+// The verified transaction names no network this server can credit: no
+// appAccountToken and no offer-code binding, or a token that is not a network
+// id. The message is the one these refusals always logged.
+var errAppleAccountTokenInvalid = errors.New("invalid App Store account token")
+
+// The verified transaction's appAccountToken names a network that does not
+// exist (deleted).
+var errAppleAccountNetworkMissing = errors.New("App Store account token does not name an existing network")
+
+// appleRecordUnownedTransactionFunc is the durable-record seam for paid App
+// Store transactions no live network can be credited for. Replaceable only by
+// hermetic tests; production never mutates it.
+var appleRecordUnownedTransactionFunc = model.AddPaymentReconciliationEventOnce
+
+// appleRecordUnownedTransaction records, once per transaction, a verified paid
+// App Store transaction (SUBSCRIBED / DID_RENEW) that no live network can be
+// credited for: no appAccountToken and no offer-code binding
+// (destination_unresolved), or a token naming a deleted network
+// (destination_deleted). The App Store keeps charging that subscriber, so the
+// payment must stay visible to the owner even though the notification is
+// refused; nothing here picks an owner. Apple redelivers a refused
+// notification, and each delivery finds the one row. An offer-code purchase
+// the app binds later is credited through the ledger, which resolves the row
+// for the monitor. A family-shared transaction is not the customer's own
+// purchase and is not recorded. Never fails the caller.
+func appleRecordUnownedTransaction(
+	ctx context.Context,
+	notification AppleNotificationDecodedPayload,
+	reason string,
+	networkId *server.Id,
+) {
+	claims := notification.TransactionInfo
+	if ownership, _ := appleControllerStringClaim(claims, "inAppOwnershipType"); ownership == "FAMILY_SHARED" {
+		return
+	}
+	transactionId, _ := appleControllerStringClaim(claims, "transactionId")
+	if transactionId == "" || len(transactionId) > 128 {
+		return
+	}
+	details := map[string]any{
+		"reason":            reason,
+		"leg":               "webhook",
+		"notification_type": notification.NotificationType,
+		"subtype":           notification.Subtype,
+	}
+	for key, claim := range map[string]string{
+		"original_transaction": "originalTransactionId",
+		"product":              "productId",
+		"storefront":           "storefront",
+		"currency":             "currency",
+	} {
+		if value, ok := appleControllerStringClaim(claims, claim); ok && value != "" && len(value) <= 128 {
+			details[key] = value
+		}
+	}
+	for key, claim := range map[string]string{
+		"purchase_date": "purchaseDate",
+		"expires_date":  "expiresDate",
+	} {
+		if millis, ok := appleControllerInt64Claim(claims, claim); ok {
+			details[key] = time.UnixMilli(millis).UTC().Format(time.RFC3339)
+		}
+	}
+	if price, ok := appleControllerInt64Claim(claims, "price"); ok {
+		details["price_milliunits"] = price
+	}
+	added, err := appleRecordUnownedTransactionFunc(ctx, &model.PaymentReconciliationEvent{
+		RunId:     server.NewId(),
+		Store:     model.SubscriptionMarketApple,
+		NetworkId: networkId,
+		Action:    model.PaymentReconcileActionCreditUnfulfillable,
+		Evidence:  transactionId,
+		Details:   details,
+	})
+	if err != nil {
+		glog.Errorf("[apple]transaction %s: could not record the unowned payment: %s\n", transactionId, err)
+		return
+	}
+	if added {
+		glog.Errorf(
+			"[apple]transaction %s (original %v) is paid but no live network can be credited (%s); recorded for support as credit_unfulfillable\n",
+			transactionId,
+			details["original_transaction"],
+			reason,
+		)
+	}
 }
 
 // appleRecordOnboardingOutcome writes the onboarding trial and refund outcomes
@@ -240,6 +351,11 @@ func appleCreditSubscriptionTransactionInTx(
 	notificationId server.Id,
 	transaction *validatedAppleTransaction,
 ) bool {
+	if appleTransactionCreditedBeforeLedgerInTx(tx, ctx, transaction) {
+		// the pre-ledger handler already credited this paid window; a second
+		// credit would add another Pro balance for it
+		return false
+	}
 	transactionTag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -292,6 +408,24 @@ func appleCreditSubscriptionTransactionInTx(
 	return true
 }
 
+// appleTransactionCreditedBeforeLedgerInTx reports whether the notification
+// handler from before the apple_subscription_transaction ledger already
+// credited this transaction's paid window (model.HasPreLedgerAppleRenewalInTx).
+// Such a credit has no ledger row, so the ledger gate alone would credit the
+// window again.
+func appleTransactionCreditedBeforeLedgerInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	transaction *validatedAppleTransaction,
+) bool {
+	return model.HasPreLedgerAppleRenewalInTx(
+		tx,
+		ctx,
+		transaction.networkId,
+		transaction.expiresTime.Add(SubscriptionGracePeriod),
+	)
+}
+
 func validateAppleTransaction(
 	notification AppleNotificationDecodedPayload,
 	allowedProductIds []string,
@@ -337,7 +471,7 @@ func validateAppleTransactionAccount(
 		var err error
 		networkId, err = server.ParseId(accountToken)
 		if err != nil || networkId == (server.Id{}) {
-			return nil, errors.New("invalid App Store account token")
+			return nil, errAppleAccountTokenInvalid
 		}
 	}
 	if renewalAccountToken, exists := appleControllerStringClaim(renewalClaims, "appAccountToken"); exists && renewalAccountToken != accountToken {
@@ -356,7 +490,7 @@ func validateAppleTransactionAccount(
 	if productId == "" {
 		productId, _ = appleControllerStringClaim(renewalClaims, "autoRenewProductId")
 	}
-	if !slices.Contains(allowedProductIds, productId) {
+	if !appleProductAllowed(allowedProductIds, productId) {
 		return nil, fmt.Errorf("App Store product %q is not allowed", productId)
 	}
 

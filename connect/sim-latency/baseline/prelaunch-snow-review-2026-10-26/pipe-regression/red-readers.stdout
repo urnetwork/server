@@ -1,0 +1,5 @@
+=== RUN   TestReviewQualificationOutputReadersCloseBrokerInput
+    review_qualification_tests_draft_test.go:118: actual output reader retained stdin or lost completion: exit status 1 output reader retained broker stdin writer
+        output reader retained broker stdin writer
+--- FAIL: TestReviewQualificationOutputReadersCloseBrokerInput (0.01s)
+FAIL

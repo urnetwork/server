@@ -772,6 +772,9 @@ type PlaySubscription struct {
 	// continues (re-signup, upgrade/downgrade, plan conversion); an unlinked
 	// token resolves through its binding (play_purchase_binding)
 	LinkedPurchaseToken string `json:"linkedPurchaseToken,omitempty"`
+	// LatestOrderId is the order id of the latest charge (GPA....), the id on
+	// the customer's Google Play receipt
+	LatestOrderId string `json:"latestOrderId,omitempty"`
 }
 
 // playAcknowledgeSubscription acknowledges the purchase with Google, unless
@@ -1072,6 +1075,15 @@ func PlayWebhook(
 					true,
 				)
 				if !bound {
+					// paid but nothing names its network: keep it visible to the
+					// owner (a later verify binding credits it and resolves it)
+					playRecordUnownedPurchase(
+						clientSession.Ctx,
+						rtdnMessage.SubscriptionNotification.PurchaseToken,
+						sub,
+						"destination_unresolved",
+						nil,
+					)
 					return &PlayWebhookResult{
 						Message: &PlayWebhookResultMessage{
 							Message: fmt.Sprintf(
@@ -1137,6 +1149,17 @@ func PlayWebhook(
 						"[sub]play inline renewal failed for token %s: %s\n",
 						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
 					)
+					if errors.Is(err, model.ErrPaymentNetworkNotFound) {
+						// paid for a network that was deleted: never credit
+						// another one; keep it visible to the owner
+						playRecordUnownedPurchase(
+							clientSession.Ctx,
+							rtdnMessage.SubscriptionNotification.PurchaseToken,
+							sub,
+							"destination_deleted",
+							&networkId,
+						)
+					}
 					return nil, err
 				}
 				if renewalResult != nil && renewalResult.Renewed {
@@ -1173,6 +1196,81 @@ func PlayWebhook(
 	// else unknown package, ignore the message
 
 	return &PlayWebhookResult{}, nil
+}
+
+// playRecordUnownedPurchaseFunc is the durable-record seam for paid Play
+// purchases no live network can be credited for. Replaceable only by hermetic
+// tests; production never mutates it.
+var playRecordUnownedPurchaseFunc = model.AddPaymentReconciliationEventOnce
+
+// playPurchasePaid reports whether the purchase holds paid time the customer
+// is entitled to now. cancelled ≠ expired: a cancel with time left is paid.
+func playPurchasePaid(sub *PlaySubscription, now time.Time) bool {
+	switch sub.SubscriptionState {
+	case "SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
+		return true
+	case "SUBSCRIPTION_STATE_CANCELED":
+		for _, item := range sub.LineItems {
+			if expiryTime, err := item.ParseExpiryTime(); err == nil && expiryTime.After(now) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// playRecordUnownedPurchase records, once per purchase token, a paid Play
+// purchase that no live network can be credited for: no account identifiers
+// and no binding (destination_unresolved), or an account link naming a
+// deleted network (destination_deleted). Google keeps the money once the
+// purchase is acknowledged, so it must stay visible to the owner; nothing here
+// picks an owner. Pub/Sub redeliveries find the one row, and a purchase the
+// verify endpoint binds later is credited and bound, which resolves the row
+// for the monitor. The order id is the one on the customer's receipt. Never
+// fails the caller.
+func playRecordUnownedPurchase(
+	ctx context.Context,
+	purchaseToken string,
+	sub *PlaySubscription,
+	reason string,
+	networkId *server.Id,
+) {
+	if purchaseToken == "" || len(sub.LineItems) == 0 || !playPurchasePaid(sub, server.NowUtc()) {
+		return
+	}
+	details := map[string]any{
+		"reason":             reason,
+		"leg":                "webhook",
+		"subscription_state": sub.SubscriptionState,
+		"product":            sub.LineItems[0].ProductId,
+		"start_time":         sub.StartTime,
+		"expiry_time":        sub.LineItems[0].ExpiryTime,
+	}
+	if sub.LatestOrderId != "" {
+		details["order"] = sub.LatestOrderId
+	}
+	if sub.RegionCode != "" {
+		details["region"] = sub.RegionCode
+	}
+	added, err := playRecordUnownedPurchaseFunc(ctx, &model.PaymentReconciliationEvent{
+		RunId:     server.NewId(),
+		Store:     model.SubscriptionMarketGoogle,
+		NetworkId: networkId,
+		Action:    model.PaymentReconcileActionCreditUnfulfillable,
+		Evidence:  purchaseToken,
+		Details:   details,
+	})
+	if err != nil {
+		glog.Errorf("[sub]play purchase %s: could not record the unowned payment: %s\n", sub.LatestOrderId, err)
+		return
+	}
+	if added {
+		glog.Errorf(
+			"[sub]play purchase %s is paid but no live network can be credited (%s); recorded for support as credit_unfulfillable\n",
+			sub.LatestOrderId,
+			reason,
+		)
+	}
 }
 
 // playHandleRevoked ends a revoked purchase's entitlement: the renewals the
@@ -1340,14 +1438,12 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 		)
 	}
 
-	if canceled {
-		return &PlaySubscriptionRenewalResult{
-			Canceled:   true,
-			ExpiryTime: maxExpiryTime,
-		}, nil
-	}
-
-	if active {
+	// cancelled ≠ expired: a CANCELED subscription that is not terminal has
+	// auto-renew off and is paid through maxExpiryTime. A period charged
+	// before the cancel is entitled like an active one, so it is credited
+	// through the same gate when no balance covers its expiry yet (its renewal
+	// notification and the scheduled poll both missed it).
+	if active || canceled {
 		if _, err := model.GetOverlappingTransferBalanceInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
 			skus := playSkusFunc()
 			skuName := playSubscriptionRenewal.SubscriptionId
@@ -1395,12 +1491,27 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 					model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 				}
 
+				if canceled {
+					// still one poll at the paid-through expiry
+					return &PlaySubscriptionRenewalResult{
+						Canceled:   true,
+						Renewed:    true,
+						ExpiryTime: maxExpiryTime,
+					}, nil
+				}
 				return &PlaySubscriptionRenewalResult{
 					ExpiryTime: minExpiryTime,
 					Renewed:    true,
 				}, nil
 			}
 		}
+	}
+
+	if canceled {
+		return &PlaySubscriptionRenewalResult{
+			Canceled:   true,
+			ExpiryTime: maxExpiryTime,
+		}, nil
 	}
 
 	// not active or
