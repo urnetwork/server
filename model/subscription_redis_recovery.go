@@ -21,7 +21,13 @@ import (
 )
 
 const redisReservationRecoveryBatch = 32
-const redisReservationCleanupBudget = 300 * time.Second
+
+// Compensation runs inside the failed CreateContract call, so its budget is
+// short: a release Redis can't take now stays pending until a later request on
+// the same grant moves it to recovery (10 min) or its lease ends. A 300 s
+// budget kept about 170k failed proxy calls retrying every second on
+// 2026-10-26, and their pool waits failed the next creations.
+const redisReservationCleanupBudget = 5 * time.Second
 
 var errRedisReservationCleanupPending = errors.New("Redis reservation compensation remains pending in retained v2 markers")
 var errRedisReservationRecoveryIdentity = errors.New("Redis reservation marker or SQL custody does not match")

@@ -119,14 +119,14 @@ func TestRedisRecoveryExhaustedCleanupRetainsExactMarkerForNextCaller(t *testing
 			recover: func(owner context.Context, balance, contract server.Id) error {
 				attempts++
 				deadline, ok := owner.Deadline()
-				if !ok || time.Until(deadline) < time.Minute || balance != f.balanceId || contract != abandoned {
-					t.Fatal("cleanup lost its single 300-second owner or original request")
+				if !ok || time.Until(deadline) < redisReservationCleanupBudget-time.Second || balance != f.balanceId || contract != abandoned {
+					t.Fatal("cleanup lost its single budget owner or original request")
 				}
 				return syscall.ECONNRESET
 			},
 			wait: func(context.Context, time.Duration) error {
-				// Accelerated logical outage, not a 65-second wall-clock sleep.
-				now = now.Add(65 * time.Second)
+				// Accelerated logical outage, not a one-second wall-clock sleep.
+				now = now.Add(time.Second)
 				return nil
 			}}
 		err := cleanup.run(ctx, abandoned, []server.Id{f.balanceId})
