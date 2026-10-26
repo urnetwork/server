@@ -120,14 +120,6 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 			generation.SignificantImprovementPercent < previous.SignificantImprovementPercent {
 			return fmt.Errorf("source generation %d recommendation does not preserve its authenticated calibrated floor", index)
 		}
-		for repository, commit := range generation.Repositories.commitsForMode(manifest.Staging) {
-			if repository != "server" && commit != previous.Repositories.commitsForMode(manifest.Staging)[repository] {
-				return fmt.Errorf("source generation %d changes protected dependency %s", index, repository)
-			}
-		}
-		if generation.Repositories.Server == previous.Repositories.Server {
-			return fmt.Errorf("source generation %d does not change the evaluated server", index)
-		}
 	}
 	for index, round := range manifest.EvaluationSource.Rounds {
 		if round.Epoch < 1 || maximumCompetitionEpoch < round.Epoch ||

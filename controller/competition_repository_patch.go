@@ -13,6 +13,34 @@ import (
 
 const competitionMonoRootPathBase = "mono_root_v1"
 
+// Uses the evaluated round's immutable path mode, not the moving live policy.
+// A promotion must change at least one locked repository; legacy authority
+// cannot be reused to approve an unreviewed dependency change.
+func validateCompetitionRepositoryPromotion(previous map[string]string, next map[string]string, policy PatchPolicy) error {
+	if _, err := model.CompetitionSourceLockDigest(previous); err != nil {
+		return err
+	}
+	if _, err := model.CompetitionSourceLockDigest(next); err != nil {
+		return err
+	}
+	if policy.PathBase != "" && policy.PathBase != competitionMonoRootPathBase {
+		return errors.New("unsupported source patch path base")
+	}
+	changed := false
+	for repository, commit := range previous {
+		if next[repository] != commit {
+			if policy.PathBase == "" && repository != "server" {
+				return errors.New("legacy promotion cannot change dependency commits")
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return errors.New("reviewed promotion must change an evaluated repository")
+	}
+	return nil
+}
+
 // Refuses unknown roots, metadata and the evaluator independently of allowlists.
 func competitionRepositoryPath(value string) (string, string, error) {
 	if err := validateRepositoryPath(value); err != nil {

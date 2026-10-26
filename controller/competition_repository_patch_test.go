@@ -94,3 +94,33 @@ func TestCompetitionRepositoryPolicyRejectsAmbiguousAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// Frozen broad policy authorizes dependency-only changes, while legacy approval
+// remains restricted even if the live season later adopts the broader mode.
+func TestCompetitionRepositoryPromotionUsesFrozenScopeAndCompleteGraph(t *testing.T) {
+	previous := map[string]string{}
+	for _, repository := range model.CompetitionSourceRepositoryNames() {
+		previous[repository] = strings.Repeat("a", 40)
+	}
+	for _, repository := range model.CompetitionSourceRepositoryNames() {
+		next := map[string]string{}
+		for name, commit := range previous {
+			next[name] = commit
+		}
+		next[repository] = strings.Repeat("b", 40)
+		if err := validateCompetitionRepositoryPromotion(previous, next, competitionRepositoryTestPolicy()); err != nil {
+			t.Fatalf("broad reviewed change refused: %s %v", repository, err)
+		}
+		err := validateCompetitionRepositoryPromotion(previous, next, PatchPolicy{})
+		if (repository == "server") != (err == nil) {
+			t.Fatalf("legacy scope changed: %s %v", repository, err)
+		}
+		delete(next, "gvisor")
+		if err := validateCompetitionRepositoryPromotion(previous, next, competitionRepositoryTestPolicy()); err == nil {
+			t.Fatal("partial promoted graph accepted")
+		}
+	}
+	if err := validateCompetitionRepositoryPromotion(previous, previous, competitionRepositoryTestPolicy()); err == nil {
+		t.Fatal("unchanged source accepted as a promotion")
+	}
+}
