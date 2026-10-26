@@ -298,6 +298,9 @@ func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Ti
 				adminUserId,
 			))
 			server.Raise(session.JournalSessionRetirementInTx(ctx, tx, networkId, server.NewId(), "delete", now.UTC()))
+			// every revocation record of the network refuses it before the
+			// deletion commits
+			server.Raise(session.RetireNetworkRecords(ctx, networkId))
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network WHERE network_id = $1`,

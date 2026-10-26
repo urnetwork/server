@@ -542,10 +542,18 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 // and client state. Password resets invalidate older credentials through
 // credential_change_time, and removed clients stop working immediately. A
 // client credential the state query already found without an active row is
-// refused from memory (state_refusal_cache.go).
+// refused from memory (state_refusal_cache.go). A tagged credential is
+// answered by its Redis revocation record once that is enabled
+// (revocation_record.go); the SQL state query answers what the record cannot.
 func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
+	}
+	if usesRevocationRecord(byJwt) {
+		if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
+			return err
+		}
+		return validateByJwtStateRecord(ctx, byJwt, nil)
 	}
 	if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
@@ -556,15 +564,28 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 // Every check ValidateByJwtState makes before its state query: the identity
 // shape, the session horizon, the session revocation marker and this
 // process's remembered refusals. A nil result is not authorization, only the
-// absence of a refusal that needs no query.
+// absence of a refusal that needs no query. A credential answered by its
+// revocation record reads its session there, in validateByJwtStateAfterBeforeQuery.
 func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
 	}
-	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+	if usesRevocationRecord(byJwt) {
+		if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
+			return err
+		}
+	} else if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
 	}
 	return refuseRememberedByJwtState(ctx, byJwt, nil)
+}
+
+// The state check that completes validateByJwtStateBeforeQuery.
+func validateByJwtStateAfterBeforeQuery(ctx context.Context, byJwt *ByJwt) error {
+	if usesRevocationRecord(byJwt) {
+		return validateByJwtStateRecord(ctx, byJwt, nil)
+	}
+	return validateByJwtStateRemembered(ctx, byJwt, nil)
 }
 
 // Checks durable child ownership and live credentials in one primary-key read.
@@ -572,6 +593,12 @@ func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireCli
 func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClientId server.Id) error {
 	if err := validateByJwtStateIdentity(byJwt, true); err != nil {
 		return err
+	}
+	if usesRevocationRecord(byJwt) {
+		if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
+			return err
+		}
+		return validateByJwtStateRecord(ctx, byJwt, &parentClientId)
 	}
 	if err := validateSessionAuthority(ctx, byJwt); err != nil {
 		return err
@@ -686,14 +713,20 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 		return true, rejectNoActiveRow(byJwt)
 	}
 	if byJwt.CreateTime.Before(credentialChangeTime) {
-		authRejectionCounter.WithLabelValues(string(AuthRejectionCredentialRotated)).Inc()
-		if glog.V(1) {
-			glog.Infof("[jwt]reject %s: rotated at %s, token created %s (user=%s)\n",
-				AuthRejectionCredentialRotated, credentialChangeTime, byJwt.CreateTime, byJwt.UserId)
-		}
-		return false, ErrByJwtInactive
+		return false, rejectRotated(byJwt, credentialChangeTime)
 	}
 	return false, nil
+}
+
+// Counts a credential created before its account's credential rotation, emits
+// its detail at V(1), and returns the caller-facing error.
+func rejectRotated(byJwt *ByJwt, credentialChangeTime time.Time) error {
+	authRejectionCounter.WithLabelValues(string(AuthRejectionCredentialRotated)).Inc()
+	if glog.V(1) {
+		glog.Infof("[jwt]reject %s: rotated at %s, token created %s (user=%s)\n",
+			AuthRejectionCredentialRotated, credentialChangeTime, byJwt.CreateTime, byJwt.UserId)
+	}
+	return ErrByJwtInactive
 }
 
 // Counts a no-active-row rejection, emits its detail at V(1), and returns the

@@ -105,6 +105,12 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
 
 **Connect transports.** These register before their final check. After admission, an authorization lease checks each connection again every 60 s and retires it after 90 s without a successful check. So a revoked session or a removed client loses its connections within about 90 s.
 
+**Redis revocation authority (owner decision, 2026-10-26; REVOKE-FINAL.md §14).** With vault `auth.yml` `revocation_record_enabled: true`, a tagged credential skips steps 4 and 5.
+- It reads one Redis revocation record, keyed by its root client or its session in one of 64 shards of its network. The record holds the session, own-client, root, admin and credential-cutoff state.
+- If the record cannot answer, the SQL state query does, after the session marker and the session journal, and its valid answer is projected into the record.
+- If Redis is unavailable, the credential is refused with 503 and nothing falls back to SQL.
+- Untagged credentials keep steps 4 and 5 unchanged.
+
 ## 4. Route authorization: admin, client, Embed
 
 Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.

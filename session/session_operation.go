@@ -218,6 +218,12 @@ func EnforceSessionOperation(ctx context.Context, networkId, operationId server.
 				return err
 			}
 		}
+		// Every revocation record of the network refuses the targets before the
+		// operation is enforced; a failure leaves it prepared for the same
+		// replay, which reads the saved receipt.
+		if err = RevokeSessionRecords(ctx, networkId, receipt.TargetSessionIds); err != nil {
+			return err
+		}
 		receipt.SessionId = op.Target
 		receipt.KeptSessionId = op.Keep
 		receipt.State = "enforced"
@@ -288,6 +294,11 @@ func GetSessionOperation(clientSession *ClientSession, operationId server.Id) (r
 				return receiptErr
 			}
 			if receipt != nil {
+				// Enforced means every revocation record refuses the targets,
+				// which an interrupted enforcement may not have finished.
+				if err := RevokeSessionRecords(clientSession.Ctx, clientSession.ByJwt.NetworkId, receipt.TargetSessionIds); err != nil {
+					return err
+				}
 				receipt.SessionId = op.Target
 				receipt.KeptSessionId = op.Keep
 				receipt.State = "enforced"
