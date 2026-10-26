@@ -257,7 +257,7 @@ func runExchangeQueueRefusal(t *testing.T, op ExchangeOp, kind exchangeQueueRefu
 			f.settings.ExchangeWriteBatchByteCount != 256*1024 ||
 			f.settings.WriteTimeout != 15*time.Second ||
 			f.settings.ExchangeReadTimeout != 30*time.Second ||
-			f.settings.ExchangePingTimeout != time.Second ||
+			f.settings.ExchangePingTimeout != 10*time.Second ||
 			!f.settings.ForwardEnforceActiveContracts {
 			t.Fatal("fixture changed production queues, batching, timeout or authorization")
 		}
