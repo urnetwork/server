@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	mathrand "math/rand"
 	"net"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,12 +24,30 @@ import (
 
 const redisReservationRecoveryBatch = 32
 
-// Compensation runs inside the failed CreateContract call, so its budget is
-// short: a release Redis can't take now stays pending until a later request on
-// the same grant moves it to recovery (10 min) or its lease ends. A 300 s
-// budget kept about 170k failed proxy calls retrying every second on
+// One short budget bounds a request's compensation: its own pass inside the
+// failed CreateContract call, then the deferred owner's retries. A release
+// Redis can't take within it stays pending until a later request on the same
+// grant moves it to recovery (10 min) or its lease ends. A 300 s budget, spent
+// inside the call, kept about 170k failed proxy calls retrying every second on
 // 2026-10-26, and their pool waits failed the next creations.
 const redisReservationCleanupBudget = 5 * time.Second
+
+// A failed compensation pass waits before the next one. The delay doubles from
+// the base up to the cap, and jitter spreads it over its upper half, so
+// requests that failed together retry apart and no request retries hot.
+const redisReservationCleanupRetryBase = time.Second
+const redisReservationCleanupRetryCap = 30 * time.Second
+
+// A request's own compensation is one pass, bounded like any admission round
+// trip. What it leaves pending passes to one process-wide deferred owner
+// (redisDeferredCompensations): a few workers, beside the deadline pool's
+// eight connections per node that every reservation shares, and a queue of a
+// bounded number of balances.
+const redisDeferredCompensationWorkers = 4
+const redisDeferredCompensationBalances = 1024
+
+// How long a test environment reset waits for the deferred owner's workers.
+const redisDeferredCompensationQuiesceTimeout = 5 * time.Second
 
 var errRedisReservationCleanupPending = errors.New("Redis reservation compensation remains pending in retained v2 markers")
 var errRedisReservationRecoveryIdentity = errors.New("Redis reservation marker or SQL custody does not match")
@@ -161,42 +181,50 @@ func recoverRedisReservationWithFenceInTx(ctx context.Context, tx server.PgTx, b
 	return operation == "release-owned" && released > 0 && err == nil, err
 }
 
+// A test seam may replace a request's compensation clock, transport and
+// deferred owner; production uses the default cleanup.
+type redisReservationCleanupContextKey struct{}
+
 // One public operation joins every foreground transaction before cleanup. The
 // action returns a successful escrow only after its commit is acknowledged.
 // Only a known insufficient-balance refusal can retry after actual recovery;
-// success, ambiguous SQL, and a canceled caller are never replayed.
+// success, ambiguous SQL, and a canceled caller are never replayed. The caller
+// waits for one bounded compensation pass, never for the cleanup budget.
 func runRedisContractAdmission(ctx context.Context, action func(context.Context) (*TransferEscrow, error)) (escrow *TransferEscrow, returnErr error) {
 	ctx = withRedisContractAdmission(ctx)
 	admission := redisAdmissionFromContext(ctx)
 	recoveryAttempted := false
 	compensatedCurrent := false
 	cleanup := admission.reservationCleanup()
-	var cleanupCtx context.Context
-	var cleanupCancel context.CancelFunc
+	if observe, ok := ctx.Value(redisReservationCleanupContextKey{}).(func(redisReservationCleanup) redisReservationCleanup); ok {
+		cleanup = observe(cleanup)
+	}
+	// Every compensation of the request shares one budget.
 	var cleanupEnd time.Time
-	compensate := func() error {
+	compensationPending := false
+	compensate := func() (bool, error) {
 		ids := admission.compensationIds()
 		if len(ids) == 0 {
-			return nil
+			return true, nil
 		}
-		if cleanupCtx == nil {
-			cleanupCtx, cleanupCancel = context.WithTimeout(context.WithoutCancel(ctx), redisReservationCleanupBudget)
+		if cleanupEnd.IsZero() {
 			cleanupEnd = cleanup.now().Add(redisReservationCleanupBudget)
 		}
-		return cleanup.runOwned(cleanupCtx, cleanupEnd, admission.contractId, ids)
+		pending, err := cleanup.compensation(admission.contractId, ids, cleanupEnd).attemptOrDefer(ctx)
+		compensationPending = compensationPending || pending
+		return !pending && err == nil, err
 	}
 	defer func() {
-		defer func() {
-			if cleanupCancel != nil {
-				cleanupCancel()
-			}
-		}()
 		if !compensatedCurrent {
-			if err := compensate(); err != nil {
+			if _, err := compensate(); err != nil {
 				returnErr = errors.Join(returnErr, err)
 			}
 		}
-		if !recoveryAttempted {
+		// Tokens a compensation left pending belong to the deferred owner, or
+		// to retained recovery once dropped. The page would move them to the
+		// recovery marker and release them in a transaction, or wait on the
+		// pending lock behind the owner, so it does not run for this request.
+		if !recoveryAttempted && !compensationPending {
 			var publication *TransferEscrow
 			if returnErr == nil && escrow != nil && escrow.ContractId == admission.contractId {
 				publication = escrow
@@ -213,7 +241,10 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 	escrow, returnErr = action(ctx)
 	if errors.Is(returnErr, errRedisReservationInsufficient) && escrow == nil && ctx.Err() == nil {
 		compensatedCurrent = true
-		if err := compensate(); err != nil {
+		// The rerun needs this request's own tokens released first. A pass
+		// that leaves any of them returns the refusal without a rerun; the
+		// deferred owner retries what is still pending.
+		if complete, err := compensate(); !complete {
 			return nil, errors.Join(returnErr, err)
 		}
 		recoveryAttempted = true
@@ -418,11 +449,13 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 
 // The caller's error/timeout is not cleanup's lifetime. One finite budget owns
 // every balance and every retry after PG has joined; tests supply an owned
-// clock/transport to prove long transient intervals without wall-clock sleeps.
+// clock/transport to prove long transient intervals without wall-clock sleeps,
+// and an owned deferred owner.
 type redisReservationCleanup struct {
-	now     func() time.Time
-	wait    func(context.Context, time.Duration) error
-	recover func(context.Context, server.Id, server.Id) error
+	now      func() time.Time
+	wait     func(context.Context, time.Duration) error
+	recover  func(context.Context, server.Id, server.Id) error
+	deferred *redisDeferredCompensations
 }
 
 func (self *redisContractAdmission) compensationIds() []server.Id {
@@ -494,7 +527,7 @@ func defaultRedisReservationCleanup() redisReservationCleanup {
 			case <-time.After(delay):
 				return nil
 			}
-		}}
+		}, deferred: deferredRedisCompensations}
 }
 
 func (self redisReservationCleanup) run(ctx context.Context, contractId server.Id, ids []server.Id) error {
@@ -505,48 +538,330 @@ func (self redisReservationCleanup) run(ctx context.Context, contractId server.I
 }
 
 func (self redisReservationCleanup) runOwned(owner context.Context, end time.Time, contractId server.Id, ids []server.Id) error {
-	pending := append([]server.Id(nil), ids...)
-	var failures []error
-	var lastAttemptErr error
-	for len(pending) != 0 {
-		if owner.Err() != nil || !self.now().Before(end) {
-			failures = append(failures, context.DeadlineExceeded)
+	return self.compensation(contractId, ids, end).run(owner)
+}
+
+// One compensation of a request's own tokens: the balances still pending and
+// every refusal, across its passes within the request's one budget.
+type redisReservationCompensation struct {
+	cleanup        redisReservationCleanup
+	contractId     server.Id
+	attempted      int
+	end            time.Time
+	pending        []server.Id
+	failures       []error
+	lastAttemptErr error
+	retries        int
+}
+
+func (self redisReservationCleanup) compensation(contractId server.Id, ids []server.Id, end time.Time) *redisReservationCompensation {
+	return &redisReservationCompensation{cleanup: self, contractId: contractId, attempted: len(ids), end: end,
+		pending: append([]server.Id(nil), ids...)}
+}
+
+// Reports whether the owner or the budget has ended.
+func (self *redisReservationCompensation) ended(owner context.Context) bool {
+	select {
+	case <-owner.Done():
+		return true
+	default:
+		return !self.cleanup.now().Before(self.end)
+	}
+}
+
+// Retries the pending balances, one pass after each backoff, until none
+// remains or the budget ends.
+func (self *redisReservationCompensation) run(owner context.Context) error {
+	for len(self.pending) != 0 {
+		if self.ended(owner) {
+			self.failures = append(self.failures, context.DeadlineExceeded)
 			break
 		}
-		next := make([]server.Id, 0, len(pending))
-		for _, id := range pending {
-			if owner.Err() != nil || !self.now().Before(end) {
-				failures = append(failures, context.DeadlineExceeded)
-				break
-			}
-			err := self.recover(owner, id, contractId)
-			if err == nil {
-				continue
-			}
-			if redisReservationRecoveryRetryable(err) {
-				lastAttemptErr = err
-				next = append(next, id)
-			} else {
-				failures = append(failures, err)
-			}
-		}
-		pending = next
-		if len(pending) != 0 {
-			if err := self.wait(owner, min(time.Second, end.Sub(self.now()))); err != nil {
-				failures = append(failures, err)
-				break
-			}
+		self.attempt(owner)
+		if len(self.pending) != 0 && !self.backOff(owner) {
+			break
 		}
 	}
-	if len(failures) != 0 || len(pending) != 0 {
-		if lastAttemptErr != nil {
-			failures = append(failures, lastAttemptErr)
+	return self.finish()
+}
+
+// Continues after the request's own pass: every later pass follows a backoff.
+// A compensation whose budget ended while it was queued makes no pass.
+func (self *redisReservationCompensation) resume(owner context.Context) error {
+	if !self.cleanup.now().Before(self.end) {
+		redisContractReservationResults.WithLabelValues("compensation", "expired").Inc()
+		return self.err()
+	}
+	if !self.backOff(owner) {
+		return self.finish()
+	}
+	return self.run(owner)
+}
+
+// One pass tries each pending balance once. A transient failure stays pending,
+// as does each balance the pass did not reach before its owner or the budget
+// ended. Any other failure leaves its balance to retained recovery.
+func (self *redisReservationCompensation) attempt(owner context.Context) {
+	next := make([]server.Id, 0, len(self.pending))
+	for index, id := range self.pending {
+		if self.ended(owner) {
+			next = append(next, self.pending[index:]...)
+			break
 		}
+		err := self.cleanup.recover(owner, id, self.contractId)
+		if err == nil {
+			continue
+		}
+		if redisReservationRecoveryRetryable(err) {
+			self.lastAttemptErr = err
+			next = append(next, id)
+		} else {
+			self.failures = append(self.failures, err)
+		}
+	}
+	self.pending = next
+}
+
+// Waits out the next retry's backoff. Reports whether another pass may follow.
+func (self *redisReservationCompensation) backOff(owner context.Context) bool {
+	if err := self.cleanup.wait(owner, self.NextRetryTimeout()); err != nil {
+		self.failures = append(self.failures, err)
+		return false
+	}
+	return true
+}
+
+// Each call advances the retry: its backoff, within the remaining budget.
+func (self *redisReservationCompensation) NextRetryTimeout() time.Duration {
+	delay := redisReservationCleanupRetryDelay(self.retries, mathrand.Float64())
+	self.retries++
+	return min(delay, self.end.Sub(self.cleanup.now()))
+}
+
+// The delay before retry number retry, from zero. The nominal delay doubles
+// from the base up to the cap, and the delay falls in its upper half, so the
+// budget bounds the number of passes. randomUnit is in [0,1).
+func redisReservationCleanupRetryDelay(retry int, randomUnit float64) time.Duration {
+	randomUnit = max(0, min(randomUnit, math.Nextafter(1, 0)))
+	nominal := redisReservationCleanupRetryCap
+	if retry < 16 {
+		nominal = min(nominal, redisReservationCleanupRetryBase<<max(0, retry))
+	}
+	return nominal/2 + time.Duration(randomUnit*float64(nominal/2))
+}
+
+// Names the balances left to retained recovery; nil when none is.
+func (self *redisReservationCompensation) err() error {
+	if len(self.failures) == 0 && len(self.pending) == 0 {
+		return nil
+	}
+	causes := append([]error{fmt.Errorf("%w: request=%s attempted_balances=%d", errRedisReservationCleanupPending, self.contractId, self.attempted)}, self.failures...)
+	if self.lastAttemptErr != nil {
+		causes = append(causes, self.lastAttemptErr)
+	}
+	return errors.Join(causes...)
+}
+
+// Counts the compensation's one final outcome.
+func (self *redisReservationCompensation) finish() error {
+	err := self.err()
+	result := "completed"
+	if err != nil {
+		result = "pending"
+	}
+	redisContractReservationResults.WithLabelValues("compensation", result).Inc()
+	return err
+}
+
+// The request's own pass, bounded like one admission round trip, after which
+// its caller returns. Balances still pending pass to the deferred owner, with
+// the rest of the budget, or are dropped to retained recovery when its queue is
+// full. Reports whether balances were left pending; the error names balances
+// left to recovery.
+func (self *redisReservationCompensation) attemptOrDefer(ctx context.Context) (bool, error) {
+	pass, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisContractAdmissionTimeout)
+	self.attempt(pass)
+	cancel()
+	if len(self.pending) == 0 {
+		return false, self.finish()
+	}
+	// Nothing of the compensation is read once the deferred owner has it.
+	var refused error
+	if len(self.failures) != 0 {
+		refused = self.err()
+	}
+	if self.cleanup.deferred != nil && self.cleanup.deferred.offer(ctx, self) {
+		redisContractReservationResults.WithLabelValues("compensation", "deferred").Inc()
+		return true, refused
+	}
+	redisContractReservationResults.WithLabelValues("compensation", "dropped").Inc()
+	return true, self.err()
+}
+
+// The process-wide owner of the compensations that their requests' own passes
+// left pending. Each worker retries one compensation at a time, with its
+// backoff and within its request's budget, so however many requests fail, a
+// failing Redis sees at most one compensation call per worker beyond each
+// request's own pass, on the same deadline pool. The queue holds a bounded
+// number of balances, since one request can hold one per selected grant. A
+// compensation the owner takes counts deferred, then completed, pending, or
+// expired when its budget ended in the queue.
+//
+// A full queue drops a compensation, counted dropped, without blocking or
+// starting a goroutine, and a quiesce ends those it holds, as process exit
+// does. That only defers the release, as a compensation that ends pending
+// does: each token stays reserved, which can under-admit its payer but never
+// over-admit, and keeps its pending marker, the state recovery reclaims for a
+// request that died. Any page on the balance takes a pending marker older than
+// redisPendingRecoveryAge, and the fenced SQL custody check then releases each
+// token no contract holds. A returned request starts no attempt that could
+// publish the token, and its lease ends it at last.
+type redisDeferredCompensations struct {
+	workers  int
+	capacity int
+	queue    chan redisDeferredCompensation
+	start    sync.Once
+
+	stateLock sync.Mutex
+	// balances offered and not yet ended
+	held int
+	// closed while held is zero
+	idle chan struct{}
+	// canceled by a quiesce, which ends every compensation offered before it
+	generation context.Context
+	cancel     context.CancelFunc
+}
+
+type redisDeferredCompensation struct {
+	owner        context.Context
+	stop         func()
+	balances     int
+	compensation *redisReservationCompensation
+}
+
+var deferredRedisCompensations = newRedisDeferredCompensations(redisDeferredCompensationWorkers, redisDeferredCompensationBalances)
+
+// A test environment reset ends the deferred compensations before its Redis and
+// PostgreSQL go away, as process exit would, so none runs in the next one. A
+// worker still blocked past the bound is abandoned, as at exit.
+func init() {
+	server.OnReset(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), redisDeferredCompensationQuiesceTimeout)
+		defer cancel()
+		_ = deferredRedisCompensations.quiesce(ctx)
+	})
+}
+
+// Ends the deferred compensations before process exit, leaving their tokens to
+// retained recovery, and waits within ctx for the workers to let them go.
+func QuiesceRedisContractCompensations(ctx context.Context) {
+	_ = deferredRedisCompensations.quiesce(ctx)
+}
+
+func newRedisDeferredCompensations(workers, capacity int) *redisDeferredCompensations {
+	idle := make(chan struct{})
+	close(idle)
+	generation, cancel := context.WithCancel(context.Background())
+	return &redisDeferredCompensations{
+		workers:    workers,
+		capacity:   capacity,
+		queue:      make(chan redisDeferredCompensation, capacity),
+		idle:       idle,
+		generation: generation,
+		cancel:     cancel,
+	}
+}
+
+// Reports whether a worker will run the compensation, within its budget. The
+// first offer starts the workers, which run for the life of the process.
+func (self *redisDeferredCompensations) offer(ctx context.Context, compensation *redisReservationCompensation) bool {
+	self.start.Do(func() {
+		for range self.workers {
+			go self.work()
+		}
+	})
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	balances := len(compensation.pending)
+	if self.capacity < self.held+balances {
+		return false
+	}
+	// The request's values stay; its cancellation and synchronous stage
+	// timing end when its caller returns. The budget ends its passes and
+	// waits, and a quiesce ends it early.
+	owner, cancel := context.WithCancel(server.WithoutContractCreationTiming(context.WithoutCancel(ctx)))
+	unlink := context.AfterFunc(self.generation, cancel)
+	deferred := redisDeferredCompensation{
+		owner:        owner,
+		stop:         func() { unlink(); cancel() },
+		balances:     balances,
+		compensation: compensation,
+	}
+	// Every queued compensation holds a balance, so the queue has room.
+	select {
+	case self.queue <- deferred:
+	default:
+		deferred.stop()
+		return false
+	}
+	if self.held == 0 {
+		self.idle = make(chan struct{})
+	}
+	self.held += balances
+	return true
+}
+
+func (self *redisDeferredCompensations) work() {
+	for deferred := range self.queue {
+		self.run(deferred)
+	}
+}
+
+// A raise ends the compensation pending, and the worker goes on.
+func (self *redisDeferredCompensations) run(deferred redisDeferredCompensation) {
+	defer self.end(deferred.balances)
+	defer deferred.stop()
+	server.HandleError(func() {
+		deferred.compensation.resume(deferred.owner)
+	}, func() {
 		redisContractReservationResults.WithLabelValues("compensation", "pending").Inc()
-		return errors.Join(append([]error{fmt.Errorf("%w: request=%s attempted_balances=%d", errRedisReservationCleanupPending, contractId, len(ids))}, failures...)...)
+	})
+}
+
+func (self *redisDeferredCompensations) end(balances int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.held -= balances
+	if self.held == 0 {
+		close(self.idle)
 	}
-	redisContractReservationResults.WithLabelValues("compensation", "completed").Inc()
-	return nil
+}
+
+// Waits within ctx until no compensation is held.
+func (self *redisDeferredCompensations) drain(ctx context.Context) error {
+	idle := func() chan struct{} {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.idle
+	}()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Ends every compensation held now, leaving its tokens to retained recovery,
+// then drains within ctx. Compensations offered later run as before.
+func (self *redisDeferredCompensations) quiesce(ctx context.Context) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.cancel()
+		self.generation, self.cancel = context.WithCancel(context.Background())
+	}()
+	return self.drain(ctx)
 }
 
 // All joined leaf causes must be transient. A schema, ownership, corrupt-token

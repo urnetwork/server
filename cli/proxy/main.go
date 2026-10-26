@@ -198,6 +198,9 @@ Options:
 	// instance can re-establish their sessions from the server side
 	// (PROXYDRAIN1.md §3.4)
 	drainCoordinator.AddBeforeExit(wg.ExportWgHandoff)
+	// then end the contract compensations still deferred; their tokens stay
+	// pending for recovery, as at any exit, and none runs into the teardown
+	drainCoordinator.AddBeforeExit(model.QuiesceRedisContractCompensations)
 
 	warmup := func(proxyClient *model.ProxyClient) error {
 		return wg.AddProxyClients(proxyClient)

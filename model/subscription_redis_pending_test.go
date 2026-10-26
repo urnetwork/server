@@ -117,6 +117,7 @@ func TestRedisPendingReservationPastPublicationWindowRefuses(t *testing.T) {
 		if escrow != nil || !errors.Is(err, ErrRedisPendingReservationExpired) {
 			t.Fatal("a reservation past its publication window was published", escrow, err)
 		}
+		drainRedisContractCompensations(t, ctx)
 		if refusals := testutil.ToFloat64(redisPendingPublicationRefusals.WithLabelValues("window_expired")) - refusalsBefore; refusals != 1 {
 			t.Fatal("the expired publication was not counted", refusals)
 		}
@@ -185,6 +186,8 @@ func TestRedisPendingCompensationOpensNoTransaction(t *testing.T) {
 		observation, uninstall := server.Testing_ObserveTxIo()
 		defer uninstall()
 		escrow, err := CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 23)
+		// a compensation left to the deferred owner is observed too
+		drainRedisContractCompensations(t, ctx)
 		uninstall()
 		if escrow != nil || !errors.Is(err, ErrContractDestinationInactive) {
 			t.Fatal("the refusal fixture did not reach the client fence", escrow, err)
@@ -416,6 +419,8 @@ func TestRedisPendingSelectionPanicEndsAttempt(t *testing.T) {
 		}); value != nil {
 			failure, _ = value.(error)
 		}
+		// a compensation left to the deferred owner is observed too
+		drainRedisContractCompensations(t, ctx)
 		uninstall()
 		if !errors.Is(failure, fault) {
 			t.Fatal("the second grant page did not fail the request", failure)

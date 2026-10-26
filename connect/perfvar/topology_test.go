@@ -170,6 +170,8 @@ type fullTunPath struct {
 	// Opt-in native ingress preserves the ordinary fixture's blocking bridge.
 	// Only native-boundary workloads install this before the bridge starts.
 	nativeIngressForTest bool
+	// Borrows the actual gVisor output before its native ownership handoff.
+	beforeBridgeSendBatchForTest func([][]byte)
 
 	// workloadProgressBytes counts application payload bytes delivered by the
 	// measured TCP workloads (client reads on download, server reads on
@@ -284,6 +286,7 @@ type fullTunConstructionTestHooks struct {
 	afterStage                        func(fullTunConstructionStage, *fullTunPath) error
 	configureConnectHandlerSettings   func(*connectserver.ConnectHandlerSettings)
 	configureProviderClientSettings   func(*clientconnect.ClientSettings)
+	configureProviderLocalNatSettings func(*clientconnect.LocalUserNatSettings)
 	configureProviderPlatformSettings func(*clientconnect.PlatformTransportSettings)
 	configureDeviceClientSettings     func(*clientconnect.ClientSettings)
 	configureDevicePlatformSettings   func(*clientconnect.PlatformTransportSettings)
@@ -3987,10 +3990,19 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageProviderTransportReady); err != nil {
 		return nil, err
 	}
-	providerLocalNat := clientconnect.NewLocalUserNatWithDefaults(
-		providerClient.Ctx(),
-		providerClientId.String(),
-	)
+	var providerLocalNat *clientconnect.LocalUserNat
+	if hooks != nil && hooks.configureProviderLocalNatSettings != nil {
+		providerLocalNatSettings := clientconnect.DefaultLocalUserNatSettings()
+		hooks.configureProviderLocalNatSettings(providerLocalNatSettings)
+		providerLocalNat = clientconnect.NewLocalUserNat(
+			providerClient.Ctx(), providerClientId.String(), providerLocalNatSettings,
+		)
+	} else {
+		providerLocalNat = clientconnect.NewLocalUserNatWithDefaults(
+			providerClient.Ctx(),
+			providerClientId.String(),
+		)
+	}
 	path.providerLocalNat = providerLocalNat
 	if err := afterStage(fullTunConstructionStageProviderLocalNat); err != nil {
 		return nil, err
@@ -4388,6 +4400,9 @@ func (self *fullTunPath) startBridge(
 			packetCount, readErr := readBatch(packets)
 			if readErr != nil {
 				return
+			}
+			if self.beforeBridgeSendBatchForTest != nil {
+				self.beforeBridgeSendBatchForTest(packets[:packetCount])
 			}
 			sendFullTunBridgeBatch(
 				self.bridgeSends,
