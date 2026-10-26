@@ -246,6 +246,12 @@ func reconcileLegacyProviderPaymentAttempts(
 	payoutWalletId func(blockchain string) (string, error),
 	now func() time.Time,
 ) (*LegacyProviderPaymentReconcileResult, error) {
+	if !settings.DryRun {
+		// an applied reconcile releases keys for the sender
+		if err := RequireUsdcPaymentsOn(); err != nil {
+			return nil, err
+		}
+	}
 	ctx := clientSession.Ctx
 	result := &LegacyProviderPaymentReconcileResult{}
 
