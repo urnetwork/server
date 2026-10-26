@@ -720,14 +720,18 @@ func (self *Settings) Validate() error {
 	if err := validatePatterns(self.PatchPolicy.AllowedPaths, "allowed_paths"); err != nil {
 		return err
 	}
-	if err := validateLiteralAllowedPaths(self.PatchPolicy.AllowedPaths); err != nil {
+	if err := validateCompetitionAllowedPaths(self.PatchPolicy); err != nil {
 		return err
 	}
 	if err := validatePatterns(self.PatchPolicy.ForbiddenPaths, "forbidden_paths"); err != nil {
 		return err
 	}
-	if !slices.Contains(self.PatchPolicy.ForbiddenPaths, protectedSimulatorTreePattern) {
-		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedSimulatorTreePattern)
+	protectedTree := protectedSimulatorTreePattern
+	if self.PatchPolicy.PathBase == competitionMonoRootPathBase {
+		protectedTree = "server/" + protectedTree
+	}
+	if !slices.Contains(self.PatchPolicy.ForbiddenPaths, protectedTree) {
+		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedTree)
 	}
 	p := self.EvaluationPolicy
 	season := self.SeasonPolicy
@@ -2904,6 +2908,9 @@ type CanonicalPatch struct {
 }
 
 func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPatch, *CompetitionError) {
+	if policy.PathBase != "" && policy.PathBase != competitionMonoRootPathBase {
+		return nil, submissionError("unsupported_patch_policy", "patch path base is not supported")
+	}
 	bytes := []byte(raw)
 	if len(bytes) == 0 {
 		return nil, submissionError("empty_patch", "patch must not be empty")
@@ -3010,7 +3017,7 @@ func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPat
 			return nil, submissionError("unsupported_patch_operation", "new/deleted files, renames, copies, and mode changes are not accepted")
 		case strings.Contains(lower, "subproject commit"):
 			return nil, submissionError("submodule_patch", "submodule changes are not accepted")
-		case (strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-")) &&
+		case policy.PathBase == "" && (strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-")) &&
 			(strings.HasPrefix(strings.TrimSpace(line[1:]), "//go:build") || strings.HasPrefix(strings.TrimSpace(line[1:]), "// +build")):
 			return nil, submissionError("build_tag_patch", "build constraint changes are not accepted")
 		case hunkSeen:
@@ -3107,6 +3114,15 @@ func validateRepositoryPath(value string) error {
 }
 
 func pathAllowed(value string, policy PatchPolicy) bool {
+	if policy.PathBase == competitionMonoRootPathBase {
+		if _, _, err := competitionRepositoryPath(value); err != nil || matchAny(policy.ForbiddenPaths, value) {
+			return false
+		}
+		return matchAny(policy.AllowedPaths, value)
+	}
+	if policy.PathBase != "" {
+		return false
+	}
 	forbidden := append(append([]string{}, hardForbiddenPatchPaths...), policy.ForbiddenPaths...)
 	if matchAny(forbidden, value) {
 		return false
