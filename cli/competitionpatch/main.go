@@ -28,12 +28,15 @@ var (
 )
 
 type options struct {
-	baseSha                  string
-	expectedPatchSha256      string
-	expectedPolicySha256     string
-	patchPath                string
-	policyPath               string
-	repositoryPatchDirectory string
+	baseSha                      string
+	expectedPatchSha256          string
+	expectedPolicySha256         string
+	patchPath                    string
+	policyPath                   string
+	repositoryPatchDirectory     string
+	sourceRoot                   string
+	sourceIdentityPath           string
+	expectedSourceIdentitySha256 string
 }
 
 type imageIdentity struct {
@@ -43,6 +46,7 @@ type imageIdentity struct {
 	PolicySha256      string                             `json:"policy_sha256"`
 	Paths             []string                           `json:"paths"`
 	RepositoryPatches map[string]repositoryPatchIdentity `json:"repository_patches,omitempty"`
+	CandidateCommits  map[string]string                  `json:"candidate_commits,omitempty"`
 }
 
 // Digests bind routed bytes to the original screened patch and policy receipt.
@@ -69,6 +73,9 @@ func run(args []string, stdout io.Writer) error {
 	flags.StringVar(&opts.patchPath, "patch", "", "canonical patch path")
 	flags.StringVar(&opts.policyPath, "policy", "", "patch policy JSON path")
 	flags.StringVar(&opts.repositoryPatchDirectory, "repository-patch-directory", "", "exclusively create private routed patch directory")
+	flags.StringVar(&opts.sourceRoot, "apply-source-root", "", "apply validated patches only to authenticated private source checkouts")
+	flags.StringVar(&opts.sourceIdentityPath, "source-identity", "", "trusted original source identity JSON")
+	flags.StringVar(&opts.expectedSourceIdentitySha256, "expected-source-identity-sha256", "", "exact original source identity digest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("usage: competitionpatch --base-sha SHA --patch FILE --expected-patch-sha256 SHA256 --policy FILE --expected-policy-sha256 SHA256")
 	}
@@ -127,6 +134,22 @@ func run(args []string, stdout io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("write routed patches: %w", err)
 		}
+	}
+	if opts.sourceRoot != "" {
+		patches, routingError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), policy)
+		if routingError != nil {
+			return errors.New("source application requires exact routed patch bytes")
+		}
+		identityBytes, err := readRegularFile(opts.sourceIdentityPath, maxPolicyBytes)
+		if err != nil {
+			return errors.New("original source identity is unavailable")
+		}
+		identity.CandidateCommits, err = applyRepositoryPatches(opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, patches, defaultRepositoryApplySettings())
+		if err != nil {
+			return err
+		}
+	} else if opts.sourceIdentityPath != "" || opts.expectedSourceIdentitySha256 != "" {
+		return errors.New("source identity options require --apply-source-root")
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
