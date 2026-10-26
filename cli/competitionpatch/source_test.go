@@ -51,7 +51,20 @@ func repositoryApplyTestGit(t *testing.T, root string, args ...string) string {
 // Returns exact trusted-preparer bytes and independently observable base heads.
 func repositoryApplyFixture(t *testing.T) (string, []byte, string, map[string]string) {
 	t.Helper()
-	root := t.TempDir()
+	// TempDir's leaf is umask-filtered 0777, unlike the preparer's 0700 root.
+	// Create our own private leaf and return its canonical absolute spelling.
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	commits := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		path := filepath.Join(root, repository)
@@ -113,8 +126,8 @@ func TestRepositorySourceDirtySiblingRefusesBeforeAnyMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := []byte("diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-original\n+improved\n")
-	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil {
-		t.Fatal("dirty sibling graph accepted")
+	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil || err.Error() != "source repository differs from its pristine frozen identity" {
+		t.Fatal("dirty sibling graph did not reach its frozen-identity refusal", err)
 	}
 	if status := repositoryApplyTestGit(t, filepath.Join(root, "connect"), "status", "--porcelain=v1"); status != "" {
 		t.Fatal("earlier repository mutated before dirty sibling refusal")
