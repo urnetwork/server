@@ -39,13 +39,28 @@ const paymentTransitionUnresolvedSampleSql = `
 // Ambiguous payments remain pending, with their processor idempotency key
 // intact. Existing PaymentRecord reconciliation does not call this admission.
 func RequireProviderUsdcPayment(ctx context.Context, paymentId server.Id) error {
+	return requireProviderUsdcPayment(ctx, paymentId, nil)
+}
+
+// A manual reimbursement is admitted by its marker instead of the earning
+// census, with or without a policy, and a request for one must carry exactly
+// its listed `amount` (account_payment_reimbursement.go). Every other payment
+// is admitted as before.
+func requireProviderUsdcPayment(ctx context.Context, paymentId server.Id, amount *float64) error {
 	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
-	if err != nil || policy == nil {
+	if err != nil {
 		return err
 	}
 	var admissionErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		_, _, admissionErr = providerUsdcPaymentAttribution(ctx, conn, paymentId, policy)
+		marked, err := admitManualReimbursement(ctx, conn, paymentId, amount)
+		if marked || err != nil {
+			admissionErr = err
+			return
+		}
+		if policy != nil {
+			_, _, admissionErr = providerUsdcPaymentAttribution(ctx, conn, paymentId, policy)
+		}
 	})
 	return admissionErr
 }
