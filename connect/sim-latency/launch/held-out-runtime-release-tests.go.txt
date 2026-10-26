@@ -503,6 +503,22 @@ func TestHeldOutRuntimeBuildEvidenceBindsOriginalSourceAndBuilder(t *testing.T) 
 	}
 }
 
+// The bridge uses the same strict native source authenticator as B; retaining
+// only the canonical lock digest would lose the raw capability-file binding.
+func TestHeldOutRuntimeBridgeProjectionRetainsRawSourceLock(t *testing.T) {
+	_, source, release, _ := newHeldOutRuntimeNativeFixture(t)
+	plan := heldOutBridgePlan{Protocol: calibrationProtocolThreeABridgeThreeB,
+		SourceLock: heldOutPinnedFile{Path: "/synthetic/c2/source-lock.json", Sha256: source.SourceLockSha256}, Noop: heldOutReference{Role: "no-op"}}
+	request := heldOutRequest{EvaluationPolicy: heldOutBindingFixturePolicy()}
+	projection := heldOutBridgeExecutionPlan(plan, request, 0.25, release)
+	if projection.Config.SourceLock != plan.SourceLock || projection.Config.Protocol != plan.Protocol || projection.Config.Kind != "sim-latency-prospective-c2-bridge-plan" || !reflect.DeepEqual(projection.Policy, request.EvaluationPolicy) || projection.Margin != 0.25 || len(projection.References) != 1 || projection.References[0].Role != "no-op" {
+		t.Fatal("bridge execution projection lost authenticated request/source pins")
+	}
+	if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, source), release, projection.Config.SourceLock.Sha256, "", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Adding a full component census cannot allow substituting another helper for
 // evaluator/network/compose/local-mount in the reviewed public configuration.
 func TestHeldOutRuntimeScriptProjectionKeepsFourRequiredFiles(t *testing.T) {

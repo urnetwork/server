@@ -389,6 +389,15 @@ func readHeldOutBridgePlan(pin heldOutPinnedFile, settings heldOutOperatorSettin
 
 // Verifies the exact one-cohort native artifact schema, immutable-image replay,
 // source/build evidence and native artifact census, retaining rejected results.
+// The shared authenticator must receive the bridge's raw source-lock pin as
+// well as its canonical release digest; they bind different C2 properties.
+func heldOutBridgeExecutionPlan(plan heldOutBridgePlan, request heldOutRequest, margin float64, release heldOutRelease) heldOutPrivatePlan {
+	return heldOutPrivatePlan{Config: heldOutPreparationConfig{Kind: "sim-latency-prospective-c2-bridge-plan", Protocol: plan.Protocol, SourceLock: plan.SourceLock},
+		Policy: request.EvaluationPolicy, PolicySha256: release.StageAPolicySha256, Margin: margin, References: []heldOutReference{plan.Noop}}
+}
+
+// Verifies the exact one-cohort native artifact schema, immutable-image replay,
+// source/build evidence and native artifact census, retaining rejected results.
 func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationConfig, release heldOutRelease, settings heldOutOperatorSettings, replay calibrationScoreReplay, observations func() []calibrationReplayObservation, now func() time.Time, run func(context.Context, string, ...string) ([]byte, error)) (*heldOutBridgeCompatibility, error) {
 	if config.Schema != 1 || config.Kind != "sim-latency-prospective-c2-bridge-verification" || replay == nil || observations == nil || now == nil {
 		return nil, errors.New("complete native bridge verification dependencies required")
@@ -520,7 +529,7 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 	}
 	job := heldOutPlannedJob{Position: 1, Role: "no-op", JobId: request.JobId, RequestSha256: plan.Request.Sha256}
 	round := heldOutPrivateRound{EffectiveSeed: configWorkload.Seed, Public: heldOutPublicRound{RoundId: request.RoundId, ProvidersSha256: request.ProvidersSha256, Jobs: []heldOutPlannedJob{job}}}
-	if _, _, err := authenticateHeldOutJob(ctx, heldOutPrivatePlan{Config: heldOutPreparationConfig{Kind: "sim-latency-prospective-c2-bridge-plan", Protocol: plan.Protocol}, Policy: request.EvaluationPolicy, PolicySha256: release.StageAPolicySha256, Margin: freeze.Margin, References: []heldOutReference{plan.Noop}}, round, job, request, nil, release, settings, memoized); err != nil {
+	if _, _, err := authenticateHeldOutJob(ctx, heldOutBridgeExecutionPlan(*plan, request, freeze.Margin, release), round, job, request, nil, release, settings, memoized); err != nil {
 		return nil, err
 	}
 	if err := authenticateHeldOutBridgeCensus(input, release, request, settingsBridge); err != nil {
