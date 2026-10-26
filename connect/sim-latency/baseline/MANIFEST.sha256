@@ -595,6 +595,16 @@ b6a66eb6de9d358a5b91adab521c03cc39302827486a5adb38d8187033e77f8b  prelaunch-snow
 6e7e667728c703e39dab9c984f35224ec2b9739598234436b46954f03a5dc366  prelaunch-snow-core-qualification-2026-10-26/sql-passed/run.sh
 ef76663c3d15e34909b108d8388434ad842301a6e710cdc0d3f789cc52af190a  prelaunch-snow-core-qualification-2026-10-26/sql-passed/source-receipt.sha256
 6cf0f44169456d1c9a037ae13e9760fd909b3638400f6dbd57494c4de6b57750  prelaunch-snow-review-2026-10-26/INDEX.json
+1c5dd8954554264af19e210a3eb8ab89fccb02507bd0da00033f331144fd6c2b  prelaunch-snow-review-2026-10-26/environment-regression/INDEX.json
+edfb4444bf7b207fe33ce77fd7af4cfdd5fcbca252760c73e35219665dce68a7  prelaunch-snow-review-2026-10-26/environment-regression/green-1.stderr
+678d6b92d54a1d02831423ab0ca7d908efc395ba16f64a2fff47d023af65dbc2  prelaunch-snow-review-2026-10-26/environment-regression/green-1.stdout
+836f592c8604c4e719ee0d286cd0688180b5ac42b2a5f668edcfbd04bb8d5d7a  prelaunch-snow-review-2026-10-26/environment-regression/green-2.stderr
+4006d21afa5d2d05dfca79f027c581290085432ab338fd1e29ab22c70fa9a3ba  prelaunch-snow-review-2026-10-26/environment-regression/green-2.stdout
+64e59619c8822311f45704ccae47df04e48bf65117d7e53484d002ccc918bbff  prelaunch-snow-review-2026-10-26/environment-regression/green-3.stderr
+fa5a42ee7907bca79e77c75a73c43f7e0364de0b59f6d8f7b69fe1e83dce82f4  prelaunch-snow-review-2026-10-26/environment-regression/green-3.stdout
+cb46255b04d3bc3558a87ea8caf7b55a4c9d0005d5ef3d2ac0ce6b18f0f97be1  prelaunch-snow-review-2026-10-26/environment-regression/native-plan.json
+58506736dc216f507db99388e331d43d60a34a3a685b7c0d3e0b709c46f3da71  prelaunch-snow-review-2026-10-26/environment-regression/red.stderr
+223e5479d8818fec5176402255efa53a3e12b189915bebc0369290ed47f36b9a  prelaunch-snow-review-2026-10-26/environment-regression/red.stdout
 e63bc1e8fc6069c4b7850bf6ef7d09268eb58d137c8f4525ebd0ea21fff35be2  prelaunch-snow-review-2026-10-26/native-plan.json
 992d5fa307fd3f20942274d9d080304fd0e8a86d052795599860db13d181d794  prelaunch-snow-review-2026-10-26/plan.json
 28e7adf572a0f8a284e17c816a8de6d29d78ff61fb557a9333adaa27a931b8dc  prelaunch-snow-review-2026-10-26/stdin-fixed-precommit/INDEX.json
