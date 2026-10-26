@@ -25,3 +25,13 @@ multi-repository build checks, the fresh R9/R9 bridge, independent-seed ranking,
 containment, provider or live readiness. No production activation is claimed.
 The unchanged original C1 image/bundle and all original measurements remain
 retained. The build's management CPU/memory bounds are not scoring measurements.
+
+## Separate trusted control build
+
+`trusted-control/` preserves the Go 1.27.3 operator validator build, new inactive
+immutable builder bundle and prospective runner installation. Those programs
+use a separately pinned current-main control dependency graph, not the measured
+C2 product graph. Actual binary/build/bundle identities and that distinction
+are explicit in `validator-release-provenance.json`. Composed runtime
+qualification and runner execution were pending at capture; installation alone
+grants no scoring or production-readiness authority.
