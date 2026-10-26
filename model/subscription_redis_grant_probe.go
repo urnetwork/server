@@ -1,11 +1,11 @@
-// A refused reservation costs a preflight PING and a six-kilobyte EVAL that
-// writes five replicated commands, and its grant joins this request's recovery
-// page. A payer whose grants are all reserved repeats that for every grant on
-// every request, only to prove that nothing is left. After a request's first
-// refusal, one pipelined read-only probe per remaining candidate of a window
-// or keyset page reads what that grant's reservation would find. Selection
-// skips a reservation only when its probe proves the refusal; any other state
-// defers to the reservation itself.
+// A refused reservation costs a preflight PING and an EVAL of the 5.8 KB
+// reservation script with up to five replicated writes, and its grant joins
+// this request's recovery page. A payer whose grants are all reserved repeats
+// that for every grant on every request, only to prove that nothing is left.
+// After a request's first refusal, pipelined read-only probes of its next
+// candidates read what each grant's reservation would find. Selection skips a
+// reservation only when its probe proves the refusal; any other state defers
+// to the reservation itself.
 package model
 
 import (
@@ -98,17 +98,25 @@ func parseRedisGrantProbe(values []any) (verdict redisGrantProbeVerdict, result 
 
 // One selection's probe observations. Probing starts after the request's
 // first refused reservation, so a request funded by its first attempt reads
-// nothing more. A batch is a spread window's attempts or one keyset page; its
-// observations are read immediately before its own attempts and are forgotten
-// before the next batch.
+// nothing more. Each probe pipeline reads the next candidates, one grant at
+// first and twice as many each time after, so a request funded soon after its
+// refusal reads few grants and one with every grant reserved needs a
+// logarithmic number of round trips. A batch is a spread window's attempts or
+// one keyset page; its observations are read immediately before its own
+// attempts and are forgotten before the next batch.
 type redisGrantProbe struct {
 	contractId server.Id
 	active     bool
-	verdicts   map[server.Id]redisGrantProbeVerdict
+	// grants the next probe pipeline reads
+	width    int
+	verdicts map[server.Id]redisGrantProbeVerdict
 }
 
 func (self *redisGrantProbe) noteRefusal() {
-	self.active = true
+	if !self.active {
+		self.active = true
+		self.width = 1
+	}
 }
 
 // Starts a batch. No observation outlives the batch it was read for.
@@ -116,9 +124,10 @@ func (self *redisGrantProbe) forget() {
 	self.verdicts = nil
 }
 
-// Reads the batch's remaining candidates, starting at the next attempt, in
-// one pipeline once the request has a refusal. Each candidate is read once per
-// batch; a failed read leaves an inexact verdict and its reservation decides.
+// Reads the next candidates of the batch, starting at the next attempt, in
+// one pipeline once the request has a refusal. Each candidate is read at most
+// once per batch; a failed read leaves an inexact verdict and its reservation
+// decides.
 func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTransferBalance) {
 	if !self.active || len(upcoming) == 0 {
 		return
@@ -129,8 +138,11 @@ func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTran
 	if self.verdicts == nil {
 		self.verdicts = map[server.Id]redisGrantProbeVerdict{}
 	}
-	probed := make([]*escrowTransferBalance, 0, len(upcoming))
+	probed := make([]*escrowTransferBalance, 0, min(self.width, len(upcoming)))
 	for _, balance := range upcoming {
+		if len(probed) == self.width {
+			break
+		}
 		if _, observed := self.verdicts[balance.balanceId]; observed {
 			continue
 		}
@@ -143,6 +155,7 @@ func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTran
 	if len(probed) == 0 {
 		return
 	}
+	self.width = min(2*self.width, redisGrantPageRows)
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
 	commands := make([]*redis.Cmd, len(probed))

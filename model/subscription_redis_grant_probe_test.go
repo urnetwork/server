@@ -266,13 +266,16 @@ func TestRedisGrantProbeAgreesWithReservationScript(t *testing.T) {
 	})
 }
 
-// The reservation counters these tests discriminate.
+// The reservation and probe counters these tests discriminate.
 func redisGrantProbeCounts() map[string]float64 {
 	counts := map[string]float64{}
 	for _, operation := range []string{"reserve-pending", "reserve-pending-full"} {
 		for _, result := range []string{"accepted", "refused", "error", "skipped"} {
 			counts[operation+" "+result] = testutil.ToFloat64(redisContractReservationResults.WithLabelValues(operation, result))
 		}
+	}
+	for _, result := range []string{"empty", "available", "undecided", "error"} {
+		counts["reserve-probe "+result] = testutil.ToFloat64(redisContractReservationResults.WithLabelValues("reserve-probe", result))
 	}
 	return counts
 }
@@ -353,6 +356,7 @@ func TestRedisGrantSelectionSkipsProvenRefusals(t *testing.T) {
 		redisGrantProbeRequireCounts(t, "reserved ordinary payer", counts, map[string]float64{
 			"reserve-pending refused": 1,
 			"reserve-pending skipped": 5,
+			"reserve-probe empty":     5,
 		})
 		if !slices.Equal(owner.attemptedBalanceIds, ordinaryIds[:1]) {
 			t.Errorf("recovery discovery of idle reserved grants: %d grants, want the one reserved", len(owner.attemptedBalanceIds))
@@ -380,6 +384,8 @@ func TestRedisGrantSelectionSkipsProvenRefusals(t *testing.T) {
 			"reserve-pending-full refused": 1,
 			"reserve-pending-full skipped": proberGrantAttemptsPerWindow - 1,
 			"reserve-pending skipped":      6,
+			// the window's remaining attempts, then every grant of the page
+			"reserve-probe empty": proberGrantAttemptsPerWindow - 1 + 6,
 		})
 		if len(owner.attemptedBalanceIds) != 1 {
 			t.Errorf("recovery discovery of idle reserved grants: %d grants, want the one reserved", len(owner.attemptedBalanceIds))
@@ -432,6 +438,10 @@ func TestRedisGrantSelectionProbeKeepsFundingAndRecovery(t *testing.T) {
 			"reserve-pending refused":  1,
 			"reserve-pending skipped":  2,
 			"reserve-pending accepted": 2,
+			"reserve-probe empty":      2,
+			"reserve-probe available":  1,
+			// the last grant has no reservation counters yet
+			"reserve-probe undecided": 1,
 		})
 		if !slices.Equal(owner.attemptedBalanceIds, []server.Id{ids[0], ids[2], ids[3], ids[4]}) {
 			t.Errorf("recovery discovery %d grants, want the reserved, marked and funding grants", len(owner.attemptedBalanceIds))
@@ -459,6 +469,7 @@ func TestRedisGrantSelectionProbeDefersUndecidedStates(t *testing.T) {
 		redisGrantProbeRequireCounts(t, "expired lease", counts, map[string]float64{
 			"reserve-pending refused":  1,
 			"reserve-pending accepted": 1,
+			"reserve-probe undecided":  1,
 		})
 
 		invalid := newEscrowSelectionTestClients(t, ctx)
@@ -474,6 +485,33 @@ func TestRedisGrantSelectionProbeDefersUndecidedStates(t *testing.T) {
 		redisGrantProbeRequireCounts(t, "invalid counter", counts, map[string]float64{
 			"reserve-pending refused": 1,
 			"reserve-pending error":   1,
+			"reserve-probe undecided": 1,
+		})
+	})
+}
+
+// A request funded by the grant after its refusal reads only that grant: the
+// probe never costs more than one read beyond the reservations it skips, even
+// for a payer with a full page of unread grants behind it.
+func TestRedisGrantSelectionProbeReadsGrowWithRefusals(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		ids := redisSelectionTestGrants(t, ctx, clients, 12, 1000, false)
+		redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
+		for _, id := range ids[1:] {
+			redisGrantProbeToken(t, ctx, id, 1000, 100)
+		}
+		escrow, _, counts, err := redisGrantProbeCreate(ctx, clients, 500)
+		if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != ids[1] || escrow.Balances[0].BalanceByteCount != 500 {
+			t.Fatal("the next grant did not fund the request", escrow, err)
+		}
+		redisGrantProbeRequireCounts(t, "funded after one refusal", counts, map[string]float64{
+			"reserve-pending refused":  1,
+			"reserve-pending accepted": 1,
+			"reserve-probe available":  1,
 		})
 	})
 }
