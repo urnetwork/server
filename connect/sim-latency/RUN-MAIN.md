@@ -34,11 +34,19 @@ a deterministic regression test. A separate Sol 6.1 low agent then reruns the
 affected test and required suite; do not accept a debugging agent's test run as
 the independent completion result.
 
-GPT-5.4 mini (`gpt-5.4-mini`) with `xhigh` reasoning owns all competition code
-evaluation, each winning-submission honesty and safety code review, and the
-approve/reject judgment. `xhigh` is its highest supported effort; do not send
-`max` or substitute GPT-5.4, GPT-5.5, or Sol. See the
-[official model contract](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
+The prospective production policy uses Snow's three reviewers:
+`qwen3.8-27b` (`xhigh`), `gemma-4-26b-a4b` (`high`), and
+`muse-glimmer-30b` (`xhigh`). Run them serially because Snow has one resident
+model at a time; allow model-swap latency inside the original shared deadline.
+All three must approve. Retain the union of all attributed findings; a concrete
+substantiated rejection rejects, while missing, malformed, unavailable or
+uncertain evidence holds progression without inventing approval or dishonesty.
+Snow replaces external model calls for automated test attestations too: the
+prescribed deterministic Go suite runs once, and all three models attest to
+the same authenticated result. Models do not choose commands or rerun tests.
+The selected endpoint requires no API key. Qualification, fixed egress,
+immutable settings, member journals and protected evidence are still mandatory.
+Historical Mini and Sol records retain their original provider identities.
 Sol 6.1 max retains implementation, debugging, and source/config merge/push
 ownership after the required independent review. The reviewer must inspect the
 exact materialized patch and score evidence before invoking this harness. The
@@ -56,7 +64,7 @@ This legacy staging path is not the v2 staging supervisor described below.
 
 ### Adopted automatic closing policy (review-provider update 2026-10-26)
 
-New seasons should freeze `winner_review_policy: elected_winner_gpt54mini_xhigh_v1`.
+New seasons should freeze `winner_review_policy: elected_winner_snow_union_v1`.
 This is a prospective opt-in, not a reinterpretation of an already-open round.
 The empty policy retains the historical independent source-choice flow described
 below. Do not change an existing season's policy approval or running worker pins
@@ -64,7 +72,7 @@ to activate this flow in place.
 
 Historical `elected_winner_sol61max_v1` records remain bound to their original
 `gpt-6.1-sol`/`max` provenance. Policy-aware readers preserve their meaning and
-digests; they are not silently relabeled as mini reviews. The empty policy still
+digests; neither these nor historical Mini reviews are relabeled as Snow reviews. The empty policy still
 means the earlier independent source-choice lifecycle. A new provider requires
 a fresh approved policy and qualified release, not a field edit to a live round.
 
@@ -73,7 +81,7 @@ For the adopted policy the durable supervisor performs:
 1. Close admission and finish every accepted evaluation.
 2. Seal and publish the provisional reward election after the reveal boundary.
 3. Automatically dispatch the current elected candidate to the qualified
-   GPT-5.4 mini xhigh honesty/safety broker, with exact source/patch/score evidence.
+   three-model Snow honesty/safety broker, with exact source/patch/score evidence.
 4. Record a substantiated rejection through the scoped review API, publish its
    reasons and replacement decision, and review the next elected candidate.
    An unavailable model, timeout or uncertainty is not a rejection.
