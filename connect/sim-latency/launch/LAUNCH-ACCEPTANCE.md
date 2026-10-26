@@ -15,16 +15,19 @@ Sol 6.1 low still owns independent test execution. These resolved inputs are not
 live provider qualification, broad-patch qualification, or production activation.
 The dated measurement and external observations below remain historical evidence.
 
-Latest update **2026-10-26 14:24 UTC**: all three original R9/R9 pairs are
+Latest update **2026-10-26 15:03 UTC**: all three original R9/R9 pairs are
 complete, preserved, checksum-verified and pushed (`f27606218`). Pair 3 passed
 all gates and cleanup in 10,160 seconds; its no-op mean was 3.4358% worse,
 Welch p=0.7826, with no significance or takeover. The user approved the named
 [deadline amendment](CALIBRATION-AMENDMENT-2026-10-26.md): all three original
 pairs, one fresh minimal-C2 R9/R9 bridge, then three independent seeds requiring
 correct ordering on all three. Original positions 04/05 remain unstarted.
-The amended native analyzer is pushed (`2f46d3cc6`), but its qualification and
-actual reduction are pending; no new margin is accepted. The minimal C2 source
-is prepared privately, not image-qualified. The first real Mini request returned
+The corrected amended analyzer (`21f371d18`) passed deterministic old/fixed
+regression proof and three 14-test runs, zero skips. Its actual reduction
+accepted all 54 measured runs with six authenticated replays, 100,000 bootstrap
+draws and 99.525% placeability. The [prospective margin is frozen at 26.9%](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
+before bridge/independent outcomes. The minimal C2 image build started at
+15:03:34 UTC; it is not yet image-qualified. The first real Mini request returned
 HTTP 429 `credit_balance_exhausted`; provider qualification needs funded access,
 not another model-metadata probe. Maintenance is cleared and the key is present.
 The live API still returns `source_not_ready`; configured MinIO health returns
@@ -90,7 +93,7 @@ substitute for formal calibration or live readiness.
 | --- | --- | --- |
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Corrected evaluated server `c1f9dda60`, image `002c3904…`, actual Go 1.27.3 and canonical lock `5e00bf5e…` are recorded in [the corrected image qualification](ARTIFACTS-CANCELED-STOP-2026-10-25.md). Preserve these exact identities through subsequent qualification. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Passed the prospectively declared corrected-release first cohort: 10,498 seconds, all gates and exact cleanup. Complete [original evidence](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md) is verified. It is one observation serving two checks, not two independent cohorts; other seeds are not yet qualified. |
-| Statistical calibration | Approved named three-pair/bridge/three-seed protocol; unchanged R9, algorithm, gates, significance, integrity and deadlines; retained outcomes and measured variance | All three original pairs passed. Means changed −2.80%, +1.16%, +3.44%; p=0.297/0.579/0.783. All placeable, no significance/takeover. Practical floor remains 16.1%; comparison-specific statistical fringes are 9.018%, 10.046%, 7.496%. Amended native reduction, frozen margin, fresh C2 bridge and all-three reference ordering remain open. Reduced confidence is explicit; no new margin is accepted. |
+| Statistical calibration | Approved named three-pair/bridge/three-seed protocol; unchanged R9, algorithm, gates, significance, integrity and deadlines; retained outcomes and measured variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin frozen at **26.9%**. Original means changed −2.80%, +1.16%, +3.44%; p=0.297/0.579/0.783; comparison-specific fringes 9.018%, 10.046%, 7.496%, no significance/takeover. Fresh C2 bridge and all-three independent reference orderings remain open. The floor was 16.1%, not the selected margin. Reduced confidence is explicit; production qualification is incomplete. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Local isolation and host bomb evidence exists in the image record. New image-bound host rebaseline and live readiness remain unverified. |
 | Honesty and source-test providers | Genuine provider-backed GPT-5.4 mini xhigh review and Sol 6.1 low test execution; retained identities/results for acceptance, rejection, uncertainty and unsafe/prompt-injected input | Dedicated key provisioned; real inference returned HTTP 429 `credit_balance_exhausted`. New policy, isolated broker and fixed acceptance/rejection/uncertainty cases still require genuine qualification after funding. Historical Sol policy receipts retain their original identity. Never expose the key. |

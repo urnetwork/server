@@ -36,6 +36,8 @@
     "next_action": "Verify actual build session before assuming live/terminal. After successful bounded image build, independently qualify C2 and new trusted control tools, then precommit/run one fresh fixed-margin R9/R9 bridge. Never restart on observation timeout."
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
+  "historical_sections_warning": "Older dated campaign/tool sections below retain their original observations and next actions. The accepted_three_a_reduction and prospective_c2_build above supersede old analysis-pending and margin-unselected statements; they do not qualify C2 or activate production.",
+  "next_action": "Observe C2 build session 98345 to an authoritative terminal result; independently qualify its exact image and revised control/held-out tools, then publish and run one fresh R9/R9 bridge at the frozen 0.269 margin. Precommit three independent seeds before any held-out result; require all-three reference ordering. Provider credit, live host/storage/runtime/monitoring proofs remain open.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",

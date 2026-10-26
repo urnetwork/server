@@ -9,10 +9,10 @@
 </style>
 <main>
 <header>
-<div class="eyebrow">Production preparation preview · measured through October 26, 2026, 06:31 UTC</div>
+<div class="eyebrow">Production preparation preview · measured through October 26, 2026, 06:31 UTC · reduction accepted 15:01 UTC</div>
 <h1>A dedicated competition environment.<br>A fixed October 28 opening.</h1>
 <p class="muted">Public admission target: <strong>2026-10-28 00:00 UTC</strong>. This is a dated preview, not launch approval or a final baseline report.</p>
-<p class="banner">The corrected Go 1.27.3 release has completed three fresh A/A cohorts: 27 controls and 27 no-op candidates, all six gates and cleanup. The latest pair finished in 2h49m20s, with 10m40s headroom. None of the no-ops was significant or takeover-eligible. The user approved a three-pair analysis, one fresh revised-instrument R9/R9 bridge and three independent seeds with all three correctly ordered. Native acceptance, the final margin and live readiness remain pending.</p>
+<p class="banner">Three fresh A/A cohorts completed: 27 controls and 27 no-op candidates, all six gates and cleanup. The native reduction accepted all three pairs with 99.525% bootstrap placeability and froze a <strong>26.9% practical improvement margin</strong>, before any new-instrument result. The fresh R9/R9 instrument bridge, all-three independent-seed ordering and live readiness remain pending. None of the original no-ops was significant or takeover-eligible.</p>
 </header>
 
 <section aria-labelledby="environment">
@@ -49,6 +49,7 @@
 <h2 id="qualification">Progress is observable; acceptance is still pending</h2>
 <div class="cards">
 <div class="card"><span class="big">3 / 3</span>amended original A/A pairs complete<div class="progress" role="progressbar" aria-label="Amended original A/A pairs completed" aria-valuemin="0" aria-valuemax="3" aria-valuenow="3"><span style="width:100%"></span></div><small>27 fresh controls + 27 fresh candidates; original positions 4–5 remain unstarted</small></div>
+<div class="card"><span class="big">26.9%</span>prospectively frozen practical margin<br><small>Native three-pair reduction accepted; 99.525% bootstrap placeability. Bridge and independent references remain open.</small></div>
 <div class="card"><span class="big">3 × 514</span>passing full control suites<br><small>Plus 3 × 340 full evaluated-source tests; neither substitutes for live readiness</small></div>
 <div class="card"><span class="big">0.958 s</span>new-image host bomb cleanup<br><small>Local qualification, not final host attestation or a scoring result</small></div>
 <div class="card"><span class="big">Directional only</span>snapshot reference pilot<br><small>18/18 runs and all gates passed; both statistics lower, but p=0.241 is not significant. Held-out qualification remains open.</small></div>
@@ -59,16 +60,18 @@
 <div class="cards">
 <div class="card">
 <h3>Median score and practical boundary</h3>
-<svg viewBox="0 0 420 210" role="img" aria-label="Median baseline 19410.10, no-op 18612.13, required practical boundary 16285.08 at the provisional 16.1 percent margin" style="width:100%;height:auto">
+<svg viewBox="0 0 420 210" role="img" aria-label="Median baseline 19410.10, no-op 18612.13, prospective 26.9 percent target 14188.79; historic 16.1 percent floor 16285.08" style="width:100%;height:auto">
 <g fill="currentColor" font-family="system-ui,sans-serif" font-size="12">
 <path d="M65 40V145H365M215 40V145M365 40V145" fill="none" stroke="#43536b"/>
 <text x="4" y="73">Control</text><rect x="65" y="56" width="264.68" height="24" rx="4" fill="#75baff"/><text x="72" y="73" fill="#101722">19,410.10</text>
 <text x="4" y="117">No-op</text><rect x="65" y="100" width="253.80" height="24" rx="4" fill="#9fb0c7"/><text x="72" y="117" fill="#101722">18,612.13</text>
-<path d="M287.07 40V145" stroke="#78dfad" stroke-width="3" stroke-dasharray="5 4"/>
+<path d="M287.07 40V145" stroke="#9fb0c7" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M258.48 40V145" stroke="#78dfad" stroke-width="3" stroke-dasharray="5 4"/>
 <text x="65" y="161">0</text><text x="205" y="161">11,000</text><text x="345" y="161">22,000</text>
-<text x="65" y="184" fill="#78dfad">Practical target: ≤16,285.08 (−16.1%)</text>
+<text x="65" y="184" fill="#78dfad">Prospective target: ≤14,188.79 (−26.9%)</text>
+<text x="65" y="202" fill="#9fb0c7">Historic floor: 16,285.08 (−16.1%)</text>
 </g></svg>
-<small>The no-op median was 4.11% lower, short of the provisional 16.1% floor. The mean-based significance gate on the right must also pass.</small>
+<small>The no-op median was 4.11% lower. Green applies the frozen 26.9% margin illustratively to this historical control; gray retains its original 16.1% floor. The mean-based significance gate must also pass.</small>
 </div>
 <div class="card">
 <h3>Means and the statistical fringe</h3>
@@ -89,16 +92,18 @@
 <div class="cards">
 <div class="card">
 <h3>Cohort 2 median and practical boundary</h3>
-<svg viewBox="0 0 420 210" role="img" aria-label="Cohort 2 median baseline 17844.39, no-op 17557.35, required practical boundary 14971.44 at the provisional 16.1 percent margin" style="width:100%;height:auto">
+<svg viewBox="0 0 420 210" role="img" aria-label="Cohort 2 median baseline 17844.39, no-op 17557.35, prospective 26.9 percent target 13044.25; historic 16.1 percent floor 14971.44" style="width:100%;height:auto">
 <g fill="currentColor" font-family="system-ui,sans-serif" font-size="12">
 <path d="M65 40V145H365M215 40V145M365 40V145" fill="none" stroke="#43536b"/>
 <text x="4" y="73">Control</text><rect x="65" y="56" width="243.33" height="24" rx="4" fill="#75baff"/><text x="72" y="73" fill="#101722">17,844.39</text>
 <text x="4" y="117">No-op</text><rect x="65" y="100" width="239.42" height="24" rx="4" fill="#9fb0c7"/><text x="72" y="117" fill="#101722">17,557.35</text>
-<path d="M269.16 40V145" stroke="#78dfad" stroke-width="3" stroke-dasharray="5 4"/>
+<path d="M269.16 40V145" stroke="#9fb0c7" stroke-width="1" stroke-dasharray="3 5"/>
+<path d="M242.88 40V145" stroke="#78dfad" stroke-width="3" stroke-dasharray="5 4"/>
 <text x="65" y="161">0</text><text x="205" y="161">11,000</text><text x="345" y="161">22,000</text>
-<text x="65" y="184" fill="#78dfad">Practical target: ≤14,971.44 (−16.1%)</text>
+<text x="65" y="184" fill="#78dfad">Prospective target: ≤13,044.25 (−26.9%)</text>
+<text x="65" y="202" fill="#9fb0c7">Historic floor: 14,971.44 (−16.1%)</text>
 </g></svg>
-<small>The no-op median was 1.61% lower, still short of the provisional practical margin.</small>
+<small>The no-op median was 1.61% lower, short of both the historical floor and the prospectively frozen practical margin.</small>
 </div>
 <div class="card">
 <h3>Cohort 2 means and statistical fringe</h3>
@@ -114,10 +119,10 @@
 <small>The no-op mean is 1.16% worse; p=0.579, not significant. The unchanged campaign retains this unfavorable observation.</small>
 </div>
 </div>
-<p class="muted">Cohort 2 sample variances: control 5,739,486.72; no-op 3,712,001.77. Raw replicate CVs are 13.41% and 10.66%, not bootstrap aggregate-score CVs. Its reported required improvement remains 16.1%, above the 10.046% comparison-specific significance fringe. The third pair's no-op mean was 3.436% worse (p = 0.782614); its complete statistics and both improvement edges are preserved in its linked record. Native amended analysis has not yet selected the final margin.</p>
+<p class="muted">Cohort 2 sample variances: control 5,739,486.72; no-op 3,712,001.77. Raw replicate CVs are 13.41% and 10.66%, not bootstrap aggregate-score CVs. Its historical required improvement was 16.1%, above the 10.046% comparison-specific significance fringe. The third pair's no-op mean was 3.436% worse (p = 0.782614); its complete statistics and both improvement edges are preserved in its linked record. Native amended analysis selected 26.9% prospectively, driven by the four-times control-noise term (26.8772%), rounded upward. No historical score was rewritten.</p>
 <h3>How a production improvement will qualify</h3>
 <div class="steps"><div class="step">All correctness, containment and integrity gates</div><div class="step">Beat the epoch’s calibrated practical improvement margin</div><div class="step">Pass the statistical test using recorded variance</div><div class="step">Honesty review, then source build and qualification</div></div>
-<p class="banner">The plots show the first two of three preserved public-seed pairs, not official epoch baselines. Each median practical line is B × (1 − m); its separate mean-based Welch fringe uses the observed variances. Historical m = 16.1% remains provisional. The approved three-pair reduction, fresh revised-instrument bridge and all-three-seed reference qualification must pass before production qualification is complete. This is reduced confidence, not the original five-pair/five-seed or twenty-seed claim.</p>
+<p class="banner">The plots show the first two of three preserved public-seed pairs, not official epoch baselines. Each median practical line is B × (1 − m); its separate mean-based Welch fringe uses the observed variances. The frozen prospective m is 26.9%; the historical 16.1% floor remains visible in gray. <a href="prelaunch-three-pair-analysis-2026-10-26/report.json">The native reduction passed</a>, but the fresh instrument bridge and all-three-seed reference qualification remain open. This is reduced confidence, not the original five-pair/five-seed or twenty-seed claim.</p>
 <p class="muted">The fresh campaign uses public seed 20261024 and explicit offline control-plane fixtures. Its first cohort also serves full-window functional qualification, without double-counting observations. It is not a hidden production baseline, live API job, MinIO durability receipt or provider-backed review.</p>
 <p><a href="prelaunch-warm-reader-pilot-2026-10-25/completed/README.md">Preserved unfavorable pilot, comparison thresholds and independently verified evidence</a>. No favorable-draw retry or source promotion follows it.</p>
 <p><a href="prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md">Preserved calibration failure</a>: all 125 original files and three readable companions independently verified. A corrected release requires fresh qualification and measurements.</p>
@@ -129,9 +134,9 @@
 <section aria-labelledby="launch">
 <div class="eyebrow">04 · Launch path</div>
 <h2 id="launch">Fixed opening. Evidence-driven release.</h2>
-<div class="steps"><div class="step">Two full-window pairs passed and preserved</div><div class="step">Finish three fresh pairs; calibrate margin and independent references</div><div class="step">Qualify real review providers, host, MinIO durability and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
-<p><span class="pill">Main maintenance hold</span> The configured MinIO endpoint returns HTTP 200; earlier refusals used an obsolete address. API returns typed <code>source_not_ready</code>, and the dedicated review-provider key is absent. Health checks do not prove immutable retention, replication or capacity. No production activation or main mutation is authorized during maintenance.</p>
-<p>Season intent: six weekly admission epochs, $20 per submission, no submission-count ceiling and immediate FIFO evaluation. Scoring drains after close. The provisional winner undergoes automatic Sol 6.1 max review; rejection advances to the next eligible candidate. An approved winner must build and qualify before becoming the next source. Exhaustion carries the incumbent forward; uncertainty pauses and alerts.</p>
+<div class="steps"><div class="step">Three original pairs accepted; 26.9% margin frozen</div><div class="step">Qualify minimal revised image, fresh bridge and three independent seeds</div><div class="step">Qualify real review providers, host, MinIO durability and runtime readiness</div><div class="step">Schedule October 28; verify API, monitoring and partner handoff</div></div>
+<p><span class="pill">Readiness still pending</span> Maintenance is cleared and the dedicated review key is present. Its real inference request returned <code>credit_balance_exhausted</code>; funded provider qualification is outstanding. The configured MinIO endpoint returns HTTP 200, but health alone does not prove immutable retention, replication or capacity. API still returns typed <code>source_not_ready</code>. Production is not activated.</p>
+<p>Season intent: six weekly admission epochs, $20 per submission, no submission-count ceiling and immediate FIFO evaluation. Scoring drains after close. The provisional winner undergoes automatic GPT-5.4 mini xhigh honesty/safety review; rejection advances to the next eligible candidate. An approved winner must build and qualify before becoming the next source. Exhaustion carries the incumbent forward; uncertainty pauses and alerts. Independent test execution remains Sol 6.1 low.</p>
 <p><a href="../launch/LAUNCH-ACCEPTANCE.md">Current acceptance matrix</a> · <a href="../launch/current-state.json">Dated state and live handle</a> · <a href="../launch/COLD-R9-PROTOCOL-2026-10-25.md">Cold qualification protocol</a> · <a href="../launch/CONTROL-VALIDATION-2026-10-25.md">Full-suite evidence</a></p>
 </section>
 <footer>Current evaluated source: server <code>c1f9dda603d6279666fca5d92b99c5663306c5f7</code>.<br>Current evaluator: <code>sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3</code>.<br>Historical frontier/cold/pilot evidence used server 0d58d0d9 / image effe9ba5; those observations are not relabeled as new-release results.<br>Static, dependency-free preview. No third-party scripts, tracking or embedded secrets. Historical reports and archived measurements are unchanged.</footer>

@@ -22,8 +22,12 @@ No scoring is active at this observation. The user approved the
 three original pairs, freeze the margin, pass one fresh minimal-C2 bridge, then
 require correct reference ordering on all three independent seeds. Original
 positions 4–5 remain unstarted. This reduces confidence without changing R9,
-gates, significance, integrity or original per-job deadlines. Amended analyzer
-qualification and reduction remain pending; no new margin is accepted.
+gates, significance, integrity or original per-job deadlines. The corrected
+amended analyzer passed three 14-test runs and actual native reduction at
+15:01:22 UTC: 54 measurements, six replay/cleanup receipts, 99.525% bootstrap
+placeability. The [prospective practical margin is frozen at 26.9%](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
+before any C2 bridge or independent result. The minimal C2 image build started
+15:03:34 UTC; image, bridge and held-out qualification are still pending.
 The snapshot reference passed its separate directional pilot, but
 was not statistically significant; independent held-out ordering remains open.
 No pilot measurements enter the amended A/A sample. A real Mini inference
