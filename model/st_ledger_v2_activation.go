@@ -68,6 +68,21 @@ func GetStLedgerV2Activation(ctx context.Context, deploymentKey StDeploymentKey)
 	return activation
 }
 
+// Reads activation using the caller's transaction without acquiring a connection.
+func GetStLedgerV2ActivationInTx(ctx context.Context, tx server.PgTx, deploymentKey StDeploymentKey) *StLedgerV2Activation {
+	return getStLedgerV2Activation(ctx, tx, requireStDeploymentKey(deploymentKey))
+}
+
+// Supports legacy deployments whose schema predates the activation latch.
+func GetStLedgerV2ActivationIfInstalledInTx(ctx context.Context, tx server.PgTx, deploymentKey StDeploymentKey) *StLedgerV2Activation {
+	var installed bool
+	server.Raise(tx.QueryRow(ctx, `SELECT to_regclass('public.st_ledger_v2_activation') IS NOT NULL`).Scan(&installed))
+	if !installed {
+		return nil
+	}
+	return GetStLedgerV2ActivationInTx(ctx, tx, deploymentKey)
+}
+
 // GetStLedgerV2ActivationIfInstalled is GetStLedgerV2Activation for a
 // database that may predate the record's table (migration 832): without the
 // table there is no activation. A deployment without the v2 pair reads the

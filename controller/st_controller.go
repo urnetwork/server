@@ -3869,6 +3869,9 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return root, 0, err
 	}
+	if err := stV1EpochAdmission(ctx, cfg, epoch); err != nil {
+		return root, 0, err
+	}
 	// A fully published release artifact is immutable and proves that all
 	// preceding close/snapshot work succeeded. Retried or duplicate close tasks
 	// must return it before consuming any public-RPC quota.
