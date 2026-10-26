@@ -156,3 +156,22 @@ input from the same untrusted file. It must separately authenticate the input
 manifest, template policy and original artifacts; this narrow pin does not
 replace the native analyzer's full replay or the wrapper's source/request
 binding. No actual Stage A report has been accepted by these drafts.
+
+## Unqualified request-finalization draft
+
+The [request-finalization core](held-out-request-finalization.go.txt) and
+[five deterministic test drafts](held-out-request-finalization-tests.go.txt)
+fill only the two declared baseline fields of exact precommitted request bytes.
+They refuse changed input bytes, cross-round identity, missing/null/previously
+filled placeholders, noncanonical paths and duplicate JSON keys at any depth.
+All other request fields are retained without caller-supplied replacements.
+
+These drafts are uncompiled/unexecuted. Qualify as `_test.go` files with
+`^TestHeldOutFinalization`, three complete race passes and zero skips in the
+exclusive frozen Go 1.27.3 workspace. Fixtures are minimal structural objects,
+not valid production requests. This core neither authenticates baseline
+artifacts nor resolves symlinks or checks path ownership: the wrapper must do
+those checks, authenticate same-round source/workload/policy/R9 provenance and
+the original control digest, and persist finalized request/provenance hashes
+before execution. Returned bytes contain private seeds and must never be
+published with the public commitment plan. No actual request is finalized here.
