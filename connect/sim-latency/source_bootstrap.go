@@ -175,7 +175,7 @@ func runBootstrapSource(opts docopt.Opts) {
 			}
 			origin := origins[repository]
 			stagedRoot := filepath.Join(root, repository)
-			if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
+			if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 				fatalf("baseline clone: %s", err)
 			}
 			if err := os.Chmod(stagedRoot, 0o700); err != nil {

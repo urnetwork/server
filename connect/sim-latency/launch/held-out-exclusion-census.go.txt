@@ -1,0 +1,186 @@
+// Authenticates the exclusion catalog against exact retained seed artifacts,
+// not just an operator assertion that a list contains every old workload.
+package main
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Every declared seed/commitment/provider exclusion must have a pinned source,
+// and every known seed field in those sources must appear in the catalog. The
+// independent reviewer still owns completeness across *all* prior campaigns;
+// recursively scanning unrelated host directories cannot establish that fact.
+func authenticateHeldOutExclusionCensus(exclusions heldOutExclusions, maximumBytes int64) error {
+	privateSeeds, effectiveSeeds := map[string]bool{}, map[int64]bool{}
+	providerDigests, commitments := map[string]bool{}, map[string]bool{}
+	for _, seed := range exclusions.PrivateSeedHexes {
+		privateSeeds[seed] = true
+	}
+	for _, seed := range exclusions.EffectiveSeeds {
+		effectiveSeeds[seed] = true
+	}
+	for _, digest := range exclusions.ProviderDigests {
+		providerDigests[digest] = true
+	}
+	for _, digest := range exclusions.RetiredCommitments {
+		commitments[digest] = true
+	}
+	seenPrivate, seenEffective := map[string]bool{}, map[int64]bool{}
+	seenProviders, seenCommitments := map[string]bool{}, map[string]bool{}
+	maximumEntries := defaultCalibrationAnalysisSettings().MaximumTraversalEntries
+	examined := 0
+	for _, source := range exclusions.Sources {
+		content, err := readHeldOutPinned(source, maximumBytes, false)
+		if err != nil {
+			return err
+		}
+		recognized := 0
+		recordPrivate := func(raw string) error {
+			if _, err := heldOutEffectiveSeed(raw); err != nil || !privateSeeds[raw] {
+				return errors.New("retained private seed missing from exclusion census")
+			}
+			seenPrivate[raw], recognized = true, recognized+1
+			return nil
+		}
+		recordEffective := func(seed int64) error {
+			if seed <= 0 || !effectiveSeeds[seed] {
+				return errors.New("retained effective/public seed missing from exclusion census")
+			}
+			seenEffective[seed], recognized = true, recognized+1
+			return nil
+		}
+		recordDigest := func(digest string, provider bool) error {
+			catalog, seen := commitments, seenCommitments
+			if provider {
+				catalog, seen = providerDigests, seenProviders
+			}
+			if !validSha256(digest) || !catalog[digest] {
+				return errors.New("retained provider/seed commitment missing from exclusion census")
+			}
+			seen[digest], recognized = true, recognized+1
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(source.Path)) {
+		case ".yml", ".yaml":
+			var config Config
+			if yaml.Unmarshal(content, &config) != nil {
+				return errors.New("retained provider exclusion cannot be decoded")
+			}
+			if err := recordEffective(config.Seed); err != nil {
+				return err
+			}
+			if err := recordDigest(source.Sha256, true); err != nil {
+				return err
+			}
+		case ".bin":
+			if len(content) != 32 {
+				return errors.New("retained binary seed must be exactly 32 bytes")
+			}
+			if err := recordPrivate(hex.EncodeToString(content)); err != nil {
+				return err
+			}
+		default:
+			var document json.RawMessage
+			if err := decodeStrictJSONBytes(content, &document, "retained exclusion source"); err != nil {
+				return err
+			}
+			var visit func(json.RawMessage) error
+			visit = func(raw json.RawMessage) error {
+				examined++
+				if examined > maximumEntries {
+					return errors.New("retained exclusion source traversal exceeds bound")
+				}
+				raw = bytes.TrimSpace(raw)
+				if len(raw) == 0 {
+					return errors.New("retained exclusion JSON value empty")
+				}
+				if raw[0] == '[' {
+					var values []json.RawMessage
+					if json.Unmarshal(raw, &values) != nil {
+						return errors.New("retained exclusion array invalid")
+					}
+					for _, value := range values {
+						if err := visit(value); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+				if raw[0] != '{' {
+					return nil
+				}
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(raw, &fields) != nil {
+					return errors.New("retained exclusion object invalid")
+				}
+				for key, value := range fields {
+					switch key {
+					case "round_seed_hex", "private_seed_hex":
+						var seed string
+						if json.Unmarshal(value, &seed) != nil {
+							return errors.New("retained raw seed invalid")
+						}
+						if err := recordPrivate(seed); err != nil {
+							return err
+						}
+					case "generator_seed", "effective_seed", "public_workload_seed", "public_seed":
+						var seed int64
+						if json.Unmarshal(value, &seed) != nil {
+							return errors.New("retained integer seed invalid")
+						}
+						if err := recordEffective(seed); err != nil {
+							return err
+						}
+					case "providers_sha256", "config_sha256":
+						var digest string
+						if json.Unmarshal(value, &digest) != nil {
+							return errors.New("retained provider digest invalid")
+						}
+						if err := recordDigest(digest, true); err != nil {
+							return err
+						}
+					case "seed_commitment", "workload_commitment":
+						var digest string
+						if json.Unmarshal(value, &digest) != nil {
+							return errors.New("retained seed commitment invalid")
+						}
+						if err := recordDigest(digest, false); err != nil {
+							return err
+						}
+					case "commitments":
+						var digests []string
+						if json.Unmarshal(value, &digests) != nil {
+							return errors.New("retained seed commitment set invalid")
+						}
+						for _, digest := range digests {
+							if err := recordDigest(digest, false); err != nil {
+								return err
+							}
+						}
+					}
+					if err := visit(value); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			if err := visit(document); err != nil {
+				return err
+			}
+		}
+		if recognized == 0 {
+			return errors.New("exclusion source contains no retained seed/workload identities")
+		}
+	}
+	if len(seenPrivate) != len(privateSeeds) || len(seenEffective) != len(effectiveSeeds) || len(seenProviders) != len(providerDigests) || len(seenCommitments) != len(commitments) {
+		return errors.New("declared exclusion census contains identities without retained sources")
+	}
+	return nil
+}

@@ -240,6 +240,9 @@ func loadCalibrationFileManifest(path string, expectedSha256 string, settings ca
 		!validSha256(manifest.EvaluationPolicySha256) || !validSha256(manifest.RoundSeedHex) || manifest.SourceEpoch < 0 {
 		return nil, errors.New("calibration campaign identity or sample cardinality is invalid")
 	}
+	if err := validateCalibrationProtocolManifest(manifest, settings); err != nil {
+		return nil, err
+	}
 	jobs, rounds := map[string]bool{}, map[string]bool{}
 	for _, cohort := range manifest.Cohorts {
 		if cohort.JobId == "" || cohort.RoundId == "" || jobs[cohort.JobId] || rounds[cohort.RoundId] {
@@ -272,5 +275,12 @@ func analyzeCalibrationFiles(ctx context.Context, path string, expectedSha256 st
 	// Bind the input set explicitly; this is not a claim of MinIO retention.
 	report.InputManifestSha256 = expectedSha256
 	report.EvaluationPolicySha256 = manifest.EvaluationPolicySha256
+	if settings.Protocol != "" {
+		report.ProtocolApprovalSha256 = manifest.ProtocolApprovalSha256
+		report.OriginalPlanSha256 = manifest.OriginalPlanSha256
+		report.OriginalPositions = append([]int{}, manifest.OriginalPositions...)
+		report.OriginalBaseSha = manifest.BaseSha
+		report.OriginalImageDigest = manifest.EvaluatorImageDigest
+	}
 	return report, nil
 }

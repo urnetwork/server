@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 var (
@@ -136,7 +137,7 @@ func refreshAutomationOperationalMetrics(ctx context.Context, settings *Settings
 					  AND policy_json->'automation_policy'->>'environment'=$2
 					  AND policy_json->'automation_policy'->>'season_id'=$3
 				`, settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&snapshot.supervisorExpected))
-				if settings.AutomationPolicy.WinnerReviewPolicy == "elected_winner_sol61max_v1" {
+				if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
 					server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT state<>'complete' FROM competition_supervisor_transition WHERE competition_id=$1 AND environment=$2 AND season_id=$3 AND target_epoch=7 ORDER BY revision DESC LIMIT 1),true)`,
 						settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&snapshot.supervisorExpected))
 				}

@@ -51,7 +51,7 @@ type competitionSupervisorWinnerReviewDriver interface {
 // restart, infrastructure retry or unchanged decision cannot reset its clock.
 func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, lease model.CompetitionSupervisorLease, snapshot *CompetitionSupervisorSnapshot, transition *model.CompetitionSupervisorTransition, now time.Time) (*model.CompetitionSupervisorTransition, string, error, bool) {
 	state := snapshot.WinnerReview
-	if snapshot.Round == nil || snapshot.Seal == nil || state == nil || state.Policy.WinnerReviewPolicy != model.CompetitionWinnerReviewPolicy || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
+	if snapshot.Round == nil || snapshot.Seal == nil || state == nil || !model.IsCompetitionWinnerReviewPolicy(state.Policy.WinnerReviewPolicy) || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
 		return transition, "winner_review_blocked", ErrConflict, true
 	}
 	if now.Before(snapshot.Seal.PublicationAt) {
@@ -133,9 +133,10 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 	if !ok {
 		return block("reviewer_integration_missing", errors.New("elected-winner reviewer integration is unavailable"))
 	}
+	modelName, reasoning, _ := model.CompetitionWinnerReviewProvider(state.Policy.WinnerReviewPolicy)
 	request := CompetitionWinnerReviewRequest{RoundId: snapshot.Round.RoundId, JobId: checkpoint.JobId, SealSha256: snapshot.Seal.SealSha256,
 		RewardRevision: checkpoint.RewardRevision, RewardDecisionSha256: checkpoint.RewardDecisionSha256, CriteriaVersion: state.Policy.ReviewCriteriaVersion,
-		ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning,
+		ReviewerModel: modelName, ReviewerReasoning: reasoning,
 		StartedAt: checkpoint.StartedAt, Deadline: checkpoint.Deadline, CurrentSource: snapshot.CurrentSource, Policy: state.Policy}
 	reviewed, err := driver.ReviewWinner(ctx, lease, request)
 	if err != nil {
@@ -156,7 +157,8 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 // Projects only the latest affirmative review of the current elected job.
 // Independent approvals of another candidate never satisfy this boundary.
 func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.CompetitionAutomationPolicy) (*CompetitionWinnerReviewState, error) {
-	if result == nil || len(result.Decisions) == 0 {
+	modelName, reasoning, supported := model.CompetitionWinnerReviewProvider(policy.WinnerReviewPolicy)
+	if result == nil || len(result.Decisions) == 0 || !supported {
 		return nil, ErrReviewNotReady
 	}
 	state := &CompetitionWinnerReviewState{Policy: policy, CurrentDecision: result.Decisions[len(result.Decisions)-1]}
@@ -178,7 +180,7 @@ func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.Comp
 	}
 	if reward != nil && source != nil && reward.ReviewId == source.ReviewId &&
 		(reward.Request.RewardDisposition == "approved" || reward.Request.RewardDisposition == "restored") && source.Request.SourceDisposition == "approved" &&
-		source.Request.ReviewerModel == model.CompetitionWinnerReviewModel && source.Request.ReviewerReasoning == model.CompetitionWinnerReviewReasoning && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
+		source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
 		state.ApprovedReview, state.ApprovedReviewId = source, &source.ReviewId
 	}
 	return state, nil
@@ -279,7 +281,7 @@ func validateWinnerSourceInTx(ctx context.Context, tx server.PgTx, settings *Set
 		}
 		return nil
 	}
-	if intent.WinnerReviewPolicy != model.CompetitionWinnerReviewPolicy || policy.AutomationPolicy.WinnerReviewPolicy != intent.WinnerReviewPolicy {
+	if !model.IsCompetitionWinnerReviewPolicy(intent.WinnerReviewPolicy) || policy.AutomationPolicy.WinnerReviewPolicy != intent.WinnerReviewPolicy {
 		return ErrConflict
 	}
 	result := automationResultInTx(ctx, tx, predecessorId)

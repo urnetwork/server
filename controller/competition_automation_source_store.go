@@ -268,10 +268,8 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		if intent.Threshold != threshold || intent.ThresholdEvidenceSha256 != review.Request.ScoreSha256 {
 			return errors.New("source threshold must follow the exact promoted implementation")
 		}
-		for repository, commit := range current.Commits {
-			if repository != "server" && intent.Commits[repository] != commit {
-				return errors.New("promotion cannot change protected dependency or runner commits")
-			}
+		if err := validateCompetitionRepositoryPromotion(current.Commits, intent.Commits, policy.PatchPolicy); err != nil {
+			return err
 		}
 	default:
 		return errors.New("unsupported source transition")
@@ -370,7 +368,7 @@ func (self PostgresStore) RecordSourceIntent(ctx context.Context, settings *Sett
 				if self.nowUtc().Before(sourceChoiceAt) || intent.PreparedAt.Before(sourceChoiceAt) || intent.RewardDecisionDigest != rewardDigest {
 					panic(ErrConflict)
 				}
-				if intent.Kind == "reviewed_source_promotion" && intent.WinnerReviewPolicy != model.CompetitionWinnerReviewPolicy {
+				if intent.Kind == "reviewed_source_promotion" && !model.IsCompetitionWinnerReviewPolicy(intent.WinnerReviewPolicy) {
 					var reviewedAt time.Time
 					server.Raise(tx.QueryRow(ctx, `SELECT created_at FROM competition_integrity_review WHERE review_id=$1`, intent.ReviewId).Scan(&reviewedAt))
 					if sourceChoiceAt.Before(reviewedAt) || intent.BuildReadyAt.IsZero() || sourceChoiceAt.Before(intent.BuildReadyAt) {

@@ -1,0 +1,15 @@
+{
+  "bounded_build_log_bytes": 4194304,
+  "extra_hidden_provider_copies_bytes": 5517170,
+  "fits_observed_launch_workload": false,
+  "future_unbounded_candidate_output_guaranteed": false,
+  "hard_tmpfs_limit_bytes": 4294967296,
+  "kind": "sim-latency-c2-observed-launch-capacity",
+  "maximum_admitted_patch_bytes": 262144,
+  "observed_max_original_a_evidence_bytes": 380473344,
+  "projected_headroom_bytes": -96755570,
+  "projected_used_bytes": 4391722866,
+  "remaining_bytes": 293691392,
+  "schema": 1,
+  "two_source_checkouts_allocated_bytes": 4001275904
+}

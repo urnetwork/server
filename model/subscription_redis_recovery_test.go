@@ -119,14 +119,14 @@ func TestRedisRecoveryExhaustedCleanupRetainsExactMarkerForNextCaller(t *testing
 			recover: func(owner context.Context, balance, contract server.Id) error {
 				attempts++
 				deadline, ok := owner.Deadline()
-				if !ok || time.Until(deadline) < time.Minute || balance != f.balanceId || contract != abandoned {
-					t.Fatal("cleanup lost its single 300-second owner or original request")
+				if !ok || time.Until(deadline) < redisReservationCleanupBudget-time.Second || balance != f.balanceId || contract != abandoned {
+					t.Fatal("cleanup lost its single budget owner or original request")
 				}
 				return syscall.ECONNRESET
 			},
 			wait: func(context.Context, time.Duration) error {
-				// Accelerated logical outage, not a 65-second wall-clock sleep.
-				now = now.Add(65 * time.Second)
+				// Accelerated logical outage, not a one-second wall-clock sleep.
+				now = now.Add(time.Second)
 				return nil
 			}}
 		err := cleanup.run(ctx, abandoned, []server.Id{f.balanceId})
@@ -169,7 +169,7 @@ func TestRedisRecoveryLostReleaseAcknowledgementRetriesExactRequest(t *testing.T
 				}
 				return nil
 			}, wait: func(context.Context, time.Duration) error {
-				now = now.Add(65 * time.Second)
+				now = now.Add(time.Second)
 				server.Tx(ctx, func(tx server.PgTx) {
 					var joined bool
 					server.Raise(tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, redisContractAdmissionLock(abandoned)).Scan(&joined))
@@ -182,7 +182,7 @@ func TestRedisRecoveryLostReleaseAcknowledgementRetriesExactRequest(t *testing.T
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
 		if err := cleanup.run(canceled, abandoned, []server.Id{f.balanceId}); err != nil || attempts != 2 {
-			t.Fatal("lost release acknowledgement did not recover after logical65-second outage", attempts, err)
+			t.Fatal("lost release acknowledgement did not recover after a one-second logical outage", attempts, err)
 		}
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatal("release acknowledgement retry changed a live neighbor", got)

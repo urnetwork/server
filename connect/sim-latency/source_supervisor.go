@@ -344,7 +344,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 				return nil, errors.New("reviewed proposal lost its private source clone")
 			}
 		}
-		if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", "--no-hardlinks", cloneSource, stagedRoot); err != nil {
+		if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", "--no-hardlinks", cloneSource, stagedRoot); err != nil {
 			return nil, err
 		}
 		if _, err := sourceGitText(ctx, stagedRoot, "remote", "set-url", "origin", origin); err != nil {
@@ -578,7 +578,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 		reviewerTokenFile: optString(opts, "--reviewer-token-file", ""), reviewApiUrl: optString(opts, "--review-api-url", "https://api.bringyour.com"),
 		buildCommand: optString(opts, "--build-command", ""), buildSha256: optString(opts, "--build-sha256", ""),
 	}
-	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+	if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
 		if runtime.reviewCommand == "" || !validSha256(runtime.reviewSha256) || runtime.buildCommand == "" || !validSha256(runtime.buildSha256) {
 			fatalf("elected-winner supervision requires qualified pinned review and build brokers")
 		}

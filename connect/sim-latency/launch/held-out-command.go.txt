@@ -1,0 +1,308 @@
+// Opt-in executable handoff for the draft operator. Build the isolated package
+// with go test -c; ordinary suites never generate real entropy or run a job.
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"reflect"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// Campaign closure is reviewed/published independently before hidden material
+// is revealed, including an aborted campaign with retained failed positions.
+type heldOutClosure struct {
+	Schema               int                 `json:"schema"`
+	Kind                 string              `json:"kind"`
+	CampaignId           string              `json:"campaign_id"`
+	PublicPlanSha256     string              `json:"public_plan_sha256"`
+	ResultSha256         string              `json:"result_sha256"`
+	ClosedAt             time.Time           `json:"closed_at"`
+	NoFurtherEvaluations bool                `json:"no_further_evaluations"`
+	Reason               string              `json:"reason"`
+	Evidence             []heldOutPinnedFile `json:"evidence"`
+}
+
+// Reveal is a separate explicit operation, never an automatic success/failure
+// log. The target must be new and the closure/result pins independently supplied.
+type heldOutRevealConfig struct {
+	Schema     int                    `json:"schema"`
+	Kind       string                 `json:"kind"`
+	Execution  heldOutExecutionConfig `json:"execution"`
+	Result     heldOutPinnedFile      `json:"result"`
+	Closure    heldOutPinnedFile      `json:"closure"`
+	RevealPath string                 `json:"reveal_path"`
+}
+
+// Reveals exactly the original committed secrets and workload identities only
+// after closure; there is no new generation, replacement or post-result order.
+func revealHeldOutCampaign(config heldOutRevealConfig, plan heldOutPrivatePlan, release heldOutRelease, settings heldOutOperatorSettings) (string, error) {
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-reveal" || config.Result.Path != filepath.Join(plan.Config.PrivateRoot, "campaign-result.json") || !filepath.IsAbs(config.RevealPath) || filepath.Clean(config.RevealPath) != config.RevealPath {
+		return "", errors.New("explicit held-out reveal targets invalid")
+	}
+	resultBytes, err := readHeldOutPinned(config.Result, settings.MaximumBytes, true)
+	if err != nil {
+		return "", err
+	}
+	var result heldOutCampaignResult
+	if err := decodeHeldOutComplete(resultBytes, &result, "closed held-out result"); err != nil {
+		return "", err
+	}
+	if result.Schema != 1 || result.Kind != "sim-latency-held-out-screen" || result.CampaignId != plan.CampaignId || result.PlanSha256 != config.Execution.PublicPlan.Sha256 || result.ClosedAt.IsZero() || result.ClosedAt.Before(plan.PreparedAt) {
+		return "", errors.New("held-out campaign has no authenticated terminal result")
+	}
+	closureBytes, err := readHeldOutPinned(config.Closure, settings.MaximumBytes, false)
+	if err != nil {
+		return "", err
+	}
+	var closure heldOutClosure
+	if err := decodeHeldOutComplete(closureBytes, &closure, "held-out campaign closure"); err != nil {
+		return "", err
+	}
+	if closure.Schema != 1 || closure.Kind != "sim-latency-held-out-campaign-closure" || closure.CampaignId != plan.CampaignId || closure.PublicPlanSha256 != config.Execution.PublicPlan.Sha256 || closure.ResultSha256 != config.Result.Sha256 || !closure.NoFurtherEvaluations || closure.ClosedAt.Before(result.ClosedAt) || closure.Reason == "" || len(closure.Evidence) == 0 {
+		return "", errors.New("reviewed campaign closure required before seed reveal")
+	}
+	for _, pin := range closure.Evidence {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return "", err
+		}
+	}
+	if result.Complete {
+		accepted, ordered, reasons := acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+		if result.Accepted != accepted || result.OrderedSeeds != ordered || !reflect.DeepEqual(result.Reasons, reasons) {
+			return "", errors.New("closed held-out acceptance does not reproduce the fixed screen")
+		}
+	} else if result.Accepted {
+		return "", errors.New("incomplete held-out screen cannot be accepted")
+	}
+	for _, round := range plan.Rounds {
+		commitment, err := heldOutRoundCommitment(round.PrivateSeedHex, round.Public, plan, release)
+		if err != nil || commitment != round.Public.SeedCommitment {
+			return "", errors.New("held-out reveal commitment mismatch")
+		}
+	}
+	reveal := struct {
+		Schema           int                   `json:"schema"`
+		Kind             string                `json:"kind"`
+		CampaignId       string                `json:"campaign_id"`
+		PublicPlanSha256 string                `json:"public_plan_sha256"`
+		ResultSha256     string                `json:"result_sha256"`
+		ClosureSha256    string                `json:"closure_sha256"`
+		Rounds           []heldOutPrivateRound `json:"revealed_rounds"`
+	}{Schema: 1, Kind: "sim-latency-held-out-seed-reveal", CampaignId: plan.CampaignId,
+		PublicPlanSha256: config.Execution.PublicPlan.Sha256, ResultSha256: config.Result.Sha256,
+		ClosureSha256: config.Closure.Sha256, Rounds: plan.Rounds}
+	content, err := json.MarshalIndent(reveal, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := writeHeldOutExclusive(config.RevealPath, content, 0644); err != nil {
+		return "", err
+	}
+	return heldOutDigest(content), nil
+}
+
+// Unset environment is inert without a skip. Real use requires an explicit
+// operation, independent configuration digest and a separate real-campaign opt-in.
+// Never set those variables during synthetic qualification.
+func TestHeldOutOperatorCommand(t *testing.T) {
+	operation := os.Getenv("SIM_LATENCY_HELD_OUT_COMMAND")
+	if operation == "" {
+		return
+	}
+	if os.Getenv("SIM_LATENCY_HELD_OUT_REAL_OPT_IN") != "1" {
+		t.Fatal("real held-out operation requires separate explicit opt-in")
+	}
+	if err := validateHeldOutOperatorRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	settings, release := defaultHeldOutOperatorSettings(), frozenHeldOutRelease()
+	configPin := heldOutPinnedFile{Path: os.Getenv("SIM_LATENCY_HELD_OUT_CONFIG"), Sha256: os.Getenv("SIM_LATENCY_HELD_OUT_CONFIG_SHA256")}
+	content, err := readHeldOutPinned(configPin, settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(content)
+	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	release, settings, err = heldOutCommandContext(ctx, operation, content, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary string
+	_, err = withCalibrationScoringSlot(release.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		switch operation {
+		case "freeze-margin":
+			var config heldOutMarginFreezeConfig
+			if err := decodeHeldOutComplete(content, &config, "amended original-A margin freeze"); err != nil {
+				return nil, err
+			}
+			receipt, err := freezeHeldOutMargin(config, settings, time.Now)
+			if err != nil {
+				return nil, err
+			}
+			summary = fmt.Sprintf("froze accepted original three-pair margin=%g before any bridge; no measurements", receipt.Margin)
+			return nil, nil
+		case "verify-bridge-precommit":
+			var config heldOutBridgePrecommitConfig
+			if err := decodeHeldOutComplete(content, &config, "read-only bridge precommit authentication"); err != nil {
+				return nil, err
+			}
+			if !filepath.IsAbs(config.ReceiptPath) || filepath.Clean(config.ReceiptPath) != config.ReceiptPath {
+				return nil, errors.New("canonical new precommit authentication receipt required")
+			}
+			precommit, err := authenticateHeldOutBridgePrecommit(ctx, config, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			})
+			if err != nil {
+				return nil, err
+			}
+			receipt := heldOutBridgePrecommitAuthentication{Schema: 1, Kind: "sim-latency-c2-precommit-reference-authentication-only",
+				Claim: "precommit-and-reference-authentication-not-compatibility-or-scoring", AuthenticatedAt: time.Now().UTC(),
+				PlanSha256: config.Plan.Sha256, PublicationSha256: config.Publication.Sha256, RequestSha256: precommit.Plan.Request.Sha256,
+				NativeBuildSha256: precommit.Plan.Noop.NativeBuild.Sha256, BuilderSha256: release.Runtime.BuilderSha256,
+				ValidatorSha256: release.Runtime.ValidatorSha256, GeneratorAuthenticated: true}
+			if err := writeHeldOutRecord(config.ReceiptPath, receipt); err != nil {
+				return nil, err
+			}
+			summary = "authenticated precommit/native reference/generator only; no compatibility, score replay or measurements"
+			return nil, nil
+		case "verify-bridge":
+			var config heldOutBridgeVerificationConfig
+			if err := decodeHeldOutComplete(content, &config, "single precommitted bridge verification"); err != nil {
+				return nil, err
+			}
+			bridge, _, err := readHeldOutBridgePlan(config.Plan, settings)
+			if err != nil {
+				return nil, err
+			}
+			analysisSettings := defaultCalibrationAnalysisSettings()
+			analysisSettings.Cohorts = 1
+			analysisSettings.MarginFloor = bridge.Margin
+			replaySettings := defaultCalibrationReplaySettings()
+			replaySettings.CpuSet = settings.ManagementCpus
+			observations := []calibrationReplayObservation{}
+			replaySettings.Observe = func(observation calibrationReplayObservation) { observations = append(observations, observation) }
+			receipt, err := verifyHeldOutBridge(ctx, config, release, settings, func(ctx context.Context, root string, inputs ScoreInputs, image, round string, baseline bool) ([]byte, error) {
+				return replayCalibrationBundle(ctx, root, inputs, image, round, baseline, analysisSettings, replaySettings, runSourceBuildDocker)
+			}, func() []calibrationReplayObservation { return observations }, time.Now, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			})
+			if err != nil {
+				return nil, err
+			}
+			summary = heldOutBridgeSummary(receipt)
+			return nil, nil
+		case "prepare":
+			var config heldOutPreparationConfig
+			if err := decodeHeldOutComplete(content, &config, "held-out preparation configuration"); err != nil {
+				return nil, err
+			}
+			inputs, err := authenticateHeldOutPreparation(config, release, settings)
+			if err != nil {
+				return nil, err
+			}
+			prospective := heldOutPrivatePlan{Config: config, Policy: inputs.Template.EvaluationPolicy, Margin: inputs.Margin, References: inputs.References}
+			if _, err := checkHeldOutHost(ctx, prospective, release, settings); err != nil {
+				return nil, err
+			}
+			public, err := prepareHeldOutCampaign(ctx, config, configPin.Sha256, *inputs, release, settings,
+				heldOutPreparationHooks{Entropy: rand.Reader, Configuration: content, Generate: generateHeldOutWorkload, Now: time.Now}, func() error {
+					if _, err := readHeldOutPinned(configPin, settings.MaximumBytes, true); err != nil {
+						return err
+					}
+					again, err := authenticateHeldOutPreparation(config, release, settings)
+					if err != nil {
+						return err
+					}
+					if !reflect.DeepEqual(again, inputs) {
+						return errors.New("held-out authenticated inputs changed")
+					}
+					return nil
+				})
+			if err != nil {
+				return nil, err
+			}
+			publicBytes, _ := json.MarshalIndent(public, "", "  ")
+			summary = fmt.Sprintf("prepared all %d rounds / %d jobs; no measurements; public_plan_sha256=%s private_plan_sha256=%s", len(public.Rounds), len(public.Rounds)*3, heldOutDigest(publicBytes), public.PrivatePlanSha256)
+			return nil, nil
+		case "verify", "execute":
+			var config heldOutExecutionConfig
+			if err := decodeHeldOutComplete(content, &config, "held-out execution configuration"); err != nil {
+				return nil, err
+			}
+			if config.Schema != 1 || config.Kind != "sim-latency-held-out-execution" {
+				return nil, errors.New("held-out execution configuration schema invalid")
+			}
+			plan, err := verifyHeldOutPlan(config.PrivatePlan, config.PublicPlan, release, settings)
+			if err != nil {
+				return nil, err
+			}
+			if operation == "verify" {
+				summary = fmt.Sprintf("verified all %d rounds / %d exact precommitted requests; no execution", len(plan.Rounds), len(plan.Rounds)*3)
+				return nil, nil
+			}
+			if err := authenticateHeldOutPublication(ctx, config, *plan, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			}); err != nil {
+				return nil, err
+			}
+			hooks := heldOutExecutionHooks{Now: time.Now,
+				CheckHost: func(ctx context.Context, plan heldOutPrivatePlan) (string, error) {
+					return checkHeldOutHost(ctx, plan, release, settings)
+				},
+				Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+					return invokeHeldOutEvaluator(ctx, root, start, release, settings)
+				},
+				Authenticate: func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+					replaySettings := defaultCalibrationReplaySettings()
+					replaySettings.CpuSet = settings.ManagementCpus
+					observations := []calibrationReplayObservation{}
+					replaySettings.Observe = func(observation calibrationReplayObservation) { observations = append(observations, observation) }
+					analysisSettings := defaultCalibrationAnalysisSettings()
+					analysisSettings.MarginFloor = plan.Margin
+					outcome, frozen, authErr := authenticateHeldOutJob(ctx, plan, round, job, request, control, release, settings,
+						func(ctx context.Context, root string, inputs ScoreInputs, image string, roundId string, baseline bool) ([]byte, error) {
+							return replayCalibrationBundle(ctx, root, inputs, image, roundId, baseline, analysisSettings, replaySettings, runSourceBuildDocker)
+						})
+					writeErr := writeHeldOutRecord(filepath.Join(filepath.Dir(request.ArtifactDirectory), "native-replays.json"), observations)
+					return outcome, frozen, errors.Join(authErr, writeErr)
+				}}
+			result, err := executeHeldOutCampaign(ctx, config, *plan, release, settings, hooks)
+			if err != nil {
+				return nil, err
+			}
+			summary = fmt.Sprintf("completed fixed %d-job screen; accepted=%t correctly_ordered_seeds=%d; no production activation", len(plan.Rounds)*3, result.Accepted, result.OrderedSeeds)
+			return nil, nil
+		case "reveal":
+			var config heldOutRevealConfig
+			if err := decodeHeldOutComplete(content, &config, "held-out reveal configuration"); err != nil {
+				return nil, err
+			}
+			plan, err := verifyHeldOutPlan(config.Execution.PrivatePlan, config.Execution.PublicPlan, release, settings)
+			if err != nil {
+				return nil, err
+			}
+			digest, err := revealHeldOutCampaign(config, *plan, release, settings)
+			if err != nil {
+				return nil, err
+			}
+			summary = "revealed original committed seeds after authenticated closure; reveal_sha256=" + digest
+			return nil, nil
+		default:
+			return nil, errors.New("held-out command must be freeze-margin, verify-bridge, prepare, verify, execute or reveal")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(summary)
+}

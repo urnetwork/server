@@ -1,0 +1,87 @@
+// Draft deterministic order-selection tests; no real hidden inputs are created.
+package main
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+// Every accepted byte maps uniformly: exactly 42 values for each permutation.
+func TestHeldOutOrderUniformAcceptedByteSpace(t *testing.T) {
+	counts := map[[3]string]int{}
+	for value := 0; value < 252; value++ {
+		order, err := drawHeldOutReferenceOrder(bytes.NewReader([]byte{byte(value)}), defaultHeldOutOrderSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		roles := map[string]bool{}
+		for _, role := range order {
+			roles[role] = true
+		}
+		if len(roles) != 3 || !roles["no-op"] || !roles["better"] || !roles["worse"] {
+			t.Fatalf("not a full reference permutation: %v", order)
+		}
+		counts[order]++
+	}
+	if len(counts) != 6 {
+		t.Fatalf("got %d permutations", len(counts))
+	}
+	for order, count := range counts {
+		if count != 42 {
+			t.Fatalf("biased permutation %v: %d", order, count)
+		}
+	}
+}
+
+// All four surplus values must consume another draw, not pick a biased order.
+func TestHeldOutOrderRejectsSurplusByteValues(t *testing.T) {
+	reader := bytes.NewReader([]byte{252, 253, 254, 255, 5})
+	order, err := drawHeldOutReferenceOrder(reader, defaultHeldOutOrderSettings())
+	if err != nil || order != [3]string{"worse", "better", "no-op"} || reader.Len() != 0 {
+		t.Fatalf("surplus draws were not rejected: %v %v remaining=%d", order, err, reader.Len())
+	}
+}
+
+// A pathological source cannot trap preparation in an infinite rejection loop.
+func TestHeldOutOrderStopsAtConfiguredRejectionBound(t *testing.T) {
+	reader := bytes.NewReader([]byte{255, 255, 0})
+	order, err := drawHeldOutReferenceOrder(reader, heldOutOrderSettings{MaxEntropyDraws: 2})
+	if err == nil || !strings.Contains(err.Error(), "rejection bound") || order != [3]string{} || reader.Len() != 1 {
+		t.Fatalf("rejection bound changed: %v %v remaining=%d", order, err, reader.Len())
+	}
+}
+
+// Entropy exhaustion must not silently fall back to a favorable or fixed order.
+func TestHeldOutOrderRefusesExhaustedEntropy(t *testing.T) {
+	order, err := drawHeldOutReferenceOrder(bytes.NewReader([]byte{255}), defaultHeldOutOrderSettings())
+	if err == nil || !strings.Contains(err.Error(), "unavailable") || order != [3]string{} {
+		t.Fatalf("exhausted entropy accepted: %v %v", order, err)
+	}
+}
+
+// Both missing source and invalid owner settings fail before any selection.
+func TestHeldOutOrderRefusesMissingSourceAndInvalidSettings(t *testing.T) {
+	if _, err := drawHeldOutReferenceOrder(nil, defaultHeldOutOrderSettings()); err == nil {
+		t.Fatal("nil entropy accepted")
+	}
+	for _, bound := range []int{0, -1} {
+		reader := bytes.NewReader([]byte{0})
+		if _, err := drawHeldOutReferenceOrder(reader, heldOutOrderSettings{MaxEntropyDraws: bound}); err == nil || reader.Len() != 1 {
+			t.Fatalf("invalid bound consumed entropy: %d %v", bound, err)
+		}
+	}
+}
+
+// Caller mutation cannot corrupt a subsequent selection's permutation table.
+func TestHeldOutOrderReturnedValueHasIndependentOwnership(t *testing.T) {
+	order, err := drawHeldOutReferenceOrder(bytes.NewReader([]byte{0}), defaultHeldOutOrderSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	order[0] = "changed"
+	next, err := drawHeldOutReferenceOrder(bytes.NewReader([]byte{0}), defaultHeldOutOrderSettings())
+	if err != nil || next != [3]string{"no-op", "better", "worse"} {
+		t.Fatalf("caller mutation escaped ownership: %v %v", next, err)
+	}
+}

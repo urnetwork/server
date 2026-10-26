@@ -1,0 +1,56 @@
+{
+  "actual_go_version": "go1.27.3",
+  "binary_sha256": "fc3709dc5dcd2448f903902d801d0e5dff6ce0274142b012fd5c029892dc9b83",
+  "build_metadata": {
+    "base_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+    "base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+    "builder_sha256": "0c0dff0ad9176986c26d3413b0ef8259859039b6648d6ec3a776354bedf3dd81",
+    "candidate_sha": "e445ffb75fc3305df6c1ccd5d99e768e45e1142e",
+    "image": "urnetwork/sim-latency-submission:bf4f27d97e95a4a2bc0a36e0c0a269ba",
+    "image_id": "sha256:c675a2158dc3a3a0238a4421c8486d51051e09b40698c1fc92aff843150c355c",
+    "image_key": "bf4f27d97e95a4a2bc0a36e0c0a269ba5c7648896557c05c89780d6e7ac91b4d",
+    "patch_sha256": "2957ef507f7edc9dadcb09abd6425664e88748612917959a9a65243a0365ebe4",
+    "policy_sha256": "0a1cb9032ee630042f1a1fe585493fba6f7b3fc10b71b697de39cebe43e00a1e",
+    "schema": 1
+  },
+  "chunks": [
+    {
+      "bytes": 76599,
+      "path": "cohort.tar.gz.part-00",
+      "sha256": "f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b"
+    }
+  ],
+  "current_release_performance_measured": false,
+  "exclusions": [
+    "full source checkouts",
+    "services directories and credentials",
+    "binary payloads",
+    "caches"
+  ],
+  "gzip_sha256": "f626aa1c328126ac11377e675301d93243448da54b22ff63fabd13209c0d854b",
+  "historical_prior_tests_and_slowdown": "Prior 312 tests and 17.8% slower pilot were on the old release and are planning evidence only, not current-release performance. Only exact c1 baseline correctness test evidence e43/c70/e226 was reused; no baseline/performance measurements reused.",
+  "kind": "warm_reader_negative_control_correctness_and_offline_build",
+  "new_current_c1_passing_race_tests": 156,
+  "official": false,
+  "schema": 1,
+  "scoring_executions": 0,
+  "selected_original_files": 13,
+  "test_log_digest_table": [
+    {
+      "passed": 52,
+      "path": "qualification/correctness-1.log",
+      "sha256": "ebe015b3790b38af7ee63efaa6780bd4b1c896e90757c8705b14851dc7f5e589"
+    },
+    {
+      "passed": 52,
+      "path": "qualification/correctness-2.log",
+      "sha256": "6d4357e8c090da1eef31b6af6295f4045020f6e34faf4aea9a319324f03abc2c"
+    },
+    {
+      "passed": 52,
+      "path": "qualification/correctness-3.log",
+      "sha256": "2b0c66ab9e4f4ce450212bdd2120d00eebbe105394aaa2113b3e4ce0519e2f17"
+    }
+  ],
+  "vcs_modified": false
+}

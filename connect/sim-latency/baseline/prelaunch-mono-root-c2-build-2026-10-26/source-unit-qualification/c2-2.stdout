@@ -1,0 +1,13 @@
+=== RUN   TestEvaluatorMonoSourceLockAcceptsDirectCandidateInEveryRepository
+--- PASS: TestEvaluatorMonoSourceLockAcceptsDirectCandidateInEveryRepository (0.85s)
+=== RUN   TestEvaluatorSourceLockRejectsUnknownCandidatePathBase
+--- PASS: TestEvaluatorSourceLockRejectsUnknownCandidatePathBase (0.00s)
+=== RUN   TestEvaluatorSourceLockRequiresCompleteRepositorySet
+--- PASS: TestEvaluatorSourceLockRequiresCompleteRepositorySet (0.01s)
+=== RUN   TestEvaluatorSourceLockRejectsUnexpectedRepositories
+--- PASS: TestEvaluatorSourceLockRejectsUnexpectedRepositories (0.00s)
+=== RUN   TestReadWinnerSignificanceRequiresEligibleR9Score
+--- PASS: TestReadWinnerSignificanceRequiresEligibleR9Score (0.00s)
+=== RUN   TestEvaluatorSourceLockAcceptsOnlyOneServerCandidateCommit
+--- PASS: TestEvaluatorSourceLockAcceptsOnlyOneServerCandidateCommit (0.26s)
+PASS

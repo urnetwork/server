@@ -207,6 +207,9 @@ func SnReconcile(clientSession *session.ClientSession, send bool, expect string)
 	}
 	if send {
 		report.Mode = "send"
+		if err := RequireUsdcPaymentsOn(); err != nil {
+			return report, err
+		}
 	}
 	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {

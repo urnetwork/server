@@ -40,12 +40,19 @@ type Authority struct {
 	appearances *model.ProviderAppearances
 	// the owner's concurrent registration bound; nil admits everything
 	mintAdmission *MintAdmission
+	// the owner's concurrent contract creation bound; nil admits everything
+	contractAdmission *ContractAdmission
+
+	// Nil in production. Tests hold an admitted contract creation here, with
+	// its slot taken, before its credential is read.
+	afterContractAdmissionForTest func()
 }
 
 // Owner-supplied bounds. The owner constructs them once and shares them with
 // every authority it creates; nil keeps the unbounded legacy behavior.
 type AuthoritySettings struct {
-	MintAdmission *MintAdmission
+	MintAdmission     *MintAdmission
+	ContractAdmission *ContractAdmission
 }
 
 // Signature, audience, current client and credential rotation are checked now
@@ -74,7 +81,7 @@ func NewWithSettings(ctx context.Context, token, apiUrl string, settings *Author
 		}
 		publisherCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		return &Authority{networkId: claims.NetworkId, userId: claims.UserId, clientId: *claims.ClientId, deviceId: *claims.DeviceId, apiUrl: strings.TrimRight(apiUrl, "/"), parentJwt: token,
-			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), mintAdmission: settings.MintAdmission, cancel: cancel}, nil
+			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), mintAdmission: settings.MintAdmission, contractAdmission: settings.ContractAdmission, cancel: cancel}, nil
 	}, func(err error) (*Authority, error) { return nil, err })
 }
 
@@ -238,6 +245,27 @@ func (self *Authority) ConnectControl(ctx context.Context, token string, args *c
 	return server.HandleError2(func() (*connect.ConnectControlResult, error) {
 		if args == nil {
 			return nil, errors.New("local control request is absent")
+		}
+		if self.contractAdmission != nil && createsContractsOnly(args.Pack) {
+			// a closed authority or an ended request reports its lifecycle,
+			// not a rate limit
+			if self.closed.Load() {
+				return nil, context.Canceled
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			// refused before any credential or database read; the slot is
+			// held until the controller has returned
+			if !self.contractAdmission.tryAcquire() {
+				return nil, contractAdmissionRefusedError()
+			}
+			defer self.contractAdmission.release()
+			if self.afterContractAdmissionForTest != nil {
+				self.afterContractAdmissionForTest()
+			}
 		}
 		s, err := self.authenticate(ctx, token, false)
 		if err != nil {

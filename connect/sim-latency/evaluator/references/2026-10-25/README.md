@@ -5,14 +5,24 @@ retained as an unfavorable result, not eligible for advancement as the faster
 reference. A separate owner-admission-map hypothesis is drafted at the end of
 this record and has not been applied or tested.
 
+The unchanged warm-reader patch is now proposed as the held-out **negative**
+control, based on its retained earlier-release regression. A
+[fresh corrected-source correctness/offline-build qualification](NEGATIVE-QUALIFICATION.md)
+passed; it does not establish corrected-source performance or reuse any old
+timing/control samples. The future fixed held-out comparison must validate its
+ordering. The historical artificial-delay control is not substituted silently.
+
 A separate [immutable positive-cache snapshot design](SNAPSHOT-HYPOTHESIS.md)
 records a lock-free-hit hypothesis and its ownership/expiry/retention test
 requirements. Its independent race-enabled correctness screen has passed three
 baseline and three candidate suites; targeted guard-removal controls reproduce
 the intended failures. Three restored suites also passed. The warm benchmark
 improved while publication became more expensive; all observations and costs
-are in [the qualification record](SNAPSHOT-QUALIFICATION.md). No end-to-end pilot
-or faster-reference qualification is claimed, and the baseline is unchanged.
+are in [the qualification record](SNAPSHOT-QUALIFICATION.md). Its subsequent
+[single directional pilot](../../../baseline/prelaunch-snapshot-pilot-2026-10-25/completed/README.md)
+also passed: mean/median raw scores were 4.4471%/about 3.27% lower, but p=0.2407
+was not significant or takeover-eligible. Held-out qualification remains open,
+and the frozen baseline is unchanged. No unfavorable pilot was rerolled.
 
 ## Warm-reader candidate
 

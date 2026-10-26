@@ -1,0 +1,25 @@
+go 1.27.3
+
+replace github.com/urnetwork/connect => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/connect
+
+replace github.com/pion/sctp => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/connect/sctp
+
+replace github.com/urnetwork/sdk => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/sdk
+
+replace github.com/urnetwork/proxy => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/proxy
+
+replace github.com/urnetwork/glog => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/glog
+
+replace github.com/urnetwork/goidenticons => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/goidenticons
+
+replace github.com/urnetwork/userwireguard => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/userwireguard
+
+replace github.com/urfoundation/sn => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/sn
+
+replace github.com/centrifuge/go-substrate-rpc-client/v4 => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/sn/third_party/go-substrate-rpc-client
+
+replace gvisor.dev/gvisor => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/gvisor
+
+replace github.com/urnetwork/warp => /home/by/urnetwork/temp/production-20261024.bUpBTuEw/warp
+
+use /home/by/urnetwork/temp/dns-unit-qualification-20261026.2y0PibAV/server

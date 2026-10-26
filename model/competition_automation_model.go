@@ -21,9 +21,17 @@ const (
 	CompetitionAutomationCapability  = "competition.reward.v2"
 	CompetitionRuntimeBlobCapability = "competition.reward.v2.runtime-blob.v1"
 	CompetitionElectionRule          = "raw_latency_g1_g6_welch_v1"
-	CompetitionWinnerReviewPolicy    = "elected_winner_sol61max_v1"
-	CompetitionWinnerReviewModel     = "gpt-6.1-sol"
-	CompetitionWinnerReviewReasoning = "max"
+	CompetitionWinnerReviewPolicy    = "elected_winner_gpt54mini_xhigh_v1"
+	CompetitionWinnerReviewModel     = "gpt-5.4-mini"
+	CompetitionWinnerReviewReasoning = "xhigh"
+	// The aggregate is a versioned union, not a fabricated individual model.
+	CompetitionSnowWinnerReviewPolicy    = "elected_winner_snow_union_v1"
+	CompetitionSnowWinnerReviewModel     = "snow-qwen-gemma-muse-union"
+	CompetitionSnowWinnerReviewReasoning = "provider-default"
+	// Historical policy identity remains bound to its original provider.
+	CompetitionLegacyWinnerReviewPolicy    = "elected_winner_sol61max_v1"
+	CompetitionLegacyWinnerReviewModel     = "gpt-6.1-sol"
+	CompetitionLegacyWinnerReviewReasoning = "max"
 )
 
 var competitionAutomationSha256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -91,7 +99,7 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 		if policy.WinnerReviewTimeoutSeconds != 0 {
 			return errors.New("winner review timeout requires an explicit frozen policy")
 		}
-	} else if policy.WinnerReviewPolicy != CompetitionWinnerReviewPolicy || policy.WinnerReviewTimeoutSeconds < 60 || policy.WinnerReviewTimeoutSeconds > 86400 {
+	} else if !IsCompetitionWinnerReviewPolicy(policy.WinnerReviewPolicy) || policy.WinnerReviewTimeoutSeconds < 60 || policy.WinnerReviewTimeoutSeconds > 86400 {
 		return errors.New("winner review requires the supported policy and a bounded timeout")
 	} else if policy.SourceChoiceDelaySeconds != 0 {
 		return errors.New("elected-winner progression cannot use the legacy independent source-choice delay")
@@ -99,6 +107,34 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 		return errors.New("elected-winner progression requires readiness rather than a fixed staging delay")
 	}
 	return nil
+}
+
+// Selection comes only from the immutable round policy, never provider output
+// or candidate text. Historical reviews cannot be relabeled after a migration.
+func CompetitionWinnerReviewProvider(policy string) (modelName string, reasoning string, supported bool) {
+	switch policy {
+	case CompetitionSnowWinnerReviewPolicy:
+		return CompetitionSnowWinnerReviewModel, CompetitionSnowWinnerReviewReasoning, true
+	case CompetitionWinnerReviewPolicy:
+		return CompetitionWinnerReviewModel, CompetitionWinnerReviewReasoning, true
+	case CompetitionLegacyWinnerReviewPolicy:
+		return CompetitionLegacyWinnerReviewModel, CompetitionLegacyWinnerReviewReasoning, true
+	default:
+		return "", "", false
+	}
+}
+
+// Every version retains the same elected-winner lifecycle and strict evidence
+// semantics; their provider provenance remains separate.
+func IsCompetitionWinnerReviewPolicy(policy string) bool {
+	_, _, supported := CompetitionWinnerReviewProvider(policy)
+	return supported
+}
+
+// Each member keeps its complete six-criterion findings; callers cannot mutate
+// this census or silently substitute another checkpoint alias.
+func CompetitionSnowWinnerReviewModels() []string {
+	return []string{"qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"}
 }
 
 // Both contracts preserve v2 reward semantics; the blob contract additionally
@@ -326,6 +362,7 @@ func SelectCompetitionReward(entries []CompetitionSealedEntry, disqualifiedJobId
 
 // Findings carry bounded public explanations and private evidence identities, never secret content.
 type CompetitionReviewFinding struct {
+	Model          string `json:"model,omitempty"`
 	Criterion      string `json:"criterion"`
 	Disposition    string `json:"disposition"`
 	ReasonCode     string `json:"reason_code"`
@@ -396,8 +433,9 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 	if request.SourceDisposition == "approved" && request.RewardDisposition != "approved" && request.RewardDisposition != "restored" {
 		return errors.New("source approval requires an affirmative integrity review")
 	}
-	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy {
-		if request.ReviewerModel != CompetitionWinnerReviewModel || request.ReviewerReasoning != CompetitionWinnerReviewReasoning || !competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) {
+	if policy.WinnerReviewPolicy != "" {
+		modelName, reasoning, supported := CompetitionWinnerReviewProvider(policy.WinnerReviewPolicy)
+		if !supported || request.ReviewerModel != modelName || request.ReviewerReasoning != reasoning || !competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) {
 			return errors.New("winner review requires the elected decision identity and pinned reviewer policy")
 		}
 		if request.SourceDisposition == "rejected" && request.RewardDisposition != "disqualified" || request.RewardDisposition == "disqualified" && request.SourceDisposition != "rejected" {
@@ -405,6 +443,10 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		}
 		if (request.RewardDisposition == "approved" || request.RewardDisposition == "restored") && request.SourceDisposition != "approved" {
 			return errors.New("affirmative winner review must approve the same source")
+		}
+		if policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy &&
+			(request.RewardDisposition == "unchanged" || request.SourceDisposition == "deferred" || request.SourceDisposition == "unchanged") {
+			return errors.New("an uncertain Snow union cannot confer review authority")
 		}
 	}
 	allowedReasonKVs := map[string]bool{}
@@ -425,7 +467,20 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 			return errors.New("repeat exclusion was not prospectively adopted")
 		}
 	}
-	criteriaKVs := map[string]bool{"measurement_integrity": false, "workload_generalization": false, "containment": false, "patch_scope": false, "reproducibility": false, "source_safety": false}
+	snowReview := policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy
+	models := []string{""}
+	if snowReview {
+		models = CompetitionSnowWinnerReviewModels()
+	}
+	criteriaKVs := map[string]bool{}
+	for _, modelName := range models {
+		for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
+			criteriaKVs[modelName+"\x00"+criterion] = false
+		}
+	}
+	if len(request.Findings) != len(criteriaKVs) {
+		return errors.New("review requires the exact policy-specific finding census")
+	}
 	failedFinding := false
 	supportedFailure := false
 	for _, finding := range request.Findings {
@@ -435,24 +490,26 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 				supportedFailure = supportedFailure || reason == finding.ReasonCode
 			}
 		}
-		seen, ok := criteriaKVs[finding.Criterion]
+		findingKey := finding.Model + "\x00" + finding.Criterion
+		seen, ok := criteriaKVs[findingKey]
 		if !ok || seen || !competitionAutomationSha256.MatchString(finding.EvidenceSha256) || finding.Explanation == "" || len(finding.Explanation) > 4096 || !allowedReasonKVs[finding.ReasonCode] {
 			return errors.New("invalid or duplicate structured finding")
 		}
-		if finding.Disposition != "pass" && finding.Disposition != "fail" && finding.Disposition != "not_applicable" {
+		uncertainRejection := snowReview && finding.Disposition == "uncertain" && request.RewardDisposition == "disqualified" && request.SourceDisposition == "rejected"
+		if finding.Disposition != "pass" && finding.Disposition != "fail" && finding.Disposition != "not_applicable" && !uncertainRejection {
 			return errors.New("invalid finding disposition")
 		}
-		if request.SourceDisposition == "approved" && finding.Disposition == "fail" {
+		if request.SourceDisposition == "approved" && (finding.Disposition == "fail" || finding.Disposition == "uncertain") {
 			return errors.New("failed finding cannot authorize source promotion")
 		}
-		criteriaKVs[finding.Criterion] = true
+		criteriaKVs[findingKey] = true
 	}
 	for _, seen := range criteriaKVs {
 		if !seen {
 			return errors.New("review is missing a required criterion")
 		}
 	}
-	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy && request.RewardDisposition == "disqualified" && (!failedFinding || !supportedFailure) {
+	if IsCompetitionWinnerReviewPolicy(policy.WinnerReviewPolicy) && request.RewardDisposition == "disqualified" && (!failedFinding || !supportedFailure) {
 		return errors.New("elected-winner disqualification requires a failed honesty or safety finding")
 	}
 	return nil

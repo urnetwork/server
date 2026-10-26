@@ -1,0 +1,37 @@
+# Minimal revised-instrument C2 image — built, not yet qualified
+
+The bounded offline build completed in **434 seconds** at 15:10:52 UTC. Actual
+image ID, binary digest, Go 1.27.3/CGO0/greenteagc, clean C2 VCS identity,
+raw source lock and source-config readbacks are retained. Original containers,
+networks and free-slot observation are captured separately. The selected
+build-info text is a compact original capture, **not a full raw module transcript**.
+
+C2 is one direct child of C1, changing only the protected source-lock verifier
+and its deterministic test. The other nine repository commits are unchanged.
+The raw lock explicitly opts into `mono_root_v1`; its byte hash is distinct from
+the canonical ten-repository identity. The embedded source ledger prospectively
+binds the already-frozen **26.9%** margin and the accepted old-C1 analysis report;
+it does not claim that old observations measured C2 or that the fresh bridge
+has passed. Build definitions, inputs, original logs and actual inspected image
+metadata are retained here; source is reproducible from the pinned Git objects.
+At 15:20:42 UTC, the server `sim-latency` branch was fast-forwarded from C1
+to C2 without force. The before/after ten-repository remote readback is retained
+in `source-publication-receipt.json`; the other nine refs were unchanged. This
+publishes the source objects for fresh isolated checkouts, not live readiness.
+
+Independent source-lock tests passed six selected cases three times (18 passes,
+zero skips). These do not substitute for runtime image/validator/composed
+multi-repository build checks, the fresh R9/R9 bridge, independent-seed ranking,
+containment, provider or live readiness. No production activation is claimed.
+The unchanged original C1 image/bundle and all original measurements remain
+retained. The build's management CPU/memory bounds are not scoring measurements.
+
+## Separate trusted control build
+
+`trusted-control/` preserves the Go 1.27.3 operator validator build, new inactive
+immutable builder bundle and prospective runner installation. Those programs
+use a separately pinned current-main control dependency graph, not the measured
+C2 product graph. Actual binary/build/bundle identities and that distinction
+are explicit in `validator-release-provenance.json`. Composed runtime
+qualification and runner execution were pending at capture; installation alone
+grants no scoring or production-readiness authority.

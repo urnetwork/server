@@ -1,0 +1,2 @@
+# Preserve native go version -m output, including intentional trailing tabs.
+reference-builds/*.stdout whitespace=-blank-at-eol

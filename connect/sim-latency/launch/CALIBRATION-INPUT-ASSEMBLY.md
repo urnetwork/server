@@ -1,7 +1,10 @@
 # Prospective final input assembly
 
-The [Go helper draft](calibration-input-assembly.go.txt) is **not compiled or
-executed yet**. It is a preparation aid, not a scorer or accepted calibration.
+The [Go discovery helper](calibration-input-assembly.go.txt) passed synthetic
+qualification: 14 race tests, three consecutive passes, zero skips. See
+[the qualification record](INPUT-TOOL-QUALIFICATION-2026-10-26.md). It has not
+assembled the real unfinished campaign or invoked the analyzer. It is a
+preparation aid, not a scorer or accepted calibration.
 No statistical algorithm, count, gate, bootstrap seed or threshold is changed.
 
 After all five fixed cohorts finish successfully and their original evidence
@@ -33,8 +36,28 @@ Qualify the helper with synthetic positive and refusal fixtures before using
 real results: incomplete/failing terminal, wrong ordered identity/request hash,
 changed shared policy, redirected root, typed failure or nonplaceable score
 despite process exit 0, missing replicate and attempted output overwrite.
-This qualification is still pending. Preserve its exact source and
-test logs; an unset-environment no-op or compile pass alone is insufficient.
+This synthetic guard qualification passed with exact source and retained logs;
+an unset-environment no-op or compile pass alone would be insufficient.
+
+A [Go qualification source](calibration-input-assembly-qualification.go.txt)
+now supplies a complete five-position synthetic discovery layout and isolated
+subprocess refusals for failed/partial/over-budget terminals, changed job or
+request identity, redirected/aliased roots, changed shared policy, missing
+replicates, typed/misspelled worker errors, nonplaceable scores, incomplete
+cleanup, reordered positions, changed release headers and output overwrite.
+Copy it beside the assembly helper as
+`calibration_input_assembly_qualification_test.go` in the isolated analyzer
+checkout. Set `SIM_LATENCY_QUALIFY_ASSEMBLY=1` and explicitly run
+`^TestAssemblyQualification` as root with actual Go 1.27.3, management affinity,
+and the canonical exclusive idle slot. It forks only its own test executable
+to observe expected helper failures; no scoring or Docker is invoked.
+
+Its small placeholder artifacts test discovery/assembly guards only; they
+intentionally cannot stand in for
+authenticated real scorer evidence. The separately qualified native loader
+and unchanged analyzer must still authenticate and replay the complete real
+campaign. Do not call an opt-in skip, a compile pass, or these synthetic
+assembly checks an accepted calibration.
 
 Pin and preserve the generated manifest's digest, then release the assembly
 lock before invoking the unchanged installed analyzer: it independently obtains

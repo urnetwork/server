@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-accepted-original-three-pair-margin",
+  "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "accepted_stage_a_report_sha256": "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb",
+  "stage_a_inputs_sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94",
+  "original_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "original_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "accepted_margin": 0.269,
+  "frozen_at": "2026-10-26T17:53:21.817794626Z"
+}

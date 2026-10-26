@@ -4,6 +4,7 @@ package model
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -67,37 +68,120 @@ func TestRedisCleanupBoundsMalformedCausesAndRetainsPendingPeer(t *testing.T) {
 	}
 }
 
+// Compensation that cannot reach Redis gives up after the short cleanup budget
+// instead of holding its failed CreateContract caller for minutes. On
+// 2026-10-26 a 300 s budget kept about 170k failed proxy calls retrying
+// release-pending every second, and their pool waits failed the next creations.
+func TestRedisCleanupBudgetBoundsUnreachableRelease(t *testing.T) {
+	request, balance := server.NewId(), server.NewId()
+	now := time.Unix(1, 0)
+	calls, waits := 0, 0
+	cleanup := redisReservationCleanup{now: func() time.Time { return now },
+		recover: func(context.Context, server.Id, server.Id) error {
+			calls++
+			return context.DeadlineExceeded
+		},
+		wait: func(_ context.Context, delay time.Duration) error {
+			waits++
+			now = now.Add(delay)
+			return nil
+		},
+	}
+	err := cleanup.run(t.Context(), request, []server.Id{balance})
+	if !errors.Is(err, errRedisReservationCleanupPending) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("unreachable release was not reported as pending compensation", err)
+	}
+	if 10*time.Second < redisReservationCleanupBudget || 10 < calls || calls < 2 {
+		t.Fatal("cleanup retried outside a short bounded budget", redisReservationCleanupBudget, calls, waits)
+	}
+}
+
 // A canceled original request does not cancel the independent cleanup owner.
+// Its transient retries back off within the short budget: each wait falls in
+// the upper half of a nominal delay that doubles from one second to the
+// thirty-second cap.
 func TestRedisCleanupPreservesIndependentTransientCancellationPolicy(t *testing.T) {
 	caller, cancel := context.WithCancel(t.Context())
 	cancel()
 	request, balance := server.NewId(), server.NewId()
 	now := time.Unix(1, 0)
-	calls, waits := 0, 0
+	calls := 0
+	var delays []time.Duration
 	cleanup := redisReservationCleanup{now: func() time.Time { return now },
 		recover: func(owner context.Context, id, actualRequest server.Id) error {
 			if owner.Err() != nil || id != balance || actualRequest != request {
 				t.Fatal("cleanup owner or exact obligation changed")
 			}
 			calls++
-			if calls <= 65 {
+			// two backoffs take under three seconds of the budget
+			if calls <= 2 {
 				return errors.Join(context.Canceled, context.DeadlineExceeded)
 			}
 			return nil
 		},
 		wait: func(owner context.Context, delay time.Duration) error {
-			waits++
-			if delay != time.Second || owner.Err() != nil {
-				t.Fatal("cleanup lost finite independent retry pacing")
+			if owner.Err() != nil {
+				t.Fatal("cleanup lost its finite independent owner")
+			}
+			delays = append(delays, delay)
+			now = now.Add(delay)
+			return nil
+		},
+	}
+	if err := cleanup.run(caller, request, []server.Id{balance}); err != nil || calls != 3 || len(delays) != 2 {
+		t.Fatal("typed transient cleanup failed within original budget", calls, len(delays), err)
+	}
+	for retry, delay := range delays {
+		nominal := min(time.Second<<retry, 30*time.Second)
+		if delay < nominal/2 || nominal <= delay {
+			t.Fatalf("cleanup retry %d waited %s; backoff waits within [%s, %s)", retry, delay, nominal/2, nominal)
+		}
+	}
+	if redisReservationRecoveryRetryable(errors.Join(context.Canceled, errRedisReservationRecoveryIdentity)) {
+		t.Fatal("cleanup cancellation overrode observed token identity refusal")
+	}
+}
+
+// A transport that never recovers costs one request at most the passes that
+// backoff fits in its budget, not one per second, and every pass is the same
+// exact obligation.
+func TestRedisCleanupBackoffBoundsPassesWithinBudget(t *testing.T) {
+	for _, extreme := range []float64{0, math.Nextafter(1, 0)} {
+		for retry := range 24 {
+			nominal := min(time.Second<<retry, 30*time.Second)
+			if delay := redisReservationCleanupRetryDelay(retry, extreme); delay < nominal/2 || nominal <= delay {
+				t.Fatalf("retry %d with jitter %v waits %s; backoff waits within [%s, %s)", retry, extreme, delay, nominal/2, nominal)
+			}
+		}
+	}
+	request, balance := server.NewId(), server.NewId()
+	start := time.Unix(1, 0)
+	now := start
+	calls := 0
+	cleanup := redisReservationCleanup{now: func() time.Time { return now },
+		recover: func(_ context.Context, id, actualRequest server.Id) error {
+			if id != balance || actualRequest != request {
+				t.Fatal("cleanup changed its exact obligation")
+			}
+			calls++
+			return context.DeadlineExceeded
+		},
+		wait: func(_ context.Context, delay time.Duration) error {
+			if delay > redisReservationCleanupRetryCap {
+				t.Fatal("cleanup waited beyond the backoff cap", delay)
 			}
 			now = now.Add(delay)
 			return nil
 		},
 	}
-	if err := cleanup.run(caller, request, []server.Id{balance}); err != nil || calls != 66 || waits != 65 {
-		t.Fatal("typed transient cleanup failed within original budget", calls, waits, err)
+	err := cleanup.run(t.Context(), request, []server.Id{balance})
+	if !errors.Is(err, errRedisReservationCleanupPending) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("exhausted cleanup was reported complete", err)
 	}
-	if redisReservationRecoveryRetryable(errors.Join(context.Canceled, errRedisReservationRecoveryIdentity)) {
-		t.Fatal("cleanup cancellation overrode observed token identity refusal")
+	if maxPasses := redisCompensationTestMaxPasses(); calls < 2 || maxPasses < calls {
+		t.Fatalf("cleanup made %d passes in its budget; backoff allows at most %d", calls, maxPasses)
+	}
+	if elapsed := now.Sub(start); elapsed != redisReservationCleanupBudget {
+		t.Fatal("cleanup did not retry through exactly its one budget", elapsed)
 	}
 }

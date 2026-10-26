@@ -1,0 +1,19 @@
+go version go1.27.3 linux/amd64
+618a6e00a2545e404b275547c656cd888d892f444e5cac393ddc9eb32030f250  connect/sim-latency/calibration_input_assembly_test.go
+e9b2f2b8633f1d446365b5c7d2a639c5a508f4ba86ec7f14b6888e945db7111f  connect/sim-latency/calibration_input_assembly_qualification_test.go
+d81aa58068150468b0e294b6a7c8faa3a045133e405c6f5c15ff0efd47d0f391  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/manager.work
+command=go test -race -count=1 -timeout=5m -v ./connect/sim-latency -run ^TestAssemblyQualification
+pass=1 exit=0 duration_seconds=99
+908ee3c3059ca5e9b62493dd0de6fa1415830f06276c7e615323649810201e87  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-1.stdout
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-1.stderr
+14
+command=go test -race -count=1 -timeout=5m -v ./connect/sim-latency -run ^TestAssemblyQualification
+pass=2 exit=0 duration_seconds=16
+15e20182db3c626840021c23d403b2adad28bf5be91d3ae43ee6e2168a2c6cef  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-2.stdout
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-2.stderr
+14
+command=go test -race -count=1 -timeout=5m -v ./connect/sim-latency -run ^TestAssemblyQualification
+pass=3 exit=0 duration_seconds=15
+2a51315bf8db597036aee3362b74ea59547ff8a0aae5d2febfdc8e5fa24dcc07  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-3.stdout
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/assembly-qualification-20261026.11sINLgK/pass-3.stderr
+14

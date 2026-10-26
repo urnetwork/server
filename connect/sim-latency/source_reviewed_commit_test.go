@@ -27,7 +27,7 @@ func TestReviewedSourceCommitReproducesAcrossCheckoutsAndAmbientIdentities(t *te
 		t.Setenv("GIT_COMMITTER_EMAIL", "ambient-committer@example.invalid")
 		t.Setenv("GIT_COMMITTER_DATE", date)
 		checkout := filepath.Join(root, []string{"first", "replacement"}[index])
-		if _, err := sourceGitText(context.Background(), root, "clone", "--quiet", "--no-checkout", filepath.Join(root, "server"), checkout); err != nil {
+		if _, err := sourceGitNetworkText(context.Background(), root, "clone", "--template=", "--quiet", "--no-checkout", filepath.Join(root, "server"), checkout); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := sourceGitText(context.Background(), checkout, "checkout", "--quiet", "--detach", base); err != nil {

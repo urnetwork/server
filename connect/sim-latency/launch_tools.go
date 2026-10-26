@@ -1,7 +1,7 @@
 package main
 
 // Launch tooling produces machine-readable, fail-closed evidence without
-// modifying the developer's four working trees. Remote source verification
+// modifying the developer's frozen working trees. Remote source verification
 // uses private temporary bare clones; live checks never serialize credentials.
 
 import (
@@ -23,21 +23,27 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 const (
-	launchEvidenceSchema          = 1
-	launchHttpResponseLimit       = 4 * 1024 * 1024
-	defaultArtifactCapacityBytes  = int64(1024 * 1024 * 1024 * 1024)
-	artifactCapacityStopPercent   = 90.0
-	runnerHeartbeatMaximumSeconds = 30.0
+	launchEvidenceSchema = 1
 )
+
+// Operational proof gates are invocation-owned, not global tunables.
+type launchGateSettings struct{ ArtifactCapacityStopPercent, RunnerHeartbeatMaximumSeconds float64 }
+
+// Frozen launch thresholds remain unchanged; no new CLI override is exposed.
+func defaultLaunchGateSettings() launchGateSettings {
+	return launchGateSettings{ArtifactCapacityStopPercent: 90, RunnerHeartbeatMaximumSeconds: 30}
+}
 
 var mandatoryLaunchChecks = []string{
 	"frozen_source",
@@ -67,6 +73,10 @@ type launchPreflightResult struct {
 }
 
 type launchPreflightConfig struct {
+	// Bounds the entire proof, including source remotes and blob operations.
+	Timeout time.Duration
+	// Bounds draining a canceled source subprocess that left inherited pipes.
+	SubprocessWaitDelay   time.Duration
 	Epoch                 int
 	SourceConfig          string
 	RepositoriesRoot      string
@@ -76,11 +86,27 @@ type launchPreflightConfig struct {
 	OperatorToken         string
 	GrafanaUrl            string
 	GrafanaToken          string
+	GrafanaCredential     *launchHttpCredential
 	MetricsUrl            string
 	MetricsToken          string
+	MetricsCredential     *launchHttpCredential
 	ArtifactCapacityBytes int64
 	OutputPath            string
 	Now                   func() time.Time
+}
+
+// Defaults belong to the invocation; callers may shorten them for diagnostics.
+func defaultLaunchPreflightConfig() *launchPreflightConfig {
+	return &launchPreflightConfig{Timeout: 10 * time.Minute, SubprocessWaitDelay: 5 * time.Second, ArtifactCapacityBytes: 10_000_000_000_000}
+}
+
+// The user's allocation is an upper bound, not permission for an arbitrary
+// command-line denominator that could make a full namespace look empty.
+func validateLaunchArtifactAllocation(capacityBytes int64) error {
+	if capacityBytes <= 0 || capacityBytes > defaultLaunchPreflightConfig().ArtifactCapacityBytes {
+		return errors.New("artifact allocation must be positive and at most the approved decimal 10 TB")
+	}
+	return nil
 }
 
 type handoffEvidence struct {
@@ -128,7 +154,9 @@ func runLaunchPreflight(opts docopt.Opts) {
 	if err != nil {
 		fatalf("launch preflight options: %s", err)
 	}
-	result, preflightErr := executeLaunchPreflight(context.Background(), config)
+	ctx, cancel := signalContext()
+	defer cancel()
+	result, preflightErr := executeLaunchPreflight(ctx, config)
 	encoded, encodeErr := json.MarshalIndent(result, "", "  ")
 	if encodeErr != nil {
 		fatalf("launch preflight encode: %s", encodeErr)
@@ -145,6 +173,11 @@ func runLaunchPreflight(opts docopt.Opts) {
 }
 
 func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig, error) {
+	defaults := defaultLaunchPreflightConfig()
+	timeout, err := time.ParseDuration(optString(opts, "--preflight-timeout", defaults.Timeout.String()))
+	if err != nil || timeout <= 0 {
+		return nil, errors.New("--preflight-timeout must be a positive duration")
+	}
 	epoch, err := configuredEpoch(opts)
 	if err != nil {
 		return nil, err
@@ -153,9 +186,9 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 	if err != nil {
 		return nil, err
 	}
-	capacityBytes, err := strconv.ParseInt(optString(opts, "--artifact-capacity-bytes", strconv.FormatInt(defaultArtifactCapacityBytes, 10)), 10, 64)
-	if err != nil || capacityBytes <= 0 {
-		return nil, errors.New("--artifact-capacity-bytes must be a positive integer")
+	capacityBytes, err := strconv.ParseInt(optString(opts, "--artifact-capacity-bytes", strconv.FormatInt(defaults.ArtifactCapacityBytes, 10)), 10, 64)
+	if err != nil || validateLaunchArtifactAllocation(capacityBytes) != nil {
+		return nil, errors.New("--artifact-capacity-bytes exceeds the approved allocation or is invalid")
 	}
 	readToken := func(option string) (string, error) {
 		filePath := optString(opts, option, "")
@@ -168,15 +201,24 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 	if err != nil {
 		return nil, err
 	}
-	grafanaToken, err := readToken("--grafana-token-file")
+	readMonitoringCredential := func(option string) (launchHttpCredential, error) {
+		path := optString(opts, option, "")
+		if path == "" {
+			return launchHttpCredential{}, fmt.Errorf("%s is required", option)
+		}
+		return readLaunchHttpCredential(path, defaultLaunchHttpCredentialSettings())
+	}
+	grafanaCredential, err := readMonitoringCredential("--grafana-token-file")
 	if err != nil {
 		return nil, err
 	}
-	metricsToken, err := readToken("--metrics-token-file")
+	metricsCredential, err := readMonitoringCredential("--metrics-token-file")
 	if err != nil {
 		return nil, err
 	}
 	return &launchPreflightConfig{
+		Timeout:               timeout,
+		SubprocessWaitDelay:   defaults.SubprocessWaitDelay,
 		Epoch:                 epoch,
 		SourceConfig:          sourceConfig,
 		RepositoriesRoot:      repositoriesRoot,
@@ -185,9 +227,9 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 		ApiUrl:                optString(opts, "--api-url", "https://api.bringyour.com"),
 		OperatorToken:         operatorToken,
 		GrafanaUrl:            optString(opts, "--grafana-url", ""),
-		GrafanaToken:          grafanaToken,
+		GrafanaCredential:     &grafanaCredential,
 		MetricsUrl:            optString(opts, "--metrics-url", ""),
-		MetricsToken:          metricsToken,
+		MetricsCredential:     &metricsCredential,
 		ArtifactCapacityBytes: capacityBytes,
 		OutputPath:            optString(opts, "--out", ""),
 		Now:                   server.NowUtc,
@@ -195,10 +237,12 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 }
 
 func executeLaunchPreflight(ctx context.Context, config *launchPreflightConfig) (*launchPreflightResult, error) {
-	if config == nil || config.Now == nil || !validSha256(strings.TrimPrefix(config.EvaluatorImageDigest, "sha256:")) ||
+	if config == nil || config.Now == nil || config.Timeout <= 0 || config.SubprocessWaitDelay <= 0 || !validSha256(strings.TrimPrefix(config.EvaluatorImageDigest, "sha256:")) ||
 		!strings.HasPrefix(config.EvaluatorImageDigest, "sha256:") {
 		return nil, errors.New("launch preflight configuration is incomplete")
 	}
+	ctx, cancel := context.WithTimeout(ctx, config.Timeout)
+	defer cancel()
 	result := &launchPreflightResult{
 		Schema:               launchEvidenceSchema,
 		Passed:               true,
@@ -224,7 +268,7 @@ func executeLaunchPreflight(ctx context.Context, config *launchPreflightConfig) 
 		manifest, sourceErr = loadSourceManifest(config.SourceConfig)
 	}
 	if sourceErr == nil {
-		sourceErr = verifyRemoteSourceEpochHead(manifest, config.Epoch, config.RepositoriesRoot)
+		sourceErr = verifyRemoteSourceEpochModeContext(ctx, config.SubprocessWaitDelay, manifest, config.Epoch, config.RepositoriesRoot, manifest.EvaluationSource.Branch, true)
 	}
 	if len(sourceBytes) != 0 {
 		digest := sha256.Sum256(sourceBytes)
@@ -308,6 +352,26 @@ func verifyRemoteSourceEpochMode(
 	branch string,
 	requireExactHead bool,
 ) error {
+	return verifyRemoteSourceEpochModeContext(context.Background(), defaultLaunchPreflightConfig().SubprocessWaitDelay, manifest, epochNumber, repositoriesRoot, branch, requireExactHead)
+}
+
+// All Git work shares the invocation's cancellation boundary. Text and error
+// output are independently bounded, including the initial remote clone.
+func verifyRemoteSourceEpochModeContext(
+	ctx context.Context,
+	waitDelay time.Duration,
+	manifest *sourceManifest,
+	epochNumber int,
+	repositoriesRoot string,
+	branch string,
+	requireExactHead bool,
+) error {
+	if manifest == nil || waitDelay <= 0 {
+		return errors.New("source preflight requires a manifest and bounded subprocess cleanup")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	epoch, err := manifest.epoch(epochNumber)
 	if err != nil {
 		return err
@@ -319,28 +383,34 @@ func verifyRemoteSourceEpochMode(
 	defer os.RemoveAll(temporaryRoot)
 	for _, repositoryName := range sourceRepositoryNamesForMode(manifest.Staging) {
 		localRoot := filepath.Join(repositoriesRoot, repositoryName)
-		origin, err := gitOutput(localRoot, "remote", "get-url", "origin")
+		origin, err := launchSourceGitText(ctx, waitDelay, localRoot, "remote", "get-url", "origin")
 		if err != nil {
 			return fmt.Errorf("repository %s origin: %w", repositoryName, err)
 		}
 		cloneRoot := filepath.Join(temporaryRoot, repositoryName+".git")
 		// Most checks pin the advertised tip and need no history or file blobs.
 		// Older checkpoints deepen only their own branch before ancestry proof.
-		cloneArgs := []string{"clone", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch,
+		cloneArgs := []string{"clone", "--template=", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch,
 			"--depth=1", "--filter=blob:none"}
 		cloneArgs = append(cloneArgs, origin, cloneRoot)
-		command := exec.Command("git", cloneArgs...)
-		if output, err := command.CombinedOutput(); err != nil {
-			return fmt.Errorf("clone repository %s competition branch: %s", repositoryName, strings.TrimSpace(string(output)))
+		command, err := sourceGitCommand(ctx, temporaryRoot, cloneArgs...)
+		if err != nil {
+			return err
+		}
+		configureLaunchSourceCommand(command, waitDelay)
+		output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+		command.Stdout, command.Stderr = output, output
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("clone repository %s competition branch: %w", repositoryName, errors.Join(ctx.Err(), err))
 		}
 		// Git's --branch also accepts tags and leaves HEAD detached for them.
 		// Source policy requires the named branch, not an identically named tag.
-		actualBranch, err := gitOutput(cloneRoot, "symbolic-ref", "--quiet", "HEAD")
+		actualBranch, err := launchSourceGitText(ctx, waitDelay, cloneRoot, "symbolic-ref", "--quiet", "HEAD")
 		if err != nil || actualBranch != "refs/heads/"+branch {
 			return fmt.Errorf("repository %s competition source %s is not the required branch", repositoryName, branch)
 		}
 		expectedCommit := epoch.Repositories.commitsForMode(manifest.Staging)[repositoryName]
-		head, err := gitOutput(cloneRoot, "rev-parse", "HEAD")
+		head, err := launchSourceGitText(ctx, waitDelay, cloneRoot, "rev-parse", "HEAD")
 		if err != nil {
 			return fmt.Errorf("repository %s competition branch head: %w", repositoryName, err)
 		}
@@ -351,23 +421,68 @@ func verifyRemoteSourceEpochMode(
 			continue
 		}
 		if head != expectedCommit {
-			shallow, err := gitOutput(cloneRoot, "rev-parse", "--is-shallow-repository")
+			shallow, err := launchSourceGitText(ctx, waitDelay, cloneRoot, "rev-parse", "--is-shallow-repository")
 			if err != nil || (shallow != "true" && shallow != "false") {
 				return fmt.Errorf("repository %s shallow history state is unavailable", repositoryName)
 			}
 			if shallow == "true" {
-				if _, err := gitOutput(cloneRoot, "fetch", "--quiet", "--unshallow", "--filter=blob:none", "origin", branch); err != nil {
+				if _, err := launchSourceGitNetworkText(ctx, waitDelay, cloneRoot, "fetch", "--quiet", "--unshallow", "--filter=blob:none", "origin", branch); err != nil {
 					return fmt.Errorf("repository %s checkpoint history unavailable: %w", repositoryName, err)
 				}
 			}
 			// Local clones and promisor fetches can contain unrelated objects.
 			// Availability alone is not proof of membership in this branch.
-			if _, err := gitOutput(cloneRoot, "merge-base", "--is-ancestor", expectedCommit, head); err != nil {
+			if _, err := launchSourceGitText(ctx, waitDelay, cloneRoot, "merge-base", "--is-ancestor", expectedCommit, head); err != nil {
 				return fmt.Errorf("repository %s competition branch does not contain epoch commit %s as an ancestor", repositoryName, expectedCommit)
 			}
 		}
 	}
 	return nil
+}
+
+// Reuses exact-root Git trust while bounding output and inherited-pipe drain.
+func launchSourceGitText(ctx context.Context, waitDelay time.Duration, repositoryRoot string, args ...string) (string, error) {
+	command, err := sourceGitLocalCommand(ctx, repositoryRoot, args...)
+	if err != nil {
+		return "", err
+	}
+	configureLaunchSourceCommand(command, waitDelay)
+	output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("launch source Git command failed: %w", errors.Join(ctx.Err(), err))
+	}
+	return strings.TrimSpace(string(output.content)), nil
+}
+
+// Explicit transport calls retain operator authentication; local object reads
+// cannot gain it by changing their argv or candidate-controlled attributes.
+func launchSourceGitNetworkText(ctx context.Context, waitDelay time.Duration, repositoryRoot string, args ...string) (string, error) {
+	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	if err != nil {
+		return "", err
+	}
+	configureLaunchSourceCommand(command, waitDelay)
+	output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("launch source Git transport failed: %w", errors.Join(ctx.Err(), err))
+	}
+	return strings.TrimSpace(string(output.content)), nil
+}
+
+// Cancellation retires the complete Git/SSH process group, not just the Git
+// parent. Pipe drain has its own bound after process cancellation.
+func configureLaunchSourceCommand(command *exec.Cmd, waitDelay time.Duration) {
+	command.WaitDelay = waitDelay
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		} else {
+			return err
+		}
+	}
 }
 
 func inspectEvaluatorImage(ctx context.Context, expectedDigest string) (string, error) {
@@ -383,11 +498,23 @@ func inspectEvaluatorImage(ctx context.Context, expectedDigest string) (string, 
 	return imageId, nil
 }
 
+// Authenticate local source identity before contacting the live API. A failed
+// independent source check must yield a failed receipt, never a nil panic.
 func checkCompetitionApi(
 	ctx context.Context,
 	config *launchPreflightConfig,
 	manifest *sourceManifest,
 ) (map[string]any, *controller.InfoResult, error) {
+	if config == nil || manifest == nil {
+		return nil, nil, errors.New("competition API check requires an authenticated source manifest")
+	}
+	if err := validateSourceManifest(manifest); err != nil {
+		return nil, nil, fmt.Errorf("competition API source manifest: %w", err)
+	}
+	epoch, err := manifest.epoch(config.Epoch)
+	if err != nil {
+		return nil, nil, err
+	}
 	client := newLaunchHttpClient()
 	health := controller.HealthResult{}
 	if err := getLaunchJson(ctx, client, config.ApiUrl, "/competition/healthz", "", &health); err != nil {
@@ -400,20 +527,44 @@ func checkCompetitionApi(
 	if err := getLaunchJson(ctx, client, config.ApiUrl, "/competition/info", "", info); err != nil {
 		return nil, nil, err
 	}
-	epoch, err := manifest.epoch(config.Epoch)
-	if err != nil {
-		return nil, nil, err
-	}
 	if !info.Enabled || info.ScoreSchema != controller.ScoreSchema || info.ScorerVersion != controller.ScorerVersion ||
 		info.BaseSha != epoch.Repositories.Server.Commit || info.EvaluatorImageDigest != config.EvaluatorImageDigest {
 		return nil, nil, errors.New("live competition policy does not match the frozen epoch and evaluator")
+	}
+	if manifest.Schema == 2 {
+		policy := info.AutomationPolicy
+		generation, err := manifest.generation(config.Epoch)
+		if err != nil || policy == nil || !policy.Enabled || model.ValidateCompetitionAutomationPolicy(*policy) != nil ||
+			policy.Staging != manifest.Staging || policy.SourceGeneration != config.Epoch || policy.SourceLockSha256 != generation.SourceLockSha256 ||
+			info.DecisionMode != model.CompetitionDecisionModeV2 || info.RequiredApiCapability != policy.RequiredApiCapability ||
+			!sourceMarginMatches(generation.SignificantImprovementPercent, info.EvaluationPolicy.TakeoverMargin) {
+			return nil, nil, errors.New("live v2 competition does not match the exact source mode, generation, lock and margin")
+		}
+		round := info.ActiveRound
+		if manifest.Staging {
+			round = info.StagingRound
+		}
+		if round == nil || round.RoundId == (server.Id{}) || round.Staging != manifest.Staging || round.DecisionMode != info.DecisionMode || round.RequiredApiCapability != info.RequiredApiCapability {
+			return nil, nil, errors.New("live v2 competition has no matching activated source round")
+		}
+		mapping, err := manifest.sourceRound(round.Epoch)
+		if err != nil || mapping.SourceGeneration != config.Epoch || mapping.ActivationGeneration != policy.SourceActivationGeneration || mapping.SourceLockSha256 != policy.SourceLockSha256 {
+			return nil, nil, errors.New("live v2 source activation does not match its immutable round mapping")
+		}
 	}
 	ready := &controller.ReadinessResult{}
 	if err := getLaunchJson(ctx, client, config.ApiUrl, "/competition/readyz", config.OperatorToken, ready); err != nil {
 		return nil, nil, err
 	}
-	if !ready.Ready {
+	if !ready.Ready || len(ready.Checks) == 0 {
 		return nil, nil, errors.New("competition readyz is false")
+	}
+	if manifest.Schema == 2 {
+		for _, name := range []string{"configuration", "frozen_policy", "retention_window", "database", "fifo_slot", "queue_admission", "authoritative_evaluator_host", "artifact_storage", "host_rebaseline", "api_image_identity", "artifact_archive"} {
+			if !ready.Checks[name] {
+				return nil, nil, fmt.Errorf("competition readiness check %s is missing or failed", name)
+			}
+		}
 	}
 	for name, passed := range ready.Checks {
 		if !passed {
@@ -425,11 +576,13 @@ func checkCompetitionApi(
 		return nil, nil, err
 	}
 	return map[string]any{
-		"competition_id":   info.CompetitionId,
-		"active_round":     info.ActiveRound,
-		"staging_round":    info.StagingRound,
-		"readiness":        ready.Checks,
-		"finalized_epochs": len(leaderboards.Epochs),
+		"competition_id":    info.CompetitionId,
+		"source_generation": config.Epoch,
+		"automation_policy": info.AutomationPolicy,
+		"active_round":      info.ActiveRound,
+		"staging_round":     info.StagingRound,
+		"readiness":         ready.Checks,
+		"finalized_epochs":  len(leaderboards.Epochs),
 	}, info, nil
 }
 
@@ -437,8 +590,28 @@ func checkCompetitionMinio(ctx context.Context, info *controller.InfoResult, cap
 	if info == nil {
 		return nil, errors.New("competition API identity is unavailable")
 	}
-	store, ok := server.LoadBlobStore()
-	if !ok || strings.HasPrefix(store.Authority(), "local:") {
+	settings, err := controller.LoadSettings()
+	if err != nil {
+		return nil, errors.New("configured competition archive settings are unavailable")
+	}
+	if settings.CompetitionId != info.CompetitionId {
+		return nil, errors.New("competition API and configured archive scopes differ")
+	}
+	store, bucket, err := settings.CompetitionArtifactStore()
+	if err != nil {
+		return nil, err
+	}
+	return checkCompetitionMinioStore(ctx, info, capacityBytes, store, bucket)
+}
+
+// The configured competition namespace includes every archive version and
+// scope, including v2 runtime/host/review records. Charging extra competition
+// history is conservative; charging only v1 would hide real allocation usage.
+func checkCompetitionMinioStore(ctx context.Context, info *controller.InfoResult, capacityBytes int64, store server.BlobStore, bucket string) (map[string]any, error) {
+	if err := validateLaunchArtifactAllocation(capacityBytes); err != nil {
+		return nil, err
+	}
+	if info == nil || store == nil || bucket == "" || store.Bucket() != bucket || strings.HasPrefix(store.Authority(), "local:") {
 		return nil, errors.New("production MinIO blob store is unavailable")
 	}
 	retainedStore, ok := store.(server.ProtectedBlobStore)
@@ -449,19 +622,31 @@ func checkCompetitionMinio(ctx context.Context, info *controller.InfoResult, cap
 	if err != nil {
 		return nil, err
 	}
-	prefix := path.Join(store.Prefix(), "competition", "v1", info.CompetitionId)
-	usage, err := server.MeasureBlobUsageAtPrefix(ctx, store, prefix, capacityBytes)
+	if protection == nil || protection.Authority != store.Authority() || protection.Bucket != bucket || protection.ObjectLock != "COMPLIANCE" || !protection.Versioning || len(protection.ReplicationTargets) == 0 {
+		return nil, errors.New("configured competition archive protection proof is incomplete")
+	}
+	for _, target := range protection.ReplicationTargets {
+		if strings.TrimSpace(target) == "" {
+			return nil, errors.New("configured competition replication target is empty")
+		}
+	}
+	prefix := path.Join(store.Prefix(), "competition") + "/"
+	usage, err := server.MeasureBlobVersionUsageAtPrefix(ctx, store, prefix, capacityBytes)
 	if err != nil {
 		return nil, err
 	}
-	if artifactCapacityStopPercent <= usage.UsedPercent {
+	if defaultLaunchGateSettings().ArtifactCapacityStopPercent <= usage.UsedPercent {
 		return map[string]any{"usage": usage}, fmt.Errorf("competition evidence allocation is %.2f%% used", usage.UsedPercent)
 	}
-	return map[string]any{"protection": protection, "usage": usage}, nil
+	return map[string]any{"protection": protection, "usage": usage, "usage_scope": "configured_competition_namespace_v1_v2_and_object_versions", "requested_competition_id": info.CompetitionId}, nil
 }
 
 func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig) (map[string]any, error) {
 	client := newLaunchHttpClient()
+	credential, err := selectLaunchHttpCredential(config.GrafanaCredential, config.GrafanaToken)
+	if err != nil {
+		return nil, err
+	}
 	requests := []struct {
 		path     string
 		required []string
@@ -475,7 +660,7 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 		{path: "/api/v1/provisioning/policies", required: []string{"sim-latency-support", "severity"}},
 	}
 	for _, probe := range requests {
-		body, err := getLaunchBytes(ctx, client, config.GrafanaUrl, probe.path, config.GrafanaToken)
+		body, err := getLaunchBytesWithCredential(ctx, client, config.GrafanaUrl, probe.path, credential)
 		if err != nil {
 			return nil, err
 		}
@@ -494,28 +679,32 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 }
 
 func checkCompetitionMetrics(ctx context.Context, config *launchPreflightConfig) (map[string]any, error) {
-	heartbeatAge, err := queryPrometheusScalar(
+	credential, err := selectLaunchHttpCredential(config.MetricsCredential, config.MetricsToken)
+	if err != nil {
+		return nil, err
+	}
+	heartbeatAge, err := queryPrometheusScalarWithCredential(
 		ctx,
 		config.MetricsUrl,
-		config.MetricsToken,
+		credential,
 		"time() - max(urnetwork_competition_runner_heartbeat_timestamp_seconds)",
 	)
 	if err != nil {
 		return nil, err
 	}
-	if heartbeatAge < 0 || runnerHeartbeatMaximumSeconds < heartbeatAge {
+	if heartbeatAge < 0 || defaultLaunchGateSettings().RunnerHeartbeatMaximumSeconds < heartbeatAge {
 		return nil, fmt.Errorf("sim-latency runner heartbeat is %.1f seconds old", heartbeatAge)
 	}
-	minioUsedPercent, err := queryPrometheusScalar(
+	minioUsedPercent, err := queryPrometheusScalarWithCredential(
 		ctx,
 		config.MetricsUrl,
-		config.MetricsToken,
+		credential,
 		`100 * (1 - max(minio_cluster_health_capacity_usable_free_bytes{job="minio"}) / max(minio_cluster_health_capacity_usable_total_bytes{job="minio"}))`,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if minioUsedPercent < 0 || artifactCapacityStopPercent <= minioUsedPercent {
+	if minioUsedPercent < 0 || defaultLaunchGateSettings().ArtifactCapacityStopPercent <= minioUsedPercent {
 		return nil, fmt.Errorf("MinIO cluster is %.2f%% used", minioUsedPercent)
 	}
 	return map[string]any{
@@ -525,6 +714,12 @@ func checkCompetitionMetrics(ctx context.Context, config *launchPreflightConfig)
 }
 
 func queryPrometheusScalar(ctx context.Context, baseUrl string, token string, query string) (float64, error) {
+	return queryPrometheusScalarWithCredential(ctx, baseUrl, launchHttpCredential{bearerToken: token}, query)
+}
+
+// The deployed Mimir /prometheus route uses its existing query-scoped Basic
+// identity; bearer remains supported without sharing credentials with Grafana.
+func queryPrometheusScalarWithCredential(ctx context.Context, baseUrl string, credential launchHttpCredential, query string) (float64, error) {
 	parsed, err := url.Parse(baseUrl)
 	if err != nil {
 		return 0, errors.New("metrics URL must be an absolute URL")
@@ -540,19 +735,20 @@ func queryPrometheusScalar(ctx context.Context, baseUrl string, token string, qu
 	if err != nil {
 		return 0, err
 	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	if err := credential.apply(request); err != nil {
+		return 0, err
 	}
 	response, err := newLaunchHttpClient().Do(request)
 	if err != nil {
 		return 0, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, launchHttpResponseLimit+1))
+	maximumBytes := defaultLaunchHttpReadSettings().MaximumResponseBytes
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if err != nil {
 		return 0, err
 	}
-	if response.StatusCode != http.StatusOK || launchHttpResponseLimit < len(body) {
+	if response.StatusCode != http.StatusOK || maximumBytes < int64(len(body)) {
 		return 0, fmt.Errorf("metrics query returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
@@ -613,8 +809,11 @@ func validateLaunchEndpoint(parsed *url.URL) error {
 // Refuses redirects so no credential can cross the configured endpoint
 // boundary, including redirects that Go would otherwise consider related.
 func newLaunchHttpClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	return &http.Client{
-		Timeout: 20 * time.Second,
+		Transport: transport,
+		Timeout:   defaultLaunchHttpReadSettings().RequestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -622,6 +821,12 @@ func newLaunchHttpClient() *http.Client {
 }
 
 func getLaunchBytes(ctx context.Context, client *http.Client, baseUrl string, requestPath string, token string) ([]byte, error) {
+	return getLaunchBytesWithCredential(ctx, client, baseUrl, requestPath, launchHttpCredential{bearerToken: token})
+}
+
+// Credential selection is typed private process state, not userinfo, an
+// arbitrary supplied header or a field copied into the public proof envelope.
+func getLaunchBytesWithCredential(ctx context.Context, client *http.Client, baseUrl, requestPath string, credential launchHttpCredential) ([]byte, error) {
 	parsed, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, errors.New("launch endpoint must be an absolute URL without userinfo")
@@ -641,22 +846,23 @@ func getLaunchBytes(ctx context.Context, client *http.Client, baseUrl string, re
 	if err != nil {
 		return nil, err
 	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	if err := credential.apply(request); err != nil {
+		return nil, err
 	}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, launchHttpResponseLimit+1))
+	maximumBytes := defaultLaunchHttpReadSettings().MaximumResponseBytes
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s returned HTTP %d", requestPath, response.StatusCode)
 	}
-	if launchHttpResponseLimit < len(body) {
+	if maximumBytes < int64(len(body)) {
 		return nil, errors.New("launch HTTP response exceeded the size limit")
 	}
 	return body, nil

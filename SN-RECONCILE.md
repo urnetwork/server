@@ -208,3 +208,74 @@ the payout policy loaded, rows with subsidy or reliability are never canceled
 this way. The planner then re-plans the canceled row's sweeps and the weekly
 plan pays them, so the obligation is still paid once. Its payout points apply
 twice, as after every hung cancellation.
+
+## Note (2026-10-26): listing cost and the read-only dry run
+
+The census listing reads each later row's sweeps once. A stuck row's replan
+evidence (A5, A10) compares its own times with each later row's earliest
+contract close and early bound, which the listing reads once per later row,
+however many stuck rows its network holds. Before, it read every later row's
+sweeps again for each stuck row without sweeps, and on main (131 stuck rows,
+later rows of up to 10.1M sweeps) the dry run had not finished after 16
+minutes. The listing returns the same rows and values
+(`TestSnReconcileStuckListingMatchesReference`). Its cost is now about one
+contract read per sweep of the later rows in the stuck rows' networks. The
+duplicates read (§6) still sums the early sweeps of every pending or safely
+canceled row.
+
+The dry run's process is read only (`server.RequirePgReadOnly`): PostgreSQL
+refuses any write it attempts, and its sessions connect directly with
+`pg_maintenance.yml`, since the transaction pooler refuses a read-only
+session. `--send` runs in an ordinary process.
+
+## Turning USDC payments off (owner, 2026-10-26)
+
+Owner, 2026-10-26: "let's stop asking people to connect their wallets now.
+Let's turn off all usdc payments after the reconcile." Both switches live in
+`config/<env>/usdc_payout.yml` (`server.LoadUsdcPayoutPolicy`), not in
+`sn.yml`. `legacy_usdc` in `sn.yml` is part of the earning identity bound into
+the provider earning boundary, so changing it would refuse subnet admission
+too.
+
+- **`wallet_requests: off`** is the default, with or without the file.
+  - No payout run holds a missing-wallet notice.
+  - A held notice is removed at its release, and a released one is abandoned
+    unsent at delivery, recording "withheld: wallet requests are off".
+  - It takes effect when the taskworker runs the new build. The email
+    templates themselves are untouched, so `on` restores the notices.
+- **`payments: off`** is set only after this runbook finishes: sn-reconcile has
+  sent, and the replacements and revived rows have drained or been decided.
+  - `AdvancePayment` reserves and submits nothing for a payment Circle does not
+    hold. A key reserved before the switch stays retained for reconciliation.
+    The task returns `payments_off` and is not scheduled again, so the
+    retained payments (about 19,900 on 2026-10-26) stop cycling within one
+    pass.
+  - A payment Circle already holds (`payment_record` set) keeps its status
+    check until Circle reports a terminal state.
+  - `SchedulePendingPayments` (at start and after each run) schedules only
+    payments Circle holds.
+  - The weekly plan still runs, because it carries the account and reliability
+    points and the subsidy epochs. Its USDC rows are parked unpaid. The daily
+    hung-payment cancellation still re-plans their sweeps after 30 days, into
+    new parked rows.
+  - Refused while off: `payouts correct-legacy-attempts --apply`,
+    `payouts reconcile-legacy-attempts --apply`, `payouts sn-reconcile --send`
+    and `wallet transfer`. Their dry runs still report.
+  - Takes effect when a process loads the new config. An unreadable or invalid
+    file counts as off and is reported.
+
+### Closing the parked payments: defined, not run
+
+Closing the parked payments is a separate, owner-approved mutation. It would
+cancel every pending payment that Circle cannot hold: not completed, not
+canceled, no `circle_idempotency_key`, no `payment_record`, no `tx_hash`, and no
+staged sweep assignment. For each, it would record an `audit_account_payment`
+event, `usdc_payout_closed`, naming the switch.
+
+It forfeits those USDC obligations. Post-cutoff earnings are paid through the
+subnet, and legacy debt never becomes subnet credit. So the planner must not
+re-plan their sweeps, unlike a hung cancellation.
+
+Keyed or recorded rows are never closed this way; their reconciliation decides
+them. A dry run reports counts by plan week and reason (wallet-less, dust,
+review-held) before anything is written.

@@ -1,0 +1,18 @@
+{
+  "additional_companions": 2,
+  "all_six_gates_passed": true,
+  "archived_regular_files": 487,
+  "candidates": 9,
+  "chunks": 4,
+  "controls": 9,
+  "directional_screen_passed": true,
+  "gzip_sha256": "13bf9ab0a24c0610c23054598623c4eccfc2894ba331ec40d7549324c9f96064",
+  "inventory_sha256": "f7605637a619d2864c5d437b6b02b6198d7b9ca082855da77a4796c00314da2c",
+  "kind": "completed_snapshot_directional_pilot",
+  "official": false,
+  "original_regular_files": 485,
+  "qualified_held_out_better_reference": false,
+  "schema": 1,
+  "summary_path": "summary.json",
+  "summary_sha256": "c765049aa7100e7a1f9b44574e5444df24a20597e97bba34088b2c64f6ce9f0a"
+}

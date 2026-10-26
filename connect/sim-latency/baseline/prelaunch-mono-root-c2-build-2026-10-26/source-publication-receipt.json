@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "c2-administrative-source-publication/v1",
+  "completed_at": "2026-10-26T15:20:42Z",
+  "git_exit": 0,
+  "ref": "refs/heads/sim-latency",
+  "server_remote": "github.com:urnetwork/server.git",
+  "expected_parent": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "published_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "non_force": true,
+  "remote_before_all_ten": {
+    "server": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+  },
+  "remote_after_all_ten": {
+    "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+  },
+  "other_nine_unchanged": true,
+  "source_tests_qualified": "Independent low reported C2 six tests ×3 =18 passes,0 skips; separate from image/runtime qualification.",
+  "main_config_changed": false,
+  "production_activated": false,
+  "image_runtime_qualified": false,
+  "bridge_qualified": false
+}

@@ -178,7 +178,7 @@ func (self *gitSourcePublicationBackend) Head(ctx context.Context, ref sourcePub
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("private staging clone is missing or unsafe")
 	}
-	output, err := sourceGitBytes(ctx, ref.StagedRoot, 4096, "ls-remote", "--exit-code", "origin", "refs/heads/"+ref.Branch)
+	output, err := sourceGitNetworkBytes(ctx, ref.StagedRoot, 4096, "ls-remote", "--exit-code", "origin", "refs/heads/"+ref.Branch)
 	if err != nil {
 		return "", err
 	}
@@ -224,6 +224,8 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if previousErr != nil || candidateErr != nil || previousTree != candidateTree {
 				return errors.New("source publication modifies the protected evaluator tree")
 			}
+		}
+		if ref.Repository != "config" {
 			patchInfo, err := os.Lstat(intent.ApprovedPatchPath)
 			if err != nil || !patchInfo.Mode().IsRegular() || patchInfo.Mode().Perm()&0o077 != 0 {
 				return errors.New("approved patch must remain a private regular file")
@@ -236,14 +238,25 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if patchErr != nil || patch.Sha256 != intent.ApprovedPatchSha256 || string(patch.Bytes) != string(patchBytes) {
 				return errors.New("approved canonical patch digest or allowed surface does not match")
 			}
+			patches, routingError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), self.patchPolicy)
+			if routingError != nil || len(patches[ref.Repository]) == 0 {
+				return errors.New("changed repository is absent from the exact approved patch")
+			}
+			if err := validateSourcePatchBase(ctx, ref.StagedRoot, ref.ExpectedCommit, ref.Repository, patch, self.patchPolicy); err != nil {
+				return err
+			}
 			indexRoot, err := os.MkdirTemp("", "sim-latency-source-verify-")
 			if err != nil {
 				return err
 			}
 			defer os.RemoveAll(indexRoot)
+			patchPath := filepath.Join(indexRoot, "approved.patch")
+			if err := writePrivateReviewFile(patchPath, patches[ref.Repository]); err != nil {
+				return err
+			}
 			indexPath := filepath.Join(indexRoot, "index")
 			runIndex := func(args ...string) ([]byte, error) {
-				command, err := sourceGitCommand(ctx, ref.StagedRoot, args...)
+				command, err := sourceGitLocalCommand(ctx, ref.StagedRoot, args...)
 				if err != nil {
 					return nil, err
 				}
@@ -259,7 +272,7 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if _, err := runIndex("read-tree", ref.ExpectedCommit); err != nil {
 				return err
 			}
-			if _, err := runIndex("apply", "--cached", "--whitespace=error-all", intent.ApprovedPatchPath); err != nil {
+			if _, err := runIndex("apply", "--cached", "--whitespace=error-all", patchPath); err != nil {
 				return err
 			}
 			approvedTree, err := runIndex("write-tree")
@@ -294,7 +307,7 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 // Captures exact bounded Git bytes with cancellation; no whitespace
 // normalization is allowed at an authenticated-content boundary.
 func sourceGitBytes(ctx context.Context, repositoryRoot string, limit int, args ...string) ([]byte, error) {
-	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	command, err := sourceGitLocalCommand(ctx, repositoryRoot, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +318,27 @@ func sourceGitBytes(ctx context.Context, repositoryRoot string, limit int, args 
 		return nil, fmt.Errorf("bounded Git content read failed: %w", err)
 	}
 	return writer.content, nil
+}
+
+// Callers select this explicitly only for authenticated transport operations;
+// no argv guessing can grant credentials to a local source command.
+func sourceGitNetworkBytes(ctx context.Context, repositoryRoot string, limit int, args ...string) ([]byte, error) {
+	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	if err != nil {
+		return nil, err
+	}
+	writer := &sourceBoundedWriter{limit: limit}
+	command.Stdout, command.Stderr = writer, &sourceBoundedWriter{limit: 4096}
+	if err := command.Run(); err != nil {
+		return nil, fmt.Errorf("bounded Git transport failed: %w", err)
+	}
+	return writer.content, nil
+}
+
+// The explicit transport counterpart of credentialless local sourceGitText.
+func sourceGitNetworkText(ctx context.Context, repositoryRoot string, args ...string) (string, error) {
+	content, err := sourceGitNetworkBytes(ctx, repositoryRoot, maximumSourceConfigBytes, args...)
+	return strings.TrimSpace(string(content)), err
 }
 
 // Reads bounded textual Git output only where whitespace is not authenticated
@@ -334,7 +368,7 @@ func (self *gitSourcePublicationBackend) Push(ctx context.Context, ref sourcePub
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err := sourceGitText(ctx, ref.StagedRoot, "push", "--porcelain", "origin", ref.Commit+":refs/heads/"+ref.Branch)
+	_, err := sourceGitNetworkText(ctx, ref.StagedRoot, "push", "--porcelain", "origin", ref.Commit+":refs/heads/"+ref.Branch)
 	return err
 }
 

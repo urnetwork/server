@@ -1,0 +1,34 @@
+[env]glog not configured from command line. Using default configuration.
+I1026 02:54:17.101082 2303702 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 02:54:17.101471 2303702 env.go:1202] [env]try /home/by/urnetwork/temp/warm-readers-negative-qualification-20261025.15cNHvs8/services/server-fixture-4220696557/site, [settings.yml]
+I1026 02:54:17.101628 2303702 env.go:81] [env]settings loaded
+=== RUN   TestAssemblyQualificationCompleteFixedCampaign
+--- PASS: TestAssemblyQualificationCompleteFixedCampaign (1.46s)
+=== RUN   TestAssemblyQualificationRejectsFailedTerminal
+--- PASS: TestAssemblyQualificationRejectsFailedTerminal (0.35s)
+=== RUN   TestAssemblyQualificationRejectsChangedJobIdentity
+--- PASS: TestAssemblyQualificationRejectsChangedJobIdentity (0.35s)
+=== RUN   TestAssemblyQualificationRejectsRedirectedPosition
+--- PASS: TestAssemblyQualificationRejectsRedirectedPosition (0.34s)
+=== RUN   TestAssemblyQualificationRejectsTypedWorkerFailure
+--- PASS: TestAssemblyQualificationRejectsTypedWorkerFailure (0.36s)
+=== RUN   TestAssemblyQualificationRejectsOutputOverwrite
+--- PASS: TestAssemblyQualificationRejectsOutputOverwrite (0.41s)
+=== RUN   TestAssemblyQualificationRejectsPartialOrOverBudgetTerminal
+--- PASS: TestAssemblyQualificationRejectsPartialOrOverBudgetTerminal (0.69s)
+=== RUN   TestAssemblyQualificationRejectsInvalidWorkerCompletion
+--- PASS: TestAssemblyQualificationRejectsInvalidWorkerCompletion (1.04s)
+=== RUN   TestAssemblyQualificationRejectsChangedSharedPolicy
+--- PASS: TestAssemblyQualificationRejectsChangedSharedPolicy (0.37s)
+=== RUN   TestAssemblyQualificationRejectsMissingReplicate
+--- PASS: TestAssemblyQualificationRejectsMissingReplicate (0.35s)
+=== RUN   TestAssemblyQualificationRejectsChangedRequestHash
+--- PASS: TestAssemblyQualificationRejectsChangedRequestHash (0.35s)
+=== RUN   TestAssemblyQualificationRejectsAliasedCampaignRoot
+--- PASS: TestAssemblyQualificationRejectsAliasedCampaignRoot (0.34s)
+=== RUN   TestAssemblyQualificationRejectsReorderedPositions
+--- PASS: TestAssemblyQualificationRejectsReorderedPositions (0.34s)
+=== RUN   TestAssemblyQualificationRejectsChangedPlanRelease
+--- PASS: TestAssemblyQualificationRejectsChangedPlanRelease (0.39s)
+PASS
+ok  	github.com/urnetwork/server/connect/sim-latency	8.431s

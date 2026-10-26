@@ -1,0 +1,136 @@
+// Deterministic semantic-response tests; no host address, socket or DNS query.
+package main
+
+import (
+	"encoding/binary"
+	"net"
+	"runtime"
+	"testing"
+	"time"
+)
+
+// Constructs the probe's ordinary owned-server response as a positive control.
+func syntheticNonceReply(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	if runtime.Version() != "go1.27.3" {
+		t.Fatal("competition DNS qualification requires actual Go 1.27.3")
+	}
+	query := question("synthetic-proof.invalid.")
+	response, ok := answer(query, query)
+	if !ok {
+		t.Fatal("synthetic owned answer could not be constructed")
+	}
+	return query, response
+}
+
+// The original compressed answer remains accepted.
+func TestNonceAnswerAcceptsCompressedResponse(t *testing.T) {
+	_, response := syntheticNonceReply(t)
+	if !nonceAnswerReceived(response, "synthetic-proof.invalid.") {
+		t.Fatal("owned compressed answer was misclassified as denied")
+	}
+}
+
+// Expanding a compression pointer is semantically neutral. The old byte-wise
+// comparison rejects this received answer, falsely claiming a denied result.
+func TestNonceAnswerAcceptsUncompressedEquivalent(t *testing.T) {
+	query, compressed := syntheticNonceReply(t)
+	response := append([]byte(nil), compressed[:len(query)]...)
+	response = append(response, query[12:len(query)-4]...)
+	response = append(response, compressed[len(query)+2:]...)
+	if !nonceAnswerReceived(response, "synthetic-proof.invalid.") {
+		t.Fatal("re-encoded owned answer was misclassified as denied")
+	}
+}
+
+// DNS caches and proxies may change a TTL without changing the nonce's address.
+func TestNonceAnswerAcceptsChangedTtl(t *testing.T) {
+	query, response := syntheticNonceReply(t)
+	binary.BigEndian.PutUint32(response[len(query)+6:], 300)
+	if !nonceAnswerReceived(response, "synthetic-proof.invalid.") {
+		t.Fatal("changed TTL hid the received owned answer")
+	}
+}
+
+// DNS names are case-insensitive even when proxies change their wire spelling.
+func TestNonceAnswerAcceptsEquivalentQuestionCase(t *testing.T) {
+	_, response := syntheticNonceReply(t)
+	if !nonceAnswerReceived(response, "SYNTHETIC-PROOF.invalid.") {
+		t.Fatal("equivalent DNS name case hid the received owned answer")
+	}
+}
+
+// An unrelated nonce, transaction, address, question type, query, or truncated
+// packet is not the authenticated answer for this probe operation.
+func TestNonceAnswerRejectsUnrelatedOrMalformedResponse(t *testing.T) {
+	query, valid := syntheticNonceReply(t)
+	for _, scenario := range []string{"transaction", "address", "question_type", "not_response", "compression_cycle", "truncated", "wrong_nonce"} {
+		response := append([]byte(nil), valid...)
+		name := "synthetic-proof.invalid."
+		switch scenario {
+		case "transaction":
+			response[0] ^= 1
+		case "address":
+			response[len(response)-1] = 8
+		case "question_type":
+			binary.BigEndian.PutUint16(response[len(query)-4:], 28)
+		case "not_response":
+			response[2] &^= 0x80
+		case "compression_cycle":
+			response[len(query)+1] = byte(len(query))
+		case "truncated":
+			response = response[:len(response)-1]
+		case "wrong_nonce":
+			name = "different-synthetic-proof.invalid."
+		}
+		if nonceAnswerReceived(response, name) {
+			t.Fatalf("unrelated or malformed %s response accepted", scenario)
+		}
+	}
+}
+
+// Both transports record reception before returning a response for any writer;
+// unrelated questions never count as this owned nonce's traffic.
+func TestObservedAnswerCountsReceivedNonceForBothTransports(t *testing.T) {
+	query, _ := syntheticNonceReply(t)
+	for _, transport := range []string{"udp", "tcp"} {
+		var observations []string
+		record := func(value string) { observations = append(observations, value) }
+		if _, ok := observedAnswer(query, query, transport, record); !ok || len(observations) != 1 || observations[0] != transport {
+			t.Fatalf("%s reception was not recorded before response handoff", transport)
+		}
+		if _, ok := observedAnswer(question("unrelated-synthetic.invalid."), query, transport, record); ok || len(observations) != 1 {
+			t.Fatalf("%s counted an unrelated question", transport)
+		}
+	}
+}
+
+// The real framed handler must record a received nonce even when the client
+// closes before reading its reply. Pipe handoff/close/join force that ordering.
+func TestServeTcpRecordsQueryWhenResponseWriteFails(t *testing.T) {
+	query, _ := syntheticNonceReply(t)
+	client, server := net.Pipe()
+	var observations []string
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		serveTcp(server, query, time.Minute, func(transport string) { observations = append(observations, transport) })
+	}()
+	defer func() { _ = client.Close(); <-joined }()
+	if err := client.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var prefix [2]byte
+	binary.BigEndian.PutUint16(prefix[:], uint16(len(query)))
+	frame := append(prefix[:], query...)
+	if _, err := client.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-joined
+	if len(observations) != 1 || observations[0] != "tcp" {
+		t.Fatal("failed response write concealed a received nonce query")
+	}
+}

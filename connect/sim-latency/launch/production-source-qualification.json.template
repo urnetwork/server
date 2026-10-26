@@ -1,0 +1,13 @@
+{
+  "sandbox": {
+    "state_directory": "/var/lib/urnetwork/competition-production-20261028/reviewed-builds"
+  },
+  "host": {
+    "command": "${QUALIFIED_HOST_SELF_CHECK_COMMAND}",
+    "command_sha256": "${QUALIFIED_HOST_SELF_CHECK_SHA256}",
+    "active_config": "/etc/urnetwork/competition-host.json"
+  },
+  "model_key_file": "",
+  "snow_provider_file": "/var/lib/urnetwork/competition-review/snow-provider.json",
+  "snow_provider_sha256": "${QUALIFIED_SNOW_PROVIDER_SETTINGS_SHA256}"
+}

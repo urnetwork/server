@@ -183,7 +183,7 @@ func TestContractStageLatencyBandEdges(t *testing.T) {
 	}
 }
 
-// One stage rising alone is a query or plan problem, not pool saturation.
+// Concentration identifies the application stage, not a query or pool cause.
 func TestContractStageLatencyNamesConcentratedStage(t *testing.T) {
 	fixture := newContractStageFixture(contractStageNow)
 	fixture.stages = map[string]float64{"companion_origin": 0.3 * 10000, "relationship": 0.02 * 10000, "other": 0.008 * 10000}
@@ -191,7 +191,7 @@ func TestContractStageLatencyNamesConcentratedStage(t *testing.T) {
 	fixture.scalars["pgbouncer_waiting"] = 0
 	alert := requireAlertClass(t, runContractStageFixture(t, contractStageNow, fixture.json(t), nil), "contract-stage-latency")
 	if alert.Severity != SeverityWarn || !strings.Contains(alert.Markdown(), "concentrated_stage=companion_origin") ||
-		!strings.Contains(alert.Mechanism, "query or plan problem in that stage, not pool saturation") {
+		!strings.Contains(alert.Mechanism, "Stage totals alone do not identify a query, pool, host or network cause.") {
 		t.Fatalf("concentrated stage diagnosis lost:\n%s", alert.Markdown())
 	}
 	if strings.Contains(alert.Mechanism, "Every database stage of CreateContract slowed together") {

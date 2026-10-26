@@ -1286,8 +1286,8 @@
     {
       "id": 40,
       "type": "timeseries",
-      "title": "hosted registrations refused and invalid performance profiles / s",
-      "description": "Hosted derived-client registrations refused because the owner's concurrent registration bound was full, and stored initial performance profiles that connect refuses, read back in auto by this service. The API dashboard shows the auth-client refusals.",
+      "title": "hosted registrations and contract creations refused, and invalid performance profiles / s",
+      "description": "Hosted derived-client registrations and contract creations refused because the owner's concurrent registration or contract creation bound was full, and stored initial performance profiles that connect refuses, read back in auto by this service. A refused creation is asked again on the device's own retry schedule. The API dashboard shows the auth-client refusals.",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -1326,6 +1326,11 @@
           "refId": "B",
           "expr": "sum by (source) (rate(urnetwork_proxy_invalid_performance_profiles_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "invalid profile {{source}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum (rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "contract creation refused"
         }
       ]
     }

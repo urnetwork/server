@@ -1,0 +1,121 @@
+diff --git a/connect/sim-latency/source_epoch.go b/connect/sim-latency/source_epoch.go
+index 89d3376..d027cdc 100644
+--- a/connect/sim-latency/source_epoch.go
++++ b/connect/sim-latency/source_epoch.go
+@@ -150,9 +150,12 @@ type sourceManifest struct {
+ }
+ 
+ type evaluatorSourceLock struct {
+-	Schema              int               `json:"schema"`
+-	DevelopmentSnapshot bool              `json:"development_snapshot"`
+-	Repositories        map[string]string `json:"repositories"`
++	Schema              int  `json:"schema"`
++	DevelopmentSnapshot bool `json:"development_snapshot"`
++	// Only a newly qualified trusted image may opt into repository-wide
++	// candidates. Omission preserves every historical server-only identity.
++	CandidatePathBase string            `json:"candidate_path_base,omitempty"`
++	Repositories      map[string]string `json:"repositories"`
+ }
+ 
+ type sourceRecord struct {
+@@ -449,6 +452,9 @@ func loadEvaluatorSourceLockForMode(path string, staging bool) (*evaluatorSource
+ 	if lock.DevelopmentSnapshot {
+ 		return nil, errors.New("development snapshot cannot be used for an epoch-bound evaluation")
+ 	}
++	if lock.CandidatePathBase != "" && lock.CandidatePathBase != "mono_root_v1" {
++		return nil, errors.New("evaluator source lock candidate path base is unsupported")
++	}
+ 	repositoryNames := sourceRepositoryNamesForMode(staging)
+ 	if len(lock.Repositories) != len(repositoryNames) {
+ 		return nil, errors.New("evaluator source lock must contain the complete repository set")
+@@ -505,7 +511,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
+ 		if head == expectedCommit {
+ 			continue
+ 		}
+-		if repository != "server" {
++		if repository != "server" && sourceLock.CandidatePathBase != "mono_root_v1" {
+ 			return fmt.Errorf("evaluator repository %s head does not match its authenticated source lock", repository)
+ 		}
+ 		parents, parentErr := gitOutput(repositoryRoot, "rev-list", "--parents", "-n", "1", "HEAD")
+@@ -514,7 +520,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
+ 		}
+ 		parentFields := strings.Fields(parents)
+ 		if len(parentFields) != 2 || parentFields[1] != expectedCommit {
+-			return errors.New("candidate server commit is not exactly one commit above its configured epoch base")
++			return fmt.Errorf("candidate %s commit is not exactly one commit above its configured epoch base", repository)
+ 		}
+ 	}
+ 	return nil
+diff --git a/connect/sim-latency/source_epoch_mono_test.go b/connect/sim-latency/source_epoch_mono_test.go
+new file mode 100644
+index 0000000..cf4f56d
+--- /dev/null
++++ b/connect/sim-latency/source_epoch_mono_test.go
+@@ -0,0 +1,67 @@
++// Broad source identities require an explicit newly qualified instrument flag;
++// old immutable image locks keep their original server-only candidate boundary.
++package main
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// Every repository is either the exact frozen base or one direct candidate
++// commit above that base, with clean worktrees throughout the full graph.
++func TestEvaluatorMonoSourceLockAcceptsDirectCandidateInEveryRepository(t *testing.T) {
++	root := t.TempDir()
++	commits := map[string]string{}
++	for _, repository := range sourceRepositoryNames() {
++		commits[repository] = sourceTestRepository(t, root, repository)
++	}
++	manifest := sourceTestManifest(commits)
++	lock := evaluatorSourceLock{Schema: 1, CandidatePathBase: "mono_root_v1", Repositories: commits}
++	content, err := json.Marshal(lock)
++	if err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(t.TempDir(), "source-lock.json")
++	if err := os.WriteFile(path, content, 0600); err != nil {
++		t.Fatal(err)
++	}
++	for _, repository := range sourceRepositoryNames() {
++		repositoryRoot := filepath.Join(root, repository)
++		if err := os.WriteFile(filepath.Join(repositoryRoot, "source.txt"), []byte("candidate\n"), 0600); err != nil {
++			t.Fatal(err)
++		}
++		sourceTestGit(t, repositoryRoot, "add", "source.txt")
++		sourceTestGit(t, repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "candidate")
++		if err := verifySourceEpoch(manifest, 0, root, path); err != nil {
++			t.Fatalf("explicit broad candidate refused: %s %v", repository, err)
++		}
++	}
++	dependency := filepath.Join(root, "connect")
++	if err := os.WriteFile(filepath.Join(dependency, "source.txt"), []byte("second candidate\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	sourceTestGit(t, dependency, "add", "source.txt")
++	sourceTestGit(t, dependency, "commit", "--quiet", "--no-gpg-sign", "-m", "unbound second candidate")
++	if err := verifySourceEpoch(manifest, 0, root, path); err == nil || !strings.Contains(err.Error(), "exactly one commit") {
++		t.Fatalf("two commits above frozen dependency accepted: %v", err)
++	}
++}
++
++// Unknown flags cannot create permissive candidate semantics by accident.
++func TestEvaluatorSourceLockRejectsUnknownCandidatePathBase(t *testing.T) {
++	lock := evaluatorSourceLock{Schema: 1, CandidatePathBase: "unknown_mode", Repositories: sourceTestCommits(strings.Repeat("a", 40))}
++	content, err := json.Marshal(lock)
++	if err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(t.TempDir(), "source-lock.json")
++	if err := os.WriteFile(path, content, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := loadEvaluatorSourceLock(path); err == nil || !strings.Contains(err.Error(), "candidate path base") {
++		t.Fatalf("unknown candidate semantics accepted: %v", err)
++	}
++}

@@ -1,6 +1,59 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 15:31 UTC
+## Current preparation pointer — October 26
+
+User-confirmed operator inputs are now resolved: maintenance is cleared, broad
+ten-repository editable scope is approved outside the protected instrument and
+repository metadata, and the dedicated review key is provisioned privately.
+The latest required honesty/code reviewer is **GPT-5.4 mini at xhigh**, under
+new prospective policy `elected_winner_gpt54mini_xhigh_v1`; Sol 6.1 low test
+ownership is unchanged. Model-access HTTP 200 is not provider qualification.
+The [template](competition-production.yml.template) records this scope/provider
+but remains disabled and unqualified. Older journal hold/model statements below
+describe their observation time, not these current user-confirmed inputs.
+
+Use [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md) and the actual live process,
+not the older journal entries below. All three original corrected-release
+R9/R9 pairs passed and their complete archives are verified and pushed through
+`f27606218`. Cohort 3 ended at **06:31:05 UTC** in **10,160 seconds**, with all
+gates and cleanup, no significance/takeover, and a 3.4358% worse no-op mean.
+No scoring is active at this observation. The user approved the
+[named deadline amendment](CALIBRATION-AMENDMENT-2026-10-26.md): reduce all
+three original pairs, freeze the margin, pass one fresh minimal-C2 bridge, then
+require correct reference ordering on all three independent seeds. Original
+positions 4–5 remain unstarted. This reduces confidence without changing R9,
+gates, significance, integrity or original per-job deadlines. The corrected
+amended analyzer passed three 14-test runs and actual native reduction at
+15:01:22 UTC: 54 measurements, six replay/cleanup receipts, 99.525% bootstrap
+placeability. The [prospective practical margin is frozen at 26.9%](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
+before any C2 bridge or independent result. The minimal C2 image build started
+15:03:34 UTC; image, bridge and held-out qualification are still pending.
+The snapshot reference passed its separate directional pilot, but
+was not statistically significant; independent held-out ordering remains open.
+No pilot measurements enter the amended A/A sample. A real Mini inference
+request failed with `credit_balance_exhausted`; genuine review qualification
+remains blocked on provider funding, despite model-metadata access.
+
+The active `config/main/competition.yml` is still staging. The separate
+[production template](competition-production.yml.template) records six weekly
+epochs, $20 admission, an unbounded FIFO, R9, a three-hour evaluation bound,
+the proposed corrected source/image and the adopted automated elected-winner
+review flow. It is **not deployable or accepted configuration**: unresolved
+tokens must be filled from authenticated qualification/approval records,
+including the final calibrated margin, host receipt, exact runtime commands,
+economic-policy identities, retention bounds and public editable-code scope.
+Both enable flags remain false. Do not activate it during maintenance or treat
+its proposed scale as already qualified. No main configuration was changed.
+
+Bootstrap must separately bind the fixed public opening
+`2026-10-28T00:00:00Z` after live readiness succeeds; it must not open early.
+The production ledger, credentials and runtime manifests must remain distinct
+from staging. Source-test/review qualification still needs the dedicated key.
+
+## Earlier preparation pointer — October 25, 15:31 UTC
+
+The following dated section is historical; its live-position statements are
+superseded by the current pointer and acceptance index above.
 
 The authoritative acceptance index is [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md).
 The [current-state.json](current-state.json) handoff binds the current process;

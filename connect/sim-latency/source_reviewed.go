@@ -43,6 +43,8 @@ type reviewedSourceProposal struct {
 	StagedRoots          map[string]string          `json:"staged_roots"`
 	PatchPath            string                     `json:"patch_path"`
 	PatchSha256          string                     `json:"patch_sha256"`
+	CandidatePathBase    string                     `json:"candidate_path_base,omitempty"`
+	WinnerReviewPolicy   string                     `json:"winner_review_policy,omitempty"`
 	Significance         *sourceSignificance        `json:"significance"`
 	RawScore             float64                    `json:"raw_score"`
 	EvaluatedImageDigest string                     `json:"evaluated_image_digest"`
@@ -84,6 +86,11 @@ func validateReviewedSourceBuildForMode(receipt reviewedSourceBuildReceipt, revi
 	return controller.ValidateCompetitionReviewedSourceBuildReceipt(receipt, reviewId, patchDigest, lockDigest, staging)
 }
 
+// The prospective policy is authenticated by the source API, never by a model.
+func validateReviewedSourceBuildForPolicy(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool, policy string) error {
+	return controller.ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, reviewId, patchDigest, lockDigest, staging, policy)
+}
+
 // Selects only a completed, applicable proposal at the frozen deadline. Exact
 // raw score, admission time, and job id retain the original sealed ranking.
 func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *model.CompetitionSourceActivation, deadline time.Time) *reviewedSourceProposal {
@@ -100,14 +107,12 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 			continue
 		}
 		lockDigest, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
-		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuildForMode(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging) != nil {
+		if err != nil || lockDigest != proposal.SourceLockSha256 || (current.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy && proposal.WinnerReviewPolicy != current.WinnerReviewPolicy) || validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging, proposal.WinnerReviewPolicy) != nil {
 			continue
 		}
-		applicable := proposal.Commits["server"] != current.Commits["server"]
+		applicable := false
 		for repository, commit := range current.Commits {
-			if repository != "server" && proposal.Commits[repository] != commit {
-				applicable = false
-			}
+			applicable = applicable || proposal.Commits[repository] != commit
 		}
 		if applicable {
 			eligible = append(eligible, proposal)
@@ -223,6 +228,10 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if patchErr != nil || patch.Sha256 != approved.Review.Request.PatchSha256 {
 		fatalf("approved source patch is not canonical or allowed")
 	}
+	repositoryPatches, patchErr := controller.SplitCompetitionRepositoryPatch(string(approved.Patch), approved.PatchPolicy)
+	if patchErr != nil {
+		fatalf("approved repository patch routing failed")
+	}
 	stateDirectory, err := filepath.Abs(optString(opts, "--state-dir", ""))
 	if err != nil || optString(opts, "--state-dir", "") == "" {
 		fatalf("source stage requires --state-dir")
@@ -250,11 +259,11 @@ func runStageReviewedSource(opts docopt.Opts) {
 		fatalf("source patch: %s", err)
 	}
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
-		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, EvaluatedImageDigest: approved.EvaluatedImageDigest}
+		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, CandidatePathBase: approved.PatchPolicy.PathBase, EvaluatedImageDigest: approved.EvaluatedImageDigest, WinnerReviewPolicy: approved.WinnerReviewPolicy}
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
-		if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
+		if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 			fatalf("source clone: %s", err)
 		}
 		if err := os.Chmod(stagedRoot, 0o700); err != nil {
@@ -268,7 +277,16 @@ func runStageReviewedSource(opts docopt.Opts) {
 			if err := verifyFrozenSourceGraphForMode(ctx, stagedRoot, current.Commits[repository], current.Staging); err != nil {
 				fatalf("reviewed measured dependency graph: %s", err)
 			}
-			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", patchPath); err != nil {
+		}
+		if repositoryPatch, changed := repositoryPatches[repository]; changed {
+			if err := validateSourcePatchBase(ctx, stagedRoot, current.Commits[repository], repository, patch, approved.PatchPolicy); err != nil {
+				fatalf("source patch pinned base: %s", err)
+			}
+			routedPath := filepath.Join(root, repository+".patch")
+			if err := writePrivateReviewFile(routedPath, repositoryPatch); err != nil {
+				fatalf("private repository patch: %s", err)
+			}
+			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", routedPath); err != nil {
 				fatalf("source patch apply: %s", err)
 			}
 			proposal.Commits[repository], err = commitReviewedSource(ctx, stagedRoot, reviewId, approved.Review.CreatedAt)
@@ -276,7 +294,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 				fatalf("source commit identity: %s", err)
 			}
 			backend := &gitSourcePublicationBackend{patchPolicy: approved.PatchPolicy}
-			if err := backend.Verify(ctx, sourcePublicationRef{Repository: "server", Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
+			if err := backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
 				fatalf("exact approved source tree: %s", err)
 			}
 		}
@@ -306,7 +324,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(output, &proposal.BuildReceipt, "isolated build receipt"); err != nil {
 		fatalf("source build receipt: %s", err)
 	}
-	if err := validateReviewedSourceBuildForMode(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256, current.Staging); err != nil {
+	if err := validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256, current.Staging, proposal.WinnerReviewPolicy); err != nil {
 		fatalf("source build readiness: %s", err)
 	}
 	// The trusted local completion time prevents an adapter from backdating a

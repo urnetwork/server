@@ -108,7 +108,30 @@ type SnReconcileEvidence struct {
 	TxHash        string `json:"tx_hash,omitempty"`
 }
 
-var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
+// A5, A10: a stuck row without sweeps has replan evidence when a later row of
+// its network holds a sweep that closed before the stuck row was created and at
+// or before the later row's early bound. A later row holds such a sweep exactly
+// when its earliest contract close does, so that close and the bound are read
+// once per later row (`later_close`), whatever the number of stuck rows of its
+// network, and each stuck row compares its own times with them. Reading every
+// later row's sweeps again for each stuck row took hours where a network holds
+// millions of sweeps.
+var snReconcileStuckSql = `WITH stuck AS MATERIALIZED (
+	SELECT p.* FROM account_payment p
+	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
+		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
+		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
+		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
+), later_rows AS MATERIALIZED (
+	SELECT DISTINCT later.payment_id,later.payment_plan_id,later.network_id,later.create_time FROM stuck p
+	JOIN account_payment later ON later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+	WHERE NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
+), later_close AS MATERIALIZED (
+	SELECT later.network_id,later.create_time,later_bound.bound,
+		(SELECT MIN(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=later.payment_id) AS earliest_close
+	FROM later_rows later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
+)
+	SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
 	p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,p.bonus_payout_nano_cents,p.attribution_review_required,
 	p.create_time,p.canceled,p.cancel_time,p.circle_idempotency_key,p.payment_record,p.tx_hash,p.token_type,p.token_amount,
 	p.payment_time,p.payment_receipt,pinned.wallet_address,payout.wallet_id,payout.wallet_address,payout.blockchain,
@@ -117,21 +140,16 @@ var snReconcileStuckSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,p.
 	EXISTS (SELECT 1 FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `)
 	OR EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id),
 	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
-		SELECT 1 FROM account_payment later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
-		JOIN transfer_escrow_sweep s ON s.payment_id=later.payment_id JOIN transfer_contract c ON c.contract_id=s.contract_id
-		WHERE later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND c.close_time<p.create_time AND c.close_time<=later_bound.bound) END,
+		SELECT 1 FROM later_close later WHERE later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+		AND later.earliest_close<p.create_time AND later.earliest_close<=later.bound) END,
 	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
 		SELECT 1 FROM account_payment later WHERE later.network_id=p.network_id
 		AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND later.create_time<=$1) END
-	FROM account_payment p
+	FROM stuck p
 	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
 	LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
 	LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
 	LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
-	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
-		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
-		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
-		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
 	ORDER BY p.create_time,p.payment_id`
 
 // RC-1 and RC-2 rows, oldest first. A request journaled under the key, valid or

@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!.dockerignore
+!source/
+!source/**
+!source-lock.json
+!sim-latency.yml
+!canonical.patch
+source/*/.git/FETCH_HEAD
+source/*/.git/logs/**

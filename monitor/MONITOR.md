@@ -336,6 +336,32 @@ type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
 type SignalExecutionHandler func(ctx context.Context, signal Signal, execution SignalExecution) error
 ```
 
+### Optional scheduler invocation evidence
+
+Optional scheduler invocation evidence is a monitor utility, not an implemented
+health probe. `-invocation-witness-output` opts a future continuous CLI launch
+into a new private 0600 sidecar under a private directory, using validated
+same-process startup identity and the selected key/number/cadence digest. A
+settings-witness identity already present at startup is reused. Disabled default
+performs no witness I/O or discovery. One record is at most 4096 bytes; each
+launch permits at most 512 MiB and 1,000,000 records. The first write, bound,
+identity-association or close error disables only the witness and emits one fixed
+safe diagnostic; it must not cancel the monitor, skip a Run/handler, change a
+source error/panic/cadence, retry, rotate or truncate. Regular-file writes have no
+wall-clock or fsync-durability guarantee.
+
+`dispatch_begin` is the post-admission wrapper's pre-call boundary, not proof the
+callee or Check body entered. A matching `run_return` proves only that exact
+Signal.Run returned; returned-nil is not healthy, target/source completeness,
+child/backend completion, or scheduler due/enablement evidence. Empty and
+held-only results also receive invocation records; gate state is not persisted.
+A canceled parent's nil return is explicitly nonaffirmative. Missing, torn,
+unpaired or refused records leave coverage UNKNOWN, never stalled. Process/run
+and selected-key binding is not a full custody attestation or proof all171
+registered keys were selected, enabled, due or contacted. Native and effective
+configured cadence fields are policy context; elapsed dispatch time includes
+witness overhead. Preserve standing-drain exemption and post-handler waits.
+
 The current CLI supplies a `SignalExecutionHandler` to `RunExecutionLoop`,
 which schedules exactly like `RunLoopWithOptions`. A `SignalExecution` carries
 the gated alerts an `AlertHandler` receives, the alerts the cadence gate still
@@ -470,10 +496,10 @@ Historical schema 1 contains `schema`, `observed_at`, integer `collectors`,
 Schema 1 is aggregate-only; it cannot identify deficient collectors.
 
 Schema 2 uses `collector_scopes` with fixed public service keys
-alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web and
+alt/api/app/connect/gossip/grafana/mcp/mmm/proxy/taskworker/web and
 `scope_projection_complete`; this is identity completeness, not healthy
 coverage. Unsupported or duplicate services leave the scope map incomplete.
-The sorted vector has at most ten rows. Each row retains `service_key`,
+The sorted vector has at most eleven rows. Each row retains `service_key`,
 `collector_count`, enabled/start state, `last_success_at`, previous/latest query
 start/completion clocks, `fresh`, `consecutive_two`, `coverage_state`, and
 `last_failure_present`. Duplicate keys have one ambiguous counted row with null

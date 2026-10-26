@@ -1,0 +1,12 @@
+start_utc=2026-10-26T14:59:20Z
+[env]glog not configured from command line. Using default configuration.
+I1026 14:59:20.522957  488599 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 14:59:20.523367  488599 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 14:59:20.523516  488599 env.go:81] [env]settings loaded
+=== RUN   TestHeldOutThreeAAssemblyCommand
+    held_out_three_a_assembly_draft_test.go:163: assembled exactly original positions 01/02/03; manifest=/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/analysis-inputs-three-a-v1.json sha256=abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94; no replay, margin or acceptance performed
+--- PASS: TestHeldOutThreeAAssemblyCommand (0.16s)
+PASS
+abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/analysis-inputs-three-a-v1.json
+400 root:root
+end_utc=2026-10-26T14:59:21Z

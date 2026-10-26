@@ -9,6 +9,7 @@ umask 077
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly BUILD_TIMEOUT_SECONDS=600
+readonly SOURCE_APPLICATION_TIMEOUT_SECONDS=70
 
 base_image=""
 patch_path=""
@@ -24,6 +25,64 @@ original_args=("$@")
 infrastructure_failure() {
     printf 'evaluator infrastructure failure: %s\n' "$*" >&2
     exit 2
+}
+
+# The caller is already trusted; authenticate the fixed helper before executing
+# it so a writable helper cannot grant itself release authority after launch.
+submission_builder_identity() {
+    local current="$SCRIPT_DIR/submission-builder-identity.sh" owner permissions
+    [[ -f "$current" && -x "$current" && ! -L "$current" ]] || return 1
+    while :; do
+        [[ ! -L "$current" ]] || return 1
+        owner="$(stat -c %u "$current")" || return 1
+        permissions="$(stat -c %a "$current")" || return 1
+        [[ "$owner" == 0 && "$permissions" =~ ^[0-7]{3,4}$ ]] || return 1
+        (( (8#$permissions & 8#022) == 0 )) || return 1
+        [[ "$current" != / ]] || break
+        current="$(dirname "$current")"
+        [[ -d "$current" ]] || return 1
+    done
+    "$SCRIPT_DIR/submission-builder-identity.sh"
+}
+
+# Cache and fresh-image readbacks use identical release/source identity gates.
+validate_submission_labels() {
+    jq -e --arg base_sha "$base_sha" --arg candidate_sha "$candidate_sha" \
+        --arg patch_sha256 "$patch_sha256" --arg policy_sha256 "$policy_sha256" \
+        --arg builder_sha256 "$builder_sha256" --arg image_key "$image_key" \
+        --arg patch_validator_sha256 "$patch_validator_sha256" \
+        --arg candidate_commits_sha256 "$candidate_commits_sha256" \
+        --arg original_source_identity_sha256 "$original_source_identity_sha256" \
+        '."com.urnetwork.competition.image-kind" == "submission" and
+         ."com.urnetwork.competition.base-sha" == $base_sha and
+         ."org.opencontainers.image.revision" == $candidate_sha and
+         ."com.urnetwork.competition.patch-sha256" == $patch_sha256 and
+         ."com.urnetwork.competition.policy-sha256" == $policy_sha256 and
+         ."com.urnetwork.competition.builder-sha256" == $builder_sha256 and
+         ."com.urnetwork.competition.patch-validator-sha256" == $patch_validator_sha256 and
+         ."com.urnetwork.competition.candidate-commits-sha256" == $candidate_commits_sha256 and
+         ."com.urnetwork.competition.source-identity-sha256" == $original_source_identity_sha256 and
+         ."com.urnetwork.competition.image-key" == $image_key' <<<"$1" >/dev/null
+}
+
+# The runtime document must bind every repository, not just the server VCS head.
+validate_submission_runtime_identity() {
+    jq -e --arg base_sha "$base_sha" --arg candidate_sha "$candidate_sha" \
+        --arg patch_sha256 "$patch_sha256" --arg policy_sha256 "$policy_sha256" \
+        --arg builder_sha256 "$builder_sha256" --arg image_key "$image_key" \
+        --arg patch_validator_sha256 "$patch_validator_sha256" \
+        --arg candidate_commits_sha256 "$candidate_commits_sha256" \
+        --arg original_source_identity_sha256 "$original_source_identity_sha256" \
+        --argjson candidate_commits "$candidate_commits_json" \
+        '.schema == 1 and .image_kind == "submission" and
+         .base_sha == $base_sha and .build_sha == $candidate_sha and
+         .patch_sha256 == $patch_sha256 and .policy_sha256 == $policy_sha256 and
+         .builder_sha256 == $builder_sha256 and .image_key == $image_key and
+         .patch_validator_sha256 == $patch_validator_sha256 and
+         .candidate_commits_sha256 == $candidate_commits_sha256 and
+         .original_source_identity_sha256 == $original_source_identity_sha256 and
+         .candidate_commits == $candidate_commits and
+         (.simulator_sha256 | test("^[0-9a-f]{64}$")) and (.paths | type == "array")' <<<"$1" >/dev/null
 }
 
 usage() {
@@ -71,7 +130,7 @@ if [ "$allow_local_base" != true ]; then
         exit 1
     }
 fi
-for command in awk git jq sha256sum mktemp realpath sudo taskset timeout; do
+for command in awk git jq sha256sum mktemp realpath sudo stat taskset timeout; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 sudo -n docker info >/dev/null
@@ -130,7 +189,15 @@ source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Lab
 
 patch_sha256="$(sha256sum "$patch_path" | awk '{print $1}')"
 policy_sha256="$(sha256sum "$policy_path" | awk '{print $1}')"
-builder_sha256="$(sha256sum "$SCRIPT_DIR/Dockerfile.submission" | awk '{print $1}')"
+builder_identity="$(submission_builder_identity)" || infrastructure_failure "trusted builder release identity is unavailable"
+builder_sha256="$(jq -er '.builder_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$builder_identity")"
+patch_validator_sha256="$(jq -er '.patch_validator_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$builder_identity")"
+trusted_validator="$SCRIPT_DIR/competitionpatch"
+patch_path_base="$(jq -er '.path_base // ""' "$policy_path")"
+case "$patch_path_base" in
+    ''|mono_root_v1) ;;
+    *) infrastructure_failure "unsupported frozen patch path base" ;;
+esac
 build_context="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-submission.XXXXXXXX")"
 cleanup() {
     if [ -n "${build_context:-}" ] && [ -d "$build_context" ]; then
@@ -142,6 +209,8 @@ trap cleanup EXIT INT TERM
 
 install -m 0400 "$patch_path" "$build_context/canonical.patch"
 install -m 0400 "$policy_path" "$build_context/policy.json"
+install -m 0555 "$trusted_validator" "$build_context/competitionpatch"
+printf '%s\n' "$builder_identity" > "$build_context/builder-identity.json"
 
 # Authenticate the freshly materialized checkout independently of the
 # preparer. The checkout comes from the base image, never from the runner's
@@ -152,6 +221,8 @@ source_identity="$source_root/.evaluation-source.json"
     printf 'evaluation source identity is missing\n' >&2
     exit 1
 }
+install -m 0400 "$source_identity" "$build_context/original-source.json"
+original_source_identity_sha256="$(sha256sum "$build_context/original-source.json" | awk '{print $1}')"
 jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
     --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
@@ -169,6 +240,7 @@ jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
         printf 'evaluation source identity does not match the base image\n' >&2
         exit 1
     }
+if [[ ${patch_path_base:-} != mono_root_v1 ]]; then
 for repository in "${REPOSITORIES[@]}"; do
     repository_root="$source_root/$repository"
     [ -d "$repository_root/.git" ] && [ ! -L "$repository_root" ] || {
@@ -197,9 +269,47 @@ protected_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD
     infrastructure_failure "could not read the trusted sim-latency source tree"
 [[ "$protected_simulator_tree" =~ ^[0-9a-f]{40}$ ]] ||
     infrastructure_failure "trusted sim-latency source tree is missing"
+fi
 
-# Apply and commit only inside the temporary candidate checkout. The same
-# deterministic commit is independently reconstructed by Dockerfile.submission.
+# Broad mode uses the installed validator to route/apply every repository. Its
+# exact original identity and expected map are independently replayed by Docker.
+if [[ ${patch_path_base:-} == mono_root_v1 ]]; then
+    base_source_lock="$source_root/.evaluation-source-lock.json"
+    [[ -f "$base_source_lock" && ! -L "$base_source_lock" ]] ||
+        infrastructure_failure "broad candidate image source-lock evidence is absent"
+    [[ "$(sha256sum "$base_source_lock" | awk '{print $1}')" == "$source_lock_sha256" ]] ||
+        infrastructure_failure "broad candidate image source-lock evidence changed"
+    jq -e --slurpfile original "$build_context/original-source.json" \
+        '.candidate_path_base == "mono_root_v1" and
+         $original[0].candidate_path_base == .candidate_path_base and
+         .repositories == $original[0].repositories' "$base_source_lock" >/dev/null ||
+        infrastructure_failure "base evaluator image does not support broad candidate source"
+    if timeout --signal=TERM --kill-after=5s "$SOURCE_APPLICATION_TIMEOUT_SECONDS" "$trusted_validator" \
+        --base-sha "$base_sha" \
+        --patch "$build_context/canonical.patch" --expected-patch-sha256 "$patch_sha256" \
+        --policy "$build_context/policy.json" --expected-policy-sha256 "$policy_sha256" \
+        --apply-source-root "$source_root" \
+        --source-identity "$build_context/original-source.json" \
+        --expected-source-identity-sha256 "$original_source_identity_sha256" \
+        > "$build_context/source-application.json"; then
+        :
+    else
+        application_status=$?
+        [[ "$application_status" == 1 ]] || infrastructure_failure "trusted multi-repository source application failed"
+        exit 1
+    fi
+    jq -e --arg base_sha "$base_sha" --arg patch_sha256 "$patch_sha256" \
+        --arg policy_sha256 "$policy_sha256" --argjson repositories "$repository_names_json" \
+        '.schema == 1 and .base_sha == $base_sha and .patch_sha256 == $patch_sha256 and
+         .policy_sha256 == $policy_sha256 and
+         ((.candidate_commits | keys) == ($repositories | sort)) and
+         (.candidate_commits | all(.[]; type == "string" and test("^[0-9a-f]{40}$")))' \
+        "$build_context/source-application.json" >/dev/null ||
+        infrastructure_failure "multi-repository source receipt is invalid"
+    candidate_sha="$(jq -er '.candidate_commits.server' "$build_context/source-application.json")"
+else
+# Historical server-relative application retains its exact commit and failure
+# classification. The Docker validator independently reconstructs the same tree.
 git -C "$source_root/server" apply --check --whitespace=error-all "$build_context/canonical.patch"
 git -C "$source_root/server" apply --whitespace=error-all "$build_context/canonical.patch"
 if git -C "$source_root/server" diff --quiet -- connect/sim-latency; then
@@ -243,9 +353,18 @@ candidate_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD
     printf 'submission modified the protected sim-latency source tree\n' >&2
     exit 1
 }
+fi
 chmod 0600 "$source_identity"
-jq -S --arg candidate_sha "$candidate_sha" --arg patch_sha256 "$patch_sha256" \
-    '.repositories.server = $candidate_sha |
+if [[ "$patch_path_base" == mono_root_v1 ]]; then
+    candidate_commits_json="$(jq -cS '.candidate_commits' "$build_context/source-application.json")"
+else
+    candidate_commits_json="$(jq -cS --arg candidate_sha "$candidate_sha" '.repositories + {server:$candidate_sha}' "$source_identity")"
+fi
+jq -nS --argjson commits "$candidate_commits_json" '$commits' > "$build_context/candidate-commits.json"
+candidate_commits_sha256="$(sha256sum "$build_context/candidate-commits.json" | awk '{print $1}')"
+chmod 0400 "$build_context/candidate-commits.json"
+jq -S --argjson candidate_commits "$candidate_commits_json" --arg patch_sha256 "$patch_sha256" \
+    '.repositories = $candidate_commits |
      .candidate_patch_sha256 = $patch_sha256' \
     "$source_identity" > "$source_identity.new"
 mv -f -- "$source_identity.new" "$source_identity"
@@ -263,21 +382,7 @@ fi
 if sudo -n docker image inspect "$image_tag" >/dev/null 2>&1; then
     image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
     cached_identity="$(sudo -n docker image inspect "$image_tag" | jq -er '.[0].Config.Labels')"
-    jq -e \
-        --arg base_sha "$base_sha" \
-        --arg candidate_sha "$candidate_sha" \
-        --arg patch_sha256 "$patch_sha256" \
-        --arg policy_sha256 "$policy_sha256" \
-        --arg builder_sha256 "$builder_sha256" \
-        --arg image_key "$image_key" \
-        '."com.urnetwork.competition.image-kind" == "submission" and
-         ."com.urnetwork.competition.base-sha" == $base_sha and
-         ."org.opencontainers.image.revision" == $candidate_sha and
-         ."com.urnetwork.competition.patch-sha256" == $patch_sha256 and
-         ."com.urnetwork.competition.policy-sha256" == $policy_sha256 and
-         ."com.urnetwork.competition.builder-sha256" == $builder_sha256 and
-         ."com.urnetwork.competition.image-key" == $image_key' \
-        <<<"$cached_identity" >/dev/null || {
+    validate_submission_labels "$cached_identity" || {
             printf 'existing candidate tag does not match authenticated build inputs: %s\n' "$image_tag" >&2
             exit 1
         }
@@ -300,6 +405,9 @@ DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS
     --build-arg "PATCH_SHA256=$patch_sha256" \
     --build-arg "POLICY_SHA256=$policy_sha256" \
     --build-arg "BUILDER_SHA256=$builder_sha256" \
+    --build-arg "PATCH_VALIDATOR_SHA256=$patch_validator_sha256" \
+    --build-arg "CANDIDATE_COMMITS_SHA256=$candidate_commits_sha256" \
+    --build-arg "ORIGINAL_SOURCE_IDENTITY_SHA256=$original_source_identity_sha256" \
     --build-arg "SUBMISSION_IDENTITY=$image_key" \
     --tag "$image_tag" \
     "$build_context" >&2
@@ -313,21 +421,7 @@ actual_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")
     exit 1
 }
 actual_labels="$(sudo -n docker image inspect "$image_id" | jq -er '.[0].Config.Labels')"
-jq -e \
-    --arg base_sha "$base_sha" \
-    --arg candidate_sha "$candidate_sha" \
-    --arg patch_sha256 "$patch_sha256" \
-    --arg policy_sha256 "$policy_sha256" \
-    --arg builder_sha256 "$builder_sha256" \
-    --arg image_key "$image_key" \
-    '."com.urnetwork.competition.image-kind" == "submission" and
-     ."com.urnetwork.competition.base-sha" == $base_sha and
-     ."org.opencontainers.image.revision" == $candidate_sha and
-     ."com.urnetwork.competition.patch-sha256" == $patch_sha256 and
-     ."com.urnetwork.competition.policy-sha256" == $policy_sha256 and
-     ."com.urnetwork.competition.builder-sha256" == $builder_sha256 and
-     ."com.urnetwork.competition.image-key" == $image_key' \
-    <<<"$actual_labels" >/dev/null || {
+validate_submission_labels "$actual_labels" || {
         printf 'candidate image labels do not authenticate build inputs\n' >&2
         exit 1
     }
@@ -337,19 +431,7 @@ runtime_identity="$(sudo -n docker run --rm \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
     "$image_id" identity)"
-jq -e \
-    --arg base_sha "$base_sha" \
-    --arg candidate_sha "$candidate_sha" \
-    --arg patch_sha256 "$patch_sha256" \
-    --arg policy_sha256 "$policy_sha256" \
-    --arg builder_sha256 "$builder_sha256" \
-    --arg image_key "$image_key" \
-    '.schema == 1 and .image_kind == "submission" and
-     .base_sha == $base_sha and .build_sha == $candidate_sha and
-     .patch_sha256 == $patch_sha256 and .policy_sha256 == $policy_sha256 and
-     .builder_sha256 == $builder_sha256 and .image_key == $image_key and
-     (.simulator_sha256 | test("^[0-9a-f]{64}$")) and (.paths | type == "array")' \
-    <<<"$runtime_identity" >/dev/null || {
+validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2
         exit 1
     }
@@ -363,9 +445,16 @@ jq -n \
     --arg patch_sha256 "$patch_sha256" \
     --arg policy_sha256 "$policy_sha256" \
     --arg builder_sha256 "$builder_sha256" \
+    --arg patch_validator_sha256 "$patch_validator_sha256" \
+    --arg candidate_commits_sha256 "$candidate_commits_sha256" \
+    --arg original_source_identity_sha256 "$original_source_identity_sha256" \
+    --argjson candidate_commits "$candidate_commits_json" \
     --arg image_key "$image_key" \
     '{schema: 1, image: $image, image_id: $image_id,
       base_image_id: $base_image_id, base_sha: $base_sha,
       candidate_sha: $candidate_sha, patch_sha256: $patch_sha256,
       policy_sha256: $policy_sha256, builder_sha256: $builder_sha256,
-      image_key: $image_key}'
+      image_key: $image_key,patch_validator_sha256:$patch_validator_sha256,
+      candidate_commits_sha256:$candidate_commits_sha256,
+      original_source_identity_sha256:$original_source_identity_sha256,
+      candidate_commits:$candidate_commits}'

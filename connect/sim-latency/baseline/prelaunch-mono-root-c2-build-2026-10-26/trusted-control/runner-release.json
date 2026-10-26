@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-c2-inactive-cohort-runner-release",
+  "installed_at": "2026-10-26 15:54:16 UTC",
+  "path": "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/cohort-runner.sh",
+  "sha256": "ea40be40e0382e464836f7d6befde349f96f8d4b743324df3be53eac1e970883",
+  "uid": 0,
+  "gid": 0,
+  "mode": "0555",
+  "builder_sha256": "22f60ee6f0ec26f229fb0c1cfe8df3a0c900a4326cc41a8226e7db9a82e7f63c",
+  "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+  "evaluator_sha256": "a6908739dc854bc9d81c8136361d8012eb0c479dedf4460a04b9987607bff6f5",
+  "control_revision": "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
+  "source_revision": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "image": "sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24",
+  "old_release_modified": false,
+  "executed": false,
+  "qualified": false,
+  "activated": false
+}

@@ -1,0 +1,11 @@
+manager_wrapper_pid=2358606
+actual_euid=0
+launch_utc=2026-10-26T03:41:44Z
+start_utc=2026-10-26T03:41:45Z
+deadline_utc=2026-10-26T06:41:45Z
+request_sha256=b33d0e3589494a2d75dc2aac3f52bf6aecf165d181ab283fafc9f838705d6283
+execution_budget_seconds=10800
+kill_grace_seconds=45
+terminal_cleanup_verified
+evaluator_exit=0 duration_seconds=10160
+end_utc=2026-10-26T06:31:05Z

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "kind": "prelaunch-heldout-tool-unit-qualification",
+  "official_baseline": false,
+  "source_commit": "30f340a2779699225ab40ec7f3c5d978525276d2",
+  "go_version": "go1.27.3",
+  "race": true,
+  "test_binary_sha256": "daccb6c357e751546e1942d0885a7781f61e4fd4a90d24af0d3822991dc5b7c4",
+  "selected_tests_per_pass": 62,
+  "consecutive_passes": 3,
+  "skips": 0,
+  "durations_seconds": [572, 573, 572],
+  "source_receipt_sha256": "cccce0d455930036f3fdf48c14bc1ef19c8a182547d030c81cd81cc5170d2e3f",
+  "dependency_receipt_sha256": "61400f9de3952af9a95b3a22938e61cae91a29d0c8d0448ff40e500dc14ef650",
+  "successful_launcher_log_sha256": "4eb65098e19d1d69c16944de88bfeeb876b2b8caa6edf01775be69b738a7b3a3",
+  "retained_initial_setup_failure_log_sha256": "c3d8079f46623e766205af05a986d50fde9692479615b73ca945308e9921f42a",
+  "amended_tool_qualified": false,
+  "held_out_measurements_executed": false,
+  "production_activated": false
+}

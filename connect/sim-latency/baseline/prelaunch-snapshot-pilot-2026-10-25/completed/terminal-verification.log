@@ -1,0 +1,38 @@
+manifest=worker-result.json verified_bindings=7
+manifest=evidence-manifest.json verified_bindings=465
+manifest=evaluation.complete.json verified_bindings=5
+{
+  "baseline_replicates": 9,
+  "candidate_replicates": 9,
+  "baseline_median": 18903.596299999994,
+  "candidate_median": 18285.9455,
+  "baseline_mean": 19053.392688888882,
+  "candidate_mean": 18206.07183888888,
+  "significance": {
+    "method": "one-sided-welch-t",
+    "alpha": 0.05,
+    "replicate_count": 9,
+    "baseline_mean_raw_score": 19053.392688888882,
+    "candidate_mean_raw_score": 18206.07183888888,
+    "baseline_sample_variance": 6846747.676340862,
+    "candidate_sample_variance": 5582011.432540893,
+    "observed_improvement_percent": 4.447086478693745,
+    "takeover_margin_percent": 16.1,
+    "minimum_significant_improvement_percent": 10.7748568913746,
+    "required_improvement_percent": 16.1,
+    "one_sided_p_value": 0.2406995133659337,
+    "welch_t": 0.721033200479702,
+    "welch_degrees_of_freedom": 15.836020169337889,
+    "statistically_significant": false,
+    "next_epoch_minimum_improvement_percent": 11.375755621154637,
+    "recommended_next_epoch_takeover_margin_percent": 16.1,
+    "recommended_next_epoch_takeover_margin_supported": true
+  }
+}
+d78b410a4d441bd62381f23204eca556fcbfa0e8a919bcd43f875a51c0a104a4  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/manager-terminal.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/evaluator.stdout
+8aa697c0a306e5ac19e1b991d44a1e71658adcee1e2c446753ca9dd1e82f45e1  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/evaluator.stderr
+1671eb7e2a6ddfb6f7d6bc0e37845f6f831eac4fa139e4b03930fb4abfc83dc7  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/worker-result.json
+2bf2ae28c42a7bcd3cac9b12840b9d3247adf8dc669c259d07e7678241ab1031  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/evidence-manifest.json
+85ca92a9ad95ebf4ca778b9f6115e441bd8b3613dc842e43a3e4dc71a2aa3343  /home/by/urnetwork/temp/snapshot-pilot-inputs-20261025.swJ5SqAa/artifacts/evaluation.complete.json
+PASS terminal_bindings_gates_cleanup

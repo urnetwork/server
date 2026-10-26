@@ -1,0 +1,261 @@
+// Owned DNS nonce probe. Preparation only: build and execute between scoring jobs.
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/signal"
+	"runtime"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+// All execution limits and addresses are explicit invocation settings.
+type probeSettings struct {
+	mode      string
+	address   string
+	name      string
+	transport string
+	expect    string
+	timeout   time.Duration
+	ioTimeout time.Duration
+}
+
+// Constructs only the exact synthetic A question used by this proof.
+func question(name string) []byte {
+	b := make([]byte, 12)
+	binary.BigEndian.PutUint16(b, 0x6243)
+	binary.BigEndian.PutUint16(b[2:], 0x0100)
+	binary.BigEndian.PutUint16(b[4:], 1)
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if len(label) == 0 || len(label) > 63 {
+			panic("invalid nonce label")
+		}
+		b = append(b, byte(len(label)))
+		b = append(b, label...)
+	}
+	return append(b, 0, 0, 1, 0, 1)
+}
+
+// Preserves the exact question, returns one documentation-only address.
+func answer(query, expected []byte) ([]byte, bool) {
+	if len(query) != len(expected) || len(query) < 12 || string(query[12:]) != string(expected[12:]) || binary.BigEndian.Uint16(query[4:]) != 1 {
+		return nil, false
+	}
+	b := append([]byte(nil), query...)
+	binary.BigEndian.PutUint16(b[2:], 0x8180)
+	binary.BigEndian.PutUint16(b[6:], 1)
+	binary.BigEndian.PutUint16(b[8:], 0)
+	binary.BigEndian.PutUint16(b[10:], 0)
+	return append(b, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7), true
+}
+
+// Observe every validated owned query before attempting a response. A failed
+// response write must not conceal that a supposedly denied request arrived.
+func observedAnswer(query, expected []byte, transport string, record func(string)) ([]byte, bool) {
+	response, ok := answer(query, expected)
+	if ok {
+		record(transport)
+	}
+	return response, ok
+}
+
+// Serves one bounded TCP query; the owning listener joins every handler.
+func serveTcp(conn net.Conn, expected []byte, timeout time.Duration, record func(string)) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	var header [2]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
+		return
+	}
+	n := binary.BigEndian.Uint16(header[:])
+	if n > 4096 {
+		return
+	}
+	query := make([]byte, int(n))
+	if _, err := io.ReadFull(conn, query); err != nil {
+		return
+	}
+	response, ok := observedAnswer(query, expected, "tcp", record)
+	if !ok {
+		return
+	}
+	binary.BigEndian.PutUint16(header[:], uint16(len(response)))
+	response = append(header[:], response...)
+	_, _ = io.Copy(conn, strings.NewReader(string(response)))
+}
+
+// Owns both listeners and joins all work on signal/deadline; no host DNS changes.
+func runServer(settings probeSettings) error {
+	udpAddress, err := net.ResolveUDPAddr("udp4", settings.address)
+	if err != nil {
+		return err
+	}
+	udp, err := net.ListenUDP("udp4", udpAddress)
+	if err != nil {
+		return err
+	}
+	defer udp.Close()
+	tcp, err := net.Listen("tcp4", settings.address)
+	if err != nil {
+		return err
+	}
+	defer tcp.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	ctx, timeoutCancel := context.WithTimeout(ctx, settings.timeout)
+	defer timeoutCancel()
+	expected := question(settings.name)
+	var outputLock sync.Mutex
+	counts := map[string]int{}
+	record := func(transport string) {
+		outputLock.Lock()
+		defer outputLock.Unlock()
+		counts[transport]++
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "owned_query_received", "transport": transport, "count": counts[transport]})
+	}
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, peer, err := udp.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			response, ok := observedAnswer(buf[:n], expected, "udp", record)
+			if ok {
+				_, _ = udp.WriteToUDP(response, peer)
+			}
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for {
+			conn, err := tcp.Accept()
+			if err != nil {
+				return
+			}
+			serveTcp(conn, expected, settings.ioTimeout, record)
+		}
+	}()
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "ready", "address": settings.address, "name": settings.name})
+	<-ctx.Done()
+	_ = udp.Close()
+	_ = tcp.Close()
+	workers.Wait()
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "joined", "counts": counts})
+}
+
+// DNS proxies may re-encode compression, flags and TTLs without changing the
+// answer. Byte inequality is not proof that the owned nonce answer was denied.
+func nonceAnswerReceived(response []byte, name string) bool {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(response)
+	if err != nil || header.ID != 0x6243 || !header.Response || header.Truncated || header.OpCode != 0 || header.RCode != dnsmessage.RCodeSuccess {
+		return false
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 || questions[0].Type != dnsmessage.TypeA || questions[0].Class != dnsmessage.ClassINET || !strings.EqualFold(questions[0].Name.String(), name) {
+		return false
+	}
+	answers, err := parser.AllAnswers()
+	if err != nil {
+		return false
+	}
+	if _, err := parser.AllAuthorities(); err != nil {
+		return false
+	}
+	if _, err := parser.AllAdditionals(); err != nil {
+		return false
+	}
+	for _, resource := range answers {
+		address, ok := resource.Body.(*dnsmessage.AResource)
+		if ok && resource.Header.Type == dnsmessage.TypeA && resource.Header.Class == dnsmessage.ClassINET && strings.EqualFold(resource.Header.Name.String(), name) && address.A == [4]byte{192, 0, 2, 7} {
+			return true
+		}
+	}
+	return false
+}
+
+// Checks one raw query over the selected transport; failures retain their cause.
+func runQuery(settings probeSettings) error {
+	conn, err := net.DialTimeout(settings.transport, settings.address, settings.ioTimeout)
+	var response []byte
+	if err == nil {
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(settings.ioTimeout))
+		query := question(settings.name)
+		if settings.transport == "tcp" {
+			var prefix [2]byte
+			binary.BigEndian.PutUint16(prefix[:], uint16(len(query)))
+			query = append(prefix[:], query...)
+		}
+		_, err = io.Copy(conn, strings.NewReader(string(query)))
+		if err == nil && settings.transport == "tcp" {
+			var prefix [2]byte
+			_, err = io.ReadFull(conn, prefix[:])
+			if err == nil {
+				response = make([]byte, int(binary.BigEndian.Uint16(prefix[:])))
+				_, err = io.ReadFull(conn, response)
+			}
+		} else if err == nil {
+			response = make([]byte, 4096)
+			var n int
+			n, err = conn.Read(response)
+			response = response[:n]
+		}
+	}
+	allowed := err == nil && nonceAnswerReceived(response, settings.name)
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "query_result", "transport": settings.transport, "expected": settings.expect, "nonce_answer_received": allowed, "error": fmt.Sprint(err), "response_bytes": len(response)})
+	if (settings.expect == "allow") != allowed {
+		return fmt.Errorf("unexpected nonce answer result")
+	}
+	return nil
+}
+
+// Only generated .invalid names and explicit transports/expectations are accepted.
+func main() {
+	if runtime.Version() != "go1.27.3" {
+		panic("competition DNS probe requires actual Go 1.27.3")
+	}
+	settings := probeSettings{}
+	flag.StringVar(&settings.mode, "mode", "", "server or query")
+	flag.StringVar(&settings.address, "address", "", "owned server or embedded resolver address")
+	flag.StringVar(&settings.name, "name", "", "generated nonce under .invalid")
+	flag.StringVar(&settings.transport, "transport", "udp", "udp or tcp")
+	flag.StringVar(&settings.expect, "expect", "", "allow or deny for query")
+	flag.DurationVar(&settings.timeout, "timeout", 0, "explicit bounded lifetime")
+	flag.DurationVar(&settings.ioTimeout, "io-timeout", 0, "explicit per-operation deadline")
+	flag.Parse()
+	if settings.timeout <= 0 || settings.ioTimeout <= 0 || settings.ioTimeout > settings.timeout || !strings.HasSuffix(settings.name, ".invalid.") || len(settings.name) > 253 || settings.address == "" || (settings.transport != "udp" && settings.transport != "tcp") {
+		panic("invalid settings")
+	}
+	var err error
+	switch settings.mode {
+	case "server":
+		err = runServer(settings)
+	case "query":
+		if settings.expect != "allow" && settings.expect != "deny" {
+			panic("invalid expectation")
+		}
+		err = runQuery(settings)
+	default:
+		panic("invalid mode")
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

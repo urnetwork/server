@@ -11,6 +11,15 @@ import (
 	"github.com/urnetwork/server/controller"
 )
 
+// SN-RECONCILE.md §2 (RC-18): the dry run writes nothing. Its process is read
+// only, so PostgreSQL refuses any write on the census path. --send writes the
+// revivals.
+func snReconcileRequireReadOnly(send bool) {
+	if !send {
+		server.RequirePgReadOnly()
+	}
+}
+
 // Prints the report, as text or as one JSON document, and returns the exit
 // code. A refusal prints its report too, then its error, and exits non-zero.
 func runSnReconcile(stdout io.Writer, stderr io.Writer, send bool, expect string, asJson bool, reconcile func(bool, string) (*controller.SnReconcileReport, error)) int {

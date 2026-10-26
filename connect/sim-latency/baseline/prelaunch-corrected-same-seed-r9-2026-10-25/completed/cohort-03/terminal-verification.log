@@ -1,0 +1,39 @@
+manifest=worker-result.json verified_bindings=7
+manifest=evidence-manifest.json verified_bindings=465
+manifest=evaluation.complete.json verified_bindings=5
+{
+  "baseline_replicates": 9,
+  "candidate_replicates": 9,
+  "baseline_median": 17417.496099999993,
+  "candidate_median": 18055.805199999988,
+  "baseline_mean": 17180.233138888878,
+  "candidate_mean": 17770.513827777773,
+  "significance": {
+    "method": "one-sided-welch-t",
+    "alpha": 0.05,
+    "replicate_count": 9,
+    "baseline_mean_raw_score": 17180.233138888878,
+    "candidate_mean_raw_score": 17770.513827777773,
+    "baseline_sample_variance": 2872787.5030349414,
+    "candidate_sample_variance": 2004803.603560338,
+    "observed_improvement_percent": -3.4358130306901726,
+    "takeover_margin_percent": 16.1,
+    "minimum_significant_improvement_percent": 7.4956956291349925,
+    "required_improvement_percent": 16.1,
+    "one_sided_p_value": 0.782614396486979,
+    "welch_t": -0.8018204621663585,
+    "welch_degrees_of_freedom": 15.508874109666428,
+    "statistically_significant": false,
+    "next_epoch_minimum_improvement_percent": 6.984528225366181,
+    "recommended_next_epoch_takeover_margin_percent": 16.1,
+    "recommended_next_epoch_takeover_margin_supported": true
+  }
+}
+ddd25375a53ff633bb963d6433b86af60f9a559103a9c1ea65caaea7224e4a46  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/manager-terminal.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/evaluator.stdout
+f6027fe0be379e9bbaae3f5be1eb0e2a4cfdd3530b0fbf7a937a6a5e7ca2dfaa  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/evaluator.stderr
+89633bd3798cc2bbb59757bd318fc2bc27af81bdcaab1c8c22137dbf65b709e4  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/artifacts/worker-result.json
+ee6b957c9fcfcdb5942c05636ba79717a2ca8855bd5545c9c8ba436e01f0e054  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/artifacts/evidence-manifest.json
+437a2d40cb54e5de4d85f6aa772afd34c182a22ef0bb8b54aa95527f1bb8fb8f  /home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/artifacts/evaluation.complete.json
+PASS terminal_bindings_gates_cleanup
+budget_duration_verified=10160

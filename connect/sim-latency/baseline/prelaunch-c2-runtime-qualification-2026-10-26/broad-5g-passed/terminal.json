@@ -1,0 +1,12 @@
+{
+  "cleanup_complete": true,
+  "duration_seconds": 277,
+  "ended_at": "2026-10-26T17:09:02Z",
+  "evaluator_controls_invoked": 0,
+  "exit_code": 0,
+  "kind": "sim-latency-c2-broad-capability-terminal",
+  "production_activated": false,
+  "qualified": true,
+  "schema": 1,
+  "scored": false
+}

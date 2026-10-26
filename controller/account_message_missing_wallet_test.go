@@ -4,7 +4,9 @@
 // sends it. A run that stops after committing slices loses nothing: its held
 // notices are released by the next run or, after the hold timeout, by the
 // delivery task. The planners here commit synthetic slices in real
-// transactions; the payout planner itself is not involved.
+// transactions; the payout planner itself is not involved. Notices go out only
+// while usdc_payout.yml turns wallet requests on (usdc_payout_switch_test.go
+// covers off, the default), so each test here declares them on.
 package controller
 
 import (
@@ -17,6 +19,11 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
+
+// Declares wallet requests on for the rest of the test.
+func missingWalletTestRequestsOn(t testing.TB) {
+	t.Cleanup(server.Config.PushSimpleResource(server.UsdcPayoutPolicyResourceName, []byte("wallet_requests: on\n")))
+}
 
 // A wallet-less network whose admin signs in by email, and its recipient.
 func newMissingWalletTestNetwork(ctx context.Context, name string) (networkId server.Id, userAuth string) {
@@ -74,6 +81,7 @@ func missingWalletTestMinPayout(minPayout model.NanoCents) func() model.NanoCent
 // a guest admin, and none at all when the slice rolls back.
 func TestMissingWalletNoticeIsHeldInTheSliceTransaction(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		missingWalletTestRequestsOn(t)
 		ctx := context.Background()
 		walletLessNetworkId, _ := newMissingWalletTestNetwork(ctx, "synthetic-wallet-less")
 		walletNetworkId, _ := newMissingWalletTestNetwork(ctx, "synthetic-with-wallet")
@@ -130,6 +138,7 @@ func TestMissingWalletNoticeIsHeldInTheSliceTransaction(t *testing.T) {
 // and a planner error after committed slices still releases them.
 func TestSendPaymentsReleasesOneMissingWalletNoticePerRun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		missingWalletTestRequestsOn(t)
 		ctx := context.Background()
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()
@@ -201,6 +210,7 @@ func TestSendPaymentsReleasesOneMissingWalletNoticePerRun(t *testing.T) {
 // later run's release does not send it again.
 func TestMissingWalletNoticeOfAStoppedRunIsReleasedLater(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		missingWalletTestRequestsOn(t)
 		ctx := context.Background()
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()
@@ -265,6 +275,7 @@ func TestMissingWalletNoticeOfAStoppedRunIsReleasedLater(t *testing.T) {
 // its own slices into one notice.
 func TestMissingWalletNoticeOfAStoppedRunJoinsTheNextRun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		missingWalletTestRequestsOn(t)
 		ctx := context.Background()
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()

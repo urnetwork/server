@@ -1,0 +1,49 @@
+// Draft request late-binding core. The caller must separately authenticate the
+// original commitment and the first control's complete same-round provenance.
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+)
+
+// Reconstructs a consuming request from its exact precommitted bytes. Only two
+// deliberately deferred fields can change; callers cannot supply a revised
+// request map. Returned bytes remain private because they contain hidden seeds.
+// Does not open the baseline path or authenticate its underlying artifacts.
+func finalizeHeldOutRequest(original []byte, expectedRequestSha256 string, authenticatedRoundId string, baselinePath string, authenticatedBaselineSha256 string) ([]byte, error) {
+	settings := defaultCalibrationAnalysisSettings()
+	if len(original) == 0 || int64(len(original)) > settings.MaximumArtifactBytes || !validSha256(expectedRequestSha256) || !validSha256(authenticatedBaselineSha256) || authenticatedRoundId == "" || !filepath.IsAbs(baselinePath) || filepath.Clean(baselinePath) != baselinePath {
+		return nil, errors.New("late-binding identities or bounded request missing")
+	}
+	digest := sha256.Sum256(original)
+	if hex.EncodeToString(digest[:]) != expectedRequestSha256 {
+		return nil, errors.New("precommitted request bytes changed")
+	}
+	var request map[string]json.RawMessage
+	if err := decodeStrictJSONBytes(original, &request, "precommitted held-out request"); err != nil {
+		return nil, err
+	}
+	for key, expected := range map[string]string{"round_id": authenticatedRoundId, "round_baseline_path": "", "round_baseline_sha256": ""} {
+		raw, present := request[key]
+		var value string
+		if !present || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil || value != expected {
+			return nil, errors.New("late-binding request round or placeholder mismatch")
+		}
+	}
+	pathJson, err := json.Marshal(baselinePath)
+	if err != nil {
+		return nil, err
+	}
+	digestJson, err := json.Marshal(authenticatedBaselineSha256)
+	if err != nil {
+		return nil, err
+	}
+	request["round_baseline_path"] = pathJson
+	request["round_baseline_sha256"] = digestJson
+	return json.MarshalIndent(request, "", "  ")
+}

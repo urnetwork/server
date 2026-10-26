@@ -343,9 +343,9 @@ type DNSAliasSignalSource interface {
 
 // SettingsGenerationCheck compares the immutable settings already owned by a
 // monitor with the effective settings available now. The implementation keeps
-// the fresh values only for the duration of the comparison: Alerts expose only
-// whether the generation still matches, never resource contents or
-// fingerprints.
+// the fresh values only for the duration of the comparison. Freshness Alerts
+// may expose fixed mismatch categories, never resource contents, map keys,
+// identifiers, endpoint values or credential-derived fingerprints.
 type SettingsGenerationCheck func(ctx context.Context, startup SignalSettings) (current bool, err error)
 
 // SignalSettingsLoader returns one complete effective settings snapshot.

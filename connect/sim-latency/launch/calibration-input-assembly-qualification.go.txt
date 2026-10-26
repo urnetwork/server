@@ -1,0 +1,275 @@
+// Draft qualification: copy beside the assembly helper in an isolated analyzer
+// checkout as a _test.go file. These fixtures qualify assembly, not scoring.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Every case begins with the same complete synthetic discovery layout. The
+// tiny placeholder artifacts deliberately do not claim scorer qualification;
+// the unchanged native analyzer separately authenticates full scoring evidence.
+func newAssemblyQualificationFixture(t *testing.T) (string, map[string]any) {
+	t.Helper()
+	if os.Getenv("SIM_LATENCY_QUALIFY_ASSEMBLY") != "1" {
+		t.Skip("explicit idle-slot assembly qualification only")
+	}
+	if os.Geteuid() != 0 || runtime.Version() != "go1.27.3" {
+		t.Fatal("qualification requires root and actual Go 1.27.3")
+	}
+	root := newCalibrationFileRoot(t)
+	policy := model.CompetitionEvaluationPolicy{Replicates: 9, TakeoverMargin: 0.161, ScoreTimeoutSeconds: 10800}
+	policyContent, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	positions := []map[string]any{}
+	for i := 1; i <= 5; i++ {
+		attempt := filepath.Join(root, fmt.Sprintf("cohort-%02d", i))
+		artifacts := filepath.Join(attempt, "artifacts")
+		if err := os.MkdirAll(artifacts, 0700); err != nil {
+			t.Fatal(err)
+		}
+		jobId, roundId := fmt.Sprintf("synthetic-job-%d", i), fmt.Sprintf("synthetic-round-%d", i)
+		request := map[string]any{
+			"job_id": jobId, "round_id": roundId, "source_epoch": 1,
+			"base_sha": strings.Repeat("a", 40), "evaluator_image_digest": "sha256:" + strings.Repeat("b", 64),
+			"providers_sha256": strings.Repeat("c", 64), "patch_sha256": strings.Repeat("d", 64),
+			"round_seed_hex": strings.Repeat("e", 64), "evaluation_policy": policy,
+		}
+		requestSha := writeCalibrationJSONFixture(t, filepath.Join(artifacts, "worker-request.json"), request)
+		for _, name := range []string{"baseline.json", "score.json", "evidence-manifest.json"} {
+			writeCalibrationJSONFixture(t, filepath.Join(artifacts, name), map[string]any{"synthetic": true})
+		}
+		writeCalibrationJSONFixture(t, filepath.Join(artifacts, "worker-result.json"), map[string]any{
+			"job_id": jobId, "eval_error": nil, "score": map[string]any{"placeable": true},
+			"security": map[string]any{"cleanup_complete": true},
+		})
+		provenanceSha := writeCalibrationJSONFixture(t, filepath.Join(attempt, "fixture-provenance.json"), map[string]any{"synthetic": true})
+		writeCalibrationFileFixture(t, attempt, "manager-terminal.log", []byte("start_utc=2000-01-02T00:00:00Z\nevaluator_exit=0 duration_seconds=6\nend_utc=2000-01-02T00:00:06Z\nterminal_cleanup_verified\n"))
+		for _, role := range []string{"baseline", "candidate"} {
+			for run := 1; run <= 9; run++ {
+				relative := filepath.Join("evidence", "scorer-input", fmt.Sprintf("%s-%02d", role, run))
+				runRoot := filepath.Join(artifacts, relative)
+				if err := os.MkdirAll(runRoot, 0700); err != nil {
+					t.Fatal(err)
+				}
+				stats := RunStats{
+					AccountingReport: "/artifacts/" + relative + "/accounting.json",
+					StatsRoot:        "/artifacts/" + relative + "/samples.json",
+					ResourceReport:   "/artifacts/" + relative + "/resources.json",
+					FinalMarker:      "/artifacts/" + relative + "/complete.json",
+				}
+				writeCalibrationJSONFixture(t, scoreSidecarForCSV(filepath.Join(runRoot, "results.csv")), stats)
+			}
+		}
+		positions = append(positions, map[string]any{
+			"position": i, "root": attempt, "job_id": jobId, "round_id": roundId,
+			"request_sha256": requestSha, "provenance_sha256": provenanceSha,
+		})
+	}
+	plan := map[string]any{
+		"base_sha": strings.Repeat("a", 40), "evaluator_image_digest": "sha256:" + strings.Repeat("b", 64),
+		"evaluation_policy_sha256": fmt.Sprintf("%x", sha256.Sum256(policyContent)), "ordered_cohorts": positions,
+	}
+	return root, plan
+}
+
+// Expected Fatal failures run in a separate process so a rejected fixture does
+// not poison the parent test or get mistaken for the negative test's success.
+func runAssemblyQualification(t *testing.T, root string, plan map[string]any, expectedFailure string) {
+	t.Helper()
+	planSha := writeCalibrationJSONFixture(t, filepath.Join(root, "plan.json"), plan)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestCalibrationAssembleFrozenCampaignHelper$", "-test.count=1", "-test.v")
+	command.Env = append(os.Environ(), "SIM_LATENCY_ASSEMBLE_CAMPAIGN_ROOT="+root, "SIM_LATENCY_ASSEMBLE_PLAN_SHA256="+planSha)
+	output, runErr := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("assembly child did not terminate: %v", ctx.Err())
+	}
+	if expectedFailure != "" {
+		if runErr == nil || !strings.Contains(string(output), expectedFailure) {
+			t.Fatalf("wanted specific assembly rejection %q, got %v: %s", expectedFailure, runErr, output)
+		}
+		return
+	}
+	if runErr != nil || !strings.Contains(string(output), "assembled all 5 frozen cohorts") {
+		t.Fatalf("complete assembly failed: %v: %s", runErr, output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "analysis-inputs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest calibrationFileManifest
+	if err := json.Unmarshal(content, &manifest); err != nil || len(manifest.Cohorts) != 5 {
+		t.Fatalf("assembly did not retain every fixed position: %v", err)
+	}
+	for i, cohort := range manifest.Cohorts {
+		if cohort.JobId != fmt.Sprintf("synthetic-job-%d", i+1) || len(cohort.Inputs.Runs) != 9 || len(cohort.BaselineInputs.Runs) != 9 {
+			t.Fatal("assembly changed order or exact replicate counts")
+		}
+	}
+	info, err := os.Stat(filepath.Join(root, "analysis-inputs.json"))
+	if err != nil || info.Mode().Perm() != 0400 {
+		t.Fatal("assembly output is not private read-only")
+	}
+}
+
+// Complete five-position discovery succeeds; it does not run a scorer.
+func TestAssemblyQualificationCompleteFixedCampaign(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	runAssemblyQualification(t, root, plan, "")
+}
+
+// A nonzero evaluator exit cannot become a successful assembly position.
+func TestAssemblyQualificationRejectsFailedTerminal(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	writeCalibrationFileFixture(t, filepath.Join(root, "cohort-01"), "manager-terminal.log", []byte("evaluator_exit=1 duration_seconds=6\n"))
+	runAssemblyQualification(t, root, plan, "calibration invocation failed or has invalid timing")
+}
+
+// Position identities are pinned before observations, not inferred afterward.
+func TestAssemblyQualificationRejectsChangedJobIdentity(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	plan["ordered_cohorts"].([]map[string]any)[0]["job_id"] = "synthetic-other-job"
+	runAssemblyQualification(t, root, plan, "cohort differs from frozen identity")
+}
+
+// A neighboring private directory cannot replace the declared position root.
+func TestAssemblyQualificationRejectsRedirectedPosition(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	plan["ordered_cohorts"].([]map[string]any)[0]["root"] = filepath.Join(root, "other-synthetic-position")
+	runAssemblyQualification(t, root, plan, "frozen order, root or identity mismatch")
+}
+
+// Worker error presence is checked at eval_error, never a misspelled alias.
+func TestAssemblyQualificationRejectsTypedWorkerFailure(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	writeCalibrationJSONFixture(t, filepath.Join(root, "cohort-01", "artifacts", "worker-result.json"), map[string]any{
+		"job_id": "synthetic-job-1", "eval_error": map[string]any{"kind": "infrastructure", "code": "synthetic_failure"},
+		"score": map[string]any{"placeable": true}, "security": map[string]any{"cleanup_complete": true},
+	})
+	runAssemblyQualification(t, root, plan, "typed worker failure or mismatched job")
+}
+
+// Exclusive output creation must not overwrite an earlier observation.
+func TestAssemblyQualificationRejectsOutputOverwrite(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	path := filepath.Join(root, "analysis-inputs.json")
+	sentinel := []byte("synthetic existing observation\n")
+	writeCalibrationFileFixture(t, root, "analysis-inputs.json", sentinel)
+	runAssemblyQualification(t, root, plan, "file exists")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(sentinel, after) {
+		t.Fatal("refused overwrite changed the earlier observation")
+	}
+}
+
+// Partial completion and successful-but-unbounded execution are both refused.
+func TestAssemblyQualificationRejectsPartialOrOverBudgetTerminal(t *testing.T) {
+	for _, terminal := range []string{
+		"start_utc=2000-01-02T00:00:00Z\nevaluator_exit=0 duration_seconds=6\n",
+		"start_utc=2000-01-02T00:00:00Z\nevaluator_exit=0 duration_seconds=10801\nend_utc=2000-01-02T03:00:01Z\nterminal_cleanup_verified\n",
+	} {
+		root, plan := newAssemblyQualificationFixture(t)
+		writeCalibrationFileFixture(t, filepath.Join(root, "cohort-01"), "manager-terminal.log", []byte(terminal))
+		runAssemblyQualification(t, root, plan, "calibration invocation lacks bounded completion and cleanup")
+	}
+}
+
+// A misspelled error alias, nonplaceable score, or missing cleanup cannot be
+// hidden behind a process exit of zero and superficially complete artifacts.
+func TestAssemblyQualificationRejectsInvalidWorkerCompletion(t *testing.T) {
+	for _, scenario := range []struct {
+		Worker map[string]any
+		Reason string
+	}{
+		{Worker: map[string]any{"job_id": "synthetic-job-1", "evaluation_error": nil, "score": map[string]any{"placeable": true}, "security": map[string]any{"cleanup_complete": true}}, Reason: "typed worker failure or mismatched job"},
+		{Worker: map[string]any{"job_id": "synthetic-job-1", "eval_error": nil, "score": map[string]any{"placeable": false}, "security": map[string]any{"cleanup_complete": true}}, Reason: "nonplaceable completion cannot enter accepted assembly"},
+		{Worker: map[string]any{"job_id": "synthetic-job-1", "eval_error": nil, "score": map[string]any{"placeable": true}, "security": map[string]any{"cleanup_complete": false}}, Reason: "worker cleanup is not complete"},
+	} {
+		root, plan := newAssemblyQualificationFixture(t)
+		writeCalibrationJSONFixture(t, filepath.Join(root, "cohort-01", "artifacts", "worker-result.json"), scenario.Worker)
+		runAssemblyQualification(t, root, plan, scenario.Reason)
+	}
+}
+
+// An authentic changed request still cannot change the shared typed policy.
+func TestAssemblyQualificationRejectsChangedSharedPolicy(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	path := filepath.Join(root, "cohort-02", "artifacts", "worker-request.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(content, &request); err != nil {
+		t.Fatal(err)
+	}
+	request["evaluation_policy"].(map[string]any)["takeover_margin"] = 0.162
+	plan["ordered_cohorts"].([]map[string]any)[1]["request_sha256"] = writeCalibrationJSONFixture(t, path, request)
+	runAssemblyQualification(t, root, plan, "shared source/workload/policy differs")
+}
+
+// Every declared R9 position is mandatory, not the first eight convenient runs.
+func TestAssemblyQualificationRejectsMissingReplicate(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	path := filepath.Join(root, "cohort-01", "artifacts", "evidence", "scorer-input", "candidate-09")
+	if err := os.Remove(scoreSidecarForCSV(filepath.Join(path, "results.csv"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	runAssemblyQualification(t, root, plan, "complete fresh R9 pair required")
+}
+
+// Frozen request bytes are authenticated independently of their JSON identity.
+func TestAssemblyQualificationRejectsChangedRequestHash(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	plan["ordered_cohorts"].([]map[string]any)[0]["request_sha256"] = strings.Repeat("f", 64)
+	runAssemblyQualification(t, root, plan, "cohort differs from frozen identity")
+}
+
+// Paths that resolve into a valid root are still not its canonical identity.
+func TestAssemblyQualificationRejectsAliasedCampaignRoot(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	alias := filepath.Join(newCalibrationFileRoot(t), "synthetic-campaign-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	runAssemblyQualification(t, alias, plan, "campaign root unavailable or redirected")
+}
+
+// Declared positions cannot be sorted afterward to hide reordered inputs.
+func TestAssemblyQualificationRejectsReorderedPositions(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	positions := plan["ordered_cohorts"].([]map[string]any)
+	positions[0], positions[1] = positions[1], positions[0]
+	runAssemblyQualification(t, root, plan, "frozen order, root or identity mismatch")
+}
+
+// Matching cohorts do not authorize replacing the precommitted release header.
+func TestAssemblyQualificationRejectsChangedPlanRelease(t *testing.T) {
+	root, plan := newAssemblyQualificationFixture(t)
+	plan["base_sha"] = strings.Repeat("f", 40)
+	runAssemblyQualification(t, root, plan, "assembled header differs from frozen plan")
+}

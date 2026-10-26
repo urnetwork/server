@@ -13,6 +13,13 @@ import (
 
 // Owns the predeclared analysis policy; tests may select smaller draw counts.
 type calibrationAnalysisSettings struct {
+	Protocol                string
+	ProtocolApprovalSha256  string
+	OriginalPlanSha256      string
+	OriginalBaseSha         string
+	OriginalImageDigest     string
+	OriginalPolicySha256    string
+	OriginalPositions       []calibrationOriginalPosition
 	Cohorts                 int
 	Replicates              int
 	BootstrapDraws          int
@@ -70,6 +77,12 @@ type calibrationAnalysisReport struct {
 	InputManifestSha256    string                         `json:"input_manifest_sha256,omitempty"`
 	EvaluationPolicySha256 string                         `json:"evaluation_policy_sha256,omitempty"`
 	ReplayObservations     []calibrationReplayObservation `json:"replay_observations,omitempty"`
+	Protocol               string                         `json:"protocol,omitempty"`
+	ProtocolApprovalSha256 string                         `json:"protocol_approval_sha256,omitempty"`
+	OriginalPlanSha256     string                         `json:"original_plan_sha256,omitempty"`
+	OriginalPositions      []int                          `json:"original_positions,omitempty"`
+	OriginalBaseSha        string                         `json:"original_base_sha,omitempty"`
+	OriginalImageDigest    string                         `json:"original_evaluator_image_digest,omitempty"`
 }
 
 // Rejects malformed input instead of letting NaN pass comparisons or sorting.
@@ -159,7 +172,8 @@ func analyzeCalibrationCohorts(cohorts []calibrationAnalysisCohort, settings cal
 	report := &calibrationAnalysisReport{
 		Kind: "sim-latency-calibration-analysis", Cohorts: len(cohorts),
 		GatePassRates: map[string]float64{}, MarginTerms: map[string]float64{"preparation_floor": settings.MarginFloor},
-		Reasons: []string{},
+		Reasons:  []string{},
+		Protocol: settings.Protocol,
 	}
 	for i, cohort := range cohorts {
 		if cohort.FailureCode != "" {

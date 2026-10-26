@@ -72,7 +72,7 @@ Usage:
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
-  sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus>
+  sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus> [--calibration-protocol=<name> --calibration-approval=<path> --calibration-approval-sha256=<digest> --calibration-original-plan=<path> --calibration-original-plan-sha256=<digest>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
@@ -88,9 +88,10 @@ Usage:
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
+  sim-latency review-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
-  sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
+  sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
   sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name> [--environment=<env> --competition-id=<id> --season-id=<id>]
@@ -105,11 +106,19 @@ Options:
   --calibration-inputs-sha256=<digest>  Exact SHA-256 of that manifest.
   --calibration-lock=<path>  Existing canonical singleton scoring lock; never created by analysis.
   --calibration-cpuset=<cpus>  Approved management CPU affinity for offline scorer replay.
+  --calibration-protocol=<name>  Explicit separately approved prospective protocol; omission keeps five cohorts.
+  --calibration-approval=<path>  Independently published amendment approval bytes.
+  --calibration-approval-sha256=<digest>  Exact approval publication SHA-256.
+  --calibration-original-plan=<path>  Complete original five-position precommitment plan.
+  --calibration-original-plan-sha256=<digest>  Exact original plan publication SHA-256.
   --qualification-settings=<path> Private deployment settings for exact-image independent qualification.
   --qualification-settings-sha256=<digest> Immutable installed qualification-settings digest.
   --build-settings=<path> Private deployment settings for the isolated source build broker.
   --build-settings-sha256=<digest> Immutable installed build-settings digest.
   --model-key-file=<path> Dedicated OpenAI API key leaf; no main credentials belong in the broker.
+  --review-provider-settings=<path> Immutable public Snow provider settings leaf.
+  --review-provider-settings-sha256=<sha256> Authenticated provider settings digest.
+  --review-state-directory=<path> Private durable member journal directory.
   --opens-at=<time>      Pin the initial automation opening (RFC3339; immutable on recovery).
   --staging             Require an explicitly staging v2 manifest and staging source refs.
   -h --help              Show this screen.
@@ -133,7 +142,7 @@ Options:
   --worker-sha256=<digest> Exact SHA-256 of the trusted worker launcher executable.
   --prepare-command=<path> Absolute trusted runtime propagation and qualification executable.
   --prepare-sha256=<digest> Exact SHA-256 of the trusted preparation executable.
-  --review-command=<path> Qualified isolated Sol 6.1 max review broker executable.
+  --review-command=<path> Qualified isolated GPT-5.4 mini xhigh review broker executable.
   --review-sha256=<digest> Exact SHA-256 of the trusted review broker.
   --reviewer-token-file=<path> Scoped reviewer credential; never passed to the model broker.
   --review-api-url=<url> HTTPS reviewer API origin [default: https://api.bringyour.com].
@@ -149,7 +158,8 @@ Options:
   --metrics-url=<url>     Main Prometheus-compatible Mimir query origin.
   --metrics-token-file=<path>  Private file containing a Mimir query token.
   --openapi=<path>        Competition OpenAPI source file.
-  --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 1099511627776].
+  --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 10000000000000].
+  --preflight-timeout=<d>  Positive bound for the complete launch proof; default 10m.
   --baseline-manifest=<path>  Versioned baseline evidence manifest.
   --preflight=<path>      Passing launch-preflight JSON evidence.
   --staging-evidence=<paths>  Comma-separated Apex staging evidence files.

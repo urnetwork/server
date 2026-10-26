@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -572,9 +573,12 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		failStatus bool
 		staging    bool
 		imageStage bool
+		pathBase   string
 		wantErr    string
 	}{
 		{name: "complete"},
+		{name: "broad-capability", pathBase: "mono_root_v1"},
+		{name: "unknown-capability", pathBase: "synthetic-unknown", wantErr: "source lock is malformed"},
 		{name: "explicit-staging", staging: true, imageStage: true},
 		{name: "production-retired-extra", extra: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "staging-retired-extra", staging: true, imageStage: true, extra: "operator-proxy", wantErr: "source lock is malformed"},
@@ -601,7 +605,7 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		if fixture.change != "" {
 			lockedCommits[fixture.change] = strings.Repeat("d", 40)
 		}
-		lockBytes, err := json.Marshal(evaluatorSourceLock{Schema: 1, Repositories: lockedCommits})
+		lockBytes, err := json.Marshal(evaluatorSourceLock{Schema: 1, CandidatePathBase: fixture.pathBase, Repositories: lockedCommits})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -636,16 +640,24 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 			t.Fatalf("prepare complete source: %v: %s", err, output)
 		}
 		var identity struct {
-			Staging      bool              `json:"staging"`
-			Branch       string            `json:"branch"`
-			BaseImageId  string            `json:"base_image_id"`
-			Repositories map[string]string `json:"repositories"`
+			Staging           bool              `json:"staging"`
+			Branch            string            `json:"branch"`
+			BaseImageId       string            `json:"base_image_id"`
+			CandidatePathBase string            `json:"candidate_path_base"`
+			Repositories      map[string]string `json:"repositories"`
 		}
 		if err := json.Unmarshal(output, &identity); err != nil {
 			t.Fatal(err)
 		}
-		if identity.Staging != fixture.staging || identity.Branch != sourceBranch(fixture.staging) || identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, expectedCommits) {
+		if identity.Staging != fixture.staging || identity.Branch != sourceBranch(fixture.staging) || identity.BaseImageId != imageId || identity.CandidatePathBase != fixture.pathBase || !maps.Equal(identity.Repositories, expectedCommits) {
 			t.Fatalf("prepared source identity = %+v, want image %s and repositories %v", identity, imageId, expectedCommits)
+		}
+		retainedLock, err := os.ReadFile(filepath.Join(destination, ".evaluation-source-lock.json"))
+		if err != nil || !bytes.Equal(retainedLock, lockBytes) {
+			t.Fatalf("preparer did not preserve authenticated raw source-lock bytes: %v", err)
+		}
+		if fixture.pathBase == "" && bytes.Contains(output, []byte(`"candidate_path_base"`)) {
+			t.Fatal("legacy identity was silently relabeled with prospective capability")
 		}
 		moduleBytes, err := os.ReadFile(filepath.Join(destination, "connect", nestedModulePath))
 		if err != nil || string(moduleBytes) != nestedModule {

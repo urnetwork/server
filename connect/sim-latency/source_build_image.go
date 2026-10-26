@@ -44,7 +44,7 @@ func sourceBuildImagePlanForDigest(request reviewedSourceBuildRequest, binaryDig
 		return nil, errors.New("source image requires an authenticated binary digest")
 	}
 	commit := request.Proposal.Commits["server"]
-	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, Repositories: request.Proposal.Commits}, "", "  ")
+	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

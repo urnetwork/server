@@ -1,0 +1,12 @@
+go version go1.27.3 linux/amd64
+cfd58c2343fd9732f0b5fc97e84cea1662275718c690575d64079f473a8f149e  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/sql.test
+pass=1 exit=0 seconds=6
+056aaf4dcdac010d0ef8449e37b1f2cce0d6b0f94626d8f16a2b70f15596d7ae  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-1.stdout
+6fdb87bc2bed5aa743bcd97980adeba117f0a6ac2f289784b21ae4173c17b70b  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-1.stderr
+pass=2 exit=0 seconds=6
+6b09eb25a6cf099741a198af2c4e5d59f06042c827a24d6dbb12566a1fc04fae  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-2.stdout
+4fde71d21cc6b35de74f7e0a335778bdce43f675419b9cc6d8829c29e6b274df  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-2.stderr
+pass=3 exit=0 seconds=6
+6fed80c21e91759987b4af96e34b1cbc3ec8c5c9426694ff44763b64cb719e6e  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-3.stdout
+5684b317a6092fc526cf25a7461bf63e3e0a41f3074e277692a5955c115cdf83  /home/by/urnetwork/temp/snow-sql-fixed-20261026.zbvTnwGA/pass-3.stderr
+PASS_SQLSnow3_three

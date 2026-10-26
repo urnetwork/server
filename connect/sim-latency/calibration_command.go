@@ -78,9 +78,24 @@ func runCalibrationAnalysis(opts docopt.Opts) {
 	defer cancel()
 	replaySettings := defaultCalibrationReplaySettings()
 	replaySettings.CpuSet = optString(opts, "--calibration-cpuset", "")
+	settings, err := calibrationSettingsForProtocol(optString(opts, "--calibration-protocol", ""))
+	if err == nil {
+		settings, err = bindCalibrationProtocolPublications(settings, optString(opts, "--calibration-approval", ""), optString(opts, "--calibration-approval-sha256", ""), optString(opts, "--calibration-original-plan", ""), optString(opts, "--calibration-original-plan-sha256", ""))
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "calibration protocol rejected: %v\n", err)
+		os.Exit(1)
+	}
 	report, err := executeCalibrationCommand(ctx,
 		optString(opts, "--calibration-inputs", ""), optString(opts, "--calibration-inputs-sha256", ""),
-		optString(opts, "--calibration-lock", ""), defaultCalibrationAnalysisSettings(), replaySettings, runSourceBuildDocker)
+		optString(opts, "--calibration-lock", ""), settings, replaySettings, runSourceBuildDocker)
+	if err == nil && settings.Protocol != "" {
+		_, err = bindCalibrationProtocolPublications(settings, optString(opts, "--calibration-approval", ""), optString(opts, "--calibration-approval-sha256", ""), optString(opts, "--calibration-original-plan", ""), optString(opts, "--calibration-original-plan-sha256", ""))
+		if err != nil {
+			report.Accepted = false
+			report.Reasons = append(report.Reasons, "protocol_publication_changed_during_analysis")
+		}
+	}
 	content, marshalErr := json.MarshalIndent(report, "", "  ")
 	if marshalErr != nil {
 		err = errors.Join(err, marshalErr)

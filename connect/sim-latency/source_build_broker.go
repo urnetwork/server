@@ -83,7 +83,7 @@ func executeSourceBuildBroker(ctx context.Context, request reviewedSourceBuildRe
 	if err != nil {
 		return nil, err
 	}
-	if err := validateReviewedSourceBuildForMode(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging); err != nil {
+	if err := validateReviewedSourceBuildForPolicy(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging, request.Proposal.WinnerReviewPolicy); err != nil {
 		return nil, err
 	}
 	if receipt.EvaluatorImageDigest != artifacts.ImageId || receipt.SandboxId != owner {

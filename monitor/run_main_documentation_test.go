@@ -482,7 +482,7 @@ func TestReconciliationDocumentationDistinguishesVersionedScopeAuthority(t *test
 		for _, required := range []string{
 			"Schema 1 is aggregate-only; it cannot identify deficient collectors.",
 			"Schema 2 uses `collector_scopes` with fixed public service keys",
-			"alt/api/app/connect/gossip/grafana/mcp/proxy/taskworker/web",
+			"alt/api/app/connect/gossip/grafana/mcp/mmm/proxy/taskworker/web",
 			"`scope_projection_complete`; this is identity completeness, not healthy coverage.",
 			"Unsupported or duplicate services leave the scope map incomplete.",
 			"Null, partial and future timestamps retain their authority qualifiers.",

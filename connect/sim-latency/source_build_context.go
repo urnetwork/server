@@ -98,6 +98,12 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 		!strings.HasPrefix(proposal.EvaluatedImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(proposal.EvaluatedImageDigest, "sha256:")) {
 		return errors.New("source build requires the authenticated reviewed-source protocol")
 	}
+	if proposal.CandidatePathBase != "" && proposal.CandidatePathBase != "mono_root_v1" {
+		return errors.New("source build candidate path base is unsupported")
+	}
+	if proposal.WinnerReviewPolicy != "" && !model.IsCompetitionWinnerReviewPolicy(proposal.WinnerReviewPolicy) {
+		return errors.New("source build review policy is unsupported")
+	}
 	manifest, err := decodeSourceManifest(request.SourceManifest)
 	if err != nil {
 		return err
@@ -142,10 +148,54 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 	return nil
 }
 
-// Make regular committed source readable in the container without making the
-// private host parent public. Symlinks and special files fail closed.
-func sealSourceBuildTree(root string) error {
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+// Seal only tracked regular source. Git's immutable mode selects 0444/0555;
+// incidental filesystem execute bits and executable metadata confer no powers.
+func sealSourceBuildTree(ctx context.Context, root string, commits map[string]string, settings sourceBuildSandboxSettings) error {
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil || canonical != root || !filepath.IsAbs(root) || root == string(filepath.Separator) || settings.OutputBytes <= 0 || settings.Timeout <= 0 {
+		return errors.New("source sealing requires an exact bounded committed tree")
+	}
+	if _, err := model.CompetitionSourceLockDigest(commits); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
+	defer cancel()
+	trackedModes := map[string]os.FileMode{}
+	for _, repository := range sourceRepositoryNames() {
+		repositoryRoot := filepath.Join(root, repository)
+		head, err := sourceGitText(ctx, repositoryRoot, "rev-parse", "HEAD")
+		if err != nil || head != commits[repository] {
+			return errors.New("source sealing repository differs from its approved commit")
+		}
+		entries, err := sourceGitBytes(ctx, repositoryRoot, settings.OutputBytes, "ls-tree", "-r", "-z", "--full-tree", commits[repository])
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 || entries[len(entries)-1] != 0 {
+			return errors.New("source sealing requires a complete tracked Git tree")
+		}
+		for _, entry := range strings.Split(string(entries[:len(entries)-1]), "\x00") {
+			header, relative, found := strings.Cut(entry, "\t")
+			fields := strings.Fields(header)
+			if !found || relative == "" || filepath.ToSlash(filepath.Clean(relative)) != relative || strings.HasPrefix(relative, "/") || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\\\r\n") ||
+				len(fields) != 3 || fields[1] != "blob" || !sourceGitShaPattern.MatchString(fields[2]) || fields[0] != "100644" && fields[0] != "100755" {
+				return errors.New("source build tree contains an unsafe path or non-regular committed entry")
+			}
+			mode := os.FileMode(0o444)
+			if fields[0] == "100755" {
+				mode = 0o555
+			}
+			trackedPath := filepath.Join(repositoryRoot, filepath.FromSlash(relative))
+			if _, duplicate := trackedModes[trackedPath]; duplicate {
+				return errors.New("source build tree repeats a tracked path")
+			}
+			trackedModes[trackedPath] = mode
+		}
+	}
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -159,8 +209,33 @@ func sealSourceBuildTree(root string) error {
 		if !info.Mode().IsRegular() {
 			return errors.New("source build context contains a symlink or special file")
 		}
-		return os.Chmod(path, 0o444|(info.Mode().Perm()&0o111))
-	})
+		mode, tracked := trackedModes[path]
+		if tracked {
+			delete(trackedModes, path)
+			return os.Chmod(path, mode)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) < 3 || !slices.Contains(sourceRepositoryNames(), parts[0]) || parts[1] != ".git" {
+			return errors.New("source build context contains an untracked file")
+		}
+		return os.Chmod(path, 0o444)
+	}); err != nil {
+		return err
+	}
+	if len(trackedModes) != 0 {
+		return errors.New("source build context is missing tracked files")
+	}
+	for _, repository := range sourceRepositoryNames() {
+		status, err := sourceGitText(ctx, filepath.Join(root, repository), "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all")
+		if err != nil || status != "" {
+			return errors.New("sealed source tree is not clean at its approved commit")
+		}
+	}
+	return nil
 }
 
 // Allocate once and retain incomplete attempts for diagnosis. The caller uses a
@@ -197,7 +272,7 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(result.SourceDirectory, "server"), request.Proposal.Commits["server"], request.Proposal.Staging); err != nil {
 		return nil, err
 	}
-	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, Repositories: request.Proposal.Commits}, "", "  ")
+	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +282,7 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 	if err := writePrivateReviewFile(result.LockPath, append(lockBytes, '\n')); err != nil {
 		return nil, err
 	}
-	if err := sealSourceBuildTree(result.SourceDirectory); err != nil {
+	if err := sealSourceBuildTree(ctx, result.SourceDirectory, request.Proposal.Commits, settings); err != nil {
 		return nil, err
 	}
 	return result, nil

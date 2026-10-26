@@ -1,0 +1,211 @@
+// Genuine local Snow uses the same opt-in command and immutable broker, never
+// an OpenAI funding receipt, external provider fallback or main API credential.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// This separate prospective configuration cannot reinterpret a funded Mini
+// authorization or relabel its old image/provider qualification.
+type snowReviewQualificationConfig struct {
+	Schema              int                    `json:"schema"`
+	Kind                string                 `json:"kind"`
+	OutputDirectory     string                 `json:"output_directory"`
+	Broker              reviewQualificationPin `json:"broker"`
+	BrokerConfiguration reviewQualificationPin `json:"broker_configuration"`
+	Image               reviewQualificationPin `json:"image"`
+	UnitQualification   reviewQualificationPin `json:"unit_qualification"`
+	ProviderSettings    reviewQualificationPin `json:"provider_settings"`
+	Authorization       reviewQualificationPin `json:"authorization"`
+}
+
+// A single explicit local attempt is authority to make these model calls only;
+// no assertion about paid funding, external keys or production approval exists.
+type snowReviewQualificationAuthorization struct {
+	Schema                 int       `json:"schema"`
+	Kind                   string    `json:"kind"`
+	Policy                 string    `json:"policy"`
+	ProviderSettingsSha256 string    `json:"provider_settings_sha256"`
+	OutputDirectory        string    `json:"output_directory"`
+	AuthorizedAt           time.Time `json:"authorized_at"`
+	SingleAttempt          bool      `json:"single_qualification_attempt"`
+	NoExternalProviders    bool      `json:"no_external_providers"`
+}
+
+// Reuses the independent exact-binary/unit qualification before any child is
+// started; settings are public root-owned0444, never a key or parent directory.
+func authenticateSnowReviewQualificationInputs(config snowReviewQualificationConfig, settings reviewQualificationSettings) (*reviewQualificationImage, winnerSnowProviderSettings, error) {
+	var provider winnerSnowProviderSettings
+	if config.Schema != 1 || config.Kind != "winner-review-snow-provider-qualification-config" || !filepath.IsAbs(config.OutputDirectory) || filepath.Clean(config.OutputDirectory) != config.OutputDirectory || config.BrokerConfiguration.Path != "/etc/urnetwork/competition-review.json" || config.ProviderSettings.Path != "/var/lib/urnetwork/competition-review/snow-provider.json" {
+		return nil, provider, errors.New("explicit Snow qualification/configuration paths required")
+	}
+	if err := reviewQualificationPrivateRoot(filepath.Dir(config.OutputDirectory)); err != nil {
+		return nil, provider, err
+	}
+	if err := verifySourceSupervisorProgram(config.Broker.Path, config.Broker.Sha256); err != nil {
+		return nil, provider, err
+	}
+	info, err := os.Lstat(config.Broker.Path)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		return nil, provider, errors.New("actual Snow review wrapper must be root owned")
+	}
+	configuration, err := readReviewQualificationPin(config.BrokerConfiguration, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, provider, err
+	}
+	var deployment struct {
+		ImageId                string `json:"image_id"`
+		ProviderSettingsFile   string `json:"provider_settings_file"`
+		ProviderSettingsSha256 string `json:"provider_settings_sha256"`
+	}
+	if err := decodeSnowReviewQualificationProof(configuration, &deployment); err != nil {
+		return nil, provider, err
+	}
+	if deployment.ProviderSettingsFile != config.ProviderSettings.Path || deployment.ProviderSettingsSha256 != config.ProviderSettings.Sha256 {
+		return nil, provider, errors.New("Snow wrapper settings differ from independent qualification pins")
+	}
+	info, err = os.Lstat(config.ProviderSettings.Path)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Sys().(*syscall.Stat_t).Gid != 0 || info.Mode().Perm() != 0444 || info.Sys().(*syscall.Stat_t).Nlink != 1 {
+		return nil, provider, errors.New("Snow provider settings must be a read-only root public leaf")
+	}
+	if _, err := readReviewQualificationPin(config.ProviderSettings, settings.MaximumProviderSettingsBytes, false); err != nil {
+		return nil, provider, err
+	}
+	provider, err = loadWinnerSnowProviderSettings(config.ProviderSettings.Path, config.ProviderSettings.Sha256)
+	if err != nil {
+		return nil, provider, err
+	}
+	imageBytes, err := readReviewQualificationPin(config.Image, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, provider, err
+	}
+	var image reviewQualificationImage
+	if err := decodeStrictJSONBytes(imageBytes, &image, "qualified Snow scratch image"); err != nil {
+		return nil, provider, err
+	}
+	if image.Schema != 1 || image.Kind != "winner-review-snow-scratch-image-qualification" || !image.Accepted || image.ImageId != deployment.ImageId || !validSha256(image.BinarySha256) || !sourceGitShaPattern.MatchString(image.SourceCommit) || image.GoVersion != "go1.27.3" || image.PolicyModel != model.CompetitionSnowWinnerReviewModel || image.ProviderModel != model.CompetitionSnowWinnerReviewModel || len(image.Evidence) == 0 {
+		return nil, provider, errors.New("new Snow image/source qualification missing; historical image cannot be relabeled")
+	}
+	for _, pin := range image.Evidence {
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return nil, provider, err
+		}
+	}
+	if err := authenticateReviewQualificationUnit(config.UnitQualification, settings); err != nil {
+		return nil, provider, err
+	}
+	authorizationBytes, err := readReviewQualificationPin(config.Authorization, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, provider, err
+	}
+	var authorization snowReviewQualificationAuthorization
+	if err := decodeSnowReviewQualificationProof(authorizationBytes, &authorization); err != nil {
+		return nil, provider, err
+	}
+	if authorization.Schema != 1 || authorization.Kind != "winner-review-snow-provider-qualification-authorization" || authorization.Policy != model.CompetitionSnowWinnerReviewPolicy || authorization.ProviderSettingsSha256 != config.ProviderSettings.Sha256 || authorization.OutputDirectory != config.OutputDirectory || !authorization.SingleAttempt || !authorization.NoExternalProviders || authorization.AuthorizedAt.IsZero() || authorization.AuthorizedAt.After(time.Now().UTC()) {
+		return nil, provider, errors.New("one explicit local three-model qualification authorization required")
+	}
+	return &image, provider, nil
+}
+
+// Lost/inflight calls are an operator hold, not permission to reuse the same
+// authorization with another directory, deadline or provider-settings file.
+func consumeSnowReviewQualificationAuthorization(config snowReviewQualificationConfig, settings reviewQualificationSettings) error {
+	parent := filepath.Dir(settings.StateRoot)
+	if err := reviewQualificationPrivateRoot(parent); err != nil {
+		return err
+	}
+	directory := filepath.Join(parent, "snow-qualification-authorizations")
+	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := reviewQualificationPrivateRoot(directory); err != nil {
+		return err
+	}
+	if err := writeReviewQualificationJson(filepath.Join(directory, config.Authorization.Sha256+".used.json"), map[string]any{"schema": 1, "kind": "snow-qualification-authorization-consumed", "authorization_sha256": config.Authorization.Sha256, "provider_settings_sha256": config.ProviderSettings.Sha256, "output_directory": config.OutputDirectory, "automatic_retries": false}); err != nil {
+		return err
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+// Called only by the existing genuine-provider command's distinct typed Snow
+// branch. Unit suites leave both real opt-ins unset and never reach this path.
+func runSnowReviewQualificationCommand(t *testing.T, configBytes []byte, settings reviewQualificationSettings) {
+	t.Helper()
+	if os.Getenv("SIM_LATENCY_REVIEW_QUALIFICATION_SNOW_OPT_IN") != "1" {
+		t.Fatal("local Snow qualification requires its own explicit one-attempt opt-in")
+	}
+	var config snowReviewQualificationConfig
+	if err := decodeStrictJSONBytes(configBytes, &config, "Snow review qualification configuration"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	var report *reviewQualificationReport
+	_, err := withCalibrationScoringSlot(settings.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		image, provider, err := authenticateSnowReviewQualificationInputs(config, settings)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(config.OutputDirectory, 0700); err != nil {
+			return nil, err
+		}
+		if err := writePrivateReviewFile(filepath.Join(config.OutputDirectory, "configuration.json"), configBytes); err != nil {
+			return nil, err
+		}
+		cases, err := frozenSnowReviewQualificationCases()
+		if err != nil {
+			return nil, err
+		}
+		plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning, BrokerSha256: config.Broker.Sha256, ImageReceiptSha256: config.Image.Sha256, Cases: cases, ProviderSettingsSha256: config.ProviderSettings.Sha256, Members: provider.Members}
+		validatePlan := func(plan reviewQualificationPlan) error {
+			return validateSnowReviewQualificationPlan(plan, provider, config.ProviderSettings.Sha256)
+		}
+		if err := validatePlan(plan); err != nil {
+			return nil, err
+		}
+		if err := writeReviewQualificationJson(filepath.Join(config.OutputDirectory, "precommitted-plan.json"), plan); err != nil {
+			return nil, err
+		}
+		if err := consumeSnowReviewQualificationAuthorization(config, settings); err != nil {
+			return nil, err
+		}
+		hooks := reviewQualificationHooks{Mode: "genuine_provider", Now: time.Now, ValidatePlan: validatePlan,
+			ValidateResponse: func(output []byte, request winnerReviewBrokerRequest, expected string) (reviewQualificationObservation, error) {
+				return validateSnowReviewQualificationResponse(output, request, expected, provider, config.ProviderSettings.Sha256, settings)
+			},
+			Invoke: func(ctx context.Context, input []byte) ([]byte, []byte, error) {
+				if _, err := readReviewQualificationPin(config.BrokerConfiguration, settings.MaximumBytes, false); err != nil {
+					return nil, nil, err
+				}
+				if _, err := readReviewQualificationPin(config.ProviderSettings, settings.MaximumProviderSettingsBytes, false); err != nil {
+					return nil, nil, err
+				}
+				return invokeReviewQualificationBroker(ctx, config.Broker, input)
+			}, AuthenticateContainment: func(input, output, diagnostics []byte, canceled bool) (string, error) {
+				return authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, canceled, image.ImageId, settings, snowReviewQualificationProfile(config.ProviderSettings))
+			}}
+		report, err = executeReviewQualification(ctx, config.OutputDirectory, plan, settings, hooks)
+		return nil, err
+	})
+	if err != nil {
+		t.Fatal("Snow provider qualification failed closed; preserve all member artifacts, no automatic retry: ", err)
+	}
+	t.Log(fmt.Sprintf("local three-model qualification complete=%t qualified=%t cases=%d; no external provider/main/API/database writes", report.Complete, report.Qualified, len(report.Observations)))
+}

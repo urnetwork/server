@@ -133,9 +133,14 @@ redis.call(expireCommand, KEYS[2], expiryMillis)
 return 1
 `
 
+// A page write also records the page's checksum, its first 32 bytes, under
+// '#' and the page's field, in the same command. The commit compares those
+// 32 bytes per page. Reading every page into the commit script held a node for
+// 16-30 ms (60 ms at most) per full slot on 2026-10-25. Readers verify every
+// page body against the manifest themselves.
 const clientScoreNativePagesScript = clientScoreNativeExpiryScript + `
 if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'g') ~= ARGV[2] then return 0 end
-for i = 4, #ARGV, 2 do redis.call('HSET', KEYS[2], ARGV[i], ARGV[i + 1]) end
+for i = 4, #ARGV, 2 do redis.call('HSET', KEYS[2], ARGV[i], ARGV[i + 1], '#' .. ARGV[i], string.sub(ARGV[i + 1], 1, 32)) end
 redis.call(expireCommand, KEYS[2], expiryMillis)
 return 1
 `
@@ -143,16 +148,24 @@ return 1
 const clientScoreNativeCommitScript = clientScoreNativeExpiryScript + `
 if redis.call('GET', KEYS[1]) == ARGV[5] and redis.call('HGET', KEYS[2], 'g') == ARGV[2] and redis.call('HGET', KEYS[2], 'm') == ARGV[4] then return 1 end
 if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'g') ~= ARGV[2] then return 0 end
-if redis.call('HLEN', KEYS[2]) ~= 1 + (#ARGV - 5) / 2 then return 0 end
+if redis.call('HLEN', KEYS[2]) ~= 1 + (#ARGV - 5) then return 0 end
 for i = 6, #ARGV, 2 do
-  local page = redis.call('HGET', KEYS[2], ARGV[i])
-  if not page or string.sub(page, 1, 32) ~= ARGV[i + 1] then return 0 end
+  if redis.call('HGET', KEYS[2], '#' .. ARGV[i]) ~= ARGV[i + 1] then return 0 end
 end
 redis.call('HSET', KEYS[2], 'm', ARGV[4])
 redis.call(expireCommand, KEYS[2], expiryMillis)
 redis.call('SET', KEYS[1], ARGV[5], setExpiryOption, expiryMillis)
 return 1
 `
+
+// A page batch is one script, which holds its node for the whole batch, unlike
+// the legacy stream's pipelined SETs. A batch therefore carries at most 1 MiB
+// of pages, or one larger page alone. At the legacy stream's 8 MiB a batch held
+// a node for 26-33 ms (80 ms at most) on 2026-10-25.
+const (
+	clientScoreNativePageBatchSize  = clientScoreExportBatchSize
+	clientScoreNativePageBatchBytes = 1 << 20
+)
 
 // A snapshot owns one inactive slot. Expected page names are recorded while
 // streaming, not reconstructed from possibly partial Redis contents at commit.
@@ -327,7 +340,7 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 		manifest.SourceCompletedAt = sources[0].SourceCompletedAt
 	}
 	staged := false
-	err = runClientScoreExportStream(ctx, clientScoreExportBatchSize, clientScoreExportBatchBytes, 1,
+	err = runClientScoreExportStream(ctx, clientScoreNativePageBatchSize, clientScoreNativePageBatchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
 			for _, facet := range ipFamilyFacets {
 				payload, ok := facets[facet]

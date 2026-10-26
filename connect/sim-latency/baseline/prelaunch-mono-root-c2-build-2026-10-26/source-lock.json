@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "development_snapshot": false,
+  "candidate_path_base": "mono_root_v1",
+  "repositories": {
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+  }
+}

@@ -1,6 +1,22 @@
 # Isolated elected-winner review broker
 
-This is the real tool-free Responses API client for `gpt-6.1-sol` at `max`
+The October26 prospective policy is now `elected_winner_snow_union_v1`: all
+three exact Snow Qwen/Gemma/Muse members, with all18 attributed findings and
+unanimous approval. Missing/error results hold; fully validated rejection is
+retained without dropping later model issues. This is not a relabel of the
+historical Mini/Sol procedures below. Use the new [Snow Dockerfile](Dockerfile.snow)
+and the [three-member qualification contract](../../launch/REVIEW-PROVIDER-QUALIFICATION.md#prospective-snow-three-model-policy--october-26-override).
+The new wrapper branch mounts only a public pinned root0444 settings leaf RO
+and one mapped-uid0700 journal leaf RW, never a key or main/vault/config parent.
+It fences only the fixed Snow LAN IPv4/TCP8000, not external HTTPS. Its real
+entrypoint is `/review-broker review-broker`, with exactly three inspected
+settings/hash/state-directory arguments. Whole-attempt/member O_EXCL journals
+prevent rerolls; cancellation before provider input consumes no claim. These
+new bytes are unqualified until independent unit and genuine broker proof pass.
+
+## Historical key-backed policies
+
+This is the real tool-free Responses API client for `gpt-5.4-mini` at `xhigh`
 reasoning, not a template-approval emulator. Its strict judgment passes through
 the manager's authenticated six-criterion validation before any main API write.
 The model chooses findings, never identity fields or publication credentials.
@@ -9,7 +25,28 @@ before a provider request. Stream/event sizes and request lifetime are bounded.
 Provider identity, token usage, and concise findings are retained privately;
 hidden chain-of-thought is neither requested nor used as an audit artifact.
 
-The client follows the official [model contract](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+The new season freezes `elected_winner_gpt54mini_xhigh_v1`; `xhigh` is the
+highest supported effort. Historical `elected_winner_sol61max_v1` records retain
+their original Sol/max provenance and cannot be relabeled as mini reviews.
+Independent prescribed tests still use Sol 6.1 low; the shared stream framing
+does not select or migrate their model.
+
+The Mini policy requests the documented immutable provider snapshot
+`gpt-5.4-mini-2026-03-17`, not a floating API alias. Private evidence separately
+records `policy_model`, `requested_model` and the actual returned `model`.
+Returned identity must match the requested snapshot exactly; another revision
+is not silently accepted. Legacy policy requests retain their original identity.
+
+An HTTP refusal is not a review. The broker exits nonzero and emits a distinct
+private `review_provider_refusal` envelope with bounded status/code/type,
+request identity and capture digest; complete JSON bodies are credential-redacted.
+Truncated/malformed bodies retain a digest only. No provider refusal triggers
+an automatic retry, test execution, approval or disqualification. In particular,
+model metadata access HTTP 200 does not prove funded inference: the October 26
+actual Mini request returned HTTP 429 `credit_balance_exhausted` and remains
+unqualified until credits and genuine broker tests pass.
+
+The client follows the official [model contract](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
 and [structured output contract](https://developers.openai.com/api/docs/guides/structured-outputs).
 It has no model tools, shell, subprocess invocation, API redirect, configurable
 provider endpoint, or ambient proxy. All candidate text is untrusted input.
@@ -42,8 +79,10 @@ non-group/world-writable `/etc/urnetwork/competition-review.json`:
 
 The wrapper runs its immutable scratch image non-root/read-only, without
 capabilities, with one CPU on the management cores and 2 GiB memory. The fixed
-client needs provider HTTPS/DNS egress; deployment must verify that no alternative
-tools, host mounts or credentials are reachable. The wrapper is for the qualified
+client uses provider HTTPS through a host-resolved, single-provider-IP fence;
+external DNS in the container is disabled. Deployment must verify that no alternative
+tools, host mounts or credentials are reachable. An IP fence is not independently
+a TLS-hostname-aware proxy. The wrapper is for the qualified
 host's core mapping, not a portable assumption about another evaluator host.
 Pin the installed wrapper digest as the supervisor's `--review-sha256`; pin and
 retain the image/key deployment record separately. No key appears in command
@@ -61,6 +100,11 @@ Verify malformed/completed uncertainty cannot be resampled into approval, and
 that unavailable model access pauses progression without approving/rejecting a
 candidate. Verify memory/CPU bounds, no main source/config/vault/socket mounts,
 and cleanup on cancellation. Retain those receipts with the launch evidence.
+
+Follow the [provider qualification procedure](../../launch/REVIEW-PROVIDER-QUALIFICATION.md)
+for the fixed cases, exact snapshot, observed container/cgroup/firewall receipts,
+and bounded cancellation checks. Its draft tools and this uninstalled wrapper
+are preparation only until their independent execution and live proof pass.
 
 As of implementation, no live provider qualification or key provisioning is
 implied. The broker must not be enabled solely because its Go tests pass.

@@ -37,9 +37,9 @@ func TestProxyDeviceManagerDefaultMintBoundIsTwo(t *testing.T) {
 	}
 }
 
-// A device's local authority registers through its manager's admission, so
-// one process's devices share one bound.
-func TestProxyDeviceAuthoritySharesManagerMintAdmission(t *testing.T) {
+// A device's local authority registers and creates contracts through its
+// manager's admissions, so one process's devices share each bound.
+func TestProxyDeviceAuthoritySharesManagerAdmissions(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -54,6 +54,12 @@ func TestProxyDeviceAuthoritySharesManagerMintAdmission(t *testing.T) {
 		}
 		if pd.localControl == nil || pd.localControl.Testing_MintAdmission() != h.proxyDeviceManager.mintAdmission {
 			t.Fatal("the device authority does not register through its manager's bound")
+		}
+		if h.proxyDeviceManager.contractAdmission == nil {
+			t.Fatal("the test manager has no contract creation bound")
+		}
+		if pd.localControl.Testing_ContractAdmission() != h.proxyDeviceManager.contractAdmission {
+			t.Fatal("the device authority does not create contracts through its manager's bound")
 		}
 	})
 }

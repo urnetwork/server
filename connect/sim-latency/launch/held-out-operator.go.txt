@@ -1,0 +1,1247 @@
+// Unqualified offline held-out operator. Compile only in the isolated qualified
+// analyzer checkout, never into the evaluated application or installed scripts.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// These are release identities, not configurable workload or statistical knobs.
+type heldOutRelease struct {
+	BaseSha, SourceLockSha256, ImageId, BinarySha256, StageAPolicySha256 string
+	AnalyzerSource, ScoringLock, ScriptDirectory                         string
+	ScriptDigests                                                        map[string]string
+	Runtime                                                              *heldOutRuntimeRelease
+	ReferenceInstrument                                                  *heldOutReferenceInstrument
+}
+
+// A new release requires a new explicit protocol, not a changed input file.
+func frozenHeldOutRelease() heldOutRelease {
+	return heldOutRelease{
+		BaseSha:            "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+		SourceLockSha256:   "5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e",
+		ImageId:            "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+		BinarySha256:       "6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3",
+		StageAPolicySha256: "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
+		AnalyzerSource:     "30f340a2779699225ab40ec7f3c5d978525276d2",
+		ScoringLock:        "/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock",
+		ScriptDirectory:    "/usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container",
+		ScriptDigests: map[string]string{
+			"evaluator.sh":        "263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e",
+			"network-boundary.sh": "9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7",
+			"compose.yml":         "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464",
+		},
+	}
+}
+
+// Bounds preparation and process output independently of the frozen workload.
+type heldOutOperatorSettings struct {
+	Workload               heldOutWorkloadSettings
+	Order                  heldOutOrderSettings
+	MaximumBytes           int64
+	MaximumExecutableBytes int64
+	MaximumLogBytes        int64
+	CommandTimeout         time.Duration
+	KillGrace              time.Duration
+	ManagementCpus         string
+	RequiredPasses         int
+}
+
+// The complete five-seed / R9 / three-hour policy is authenticated separately.
+func defaultHeldOutOperatorSettings() heldOutOperatorSettings {
+	return heldOutOperatorSettings{
+		Workload: defaultHeldOutWorkloadSettings(), Order: defaultHeldOutOrderSettings(),
+		MaximumBytes: 128 * 1024 * 1024, MaximumExecutableBytes: 1024 * 1024 * 1024, MaximumLogBytes: 32 * 1024 * 1024,
+		CommandTimeout: 30 * time.Second, KillGrace: 45 * time.Second,
+		ManagementCpus: "20,22", RequiredPasses: 3,
+	}
+}
+
+// The digest must come from an independent publication, never the same read.
+type heldOutPinnedFile struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+}
+
+// Both native generator files must byte-match the evaluated c1 checkout.
+type heldOutGeneratorFile struct {
+	Analyzer heldOutPinnedFile `json:"analyzer"`
+	Frozen   heldOutPinnedFile `json:"frozen"`
+}
+
+// A reviewed exclusion census includes retired/failed/precommitted campaigns,
+// not just successful prior measurements. All material is private input.
+type heldOutExclusions struct {
+	Schema             int                 `json:"schema"`
+	Kind               string              `json:"kind"`
+	Complete           bool                `json:"complete_through_preparation"`
+	ReviewedAt         time.Time           `json:"reviewed_at"`
+	Sources            []heldOutPinnedFile `json:"sources"`
+	PrivateSeedHexes   []string            `json:"private_seed_hexes"`
+	EffectiveSeeds     []int64             `json:"effective_seeds"`
+	ProviderDigests    []string            `json:"providers_sha256s"`
+	RetiredCommitments []string            `json:"retired_commitments"`
+}
+
+// Pinned qualification receipts bind real evidence; booleans in the operator
+// configuration cannot qualify a proposed reference or manufacture a pilot.
+type heldOutReference struct {
+	Role         string            `json:"role"`
+	Patch        heldOutPinnedFile `json:"patch"`
+	CandidateSha string            `json:"candidate_sha"`
+	ImageId      string            `json:"image_id"`
+	BinarySha256 string            `json:"binary_sha256"`
+	Build        heldOutPinnedFile `json:"build"`
+	NativeBuild  heldOutPinnedFile `json:"native_build"`
+	Correctness  heldOutPinnedFile `json:"correctness"`
+	Direction    heldOutPinnedFile `json:"direction"`
+}
+
+// Normalizes externally reviewed build/correctness/pilot evidence without
+// interpreting a receipt from an obsolete source/image as current authority.
+type heldOutReferenceQualification struct {
+	Schema            int                       `json:"schema"`
+	Kind              string                    `json:"kind"`
+	Role              string                    `json:"role"`
+	Accepted          bool                      `json:"accepted"`
+	BaseSha           string                    `json:"base_sha"`
+	SourceLockSha256  string                    `json:"source_lock_sha256"`
+	BaseImageId       string                    `json:"base_image_id"`
+	PatchSha256       string                    `json:"patch_sha256"`
+	CandidateSha      string                    `json:"candidate_sha"`
+	ImageId           string                    `json:"image_id"`
+	BinarySha256      string                    `json:"binary_sha256"`
+	GoVersion         string                    `json:"go_version"`
+	VcsModified       bool                      `json:"vcs_modified"`
+	Direction         string                    `json:"direction"`
+	Evidence          []heldOutPinnedFile       `json:"evidence"`
+	EvidenceBasis     string                    `json:"evidence_basis,omitempty"`
+	ExpectedDirection string                    `json:"expected_direction,omitempty"`
+	PriorReference    *heldOutReferenceTransfer `json:"prior_reference,omitempty"`
+}
+
+// Pins this exact executable, all draft sources, the actual toolchain and the
+// independently retained three-pass qualification, not a compile-only check.
+type heldOutToolQualification struct {
+	Protocol               string              `json:"protocol,omitempty"`
+	ProtocolApprovalSha256 string              `json:"protocol_approval_sha256,omitempty"`
+	OriginalPlanSha256     string              `json:"original_plan_sha256,omitempty"`
+	Schema                 int                 `json:"schema"`
+	Kind                   string              `json:"kind"`
+	Accepted               bool                `json:"accepted"`
+	BinarySha256           string              `json:"binary_sha256"`
+	AnalyzerSource         string              `json:"analyzer_source"`
+	BaseSha                string              `json:"base_sha"`
+	SourceLockSha256       string              `json:"source_lock_sha256"`
+	GoVersion              string              `json:"go_version"`
+	Race                   bool                `json:"race"`
+	ConsecutivePasses      int                 `json:"consecutive_passes"`
+	TestsPerPass           int                 `json:"tests_per_pass"`
+	Skips                  int                 `json:"skips"`
+	Sources                []heldOutPinnedFile `json:"sources"`
+	Evidence               []heldOutPinnedFile `json:"evidence"`
+}
+
+// Every file pin is supplied before entropy or publication. PrivateRoot must
+// not exist; its parent must already be private and owned by the operator.
+type heldOutPreparationConfig struct {
+	Protocol       string                 `json:"protocol,omitempty"`
+	Amendment      *heldOutAmendmentPins  `json:"amendment,omitempty"`
+	Schema         int                    `json:"schema"`
+	Kind           string                 `json:"kind"`
+	PrivateRoot    string                 `json:"private_root"`
+	PublicPlanPath string                 `json:"public_plan_path"`
+	Template       heldOutPinnedFile      `json:"template"`
+	StageAReport   heldOutPinnedFile      `json:"stage_a_report"`
+	StageAInputs   heldOutPinnedFile      `json:"stage_a_inputs"`
+	SourceLock     heldOutPinnedFile      `json:"source_lock"`
+	Exclusions     heldOutPinnedFile      `json:"exclusions"`
+	References     heldOutPinnedFile      `json:"references"`
+	Qualification  heldOutPinnedFile      `json:"qualification"`
+	GeneratorFiles []heldOutGeneratorFile `json:"generator_files"`
+	Scripts        []heldOutPinnedFile    `json:"scripts"`
+}
+
+// Matches the complete evaluator schema, including deliberately deferred
+// baseline fields. No caller-supplied per-job override is accepted.
+type heldOutRequest struct {
+	Schema               int                               `json:"schema"`
+	JobId                string                            `json:"job_id"`
+	RoundId              string                            `json:"round_id"`
+	SourceEpoch          int                               `json:"source_epoch"`
+	Attempt              int                               `json:"attempt"`
+	CompetitionId        string                            `json:"competition_id"`
+	BaseSha              string                            `json:"base_sha"`
+	EvaluatorImageDigest string                            `json:"evaluator_image_digest"`
+	ApiImageDigest       string                            `json:"api_image_digest"`
+	WorkerImageDigest    string                            `json:"worker_image_digest"`
+	ScorerVersion        string                            `json:"scorer_version"`
+	RoundSeedHex         string                            `json:"round_seed_hex"`
+	ProvidersPath        string                            `json:"providers_path"`
+	ProvidersSha256      string                            `json:"providers_sha256"`
+	RoundBaselinePath    string                            `json:"round_baseline_path"`
+	RoundBaselineSha256  string                            `json:"round_baseline_sha256"`
+	PatchPath            string                            `json:"patch_path"`
+	PatchSha256          string                            `json:"patch_sha256"`
+	ArtifactDirectory    string                            `json:"artifact_directory"`
+	ConfigLocalDirectory string                            `json:"config_local_directory"`
+	VaultLocalDirectory  string                            `json:"vault_local_directory"`
+	PatchPolicy          model.CompetitionPatchPolicy      `json:"patch_policy"`
+	EvaluationPolicy     model.CompetitionEvaluationPolicy `json:"evaluation_policy"`
+}
+
+// Public job identities commit the pre-baseline request, not an invented final
+// hash. The only deferred fields are named explicitly in the public plan.
+type heldOutPlannedJob struct {
+	Position      int    `json:"position"`
+	Role          string `json:"role"`
+	JobId         string `json:"job_id"`
+	RequestSha256 string `json:"precommitted_request_sha256"`
+}
+
+// Provider hashes are public; provider bytes and both seed representations are
+// absent from this type, so accidental public marshaling cannot disclose them.
+type heldOutPublicRound struct {
+	Position        int                 `json:"position"`
+	RoundId         string              `json:"round_id"`
+	SeedCommitment  string              `json:"seed_commitment"`
+	ProvidersSha256 string              `json:"providers_sha256"`
+	Order           [3]string           `json:"reference_order"`
+	Jobs            []heldOutPlannedJob `json:"jobs"`
+}
+
+// Explicit private serialization is confined to a mode-0600 file. Do not log
+// this object or use it as a public commitment/reveal before campaign closure.
+type heldOutPrivateRound struct {
+	Public         heldOutPublicRound `json:"public"`
+	PrivateSeedHex string             `json:"private_seed_hex"`
+	EffectiveSeed  int64              `json:"effective_seed"`
+}
+
+// This is the immutable operator handoff; runtime state is append-only files.
+type heldOutPrivatePlan struct {
+	Schema       int                               `json:"schema"`
+	Kind         string                            `json:"kind"`
+	CampaignId   string                            `json:"campaign_id"`
+	PreparedAt   time.Time                         `json:"prepared_at"`
+	Config       heldOutPreparationConfig          `json:"config"`
+	ConfigSha256 string                            `json:"configuration_sha256"`
+	Policy       model.CompetitionEvaluationPolicy `json:"evaluation_policy"`
+	PolicySha256 string                            `json:"evaluation_policy_sha256"`
+	Margin       float64                           `json:"accepted_margin"`
+	References   []heldOutReference                `json:"references"`
+	Rounds       []heldOutPrivateRound             `json:"rounds"`
+}
+
+// Only this allowlisted shape is ever written to the public plan destination.
+type heldOutPublicPlan struct {
+	Protocol               string               `json:"protocol,omitempty"`
+	ProtocolApprovalSha256 string               `json:"protocol_approval_sha256,omitempty"`
+	OriginalPlanSha256     string               `json:"original_plan_sha256,omitempty"`
+	OriginalABaseSha       string               `json:"original_a_base_sha,omitempty"`
+	OriginalAImageId       string               `json:"original_a_evaluator_image_id,omitempty"`
+	NewReleaseSha256       string               `json:"new_release_sha256,omitempty"`
+	MarginFreezeSha256     string               `json:"margin_freeze_sha256,omitempty"`
+	BridgePlanSha256       string               `json:"bridge_plan_sha256,omitempty"`
+	BridgeInputsSha256     string               `json:"bridge_inputs_sha256,omitempty"`
+	BridgeReceiptSha256    string               `json:"bridge_compatibility_receipt_sha256,omitempty"`
+	RequiredOrderedSeeds   int                  `json:"required_correctly_ordered_seeds,omitempty"`
+	Schema                 int                  `json:"schema"`
+	Kind                   string               `json:"kind"`
+	CampaignId             string               `json:"campaign_id"`
+	PreparedAt             time.Time            `json:"prepared_at"`
+	PrivatePlanSha256      string               `json:"private_plan_sha256"`
+	ConfigSha256           string               `json:"configuration_sha256"`
+	BaseSha                string               `json:"base_sha"`
+	SourceLockSha256       string               `json:"source_lock_sha256"`
+	EvaluatorImageId       string               `json:"evaluator_image_id"`
+	StageAReportSha256     string               `json:"accepted_stage_a_report_sha256"`
+	StageAInputsSha256     string               `json:"stage_a_inputs_sha256"`
+	PolicySha256           string               `json:"evaluation_policy_sha256"`
+	Margin                 float64              `json:"accepted_margin"`
+	ReferenceSha256        string               `json:"reference_bundle_sha256"`
+	ExclusionsSha256       string               `json:"exclusions_sha256"`
+	QualificationSha256    string               `json:"qualification_sha256"`
+	ControlReplicates      int                  `json:"control_replicates_per_round"`
+	CandidateReplicates    int                  `json:"candidate_replicates_per_job"`
+	ExecutionLimitSeconds  int                  `json:"original_job_limit_seconds"`
+	DeferredFields         []string             `json:"deferred_request_fields"`
+	Rounds                 []heldOutPublicRound `json:"rounds"`
+}
+
+// Owns already authenticated bytes so a mutable source cannot change a patch
+// midway through preparation. Files are reauthenticated before publication.
+type heldOutPreparationInputs struct {
+	Template          heldOutRequest
+	Margin            float64
+	Exclusions        heldOutExclusions
+	References        []heldOutReference
+	Patches           map[string][]byte
+	MinimumPreparedAt time.Time
+}
+
+// Test injection is private to this package. The real command always supplies
+// crypto/rand.Reader and the native control-plane generator.
+type heldOutPreparationHooks struct {
+	Entropy       io.Reader
+	Configuration []byte
+	Generate      func(context.Context, string, model.CompetitionEvaluationPolicy, heldOutWorkloadSettings) (*heldOutGeneratedWorkload, error)
+	Now           func() time.Time
+}
+
+// Digest is a byte identity, never a substitute for independent pin provenance.
+func heldOutDigest(content []byte) string {
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:])
+}
+
+// Reads canonical regular files without symlink/FIFO following or unbounded
+// allocation. Opened inode, metadata and digest must agree with the first stat.
+func readHeldOutPinned(pin heldOutPinnedFile, maximumBytes int64, private bool) ([]byte, error) {
+	if !validSha256(pin.Sha256) || maximumBytes <= 0 || !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path {
+		return nil, errors.New("held-out file pin or bound invalid")
+	}
+	resolved, err := filepath.EvalSymlinks(pin.Path)
+	if err != nil || resolved != pin.Path {
+		return nil, errors.New("held-out pinned file redirected or unavailable")
+	}
+	before, err := os.Lstat(pin.Path)
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0022 != 0 || before.Size() < 0 || before.Size() > maximumBytes {
+		return nil, errors.New("held-out pinned file type, permissions or size invalid")
+	}
+	if private && (before.Mode().Perm() != 0600 || before.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid())) {
+		return nil, errors.New("held-out private file must be owned mode 0600")
+	}
+	fd, err := syscall.Open(pin.Path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("held-out pinned file cannot be opened")
+	}
+	file := os.NewFile(uintptr(fd), pin.Path)
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || opened.Size() != before.Size() {
+		return nil, errors.New("held-out pinned file changed during open")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maximumBytes+1))
+	after, statErr := file.Stat()
+	if err != nil || statErr != nil || int64(len(content)) != before.Size() || after.Size() != before.Size() || after.ModTime() != before.ModTime() || heldOutDigest(content) != pin.Sha256 {
+		clear(content)
+		return nil, errors.New("held-out pinned file bytes changed")
+	}
+	return content, nil
+}
+
+// A strict re-encoding census rejects omitted/null fields despite Go defaults.
+func decodeHeldOutComplete(content []byte, value any, label string) error {
+	if err := decodeStrictJSONBytes(content, value, label); err != nil {
+		return err
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var before, after map[string]json.RawMessage
+	if json.Unmarshal(content, &before) != nil || json.Unmarshal(canonical, &after) != nil || len(before) != len(after) {
+		return errors.New("held-out object fields incomplete")
+	}
+	for key := range after {
+		if raw, present := before[key]; !present || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("held-out object contains missing/null field")
+		}
+	}
+	// Go's fixed-array decoder silently drops surplus elements. Check the
+	// complete nested shape as well as top-level keys before trusting [3] orders.
+	examined := 0
+	var census func(json.RawMessage, json.RawMessage) error
+	census = func(recorded json.RawMessage, decoded json.RawMessage) error {
+		examined++
+		if examined > defaultCalibrationAnalysisSettings().MaximumTraversalEntries {
+			return errors.New("held-out JSON shape exceeds traversal bound")
+		}
+		recorded, decoded = bytes.TrimSpace(recorded), bytes.TrimSpace(decoded)
+		if len(recorded) == 0 || len(decoded) == 0 {
+			return errors.New("held-out JSON shape empty")
+		}
+		if bytes.Equal(recorded, []byte("null")) != bytes.Equal(decoded, []byte("null")) {
+			return errors.New("held-out nested field is missing/null")
+		}
+		if recorded[0] == '{' || decoded[0] == '{' {
+			var recordedFields, decodedFields map[string]json.RawMessage
+			if json.Unmarshal(recorded, &recordedFields) != nil || json.Unmarshal(decoded, &decodedFields) != nil || len(recordedFields) != len(decodedFields) {
+				return errors.New("held-out nested object fields incomplete")
+			}
+			for key, decodedField := range decodedFields {
+				recordedField, present := recordedFields[key]
+				if !present {
+					return errors.New("held-out nested object field missing")
+				}
+				if err := census(recordedField, decodedField); err != nil {
+					return err
+				}
+			}
+		} else if recorded[0] == '[' || decoded[0] == '[' {
+			var recordedValues, decodedValues []json.RawMessage
+			if json.Unmarshal(recorded, &recordedValues) != nil || json.Unmarshal(decoded, &decodedValues) != nil || len(recordedValues) != len(decodedValues) {
+				return errors.New("held-out nested array cardinality mismatch")
+			}
+			for i := range decodedValues {
+				if err := census(recordedValues[i], decodedValues[i]); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return census(content, canonical)
+}
+
+// Append-only publication retains incomplete files on failure for diagnosis;
+// an existing path is never truncated, renamed over, or silently regenerated.
+func writeHeldOutExclusive(path string, content []byte, mode os.FileMode) error {
+	if mode != 0600 && mode != 0644 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("held-out publication mode or path invalid")
+	}
+	parent := filepath.Dir(path)
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return errors.New("held-out publication parent redirected")
+	}
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, uint32(mode))
+	if err != nil {
+		return errors.New("held-out publication target already exists or unavailable")
+	}
+	file := os.NewFile(uintptr(fd), path)
+	_, writeErr := file.Write(content)
+	syncErr, closeErr := file.Sync(), file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	return syncHeldOutDirectory(parent)
+}
+
+// Directory fsync makes the exclusive name durable before a later invocation.
+func syncHeldOutDirectory(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+// Private trees reject ownership or permission drift before each operation.
+func validateHeldOutPrivateDirectory(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	info, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || !filepath.IsAbs(path) || filepath.Clean(path) != path || resolved != path || !info.IsDir() || info.Mode().Perm() != 0700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return errors.New("held-out private directory must be canonical owned mode 0700")
+	}
+	return nil
+}
+
+// Avoids implicit identities and seeded PRNGs for all campaign/round/job ids.
+func drawHeldOutId(entropy io.Reader) (string, error) {
+	var content [16]byte
+	if entropy == nil {
+		return "", errors.New("held-out identity entropy unavailable")
+	}
+	if _, err := io.ReadFull(entropy, content[:]); err != nil {
+		return "", errors.New("held-out identity entropy unavailable")
+	}
+	content[6], content[8] = (content[6]&15)|64, (content[8]&63)|128
+	return fmt.Sprintf("%x-%x-%x-%x-%x", content[:4], content[4:6], content[6:8], content[8:10], content[10:]), nil
+}
+
+// The domain-separated commitment binds the secret to the whole public round,
+// release, policy, margin, reference bundle and accepted analysis before results.
+func heldOutRoundCommitment(seedHex string, round heldOutPublicRound, plan heldOutPrivatePlan, release heldOutRelease) (string, error) {
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil || len(seed) != 32 || hex.EncodeToString(seed) != seedHex {
+		return "", errors.New("held-out commitment seed invalid")
+	}
+	defer clear(seed)
+	round.SeedCommitment = ""
+	protocol, approval, originalPlan, marginFreeze, bridgePlan, bridgeReceipt, newRelease := "", "", "", "", "", "", ""
+	if plan.Config.Protocol != "" {
+		if plan.Config.Protocol != calibrationProtocolThreeABridgeThreeB || plan.Config.Amendment == nil {
+			return "", errors.New("held-out commitment amendment metadata missing")
+		}
+		pins := plan.Config.Amendment
+		protocol, approval, originalPlan, marginFreeze, bridgePlan, bridgeReceipt, newRelease = plan.Config.Protocol, pins.Approval.Sha256, pins.OriginalPlan.Sha256, pins.MarginFreeze.Sha256, pins.BridgePlan.Sha256, pins.BridgeReceipt.Sha256, pins.Release.Sha256
+	} else if plan.Config.Amendment != nil {
+		return "", errors.New("held-out historical commitment cannot carry amendment metadata")
+	}
+	content, err := json.Marshal(struct {
+		Domain                                          string             `json:"domain"`
+		CampaignId                                      string             `json:"campaign_id"`
+		Round                                           heldOutPublicRound `json:"round"`
+		Source, Image, Lock, Policy, Report, References string
+		Margin                                          float64 `json:"margin"`
+		Protocol                                        string  `json:"protocol,omitempty"`
+		Approval                                        string  `json:"protocol_approval_sha256,omitempty"`
+		OriginalPlan                                    string  `json:"original_plan_sha256,omitempty"`
+		MarginFreeze                                    string  `json:"margin_freeze_sha256,omitempty"`
+		BridgePlan                                      string  `json:"bridge_plan_sha256,omitempty"`
+		BridgeReceipt                                   string  `json:"bridge_receipt_sha256,omitempty"`
+		NewRelease                                      string  `json:"new_release_sha256,omitempty"`
+	}{Domain: "urnetwork-held-out-stage-b-v1", CampaignId: plan.CampaignId, Round: round, Source: release.BaseSha,
+		Image: release.ImageId, Lock: release.SourceLockSha256, Policy: plan.PolicySha256, Report: plan.Config.StageAReport.Sha256,
+		References: plan.Config.References.Sha256, Margin: plan.Margin, Protocol: protocol, Approval: approval, OriginalPlan: originalPlan, MarginFreeze: marginFreeze, BridgePlan: bridgePlan, BridgeReceipt: bridgeReceipt, NewRelease: newRelease})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("urnetwork-held-out-stage-b-seed-v1\x00"))
+	_, _ = digest.Write(seed)
+	_, _ = digest.Write(content)
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// Every known seed representation and provider digest is excluded. This also
+// guards legacy direct-integer public workloads, which do not use native hex
+// derivation. The externally reviewed census must include all retired campaigns.
+func validateHeldOutExclusions(exclusions heldOutExclusions, maximumBytes int64) error {
+	if exclusions.Schema != 1 || exclusions.Kind != "sim-latency-held-out-exclusions" || !exclusions.Complete || exclusions.ReviewedAt.IsZero() || len(exclusions.Sources) == 0 || len(exclusions.PrivateSeedHexes) == 0 || len(exclusions.RetiredCommitments) == 0 || len(exclusions.ProviderDigests) == 0 {
+		return errors.New("complete reviewed prior/public/pilot exclusion census required")
+	}
+	publicExcluded := false
+	for _, seed := range exclusions.EffectiveSeeds {
+		if seed <= 0 {
+			return errors.New("excluded effective seed invalid")
+		}
+		publicExcluded = publicExcluded || seed == 20261024
+	}
+	if !publicExcluded {
+		return errors.New("public workload seed is not excluded")
+	}
+	for _, seed := range exclusions.PrivateSeedHexes {
+		if _, err := heldOutEffectiveSeed(seed); err != nil {
+			return err
+		}
+	}
+	for _, digest := range append(append([]string{}, exclusions.ProviderDigests...), exclusions.RetiredCommitments...) {
+		if !validSha256(digest) {
+			return errors.New("excluded provider/commitment digest invalid")
+		}
+	}
+	return authenticateHeldOutExclusionCensus(exclusions, maximumBytes)
+}
+
+// No digest-only build identity or previous-release pilot is accepted as a
+// qualified reference. Raw evidence is authenticated as well as its summary.
+func authenticateHeldOutReferences(content []byte, release heldOutRelease, settings heldOutOperatorSettings) ([]heldOutReference, map[string][]byte, error) {
+	var references []heldOutReference
+	if err := decodeStrictJSONBytes(content, &references, "held-out references"); err != nil {
+		return nil, nil, err
+	}
+	if len(references) != 3 {
+		return nil, nil, errors.New("exact no-op/better/worse reference set required")
+	}
+	patches, roles, images, binaries := map[string][]byte{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, reference := range references {
+		if roles[reference.Role] || images[reference.ImageId] || binaries[reference.BinarySha256] {
+			return nil, nil, errors.New("reference role or independent build identity invalid")
+		}
+		patch, err := authenticateHeldOutReference(reference, release, settings)
+		if err != nil {
+			return nil, nil, err
+		}
+		roles[reference.Role], images[reference.ImageId], binaries[reference.BinarySha256] = true, true, true
+		patches[reference.Role] = patch
+	}
+	return references, patches, nil
+}
+
+// The same single-reference authenticator serves pre-bridge no-op admission
+// and the complete B set; no partial or copied receipt validator is substituted.
+func authenticateHeldOutReference(reference heldOutReference, release heldOutRelease, settings heldOutOperatorSettings) ([]byte, error) {
+	if (reference.Role != "no-op" && reference.Role != "better" && reference.Role != "worse") || !sourceGitShaPattern.MatchString(reference.CandidateSha) || !validSha256(strings.TrimPrefix(reference.ImageId, "sha256:")) || !strings.HasPrefix(reference.ImageId, "sha256:") || !validSha256(reference.BinarySha256) {
+		return nil, errors.New("reference role or independent build identity invalid")
+	}
+	patch, err := readHeldOutPinned(reference.Patch, settings.MaximumBytes, false)
+	if err != nil || len(patch) == 0 {
+		return nil, errors.New("reference patch unavailable or changed")
+	}
+	nativeContent, err := readHeldOutPinned(reference.NativeBuild, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var native heldOutNativeBuild
+	if err := decodeHeldOutComplete(nativeContent, &native, "committed native reference build"); err != nil {
+		return nil, err
+	}
+	if native.Schema != 1 || native.ImageId != reference.ImageId || native.BaseImageId != release.ImageId || native.BaseSha != release.BaseSha || native.CandidateSha != reference.CandidateSha || native.PatchSha256 != reference.Patch.Sha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" {
+		return nil, errors.New("native reference build does not bind committed patch/source/policy")
+	}
+	if err := validateHeldOutRuntimeBuilderPin(native, release); err != nil {
+		return nil, err
+	}
+	for _, qualification := range []struct {
+		kind string
+		pin  heldOutPinnedFile
+	}{
+		{kind: "build", pin: reference.Build}, {kind: "correctness", pin: reference.Correctness}, {kind: "direction", pin: reference.Direction},
+	} {
+		content, err := readHeldOutPinned(qualification.pin, settings.MaximumBytes, false)
+		if err != nil {
+			return nil, err
+		}
+		var receipt heldOutReferenceQualification
+		if err := decodeHeldOutComplete(content, &receipt, "held-out reference qualification"); err != nil {
+			return nil, err
+		}
+		if receipt.Schema != 1 || receipt.Kind != "sim-latency-held-out-reference-"+qualification.kind || !receipt.Accepted || receipt.Role != reference.Role || receipt.BaseSha != release.BaseSha || receipt.SourceLockSha256 != release.SourceLockSha256 || receipt.BaseImageId != release.ImageId || receipt.PatchSha256 != reference.Patch.Sha256 || receipt.CandidateSha != reference.CandidateSha || receipt.ImageId != reference.ImageId || receipt.BinarySha256 != reference.BinarySha256 || receipt.GoVersion != "go1.27.3" || receipt.VcsModified || len(receipt.Evidence) == 0 {
+			return nil, errors.New("reference qualification does not bind the frozen build/source")
+		}
+		if qualification.kind == "direction" {
+			if err := authenticateHeldOutReferenceDirection(receipt, reference, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			}); err != nil {
+				return nil, err
+			}
+		} else if receipt.EvidenceBasis != "" || receipt.ExpectedDirection != "" || receipt.PriorReference != nil {
+			return nil, errors.New("build/correctness receipt cannot inherit directional evidence")
+		}
+		for _, pin := range receipt.Evidence {
+			if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return patch, nil
+}
+
+// A pinned accepted report and its full five-position input manifest must
+// agree before generation and after generation. No analysis is run here.
+func authenticateHeldOutMargin(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings) (float64, error) {
+	settingsA, err := heldOutStageASettings(config)
+	if err != nil {
+		return 0, err
+	}
+	baseSha, imageId, policySha := release.BaseSha, release.ImageId, release.StageAPolicySha256
+	if config.Protocol != "" {
+		baseSha, imageId, policySha = settingsA.OriginalBaseSha, settingsA.OriginalImageDigest, settingsA.OriginalPolicySha256
+	}
+	report, err := readHeldOutPinned(config.StageAReport, settings.MaximumBytes, false)
+	if err != nil {
+		return 0, err
+	}
+	margin, err := pinnedHeldOutMargin(report, heldOutMarginPins{ReportSha256: config.StageAReport.Sha256,
+		InputManifestSha256: config.StageAInputs.Sha256, EvaluationPolicySha256: policySha, Protocol: config.Protocol,
+		ProtocolApprovalSha256: settingsA.ProtocolApprovalSha256, OriginalPlanSha256: settingsA.OriginalPlanSha256})
+	if err != nil {
+		return 0, err
+	}
+	manifest, err := loadCalibrationFileManifest(config.StageAInputs.Path, config.StageAInputs.Sha256, settingsA)
+	if err != nil {
+		return 0, err
+	}
+	if manifest.BaseSha != baseSha || manifest.EvaluatorImageDigest != imageId || manifest.EvaluationPolicySha256 != policySha {
+		return 0, errors.New("accepted Stage A inputs bind another release or policy")
+	}
+	for _, cohort := range manifest.Cohorts {
+		if cohort.FailureCode != "" || !validSha256(cohort.ScoreSha256) || !validSha256(cohort.BaselineSha256) || !validSha256(cohort.WorkerResultSha256) || !validSha256(cohort.EvidenceManifestSha256) || !validSha256(cohort.TerminalSha256) {
+			return 0, errors.New("accepted Stage A manifest contains an incomplete position")
+		}
+	}
+	var decoded calibrationAnalysisReport
+	if err := decodeStrictJSONBytes(report, &decoded, "accepted Stage A replay receipts"); err != nil {
+		return 0, err
+	}
+	if settingsA.Protocol != "" && (decoded.OriginalBaseSha != manifest.BaseSha || decoded.OriginalImageDigest != manifest.EvaluatorImageDigest) {
+		return 0, errors.New("amended report relabeled the original A instrument")
+	}
+	if len(decoded.ReplayObservations) != settingsA.Cohorts*2 {
+		return 0, errors.New("accepted Stage A report lacks all native baseline/candidate replays")
+	}
+	seen := map[string]bool{}
+	for _, observation := range decoded.ReplayObservations {
+		if observation.ImageId != imageId || !validSha256(observation.ContainerId) || !validSha256(observation.Owner) || !validSha256(observation.InspectionSha256) || !validSha256(observation.TerminalSha256) || !observation.ContainerCleanupVerified || observation.CorpusRetained || observation.Failure != "" || seen[observation.ContainerId] {
+			return 0, errors.New("accepted Stage A replay integrity or cleanup incomplete")
+		}
+		seen[observation.ContainerId] = true
+	}
+	return margin, nil
+}
+
+// Verifies byte-exact generator provenance, the native ten-repository digest,
+// full typed template policy, reference receipts and this executable's receipt.
+func authenticateHeldOutPreparation(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings) (*heldOutPreparationInputs, error) {
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-preparation" || len(config.GeneratorFiles) != 2 || len(config.Scripts) != 4 {
+		return nil, errors.New("held-out preparation schema or provenance incomplete")
+	}
+	margin, err := authenticateHeldOutMargin(config, release, settings)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutProtocolSettings(config, settings); err != nil {
+		return nil, err
+	}
+	minimumPreparedAt := time.Time{}
+	if config.Protocol != "" {
+		if err := authenticateHeldOutBridge(config, release, settings, margin); err != nil {
+			return nil, err
+		}
+		content, err := readHeldOutPinned(config.Amendment.BridgeReceipt, settings.MaximumBytes, false)
+		if err != nil {
+			return nil, err
+		}
+		var bridge heldOutBridgeCompatibility
+		if err := decodeHeldOutComplete(content, &bridge, "completed prospective bridge"); err != nil {
+			return nil, err
+		}
+		minimumPreparedAt = bridge.VerifiedAt
+	}
+	templateBytes, err := readHeldOutPinned(config.Template, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var template heldOutRequest
+	if err := decodeHeldOutComplete(templateBytes, &template, "held-out template"); err != nil {
+		return nil, err
+	}
+	if config.Protocol == "" {
+		manifest, err := loadCalibrationFileManifest(config.StageAInputs.Path, config.StageAInputs.Sha256, defaultCalibrationAnalysisSettings())
+		if err != nil || len(manifest.Cohorts) == 0 || manifest.Cohorts[0].RequestSha256 != config.Template.Sha256 {
+			return nil, errors.New("held-out template is not the exact accepted first Stage A request")
+		}
+	}
+	policyBytes, err := json.Marshal(template.EvaluationPolicy)
+	if err != nil || heldOutDigest(policyBytes) != release.StageAPolicySha256 || template.Schema != 1 || template.BaseSha != release.BaseSha || template.EvaluatorImageDigest != release.ImageId || template.SourceEpoch != 0 || template.ScorerVersion != officialScorerVersion || template.RoundBaselinePath != "" || template.RoundBaselineSha256 != "" {
+		return nil, errors.New("full frozen template/source/policy mismatch")
+	}
+	if config.Protocol != "" && template.EvaluationPolicy.TakeoverMargin != margin {
+		return nil, errors.New("bridge template changed the already frozen margin")
+	}
+	var rawTemplate map[string]json.RawMessage
+	_ = json.Unmarshal(templateBytes, &rawTemplate)
+	var completePolicy model.CompetitionEvaluationPolicy
+	if err := decodeHeldOutComplete(rawTemplate["evaluation_policy"], &completePolicy, "held-out template policy"); err != nil {
+		return nil, err
+	}
+	lockContent, err := readHeldOutPinned(config.SourceLock, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var lock heldOutSourceLock
+	if err := decodeHeldOutComplete(lockContent, &lock, "held-out source lock"); err != nil {
+		return nil, err
+	}
+	canonicalLock, err := model.CompetitionSourceLockDigest(lock.Repositories)
+	if err != nil || lock.Schema != 1 || lock.DevelopmentSnapshot || lock.Repositories["server"] != release.BaseSha || canonicalLock != release.SourceLockSha256 {
+		return nil, errors.New("held-out canonical ten-repository source lock mismatch")
+	}
+	if (config.Protocol == "" && lock.CandidatePathBase != "") || (config.Protocol != "" && lock.CandidatePathBase != "mono_root_v1") {
+		return nil, errors.New("held-out release source capability does not match its explicit protocol")
+	}
+	if err := authenticateHeldOutGeneratorFiles(config.GeneratorFiles, release, settings); err != nil {
+		return nil, err
+	}
+	if err := authenticateHeldOutScripts(config.Scripts, release, settings); err != nil {
+		return nil, err
+	}
+	qualificationBytes, err := readHeldOutPinned(config.Qualification, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var qualification heldOutToolQualification
+	if err := decodeHeldOutComplete(qualificationBytes, &qualification, "held-out operator qualification"); err != nil {
+		return nil, err
+	}
+	if qualification.Schema != 1 || qualification.Kind != "sim-latency-held-out-operator-qualification" || !qualification.Accepted || qualification.AnalyzerSource != release.AnalyzerSource || qualification.BaseSha != release.BaseSha || qualification.SourceLockSha256 != release.SourceLockSha256 || qualification.GoVersion != "go1.27.3" || !qualification.Race || qualification.ConsecutivePasses != settings.RequiredPasses || qualification.TestsPerPass <= 0 || qualification.Skips != 0 || len(qualification.Sources) == 0 || len(qualification.Evidence) != settings.RequiredPasses {
+		return nil, errors.New("exact three-pass held-out operator qualification missing")
+	}
+	if qualification.Protocol != config.Protocol || (config.Protocol != "" && (qualification.ProtocolApprovalSha256 != config.Amendment.Approval.Sha256 || qualification.OriginalPlanSha256 != config.Amendment.OriginalPlan.Sha256)) {
+		return nil, errors.New("held-out qualification does not cover the explicit amended protocol")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyHeldOutExecutable(executable, qualification.BinarySha256, settings.MaximumExecutableBytes); err != nil {
+		return nil, errors.New("held-out operator executable differs from qualification")
+	}
+	for _, pin := range append(append([]heldOutPinnedFile{}, qualification.Sources...), qualification.Evidence...) {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return nil, err
+		}
+	}
+	exclusionContent, err := readHeldOutPinned(config.Exclusions, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var exclusions heldOutExclusions
+	if err := decodeHeldOutComplete(exclusionContent, &exclusions, "held-out exclusions"); err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutExclusions(exclusions, settings.MaximumBytes); err != nil {
+		return nil, err
+	}
+	referenceContent, err := readHeldOutPinned(config.References, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	references, patches, err := authenticateHeldOutReferences(referenceContent, release, settings)
+	if err != nil {
+		return nil, err
+	}
+	for _, patch := range patches {
+		if len(patch) > template.PatchPolicy.MaxPatchBytes {
+			return nil, errors.New("reference exceeds frozen patch size policy")
+		}
+	}
+	return &heldOutPreparationInputs{Template: template, Margin: margin, Exclusions: exclusions, References: references, Patches: patches, MinimumPreparedAt: minimumPreparedAt}, nil
+}
+
+// The fourth helper is pinned by the reviewed configuration. The three known
+// release hashes and installed directory cannot be redirected by that config.
+func authenticateHeldOutScripts(scripts []heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if err := validateHeldOutScriptProjection(scripts, release); err != nil {
+		return err
+	}
+	if release.Runtime != nil {
+		if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+			return err
+		}
+	}
+	for _, pin := range scripts {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// The complete C2 component map cannot broaden the legacy four-file handoff
+// projection or permit another helper to replace a required script.
+func validateHeldOutScriptProjection(scripts []heldOutPinnedFile, release heldOutRelease) error {
+	required := map[string]bool{"evaluator.sh": true, "network-boundary.sh": true, "compose.yml": true, "hash-local-mount.sh": true}
+	seen := map[string]bool{}
+	for _, pin := range scripts {
+		name := filepath.Base(pin.Path)
+		if !required[name] || seen[name] || filepath.Dir(pin.Path) != release.ScriptDirectory || (name != "hash-local-mount.sh" && release.ScriptDigests[name] == "") || (name != "hash-local-mount.sh" && release.ScriptDigests[name] != pin.Sha256) || (release.Runtime != nil && name == "hash-local-mount.sh" && release.ScriptDigests[name] != pin.Sha256) {
+			return errors.New("installed held-out script identity mismatch")
+		}
+		seen[name] = true
+	}
+	if len(seen) != len(required) {
+		return errors.New("complete installed script bundle required")
+	}
+	return nil
+}
+
+// Generates exactly once, validates the whole native workload census before
+// publishing, and reauthenticates all mutable input files after generation.
+// Failure retains the private started marker and never publishes a partial plan.
+func prepareHeldOutCampaign(ctx context.Context, config heldOutPreparationConfig, configSha256 string, inputs heldOutPreparationInputs,
+	release heldOutRelease, settings heldOutOperatorSettings, hooks heldOutPreparationHooks, reauthenticate func() error) (*heldOutPublicPlan, error) {
+	if hooks.Entropy == nil || hooks.Generate == nil || hooks.Now == nil || reauthenticate == nil || !validSha256(configSha256) || heldOutDigest(hooks.Configuration) != configSha256 || validateHeldOutProtocolSettings(config, settings) != nil {
+		return nil, errors.New("complete frozen held-out preparation dependencies required")
+	}
+	if err := validateHeldOutPrivateDirectory(filepath.Dir(config.PrivateRoot)); err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(config.PrivateRoot) || filepath.Clean(config.PrivateRoot) != config.PrivateRoot || !filepath.IsAbs(config.PublicPlanPath) || filepath.Clean(config.PublicPlanPath) != config.PublicPlanPath || config.PublicPlanPath == config.PrivateRoot || strings.HasPrefix(config.PublicPlanPath, config.PrivateRoot+string(filepath.Separator)) {
+		return nil, errors.New("distinct canonical private root and public plan path required")
+	}
+	if _, err := os.Lstat(config.PublicPlanPath); !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("public commitment destination already exists or unavailable")
+	}
+	if err := os.Mkdir(config.PrivateRoot, 0700); err != nil {
+		return nil, errors.New("private campaign root already exists or unavailable")
+	}
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "preparation.started"), []byte("one preparation; no reroll or execution authorized\n"), 0600); err != nil {
+		return nil, err
+	}
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "configuration.json"), hooks.Configuration, 0600); err != nil {
+		return nil, err
+	}
+	campaignId, err := drawHeldOutId(hooks.Entropy)
+	if err != nil {
+		return nil, err
+	}
+	policy := inputs.Template.EvaluationPolicy
+	policy.TakeoverMargin = inputs.Margin
+	policyBytes, err := json.Marshal(policy)
+	if err != nil {
+		return nil, err
+	}
+	plan := heldOutPrivatePlan{Schema: 1, Kind: "sim-latency-held-out-private-plan", CampaignId: campaignId,
+		PreparedAt: hooks.Now().UTC(), Config: config, ConfigSha256: configSha256, Policy: policy,
+		PolicySha256: heldOutDigest(policyBytes), Margin: inputs.Margin, References: inputs.References,
+		Rounds: []heldOutPrivateRound{}}
+	if plan.PreparedAt.IsZero() || plan.PreparedAt.Before(inputs.MinimumPreparedAt) {
+		return nil, errors.New("B preparation must follow the authenticated successful bridge")
+	}
+	workloads := []heldOutGeneratedWorkload{}
+	defer func() {
+		for _, workload := range workloads {
+			clear(workload.ProviderBytes)
+		}
+	}()
+	seenIds := map[string]bool{campaignId: true}
+	for position := 1; position <= settings.Workload.SeedCount; position++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var secret [32]byte
+		if _, err := io.ReadFull(hooks.Entropy, secret[:]); err != nil {
+			clear(secret[:])
+			return nil, errors.New("cryptographic held-out seed entropy unavailable")
+		}
+		seedHex := hex.EncodeToString(secret[:])
+		clear(secret[:])
+		for _, excluded := range inputs.Exclusions.PrivateSeedHexes {
+			if seedHex == excluded {
+				return nil, errors.New("drawn private seed is retired; retain failed preparation")
+			}
+		}
+		workload, err := hooks.Generate(ctx, seedHex, policy, settings.Workload)
+		if err != nil || workload == nil || workload.PrivateSeedHex != seedHex {
+			return nil, errors.New("native held-out generation failed or changed the drawn seed")
+		}
+		workloads = append(workloads, *workload)
+		roundId, err := drawHeldOutId(hooks.Entropy)
+		if err != nil || seenIds[roundId] {
+			return nil, errors.New("fresh independent round identity unavailable")
+		}
+		seenIds[roundId] = true
+		order, err := drawHeldOutReferenceOrder(hooks.Entropy, settings.Order)
+		if err != nil {
+			return nil, err
+		}
+		round := heldOutPublicRound{Position: position, RoundId: roundId, ProvidersSha256: workload.ProvidersSha256,
+			Order: order, Jobs: []heldOutPlannedJob{}}
+		for referencePosition, role := range order {
+			jobId, err := drawHeldOutId(hooks.Entropy)
+			if err != nil || seenIds[jobId] {
+				return nil, errors.New("fresh independent job identity unavailable")
+			}
+			seenIds[jobId] = true
+			request := inputs.Template
+			request.JobId, request.RoundId, request.RoundSeedHex = jobId, roundId, seedHex
+			request.Attempt, request.CompetitionId = 1, "offline-held-out-"+campaignId
+			request.EvaluationPolicy = policy
+			request.ArtifactDirectory = filepath.Join(config.PrivateRoot, fmt.Sprintf("round-%02d", position), fmt.Sprintf("job-%02d-%s", referencePosition+1, role), "artifacts")
+			request.ProvidersPath, request.PatchPath = filepath.Join(request.ArtifactDirectory, "providers.yml"), filepath.Join(request.ArtifactDirectory, "canonical.patch")
+			request.ProvidersSha256, request.PatchSha256 = workload.ProvidersSha256, heldOutDigest(inputs.Patches[role])
+			content, err := json.MarshalIndent(request, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			round.Jobs = append(round.Jobs, heldOutPlannedJob{Position: referencePosition + 1, Role: role, JobId: jobId, RequestSha256: heldOutDigest(content)})
+		}
+		commitment, err := heldOutRoundCommitment(seedHex, round, plan, release)
+		if err != nil {
+			return nil, err
+		}
+		for _, excluded := range inputs.Exclusions.RetiredCommitments {
+			if commitment == excluded {
+				return nil, errors.New("retired seed commitment drawn")
+			}
+		}
+		round.SeedCommitment = commitment
+		plan.Rounds = append(plan.Rounds, heldOutPrivateRound{Public: round, PrivateSeedHex: seedHex, EffectiveSeed: workload.EffectiveSeed})
+	}
+	if err := validateHeldOutExcludedWorkloads(workloads, inputs.Exclusions, policy, settings.Workload); err != nil {
+		return nil, err
+	}
+	if err := reauthenticate(); err != nil {
+		return nil, errors.New("held-out preparation inputs changed before publication")
+	}
+	for index, round := range plan.Rounds {
+		roundRoot := filepath.Join(config.PrivateRoot, fmt.Sprintf("round-%02d", index+1))
+		if err := os.Mkdir(roundRoot, 0700); err != nil {
+			return nil, err
+		}
+		for _, job := range round.Public.Jobs {
+			request := inputs.Template
+			request.JobId, request.RoundId, request.RoundSeedHex = job.JobId, round.Public.RoundId, round.PrivateSeedHex
+			request.Attempt, request.CompetitionId = 1, "offline-held-out-"+campaignId
+			request.EvaluationPolicy = policy
+			jobRoot := heldOutJobRoot(config.PrivateRoot, round.Public, job)
+			request.ArtifactDirectory = filepath.Join(jobRoot, "artifacts")
+			request.ProvidersPath, request.PatchPath = filepath.Join(request.ArtifactDirectory, "providers.yml"), filepath.Join(request.ArtifactDirectory, "canonical.patch")
+			request.ProvidersSha256, request.PatchSha256 = workloads[index].ProvidersSha256, heldOutDigest(inputs.Patches[job.Role])
+			content, err := json.MarshalIndent(request, "", "  ")
+			if err != nil || heldOutDigest(content) != job.RequestSha256 {
+				return nil, errors.New("precommitted request reconstruction changed")
+			}
+			for _, directory := range []string{jobRoot, request.ArtifactDirectory} {
+				if err := os.Mkdir(directory, 0700); err != nil {
+					return nil, err
+				}
+			}
+			for name, payload := range map[string][]byte{"providers.yml": workloads[index].ProviderBytes, "canonical.patch": inputs.Patches[job.Role], "precommitted-request.json": content} {
+				if err := writeHeldOutExclusive(filepath.Join(request.ArtifactDirectory, name), payload, 0600); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	privateBytes, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(privateBytes)
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "private-plan.json"), privateBytes, 0600); err != nil {
+		return nil, err
+	}
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "evaluation-policy-canonical.json"), policyBytes, 0600); err != nil {
+		return nil, err
+	}
+	public := publicHeldOutPlan(plan, heldOutDigest(privateBytes), release)
+	publicBytes, err := json.MarshalIndent(public, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := reauthenticate(); err != nil {
+		return nil, errors.New("held-out preparation inputs changed at final publication")
+	}
+	if err := writeHeldOutExclusive(config.PublicPlanPath, publicBytes, 0644); err != nil {
+		return nil, err
+	}
+	return &public, nil
+}
+
+// Paths derive only from validated fixed positions/roles, never input paths.
+func heldOutJobRoot(root string, round heldOutPublicRound, job heldOutPlannedJob) string {
+	return filepath.Join(root, fmt.Sprintf("round-%02d", round.Position), fmt.Sprintf("job-%02d-%s", job.Position, job.Role))
+}
+
+// Constructs the public allowlist without embedding config, requests or seeds.
+func publicHeldOutPlan(plan heldOutPrivatePlan, privateDigest string, release heldOutRelease) heldOutPublicPlan {
+	settingsA := defaultCalibrationAnalysisSettings()
+	public := heldOutPublicPlan{Schema: 1, Kind: "sim-latency-held-out-public-plan", CampaignId: plan.CampaignId,
+		PreparedAt: plan.PreparedAt, PrivatePlanSha256: privateDigest, ConfigSha256: plan.ConfigSha256,
+		BaseSha: release.BaseSha, SourceLockSha256: release.SourceLockSha256, EvaluatorImageId: release.ImageId,
+		StageAReportSha256: plan.Config.StageAReport.Sha256, StageAInputsSha256: plan.Config.StageAInputs.Sha256,
+		PolicySha256: plan.PolicySha256, Margin: plan.Margin, ReferenceSha256: plan.Config.References.Sha256,
+		ExclusionsSha256: plan.Config.Exclusions.Sha256, QualificationSha256: plan.Config.Qualification.Sha256,
+		ControlReplicates: settingsA.Replicates, CandidateReplicates: settingsA.Replicates, ExecutionLimitSeconds: settingsA.ExecutionLimitSeconds,
+		DeferredFields: []string{"round_baseline_path", "round_baseline_sha256"}, Rounds: []heldOutPublicRound{}}
+	if plan.Config.Protocol == calibrationProtocolThreeABridgeThreeB && plan.Config.Amendment != nil {
+		pins := plan.Config.Amendment
+		public.Protocol, public.ProtocolApprovalSha256, public.OriginalPlanSha256 = plan.Config.Protocol, pins.Approval.Sha256, pins.OriginalPlan.Sha256
+		public.NewReleaseSha256, public.MarginFreezeSha256, public.BridgePlanSha256, public.BridgeInputsSha256, public.BridgeReceiptSha256 = pins.Release.Sha256, pins.MarginFreeze.Sha256, pins.BridgePlan.Sha256, pins.BridgeInputs.Sha256, pins.BridgeReceipt.Sha256
+		public.OriginalABaseSha, public.OriginalAImageId = pins.OriginalBaseSha, pins.OriginalImageId
+		public.RequiredOrderedSeeds = 3
+	}
+	for _, round := range plan.Rounds {
+		public.Rounds = append(public.Rounds, round.Public)
+	}
+	return public
+}
+
+// Loads the exact prepared handoff and checks its public projection, all
+// commitments, every original request, private modes and the native workloads.
+// No evaluator, analysis or entropy source is called by this verification.
+func verifyHeldOutPlan(privatePin heldOutPinnedFile, publicPin heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings) (*heldOutPrivatePlan, error) {
+	privateBytes, err := readHeldOutPinned(privatePin, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(privateBytes)
+	var plan heldOutPrivatePlan
+	if err := decodeHeldOutComplete(privateBytes, &plan, "held-out private plan"); err != nil {
+		return nil, err
+	}
+	if plan.Schema != 1 || plan.Kind != "sim-latency-held-out-private-plan" || !scoreRoundIdPattern.MatchString(plan.CampaignId) || plan.PreparedAt.IsZero() || len(plan.Rounds) != settings.Workload.SeedCount || privatePin.Path != filepath.Join(plan.Config.PrivateRoot, "private-plan.json") || publicPin.Path != plan.Config.PublicPlanPath {
+		return nil, errors.New("held-out private plan shape or path invalid")
+	}
+	if err := validateHeldOutPrivateDirectory(plan.Config.PrivateRoot); err != nil {
+		return nil, err
+	}
+	configurationBytes, err := readHeldOutPinned(heldOutPinnedFile{Path: filepath.Join(plan.Config.PrivateRoot, "configuration.json"), Sha256: plan.ConfigSha256}, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	var configuration heldOutPreparationConfig
+	if err := decodeHeldOutComplete(configurationBytes, &configuration, "frozen held-out preparation configuration"); err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(configuration, plan.Config) {
+		return nil, errors.New("held-out configuration differs from its original pin")
+	}
+	publicBytes, err := readHeldOutPinned(publicPin, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var public heldOutPublicPlan
+	if err := decodeHeldOutComplete(publicBytes, &public, "held-out public plan"); err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(public, publicHeldOutPlan(plan, privatePin.Sha256, release)) {
+		return nil, errors.New("held-out public/private plan mismatch or reordered references")
+	}
+	inputs, err := authenticateHeldOutPreparation(plan.Config, release, settings)
+	if err != nil {
+		return nil, err
+	}
+	expectedPolicy := inputs.Template.EvaluationPolicy
+	expectedPolicy.TakeoverMargin = inputs.Margin
+	policyBytes, _ := json.Marshal(expectedPolicy)
+	if plan.PreparedAt.Before(inputs.MinimumPreparedAt) || plan.Margin != inputs.Margin || !reflect.DeepEqual(plan.Policy, expectedPolicy) || plan.PolicySha256 != heldOutDigest(policyBytes) || !reflect.DeepEqual(plan.References, inputs.References) {
+		return nil, errors.New("held-out accepted margin, reference or complete policy changed")
+	}
+	workloads := []heldOutGeneratedWorkload{}
+	defer func() {
+		for _, workload := range workloads {
+			clear(workload.ProviderBytes)
+		}
+	}()
+	seenIds := map[string]bool{plan.CampaignId: true}
+	for index, round := range plan.Rounds {
+		if round.Public.Position != index+1 || len(round.Public.Jobs) != 3 || !scoreRoundIdPattern.MatchString(round.Public.RoundId) || seenIds[round.Public.RoundId] {
+			return nil, errors.New("held-out round cardinality/order/identity changed")
+		}
+		seenIds[round.Public.RoundId] = true
+		commitment, err := heldOutRoundCommitment(round.PrivateSeedHex, round.Public, plan, release)
+		if err != nil || commitment != round.Public.SeedCommitment {
+			return nil, errors.New("held-out seed/order/request commitment mismatch")
+		}
+		roles := map[string]bool{}
+		for jobIndex, job := range round.Public.Jobs {
+			if job.Position != jobIndex+1 || job.Role != round.Public.Order[jobIndex] || (job.Role != "no-op" && job.Role != "better" && job.Role != "worse") || roles[job.Role] || !scoreRoundIdPattern.MatchString(job.JobId) || seenIds[job.JobId] {
+				return nil, errors.New("held-out job identity or committed reference order changed")
+			}
+			roles[job.Role], seenIds[job.JobId] = true, true
+			root := heldOutJobRoot(plan.Config.PrivateRoot, round.Public, job)
+			if err := validateHeldOutPrivateDirectory(root); err != nil {
+				return nil, err
+			}
+			artifacts := filepath.Join(root, "artifacts")
+			if err := validateHeldOutPrivateDirectory(artifacts); err != nil {
+				return nil, err
+			}
+			requestBytes, err := readHeldOutPinned(heldOutPinnedFile{Path: filepath.Join(artifacts, "precommitted-request.json"), Sha256: job.RequestSha256}, settings.MaximumBytes, true)
+			if err != nil {
+				return nil, err
+			}
+			var request heldOutRequest
+			if err := decodeHeldOutComplete(requestBytes, &request, "held-out precommitted request"); err != nil {
+				return nil, err
+			}
+			expected := inputs.Template
+			expected.JobId, expected.RoundId, expected.RoundSeedHex = job.JobId, round.Public.RoundId, round.PrivateSeedHex
+			expected.Attempt, expected.CompetitionId, expected.EvaluationPolicy = 1, "offline-held-out-"+plan.CampaignId, plan.Policy
+			expected.ArtifactDirectory, expected.ProvidersPath, expected.PatchPath = artifacts, filepath.Join(artifacts, "providers.yml"), filepath.Join(artifacts, "canonical.patch")
+			expected.ProvidersSha256, expected.PatchSha256 = round.Public.ProvidersSha256, heldOutDigest(inputs.Patches[job.Role])
+			if !reflect.DeepEqual(request, expected) {
+				return nil, errors.New("held-out precommitted request fields changed")
+			}
+			payload, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.MaximumBytes, true)
+			if err != nil {
+				return nil, err
+			}
+			if jobIndex == 0 {
+				workloads = append(workloads, heldOutGeneratedWorkload{PrivateSeedHex: round.PrivateSeedHex, EffectiveSeed: round.EffectiveSeed, ProviderBytes: payload, ProvidersSha256: round.Public.ProvidersSha256})
+			} else {
+				clear(payload)
+			}
+			if _, err := readHeldOutPinned(heldOutPinnedFile{Path: request.PatchPath, Sha256: request.PatchSha256}, settings.MaximumBytes, true); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := validateHeldOutExcludedWorkloads(workloads, inputs.Exclusions, plan.Policy, settings.Workload); err != nil {
+		return nil, err
+	}
+	return &plan, nil
+}
+
+// Streams the potentially large race-enabled operator binary without retaining
+// it in memory. File identity and metadata are rechecked after hashing.
+func verifyHeldOutExecutable(path string, expectedDigest string, maximumBytes int64) error {
+	if !validSha256(expectedDigest) || maximumBytes <= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("held-out executable pin invalid")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	before, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || resolved != path || !before.Mode().IsRegular() || before.Mode().Perm()&0022 != 0 || before.Size() <= 0 || before.Size() > maximumBytes {
+		return errors.New("held-out executable metadata invalid")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return errors.New("held-out executable changed during open")
+	}
+	digest := sha256.New()
+	n, copyErr := io.Copy(digest, io.LimitReader(file, maximumBytes+1))
+	after, statErr := file.Stat()
+	if copyErr != nil || statErr != nil || n != before.Size() || after.Size() != before.Size() || after.ModTime() != before.ModTime() || hex.EncodeToString(digest.Sum(nil)) != expectedDigest {
+		return errors.New("held-out executable digest changed")
+	}
+	return nil
+}
+
+// Excludes all known native derivations in addition to explicitly recorded
+// legacy integer seeds; a partial effective-seed census cannot hide a known raw
+// seed's effective workload behind a different raw-seed label.
+func validateHeldOutExcludedWorkloads(workloads []heldOutGeneratedWorkload, exclusions heldOutExclusions,
+	policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) error {
+	excludedSeeds := append([]int64{}, exclusions.EffectiveSeeds...)
+	for _, raw := range exclusions.PrivateSeedHexes {
+		seed, err := heldOutEffectiveSeed(raw)
+		if err != nil {
+			return err
+		}
+		excludedSeeds = append(excludedSeeds, seed)
+	}
+	if err := validateHeldOutWorkloadSet(workloads, excludedSeeds, policy, settings); err != nil {
+		return err
+	}
+	for _, workload := range workloads {
+		for _, raw := range exclusions.PrivateSeedHexes {
+			if raw == workload.PrivateSeedHex {
+				return errors.New("retired private seed reused")
+			}
+		}
+		for _, digest := range exclusions.ProviderDigests {
+			if digest == workload.ProvidersSha256 {
+				return errors.New("retired provider bytes drawn")
+			}
+		}
+	}
+	return nil
+}
+
+// The real command validates principal/toolchain before an operation can read
+// private material, acquire entropy or launch a process. Unit hooks cannot
+// weaken this external boundary.
+func validateHeldOutOperatorRuntime() error {
+	if os.Geteuid() != 0 || runtime.Version() != "go1.27.3" {
+		return errors.New("held-out operator requires root and actual Go 1.27.3")
+	}
+	content, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "Cpus_allowed_list:") && strings.TrimSpace(strings.TrimPrefix(line, "Cpus_allowed_list:")) == defaultHeldOutOperatorSettings().ManagementCpus {
+			return nil
+		}
+	}
+	return errors.New("held-out operator must be confined to management CPUs 20,22")
+}

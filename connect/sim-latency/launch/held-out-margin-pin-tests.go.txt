@@ -1,0 +1,109 @@
+// Draft report-pin tests. Fixtures are synthetic accepted shapes, not genuine
+// native replay evidence and never authorization to create held-out requests.
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// Synthetic identities deliberately contain no live source or campaign values.
+func heldOutMarginFixture() (calibrationAnalysisReport, heldOutMarginPins) {
+	settings := defaultCalibrationAnalysisSettings()
+	pins := heldOutMarginPins{InputManifestSha256: strings.Repeat("1", 64), EvaluationPolicySha256: strings.Repeat("2", 64)}
+	report := calibrationAnalysisReport{
+		Kind: "sim-latency-calibration-analysis", Cohorts: settings.Cohorts,
+		ObservedReplicates: settings.Cohorts * settings.Replicates * 2,
+		BootstrapDraws:     settings.BootstrapDraws, Placeability: 0.98,
+		RecommendedMargin: 0.200, Accepted: true, Reasons: []string{},
+		InputManifestSha256: pins.InputManifestSha256, EvaluationPolicySha256: pins.EvaluationPolicySha256,
+	}
+	return report, pins
+}
+
+// Re-pinning mutations tests semantic refusals independently of digest refusal.
+func heldOutMarginFixtureBytes(t *testing.T, report calibrationAnalysisReport, pins heldOutMarginPins) ([]byte, heldOutMarginPins) {
+	t.Helper()
+	content, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	pins.ReportSha256 = hex.EncodeToString(digest[:])
+	return content, pins
+}
+
+// Successful pinning returns the already-selected value without recalibration.
+func TestHeldOutMarginAcceptsPinnedFullReport(t *testing.T) {
+	report, pins := heldOutMarginFixture()
+	content, pins := heldOutMarginFixtureBytes(t, report, pins)
+	margin, err := pinnedHeldOutMargin(content, pins)
+	if err != nil || margin != report.RecommendedMargin {
+		t.Fatalf("accepted pin rejected: %v %v", margin, err)
+	}
+}
+
+// Whitespace changes still change the published byte identity.
+func TestHeldOutMarginRejectsChangedReportBytes(t *testing.T) {
+	report, pins := heldOutMarginFixture()
+	content, pins := heldOutMarginFixtureBytes(t, report, pins)
+	if _, err := pinnedHeldOutMargin(append(content, '\n'), pins); err == nil {
+		t.Fatal("changed report accepted")
+	}
+}
+
+// An accepted flag cannot override failures, missing samples or wrong bindings.
+func TestHeldOutMarginRejectsIncompleteOrUnboundReports(t *testing.T) {
+	mutations := []func(*calibrationAnalysisReport){
+		func(r *calibrationAnalysisReport) { r.Accepted = false },
+		func(r *calibrationAnalysisReport) { r.Reasons = []string{"synthetic_failure"} },
+		func(r *calibrationAnalysisReport) { r.Kind = "other" },
+		func(r *calibrationAnalysisReport) { r.Cohorts-- },
+		func(r *calibrationAnalysisReport) { r.ObservedReplicates-- },
+		func(r *calibrationAnalysisReport) { r.BootstrapDraws-- },
+		func(r *calibrationAnalysisReport) { r.InputManifestSha256 = strings.Repeat("3", 64) },
+		func(r *calibrationAnalysisReport) { r.EvaluationPolicySha256 = strings.Repeat("4", 64) },
+		func(r *calibrationAnalysisReport) { r.Placeability = 0.93 },
+		func(r *calibrationAnalysisReport) { r.Placeability = 1.01 },
+		func(r *calibrationAnalysisReport) { r.RecommendedMargin = 0.160 },
+		func(r *calibrationAnalysisReport) { r.RecommendedMargin = 0.501 },
+		func(r *calibrationAnalysisReport) { r.RecommendedMargin = 0.2001 },
+	}
+	for i, mutate := range mutations {
+		report, pins := heldOutMarginFixture()
+		mutate(&report)
+		content, pins := heldOutMarginFixtureBytes(t, report, pins)
+		if _, err := pinnedHeldOutMargin(content, pins); err == nil {
+			t.Fatalf("invalid semantic mutation %d accepted", i)
+		}
+	}
+}
+
+// Both lower/upper boundaries are supported native grid values.
+func TestHeldOutMarginAcceptsFrozenGridBoundaries(t *testing.T) {
+	for _, margin := range []float64{0.161, 0.162, 0.499, 0.500} {
+		report, pins := heldOutMarginFixture()
+		report.RecommendedMargin = margin
+		content, pins := heldOutMarginFixtureBytes(t, report, pins)
+		if _, err := pinnedHeldOutMargin(content, pins); err != nil {
+			t.Fatalf("boundary %v refused: %v", margin, err)
+		}
+	}
+}
+
+// Strict decoding must refuse appended JSON and unknown contract fields even
+// when an independently supplied digest matches those malformed bytes.
+func TestHeldOutMarginRejectsTrailingDataAndUnknownFields(t *testing.T) {
+	report, pins := heldOutMarginFixture()
+	content, pins := heldOutMarginFixtureBytes(t, report, pins)
+	for _, changed := range [][]byte{append(append([]byte{}, content...), []byte("{}")...), append([]byte(`{"unexpected":true,`), content[1:]...)} {
+		digest := sha256.Sum256(changed)
+		pins.ReportSha256 = hex.EncodeToString(digest[:])
+		if _, err := pinnedHeldOutMargin(changed, pins); err == nil {
+			t.Fatal("malformed report accepted")
+		}
+	}
+}

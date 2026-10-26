@@ -38,7 +38,7 @@ func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 func winnerModelFixtureStream(t *testing.T, output string) string {
 	t.Helper()
 	content, err := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{
-		"id": "resp_synthetic", "status": "completed", "model": model.CompetitionWinnerReviewModel,
+		"id": "resp_synthetic", "status": "completed", "model": winnerReviewProviderModelName(model.CompetitionWinnerReviewModel),
 		"usage":  map[string]int{"input_tokens": 100, "output_tokens": 100},
 		"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": output}}}},
 	}})
@@ -77,7 +77,7 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Model != model.CompetitionWinnerReviewModel || payload.Reasoning.Effort != "max" || payload.Store || !payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" {
+		if payload.Model != winnerReviewMiniProviderSnapshot || payload.Reasoning.Effort != "xhigh" || payload.Store || !payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" {
 			t.Fatal("model execution contract was downgraded or gained tools")
 		}
 		var readable struct {
@@ -105,6 +105,90 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 		if finding.EvidenceSha256 != result.Review.PrivateEvidenceSha256 {
 			t.Fatal("finding lacks actual report binding")
 		}
+	}
+}
+
+// Existing policy records keep their original provider. Neither the request
+// nor the broker receipt can silently relabel them under a new season default.
+func TestWinnerReviewModelSelectsProviderFromFrozenPolicy(t *testing.T) {
+	for _, policyName := range []string{model.CompetitionWinnerReviewPolicy, model.CompetitionLegacyWinnerReviewPolicy} {
+		request, judgment := winnerModelFixture()
+		modelName, reasoning, _ := model.CompetitionWinnerReviewProvider(policyName)
+		providerModelName := winnerReviewProviderModelName(modelName)
+		request.Request.Policy.WinnerReviewPolicy = policyName
+		request.Request.ReviewerModel, request.Request.ReviewerReasoning = modelName, reasoning
+		request.Template.ReviewerModel, request.Template.ReviewerReasoning = modelName, reasoning
+		content, err := json.Marshal(judgment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream := strings.ReplaceAll(winnerModelFixtureStream(t, string(content)), winnerReviewMiniProviderSnapshot, providerModelName)
+		calls := 0
+		client := &http.Client{Transport: winnerReviewTransport(func(message *http.Request) (*http.Response, error) {
+			calls++
+			var body struct {
+				Model     string `json:"model"`
+				Reasoning struct {
+					Effort string `json:"effort"`
+				} `json:"reasoning"`
+			}
+			if err := json.NewDecoder(message.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Model != providerModelName || body.Reasoning.Effort != reasoning {
+				t.Fatalf("policy %s dispatched %s/%s", policyName, body.Model, body.Reasoning.Effort)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream)), Header: make(http.Header)}, nil
+		})}
+		result, err := executeWinnerModel(context.Background(), client, "synthetic-model-key", request, defaultWinnerModelSettings())
+		if err != nil || calls != 1 || result == nil || result.Model != modelName || result.Reasoning != reasoning {
+			t.Fatalf("frozen policy result: %+v calls=%d error=%v", result, calls, err)
+		}
+		if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Changing review defaults must never migrate the independent Sol-low test
+// agent's stream acceptance or let either provider impersonate the other.
+func TestWinnerReviewAndSourceTestsKeepSeparateModelPins(t *testing.T) {
+	stream := winnerModelFixtureStream(t, "synthetic text")
+	settings := defaultWinnerModelSettings()
+	if _, err := readPinnedSolModelResponse(strings.NewReader(stream), settings); err == nil {
+		t.Fatal("Sol test parser accepted a mini review response")
+	}
+	solStream := strings.ReplaceAll(stream, winnerReviewMiniProviderSnapshot, sourceTestModelName)
+	if _, err := readPinnedSolModelResponse(strings.NewReader(solStream), settings); err != nil {
+		t.Fatal("review migration changed Sol test stream acceptance:", err)
+	}
+	if _, err := readWinnerModelResponse(strings.NewReader(solStream), settings); err == nil {
+		t.Fatal("new honesty-review parser accepted a Sol test response")
+	}
+}
+
+// Mono-root context must bind all ten source pins before any provider call,
+// even if the modified files and their individual content hashes are valid.
+func TestWinnerReviewModelAuthenticatesCompleteMonoRootSourceMap(t *testing.T) {
+	request, _ := winnerModelFixture()
+	request.Packet.Patch = []byte(strings.NewReplacer("a/connect/example.go", "a/server/connect/example.go", "b/connect/example.go", "b/server/connect/example.go").Replace(string(request.Packet.Patch)))
+	request.Packet.PatchPolicy = controller.PatchPolicy{PathBase: "mono_root_v1", MaxPatchBytes: 4096, AllowedPaths: []string{"server/**"}, ForbiddenPaths: []string{"server/connect/sim-latency/**"}}
+	request.SourceFiles[0].Path = "server/connect/example.go"
+	request.Packet.SourceCommits = sourceTestCommits(strings.Repeat("a", 40))
+	request.Packet.BaseSha = request.Packet.SourceCommits["server"]
+	lock, err := model.CompetitionSourceLockDigest(request.Packet.SourceCommits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Template.BaseSourceLockSha256 = lock
+	patchDigest := sha256.Sum256(request.Packet.Patch)
+	request.Template.PatchSha256 = hex.EncodeToString(patchDigest[:])
+	if _, err := winnerModelInput(request); err != nil {
+		t.Fatal("complete mono-root context was refused:", err)
+	}
+	request.Packet.SourceCommits["sdk"] = strings.Repeat("b", 40)
+	if _, err := winnerModelInput(request); err == nil || !strings.Contains(err.Error(), "frozen lock") {
+		t.Fatal("changed sibling pin reached the provider boundary", err)
 	}
 }
 
@@ -155,7 +239,7 @@ func TestWinnerReviewModelStreamRequiresOneBoundedPinnedCompletion(t *testing.T)
 	for _, stream := range []string{
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"approve\"}\n\n",
 		valid + valid,
-		strings.ReplaceAll(valid, model.CompetitionWinnerReviewModel, "synthetic-other-model"),
+		strings.ReplaceAll(valid, winnerReviewMiniProviderSnapshot, "synthetic-other-model"),
 		strings.ReplaceAll(valid, `"status":"completed"`, `"status":"incomplete"`),
 		"data: {\"type\":\"response.failed\"}\n\n",
 		"data: not-json\n\n",

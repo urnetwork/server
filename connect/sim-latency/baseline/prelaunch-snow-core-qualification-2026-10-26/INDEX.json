@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-snow-core-unit-qualification",
+  "official": false,
+  "source_commit": "74a456bcb2ebe42fc11b233cb9517c9e262aa148",
+  "sim_tests_per_pass": 12,
+  "model_tests_per_pass": 5,
+  "consecutive_passes_each": 3,
+  "passes": 51,
+  "skips": 0,
+  "sim_test_binary_sha256": "71c9a3bee36bf1038e3ce981d02cb13e6e7d78e95e9d1f7b0443d9a07bb44b56",
+  "model_test_binary_sha256": "1638c43512b25aaecc6194e190711a4d9fdd8a803fc2a41e9f518cee803d2345",
+  "live_provider_calls": 0,
+  "scored": false,
+  "production_activated": false
+}

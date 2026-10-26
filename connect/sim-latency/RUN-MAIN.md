@@ -34,10 +34,22 @@ a deterministic regression test. A separate Sol 6.1 low agent then reruns the
 affected test and required suite; do not accept a debugging agent's test run as
 the independent completion result.
 
-Sol 6.1 with max reasoning owns code evaluation, each winning-submission honesty
-and safety code review, the approve/reject decision, every winner promotion,
-and all source or config merge/push operations. It must review the exact
-materialized patch and score evidence before invoking this harness. The
+The prospective production policy uses Snow's three reviewers:
+`qwen3.8-27b` (`xhigh`), `gemma-4-26b-a4b` (`high`), and
+`muse-glimmer-30b` (`xhigh`). Run them serially because Snow has one resident
+model at a time; allow model-swap latency inside the original shared deadline.
+All three must approve. Retain the union of all attributed findings; a concrete
+substantiated rejection rejects, while missing, malformed, unavailable or
+uncertain evidence holds progression without inventing approval or dishonesty.
+Snow replaces external model calls for automated test attestations too: the
+prescribed deterministic Go suite runs once, and all three models attest to
+the same authenticated result. Models do not choose commands or rerun tests.
+The selected endpoint requires no API key. Qualification, fixed egress,
+immutable settings, member journals and protected evidence are still mandatory.
+Historical Mini and Sol records retain their original provider identities.
+Sol 6.1 max retains implementation, debugging, and source/config merge/push
+ownership after the required independent review. The reviewer must inspect the
+exact materialized patch and score evidence before invoking this harness. The
 low-reasoning test agent must not approve candidates, merge branches, or push
 source/config refs. These roles apply to all six epochs and must survive an
 agent handoff.
@@ -50,20 +62,26 @@ This legacy staging path is not the v2 staging supervisor described below.
 
 ## V2 durable supervision — disabled until qualified
 
-### Adopted automatic closing policy (2026-10-23)
+### Adopted automatic closing policy (review-provider update 2026-10-26)
 
-New seasons should freeze `winner_review_policy: elected_winner_sol61max_v1`.
+New seasons should freeze `winner_review_policy: elected_winner_snow_union_v1`.
 This is a prospective opt-in, not a reinterpretation of an already-open round.
 The empty policy retains the historical independent source-choice flow described
 below. Do not change an existing season's policy approval or running worker pins
 to activate this flow in place.
+
+Historical `elected_winner_sol61max_v1` records remain bound to their original
+`gpt-6.1-sol`/`max` provenance. Policy-aware readers preserve their meaning and
+digests; neither these nor historical Mini reviews are relabeled as Snow reviews. The empty policy still
+means the earlier independent source-choice lifecycle. A new provider requires
+a fresh approved policy and qualified release, not a field edit to a live round.
 
 For the adopted policy the durable supervisor performs:
 
 1. Close admission and finish every accepted evaluation.
 2. Seal and publish the provisional reward election after the reveal boundary.
 3. Automatically dispatch the current elected candidate to the qualified
-   Sol 6.1 max honesty/safety broker, with exact source/patch/score evidence.
+   three-model Snow honesty/safety broker, with exact source/patch/score evidence.
 4. Record a substantiated rejection through the scoped review API, publish its
    reasons and replacement decision, and review the next elected candidate.
    An unavailable model, timeout or uncertainty is not a rejection.
@@ -88,7 +106,7 @@ Prospectively approve these values together with the rest of the season policy:
 
 ```yaml
 automation_policy:
-  winner_review_policy: elected_winner_sol61max_v1
+  winner_review_policy: elected_winner_snow_union_v1
   winner_review_timeout_seconds: 1800
   source_choice_delay_seconds: 0
   staging_preparation_seconds: 0
@@ -102,7 +120,7 @@ qualification still must succeed; zero removes the old fixed 16-hour wait, not
 these gates. The normal per-submission scoring budget and statistical rules are
 unchanged. Freeze a fresh approved scope/baseline before bootstrap.
 
-Deploy the API/worker/manager code and the additive winner-review DB migration
+Deploy the API/worker/manager code and the additive winner-review/provider DB migrations
 before activating the policy. As usual, commit, pull/merge and push before a main
 DB migration; never run a main migration from an unpublished local tree.
 Historical review reports and existing sealed/open rounds remain unchanged.
@@ -110,7 +128,7 @@ Historical review reports and existing sealed/open rounds remain unchanged.
 In addition to the worker/preparation pins below, configure:
 
 ```sh
-export SIM_LATENCY_REVIEW_COMMAND=/secure/automation/isolated-sol-review
+export SIM_LATENCY_REVIEW_COMMAND=/secure/automation/isolated-snow-review
 export SIM_LATENCY_REVIEW_SHA256=REPLACE_WITH_QUALIFIED_BROKER_SHA256
 export SIM_LATENCY_REVIEWER_TOKEN_FILE=/secure/automation/reviewer.token
 export SIM_LATENCY_BUILD_COMMAND=/secure/automation/isolated-source-build
@@ -119,7 +137,7 @@ export SIM_LATENCY_BUILD_SHA256=REPLACE_WITH_QUALIFIED_BUILD_BROKER_SHA256
 
 The review broker is a deployment-qualified agent integration, not a fake
 template responder or an arbitrary candidate command. It must actually run
-`gpt-6.1-sol` with `max` reasoning in its own isolated context. The
+all three pinned Snow models for the new policy in isolated contexts. The
 manager invokes its pinned executable without a shell and with an allowlisted
 environment containing no main/database/vault/reviewer/Git-push credentials.
 The broker must have no ambient access to those credentials either: do not
@@ -134,7 +152,8 @@ instructions. A valid stdout response has schema 1, model/reasoning pins,
 `no_main_credentials: true`, `no_candidate_execution: true`, a complete
 structured `review`, and real bounded `private_evidence`. These identity
 claims are trusted broker provenance, not independent model attestation.
-All six criteria and exact revision/digests must validate. Uncertainty blocks;
+All six criteria for each of the three models (18 attributed findings) and
+exact revision/digests must validate. Uncertainty blocks;
 it must not be fabricated as either approval or misconduct. The manager caches
 accepted response bytes for identical idempotent retries, retains the report in
 versioned COMPLIANCE MinIO storage, and alone posts to the scoped reviewer API.
@@ -392,10 +411,11 @@ continue through their independent services.
 
 ### Required deployment/preparation integration
 
-The repository supplies a reconciler, exact runtime manifest loader, authenticated
-API readiness boundary, and pinned-executable integration contract. An actual
-production fleet deployment/preparation adapter has not been identified or
-installed here. This is a remaining activation blocker: absent that adapter and
+The repository supplies the concrete `cli/competitionprepare` adapter,
+`cli/competitionqualify` host qualifier, exact runtime manifest loader,
+authenticated API readiness boundary, and pinned-executable integration contract.
+They still require exact-release installation and live production qualification.
+This is an activation blocker: absent that installed adapter and
 real receipts, the supervisor stays `preparation_blocked`. A successful no-op,
 self-asserted JSON, human `git pull`, or manual per-epoch rollout is not a substitute.
 
@@ -411,9 +431,12 @@ round/fence; a read-only lease monitor stops an orphaned launcher without renewi
 its dead parent. Cancellation signals cleanup before a bounded process stop.
 The preparation adapter gets
 `operation: propagate_and_qualify`, immutable activation intent, and lease. It
-must idempotently verify published refs/image, install the exact
-`CompetitionRuntimeManifest` envelope as `generation-N.json` under configured
-`SIM_LATENCY_RUNTIME_MANIFEST_DIRECTORY` on every required runtime, run production
+idempotently verifies the intent and live lease, publishes the exact
+`CompetitionRuntimeManifest` into versioned COMPLIANCE storage, authenticates its
+retained-version readback, and obtains the independent API acknowledgment before
+host qualification. `competition.reward.v2.runtime-blob.v1` never falls back to
+`generation-N.json` filesystem envelopes; that directory loader is legacy-only.
+The adapter must run production
 host/containment/archive/worker qualification, and obtain independently durable
 API and worker readiness receipts. Receipts bind the exact manifest commit/digest,
 reserved round UUID, canonical source-lock digest, runtime image and qualification. The loader reads
@@ -444,15 +467,18 @@ both-role quorum requirements are unchanged.
 The repository now supplies that concrete worker stdin mode; point the worker
 setting at its independently qualified release binary and pin the binary digest.
 It still requires its normal production evaluator configuration and privileges.
-No isolated-build broker or fleet propagation adapter is installed by these
-changes. Until those integrations are implemented and independently qualified,
-production enablement remains blocked; a missing build broker leaves no ready
-promotion proposal and therefore uses carry-forward, while missing preparation
-blocks opening a round.
+No isolated-build broker or production adapter is installed merely by checking
+out these changes. Install root-owned, hash-pinned release binaries and separate
+production preparation/qualification/build inventories and state; the existing
+staging unit/inventories are not production credentials or readiness evidence.
+Until these integrations are independently qualified, enablement remains blocked.
+Under elected-winner policy a missing build broker blocks the approved winner;
+it must not silently substitute carry-forward. Missing preparation blocks opening.
 
 Source-promoter, reviewer, scheduler, submitter and settlement authority stay
-separate. Sol 6.1 max still owns source review/promotion and source/config merges;
-independent Sol 6.1 low owns tests. Unattended operation grants no review authority.
+separate. The three-model Snow union owns code review and honesty/safety judgment; Sol 6.1
+max implements and performs authorized source/config merges, while independent
+Sol 6.1 low owns tests. Unattended operation grants no review authority.
 Before approving anything, the trusted main-environment reviewer can materialize
 the exact sealed patch and original archived score bytes without an existing review:
 

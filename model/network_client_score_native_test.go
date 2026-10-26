@@ -291,6 +291,63 @@ func TestNativePublicationRejectsMissingAndCorruptPages(t *testing.T) {
 	})
 }
 
+// A commit compares the checksum each page write recorded beside its page,
+// never the page bodies: reading every body into the commit script held a node
+// for 16-30 ms per full slot on 2026-10-25. Integrity holds as before:
+//   - a page and its recorded checksum are written by one command under the
+//     publication's generation;
+//   - a recorded checksum that differs from the manifest still refuses the
+//     commit;
+//   - readers verify every page body against the manifest, so a body changed
+//     after its write is an unavailable page, never served scores.
+func TestNativePublicationCommitComparesRecordedChecksums(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		for _, tamper := range []string{"body", "recorded"} {
+			location := server.NewId()
+			key := clientScoreNativeKey(clientScoreLocationCountsKey(false, RankModeQuality, location, server.Id{}))
+			server.Redis(ctx, func(r server.RedisClient) {
+				publication, err := beginClientScoreNativePublication(ctx, r, key, time.Hour)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data := gobEncodeForTest(t, []*ClientScore{nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)})
+				checksum := sha256.Sum256(data)
+				field := clientScoreNativePageField(ipFamilyFacetV4Only, 0)
+				page := clientScoreRedisSet{key: field, value: append(checksum[:sha256.Size:sha256.Size], data...)}
+				if err := publication.writePages(ctx, r, []clientScoreRedisSet{page}); err != nil {
+					t.Fatal(err)
+				}
+				switch tamper {
+				case "body":
+					// the same length: only a commit that reads the body can see it
+					server.Raise(r.HSet(ctx, publication.slotKey, field, make([]byte, len(page.value))).Err())
+				case "recorded":
+					server.Raise(r.HSet(ctx, publication.slotKey, "#"+field, make([]byte, sha256.Size)).Err())
+				}
+				manifest := clientScoreNativeManifest{Generation: publication.generation, Facets: map[ipFamilyFacet][]clientScoreNativePageInfo{}}
+				for _, facet := range ipFamilyFacets {
+					manifest.Facets[facet] = []clientScoreNativePageInfo{}
+				}
+				manifest.Facets[ipFamilyFacetV4Only] = []clientScoreNativePageInfo{{Count: 1, Checksum: checksum}}
+				err = publication.commit(ctx, r, manifest)
+				switch {
+				case tamper == "body" && err != nil:
+					t.Fatalf("commit read a page body: %v", err)
+				case tamper == "recorded" && err == nil:
+					t.Fatal("commit accepted a page whose recorded checksum differs from the manifest")
+				}
+			})
+			if tamper == "body" {
+				scores, _, _, err := loadNativeClientScoresWithCursor(ctx, RankModeQuality, map[server.Id]bool{location: true}, nil, server.Id{}, 20, []ipFamilyFacet{ipFamilyFacetV4Only}, nil)
+				if !errors.Is(err, errClientScoreNativeUnavailable) || len(scores) != 0 {
+					t.Fatalf("reader served a page whose body changed after its write: count=%d err=%v", len(scores), err)
+				}
+			}
+		}
+	})
+}
+
 // Cancellation after staging begins leaves the prior active generation intact.
 func TestNativePublicationCancellationRetainsLastGood(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

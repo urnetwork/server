@@ -384,6 +384,7 @@ func main() {
 			os.Exit(correctLegacyPayoutAttempts(opts))
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
+			snReconcileRequireReadOnly(send)
 			expect, _ := opts.String("--expect")
 			asJson, _ := opts.Bool("--json")
 			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
@@ -2108,6 +2109,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 func adminWalletTransfer(opts docopt.Opts) {
 	ctx := context.Background()
+	server.Raise(controller.RequireUsdcPaymentsOn())
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {

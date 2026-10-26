@@ -129,6 +129,7 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
 }
 jq -e --argjson repositories "$repository_names_json" '
     type == "object" and .schema == 1 and
+    ((.candidate_path_base // "") == "" or .candidate_path_base == "mono_root_v1") and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and
     ((.repositories | keys) == ($repositories | sort)) and
@@ -169,6 +170,8 @@ done
 # Every locked head was just verified. Serialize that authenticated map instead
 # of hiding another round of Git invocation failures inside jq's arguments.
 source_repositories="$(jq -c .repositories "$source_lock_path")"
+candidate_path_base="$(jq -er '.candidate_path_base // ""' "$source_lock_path")"
+install -m 0400 "$source_lock_path" "$destination/.evaluation-source-lock.json"
 identity_path="$destination/.evaluation-source.json"
 jq -nS \
     --arg base_image_id "$base_image_id" \
@@ -176,12 +179,14 @@ jq -nS \
     --argjson source_epoch "$source_epoch" \
     --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
+    --arg candidate_path_base "$candidate_path_base" \
     --argjson repositories "$source_repositories" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
       staging:$staging,branch:$branch,source_lock_sha256:$source_lock_sha256,
       repositories:$repositories,
-      candidate_patch_sha256:null}' > "$identity_path"
+      candidate_patch_sha256:null} +
+      (if $candidate_path_base == "" then {} else {candidate_path_base:$candidate_path_base} end)' > "$identity_path"
 chmod 0400 "$identity_path"
 rm -f -- "$source_lock_path"
 source_lock_path=""

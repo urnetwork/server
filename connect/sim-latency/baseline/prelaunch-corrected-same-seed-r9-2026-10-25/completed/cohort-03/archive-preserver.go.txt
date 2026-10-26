@@ -1,0 +1,155 @@
+package main
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+type Entry struct {
+	Path   string `json:"path"`
+	Source string `json:"source"`
+	Bytes  int64  `json:"bytes"`
+	SHA    string `json:"sha256"`
+}
+
+func must(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
+func digest(p string) (int64, string) {
+	f, e := os.Open(p)
+	must(e)
+	defer f.Close()
+	h := sha256.New()
+	n, e := io.Copy(h, f)
+	must(e)
+	return n, fmt.Sprintf("%x", h.Sum(nil))
+}
+func create(p string) *os.File {
+	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	must(e)
+	return f
+}
+
+type chunks struct {
+	dir   string
+	f     *os.File
+	n     int64
+	index int
+}
+
+func (c *chunks) Write(p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		if c.f == nil {
+			c.f = create(filepath.Join(c.dir, fmt.Sprintf("cohort.tar.gz.part-%02d", c.index)))
+			c.index++
+			c.n = 0
+		}
+		size := int64(len(p))
+		if size > 33554432-c.n {
+			size = 33554432 - c.n
+		}
+		n, e := c.f.Write(p[:size])
+		total += n
+		c.n += int64(n)
+		p = p[n:]
+		if e != nil {
+			return total, e
+		}
+		if c.n == 33554432 {
+			must(c.f.Close())
+			c.f = nil
+		}
+	}
+	return total, nil
+}
+func main() {
+	src := os.Args[1]
+	dst := os.Args[2]
+	checker := os.Args[3]
+	toolRoot := os.Args[4]
+	entries := []Entry{}
+	add := func(name, source string) {
+		s, e := os.Lstat(source)
+		must(e)
+		if !s.Mode().IsRegular() {
+			panic("nonregular source " + source)
+		}
+		n, h := digest(source)
+		entries = append(entries, Entry{name, source, n, h})
+	}
+	count := 0
+	must(filepath.WalkDir(src, func(p string, d os.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			panic("source link")
+		}
+		if d.IsDir() {
+			return nil
+		}
+		r, e := filepath.Rel(src, p)
+		must(e)
+		add("cohort/"+filepath.ToSlash(r), p)
+		count++
+		return nil
+	}))
+	extras := map[string]string{
+		"parent-launch.log":         filepath.Dir(src) + "/" + filepath.Base(src) + "-parent-launch.log",
+		"terminal-verification.log": checker + "/verification.log",
+		"terminal-checker.sh.txt":   checker + "/verify.sh",
+		"archive-preserver.go.txt":  toolRoot + "/preserve.go",
+		"archive-verifier.go.txt":   toolRoot + "/verify.go",
+	}
+	for n, p := range extras {
+		add("companions/"+n, p)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	inventory := create(dst + "/original-inventory.json")
+	must(json.NewEncoder(inventory).Encode(entries))
+	must(inventory.Close())
+	c := &chunks{dir: dst}
+	gz := gzip.NewWriter(c)
+	tw := tar.NewWriter(gz)
+	for _, v := range entries {
+		must(tw.WriteHeader(&tar.Header{Name: v.Path, Mode: 0444, Size: v.Bytes, ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg}))
+		f, e := os.Open(v.Source)
+		must(e)
+		n, e := io.Copy(tw, f)
+		must(e)
+		must(f.Close())
+		if n != v.Bytes {
+			panic("source changed")
+		}
+	}
+	must(tw.Close())
+	must(gz.Close())
+	if c.f != nil {
+		must(c.f.Close())
+	}
+	copies := map[string]string{"worker-result.json": src + "/artifacts/worker-result.json", "baseline.json": src + "/artifacts/baseline.json", "score.json": src + "/artifacts/score.json", "evaluation.complete.json": src + "/artifacts/evaluation.complete.json", "evidence-manifest.json": src + "/artifacts/evidence-manifest.json", "fixture-provenance.json": src + "/fixture-provenance.json", "manager-terminal.log": src + "/manager-terminal.log"}
+	for n, p := range extras {
+		copies[n] = p
+	}
+	for n, p := range copies {
+		f, e := os.Open(p)
+		must(e)
+		out := create(dst + "/" + n)
+		_, e = io.Copy(out, f)
+		must(e)
+		must(out.Close())
+		must(f.Close())
+	}
+	fmt.Printf("PASS packaged cohort_original_regular_files=%d companions=%d archive_regular_files=%d chunks=%d readable_copies=%d\n", count, len(extras), len(entries), c.index, len(copies))
+}

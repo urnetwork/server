@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/urnetwork/server/model"
 )
 
 // The caller supplies the isolated model client/key; candidate code receives
@@ -20,7 +22,7 @@ func executeSourceBuildIndependentTests(ctx context.Context, client *http.Client
 	if err := validateSourceBuildRequest(request); err != nil {
 		return nil, "", err
 	}
-	if key == "" || client == nil || docker == nil || !validSha256(owner) {
+	if (key == "" && request.Proposal.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy) || client == nil || docker == nil || !validSha256(owner) {
 		return nil, "", errors.New("independent source tests require their real isolated model client and owner")
 	}
 	if err := verifySourceBuildAttemptArtifacts(ctx, owner, &artifacts, sandbox, docker); err != nil {
@@ -33,6 +35,9 @@ func executeSourceBuildIndependentTests(ctx context.Context, client *http.Client
 	settings.ResponseJournalDirectory = journal
 	plan := sourceTestPlan{Owner: owner, ImageId: artifacts.ImageId, SourceLockSha256: request.Proposal.SourceLockSha256,
 		PatchSha256: request.Proposal.PatchSha256, SuiteSha256: sourceCorrectnessSuiteDigest()}
+	if request.Proposal.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		plan.WinnerReviewPolicy = request.Proposal.WinnerReviewPolicy
+	}
 	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
 		SourceDirectory: filepath.Join(artifacts.Directory, "source"), MetadataDirectory: filepath.Join(artifacts.Directory, "correctness", "metadata"),
 		OutputDirectory: filepath.Join(artifacts.Directory, "correctness", "output")}

@@ -1,0 +1,11 @@
+0ecd28adc24c705c142e25bcd1b3156ff6c0029f87c923072f6bf8ec5315b568  connect/sim-latency/calibration_protocol.go
+[env]glog not configured from command line. Using default configuration.
+I1026 14:57:02.789898  485607 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 14:57:02.790362  485607 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 14:57:02.790514  485607 env.go:81] [env]settings loaded
+=== RUN   TestCalibrationProtocolAuthenticatesArtifactRequestInventory
+    calibration_protocol_test.go:70: original five-position request inventory not retained
+--- FAIL: TestCalibrationProtocolAuthenticatesArtifactRequestInventory (0.01s)
+FAIL
+FAIL	github.com/urnetwork/server/connect/sim-latency	0.317s
+FAIL
