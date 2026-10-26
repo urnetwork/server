@@ -384,6 +384,7 @@ func main() {
 			os.Exit(correctLegacyPayoutAttempts(opts))
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
+			snReconcileRequireReadOnly(send)
 			expect, _ := opts.String("--expect")
 			asJson, _ := opts.Bool("--json")
 			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)

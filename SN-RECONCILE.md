@@ -208,3 +208,22 @@ the payout policy loaded, rows with subsidy or reliability are never canceled
 this way. The planner then re-plans the canceled row's sweeps and the weekly
 plan pays them, so the obligation is still paid once. Its payout points apply
 twice, as after every hung cancellation.
+
+## Note (2026-10-26): listing cost and the read-only dry run
+
+The census listing reads each later row's sweeps once. A stuck row's replan
+evidence (A5, A10) compares its own times with each later row's earliest
+contract close and early bound, which the listing reads once per later row,
+however many stuck rows its network holds. Before, it read every later row's
+sweeps again for each stuck row without sweeps, and on main (131 stuck rows,
+later rows of up to 10.1M sweeps) the dry run had not finished after 16
+minutes. The listing returns the same rows and values
+(`TestSnReconcileStuckListingMatchesReference`). Its cost is now about one
+contract read per sweep of the later rows in the stuck rows' networks. The
+duplicates read (§6) still sums the early sweeps of every pending or safely
+canceled row.
+
+The dry run's process is read only (`server.RequirePgReadOnly`): PostgreSQL
+refuses any write it attempts, and its sessions connect directly with
+`pg_maintenance.yml`, since the transaction pooler refuses a read-only
+session. `--send` runs in an ordinary process.
