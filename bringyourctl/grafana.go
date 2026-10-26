@@ -21,29 +21,47 @@ import (
 )
 
 // load the default dashboards into the grafana service, then reconcile the
-// alert routing
+// alert routing. --dashboards_only leaves the alert routing, and the vault
+// webhook it reads, untouched.
 func grafanaLoadDefaults(opts docopt.Opts) {
 	grafanaUrl, adminPassword := grafanaAdminTarget(opts)
-
-	fmt.Printf("Loading default dashboards into %s (folder %s)\n", grafanaUrl, grafana.FolderTitle)
-
-	titles, public, err := grafana.LoadDefaults(context.Background(), grafanaUrl, "admin", adminPassword)
-	if err != nil {
+	dashboardsOnly, _ := opts.Bool("--dashboards_only")
+	var routing grafana.AlertRoutingSettings
+	if !dashboardsOnly {
+		routing = grafanaAlertRoutingSettings()
+	}
+	if err := grafanaLoadDefaultsTo(context.Background(), os.Stdout, grafanaUrl, adminPassword, !dashboardsOnly, routing); err != nil {
 		panic(err)
 	}
-	if err := grafanaReconcileAlerting(context.Background(), os.Stdout, grafanaUrl, adminPassword, grafanaAlertRoutingSettings()); err != nil {
-		panic(err)
+}
+
+// Upserts the default dashboards, then reconciles the alert routing only when
+// reconcileAlerting is set.
+func grafanaLoadDefaultsTo(ctx context.Context, out io.Writer, grafanaUrl string, adminPassword string, reconcileAlerting bool, routing grafana.AlertRoutingSettings) error {
+	fmt.Fprintf(out, "Loading default dashboards into %s (folder %s)\n", grafanaUrl, grafana.FolderTitle)
+
+	titles, public, err := grafana.LoadDefaults(ctx, grafanaUrl, "admin", adminPassword)
+	if err != nil {
+		return err
+	}
+	if reconcileAlerting {
+		if err := grafanaReconcileAlerting(ctx, out, grafanaUrl, adminPassword, routing); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(out, "Alert routing left unchanged (--dashboards_only)\n")
 	}
 	for _, title := range titles {
-		fmt.Printf("- %s\n", title)
+		fmt.Fprintf(out, "- %s\n", title)
 	}
 	if 0 < len(public) {
-		fmt.Printf("\nPublic dashboards (read-only, no login):\n")
+		fmt.Fprintf(out, "\nPublic dashboards (read-only, no login):\n")
 		for _, pd := range public {
-			fmt.Printf("- %s\n    %s/public-dashboards/%s\n", pd.Title, grafanaUrl, pd.AccessToken)
+			fmt.Fprintf(out, "- %s\n    %s/public-dashboards/%s\n", pd.Title, grafanaUrl, pd.AccessToken)
 		}
-		fmt.Printf("\nPublic directory: %s/stats\n", grafanaUrl)
+		fmt.Fprintf(out, "\nPublic directory: %s/stats\n", grafanaUrl)
 	}
+	return nil
 }
 
 // reconcile only the alert routing: the competition route and the Slack

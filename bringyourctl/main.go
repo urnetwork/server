@@ -153,7 +153,7 @@ Usage:
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
-    bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
+    bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
 
