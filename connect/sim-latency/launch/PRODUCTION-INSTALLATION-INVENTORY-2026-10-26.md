@@ -31,7 +31,10 @@ and dedicated-key model-metadata HTTP 200 for that exact ID; private evidence is
 `6758fa4e5c9713796e25f54fa8982b68eade256fdb6828213ca5aae9ff740d92`.
 That resolves the source-test model access/spec question only. Genuine low-model
 test execution and funded inference remain unqualified; no model switch or
-paid retry is inferred. Mini/xhigh still owns code/honesty review.
+paid retry is inferred. This observation is historical. The user subsequently
+selected Snow for all automated model calls: Qwen, Gemma and Muse, serially,
+with an attributed union and unanimous approval. That prospective policy needs
+no OpenAI key or funding; genuine Snow inference remains unqualified.
 
 ## Resolved policy versus release-dependent values
 
@@ -39,8 +42,8 @@ Resolved: environment `main`, competition `sim-latency-season-1`, new season
 `sim-latency-production-20261028`, `staging:false`, six complete 604800-second
 windows, $20 admission, `queue_limit:0`, R9, whole-job 10800-second deadline,
 initial source generation 0/activation generation 1, ten-repository
-`mono_root_v1`, protected instrument/metadata, and Mini/xhigh review policy
-`elected_winner_gpt54mini_xhigh_v1`. Required API capability is
+`mono_root_v1`, protected instrument/metadata, and three-model Snow review policy
+`elected_winner_snow_union_v1`. Required API capability is
 `competition.reward.v2.runtime-blob.v1`, not a software version or image tag.
 
 Original A completed at **2026-10-26T15:01:22Z**: accepted report SHA-256
@@ -59,11 +62,12 @@ Not interchangeable or yet fixed by this inventory:
   ten-lock `ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf`;
   source preparation is not an image or runtime qualification.
 - New control-plane source commit, clean exact-Go binaries and individual
-  program hashes; actual worker OCI identity and Mini review OCI identity;
+  program hashes; actual worker OCI identity and Snow review OCI identity;
   rendered immutable wrapper/settings hashes. Do not use an evaluator image
   ID for API/worker identity or a native binary hash for an OCI ID.
-- Current-boot host/bomb/rebaseline/artifact proofs, genuine Mini review and
-  prescribed Sol 6.1 low source-test provider evidence, monitoring delivery.
+- Current-boot host/bomb/rebaseline/artifact proofs, genuine three-model Snow
+  review and once-executed Go-suite/three-model attestation, monitoring delivery.
+  Independent prelaunch tests retain Sol 6.1 low ownership.
 - Approved policy/criteria/settlement/burn/repeat identities, outer season end
   and retention. Six full weekly windows total at least 42 days, but unbounded
   FIFO drain can extend elapsed calendar time; do not truncate accepted work
