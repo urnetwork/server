@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -516,6 +517,142 @@ func TestHeldOutRuntimeBridgeProjectionRetainsRawSourceLock(t *testing.T) {
 	}
 	if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, source), release, projection.Config.SourceLock.Sha256, "", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Retains a different prior-public-pilot tuple without importing any production
+// identity or pretending that its raw observations came from C1 or C2.
+type heldOutReferenceTransferFixture struct {
+	Receipt   heldOutReferenceQualification
+	Prior     heldOutReferenceQualification
+	Reference heldOutReference
+	Release   heldOutRelease
+	Settings  heldOutOperatorSettings
+	Target    []byte
+	Calls     int
+}
+
+// Both native-build and direction provenance are real private fixture files;
+// only immutable Git object reads are replaced by a deterministic callback.
+func newHeldOutReferenceTransferFixture(t *testing.T, role string) *heldOutReferenceTransferFixture {
+	t.Helper()
+	build, _, release, _ := newHeldOutRuntimeNativeFixture(t)
+	root := newCalibrationFileRoot(t)
+	priorBuild := heldOutNativeBuild{Schema: 1, Image: "synthetic-original-reference", ImageId: "sha256:" + strings.Repeat("d", 64),
+		BaseImageId: "sha256:" + strings.Repeat("e", 64), BaseSha: strings.Repeat("d", 40), CandidateSha: strings.Repeat("c", 40),
+		PatchSha256: build.PatchSha256, PolicySha256: strings.Repeat("a", 64), BuilderSha256: strings.Repeat("b", 64), ImageKey: strings.Repeat("c", 64)}
+	evidence := heldOutOpWrite(t, filepath.Join(root, "original-public-pilot.txt"), []byte("synthetic retained original public reference evidence\n"))
+	direction := map[string]string{"better": "faster", "worse": "slower", "no-op": "no-op"}[role]
+	prior := heldOutReferenceQualification{Schema: 1, Kind: "sim-latency-held-out-reference-direction", Role: role, Accepted: true,
+		BaseSha: priorBuild.BaseSha, SourceLockSha256: strings.Repeat("f", 64), BaseImageId: priorBuild.BaseImageId,
+		PatchSha256: priorBuild.PatchSha256, CandidateSha: priorBuild.CandidateSha, ImageId: priorBuild.ImageId,
+		BinarySha256: strings.Repeat("e", 64), GoVersion: "go1.27.3", Direction: direction, Evidence: []heldOutPinnedFile{evidence}}
+	delta := heldOutOpWrite(t, filepath.Join(root, "authenticated-instrument-delta.patch"), []byte("synthetic previously authenticated four-hunk instrument delta\n"))
+	release.ReferenceInstrument = &heldOutReferenceInstrument{OriginalBaseSha: strings.Repeat("f", 40), Repository: "/synthetic/retained-source", SourceDelta: delta}
+	target := []byte("// synthetic unchanged reference target\n")
+	transfer := &heldOutReferenceTransfer{Schema: 1, Kind: "sim-latency-prior-public-reference-direction-transfer", Protocol: calibrationProtocolThreeABridgeThreeB,
+		Claim: "expected-direction-hypothesis-not-new-c2-measurement", PriorBuild: heldOutOpJson(t, filepath.Join(root, "prior-native-build.json"), priorBuild),
+		PriorDirection: heldOutOpJson(t, filepath.Join(root, "prior-direction.json"), prior), PriorDirectionMeasured: role != "no-op",
+		TargetPath: "connect/resident_contract_manager.go", TargetBlobSha256: heldOutDigest(target), PriorToC1DiffPaths: []string{"synthetic-prior-change.go"},
+		InstrumentSourceDelta: delta, FreshBridgeRequired: true, AllThreeOrderedBRequired: true}
+	return &heldOutReferenceTransferFixture{Receipt: heldOutReferenceQualification{Role: role, EvidenceBasis: "prior_public_reference_expected_direction", ExpectedDirection: direction, PriorReference: transfer},
+		Prior: prior, Reference: heldOutReference{Role: role, Patch: heldOutPinnedFile{Path: "/synthetic/unchanged-reference.patch", Sha256: build.PatchSha256}},
+		Release: release, Settings: defaultHeldOutOperatorSettings(), Target: target}
+}
+
+// Every expected Git read is explicit; no candidate command, checkout, model,
+// Docker invocation or hidden-seed generator is reachable from this callback.
+func (self *heldOutReferenceTransferFixture) run(_ context.Context, program string, args ...string) ([]byte, error) {
+	self.Calls++
+	if program != "git" || len(args) < 8 || args[0] != "-C" || args[1] != self.Release.ReferenceInstrument.Repository {
+		return nil, errors.New("unexpected synthetic transfer command")
+	}
+	if args[6] == "cat-file" && args[7] == "blob" {
+		return append([]byte{}, self.Target...), nil
+	}
+	if args[6] == "diff" && args[7] == "--name-only" {
+		return []byte("synthetic-prior-change.go\n"), nil
+	}
+	return nil, errors.New("unexpected synthetic Git object query")
+}
+
+// Expected labels can originate from older public pilots or semantic no-op
+// evidence; all actual prior tuples remain original, never rewritten as C2.
+func TestHeldOutRuntimeReferenceTransferRetainsActualPriorTuple(t *testing.T) {
+	for _, role := range []string{"no-op", "better", "worse"} {
+		fixture := newHeldOutReferenceTransferFixture(t, role)
+		if err := authenticateHeldOutReferenceDirection(fixture.Receipt, fixture.Reference, fixture.Release, fixture.Settings, fixture.run); err != nil {
+			t.Fatalf("%s prior reference label refused: %v", role, err)
+		}
+		if fixture.Calls != 4 || fixture.Prior.BaseSha == fixture.Release.BaseSha || fixture.Prior.BaseSha == fixture.Release.ReferenceInstrument.OriginalBaseSha || fixture.Receipt.Direction != "" || fixture.Receipt.ExpectedDirection == "" {
+			t.Fatalf("%s prior evidence was relabeled or skipped native source authentication", role)
+		}
+	}
+}
+
+// A recomputed receipt digest cannot hide another prior base/patch or a source
+// delta that never received the exact instrument-only source authentication.
+func TestHeldOutRuntimeReferenceTransferRejectsWrongPriorTupleOrDelta(t *testing.T) {
+	for index, mutate := range []func(*heldOutReferenceTransferFixture){
+		func(f *heldOutReferenceTransferFixture) { f.Prior.BaseSha = strings.Repeat("9", 40) },
+		func(f *heldOutReferenceTransferFixture) { f.Prior.PatchSha256 = strings.Repeat("9", 64) },
+		func(f *heldOutReferenceTransferFixture) { f.Prior.BaseImageId = "sha256:" + strings.Repeat("9", 64) },
+		func(f *heldOutReferenceTransferFixture) {
+			f.Receipt.PriorReference.InstrumentSourceDelta.Sha256 = strings.Repeat("9", 64)
+		},
+		func(f *heldOutReferenceTransferFixture) { f.Release.ReferenceInstrument = nil },
+		func(f *heldOutReferenceTransferFixture) { f.Receipt.PriorReference.FreshBridgeRequired = false },
+		func(f *heldOutReferenceTransferFixture) { f.Receipt.PriorReference.AllThreeOrderedBRequired = false },
+		func(f *heldOutReferenceTransferFixture) { f.Receipt.Direction = "faster" },
+	} {
+		fixture := newHeldOutReferenceTransferFixture(t, "better")
+		mutate(fixture)
+		pin := fixture.Receipt.PriorReference.PriorDirection
+		fixture.Receipt.PriorReference.PriorDirection = heldOutOpJson(t, pin.Path, fixture.Prior)
+		if err := authenticateHeldOutReferenceDirection(fixture.Receipt, fixture.Reference, fixture.Release, fixture.Settings, fixture.run); err == nil {
+			t.Errorf("prior reference tuple/delta mutation %d accepted", index)
+		}
+	}
+}
+
+// Sharing a path name is not source equivalence. Git failures, a changed blob
+// and any omitted prior-to-C1 path all fail without manufacturing absence.
+func TestHeldOutRuntimeReferenceTransferRejectsChangedTargetAndHiddenHistory(t *testing.T) {
+	for _, mode := range []string{"git-error", "changed-target", "undisclosed-history"} {
+		fixture := newHeldOutReferenceTransferFixture(t, "worse")
+		run := func(ctx context.Context, program string, args ...string) ([]byte, error) {
+			if mode == "git-error" {
+				return nil, errors.New("synthetic Git refusal")
+			}
+			content, err := fixture.run(ctx, program, args...)
+			if mode == "changed-target" && args[6] == "cat-file" {
+				return []byte("// synthetic changed target\n"), nil
+			}
+			if mode == "undisclosed-history" && args[6] == "diff" {
+				return append(content, []byte("synthetic-hidden-change.go\n")...), nil
+			}
+			return content, err
+		}
+		if err := authenticateHeldOutReferenceDirection(fixture.Receipt, fixture.Reference, fixture.Release, fixture.Settings, run); err == nil {
+			t.Errorf("%s prior evidence accepted", mode)
+		}
+	}
+}
+
+// New expected-direction metadata never changes the historical measured-
+// direction codec or creates an open-ended basis selector for old releases.
+func TestHeldOutRuntimeReferenceTransferCannotRelabelLegacyDirection(t *testing.T) {
+	fixture := newHeldOutReferenceTransferFixture(t, "better")
+	legacy := heldOutReferenceQualification{Direction: "faster"}
+	if err := authenticateHeldOutReferenceDirection(legacy, fixture.Reference, heldOutRelease{}, fixture.Settings, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticateHeldOutReferenceDirection(fixture.Receipt, fixture.Reference, heldOutRelease{}, fixture.Settings, fixture.run); err == nil {
+		t.Fatal("historical release inherited new expected-direction transfer")
+	}
+	fixture.Receipt.EvidenceBasis = "synthetic-unknown-basis"
+	if err := authenticateHeldOutReferenceDirection(fixture.Receipt, fixture.Reference, fixture.Release, fixture.Settings, fixture.run); err == nil {
+		t.Fatal("unknown direction evidence basis accepted")
 	}
 }
 

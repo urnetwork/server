@@ -314,6 +314,9 @@ func authenticateHeldOutAmendedRelease(ctx context.Context, pin heldOutPinnedFil
 	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
 		return old, err
 	}
+	// This private capability is created only after the exact parent/two-path/
+	// four-hunk source authenticator above succeeds; input JSON cannot set it.
+	release.ReferenceInstrument = &heldOutReferenceInstrument{OriginalBaseSha: old.BaseSha, Repository: descriptor.Repository, SourceDelta: descriptor.SourceDelta}
 	return release, nil
 }
 

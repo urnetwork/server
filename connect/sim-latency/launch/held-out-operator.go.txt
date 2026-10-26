@@ -28,6 +28,7 @@ type heldOutRelease struct {
 	AnalyzerSource, ScoringLock, ScriptDirectory                         string
 	ScriptDigests                                                        map[string]string
 	Runtime                                                              *heldOutRuntimeRelease
+	ReferenceInstrument                                                  *heldOutReferenceInstrument
 }
 
 // A new release requires a new explicit protocol, not a changed input file.
@@ -115,21 +116,24 @@ type heldOutReference struct {
 // Normalizes externally reviewed build/correctness/pilot evidence without
 // interpreting a receipt from an obsolete source/image as current authority.
 type heldOutReferenceQualification struct {
-	Schema           int                 `json:"schema"`
-	Kind             string              `json:"kind"`
-	Role             string              `json:"role"`
-	Accepted         bool                `json:"accepted"`
-	BaseSha          string              `json:"base_sha"`
-	SourceLockSha256 string              `json:"source_lock_sha256"`
-	BaseImageId      string              `json:"base_image_id"`
-	PatchSha256      string              `json:"patch_sha256"`
-	CandidateSha     string              `json:"candidate_sha"`
-	ImageId          string              `json:"image_id"`
-	BinarySha256     string              `json:"binary_sha256"`
-	GoVersion        string              `json:"go_version"`
-	VcsModified      bool                `json:"vcs_modified"`
-	Direction        string              `json:"direction"`
-	Evidence         []heldOutPinnedFile `json:"evidence"`
+	Schema            int                       `json:"schema"`
+	Kind              string                    `json:"kind"`
+	Role              string                    `json:"role"`
+	Accepted          bool                      `json:"accepted"`
+	BaseSha           string                    `json:"base_sha"`
+	SourceLockSha256  string                    `json:"source_lock_sha256"`
+	BaseImageId       string                    `json:"base_image_id"`
+	PatchSha256       string                    `json:"patch_sha256"`
+	CandidateSha      string                    `json:"candidate_sha"`
+	ImageId           string                    `json:"image_id"`
+	BinarySha256      string                    `json:"binary_sha256"`
+	GoVersion         string                    `json:"go_version"`
+	VcsModified       bool                      `json:"vcs_modified"`
+	Direction         string                    `json:"direction"`
+	Evidence          []heldOutPinnedFile       `json:"evidence"`
+	EvidenceBasis     string                    `json:"evidence_basis,omitempty"`
+	ExpectedDirection string                    `json:"expected_direction,omitempty"`
+	PriorReference    *heldOutReferenceTransfer `json:"prior_reference,omitempty"`
 }
 
 // Pins this exact executable, all draft sources, the actual toolchain and the
@@ -591,9 +595,14 @@ func authenticateHeldOutReferences(content []byte, release heldOutRelease, setti
 			if receipt.Schema != 1 || receipt.Kind != "sim-latency-held-out-reference-"+qualification.kind || !receipt.Accepted || receipt.Role != reference.Role || receipt.BaseSha != release.BaseSha || receipt.SourceLockSha256 != release.SourceLockSha256 || receipt.BaseImageId != release.ImageId || receipt.PatchSha256 != reference.Patch.Sha256 || receipt.CandidateSha != reference.CandidateSha || receipt.ImageId != reference.ImageId || receipt.BinarySha256 != reference.BinarySha256 || receipt.GoVersion != "go1.27.3" || receipt.VcsModified || len(receipt.Evidence) == 0 {
 				return nil, nil, errors.New("reference qualification does not bind the frozen build/source")
 			}
-			expectedDirection := map[string]string{"better": "faster", "worse": "slower", "no-op": "no-op"}[reference.Role]
-			if qualification.kind == "direction" && receipt.Direction != expectedDirection {
-				return nil, nil, errors.New("reference independent directional qualification missing")
+			if qualification.kind == "direction" {
+				if err := authenticateHeldOutReferenceDirection(receipt, reference, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+					return runHeldOutReadOnly(ctx, settings, program, args...)
+				}); err != nil {
+					return nil, nil, err
+				}
+			} else if receipt.EvidenceBasis != "" || receipt.ExpectedDirection != "" || receipt.PriorReference != nil {
+				return nil, nil, errors.New("build/correctness receipt cannot inherit directional evidence")
 			}
 			for _, pin := range receipt.Evidence {
 				if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {

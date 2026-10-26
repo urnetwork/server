@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -207,6 +208,98 @@ func authenticateHeldOutRuntimeBuildEvidence(artifacts string, bound map[string]
 		if release.ScriptDigests[name] != digest || !validSha256(digest) {
 			return errors.New("executed C2 builder component changed")
 		}
+	}
+	return nil
+}
+
+// Only authenticated C1-to-C2 instrument selection creates this internal
+// capability. It is not serialized or accepted from a qualification receipt.
+type heldOutReferenceInstrument struct {
+	OriginalBaseSha string
+	Repository      string
+	SourceDelta     heldOutPinnedFile
+}
+
+// Prior public pilots select an expected label, not a new measured C2 result.
+// The original tuple and prior-to-C1 changes remain explicit and digest-bound.
+type heldOutReferenceTransfer struct {
+	Schema                   int               `json:"schema"`
+	Kind                     string            `json:"kind"`
+	Protocol                 string            `json:"protocol"`
+	Claim                    string            `json:"claim"`
+	PriorBuild               heldOutPinnedFile `json:"prior_native_build"`
+	PriorDirection           heldOutPinnedFile `json:"prior_direction_evidence"`
+	PriorDirectionMeasured   bool              `json:"prior_direction_measured"`
+	TargetPath               string            `json:"target_path"`
+	TargetBlobSha256         string            `json:"unchanged_target_blob_sha256"`
+	PriorToC1DiffPaths       []string          `json:"prior_to_c1_changed_paths"`
+	InstrumentSourceDelta    heldOutPinnedFile `json:"c1_to_c2_instrument_delta"`
+	FreshBridgeRequired      bool              `json:"fresh_c2_bridge_required"`
+	AllThreeOrderedBRequired bool              `json:"all_three_ordered_c2_b_required"`
+}
+
+// Legacy measured-direction receipts keep their meaning. The named new basis
+// authenticates historical tuples and unchanged target bytes, while leaving
+// fresh C2 bridge/all-three-B ordering as separate mandatory acceptance gates.
+func authenticateHeldOutReferenceDirection(receipt heldOutReferenceQualification, reference heldOutReference, release heldOutRelease, settings heldOutOperatorSettings, run func(context.Context, string, ...string) ([]byte, error)) error {
+	expectedDirection := map[string]string{"better": "faster", "worse": "slower", "no-op": "no-op"}[reference.Role]
+	if receipt.EvidenceBasis == "" && receipt.ExpectedDirection == "" && receipt.PriorReference == nil {
+		if receipt.Direction != expectedDirection {
+			return errors.New("reference independent directional qualification missing")
+		}
+		return nil
+	}
+	transfer, instrument := receipt.PriorReference, release.ReferenceInstrument
+	if release.Runtime == nil || instrument == nil || run == nil || receipt.EvidenceBasis != "prior_public_reference_expected_direction" || receipt.ExpectedDirection != expectedDirection || receipt.Direction != "" || transfer == nil {
+		return errors.New("explicit prospective prior-reference evidence basis required")
+	}
+	if transfer.Schema != 1 || transfer.Kind != "sim-latency-prior-public-reference-direction-transfer" || transfer.Protocol != calibrationProtocolThreeABridgeThreeB || transfer.Claim != "expected-direction-hypothesis-not-new-c2-measurement" || transfer.TargetPath != "connect/resident_contract_manager.go" || !validSha256(transfer.TargetBlobSha256) || !transfer.FreshBridgeRequired || !transfer.AllThreeOrderedBRequired || transfer.InstrumentSourceDelta != instrument.SourceDelta || !validSha256(instrument.SourceDelta.Sha256) || !sourceGitShaPattern.MatchString(instrument.OriginalBaseSha) || !filepath.IsAbs(instrument.Repository) || filepath.Clean(instrument.Repository) != instrument.Repository || transfer.PriorDirectionMeasured != (reference.Role != "no-op") {
+		return errors.New("prior-reference transfer changed its claim, target or authenticated instrument delta")
+	}
+	priorBytes, err := readHeldOutPinned(transfer.PriorDirection, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var prior heldOutReferenceQualification
+	if err := decodeHeldOutComplete(priorBytes, &prior, "original prior-reference direction evidence"); err != nil {
+		return err
+	}
+	if prior.Schema != 1 || prior.Kind != "sim-latency-held-out-reference-direction" || !prior.Accepted || prior.Role != reference.Role || prior.Direction != expectedDirection || prior.ExpectedDirection != "" || prior.EvidenceBasis != "" || prior.PriorReference != nil || prior.PatchSha256 != reference.Patch.Sha256 || prior.GoVersion != "go1.27.3" || prior.VcsModified || prior.BaseSha == release.BaseSha || prior.BaseImageId == release.ImageId || !sourceGitShaPattern.MatchString(prior.BaseSha) || !sourceGitShaPattern.MatchString(prior.CandidateSha) || !validSha256(prior.SourceLockSha256) || !validSha256(prior.BinarySha256) || !strings.HasPrefix(prior.BaseImageId, "sha256:") || !validSha256(strings.TrimPrefix(prior.BaseImageId, "sha256:")) || len(prior.Evidence) == 0 {
+		return errors.New("prior-reference direction tuple/patch changed or was relabeled as C2")
+	}
+	nativeBytes, err := readHeldOutPinned(transfer.PriorBuild, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var native heldOutNativeBuild
+	if err := decodeHeldOutComplete(nativeBytes, &native, "original prior-reference native build"); err != nil {
+		return err
+	}
+	if native.Schema != 1 || native.BaseSha != prior.BaseSha || native.BaseImageId != prior.BaseImageId || native.CandidateSha != prior.CandidateSha || native.ImageId != prior.ImageId || native.PatchSha256 != prior.PatchSha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" || !strings.HasPrefix(prior.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(prior.ImageId, "sha256:")) {
+		return errors.New("prior-reference direction evidence differs from its actual native build")
+	}
+	if err := validateHeldOutRuntimeBuilderPin(native, heldOutRelease{}); err != nil {
+		return err
+	}
+	for _, pin := range append(append([]heldOutPinnedFile{}, prior.Evidence...), instrument.SourceDelta) {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settings.CommandTimeout)
+	defer cancel()
+	git := func(args ...string) ([]byte, error) {
+		return run(ctx, "git", append([]string{"-C", instrument.Repository, "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"}, args...)...)
+	}
+	for _, revision := range []string{prior.BaseSha, instrument.OriginalBaseSha, release.BaseSha} {
+		content, err := git("cat-file", "blob", revision+":"+transfer.TargetPath)
+		if err != nil || heldOutDigest(content) != transfer.TargetBlobSha256 {
+			return errors.New("prior/C1/C2 reference target blobs are not identical")
+		}
+	}
+	paths, err := git("diff", "--name-only", "--no-ext-diff", "--no-textconv", prior.BaseSha, instrument.OriginalBaseSha)
+	if err != nil || !reflect.DeepEqual(append([]string{}, strings.Fields(string(paths))...), append([]string{}, transfer.PriorToC1DiffPaths...)) {
+		return errors.New("prior-to-C1 source changes were not fully disclosed")
 	}
 	return nil
 }
