@@ -131,6 +131,11 @@ This closes the three-suite release gate, not calibration or live readiness.
 
 ## External DNS follow-up: exact engine source review
 
+The [probe preparation record](DNS-PROBE-PREPARATION.md) preserves the revised,
+uncompiled Go probe and deterministic test drafts. It corrects response-encoding
+and receive-versus-write observation weaknesses before future runtime use; it
+does not claim that either DNS branch has passed new runtime qualification.
+
 Read-only `docker version` identifies the installed engine as **29.9.0**, build
 `a5b58c9`. Its exact upstream
 [resolver initialization](https://github.com/moby/moby/blob/a5b58c9/daemon/libnetwork/sandbox_dns_unix.go#L55)
