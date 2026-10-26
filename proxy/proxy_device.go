@@ -27,6 +27,7 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		SequenceBufferSize:           2048,
 		DeviceMemoryTargetByteCount:  proxyDeviceMemoryTargetByteCountFromConfig(),
 		HostedMintConcurrency:        defaultHostedMintConcurrency,
+		HostedContractConcurrency:    defaultHostedContractConcurrency,
 		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
 	}
 }
@@ -40,6 +41,15 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 // replacements, and every admitted mint added database work to the loop while
 // a refused mint costs none.
 const defaultHostedMintConcurrency = 2
+
+// Far above what a process holds in ordinary operation and far below a pile-up.
+// From 00:00 to 14:00 on 2026-10-26 a process held more than 256 contract
+// creations in flight in 0.55% of its minutes, in short bursts. In the pile-ups
+// around the connect deploys of 2026-10-25 and 2026-10-26 the processes held
+// about 3,800 and 8,600 each, up to 11,500. Past the bound a creation is refused
+// at once (see localclient.ContractAdmission) and its send sequence asks again
+// on its own retry schedule.
+const defaultHostedContractConcurrency = 256
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(sdk.LowMemoryDeviceTargetByteCount)
 
@@ -85,6 +95,10 @@ type ProxyDeviceManagerSettings struct {
 	// across every device of this manager; past it a registration is refused
 	// as a rate limit (see localclient.MintAdmission). Nonpositive is unbounded.
 	HostedMintConcurrency int
+	// HostedContractConcurrency bounds the contract creations in flight across
+	// every device of this manager; past it a creation is refused as a rate
+	// limit (see localclient.ContractAdmission). Nonpositive is unbounded.
+	HostedContractConcurrency int
 	// HostedEvaluationPoolMultiple is each opened device's
 	// ProxyDeviceSettings.HostedEvaluationPoolMultiple. Nonpositive keeps the
 	// connect default.
@@ -140,6 +154,8 @@ type ProxyDeviceManager struct {
 	windowIdentityGate  *windowIdentityRestoreGate
 	// One registration bound shared by every device this manager opens.
 	mintAdmission *localclient.MintAdmission
+	// One contract creation bound shared by every device this manager opens.
+	contractAdmission *localclient.ContractAdmission
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -192,7 +208,8 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
 		),
-		mintAdmission: localclient.NewMintAdmission(settings.HostedMintConcurrency),
+		mintAdmission:     localclient.NewMintAdmission(settings.HostedMintConcurrency),
+		contractAdmission: localclient.NewContractAdmission(settings.HostedContractConcurrency),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
@@ -426,6 +443,7 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.PlatformPlacement = self.settings.PlatformPlacement
 	settings.windowIdentityGate = self.windowIdentityGate
 	settings.mintAdmission = self.mintAdmission
+	settings.contractAdmission = self.contractAdmission
 	return settings
 }
 
@@ -743,6 +761,16 @@ type ProxyDeviceSettings struct {
 	windowIdentityGate *windowIdentityRestoreGate
 	// the owning manager's registration bound; nil is unbounded
 	mintAdmission *localclient.MintAdmission
+	// the owning manager's contract creation bound; nil is unbounded
+	contractAdmission *localclient.ContractAdmission
+}
+
+// The owner's bounds the device's local authority shares.
+func (self *ProxyDeviceSettings) authoritySettings() *localclient.AuthoritySettings {
+	return &localclient.AuthoritySettings{
+		MintAdmission:     self.mintAdmission,
+		ContractAdmission: self.contractAdmission,
+	}
 }
 
 // Packet routing can overlap owner-driven teardown. The NAT identity is immutable;
@@ -850,9 +878,7 @@ func NewProxyDevice(
 		return nil, mintErr
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
-	localControl, err := localclient.NewWithSettings(ctx, signedByJwt, networkSpace.GetApiUrl(), &localclient.AuthoritySettings{
-		MintAdmission: settings.mintAdmission,
-	})
+	localControl, err := localclient.NewWithSettings(ctx, signedByJwt, networkSpace.GetApiUrl(), settings.authoritySettings())
 	if err != nil {
 		cancel()
 		return nil, err
