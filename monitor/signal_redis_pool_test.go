@@ -1,3 +1,5 @@
+// Synthetic observations preserve calibrated pressure assertions while
+// supplying explicit desired placement and independent source/history proofs.
 package monitor
 
 import (
@@ -22,6 +24,7 @@ type redisPoolFixtureService struct {
 	hosts         map[string][2]float64 // host -> {timeouts, misses}
 }
 
+// Encodes actual rate rows plus independently named original-source proof rows.
 func redisPoolFixtureJSON(t testing.TB, now time.Time, services []redisPoolFixtureService) string {
 	t.Helper()
 	result := []map[string]any{}
@@ -35,7 +38,14 @@ func redisPoolFixtureJSON(t testing.TB, now time.Time, services []redisPoolFixtu
 			"value":  []any{float64(now.Unix()), text},
 		})
 	}
+	sample(map[string]string{"monitor_metric": "source/expected"}, 11)
 	for _, service := range services {
+		for _, hostName := range redisPoolFixtureHosts(service.service) {
+			proofValues := redisPoolFixtureProof(now)
+			for part, value := range proofValues {
+				sample(map[string]string{"monitor_metric": part, "env": "synthetic", "job": service.service, "service": service.service, "host": hostName, "block": "g1", "instance": "a1b2c3d4"}, value)
+			}
+		}
 		for class, value := range map[string]float64{
 			"timeouts_floor": service.timeoutsFloor,
 			"timeouts_now":   service.timeoutsNow,
@@ -64,7 +74,14 @@ func redisPoolFixtureJSON(t testing.TB, now time.Time, services []redisPoolFixtu
 
 var redisPoolFixtureNow = time.Date(2026, 10, 25, 15, 20, 0, 0, time.UTC)
 
+// Legacy fixture callers use a fixed four-service desired fleet.
 func runRedisPoolFixtureOutput(t *testing.T, payload string) Alerts {
+	t.Helper()
+	return runRedisPoolFixtureOutputForServices(t, payload, []string{"api", "connect", "proxy", "taskworker"})
+}
+
+// Explicit desired services are independent of whichever rows survive in payload.
+func runRedisPoolFixtureOutputForServices(t *testing.T, payload string, services []string) Alerts {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		for _, want := range []string{
@@ -80,11 +97,24 @@ func runRedisPoolFixtureOutput(t *testing.T, payload string) Alerts {
 				return "", fmt.Errorf("pool query missing %q: %s", want, command)
 			}
 		}
-		return payload, nil
+		return redisPoolFixtureResponseForQuery(t, payload, command), nil
 	}}
 	settings := syntheticSettings(source)
 	settings.Now = func() time.Time { return redisPoolFixtureNow }
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+	settings.LogServices = services
+	settings.LogServiceHosts = map[string][]string{}
+	settings.LogServiceBlocks = map[string][]string{}
+	for _, service := range services {
+		settings.LogServiceHosts[service] = redisPoolFixtureHosts(service)
+		settings.LogServiceBlocks[service] = []string{"g1"}
+		for _, hostName := range redisPoolFixtureHosts(service) {
+			settings.Hosts = append(settings.Hosts, HostSettings{Name: hostName, Roles: []string{"edge"}})
+		}
+	}
+	if err := settings.Validate(); err != nil {
+		t.Fatal("synthetic Redis pool inventory invalid")
+	}
 	alerts, err := NewRedisPoolSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
@@ -92,9 +122,14 @@ func runRedisPoolFixtureOutput(t *testing.T, payload string) Alerts {
 	return alerts
 }
 
+// A test explicitly names its desired fleet, never inferring it from response rows.
 func runRedisPoolFixture(t *testing.T, services []redisPoolFixtureService) Alerts {
 	t.Helper()
-	return runRedisPoolFixtureOutput(t, redisPoolFixtureJSON(t, redisPoolFixtureNow, services))
+	serviceNames := []string{}
+	for _, service := range services {
+		serviceNames = append(serviceNames, service.service)
+	}
+	return runRedisPoolFixtureOutputForServices(t, redisPoolFixtureJSON(t, redisPoolFixtureNow, services), serviceNames)
 }
 
 // The pre-incident week's medians: every service at zero timeouts and a few
@@ -108,6 +143,7 @@ func redisPoolHealthyFleet() []redisPoolFixtureService {
 	}
 }
 
+// Complete below-band accounting is quiet, without interval-health credit.
 func TestRedisPoolSignalHealthyFleetIsQuiet(t *testing.T) {
 	if alerts := runRedisPoolFixture(t, redisPoolHealthyFleet()); len(alerts) != 0 {
 		t.Fatalf("healthy pools alerted: %+v", alerts)
@@ -181,11 +217,12 @@ func TestRedisPoolSignalBriefBurstIsHealthy(t *testing.T) {
 
 // The thresholds sit between the healthy week and both incidents.
 func TestRedisPoolSignalThresholdsSeparateHealthyFromIncidents(t *testing.T) {
-	if !(0 < redisPoolTimeoutsWarnPerSecond && redisPoolTimeoutsWarnPerSecond < redisPoolTimeoutsPagePerSecond) ||
-		!(15.5 < redisPoolMissesWarnPerSecond && redisPoolMissesWarnPerSecond < redisPoolMissesPagePerSecond) {
+	settings := DefaultRedisPoolSettings()
+	if !(0 < settings.TimeoutsWarnPerSecond && settings.TimeoutsWarnPerSecond < settings.TimeoutsPagePerSecond) ||
+		!(15.5 < settings.MissesWarnPerSecond && settings.MissesWarnPerSecond < settings.MissesPagePerSecond) {
 		t.Fatal("pool thresholds are not ordered above the healthy medians")
 	}
-	if redisPoolTimeoutsPagePerSecond > 1780 || redisPoolTimeoutsWarnPerSecond > 192 {
+	if settings.TimeoutsPagePerSecond > 1780 || settings.TimeoutsWarnPerSecond > 192 {
 		t.Fatal("pool thresholds no longer catch the 2026-10-25 and 2026-10-22 floors")
 	}
 }
@@ -221,20 +258,18 @@ func TestRedisPoolSignalIncompleteEvidenceIsUnknown(t *testing.T) {
 
 // A refused or malformed Mimir response fails the probe, not a quiet run.
 func TestRedisPoolSignalRejectsUnsuccessfulResponses(t *testing.T) {
-	for name, payload := range map[string]string{
+	for _, payload := range map[string]string{
 		"error":  `{"status":"error","error":"synthetic"}`,
 		"matrix": `{"status":"success","data":{"resultType":"matrix","result":[]}}`,
 		"text":   `not json`,
 	} {
-		t.Run(name, func(t *testing.T) {
-			source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return payload, nil }}
-			settings := syntheticSettings(source)
-			settings.Now = func() time.Time { return redisPoolFixtureNow }
-			settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
-			if _, err := NewRedisPoolSignal().Run(context.Background(), settings); err == nil {
-				t.Fatal("unsuccessful response did not fail the probe")
-			}
-		})
+		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return payload, nil }}
+		settings := syntheticSettings(source)
+		settings.Now = func() time.Time { return redisPoolFixtureNow }
+		settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+		if _, err := NewRedisPoolSignal().Run(context.Background(), settings); err == nil {
+			t.Fatal("unsuccessful response did not fail the probe")
+		}
 	}
 }
 

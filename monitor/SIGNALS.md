@@ -4815,6 +4815,18 @@ unavailable. No product correction or runtime recovery is claimed by the
 guidance repair alone.
 
 ### 1.6 Monitor settings generation freshness
+
+The scheduled freshness comparison reports `mismatch_categories` on a stale
+result. Names come only from a fixed category allowlist; they identify differing
+parts of the two effective in-memory snapshots, not resource paths, changed
+values, an actor or a configuration-change event clock. The equality guard and
+stale thresholds are unchanged. A custom Boolean-only or ambiguous multi-check
+callback reports `unknown`, including ignored failed/canceled or in-flight
+comparison attempts. If no fixed category differs, an unclassified future input
+remains stale with `unclassified_input`. When an unmapped future input and known
+inputs differ together, the diagnostic may list only the known categories; it
+is not an exhaustive field or leaf diff. No extra reload, request or automatic configuration update
+is performed. Existing native settings-witness schema and status are unchanged.
 Probe: `settings-freshness`
 
 A continuous watcher captures one complete `SignalSettings` value at process
@@ -23979,18 +23991,20 @@ Probe: `redis-pool`
 - Every service process exports its go-redis pools' cumulative
   `urnetwork_redis_pool_timeouts_total` (a caller waited the pool timeout
   without a connection) and `urnetwork_redis_pool_misses_total` (a caller found
-  no idle connection and dialed), summed over its pools and every Redis node,
+  no idle connection and dialed), summed over the current primary pools of four client wrappers and the current
+  cluster members,
   with the scrape labels `env`, `service`, `block`, `host`, `instance` and
   `job`. One loopback Mimir evaluation through the service gateway takes, per
   service, the five-minute rates now, their minimum over the last ten minutes
-  at one-minute steps (the floor), and the per-host current rates. The floor
-  carries the sustain, so a deploy's pool refill burst or one bad minute does
-  not count, and both distress classes use sustain 1.
+  at one-minute steps (the floor), and the per-host current rates. The existing band values and sustain1 remain unchanged. The request now fixes
+  its exact whole-second evaluation time; only expected active service slots
+  may qualify. No extra gateway call, node read or producer collection is added.
 - `redis-pool-distress-critical` pages when a service's timeout floor reaches
   1,000/s or its miss floor 10,000/s. `redis-pool-distress` warns at 50/s or
-  1,000/s. Below both the service is healthy and both clear; while a page is
-  open in the warning band only the warning is reported, so the page stays
-  open until the service is fully healthy.
+  1,000/s. A below-band result means no current reported band crossing, not complete
+  interval health. Both exact service pressure classes withhold absence credit
+  through execution-scoped clear holds, including warning-band observations;
+  neither auto-clears from flat/zero/below-band accounting.
 - Calibration (Mimir, five-minute rates by service). The pre-incident week
   2026-10-18..25 06:00Z: every service's median timeout rate was zero, its
   median miss rate at most 16/s (Connect) and under 6/s elsewhere; proxy,
@@ -24001,12 +24015,37 @@ Probe: `redis-pool`
   still 1,780 and 9,653: a page from about 15:13Z, more than an hour before
   the hot node was found by hand. A brief API burst of 1,384 timeouts/s with a
   zero floor stays quiet.
-- A service is judged only from one fresh (five minutes), valid,
-  nonnegative sample of each of its four series. Missing, duplicate, stale,
-  invalid or unlabeled series report `redis-pool-unobservable` on stable target
-  `<env>/redis-pool` with fixed reasons and the incomplete services' names;
-  an independently proven sibling still reports. An unsuccessful or
-  non-vector response fails the probe.
+- Expected service/host/block placement comes from active inventory, independent
+  of returned series. Missing an entire expected service is unknown beside
+  any qualified sibling. Complete proof rows do not replace missing derived
+  timeout/miss rate rows; all four derived fields must also be present. Each observed process requires original source clocks,
+  an unchanged old/current process-start value spanning rate+hold, per-counter
+  complete discrete rate/clock hold points against an engine-generated expected
+  count, and no visible reset. Stale original clocks, sparse holds, duplicate,
+  missing, foreign or invalid tuples remain `redis-pool-unobservable`.
+  An aggregate query's evaluation timestamp is not raw-source freshness.
+  Unsuccessful, annotated or non-vector responses remain unavailable; no
+  missing field is manufactured into zero. Discrete coverage is not continuous
+  scraping or an inventory-independent census.
+- These checks qualify reported accounting, not actual event counts in an
+  exact interval. Both pinned go-redis9.22 and9.23 use uint32 child counters and
+  current-node aggregation. Independent wrapper resets, cluster membership and
+  wrap may be masked without changing process identity. In9.23 dedicated
+  pipeline statistics are nested in `PipelineStats`, which this existing server
+  metric does not export; pubsub statistics are also separate. TryGet pipeline
+  spills are not waited pool timeouts. Unopened clients contribute zero.
+  Therefore pool-generation/interval recovery stays unknown even with fresh
+  complete discrete source clocks. Closure needs separately reviewed complete
+  pool-lifecycle authority and independently successful affected operations.
+- False-positive qualifiers: misses can be successful new dials; a sustained
+  calibrated accounting band alone does not prove rejected connections, a slow
+  node, CPU cause, socket leak, deployed driver or customer impact. Reset and
+  topology behavior prevent interpreting a reported rate as an actual event
+  count. False-negative qualifiers: hidden resets/wrap, omitted nested pipeline
+  or pubsub pools and missing source slots can hide failure; quiet or below-band
+  reports cannot certify health. Source controls cover missing whole services,
+  fresh-derived/stale-original clocks, sparse holds, resets/restarts, independent
+  sibling pressure and actual public-Run/notifier retention of existing bands.
 - The counters do not say which Redis node the timeouts and dials belong to.
   Find the node first (§3.5a refusals, §3.5 client spikes, node latency and
   slow log), then count the service hosts' established sockets per Redis node
