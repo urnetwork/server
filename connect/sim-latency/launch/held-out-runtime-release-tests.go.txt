@@ -16,6 +16,7 @@ import (
 func newHeldOutRuntimeFixture(t *testing.T) (heldOutRuntimeRelease, heldOutRelease, heldOutRuntimeManifest, heldOutRuntimeRunnerManifest, map[string]string) {
 	t.Helper()
 	runtime := heldOutRuntimeRelease{ControlRevision: strings.Repeat("a", 40), ScriptDirectory: "/synthetic/control/container",
+		ValidatorSourceRevision: strings.Repeat("b", 40), EvidenceMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
 		Manifest:        heldOutPinnedFile{Path: "/synthetic/control/release.json", Sha256: strings.Repeat("b", 64)},
 		ValidatorSha256: strings.Repeat("c", 64), Runner: heldOutPinnedFile{Path: "/synthetic/runner/cohort-runner.sh", Sha256: strings.Repeat("d", 64)},
 		RunnerManifest: heldOutPinnedFile{Path: "/synthetic/runner/release.json", Sha256: strings.Repeat("e", 64)}}
@@ -30,13 +31,18 @@ func newHeldOutRuntimeFixture(t *testing.T) (heldOutRuntimeRelease, heldOutRelea
 	runtime.BuilderSha256 = builder.BuilderSha256
 	release := heldOutRelease{BaseSha: strings.Repeat("f", 40), ImageId: "sha256:" + strings.Repeat("7", 64), ScriptDirectory: runtime.ScriptDirectory, Runtime: &runtime}
 	bundle := heldOutRuntimeManifest{Schema: 1, Kind: "sim-latency-c2-inactive-builder-release", ControlRevision: runtime.ControlRevision, ImageId: release.ImageId,
+		ValidatorSourceRevision: runtime.ValidatorSourceRevision, EvidenceMemoryLimitBytes: runtime.EvidenceMemoryLimitBytes,
+		ActiveMemoryLimitBytes: 96 * 1024 * 1024 * 1024, MinimumManagementMemoryReserveBytes: 24 * 1024 * 1024 * 1024,
+		ExpectedHostMemoryBytes: 128 * 1024 * 1024 * 1024, ExpectedCapacityReserveBytes: 27 * 1024 * 1024 * 1024,
 		InstalledAt: "2020-01-01T00:00:00Z", BaseSha: release.BaseSha, ReleaseDirectory: filepath.Dir(runtime.ScriptDirectory), ValidatorSha256: runtime.ValidatorSha256, Builder: builder}
 	runner := heldOutRuntimeRunnerManifest{Schema: 1, Kind: "sim-latency-c2-inactive-cohort-runner-release", InstalledAt: "2020-01-01T00:00:00Z", Path: runtime.Runner.Path,
 		Sha256: runtime.Runner.Sha256, Mode: "0555", BuilderSha256: runtime.BuilderSha256, ValidatorSha256: runtime.ValidatorSha256, EvaluatorSha256: builder.EvaluatorSha256,
 		ControlRevision: runtime.ControlRevision, BaseSha: release.BaseSha, ImageId: release.ImageId}
+	runner.ValidatorSourceRevision, runner.EvidenceMemoryLimitBytes, runner.ResourceBoundarySha256 = runtime.ValidatorSourceRevision, runtime.EvidenceMemoryLimitBytes, strings.Repeat("8", 64)
 	components := map[string]string{"competitionpatch": builder.PatchValidatorSha256, "Dockerfile.submission": builder.DockerfileSha256,
 		"build-submission.sh": builder.BuildScriptSha256, "submission-builder-identity.sh": builder.IdentityHelperSha256,
-		"competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256}
+		"competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256,
+		"resource-boundary.sh": runner.ResourceBoundarySha256}
 	return runtime, release, bundle, runner, components
 }
 
@@ -151,6 +157,36 @@ func TestHeldOutRuntimeRejectsChangedRunnerManifest(t *testing.T) {
 		mutate(&changed)
 		if err := validateHeldOutRuntimeManifests(heldOutRuntimeJson(t, bundle), heldOutRuntimeJson(t, changed), runtime, release, components); err == nil {
 			t.Errorf("runner mutation %d accepted", index)
+		}
+	}
+}
+
+// The prospective cap cannot change active evaluation or management ceilings,
+// and the reused qualified validator keeps its separate immutable provenance.
+func TestHeldOutRuntimeRejectsChangedEvidenceProfileAndValidatorSource(t *testing.T) {
+	runtime, release, bundle, runner, components := newHeldOutRuntimeFixture(t)
+	for _, mutate := range []func(*heldOutRuntimeManifest){
+		func(m *heldOutRuntimeManifest) { m.EvidenceMemoryLimitBytes = 4 * 1024 * 1024 * 1024 },
+		func(m *heldOutRuntimeManifest) { m.ActiveMemoryLimitBytes -= 1024 * 1024 * 1024 },
+		func(m *heldOutRuntimeManifest) { m.MinimumManagementMemoryReserveBytes -= 1024 * 1024 * 1024 },
+		func(m *heldOutRuntimeManifest) { m.ExpectedCapacityReserveBytes++ },
+		func(m *heldOutRuntimeManifest) { m.ValidatorSourceRevision = strings.Repeat("9", 40) },
+	} {
+		changed := bundle
+		mutate(&changed)
+		if validateHeldOutRuntimeManifests(heldOutRuntimeJson(t, changed), heldOutRuntimeJson(t, runner), runtime, release, components) == nil {
+			t.Error("changed source or memory-profile installation manifest accepted")
+		}
+	}
+	for _, mutate := range []func(*heldOutRuntimeRunnerManifest){
+		func(m *heldOutRuntimeRunnerManifest) { m.EvidenceMemoryLimitBytes = 4 * 1024 * 1024 * 1024 },
+		func(m *heldOutRuntimeRunnerManifest) { m.ResourceBoundarySha256 = strings.Repeat("9", 64) },
+		func(m *heldOutRuntimeRunnerManifest) { m.ValidatorSourceRevision = strings.Repeat("9", 40) },
+	} {
+		changed := runner
+		mutate(&changed)
+		if validateHeldOutRuntimeManifests(heldOutRuntimeJson(t, bundle), heldOutRuntimeJson(t, changed), runtime, release, components) == nil {
+			t.Error("changed source or memory-profile runner manifest accepted")
 		}
 	}
 }

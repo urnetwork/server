@@ -16,25 +16,29 @@ import (
 // These public byte identities are mandatory in the C2 instrument descriptor.
 // The inactive installation receipts do not claim runtime qualification.
 type heldOutRuntimeRelease struct {
-	ControlRevision string            `json:"control_revision"`
-	ScriptDirectory string            `json:"script_directory"`
-	Manifest        heldOutPinnedFile `json:"release_manifest"`
-	BuilderSha256   string            `json:"builder_sha256"`
-	ValidatorSha256 string            `json:"patch_validator_sha256"`
-	Runner          heldOutPinnedFile `json:"bridge_runner"`
-	RunnerManifest  heldOutPinnedFile `json:"bridge_runner_manifest"`
+	ControlRevision          string            `json:"control_revision"`
+	ValidatorSourceRevision  string            `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes int64             `json:"evidence_memory_limit_bytes"`
+	ScriptDirectory          string            `json:"script_directory"`
+	Manifest                 heldOutPinnedFile `json:"release_manifest"`
+	BuilderSha256            string            `json:"builder_sha256"`
+	ValidatorSha256          string            `json:"patch_validator_sha256"`
+	Runner                   heldOutPinnedFile `json:"bridge_runner"`
+	RunnerManifest           heldOutPinnedFile `json:"bridge_runner_manifest"`
 }
 
 // Actual installed facts, not user-selected executables or changeable policy.
 func frozenHeldOutAmendedRuntime() heldOutRuntimeRelease {
 	return heldOutRuntimeRelease{
-		ControlRevision: "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
-		ScriptDirectory: "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-7c4dc74e5-go1273-v1/container",
-		Manifest:        heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-7c4dc74e5-go1273-v1/release.json", Sha256: "68f980abea7fc2b7a8405c988525f670f2172da3cc7b285af4e3b198808afec8"},
-		BuilderSha256:   "22f60ee6f0ec26f229fb0c1cfe8df3a0c900a4326cc41a8226e7db9a82e7f63c",
-		ValidatorSha256: "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
-		Runner:          heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/cohort-runner.sh", Sha256: "ea40be40e0382e464836f7d6befde349f96f8d4b743324df3be53eac1e970883"},
-		RunnerManifest:  heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/release.json", Sha256: "a5e00e537342e63909820ee99039ec010c47c0c4803c04c126dfd84a0cb1b8a9"},
+		ControlRevision:          "79e96f0eddf784038d4ed7601da8cc12d3d94e41",
+		ValidatorSourceRevision:  "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
+		EvidenceMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
+		ScriptDirectory:          "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/container",
+		Manifest:                 heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/release.json", Sha256: "20ad995d806bca7a9aba18a50f6e60ee2fba0b9ae038f3a484285c6d60e799d0"},
+		BuilderSha256:            "fbbf8010750d23f1f94a164780a56f40472a3325bc758d221dd2968bb0010b6e",
+		ValidatorSha256:          "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+		Runner:                   heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/cohort-runner.sh", Sha256: "f691eca1a83edce8f961fd512b4d9320778f507e603a0c553d98afb9256a686d"},
+		RunnerManifest:           heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/release.json", Sha256: "7edd2ee4dcc840734fe27abca8eb35777294344f169a0e61dab734330f3ddc1e"},
 	}
 }
 
@@ -42,12 +46,12 @@ func frozenHeldOutAmendedRuntime() heldOutRuntimeRelease {
 // evaluator or builder; candidate/image contents retain their separate pins.
 func heldOutRuntimeComponentDigests() map[string]string {
 	return map[string]string{
-		"evaluator.sh":                   "a6908739dc854bc9d81c8136361d8012eb0c479dedf4460a04b9987607bff6f5",
+		"evaluator.sh":                   "d2b03b5b7d45bdb3943f594d410f7b5e955d5529553e1475bb1db7f9d313772a",
 		"network-boundary.sh":            "9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7",
 		"compose.yml":                    "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464",
 		"hash-local-mount.sh":            "94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86",
 		"docker-id-map.sh":               "0babbcce2d286bf861827c9c11fa02d841d487b33c23765c96916ee1063d854c",
-		"resource-boundary.sh":           "6eb649c48dca47d8556a48b5ebb1c9ee8637ebff48669631515cea04d176fbd2",
+		"resource-boundary.sh":           "14909d09069d0ee329a2779796bf003b12765fa4fad435c0aeb784c316ccbd03",
 		"retain-failure-evidence.sh":     "f3f119c06b12662c1f2d1dae433be40de7a7b222fc42f55aba8b75a3cd14c4d1",
 		"postgres-init.sh":               "653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c",
 		"timeout-budget.sh":              "7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d",
@@ -64,7 +68,7 @@ func heldOutRuntimeComponentDigests() map[string]string {
 // Only the named constructor above can select the new runtime. The old map is
 // replaced, never mutated through the shallow release copy shared with C1.
 func selectHeldOutAmendedRuntime(release *heldOutRelease, supplied, expected heldOutRuntimeRelease) error {
-	if release == nil || !reflect.DeepEqual(supplied, expected) || !sourceGitShaPattern.MatchString(expected.ControlRevision) || !validSha256(expected.BuilderSha256) || !validSha256(expected.ValidatorSha256) || expected.ScriptDirectory != filepath.Join(filepath.Dir(expected.Manifest.Path), "container") || filepath.Dir(expected.Runner.Path) != filepath.Dir(expected.RunnerManifest.Path) {
+	if release == nil || !reflect.DeepEqual(supplied, expected) || !sourceGitShaPattern.MatchString(expected.ControlRevision) || !sourceGitShaPattern.MatchString(expected.ValidatorSourceRevision) || expected.EvidenceMemoryLimitBytes != 5*1024*1024*1024 || !validSha256(expected.BuilderSha256) || !validSha256(expected.ValidatorSha256) || expected.ScriptDirectory != filepath.Join(filepath.Dir(expected.Manifest.Path), "container") || filepath.Dir(expected.Runner.Path) != filepath.Dir(expected.RunnerManifest.Path) {
 		return errors.New("named C2 runtime release differs from its immutable installation")
 	}
 	release.ScriptDirectory, release.Runtime = supplied.ScriptDirectory, &supplied
@@ -178,40 +182,49 @@ func heldOutRuntimeBuilderDigest(builder heldOutRuntimeBuilder) (string, error) 
 
 // The root installation is deliberately still inactive and unqualified.
 type heldOutRuntimeManifest struct {
-	Schema              int                   `json:"schema"`
-	Kind                string                `json:"kind"`
-	ControlRevision     string                `json:"control_revision"`
-	ImageId             string                `json:"evaluator_image_digest"`
-	InstalledAt         string                `json:"installed_at"`
-	BaseSha             string                `json:"measured_source_revision"`
-	OldReleasesModified bool                  `json:"old_releases_modified"`
-	Qualified           bool                  `json:"qualified"`
-	Activated           bool                  `json:"activated"`
-	ReleaseDirectory    string                `json:"release_directory"`
-	ValidatorSha256     string                `json:"validator_sha256"`
-	Builder             heldOutRuntimeBuilder `json:"builder"`
+	Schema                              int                   `json:"schema"`
+	Kind                                string                `json:"kind"`
+	ControlRevision                     string                `json:"control_revision"`
+	ValidatorSourceRevision             string                `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes            int64                 `json:"evidence_memory_limit_bytes"`
+	ActiveMemoryLimitBytes              int64                 `json:"active_memory_limit_bytes"`
+	MinimumManagementMemoryReserveBytes int64                 `json:"minimum_management_memory_reserve_bytes"`
+	ExpectedHostMemoryBytes             int64                 `json:"expected_host_memory_bytes"`
+	ExpectedCapacityReserveBytes        int64                 `json:"expected_capacity_reserve_bytes"`
+	ImageId                             string                `json:"evaluator_image_digest"`
+	InstalledAt                         string                `json:"installed_at"`
+	BaseSha                             string                `json:"measured_source_revision"`
+	OldReleasesModified                 bool                  `json:"old_releases_modified"`
+	Qualified                           bool                  `json:"qualified"`
+	Activated                           bool                  `json:"activated"`
+	ReleaseDirectory                    string                `json:"release_directory"`
+	ValidatorSha256                     string                `json:"validator_sha256"`
+	Builder                             heldOutRuntimeBuilder `json:"builder"`
 }
 
 // The runner receipt is installation evidence, never an execution observation.
 type heldOutRuntimeRunnerManifest struct {
-	Schema             int    `json:"schema"`
-	Kind               string `json:"kind"`
-	InstalledAt        string `json:"installed_at"`
-	Path               string `json:"path"`
-	Sha256             string `json:"sha256"`
-	Uid                int    `json:"uid"`
-	Gid                int    `json:"gid"`
-	Mode               string `json:"mode"`
-	BuilderSha256      string `json:"builder_sha256"`
-	ValidatorSha256    string `json:"patch_validator_sha256"`
-	EvaluatorSha256    string `json:"evaluator_sha256"`
-	ControlRevision    string `json:"control_revision"`
-	BaseSha            string `json:"source_revision"`
-	ImageId            string `json:"image"`
-	OldReleaseModified bool   `json:"old_release_modified"`
-	Executed           bool   `json:"executed"`
-	Qualified          bool   `json:"qualified"`
-	Activated          bool   `json:"activated"`
+	Schema                   int    `json:"schema"`
+	Kind                     string `json:"kind"`
+	InstalledAt              string `json:"installed_at"`
+	Path                     string `json:"path"`
+	Sha256                   string `json:"sha256"`
+	Uid                      int    `json:"uid"`
+	Gid                      int    `json:"gid"`
+	Mode                     string `json:"mode"`
+	BuilderSha256            string `json:"builder_sha256"`
+	ValidatorSha256          string `json:"patch_validator_sha256"`
+	EvaluatorSha256          string `json:"evaluator_sha256"`
+	ControlRevision          string `json:"control_revision"`
+	ValidatorSourceRevision  string `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes int64  `json:"evidence_memory_limit_bytes"`
+	ResourceBoundarySha256   string `json:"resource_boundary_sha256"`
+	BaseSha                  string `json:"source_revision"`
+	ImageId                  string `json:"image"`
+	OldReleaseModified       bool   `json:"old_release_modified"`
+	Executed                 bool   `json:"executed"`
+	Qualified                bool   `json:"qualified"`
+	Activated                bool   `json:"activated"`
 }
 
 // Complete exact schemas, linked source/image and recomputed composite prevent
@@ -228,6 +241,11 @@ func validateHeldOutRuntimeManifests(bundleBytes, runnerBytes []byte, runtime he
 	if bundle.Schema != 1 || bundle.Kind != "sim-latency-c2-inactive-builder-release" || bundle.ControlRevision != runtime.ControlRevision || bundle.ImageId != release.ImageId || bundle.BaseSha != release.BaseSha || bundle.InstalledAt == "" || bundle.OldReleasesModified || bundle.Qualified || bundle.Activated || bundle.ReleaseDirectory != filepath.Dir(runtime.ScriptDirectory) || bundle.ValidatorSha256 != runtime.ValidatorSha256 {
 		return errors.New("C2 builder installation receipt source/control identity changed")
 	}
+	if bundle.ValidatorSourceRevision != runtime.ValidatorSourceRevision || bundle.EvidenceMemoryLimitBytes != runtime.EvidenceMemoryLimitBytes ||
+		bundle.EvidenceMemoryLimitBytes != 5*1024*1024*1024 || bundle.ActiveMemoryLimitBytes != 96*1024*1024*1024 || bundle.MinimumManagementMemoryReserveBytes != 24*1024*1024*1024 ||
+		bundle.ExpectedHostMemoryBytes-bundle.ActiveMemoryLimitBytes-bundle.EvidenceMemoryLimitBytes != bundle.ExpectedCapacityReserveBytes || bundle.ExpectedCapacityReserveBytes < bundle.MinimumManagementMemoryReserveBytes {
+		return errors.New("C2 prospective evidence profile weakened source or host management reserve")
+	}
 	builder := bundle.Builder
 	digest, err := heldOutRuntimeBuilderDigest(builder)
 	if err != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || builder.BuilderSha256 != runtime.BuilderSha256 || digest != runtime.BuilderSha256 || builder.PatchValidatorSha256 != runtime.ValidatorSha256 {
@@ -240,6 +258,10 @@ func validateHeldOutRuntimeManifests(bundleBytes, runnerBytes []byte, runtime he
 	}
 	if runner.Schema != 1 || runner.Kind != "sim-latency-c2-inactive-cohort-runner-release" || runner.InstalledAt == "" || runner.Path != runtime.Runner.Path || runner.Sha256 != runtime.Runner.Sha256 || runner.Uid != 0 || runner.Gid != 0 || runner.Mode != "0555" || runner.BuilderSha256 != runtime.BuilderSha256 || runner.ValidatorSha256 != runtime.ValidatorSha256 || runner.EvaluatorSha256 != builder.EvaluatorSha256 || runner.ControlRevision != runtime.ControlRevision || runner.BaseSha != release.BaseSha || runner.ImageId != release.ImageId || runner.OldReleaseModified || runner.Executed || runner.Qualified || runner.Activated {
 		return errors.New("C2 bridge runner installation receipt changed")
+	}
+	if runner.ValidatorSourceRevision != runtime.ValidatorSourceRevision || runner.EvidenceMemoryLimitBytes != runtime.EvidenceMemoryLimitBytes ||
+		!validSha256(runner.ResourceBoundarySha256) || runner.ResourceBoundarySha256 != components["resource-boundary.sh"] {
+		return errors.New("C2 runner differs from the prospective evidence profile")
 	}
 	return nil
 }
