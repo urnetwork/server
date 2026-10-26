@@ -304,7 +304,7 @@ func validateAppleTransactionBoundInConn(connOwner server.PgConn,
 	if transaction.unboundAccountToken {
 		networkId, ok := appleOfferCodeBindingLookupFunc(connOwner, ctx, transaction.originalTransactionId)
 		if !ok {
-			return nil, errors.New("invalid App Store account token")
+			return nil, errAppleAccountTokenInvalid
 		}
 		transaction.networkId = networkId
 	}
