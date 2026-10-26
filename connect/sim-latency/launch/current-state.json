@@ -34,6 +34,12 @@
     "snow_native_skips": 0,
     "snow_native_tested_commit": "74a456bcb2ebe42fc11b233cb9517c9e262aa148",
     "snow_native_evidence": "server/connect/sim-latency/baseline/prelaunch-snow-core-qualification-2026-10-26/INDEX.json",
+    "snow_sql_tests_per_pass": 3,
+    "snow_sql_consecutive_passes": 3,
+    "snow_sql_skips": 0,
+    "snow_sql_tested_commit": "e82b4ea3cc08615baa67eabdc8da5ef17ffcedbf",
+    "snow_sql_original_failure_retained": true,
+    "snow_main_migration_verified": false,
     "prospective_5g_broad_session": 53616,
     "prospective_5g_broad_script_sha256": "25d4d6e851e324accf78c0af30fce1900e8566e744d9abd02b1fe163d1c19dbc",
     "prospective_5g_broad_process_verified_live": false,
@@ -55,6 +61,9 @@
     "seed_rotated": false,
     "api_deployment_requested": true,
     "api_deployment_verified": false,
+    "root_runtime_leaves_installed": true,
+    "root_runtime_directory_mode": "0700",
+    "root_runtime_leaf_mode": "0400",
     "raw_tokens_in_this_checkpoint": false
   },
   "accepted_three_a_reduction": {
