@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T15:03:34Z",
+  "observed_at": "2026-10-26T15:22:20Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "three_original_pair_reduction_accepted_margin_frozen_c2_image_build_active",
+  "status": "three_original_pair_reduction_accepted_margin_frozen_c2_built_independent_units_active",
   "accepted_three_a_reduction": {
     "completed_at": "2026-10-26T15:01:22Z",
     "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
@@ -32,12 +32,31 @@
     "canonical_source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
     "raw_mono_source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
     "source_config_sha256": "589ab624be8301c22e01571ac33b3e1b44e419ffb68009a577e6d520c0bb8995",
+    "terminal": true,
+    "exit_code": 0,
+    "ended_at": "2026-10-26T15:10:52Z",
+    "duration_seconds": 434,
+    "image_id": "sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24",
+    "binary_sha256": "efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727",
+    "source_unit_passes": 18,
+    "source_unit_skips": 0,
     "qualified": false,
-    "next_action": "Verify actual build session before assuming live/terminal. After successful bounded image build, independently qualify C2 and new trusted control tools, then precommit/run one fresh fixed-margin R9/R9 bridge. Never restart on observation timeout."
+    "next_action": "Build/readback terminal; do not restart. Independently qualify the composed wide-repository builder/runtime, new trusted control tools and image-bound host, then precommit/run one fresh fixed-margin R9/R9 bridge."
+  },
+  "active_control_qualification": {
+    "owner_agent": "/root/provide_serialization_test",
+    "session_id": 37185,
+    "root": "/home/by/urnetwork/temp/next-idle-plan-20261026.aEKfrDr8",
+    "log": "control-corrected.launch.log",
+    "production_source_commit": "21f371d180bc62a5f11a94ee23ccb31c23204314",
+    "review_command_draft_fix_commit": "81545f1d0",
+    "planned_selections": {"held_out_tests": 87, "review_tests": 16, "native_protocol_tests": 9, "consecutive_passes_each": 3},
+    "prior_compile_failure_retained": true,
+    "next_action": "Poll exact session/process and original logs. Stop on first unexpected failure; max owner diagnoses. No provider calls or scoring, and no overlap with timed measurement."
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "historical_sections_warning": "Older dated campaign/tool sections below retain their original observations and next actions. The accepted_three_a_reduction and prospective_c2_build above supersede old analysis-pending and margin-unselected statements; they do not qualify C2 or activate production.",
-  "next_action": "Observe C2 build session 98345 to an authoritative terminal result; independently qualify its exact image and revised control/held-out tools, then publish and run one fresh R9/R9 bridge at the frozen 0.269 margin. Precommit three independent seeds before any held-out result; require all-three reference ordering. Provider credit, live host/storage/runtime/monitoring proofs remain open.",
+  "next_action": "Observe independent qualification session 37185 to an authoritative terminal result; finish composed wide-repository runtime/image and host qualification, then publish and run one fresh R9/R9 bridge at the frozen 0.269 margin. Precommit three independent seeds before any held-out result; require all-three reference ordering. Provider credit, live host/storage/runtime/monitoring proofs remain open.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "c2-build-and-identity-cleanup-observation/v1",
+  "observed_at": "2026-10-26T15:13:13Z",
+  "build_session": 98345,
+  "build_exit": 0,
+  "build_duration_seconds": 434,
+  "build_ended_at": "2026-10-26T15:10:52Z",
+  "readback_session": 57977,
+  "readback_exit": 0,
+  "containers": [
+    "buildx_buildkit_warp-multiarch0",
+    "urnetwork-local-pg",
+    "urnetwork-local-redis"
+  ],
+  "networks": [
+    "bridge",
+    "host",
+    "none",
+    "urnetwork-local"
+  ],
+  "canonical_slot": "/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock",
+  "canonical_slot_acquire_succeeded": true,
+  "canonical_slot_released": true,
+  "extra_evidence_mounts_observed": false,
+  "low_handoff_authorized": true,
+  "qualified": false
+}

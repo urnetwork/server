@@ -1,0 +1,17 @@
+# Selected exact identity lines from go version -m in joined session 57977.
+# Dependency/module-list entries are intentionally omitted from this compact capture.
+/opt/urnetwork/bin/sim-latency: go1.27.3
+	path	github.com/urnetwork/server/connect/sim-latency
+	mod	github.com/urnetwork/server	v0.0.0-20261026142000-a9e8e1a710b2	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=amd64
+	build	GOEXPERIMENT=greenteagc
+	build	GOOS=linux
+	build	GOAMD64=v1
+	build	vcs=git
+	build	vcs.revision=a9e8e1a710b24c749e6499a0606938252c83e136
+	build	vcs.time=2026-10-26T14:20:00Z
+	build	vcs.modified=false

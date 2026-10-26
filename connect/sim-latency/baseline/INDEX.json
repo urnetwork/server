@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-mono-root-c2-build-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-mono-root-c2-build-2026-10-26/INDEX.json",
+      "index_sha256": "ed880ce407598c7ec36ed09c10eab6c1cac6cc75675927f37f87ac65b895a527"
+    },
+    {
       "id": "prelaunch-three-pair-analysis-2026-10-26",
       "official": false,
       "index_path": "prelaunch-three-pair-analysis-2026-10-26/INDEX.json",
