@@ -72,7 +72,7 @@ Usage:
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
-  sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus>
+  sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus> [--calibration-protocol=<name> --calibration-approval=<path> --calibration-approval-sha256=<digest> --calibration-original-plan=<path> --calibration-original-plan-sha256=<digest>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
@@ -105,6 +105,11 @@ Options:
   --calibration-inputs-sha256=<digest>  Exact SHA-256 of that manifest.
   --calibration-lock=<path>  Existing canonical singleton scoring lock; never created by analysis.
   --calibration-cpuset=<cpus>  Approved management CPU affinity for offline scorer replay.
+  --calibration-protocol=<name>  Explicit separately approved prospective protocol; omission keeps five cohorts.
+  --calibration-approval=<path>  Independently published amendment approval bytes.
+  --calibration-approval-sha256=<digest>  Exact approval publication SHA-256.
+  --calibration-original-plan=<path>  Complete original five-position precommitment plan.
+  --calibration-original-plan-sha256=<digest>  Exact original plan publication SHA-256.
   --qualification-settings=<path> Private deployment settings for exact-image independent qualification.
   --qualification-settings-sha256=<digest> Immutable installed qualification-settings digest.
   --build-settings=<path> Private deployment settings for the isolated source build broker.

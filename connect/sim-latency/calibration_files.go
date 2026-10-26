@@ -35,6 +35,10 @@ type calibrationFileManifest struct {
 	RoundSeedHex           string                  `json:"round_seed_hex"`
 	SourceEpoch            int                     `json:"source_epoch"`
 	Cohorts                []calibrationFileCohort `json:"cohorts"`
+	Protocol               string                  `json:"protocol,omitempty"`
+	ProtocolApprovalSha256 string                  `json:"protocol_approval_sha256,omitempty"`
+	OriginalPlanSha256     string                  `json:"original_plan_sha256,omitempty"`
+	OriginalPositions      []int                   `json:"original_positions,omitempty"`
 }
 
 // Paths in Inputs are relative to ArtifactDirectory, never candidate commands.
